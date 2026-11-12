@@ -25,6 +25,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("games_picker.rs", include_str!("games_picker.rs")),
     ("games_retry.rs", include_str!("games_retry.rs")),
     ("games_rows.rs", include_str!("games_rows.rs")),
+    ("games_sessions.rs", include_str!("games_sessions.rs")),
     ("games_state.rs", include_str!("games_state.rs")),
     ("games_table.rs", include_str!("games_table.rs")),
     ("hero_pack_hint.rs", include_str!("hero_pack_hint.rs")),

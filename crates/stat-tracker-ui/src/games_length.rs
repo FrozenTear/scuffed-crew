@@ -28,8 +28,10 @@ pub const NOT_THE_REAL_LENGTH: &str = ", so this is not the real length";
 
 /// How much shorter than the Tab span stored times may be and still be the
 /// real length: the daemon's post-match grace (75 s, a Tab in it stays on
-/// the game after its result) plus its result confirm window (60 s).
-pub const TIMES_SLACK_SECS: i64 = 75 + 60;
+/// the game after its result read) plus the oldest result mark it still
+/// takes as the end (`MATCH_END_MARK_MAX_AGE`, 120 s before that read). So
+/// a fresh end may sit up to 3:15 before the last Tab press.
+pub const TIMES_SLACK_SECS: i64 = 75 + 120;
 
 /// Why the Length is a floor on a game that has stored times.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -311,12 +313,18 @@ mod tests {
             "Game start to end is shorter than your Tab presses, so this is not the real length";
         assert_eq!(len.warning(false).as_deref(), Some(want));
         assert_eq!(len.warning(true).as_deref(), Some(want));
-        // 7:45 + 2:15 = 10:00: inside the slack, a real length.
-        g.match_times = times(Some(at(20, 0, 0)), Some(at(20, 7, 45)));
-        assert_eq!(game_length(&g), GameLength::Real(465));
+        // 6:45 + 3:15 = 10:00: inside the slack, a real length.
+        g.match_times = times(Some(at(20, 0, 0)), Some(at(20, 6, 45)));
+        assert_eq!(game_length(&g), GameLength::Real(405));
         // One second shorter: outside it.
-        g.match_times = times(Some(at(20, 0, 0)), Some(at(20, 7, 44)));
+        g.match_times = times(Some(at(20, 0, 0)), Some(at(20, 6, 44)));
         assert!(!game_length(&g).is_real());
+        // A fresh end the daemon takes: VICTORY first seen at 20:10:00 and
+        // confirmed 115 s later, then a Tab inside the grace at 20:13:08.
+        // The span is 12:18, the real length 10:00, and it stays real.
+        g.segments = vec![seg(0, "Mei", 6, true, at(20, 0, 50), at(20, 13, 8))];
+        g.match_times = times(Some(at(20, 0, 0)), Some(at(20, 10, 0)));
+        assert_eq!(game_length(&g), GameLength::Real(600));
     }
 
     /// A game recorded before start and end were stored keeps today's

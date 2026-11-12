@@ -581,6 +581,51 @@ async fn a_tab_opened_game_records_with_no_start_and_its_end_from_a_board() {
     }
 }
 
+/// The most used end on a Tab: a stored board (recorded, not a split,
+/// with a gate) that shows the result ends the game at the press, and the
+/// end is written to the rows at once.
+#[tokio::test]
+async fn a_stored_board_that_shows_the_result_ends_the_game_at_the_press() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = storage::LocalStore::open(dir.path()).await.unwrap();
+    let t0 = test_now();
+    let g = open_game(&store, "board-end", t0, Some(t0 + MIN)).await;
+    let mut st = session(Some(g), t0);
+    let press = t0 + 10 * MIN;
+    st.tab_press = Some(press);
+    let mut report = rejected_report("board-end");
+    report.recorded = true;
+    report.outcome = detect::MatchOutcome::Victory;
+    report.gate_state = Some(GateState::default());
+    assert!(!report.split);
+    apply_capture_report(
+        &mut st,
+        &store,
+        dir.path(),
+        "board-end",
+        Ok(report),
+        press + Duration::from_secs(4),
+    )
+    .await;
+    let g = st.active_game.as_ref().expect("the game stays open");
+    assert_eq!(g.outcome, detect::MatchOutcome::Victory);
+    assert!(is_at(g.match_times.ended_at, press), "the end is the press");
+    for times in stored_times(&store, "board-end").await {
+        let times = times.expect("times stored");
+        assert!(is_at(times.started_at, t0));
+        assert!(is_at(times.ended_at, press), "written at the read");
+    }
+}
+
+/// The run loop writes the open game's times after each stored capture,
+/// before it cuts the live snapshot, so the snapshot carries them.
+#[test]
+fn the_run_loop_stores_the_times_before_the_snapshot() {
+    let body = fn_source("run_loop");
+    let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("{needle}"));
+    assert!(at("store_open_game_times(") < at("refresh_snapshot_after_capture("));
+}
+
 /// A missed end: a game a hero select opened, with a stored board and no
 /// result, closes at the next game's ban. It stays recorded with its
 /// start and no end, so the app warns.
@@ -708,7 +753,7 @@ async fn an_archived_fresh_hold_gets_empty_times() {
 
     let dir = tempfile::tempdir().unwrap();
     let store = storage::LocalStore::open(dir.path()).await.unwrap();
-    let hold = persisted_with_hold(
+    let mut hold = persisted_with_hold(
         "imported",
         detect::MatchOutcome::Defeat,
         Some("Nepal"),
@@ -716,6 +761,11 @@ async fn an_archived_fresh_hold_gets_empty_times() {
         8,
         old,
     );
+    let skeleton = MatchTimes {
+        started_at: Some((old - chrono::Duration::minutes(15)).into()),
+        ended_at: Some((old - chrono::Duration::minutes(1)).into()),
+    };
+    hold.match_times = skeleton.clone();
     begin_from_persisted(dir.path(), &store, hold).await;
     let rows = store.get_all_matches().await.unwrap();
     let held = rows
@@ -723,7 +773,39 @@ async fn an_archived_fresh_hold_gets_empty_times() {
         .find(|r| r.elims == 8)
         .expect("the hold is kept");
     assert_eq!(held.session_id, "imported");
-    assert_eq!(held.match_times, None, "no times of its own invented");
+    assert_eq!(
+        held.match_times,
+        Some(skeleton),
+        "the session's first row takes the skeleton's times"
+    );
+}
+
+/// An imported hold written at shutdown is its game's first row, so it
+/// gets the game's times there, also when the game is not finished and
+/// stays open on disk.
+#[tokio::test]
+async fn an_imported_hold_written_at_shutdown_stores_the_times() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = storage::LocalStore::open(dir.path()).await.unwrap();
+    let t0 = test_now();
+    let mut g = game(detect::MatchOutcome::Unknown, None, t0);
+    g.session_id = "carried-in".into();
+    g.map = Some("Busan".into());
+    g.session_created = false;
+    g.note_match_start(t0);
+    g.deferred = Some(fresh_counters(3));
+    g.deferred_hero = Some("Ana".into());
+    g.deferred_imported = true;
+    assert!(!g.finished());
+    let mut st = session(Some(g), t0);
+    close_session_on_shutdown(&mut st, &store, dir.path()).await;
+    let stored = stored_times(&store, "carried-in").await;
+    assert!(!stored.is_empty(), "the hold is written");
+    for times in stored {
+        let times = times.expect("the hold's row gets the times");
+        assert!(is_at(times.started_at, t0));
+        assert_eq!(times.ended_at, None);
+    }
 }
 
 /// A game with no stored row of its own writes nothing, even
