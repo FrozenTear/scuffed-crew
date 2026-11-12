@@ -63,7 +63,7 @@ pub use training_store::{
     OUTBOX_KEEP_PER_KIND, TrainingStatus, adopt_training_owner, cached_training_consent,
     clear_training_outbox, drop_kind, forget_training_crops, game_token_for, has_queued_crops,
     keep_map_name_crop, keep_training_crop, mark_training_delete, queued_crops,
-    read_training_status, training_warning,
+    read_training_status, record_training_delete_ok, training_warning,
 };
 pub use visibility::{StatsVisibility, parse_stats_visibility};
 pub use wire::{UploadEntry, UploadRequest, row_needs_review, upload_request};

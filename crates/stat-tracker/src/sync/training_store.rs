@@ -24,6 +24,11 @@
 //!   every own training crop (Unix milliseconds). A pass drops crops kept
 //!   before it. When the file changed while an upload ran, the pass removes
 //!   again by id what that upload stored.
+//! - `deleted_ok`: the `deleted_at` value of the last delete the website
+//!   answered with success. A "press Delete my training crops again"
+//!   warning goes only once this equals a `deleted_at` newer than the one
+//!   it was left under, so a failed delete does not hide it and a delete
+//!   that worked hides it at once.
 //! - `pending_deletes.json`: ids of crops the site stored that such a
 //!   removal could not delete yet. Each pass tries them again before it
 //!   sends anything, and warns until they are gone, the website changes or
@@ -46,6 +51,7 @@ const STATUS_FILE: &str = "status.json";
 const TOKENS_FILE: &str = "game_tokens.json";
 const OWNER_FILE: &str = "owner.json";
 const DELETED_AT_FILE: &str = "deleted_at";
+const DELETED_OK_FILE: &str = "deleted_ok";
 const PENDING_DELETES_FILE: &str = "pending_deletes.json";
 
 /// Held while the owner is changed, and while a send pass writes what it
@@ -134,7 +140,8 @@ pub struct TrainingStatus {
     pub sticky: bool,
     /// The delete marker (see [`mark_training_delete`]) under which a send
     /// got no answer while the member deleted. The warning asks the member
-    /// to delete again, and stays until the marker changes.
+    /// to delete again, and stays until a later delete the website answered
+    /// with success (see [`deleted_again_since`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delete_again_at: Option<i64>,
 }
@@ -145,9 +152,20 @@ pub fn read_training_status(data_dir: &Path) -> Option<TrainingStatus> {
     serde_json::from_slice(&bytes).ok()
 }
 
-/// The warning to show, if the last pass left one.
+/// The warning to show, if the last pass left one. An ask to delete again
+/// that a delete the website answered has met is left out at once, before
+/// the next pass clears it.
 pub fn training_warning(data_dir: &Path) -> Option<String> {
-    read_training_status(data_dir).and_then(|status| status.warning)
+    let status = read_training_status(data_dir)?;
+    let warning = status.warning?;
+    if !deleted_again_since(data_dir, status.delete_again_at) {
+        return Some(warning);
+    }
+    let rest = warning
+        .strip_prefix(super::training_pass::TRAINING_DELETE_AGAIN)
+        .unwrap_or(&warning)
+        .trim_start();
+    (!rest.is_empty()).then(|| rest.to_string())
 }
 
 /// Leave `warning` for the desktop app, or clear the last one (`None`).
@@ -402,7 +420,9 @@ pub fn clear_training_outbox(data_dir: &Path) {
 /// the website changed, so no crop is kept until the site is read again,
 /// and there is no send to warn about. The ids to delete go too: with no
 /// token, or on another website, the tracker cannot remove them, so a crop
-/// the old website kept stays there until the member deletes it there. A
+/// the old website kept stays there until the member connects the tracker
+/// to that website again and presses Delete my training crops (the
+/// website's own delete removes hero icons only). A
 /// new token for the same website does not come here (see
 /// [`adopt_training_owner`]).
 pub fn forget_training_crops(data_dir: &Path) {
@@ -534,13 +554,44 @@ pub(super) fn while_owner<T>(
 // ------------------------------------------------------------ delete marker
 
 /// Record that the member asked the website to delete every own training
-/// crop, now. The desktop app calls this before `DELETE /mine`.
-pub fn mark_training_delete(data_dir: &Path) -> std::io::Result<()> {
+/// crop, now. The desktop app calls this before `DELETE /mine`. The marker
+/// written, for [`record_training_delete_ok`].
+pub fn mark_training_delete(data_dir: &Path) -> std::io::Result<i64> {
     let millis = chrono::Utc::now().timestamp_millis().max(0);
     write_private(
         &root(data_dir).join(DELETED_AT_FILE),
         millis.to_string().as_bytes(),
+    )?;
+    Ok(millis)
+}
+
+/// Record that the website answered the delete marked as `marker` (the
+/// value [`mark_training_delete`] returned) with success. The desktop app
+/// calls this after `DELETE /mine` worked.
+pub fn record_training_delete_ok(data_dir: &Path, marker: i64) -> std::io::Result<()> {
+    write_private(
+        &root(data_dir).join(DELETED_OK_FILE),
+        marker.to_string().as_bytes(),
     )
+}
+
+fn read_marker(data_dir: &Path, file: &str) -> Option<i64> {
+    std::fs::read_to_string(root(data_dir).join(file))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// True when an ask to delete again left under `asked_at` was met: the
+/// last delete marked after it is the one the website answered with
+/// success. A delete that failed (offline, 429) leaves it unmet.
+pub(super) fn deleted_again_since(data_dir: &Path, asked_at: Option<i64>) -> bool {
+    let Some(asked_at) = asked_at else {
+        return false;
+    };
+    let marker = training_delete_at(data_dir);
+    marker.is_some() && marker != Some(asked_at) && read_marker(data_dir, DELETED_OK_FILE) == marker
 }
 
 /// When the last delete was asked for, in Unix milliseconds. A send pass
@@ -549,11 +600,7 @@ pub fn mark_training_delete(data_dir: &Path) -> std::io::Result<()> {
 /// for equality, never as times, since the desktop app wrote this with its
 /// own clock.
 pub(super) fn training_delete_at(data_dir: &Path) -> Option<i64> {
-    std::fs::read_to_string(root(data_dir).join(DELETED_AT_FILE))
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
+    read_marker(data_dir, DELETED_AT_FILE)
 }
 
 /// The time a crop was kept, from its id.

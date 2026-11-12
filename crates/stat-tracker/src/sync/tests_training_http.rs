@@ -915,13 +915,90 @@ async fn no_answer_to_a_send_during_a_delete_asks_to_delete_again() {
         Some(TRAINING_DELETE_AGAIN)
     );
 
-    // The member deletes again: the next pass clears it.
+    // A delete the website did not answer with success (offline, 429)
+    // leaves the ask, on screen and after the next pass.
+    std::thread::sleep(std::time::Duration::from_millis(5));
     mark_training_delete(dir.path()).unwrap();
+    assert_eq!(
+        training_warning(dir.path()).as_deref(),
+        Some(TRAINING_DELETE_AGAIN)
+    );
+    let fourth = third.try_clone().unwrap();
     let (_, server) = serve_on(third, vec![http(200, "", &consent_body(all_consent()))]);
+    let report = run_training_pass(&c, dir.path()).await;
+    server.join().unwrap();
+    assert_eq!(report.warning.as_deref(), Some(TRAINING_DELETE_AGAIN));
+    assert_eq!(
+        training_warning(dir.path()).as_deref(),
+        Some(TRAINING_DELETE_AGAIN)
+    );
+
+    // The member deletes again and the website answers 200: the ask is
+    // gone from the app's view at once, and the next pass clears it.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let marker = mark_training_delete(dir.path()).unwrap();
+    record_training_delete_ok(dir.path(), marker).unwrap();
+    assert_eq!(training_warning(dir.path()), None);
+    let (_, server) = serve_on(fourth, vec![http(200, "", &consent_body(all_consent()))]);
     let report = run_training_pass(&c, dir.path()).await;
     server.join().unwrap();
     assert_eq!(report.warning, None);
     assert_eq!(read_training_status(dir.path()), None);
+}
+
+/// An ask to delete again that sits with another warning: a delete that
+/// worked leaves out only the ask, in the app's view.
+#[test]
+fn a_delete_that_worked_leaves_out_only_the_ask_to_delete_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let asked = mark_training_delete(dir.path()).unwrap();
+    let both = format!("{TRAINING_DELETE_AGAIN} {TRAINING_DELETE_OWED}");
+    write_training_warning(dir.path(), Some(&both), true, false, Some(asked));
+    // The website answered the delete the ask was left under, not a new one.
+    record_training_delete_ok(dir.path(), asked).unwrap();
+    assert_eq!(training_warning(dir.path()), Some(both));
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let marker = mark_training_delete(dir.path()).unwrap();
+    record_training_delete_ok(dir.path(), marker).unwrap();
+    assert_eq!(
+        training_warning(dir.path()).as_deref(),
+        Some(TRAINING_DELETE_OWED)
+    );
+}
+
+/// An upload that gets no answer when no delete ran meanwhile, though one
+/// ran before the crop was kept: the plain "could not reach" warning, not
+/// sticky and no ask to delete again, the crop stays queued, and the pass
+/// backs off.
+#[tokio::test]
+async fn no_answer_to_a_send_with_no_delete_meanwhile_is_a_plain_warning() {
+    let dir = tempfile::tempdir().unwrap();
+    consent(dir.path(), all_consent());
+    mark_training_delete(dir.path()).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    queue(dir.path(), UploadKind::MapName, 1);
+    let (url, server) = serve(vec![
+        http(200, "", &consent_body(all_consent())),
+        // Nothing comes back: the connection closes unanswered.
+        String::new(),
+    ]);
+    let report = run_training_pass(&client(&url), dir.path()).await;
+    let seen = lines(&server.join().unwrap());
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert!(seen[1].starts_with("POST"), "{seen:?}");
+    assert_eq!(report.sent, 0);
+    assert_eq!(report.retry, TrainingRetry::Backoff);
+    let warning = report.warning.expect("a warning");
+    assert!(
+        warning.contains("Could not reach the website."),
+        "{warning}"
+    );
+    assert!(!warning.contains(TRAINING_DELETE_AGAIN), "{warning}");
+    let status = read_training_status(dir.path()).expect("a warning");
+    assert!(!status.sticky);
+    assert_eq!(status.delete_again_at, None);
+    assert_eq!(status.warning, Some(warning));
+    assert_eq!(queued_crops(dir.path(), UploadKind::MapName).len(), 1);
 }
 
 /// A new token for the same website keeps the ids still to delete and
