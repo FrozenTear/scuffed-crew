@@ -626,6 +626,22 @@ fn the_run_loop_stores_the_times_before_the_snapshot() {
     assert!(at("store_open_game_times(") < at("refresh_snapshot_after_capture("));
 }
 
+/// The shutdown write of an imported hold's times marks the snapshot when
+/// it stores them. For a finished game the close that follows finds the
+/// times already stored and would not mark it.
+#[test]
+fn the_shutdown_hold_times_write_refreshes_the_snapshot() {
+    let body: String = fn_source("close_session_on_shutdown")
+        .split_whitespace()
+        .collect();
+    assert!(
+        body.contains(
+            "ifstore_match_times(store,game).await{refresh_snapshot(store,data_dir).await;}"
+        ),
+        "the times write must mark the snapshot"
+    );
+}
+
 /// A missed end: a game a hero select opened, with a stored board and no
 /// result, closes at the next game's ban. It stays recorded with its
 /// start and no end, so the app warns.
