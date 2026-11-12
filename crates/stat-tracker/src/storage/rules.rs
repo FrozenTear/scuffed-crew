@@ -79,7 +79,7 @@ pub fn carry_member_hero_edit(edited: &PersonalMatch, row: &mut PersonalMatch) -
 /// name. Re-editing accumulates the union of edited fields and overwrites
 /// earlier corrections for the same field. Returns whether anything changed;
 /// stamps `edited_at` only then.
-pub(super) fn apply_match_edit(
+pub(crate) fn apply_match_edit(
     m: &mut PersonalMatch,
     edit: &MatchEdit,
     now: SurrealDatetime,

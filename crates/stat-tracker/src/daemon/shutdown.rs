@@ -48,6 +48,10 @@ pub(crate) async fn close_session_on_shutdown(
         Some(Ok(())) => {
             if let Some(game) = st.active_game.as_mut() {
                 clear_imported_hold(game);
+                // The hold is the game's first row, so nothing else writes
+                // its times when the game is not finished, or at a later
+                // stale restart.
+                store_match_times(store, game).await;
             }
         }
         Some(Err(e)) => {

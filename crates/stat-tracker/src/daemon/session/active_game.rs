@@ -361,6 +361,8 @@ pub(crate) struct StaleHeldBoard {
     pub(crate) at: Option<chrono::DateTime<Utc>>,
     pub(crate) outcome: detect::MatchOutcome,
     pub(crate) imported: bool,
+    /// The skeleton's start and end, kept for an imported hold's rows.
+    pub(crate) times: stat_tracker::model::MatchTimes,
 }
 
 /// Where a stale hold is written. An imported hold stays on its session.
@@ -372,9 +374,11 @@ pub(crate) struct ArchivedHold {
     pub(crate) map: String,
     pub(crate) outcome: String,
     pub(crate) at: chrono::DateTime<Utc>,
-    /// Times to store on a fresh hold's own session: none seen, so its
-    /// length warns. `None` on an imported hold, whose rows carry the
-    /// session's times.
+    /// Times to store on the hold's session. A fresh hold's own session
+    /// gets empty times (none seen), so its length warns. An imported hold
+    /// is always its session's first row, so it gets the skeleton's times:
+    /// with nothing to carry them, the row would read as one from before
+    /// the times were stored, with no warning.
     pub(crate) times: Option<stat_tracker::model::MatchTimes>,
 }
 
@@ -426,6 +430,7 @@ pub(crate) fn admit_persisted_game(data_dir: &std::path::Path) -> ActiveAdmissio
         at: persisted.deferred_at,
         outcome: persisted.outcome,
         imported: persisted.deferred_imported,
+        times: persisted.match_times.clone(),
     });
     let crash_seen = stat_tracker::report::marker::last_crash_seen(data_dir);
     match active_game_from_persisted(persisted, crash_seen) {
@@ -848,7 +853,7 @@ pub(crate) fn retire_stale_skeleton(data_dir: &std::path::Path) -> Option<StaleD
                         session_id.clone(),
                         hold.map.unwrap_or_default(),
                         hold.outcome.to_string(),
-                        None,
+                        Some(hold.times),
                     )
                 } else {
                     (
@@ -890,9 +895,10 @@ pub(crate) fn retire_stale_skeleton(data_dir: &std::path::Path) -> Option<StaleD
 }
 
 /// Write a stale hold into local history. An imported hold keeps the
-/// persisted map and outcome. A fresh hold is an unknown session with an
-/// empty map, and with empty times ([`ArchivedHold::times`]), so its length
-/// warns instead of reading as a row from before the times were stored.
+/// persisted map, outcome and times. A fresh hold is an unknown session
+/// with an empty map, and with empty times ([`ArchivedHold::times`]), so
+/// its length warns instead of reading as a row from before the times were
+/// stored.
 /// Unknown rows are not uploaded. A Deathmatch map stays local even if a
 /// later edit sets a result.
 pub(crate) async fn archive_stale_hold(

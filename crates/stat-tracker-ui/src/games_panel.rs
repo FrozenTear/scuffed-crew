@@ -32,6 +32,14 @@ const TILES_W_NARROW: f32 = 420.0;
 /// Every v2-only line (deltas, Read/set, notes, status) is 12px.
 const SMALL: f32 = 12.0;
 
+/// Whether the Games tab treats a website as linked: the panel, its
+/// picker and the Edit save's toast all read it here. The games fixture
+/// stands for a signed-in player: its rows upload, and some were refused,
+/// so it reads as with sync on.
+pub(crate) fn sync_on(app: &TrackerApp) -> bool {
+    app.sync_on() || app.fixture == Some(crate::cli::FixtureKind::Games)
+}
+
 /// The panel under the open row. `narrow` is the 1024 layout.
 pub fn panel<'a>(
     app: &'a TrackerApp,
@@ -42,9 +50,7 @@ pub fn panel<'a>(
     let has_kit = app.sessions_with_kit.contains(&g.session_id);
     // At 1024 the left column takes what the 420px tile column leaves.
     let picker = games_picker::open_picker(app).filter(|p| p.sid == g.session_id);
-    // The games fixture stands for a signed-in player: its rows upload,
-    // and some were refused, so its status reads as with sync on.
-    let sync_on = app.sync_on() || app.fixture == Some(crate::cli::FixtureKind::Games);
+    let sync_on = sync_on(app);
     let ctx = Ctx {
         in_progress,
         sync_on,
@@ -55,13 +61,13 @@ pub fn panel<'a>(
     let editing = app.editing && app.edit.session_id == g.session_id;
     let stats = stats_column(app, g, narrow, in_progress);
     let status = status_box(g, in_progress, sync_on);
-    let up = detail::upload(g, in_progress, sync_on);
     // Delete game's confirm strip replaces the actions; the status stays.
     let confirming = app.confirm_delete.as_deref() == Some(g.session_id.as_str());
     let strip = confirming.then(|| {
         crate::games_delete::strip(
             &g.session_id,
-            crate::games_delete::reach(&up, sync_on),
+            crate::games_delete::reach(g, in_progress),
+            sync_on,
             &app.games_tab.focus,
         )
     });
@@ -215,8 +221,8 @@ fn section_label(label: &'static str) -> Element<'static, Message> {
 
 /// The map, EDITED when set by hand, then its chips ([`detail::map_chips`]:
 /// the mode, then the confident queue), and "Set map" (or the open picker)
-/// while the game is held for it. Under the line: the read vs set note for
-/// a hand fix, then the queue warning ([`detail::queue_warning`]) when the
+/// when the field offers Set. Under the line: the read vs set note for a
+/// hand fix, then the queue warning ([`detail::queue_warning`]) when the
 /// game has a queue title with no confident value. With the reader off
 /// there is neither the queue chip nor the warning.
 fn map_line(g: &Game, ctx: Ctx, picker: Option<&Picker>) -> Element<'static, Message> {
@@ -253,9 +259,9 @@ fn edited(g: &Game, field: Field) -> bool {
     g.edited_fields.iter().any(|f| f == field.edited_name())
 }
 
-/// "Set map" / "Set hero" on a field the game is held for.
+/// "Set map" / "Set hero" on a field that offers Set.
 fn with_set<'a>(r: Row<'a, Message>, g: &Game, field: Field, editing: bool) -> Row<'a, Message> {
-    if !editing && games_picker::held_for(g, field) {
+    if !editing && games_picker::offers_set(g, field) {
         return r.push(games_picker::set_button(&g.session_id, field));
     }
     r
@@ -603,7 +609,7 @@ fn stats_column<'a>(
     let mut head = row![section_label("STATS")]
         .spacing(10)
         .align_y(Alignment::Center);
-    if g.edited {
+    if stats_edited(g) {
         head = head.push(small_chip("Edited", theme::WARN, theme::WARN));
     }
     if let Some(label) = g.unsure_label() {
@@ -652,6 +658,14 @@ fn stats_column<'a>(
     column![head, grid, text(caption).size(SMALL).color(TEXT_3),]
         .spacing(10)
         .into()
+}
+
+/// STATS gets its Edited chip for a fix to one of the six stats only. A
+/// map, hero, role or result fix has its own EDITED badge on that field.
+fn stats_edited(g: &Game) -> bool {
+    Stat::ALL
+        .iter()
+        .any(|s| g.edited_fields.iter().any(|f| f == s.edit_name()))
 }
 
 /// One tile: the corrected value, an EDITED badge and "Read 22, you set
@@ -708,12 +722,21 @@ fn status_box(g: &Game, in_progress: bool, sync_on: bool) -> Element<'static, Me
         .font(FONT_BOLD)
         .color(title_color);
     let detail_line = text(up.detail(&g.recognizer)).size(SMALL).color(TEXT_2);
+    let notice = detail::site_fix_notice(g, &up);
     let body: Element<'static, Message> = match up {
-        // "Uploaded · Read by cv-v1" on one line.
-        Upload::Uploaded => row![title, text("·").size(SMALL).color(TEXT_3), detail_line]
-            .spacing(6)
-            .align_y(Alignment::Center)
-            .into(),
+        // "Uploaded · Read by cv-v1" on one line, and for a game an older
+        // build sent with no map or hero, why it offers Set.
+        Upload::Uploaded => {
+            let line = row![title, text("·").size(SMALL).color(TEXT_3), detail_line]
+                .spacing(6)
+                .align_y(Alignment::Center);
+            match notice {
+                Some(n) => column![line, text(n).size(SMALL).color(theme::WARN)]
+                    .spacing(4)
+                    .into(),
+                None => line.into(),
+            }
+        }
         // The outlined Retry upload beside the server's words.
         Upload::Rejected(_) => column![
             title,
@@ -993,6 +1016,32 @@ mod tests {
         );
     }
 
+    /// STATS reads Edited for a stat fix only; a map, hero or result fix
+    /// marks its own field (the picker's "no STATS chip").
+    #[test]
+    fn the_stats_chip_is_for_stat_fixes_only() {
+        let all = crate::snapshot::games_from_snapshot(&crate::fixtures_games::snapshot());
+        let mut g = all
+            .into_iter()
+            .find(|g| g.session_id == crate::fixtures_games::NORMAL)
+            .unwrap();
+        assert!(stats_edited(&g), "E was set by hand");
+        for fields in [
+            vec!["map_name"],
+            vec!["hero", "role"],
+            vec!["outcome"],
+            vec![],
+        ] {
+            g.edited_fields = fields.iter().map(|f| f.to_string()).collect();
+            g.edited = !fields.is_empty();
+            assert!(!stats_edited(&g), "{fields:?}");
+        }
+        for stat in Stat::ALL {
+            g.edited_fields = vec!["map_name".into(), stat.edit_name().into()];
+            assert!(stats_edited(&g), "{stat:?}");
+        }
+    }
+
     #[test]
     fn every_fixture_state_draws_at_both_widths() {
         let dir = tempfile::tempdir().unwrap();
@@ -1023,6 +1072,7 @@ mod tests {
             crate::fixtures_games::REJECTED_2,
             crate::fixtures_games::QUEUE_SURE,
             crate::fixtures_games::QUEUE_UNSURE,
+            crate::fixtures_games::HELD,
         ] {
             let g = games.iter().find(|g| g.session_id == sid).unwrap();
             for narrow in [false, true] {
@@ -1042,6 +1092,47 @@ mod tests {
         app.nav_style = crate::nav::NavStyle::TopTabs;
         for width in [780.0, 1100.0, 1280.0, 1440.0] {
             let _ = crate::games::view(&app, width, width);
+        }
+    }
+
+    /// The held game draws its Held status box ("Needs a look") and, with
+    /// a picker open on either field, `games_picker::view` in its place,
+    /// at both widths, with and without a query and a pick.
+    #[test]
+    fn the_held_game_draws_with_an_open_picker() {
+        use crate::games_picker::{Field, Picker};
+        let dir = tempfile::tempdir().unwrap();
+        let mut cli = crate::fixtures::test_cli(dir.path());
+        cli.fixture = Some(crate::cli::FixtureKind::Games);
+        let mut app = crate::app::TrackerApp::new(cli).0;
+        app.nav_style = crate::nav::NavStyle::TopTabs;
+        let sid = crate::fixtures_games::HELD;
+        let g = app
+            .games
+            .iter()
+            .find(|g| g.session_id == sid)
+            .unwrap()
+            .clone();
+        assert_eq!(
+            detail::upload(&g, false, true),
+            Upload::Held("map and hero")
+        );
+        app.expanded = Some(sid.into());
+        for (field, name) in [(Field::Map, "Ilios"), (Field::Hero, "Ana")] {
+            for (query, picked) in [("", None), ("a", Some(name)), ("zzz", None)] {
+                app.games_tab.picker = Some(Picker {
+                    sid: sid.into(),
+                    field,
+                    query: query.into(),
+                    picked: picked.map(str::to_string),
+                    active: 0,
+                    top: 0,
+                });
+                assert!(games_picker::open_picker(&app).is_some());
+                for narrow in [false, true] {
+                    let _ = panel(&app, &g, narrow, false);
+                }
+            }
         }
     }
 }

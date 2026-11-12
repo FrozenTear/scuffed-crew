@@ -47,6 +47,7 @@ mod games_panel;
 mod games_picker;
 mod games_retry;
 mod games_rows;
+mod games_sessions;
 mod games_state;
 mod games_table;
 mod hero_pack_hint;
