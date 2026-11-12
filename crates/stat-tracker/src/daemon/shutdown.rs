@@ -52,8 +52,12 @@ pub(crate) async fn close_session_on_shutdown(
                 // its times when the game is not finished, or at a later
                 // stale restart. A finished game's close then finds its
                 // times already stored, so this write marks the snapshot.
+                // It only marks it: an export here runs before the skeleton
+                // and the close are saved, and a deadline hit inside it would
+                // leave the hold pending, so the next start stores the board
+                // again. The snapshot export stage writes it last.
                 if store_match_times(store, game).await {
-                    refresh_snapshot(store, data_dir).await;
+                    mark_snapshot(&SNAPSHOT_STATE, false);
                 }
             }
         }
