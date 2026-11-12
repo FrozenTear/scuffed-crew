@@ -366,12 +366,19 @@ fn the_outbox_keeps_consented_crops_private_and_capped() {
 fn the_app_has_no_consent_put() {
     // Consent is set on the site with a session only; a token PUT is 401.
     // No training crop code may send one, so a 401 there can never be read
-    // as a dead token.
+    // as a dead token. Scanned: the tracker's training crop and sync client
+    // files, and the desktop app's training crop section, which makes the
+    // app's training calls.
     for (name, source) in [
         ("training_client.rs", include_str!("training_client.rs")),
         ("training_pass.rs", include_str!("training_pass.rs")),
         ("training_store.rs", include_str!("training_store.rs")),
         ("training.rs", include_str!("training.rs")),
+        ("client.rs", include_str!("client.rs")),
+        (
+            "stat-tracker-ui training_card.rs",
+            include_str!("../../../stat-tracker-ui/src/training_card.rs"),
+        ),
     ] {
         assert!(!source.contains(".put("), "{name}");
         assert!(!source.contains("Method::PUT"), "{name}");

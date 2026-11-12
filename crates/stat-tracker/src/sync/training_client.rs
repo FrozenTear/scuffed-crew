@@ -27,7 +27,8 @@ pub(super) const CONSENT_PATH: &str = "/api/training-crops/consent";
 pub(super) const UPLOAD_PATH: &str = "/api/training-crops";
 pub(super) const DELETE_MINE_PATH: &str = "/api/training-crops/mine";
 
-/// Largest answer body read from these routes.
+/// Largest success answer body accepted from these routes. It is checked
+/// after the body is read; an error body is read for its code only.
 const MAX_ANSWER_BYTES: usize = 256 * 1024;
 
 /// A training crop call that did not work.

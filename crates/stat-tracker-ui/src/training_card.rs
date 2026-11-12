@@ -152,7 +152,7 @@ pub(crate) fn ask_consent_if_unread(app: &mut TrackerApp) -> Option<Task<Message
 /// recorded first for the tracker's send pass (see
 /// `stat_tracker::sync::mark_training_delete`), and after a delete that
 /// worked, that it worked (`record_training_delete_ok`), which ends an ask
-/// to delete again.
+/// to delete again left before this delete.
 pub(crate) async fn delete_everywhere(
     client: SyncClient,
     data_dir: std::path::PathBuf,
@@ -214,8 +214,8 @@ pub(crate) fn update(app: &mut TrackerApp, msg: TrainingMsg) -> Task<Message> {
         TrainingMsg::Deleted(result) => {
             state.deleting = false;
             state.deleted = Some(result);
-            // A delete that worked ends an ask to delete again: show that
-            // now, not at the next refresh.
+            // A delete that worked ends an ask to delete again left before
+            // it: show that now, not at the next refresh.
             app.daemon.training_warning = stat_tracker::sync::training_warning(&app.data_dir);
         }
     }
