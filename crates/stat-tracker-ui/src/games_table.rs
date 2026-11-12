@@ -1369,11 +1369,14 @@ mod tests {
     }
 
     /// The unsure-map row (QUEUE_SURE: name, sign, mode and queue chips),
-    /// laid out with the tiny-skia renderer at row widths across each grid,
-    /// so the Map cell's `responsive` runs. Also with the longest map name
-    /// (Wuxing University - Water College, wider than a Mid Map cell at
-    /// 1100). The sign keeps its full width inside the cell, after the name
-    /// and its gap, and the name stays within its cap, wrapping inside it.
+    /// laid out with the tiny-skia renderer for every real window from 720
+    /// to 1920 px in 1 px steps: the window's grid, and its width minus both
+    /// page gutters as the row width, so the Map cell's `responsive` runs.
+    /// Also with the two names that wrap in real windows, where an uncapped
+    /// sign shrinks: "Wuxing University - Water College" (1100 to 1239 px)
+    /// and "Workshop Green Screen" (1100 to 1107 px). The sign keeps its
+    /// full width inside the cell, after the name and its gap, and the name
+    /// stays within its cap, wrapping inside it.
     #[test]
     fn the_unsure_map_sign_keeps_its_width_when_laid_out() {
         use crate::games_detail::{MAP_CELL_GAP, MAP_WARN_W, map_cell_parts, map_name_max_width};
@@ -1386,51 +1389,52 @@ mod tests {
             .find(|g| g.session_id == crate::fixtures_games::QUEUE_SURE)
             .unwrap()
             .clone();
-        let mut long = sure.clone();
-        long.map_name = "Wuxing University - Water College".into();
+        let named = |name: &str| {
+            let mut g = sure.clone();
+            g.map_name = name.into();
+            g
+        };
+        let water = named("Wuxing University - Water College");
+        let green = named("Workshop Green Screen");
         let renderer = crate::games_bans_view::tests::headless();
-        let grids = [
-            (Grid::Narrow, &[600.0, 700.0, 780.0, 900.0, 1000.0][..]),
-            (Grid::Mid, &[1000.0, 1100.0, 1200.0, 1280.0, 1400.0][..]),
-            (Grid::Wide, &[1300.0, 1440.0, 1600.0, 1920.0][..]),
-        ];
         let mut wrapped = false;
-        for g in [&sure, &long] {
+        for g in [&sure, &water, &green] {
             let parts = map_cell_parts(g, true);
             assert_eq!(parts.len(), 4, "name, sign and two chips: {parts:?}");
-            for (grid, widths) in grids {
+            for window in 720..=1920 {
+                let window = window as f32;
+                let grid = Grid::for_window(window);
+                let width = window - 2.0 * crate::theme::page_gutter(window);
                 let cols = games_rows::columns(grid);
                 let map_at = cols.iter().position(|(c, _)| *c == Col::Map).unwrap();
-                for &width in widths {
-                    let mut row = game_row(g, &cols, TabState::default(), false, false, false);
-                    let mut tree = Tree::new(&row);
-                    let node = row.as_widget_mut().layout(
-                        &mut tree,
-                        &renderer,
-                        &Limits::new(iced::Size::ZERO, iced::Size::new(width, 400.0)),
-                    );
-                    // The columns, then the row's mark.
-                    let cells = row_node(&node).children();
-                    assert_eq!(cells.len(), cols.len() + 1, "{grid:?} at {width}");
-                    let cell = &cells[map_at];
-                    let cell_w = cell.bounds().width;
-                    let inner = row_node(cell);
-                    assert_eq!(inner.children().len(), parts.len(), "{grid:?} at {width}");
-                    let [name, sign, ..] = inner.children() else {
-                        panic!("name and sign first");
-                    };
-                    let (name, sign) = (name.bounds(), sign.bounds());
-                    let at = format!(
-                        "{} {grid:?} at {width}: cell {cell_w}, name {name:?}, sign {sign:?}",
-                        g.map_name
-                    );
-                    let cap = map_name_max_width(cell_w, &parts).unwrap();
-                    assert!(name.width > 0.0 && name.width <= cap + 0.5, "{at}");
-                    assert_eq!(sign.width, MAP_WARN_W, "{at}");
-                    assert!(sign.x + 0.5 >= name.x + name.width + MAP_CELL_GAP, "{at}");
-                    assert!(sign.x + sign.width <= cell_w + 0.5, "{at}");
-                    wrapped |= name.height > 20.0;
-                }
+                let mut row = game_row(g, &cols, TabState::default(), false, false, false);
+                let mut tree = Tree::new(&row);
+                let node = row.as_widget_mut().layout(
+                    &mut tree,
+                    &renderer,
+                    &Limits::new(iced::Size::ZERO, iced::Size::new(width, 400.0)),
+                );
+                // The columns, then the chevron.
+                let cells = row_node(&node).children();
+                assert_eq!(cells.len(), cols.len() + 1, "{grid:?} at {width}");
+                let cell = &cells[map_at];
+                let cell_w = cell.bounds().width;
+                let inner = row_node(cell);
+                assert_eq!(inner.children().len(), parts.len(), "{grid:?} at {width}");
+                let [name, sign, ..] = inner.children() else {
+                    panic!("name and sign first");
+                };
+                let (name, sign) = (name.bounds(), sign.bounds());
+                let at = format!(
+                    "{} {grid:?} window {window} row {width}: cell {cell_w}, name {name:?}, sign {sign:?}",
+                    g.map_name
+                );
+                let cap = map_name_max_width(cell_w, &parts).unwrap();
+                assert!(name.width > 0.0 && name.width <= cap + 0.5, "{at}");
+                assert_eq!(sign.width, MAP_WARN_W, "{at}");
+                assert!(sign.x + 0.5 >= name.x + name.width + MAP_CELL_GAP, "{at}");
+                assert!(sign.x + sign.width <= cell_w + 0.5, "{at}");
+                wrapped |= name.height > 20.0;
             }
         }
         assert!(wrapped, "some name wrapped inside its cap");
