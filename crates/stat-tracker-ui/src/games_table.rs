@@ -5,12 +5,16 @@
 //! headers and the row cells (amber E/D/A, portrait and role letter,
 //! Playing, the marks). The filter chips live in [`crate::filter_chips`].
 
-use iced::widget::{button, column, container, image, mouse_area, row, rule, space, text};
+use iced::widget::text::Wrapping;
+use iced::widget::{
+    button, column, container, image, mouse_area, responsive, row, rule, space, text,
+};
 use iced::{
     Alignment, Background, Border, Color, Element, Fill, FillPortion, Length, Padding, Theme,
 };
 
 use crate::app::{Message, TrackerApp};
+use crate::games_detail::MapPart;
 use crate::games_rows::{self, Col, Focus, Grid, Mark, TabState, Tick, UnsureItem, Width};
 use crate::icons::{self, Icon};
 use crate::model::{Game, Outcome, Role, Screen, game_card_in_progress};
@@ -678,13 +682,24 @@ fn game_row(
                 } else {
                     iced::Font::DEFAULT
                 };
-                let mut m = row![text(name).size(SIZE_META).font(font).color(color)]
-                    .spacing(8)
-                    .align_y(Alignment::Center);
-                if let Some(mode) = games_rows::mode_chip(&g.map_name) {
-                    m = m.push(small_chip(mode, TEXT_2, BORDER));
+                // The sign right after the name and before the chips, so a
+                // narrow column clips the chips first. The Map column is a
+                // share, so with the sign the cell reads its width to cap the
+                // name, which wraps inside the cap, and keep the sign's
+                // full width (map_name_max_width).
+                let parts = crate::games_detail::map_cell_parts(g, doubt);
+                if parts.contains(&MapPart::Warn) {
+                    responsive(move |size| {
+                        let max = crate::games_detail::map_name_max_width(size.width, &parts);
+                        let m = map_cell(&name, color, font, &parts, max);
+                        container(m).center_y(Fill).into()
+                    })
+                    .width(Fill)
+                    .height(Length::Fixed(h))
+                    .into()
+                } else {
+                    map_cell(&name, color, font, &parts, None)
                 }
-                with_warn(m.into(), doubt)
             }
             Col::Hero => hero_cell(g, unsure(UnsureItem::Hero)),
             Col::Eda => text(games_rows::eda(g))
@@ -774,10 +789,57 @@ fn with_warn(cell: Element<'static, Message>, unsure: bool) -> Element<'static, 
     if !unsure {
         return cell;
     }
-    row![cell, image(icons::handle(Icon::Warn)).width(12).height(12)]
+    row![cell, warn_sign()]
         .spacing(6)
         .align_y(Alignment::Center)
         .into()
+}
+
+/// The amber warning sign of an unsure read, [`MAP_WARN_W`] square, the
+/// width the Map cell's name cap reserves for it.
+///
+/// [`MAP_WARN_W`]: crate::games_detail::MAP_WARN_W
+fn warn_sign() -> Element<'static, Message> {
+    let side = crate::games_detail::MAP_WARN_W;
+    image(icons::handle(Icon::Warn))
+        .width(side)
+        .height(side)
+        .into()
+}
+
+/// The list row's Map cell from `parts` in order. With `name_max` the name
+/// is capped at that width (a long name wraps inside the cap, like a sure
+/// one wraps in its cell), so the sign after it keeps its width; without
+/// it the name draws as before. In the list row a squeezed
+/// chip clips on one line instead of becoming a two-line pill.
+fn map_cell(
+    name: &str,
+    color: Color,
+    font: iced::Font,
+    parts: &[MapPart],
+    name_max: Option<f32>,
+) -> Element<'static, Message> {
+    let mut m = row![]
+        .spacing(crate::games_detail::MAP_CELL_GAP)
+        .align_y(Alignment::Center);
+    for part in parts {
+        let part: Element<'static, Message> = match part {
+            MapPart::Name => {
+                let t = text(name.to_string())
+                    .size(SIZE_META)
+                    .font(font)
+                    .color(color);
+                match name_max {
+                    Some(max) => container(t).max_width(max).clip(true).into(),
+                    None => t.into(),
+                }
+            }
+            MapPart::Warn => warn_sign(),
+            MapPart::Chip(chip) => chip_box(chip.clone(), TEXT_2, BORDER, Wrapping::None),
+        };
+        m = m.push(part);
+    }
+    m.into()
 }
 
 /// A grey silhouette for the portrait (no Blizzard art is shipped), the
@@ -901,16 +963,33 @@ pub(crate) fn small_chip(
     small_chip_owned(label.to_string(), color, border)
 }
 
+/// A small outline chip whose label wraps inside the pill when squeezed,
+/// as text does by default. The open game's map line, the picker and the
+/// STATS heading use it. The open game's left column does not clip, so a
+/// one-line label there could run into the tile column.
 pub(crate) fn small_chip_owned(
     label: String,
     color: Color,
     border: Color,
 ) -> Element<'static, Message> {
+    chip_box(label, color, border, Wrapping::default())
+}
+
+/// A small outline chip with its label wrapped as `wrapping` says. The list
+/// row's Map cell passes `Wrapping::None`: its cell clips, so a squeezed
+/// chip there clips on one line.
+fn chip_box(
+    label: String,
+    color: Color,
+    border: Color,
+    wrapping: Wrapping,
+) -> Element<'static, Message> {
     container(
         text(label)
             .size(SIZE_LABEL)
             .font(FONT_SEMIBOLD)
-            .color(color),
+            .color(color)
+            .wrapping(wrapping),
     )
     .padding(Padding::from([1, 8]))
     .style(move |_: &Theme| container::Style {
@@ -1277,5 +1356,87 @@ mod tests {
         send(&mut app, Msg::Delete(NORMAL.into()));
         assert!(crate::games::shown_games(&app).is_empty());
         assert!(app.games_tab.deleted_empty_shown);
+    }
+
+    /// The first descendant of `node` with more than one child, through
+    /// nodes with one child (the wrappers around a row).
+    fn row_node(node: &iced::advanced::layout::Node) -> &iced::advanced::layout::Node {
+        match node.children() {
+            [only] => row_node(only),
+            [] => panic!("no row under {:?}", node.bounds()),
+            _ => node,
+        }
+    }
+
+    /// The unsure-map row (QUEUE_SURE: name, sign, mode and queue chips),
+    /// laid out with the tiny-skia renderer for every real window from 720
+    /// to 1920 px in 1 px steps: the window's grid, and its width minus both
+    /// page gutters as the row width, so the Map cell's `responsive` runs.
+    /// Also with the two names that wrap in real windows, where an uncapped
+    /// sign shrinks: "Wuxing University - Water College" (1100 to 1239 px)
+    /// and "Workshop Green Screen" (1100 to 1107 px). The sign keeps its
+    /// full width inside the cell, after the name and its gap, and the name
+    /// stays within its cap, wrapping inside it.
+    #[test]
+    fn the_unsure_map_sign_keeps_its_width_when_laid_out() {
+        use crate::games_detail::{MAP_CELL_GAP, MAP_WARN_W, map_cell_parts, map_name_max_width};
+        use iced::advanced::layout::Limits;
+        use iced::advanced::widget::Tree;
+        let (_dir, app) = app();
+        let sure = app
+            .games
+            .iter()
+            .find(|g| g.session_id == crate::fixtures_games::QUEUE_SURE)
+            .unwrap()
+            .clone();
+        let named = |name: &str| {
+            let mut g = sure.clone();
+            g.map_name = name.into();
+            g
+        };
+        let water = named("Wuxing University - Water College");
+        let green = named("Workshop Green Screen");
+        let renderer = crate::games_bans_view::tests::headless();
+        let mut wrapped = false;
+        for g in [&sure, &water, &green] {
+            let parts = map_cell_parts(g, true);
+            assert_eq!(parts.len(), 4, "name, sign and two chips: {parts:?}");
+            for window in 720..=1920 {
+                let window = window as f32;
+                let grid = Grid::for_window(window);
+                let width = window - 2.0 * crate::theme::page_gutter(window);
+                let cols = games_rows::columns(grid);
+                let map_at = cols.iter().position(|(c, _)| *c == Col::Map).unwrap();
+                let mut row = game_row(g, &cols, TabState::default(), false, false, false);
+                let mut tree = Tree::new(&row);
+                let node = row.as_widget_mut().layout(
+                    &mut tree,
+                    &renderer,
+                    &Limits::new(iced::Size::ZERO, iced::Size::new(width, 400.0)),
+                );
+                // The columns, then the chevron.
+                let cells = row_node(&node).children();
+                assert_eq!(cells.len(), cols.len() + 1, "{grid:?} at {width}");
+                let cell = &cells[map_at];
+                let cell_w = cell.bounds().width;
+                let inner = row_node(cell);
+                assert_eq!(inner.children().len(), parts.len(), "{grid:?} at {width}");
+                let [name, sign, ..] = inner.children() else {
+                    panic!("name and sign first");
+                };
+                let (name, sign) = (name.bounds(), sign.bounds());
+                let at = format!(
+                    "{} {grid:?} window {window} row {width}: cell {cell_w}, name {name:?}, sign {sign:?}",
+                    g.map_name
+                );
+                let cap = map_name_max_width(cell_w, &parts).unwrap();
+                assert!(name.width > 0.0 && name.width <= cap + 0.5, "{at}");
+                assert_eq!(sign.width, MAP_WARN_W, "{at}");
+                assert!(sign.x + 0.5 >= name.x + name.width + MAP_CELL_GAP, "{at}");
+                assert!(sign.x + sign.width <= cell_w + 0.5, "{at}");
+                wrapped |= name.height > 20.0;
+            }
+        }
+        assert!(wrapped, "some name wrapped inside its cap");
     }
 }
