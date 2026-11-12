@@ -291,6 +291,8 @@ pub(crate) async fn handle_capture(
                             );
                         }
                     };
+                    // Only the size is kept, for the capture size notice.
+                    daemon::vision_size::note_frame(img.width(), img.height());
                     let analysis = tokio::task::spawn_blocking(move || {
                         let started = Instant::now();
                         let cpu_started = stat_tracker::perf::thread_cpu();
