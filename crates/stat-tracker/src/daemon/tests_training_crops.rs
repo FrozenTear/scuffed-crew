@@ -51,16 +51,24 @@ fn tab_frame() -> DynamicImage {
     tab_frame_with(&REAL_LABELS)
 }
 
-/// The left edge, in frame px, of the 8 px mark [`tab_frame_with`] centres
-/// on `label` (a fraction of the board width).
-fn label_start(label: f64) -> u32 {
+/// The width in frame px of the mark [`tab_frame_with`] draws for the
+/// `index`th label: 8 px, but 32 px for the fourth, as the real DMG label
+/// is the widest of the six.
+fn label_width(index: usize) -> u32 {
+    if index == 3 { 32 } else { 8 }
+}
+
+/// The left edge, in frame px, of the mark [`tab_frame_with`] centres on
+/// the `index`th label at `label` (a fraction of the board width).
+fn label_start(label: f64, index: usize) -> u32 {
     let (bx, _, bw, _) = ocr::preprocess::crop_scoreboard_rect(1920, 1080);
-    bx + (label * f64::from(bw)).round() as u32 - 4
+    bx + (label * f64::from(bw)).round() as u32 - label_width(index) / 2
 }
 
 /// A 1920x1080 Tab: every pixel right of the chat strip names its own
 /// position, and the scoreboard's header strip is a bright bar with a dark
-/// 8 px mark centred on each of `labels` (fractions of the board width).
+/// mark centred on each of `labels` (fractions of the board width), the
+/// fourth wider than the rest ([`label_width`]).
 fn tab_frame_with(labels: &[f64]) -> DynamicImage {
     let (w, h) = (1920, 1080);
     let (bx, by, bw, bh) = ocr::preprocess::crop_scoreboard_rect(w, h);
@@ -69,9 +77,13 @@ fn tab_frame_with(labels: &[f64]) -> DynamicImage {
         by + (f64::from(bh) * 0.008) as u32,
         by + (f64::from(bh) * 0.022) as u32,
     );
-    let starts: Vec<u32> = labels.iter().map(|&c| label_start(c)).collect();
+    let spans: Vec<(u32, u32)> = labels
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| (label_start(c, i), label_start(c, i) + label_width(i)))
+        .collect();
     let is_label = |x: u32, y: u32| {
-        (label_y0..label_y1).contains(&y) && starts.iter().any(|&s| (s..s + 8).contains(&x))
+        (label_y0..label_y1).contains(&y) && spans.iter().any(|&(s, e)| (s..e).contains(&x))
     };
     let img = RgbImage::from_fn(w, h, |x, y| {
         if x < bx {
@@ -363,9 +375,9 @@ async fn stat_digit_crops_are_the_own_rows_stat_cells_only() {
     cells.sort_by_key(|&(x0, _, _)| x0);
     let slots: Vec<&str> = cells.iter().map(|(_, _, slot)| slot.as_str()).collect();
     assert_eq!(slots, sync::STAT_DIGIT_COLUMNS);
-    for ((x0, width, slot), label) in cells.iter().zip(REAL_LABELS) {
+    for (i, ((x0, width, slot), label)) in cells.iter().zip(REAL_LABELS).enumerate() {
         let centre = f64::from(x0 * 2 + width) / 2.0;
-        let want = f64::from(label_start(label)) + 4.0;
+        let want = f64::from(label_start(label, i)) + f64::from(label_width(i)) / 2.0;
         assert!(
             (centre - want).abs() <= 2.0,
             "{slot} cell centred at {centre}, its label at {want}"
@@ -516,6 +528,19 @@ fn training_columns_need_exactly_the_six_labels_in_their_gap_pattern() {
         (935, 949),
     ];
     assert_eq!(training_stat_columns(&swapped, w), None);
+    // E missing and a mark past MIT: shifted one column right, every gap
+    // still one the reader takes and narrow before wide, but the fourth
+    // group is H, not the widest (DMG).
+    let shifted = [
+        (586, 595),
+        (649, 653),
+        (720, 758),
+        (846, 849),
+        (935, 949),
+        (1040, 1060),
+    ];
+    assert!(ocr::preprocess::columns_from_header_groups(&shifted, w).is_some());
+    assert_eq!(training_stat_columns(&shifted, w), None);
     // Five labels.
     assert_eq!(training_stat_columns(&real[..5], w), None);
     assert_eq!(training_stat_columns(&real, 0), None);

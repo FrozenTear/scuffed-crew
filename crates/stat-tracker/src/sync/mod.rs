@@ -9,7 +9,7 @@
 //! - `client`: [`SyncClient`] and its redirect policy (reqwest).
 //! - `training`, `training_store`, `training_client`, `training_pass`,
 //!   `training_collect`: opt-in training crops (kinds and caps, the outbox,
-//!   the three routes, one send pass, the Tab crops the daemon offers).
+//!   the routes, one send pass, the Tab crops the daemon offers).
 //!   `training_client` is the other reqwest file.
 //!
 //! Every public item is re-exported here, so `crate::sync::X` paths are

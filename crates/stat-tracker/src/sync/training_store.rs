@@ -202,6 +202,23 @@ pub(super) fn write_training_warning(
     }
 }
 
+/// Leave `warning` as a sticky warning (see [`write_training_warning`]),
+/// keeping an ask to delete again that is still open: its marker, and its
+/// text in front, so the app still shows it. The read and the write hold
+/// `OWNER_LOCK`, the lock a send pass writes its status under, so an ask a
+/// pass leaves meanwhile is never overwritten.
+pub(super) fn add_sticky_training_warning(data_dir: &Path, warning: &str) {
+    let _owner = OWNER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let asked = read_training_status(data_dir)
+        .and_then(|status| status.delete_again_at)
+        .filter(|at| !deleted_again_since(data_dir, Some(*at)));
+    let text = match asked {
+        Some(_) => format!("{} {warning}", super::training_pass::TRAINING_DELETE_AGAIN),
+        None => warning.to_string(),
+    };
+    write_training_warning(data_dir, Some(&text), true, false, asked);
+}
+
 // ------------------------------------------------------------------- outbox
 
 /// Crop ids sort by the time they were kept: milliseconds, then random.

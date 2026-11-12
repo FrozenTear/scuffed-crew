@@ -1123,13 +1123,13 @@ async fn a_lost_tab_crop_keeps_the_ask_to_delete_again() {
     );
     warn_crop_lost(dir.path(), UploadKind::StatDigits);
     let status = read_training_status(dir.path()).expect("a warning");
+    let warning = status.warning.as_deref().unwrap();
+    assert!(warning.contains("could not be kept"), "{warning}");
     assert!(
-        status
-            .warning
-            .as_deref()
-            .unwrap()
-            .contains("could not be kept")
+        warning.starts_with(TRAINING_DELETE_AGAIN),
+        "the app still shows the ask: {warning}"
     );
+    assert!(status.sticky);
     assert_eq!(status.delete_again_at, marker, "the ask is kept");
 
     let (_, server) = serve_on(
@@ -1139,4 +1139,38 @@ async fn a_lost_tab_crop_keeps_the_ask_to_delete_again() {
     let report = run_training_pass(&client(&url), dir.path()).await;
     server.join().unwrap();
     assert_eq!(report.warning.as_deref(), Some(TRAINING_DELETE_AGAIN));
+}
+
+/// An ask a delete that worked has met is not carried into a lost crop
+/// warning, and with no ask the warning is the lost crop line alone.
+#[test]
+fn a_lost_tab_crop_does_not_carry_a_met_ask_to_delete_again() {
+    let dir = tempfile::tempdir().unwrap();
+    warn_crop_lost(dir.path(), UploadKind::HeroIcon);
+    let status = read_training_status(dir.path()).expect("a warning");
+    assert!(
+        status
+            .warning
+            .as_deref()
+            .unwrap()
+            .starts_with("Training crops: hero")
+    );
+    assert_eq!(status.delete_again_at, None);
+
+    let asked = mark_training_delete(dir.path()).unwrap();
+    super::training_store::write_training_warning(
+        dir.path(),
+        Some(TRAINING_DELETE_AGAIN),
+        true,
+        false,
+        Some(asked),
+    );
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let marker = mark_training_delete(dir.path()).unwrap();
+    record_training_delete_ok(dir.path(), marker).unwrap();
+    warn_crop_lost(dir.path(), UploadKind::StatDigits);
+    let status = read_training_status(dir.path()).expect("a warning");
+    let warning = status.warning.as_deref().unwrap();
+    assert!(!warning.contains(TRAINING_DELETE_AGAIN), "{warning}");
+    assert_eq!(status.delete_again_at, None);
 }

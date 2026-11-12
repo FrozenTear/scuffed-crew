@@ -184,7 +184,10 @@ fn hero_icon_crop(
 /// which takes the first six narrow groups: there a stray mark left of E
 /// is a misread, here it would shift every window one column and upload
 /// every crop under the wrong `slot_type`. So exactly six narrow groups,
-/// and both E/A/D gaps narrower than each DMG/H/MIT gap, else `None`.
+/// both E/A/D gaps narrower than each DMG/H/MIT gap, and the fourth group
+/// (DMG) wider than each of the other five, else `None`. The width rule
+/// catches a set shifted one column right (E missing, a mark past MIT),
+/// whose gaps can still pass.
 pub(crate) fn training_stat_columns(groups: &[(u32, u32)], board_w: u32) -> Option<StatColumns> {
     if board_w == 0 {
         return None;
@@ -206,6 +209,15 @@ pub(crate) fn training_stat_columns(groups: &[(u32, u32)], board_w: u32) -> Opti
     let narrow = gaps[0].max(gaps[1]);
     let wide = gaps[2].min(gaps[3]).min(gaps[4]);
     if narrow >= wide {
+        return None;
+    }
+    let width = |&(s, e): &(u32, u32)| e.saturating_sub(s);
+    let dmg = width(&labels[3]);
+    if labels
+        .iter()
+        .enumerate()
+        .any(|(i, label)| i != 3 && width(label) >= dmg)
+    {
         return None;
     }
     ocr::preprocess::columns_from_header_groups(&labels, board_w)

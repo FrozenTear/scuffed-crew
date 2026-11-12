@@ -15,8 +15,7 @@ use scuffed_types::api::training_crops::TrainingCropUploadMeta;
 
 use super::training::UploadKind;
 use super::training_store::{
-    Kept, cached_training_consent, game_token_for, keep_crop, read_training_status,
-    write_training_warning,
+    Kept, add_sticky_training_warning, cached_training_consent, game_token_for, keep_crop,
 };
 
 /// The site's last answer has `kind`'s consent on. The daemon asks before
@@ -62,7 +61,8 @@ pub fn keep_tab_crops(
 
 /// Leave the training warning: a consented crop of `kind` from a Tab could
 /// not be kept on this PC. It stays until a send pass sends something. An
-/// ask to delete again (`delete_again_at`) is carried over, so this warning
+/// open ask to delete again (`delete_again_at` and its text) is kept, read
+/// and written under the lock a send pass writes under, so this warning
 /// never drops it.
 pub fn warn_crop_lost(data_dir: &Path, kind: UploadKind) {
     tracing::warn!(
@@ -73,6 +73,5 @@ pub fn warn_crop_lost(data_dir: &Path, kind: UploadKind) {
         "Training crops: {} from a Tab could not be kept on this PC. Your games still record.",
         kind.label().to_lowercase()
     );
-    let delete_again_at = read_training_status(data_dir).and_then(|s| s.delete_again_at);
-    write_training_warning(data_dir, Some(&text), true, false, delete_again_at);
+    add_sticky_training_warning(data_dir, &text);
 }
