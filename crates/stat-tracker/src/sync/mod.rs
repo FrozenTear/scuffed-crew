@@ -6,7 +6,10 @@
 //! - `batching`: the 413 caps and the 400/422 bisection.
 //! - `auth_pause`: `sync_auth.json` and the GUI status text.
 //! - `visibility`: the member's stats visibility, parsed from the site.
-//! - `client`: [`SyncClient`], the only reqwest code.
+//! - `client`: [`SyncClient`] and its redirect policy (reqwest).
+//! - `training`, `training_store`, `training_client`, `training_pass`:
+//!   opt-in training crops (kinds and caps, the outbox, the routes, one
+//!   send pass). `training_client` is the other reqwest file.
 //!
 //! Every public item is re-exported here, so `crate::sync::X` paths are
 //! unchanged.
@@ -17,6 +20,10 @@ mod bans_picks;
 mod batching;
 mod client;
 mod errors;
+mod training;
+mod training_client;
+mod training_pass;
+mod training_store;
 mod visibility;
 mod wire;
 
@@ -42,6 +49,18 @@ pub use client::{
     off_site_redirect_message, token_safe_redirects,
 };
 pub use errors::{SyncUploadError, server_error_text};
+pub use training::{
+    CropRefusal, QueuedCrop, UploadKind, batch_len, check_crop, game_token_ok, hero_field,
+    map_name_meta, meta_json, multipart_body, png_size, random_token,
+};
+pub use training_client::TrainingCallError;
+pub use training_pass::{TrainingPassReport, TrainingRetry, run_training_pass};
+pub use training_store::{
+    OUTBOX_KEEP_PER_KIND, TrainingStatus, adopt_training_owner, cached_training_consent,
+    clear_training_outbox, drop_kind, forget_training_crops, game_token_for, has_queued_crops,
+    keep_map_name_crop, keep_training_crop, mark_training_delete, queued_crops,
+    read_training_status, record_training_delete_ok, training_warning,
+};
 pub use visibility::{StatsVisibility, parse_hero_icon_consent, parse_stats_visibility};
 pub use wire::{UploadEntry, UploadRequest, row_needs_review, upload_request};
 
@@ -82,6 +101,12 @@ mod tests_batching;
 
 #[cfg(test)]
 mod tests_visibility;
+
+#[cfg(test)]
+mod tests_training;
+
+#[cfg(test)]
+mod tests_training_http;
 
 #[cfg(test)]
 mod tests_consent_fetch;

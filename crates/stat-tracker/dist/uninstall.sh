@@ -419,7 +419,7 @@ remove_own_name_seed "$DATA_DIR"
 
 if [[ $PURGE -eq 0 && $ASSUME_YES -eq 0 && -t 0 && -t 2 ]]; then
     reply=""
-    printf '%b' "${YLW}[uninstall]${NC} Also delete local data ($DATA_DIR: games database, debug crops, shadow logs) and config ($CONFIG_DIR, including the sync token)? [y/N] " >&2
+    printf '%b' "${YLW}[uninstall]${NC} Also delete local data ($DATA_DIR: games database, debug crops, training crops waiting to be sent, shadow logs) and config ($CONFIG_DIR, including the sync token)? [y/N] " >&2
     IFS= read -r reply || reply=""
     case "$reply" in
         [yY]*) PURGE=1 ;;
@@ -433,7 +433,7 @@ tracker_data_name() {
         matches.jsonl|commands|daemon.pid|daemon.log|daemon.log.1|debug|shadow|\
         tessdata|active_game.json|sync_auth.json|portraits|ui_state.json|\
         report-kit|run.marker|last_crash.marker|ocr_switch.json|ocr_switch.json.tmp|\
-        update-install.log|tracker.sock)
+        update-install.log|tracker.sock|training_crops)
             return 0
             ;;
         stats.surrealkv.pre-*)

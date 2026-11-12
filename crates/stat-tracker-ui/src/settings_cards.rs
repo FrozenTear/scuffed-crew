@@ -208,6 +208,7 @@ pub(crate) fn website_account(app: &TrackerApp) -> Element<'_, Message> {
     let sharing = sharing.push(crate::account_card::what_leaves_link());
     let mut rows = vec![connection.into()];
     rows.extend(uploads);
+    rows.extend(crate::training_card::section(app));
     rows.push(sharing.into());
     divided(rows)
 }

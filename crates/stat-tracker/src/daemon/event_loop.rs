@@ -166,6 +166,7 @@ pub(crate) async fn run_loop(
     let mut cmd_timer = tokio::time::interval(tokio::time::Duration::from_secs(3));
     cmd_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut idle_sync_checked = Instant::now();
+    let mut training = TrainingSched::default();
     let mut binary_checked = tokio::time::Instant::now();
     let mut logged_binary_wait = false;
     // A restart of this binary after the new one failed its exec waits out
@@ -1070,6 +1071,9 @@ pub(crate) async fn run_loop(
                     Instant::now(),
                 )
                 .await;
+                // Opt-in training crops: own task and clock, never awaited.
+                let paused = stats_sync_paused(&sync_backoff);
+                training.tick(sync_client, paused, data_dir, Instant::now());
             }
         }
     }

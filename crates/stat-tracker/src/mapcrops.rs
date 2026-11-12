@@ -7,10 +7,21 @@
 //! Each file is the full map-label box at native resolution, raw pixels,
 //! with no timer trim and no brighten or invert. The reader still trims
 //! when it reads. The cap is 100 games, not 100 files. Both files of a game
-//! are removed together. These files are never handed to [`crate::sync`]
-//! and are not part of the rolling debug rings. Report zips must leave
-//! `debug/mapcrops/` out. The helpers here are not called by a report
-//! builder yet.
+//! are removed together. These files themselves are never handed to
+//! [`crate::sync`] and are not part of the rolling debug rings. Report zips
+//! must leave `debug/mapcrops/` out. The helpers here are not called by a
+//! report builder yet.
+//!
+//! Training crops (opt-in): while the member's `map_name` consent on the
+//! site is on, the daemon copies a crop it just wrote into the training
+//! crop outbox (`sync::keep_map_name_crop`), which sends it to the site,
+//! but only from a Tab the tracker keeps for its game (`prepare_capture_row`
+//! returns Store) of a tracked mode. A crop from a rejected capture, from a
+//! Tab `prepare_capture_row` drops (an untracked map with no open game, a
+//! PvE Adlersbrunn board), or from a game of an untracked mode (Practice,
+//! Workshop, Deathmatch and the like, which never upload), is kept here and
+//! never copied. With
+//! that consent off nothing is copied and nothing here leaves the machine.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -65,15 +76,22 @@ pub fn prepare_mapcrop(
     })
 }
 
+impl MapcropJob {
+    /// Where [`commit_mapcrop`] writes this crop.
+    pub fn path(&self) -> PathBuf {
+        self.dir.join(&self.file_name)
+    }
+}
+
 /// Write `job` if that slot is still absent, then keep the newest
-/// [`MAPCROP_KEEP`] games.
-pub fn commit_mapcrop(job: MapcropJob) {
+/// [`MAPCROP_KEEP`] games. `true` when this call wrote the file.
+pub fn commit_mapcrop(job: MapcropJob) -> bool {
     if std::fs::create_dir_all(&job.dir).is_err() {
-        return;
+        return false;
     }
     let dest = job.dir.join(&job.file_name);
     if dest.is_file() {
-        return;
+        return false;
     }
     let tmp = job.dir.join(format!(".{}.partial", job.file_name));
     if job
@@ -82,7 +100,7 @@ pub fn commit_mapcrop(job: MapcropJob) {
         .is_err()
     {
         let _ = std::fs::remove_file(&tmp);
-        return;
+        return false;
     }
     match std::fs::hard_link(&tmp, &dest) {
         Ok(()) => {
@@ -90,16 +108,17 @@ pub fn commit_mapcrop(job: MapcropJob) {
         }
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
             let _ = std::fs::remove_file(&tmp);
-            return;
+            return false;
         }
         Err(_) => {
             if dest.is_file() || std::fs::rename(&tmp, &dest).is_err() {
                 let _ = std::fs::remove_file(&tmp);
-                return;
+                return false;
             }
         }
     }
     prune_mapcrops(&job.dir, MAPCROP_KEEP);
+    true
 }
 
 /// Save the map-name crop that this Tab is due to write.
@@ -108,7 +127,7 @@ pub fn save_mapcrop(data_dir: &Path, session_id: &str, frame: &DynamicImage) -> 
     let Some(job) = prepare_mapcrop(data_dir, session_id, frame) else {
         return false;
     };
-    let dest = job.dir.join(&job.file_name);
+    let dest = job.path();
     commit_mapcrop(job);
     dest.is_file()
 }

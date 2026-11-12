@@ -29,3 +29,26 @@ fn the_shell_uninstaller_removes_the_timeline_backups_too() {
     // timeline, a half-done `.partial` copy and its `.pending` note).
     assert!(sh.contains("        stats.surrealkv.pre-*)\n"));
 }
+
+/// The training crop folder (`<data_dir>/training_crops/`: waiting crops,
+/// game tokens, owner, consent, status and the delete marker) goes with
+/// the saved games, in both uninstallers, and the shell prompt names it.
+#[test]
+fn both_uninstallers_remove_the_training_crops() {
+    assert!(is_tracker_data_name("training_crops"));
+    let sh = include_str!("../../stat-tracker/dist/uninstall.sh");
+    let start = sh.find("tracker_data_name() {").expect("the shell list");
+    let end = start + sh[start..].find("\n}\n").expect("end of the shell list");
+    let list = &sh[start..end];
+    let names: Vec<&str> = list
+        .split(['|', ')', '\\', '\n', ' '])
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .collect();
+    assert!(names.contains(&"training_crops"), "{list}");
+    let prompt = sh
+        .lines()
+        .find(|line| line.contains("Also delete local data"))
+        .expect("the purge prompt");
+    assert!(prompt.contains("training crops"), "{prompt}");
+}
