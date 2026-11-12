@@ -44,8 +44,8 @@ pub fn find_player_row_by_name(rows: &[RowOcrResult], player_name: &str) -> Opti
 /// per table layout). The first row, in board order, with a whole-word hit
 /// in any window wins outright, then the first row with a substring hit;
 /// otherwise the best fuzzy row at or above 0.55. This ranking holds with
-/// one saved name too: a board reading FROZENTEAR on row 0 and FROZEN on
-/// row 1 is row 1 for "Frozen", where the first substring row used to win.
+/// one saved name too: a board reading ALPHABET on row 0 and ALPHA on
+/// row 1 is row 1 for "Alpha", where the first substring row used to win.
 pub fn match_player_row_by_name(rows: &[RowOcrResult], player_name: &str) -> Option<NameMatch> {
     scored_match(rows, &player_name.to_lowercase()).map(|(found, _)| found)
 }
@@ -153,10 +153,14 @@ type NameHit<'a> = (NameMatch, &'a str, String, Hit);
 ///    on "ALPHA2").
 /// 3. Two hits still left (two names on different rows, or two unrelated
 ///    names on one row) are a tie: `None`.
-/// 4. A substring hit (never a whole word) names nothing when a longer
-///    saved name holding it also reads on that row at or above the floor,
-///    even fuzzily: "ALPHAZ" may be Alpha2 misread, so it names neither
-///    Alpha nor Alpha2. "ALPHA" and "[TAG] ALPHA" stay Alpha's.
+/// 4. A hit names nothing when a longer saved name holding it may be what
+///    the row says. For a substring hit (never a whole word): the longer
+///    name reads on that row at or above the floor, even fuzzily ("ALPHAZ"
+///    may be Alpha2 misread, so it names neither Alpha nor Alpha2). For
+///    any hit, whole words too: the longer name is inside a read of that
+///    row once spaces and punctuation are dropped ("ALPHA 2" and "ALPHA.2"
+///    are Alpha2 split, so they name neither). "ALPHA" and "[TAG] ALPHA"
+///    stay Alpha's.
 /// 5. Fuzzy only: the best score, when it leads every other saved name's
 ///    by more than nothing and by at least `fuzzy_margin`; else `None`.
 ///
@@ -195,14 +199,16 @@ fn pick_name<'a>(
                 other.len() > h.2.len()
                     && other.contains(&h.2)
                     && rows.get(h.0.row).is_some_and(|row| {
-                        row_window_scores(row, other)
-                            .iter()
-                            .any(|(_, read)| read.passes(NAME_MATCH_MIN))
+                        let fuzzy = kind == Hit::Substring
+                            && row_window_scores(row, other)
+                                .iter()
+                                .any(|(_, read)| read.passes(NAME_MATCH_MIN));
+                        fuzzy || split_read_holds(row, other)
                     })
             })
         };
         return match specific.as_slice() {
-            [only] if kind == Hit::Substring && longer_reads_row(only) => None,
+            [only] if longer_reads_row(only) => None,
             [only] => Some((only.0, only.1)),
             _ => None,
         };
@@ -280,6 +286,27 @@ fn scored_match(rows: &[RowOcrResult], name_lower: &str) -> Option<(NameMatch, H
         .unwrap_or(0);
     tracing::debug!(row, window, score, "player name fuzzy-matched in row");
     Some((name_match(row, window, &scores), Hit::Fuzzy(score)))
+}
+
+/// Letters and digits only, lowercased: "ALPHA 2" and "Alpha.2" are both
+/// "alpha2".
+fn compact(text: &str) -> String {
+    text.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// Some name read of `row`, with spaces and punctuation dropped, holds
+/// `name_lower` likewise compacted: the read may be that name split by a
+/// misread gap or dot.
+fn split_read_holds(row: &RowOcrResult, name_lower: &str) -> bool {
+    let name = compact(name_lower);
+    !name.is_empty()
+        && std::iter::once(row.name.as_ref())
+            .chain(row.name_alternates.iter().map(Option::as_ref))
+            .flatten()
+            .any(|read| compact(&read.value).contains(&name))
 }
 
 fn name_match(row: usize, window: usize, scores: &[(usize, NameRead)]) -> NameMatch {

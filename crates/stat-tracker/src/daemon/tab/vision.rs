@@ -235,11 +235,14 @@ pub(crate) fn analyze_frame(
     let read_cells = || ocr::recognize_scoreboard_cells_pre_cropped(&scoreboard, team_size);
     let mut rows = read_tab_rows(use_new_reader, read_cells, || ocr::unread_rows(team_size));
 
-    // Player row. ocr-v1: with two or more saved names, a highlighted row
-    // whose own name read names one of them is the row. Otherwise, if a
-    // player name is configured, scan ALL rows (both teams) for a name
-    // match, this handles replays and post-match screens where the player
-    // may be on team 2. Fall back to brightness-detected row otherwise.
+    // Player row. ocr-v1: with two or more saved names and a strong
+    // highlight, that row's own name read decides first: it is the row
+    // when it names one saved name, and it stays the row with no name when
+    // saved names read on it but none wins (no board scan then). With no
+    // highlight, a weak one, fewer than two names, or a row no saved name
+    // reads on, a configured name is matched over ALL rows (both teams),
+    // for replays and post-match screens where the player may be on team
+    // 2. Fall back to the brightness-detected row otherwise.
     // `reader = "new"`: the seed match combined with the
     // highlight, and where both are silent the row the career panel's hero
     // is read on (alpha.7 O9b). Only when none of them names a row are this
@@ -269,7 +272,8 @@ pub(crate) fn analyze_frame(
             if own_names.is_empty() {
                 return None;
             }
-            // Runs only when no saved name reads on the highlighted row.
+            // Runs only when the highlighted row's own read leaves the
+            // choice to the board (see `highlighted_own_name`).
             let board = || {
                 let hit = names::match_player_row(
                     &scoreboard,
@@ -281,8 +285,7 @@ pub(crate) fn analyze_frame(
                 )?;
                 Some((hit.name, hit.recognizer))
             };
-            let lit = highlight.map(|h| h.row);
-            let (found, recognizer) = ocr_v1_name_match(&rows, lit, &own_names, board)?;
+            let (found, recognizer) = ocr_v1_name_match(&rows, highlight, &own_names, board)?;
             name_recognizer_slot.set(Some(recognizer));
             Some(found)
         },
@@ -585,10 +588,11 @@ pub(crate) fn name_on_a_full_board(
 ///
 /// * `reader = "ocr-v1"`: `name_match` runs, and the row is that match,
 ///   else the highlighted row. The daemon's `name_match` is
-///   [`ocr_v1_name_match`]: with two or more saved names the highlighted
-///   row's own name read decides first, and the name OCR over every row
-///   runs only when no saved name reads on that row. The seeds are not
-///   read.
+///   [`ocr_v1_name_match`]: with two or more saved names and a strong
+///   highlight, that row's own name read decides first; an unresolved read
+///   there keeps the highlight with no name. The name OCR over every row
+///   runs only with no highlight, a weak one, fewer than two names, or a
+///   highlighted row no saved name reads on. The seeds are not read.
 /// * `reader = "new"`: `seed_read` (the own-name seeds matched on every row,
 ///   combined with the highlight in [`detect::own_row::combine`]) gives the
 ///   row. A seed against a strong highlight is no row: the capture is held.
@@ -852,29 +856,35 @@ pub(crate) enum HighlightedName {
     /// row with no name; the board match does not run.
     Unresolved,
     /// No saved name reads on the row, there is no highlight (or no OCR row
-    /// for it), or fewer than two names are saved: the board match decides.
+    /// for it), the highlight is not strong, or fewer than two names are
+    /// saved: the board match decides.
     Board,
 }
 
-/// ocr-v1, two or more saved names: the highlighted row's own name read
-/// against the saved names ([`parse::match_row_by_names`]). A row that
+/// ocr-v1, two or more saved names, a strong highlight
+/// ([`detect::own_row::Highlight::strong`]): the highlighted row's own name
+/// read against the saved names ([`parse::match_row_by_names`]). A weak
+/// highlight (on the alpha.7 boards every wrong one, a cursor hover or a
+/// party tint, led by under 1.30) is not asked, so a tint on another
+/// account's row does not name that row. A row that
 /// names one saved name is the own row before any match over the whole
 /// board, so another of the member's accounts readable elsewhere on the
 /// board does not take its place. A row some saved name reads on but none
 /// wins is [`HighlightedName::Unresolved`]: such a read is likely one of
 /// the member's accounts misread, and the board match could pick the other
 /// account's row at full trust. Only a row no saved name reads on
-/// ([`parse::any_name_reads_row`]), or fewer than two names, or no
-/// highlight, leaves the decision to the board match.
+/// ([`parse::any_name_reads_row`]), fewer than two names, or no strong
+/// highlight leaves the decision to the board match.
 pub(crate) fn highlighted_own_name(
     rows: &[ocr::RowOcrResult],
-    highlight: Option<usize>,
+    highlight: Option<detect::own_row::Highlight>,
     names: &[String],
 ) -> HighlightedName {
     if names.len() < 2 {
         return HighlightedName::Board;
     }
-    let Some((idx, row)) = highlight.and_then(|idx| Some((idx, rows.get(idx)?))) else {
+    let lit = highlight.filter(detect::own_row::Highlight::strong);
+    let Some((idx, row)) = lit.and_then(|h| Some((h.row, rows.get(h.row)?))) else {
         return HighlightedName::Board;
     };
     match parse::match_row_by_names(row, idx, names) {
@@ -886,13 +896,13 @@ pub(crate) fn highlighted_own_name(
 
 /// ocr-v1's own-row name match, the one `analyze_frame` runs: the
 /// highlighted row's own read first ([`highlighted_own_name`]), and the
-/// whole-board match `board` only when no saved name reads on that row.
+/// whole-board match `board` only when that read leaves the choice to it.
 /// An unresolved highlighted read gives no match at all, so
 /// [`find_own_row`] keeps the highlight and the text fallback gets no
 /// name. A named highlighted row comes back with the ocr-v1 recognizer.
 pub(crate) fn ocr_v1_name_match(
     rows: &[ocr::RowOcrResult],
-    highlight: Option<usize>,
+    highlight: Option<detect::own_row::Highlight>,
     saved: &[String],
     board: impl FnOnce() -> Option<(parse::NameMatch, names::NameRecognizer)>,
 ) -> Option<(parse::NameMatch, names::NameRecognizer)> {

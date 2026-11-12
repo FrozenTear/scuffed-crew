@@ -167,12 +167,26 @@ fn lobby(own: &str, own_stats: Option<[&str; 6]>, other: &str) -> Vec<ocr::RowOc
 /// The highlighted row's own stat cells in [`lobby`]: (7, 2100).
 const OWN_STATS: [&str; 6] = ["7", "2", "1", "2,100", "300", "50"];
 
+/// A strong highlight on row 2 of [`lobby`].
+const LIT: Option<detect::own_row::Highlight> =
+    Some(detect::own_row::Highlight { row: 2, lead: 1.5 });
+
 /// The ocr-v1 own row as the daemon chooses it: `analyze_frame`'s name
 /// match is [`ocr_v1_name_match`], here with the names switch off (the
 /// board match is the per-cell OCR read), then the highlight.
 fn ocr_v1_own_row(
     rows: &[ocr::RowOcrResult],
     highlight: usize,
+    names: &[String],
+) -> (Option<usize>, Option<parse::NameMatch>) {
+    ocr_v1_own_row_lit(rows, highlight, 1.5, names)
+}
+
+/// [`ocr_v1_own_row`] with the highlight's brightness lead.
+fn ocr_v1_own_row_lit(
+    rows: &[ocr::RowOcrResult],
+    highlight: usize,
+    lead: f64,
     names: &[String],
 ) -> (Option<usize>, Option<parse::NameMatch>) {
     let choice = find_own_row(
@@ -182,11 +196,11 @@ fn ocr_v1_own_row(
                 names::match_named_rows(rows, names, 5, names::BoardMatch::Cells)
                     .map(|found| (found, names::NameRecognizer::OcrV1))
             };
-            ocr_v1_name_match(rows, Some(highlight), names, board).map(|(found, _)| found)
+            ocr_v1_name_match(rows, o9_lit(highlight, lead), names, board).map(|(found, _)| found)
         },
         || panic!("seeds read under ocr-v1"),
         || panic!("name fallback under ocr-v1"),
-        o9_lit(highlight, 1.5),
+        o9_lit(highlight, lead),
         None,
         false,
     );
@@ -219,15 +233,39 @@ fn ocr_v1_takes_the_highlighted_row_over_another_saved_name_on_the_board() {
     // as before: Main's row. One saved name never asks the highlight.
     let rows = lobby("Stranger", Some(OWN_STATS), "MAIN");
     assert_eq!(
-        highlighted_own_name(&rows, Some(2), &main_first),
+        highlighted_own_name(&rows, LIT, &main_first),
         HighlightedName::Board
     );
     assert_eq!(ocr_v1_own_row(&rows, 2, &main_first).0, Some(7));
     let main_only = ["Main".to_string()];
     assert_eq!(
-        highlighted_own_name(&rows, Some(2), &main_only),
+        highlighted_own_name(&rows, LIT, &main_only),
         HighlightedName::Board
     );
+}
+
+/// Site's re-review nit 2 (8fd63ad2): a weak highlight (a cursor hover or
+/// a party tint leads by under 1.30) is not asked for its name, so a tint
+/// on another saved account's row does not name that row: the board match
+/// decides, as before this PR: here Main's clean row 7 over the lit row's
+/// fuzzy "A1T". A strong highlight on the same row is named Alt, and its
+/// match carries the ocr-v1 recognizer (the board closure is not run).
+#[test]
+fn a_weak_highlight_leaves_the_own_row_to_the_board_match() {
+    let names = ["Main".to_string(), "Alt".to_string()];
+    let rows = lobby("A1T", Some(OWN_STATS), "MAIN");
+    let weak = detect::own_row::SEED_HIGHLIGHT_LEAD - 0.01;
+    assert_eq!(
+        highlighted_own_name(&rows, o9_lit(2, weak), &names),
+        HighlightedName::Board
+    );
+    assert_eq!(ocr_v1_own_row_lit(&rows, 2, weak, &names).0, Some(7));
+    let strong = detect::own_row::SEED_HIGHLIGHT_LEAD;
+    assert_eq!(ocr_v1_own_row_lit(&rows, 2, strong, &names).0, Some(2));
+    let (found, recognizer) =
+        ocr_v1_name_match(&rows, LIT, &names, || panic!("board run")).expect("named");
+    assert_eq!((found.row, found.name), (2, 1));
+    assert_eq!(recognizer, names::NameRecognizer::OcrV1);
 }
 
 /// Site's blocking finding 1, cells unreadable: the same lobby with the
@@ -272,7 +310,7 @@ fn assert_unresolved_highlight(saved: [&str; 2], read: &str, other: &str) {
             let rows = lobby(read, own_stats, other);
             let why = format!("{names:?} {read} cells {}", own_stats.is_some());
             assert_eq!(
-                highlighted_own_name(&rows, Some(2), names),
+                highlighted_own_name(&rows, LIT, names),
                 HighlightedName::Unresolved,
                 "{why}"
             );
@@ -361,7 +399,7 @@ fn the_highlighted_rows_name_is_read_in_any_name_window() {
         }),
         None,
     ];
-    let HighlightedName::Named(found) = highlighted_own_name(&rows, Some(2), &names) else {
+    let HighlightedName::Named(found) = highlighted_own_name(&rows, LIT, &names) else {
         panic!("named");
     };
     assert_eq!((found.row, found.window, found.name), (2, 1, 1));
@@ -412,7 +450,7 @@ fn the_ocr_v1_name_match_asks_the_highlighted_row_first() {
     assert_eq!(body.matches("ocr_v1_name_match(").count(), 1);
     assert_eq!(body.matches("highlighted_own_name(").count(), 0);
     let board = body.find("let board = || { let hit = names::match_player_row(");
-    let call = body.find("= ocr_v1_name_match(&rows, lit, &own_names, board)?;");
+    let call = body.find("= ocr_v1_name_match(&rows, highlight, &own_names, board)?;");
     assert!(board.expect("board closure") < call.expect("shared decision"));
     let decide = norm(fn_source("ocr_v1_name_match"));
     assert!(decide.contains("match highlighted_own_name(rows, highlight, saved) {"));
@@ -426,9 +464,9 @@ fn the_ocr_v1_name_match_asks_the_highlighted_row_first() {
 /// saved names). A Tab whose highlighted row (named Main) has no readable
 /// cells, while the text holds Alt's stat line, stores nothing and logs a
 /// WARN. A row that names no saved name does the same and also logs why at
-/// INFO; a readable Tab logs no such line. The game stays open, and the
-/// next Tab with readable cells is recorded on it. Alt's numbers are not
-/// stored.
+/// INFO. A row that names no saved name but whose cells parse logs no such
+/// line (one INFO in all) and is recorded: the game stays open, and its
+/// numbers (5, 4316) are stored. Alt's numbers are not stored.
 #[tokio::test]
 async fn an_unreadable_highlighted_row_warns_and_the_game_keeps_recording() {
     let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
@@ -460,7 +498,7 @@ async fn an_unreadable_highlighted_row_warns_and_the_game_keeps_recording() {
     active.session_created = false;
     let mut st = session(Some(active), now);
 
-    let tabs = [("MAIN", false), ("STRANGER", false), ("MAIN", true)];
+    let tabs = [("MAIN", false), ("STRANGER", false), ("STRANGER", true)];
     for (tab, (name, readable)) in tabs.into_iter().enumerate() {
         *INJECTED_CAPTURE.lock().unwrap() = Some(InjectedCapture {
             analysis: own_row(name, readable),
