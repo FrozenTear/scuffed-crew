@@ -104,6 +104,7 @@ pub mod update;
 mod update_check;
 #[cfg(test)]
 mod update_pretag06_tests;
+pub mod vision_size_notice;
 mod what_leaves;
 pub mod widgets;
 mod winrate_bar;

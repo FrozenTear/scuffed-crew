@@ -135,6 +135,230 @@ fn any_saved_name_finds_the_row() {
     );
 }
 
+/// The saved name one row's name read belongs to: one name only, a whole
+/// name hit first, else a fuzzy read that clearly leads. A row with no name
+/// read, or a read that names none of the saved names, names nothing.
+#[test]
+fn best_name_for_row_names_one_saved_name() {
+    let names = ["Main".to_string(), "Alt".to_string()];
+    assert_eq!(
+        best_name_for_row(&valid_row("ALT"), &names[..]),
+        Some("Alt")
+    );
+    assert_eq!(
+        best_name_for_row(&valid_row("MAIN"), &names[..]),
+        Some("Main")
+    );
+    // Main 0.75, Alt below the floor: a clear fuzzy lead.
+    assert_eq!(
+        best_name_for_row(&valid_row("MAIM"), &names[..]),
+        Some("Main")
+    );
+    assert_eq!(best_name_for_row(&valid_row("Stranger"), &names[..]), None);
+    assert_eq!(best_name_for_row(&garbage_row(), &names[..]), None);
+    let blank = ["  ".to_string(), "Alt".to_string()];
+    assert_eq!(
+        best_name_for_row(&valid_row("ALT"), &blank[..]),
+        Some("Alt")
+    );
+}
+
+/// Site's probe: "Alpha" sits inside "Alpha2". A row reading ALPHA2 is
+/// Alpha2's and a row reading ALPHA is Alpha's, whichever name is saved
+/// first. The old rule (first substring hit in list order) named the
+/// ALPHA2 row "Alpha" when Alpha was listed first.
+#[test]
+fn best_name_for_row_prefers_the_longer_saved_name_in_either_order() {
+    let main_first = ["Alpha".to_string(), "Alpha2".to_string()];
+    let alt_first = ["Alpha2".to_string(), "Alpha".to_string()];
+    for names in [&main_first, &alt_first] {
+        assert_eq!(
+            best_name_for_row(&valid_row("ALPHA2"), &names[..]),
+            Some("Alpha2"),
+            "{names:?}"
+        );
+        // A whole word of the shorter name stays its own, even though
+        // Alpha2 fuzzy-scores ALPHA at 0.83.
+        assert_eq!(
+            best_name_for_row(&valid_row("[TAG] ALPHA"), &names[..]),
+            Some("Alpha"),
+            "{names:?}"
+        );
+        assert_eq!(
+            best_name_for_row(&valid_row("ALPHA"), &names[..]),
+            Some("Alpha"),
+            "{names:?}"
+        );
+    }
+    // Unicode folds the same way: "ÖSTERS" is Östers, "ÖSTER" is Öster.
+    let names = ["Öster".to_string(), "Östers".to_string()];
+    assert_eq!(
+        best_name_for_row(&valid_row("ÖSTERS"), &names[..]),
+        Some("Östers")
+    );
+    assert_eq!(
+        best_name_for_row(&valid_row("ÖSTER"), &names[..]),
+        Some("Öster")
+    );
+}
+
+/// A tie the rule cannot break names nothing, never the earlier entry:
+/// two unrelated names on one read, a fuzzy read with no clear lead
+/// ("MAlN": Main 0.75, Alt 0.67), and a name saved twice is one name.
+#[test]
+fn best_name_for_row_names_nothing_on_a_tie() {
+    let names = ["Main".to_string(), "Alt".to_string()];
+    let swapped = ["Alt".to_string(), "Main".to_string()];
+    for names in [&names, &swapped] {
+        assert_eq!(
+            best_name_for_row(&valid_row("MAIN ALT"), &names[..]),
+            None,
+            "{names:?}"
+        );
+        assert_eq!(
+            best_name_for_row(&valid_row("MAlN"), &names[..]),
+            None,
+            "{names:?}"
+        );
+    }
+    let twice = ["Main".to_string(), "MAIN".to_string()];
+    assert_eq!(
+        best_name_for_row(&valid_row("MAIN"), &twice[..]),
+        Some("Main")
+    );
+}
+
+/// Site's nit on the re-review: a substring hit of the shorter name does
+/// not beat a fuzzy read of the longer one on the same row. "ALPHAZ" may
+/// be Alpha2 with the 2 misread, so it names neither name, in either
+/// order; so does the board matcher with that row alone on the board. A
+/// substring hit with no longer saved name reading the row still names
+/// the shorter name.
+#[test]
+fn a_shorter_names_substring_does_not_beat_the_longer_names_fuzzy_read() {
+    let main_first = ["Alpha".to_string(), "Alpha2".to_string()];
+    let alt_first = ["Alpha2".to_string(), "Alpha".to_string()];
+    for names in [&main_first, &alt_first] {
+        assert_eq!(
+            best_name_for_row(&valid_row("ALPHAZ"), &names[..]),
+            None,
+            "{names:?}"
+        );
+        assert_eq!(
+            match_row_by_names(&valid_row("ALPHAZ"), 4, &names[..]),
+            None,
+            "{names:?}"
+        );
+        assert!(any_name_reads_row(&valid_row("ALPHAZ"), &names[..]));
+        let board = vec![valid_row("Stranger"), valid_row("ALPHAZ")];
+        assert_eq!(
+            match_player_row_by_names(&board, &names[..]),
+            None,
+            "{names:?}"
+        );
+    }
+    let alpha_only = ["Alpha".to_string(), "Main".to_string()];
+    assert_eq!(
+        best_name_for_row(&valid_row("ALPHAZ"), &alpha_only[..]),
+        Some("Alpha")
+    );
+}
+
+/// Site's re-review nit 1 (8fd63ad2): a split read of the longer name
+/// ("ALPHA 2", "ALPHA.2") holds the shorter name as a whole word, but it
+/// is Alpha2 with a misread gap, so it names neither, in either order, on
+/// one row and on the board. "[TAG] ALPHA" and "ALPHA" stay Alpha's, and
+/// one saved name still reads its whole word.
+#[test]
+fn a_split_read_of_the_longer_name_names_neither() {
+    let main_first = ["Alpha".to_string(), "Alpha2".to_string()];
+    let alt_first = ["Alpha2".to_string(), "Alpha".to_string()];
+    for names in [&main_first, &alt_first] {
+        for read in ["ALPHA 2", "ALPHA.2", "[TAG] ALPHA 2"] {
+            let row = valid_row(read);
+            assert_eq!(
+                best_name_for_row(&row, &names[..]),
+                None,
+                "{names:?} {read}"
+            );
+            assert_eq!(match_row_by_names(&row, 4, &names[..]), None, "{read}");
+            assert!(any_name_reads_row(&row, &names[..]), "{read}");
+            let board = vec![valid_row("Stranger"), row];
+            assert_eq!(
+                match_player_row_by_names(&board, &names[..]),
+                None,
+                "{read}"
+            );
+        }
+        for read in ["ALPHA", "[TAG] ALPHA"] {
+            assert_eq!(
+                best_name_for_row(&valid_row(read), &names[..]),
+                Some("Alpha"),
+                "{names:?} {read}"
+            );
+        }
+    }
+    let alpha_only = ["Alpha".to_string()];
+    assert_eq!(
+        best_name_for_row(&valid_row("ALPHA 2"), &alpha_only[..]),
+        Some("Alpha")
+    );
+}
+
+/// A row is unresolved, not a stranger's, when some saved name reads on
+/// it at or above the floor but none wins: "ALPHE2" (Alpha2 0.83, Alpha
+/// 0.80) and "MAlN" (Main 0.75, Alt 0.67). A stranger, a blank read, and
+/// blank saved names read as nothing.
+#[test]
+fn any_name_reads_row_tells_an_unresolved_row_from_a_stranger() {
+    let alphas = ["Alpha".to_string(), "Alpha2".to_string()];
+    let main_alt = ["Main".to_string(), "Alt".to_string()];
+    for (read, names) in [("ALPHE2", &alphas), ("ALPHE", &alphas), ("MAlN", &main_alt)] {
+        assert_eq!(
+            best_name_for_row(&valid_row(read), &names[..]),
+            None,
+            "{read}"
+        );
+        assert!(any_name_reads_row(&valid_row(read), &names[..]), "{read}");
+    }
+    assert!(any_name_reads_row(&valid_row("ALT"), &main_alt[..]));
+    assert!(!any_name_reads_row(&valid_row("Stranger"), &main_alt[..]));
+    assert!(!any_name_reads_row(&valid_row("Stranger"), &alphas[..]));
+    assert!(!any_name_reads_row(&garbage_row(), &main_alt[..]));
+    let blank = ["  ".to_string(), String::new()];
+    assert!(!any_name_reads_row(&valid_row("MAIN"), &blank[..]));
+}
+
+/// The board matcher ranks the same way. ALPHA2 alone on the board is
+/// Alpha2's row in either order. With both accounts on the board, each a
+/// whole word on its own row, no row is named (the caller falls back to
+/// the highlight). Inside one name, a whole-word row beats an earlier row
+/// that only holds it inside a longer word; this holds for one saved name
+/// as well (ALPHABET then ALPHA is row 1 for "Alpha").
+#[test]
+fn the_board_matcher_ranks_saved_names_without_list_order() {
+    let main_first = ["Alpha".to_string(), "Alpha2".to_string()];
+    let alt_first = ["Alpha2".to_string(), "Alpha".to_string()];
+    let one = vec![valid_row("ALPHA2"), valid_row("Stranger")];
+    let both = vec![
+        valid_row("ALPHA2"),
+        valid_row("Stranger"),
+        valid_row("ALPHA"),
+    ];
+    for (names, alt_idx) in [(&main_first, 1), (&alt_first, 0)] {
+        let found = match_player_row_by_names(&one, &names[..]).unwrap();
+        assert_eq!((found.row, found.name), (0, alt_idx), "{names:?}");
+        assert_eq!(
+            match_player_row_by_names(&both, &names[..]),
+            None,
+            "{names:?}"
+        );
+    }
+    let rows = vec![valid_row("ALPHABET"), valid_row("ALPHA")];
+    assert_eq!(find_player_row_by_name(&rows, "Alpha"), Some(1));
+    assert_eq!(find_player_row_by_name(&rows[..1], "Alpha"), Some(0));
+}
+
 /// A whole-name hit for any saved name beats a fuzzy hit for another,
 /// whatever the order; between two fuzzy hits the better score wins.
 #[test]

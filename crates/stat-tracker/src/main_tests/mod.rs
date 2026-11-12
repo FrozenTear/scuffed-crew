@@ -25,8 +25,7 @@ impl KeyboardWaiter for ScriptedWaiter {
     }
 }
 
-// Tests construct `now` in the future so subtracting ages can't underflow
-// the monotonic clock on a freshly-booted machine.
+// `now` is in the future so subtracting ages can't underflow a freshly-booted monotonic clock.
 pub(crate) fn test_now() -> Instant {
     Instant::now() + Duration::from_secs(600)
 }
@@ -2161,6 +2160,7 @@ mod session_recovery;
 mod shutdown_and_restart;
 mod source_text;
 mod tab_keyboard_pid;
+mod test_log;
 mod unread_columns;
 mod untrusted_maps;
 mod upload_batches;

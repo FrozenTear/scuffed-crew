@@ -44,7 +44,7 @@ fn sidebar(app: &TrackerApp) -> Element<'_, Message> {
     // (rev 3). Header chips live in that pane. Column counts come from
     // `responsive`. Settings keeps the header and scrolls the form in the
     // leftover height. Other screens scroll the whole pane.
-    let content = column![widgets::app_header(app)];
+    let content = with_vision_notice(app, column![widgets::app_header(app)]);
     row![
         container(widgets::sidebar(app.screen))
             .width(SIDEBAR_WIDTH)
@@ -86,6 +86,7 @@ fn top_tabs(app: &TrackerApp) -> Element<'_, Message> {
         if let Some(notice) = top_tabs_input_notice(app) {
             content = content.push(widgets::warn_line(notice));
         }
+        content = with_vision_notice(app, content);
         // Settings has none; Overview, Games, Heroes, Maps and Seasons draw
         // the spec's filter chips themselves.
         if !matches!(
@@ -130,6 +131,19 @@ fn top_tabs_input_notice(app: &TrackerApp) -> Option<&str> {
     (app.nav_style == NavStyle::TopTabs)
         .then_some(app.ocr_switch.input_notice.as_deref())
         .flatten()
+}
+
+/// The capture size notice ([`crate::vision_size_notice`]) under the
+/// Overview title, in both layouts. Never on Games or in a game row:
+/// [`crate::vision_size_notice::view`] draws nothing off Overview.
+fn with_vision_notice<'a>(
+    app: &'a TrackerApp,
+    content: Column<'a, Message>,
+) -> Column<'a, Message> {
+    match crate::vision_size_notice::view(app) {
+        Some(notice) => content.push(notice),
+        None => content,
+    }
 }
 
 /// Where the toast and the restart bar go.

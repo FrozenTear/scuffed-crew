@@ -199,14 +199,17 @@ pub struct Config {
     /// when missing, so a 0.5.0 file loads unchanged) and not written while
     /// empty. [`Self::own_player_names`] is the merged list.
     ///
-    /// The Tab reader's name match, its name fallback and the raw-text
-    /// fallback try every name of [`Self::own_player_names`] (a whole-name
-    /// hit for any name first, else the best fuzzy one), read once at
-    /// daemon start. The report scrubber drops these names too.
+    /// The Tab reader's name match and its name fallback try every name of
+    /// [`Self::own_player_names`] (a whole word, then a substring, then a
+    /// fuzzy read that clearly leads), read once at daemon start. The
+    /// raw-text fallback tries every name only when there is no own row;
+    /// beside an own row it tries that row's one name, and none when the
+    /// row's name names no saved name. The report scrubber drops these
+    /// names too.
     ///
     /// TODO: when two rows each match a different saved name, take the
-    /// highlighted row whose hero matches the hero panel. Today the
-    /// whole-name hit, then the best fuzzy score, wins.
+    /// highlighted row whose hero matches the hero panel. Today that board
+    /// is a tie: no row is named by name, and ocr-v1 takes the highlight.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub player_names: Vec<String>,
     /// Upload each game to the site after it closes ("Upload games after

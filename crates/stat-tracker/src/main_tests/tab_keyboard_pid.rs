@@ -404,26 +404,6 @@ impl stat_tracker::tab_retry::TabKeySource for ScriptedKeys {
     }
 }
 
-#[derive(Clone, Default)]
-struct KeyboardLog(Arc<std::sync::Mutex<Vec<u8>>>);
-
-impl std::io::Write for KeyboardLog {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for KeyboardLog {
-    type Writer = KeyboardLog;
-    fn make_writer(&'a self) -> KeyboardLog {
-        self.clone()
-    }
-}
-
 /// alpha.3 item 32: a user outside the `input` group (every open is
 /// "Permission denied") crash-looped the systemd service. Now the key wait
 /// runs on without a keyboard, retries quietly, warns once in the log and
@@ -433,7 +413,7 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for KeyboardLog {
 #[tokio::test(start_paused = true)]
 async fn permission_denied_keyboard_runs_on_and_warns_once() {
     const DENIED: &str = "Permission denied (os error 13)";
-    let log = KeyboardLog::default();
+    let log = test_log::TestLog::default();
     let sub = tracing_subscriber::fmt()
         .with_writer(log.clone())
         .with_ansi(false)
@@ -522,7 +502,7 @@ async fn permission_denied_keyboard_runs_on_and_warns_once() {
 /// frequent cancels do not push it back. The clock is paused.
 #[tokio::test(start_paused = true)]
 async fn keyboard_reopen_deadline_survives_frequent_select_cancels() {
-    let log = KeyboardLog::default();
+    let log = test_log::TestLog::default();
     let sub = tracing_subscriber::fmt()
         .with_writer(log.clone())
         .with_ansi(false)
