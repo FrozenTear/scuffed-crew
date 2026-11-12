@@ -337,3 +337,59 @@ async fn without_a_no_the_gate_reads_consent_once() {
         );
     }
 }
+
+/// The pack record with one more hero pack, cut for `size`.
+fn packs_with(data_dir: &Path, size: ScreenSize) {
+    let templates = data_dir.join("templates");
+    std::fs::create_dir_all(&templates).unwrap();
+    let extra = format!("heroes-v3-{}x{}.tar", size.width, size.height);
+    std::fs::write(
+        templates.join("pack-versions.json"),
+        format!(
+            r#"{{"heroes-v1.tar":"1","heroes-v2.tar":"2","heroes-v2-1080.tar":"1","{extra}":"1","maps-v1.tar":"1"}}"#
+        ),
+    )
+    .unwrap();
+}
+
+/// `Decision::Clear` through `check_size`: once a pack declares the size,
+/// or the member said no to it, the next check at that size takes its ask
+/// down. Make the Clear arm a no-op and this fails.
+#[test]
+fn the_next_check_takes_the_ask_down_when_no_longer_due() {
+    // A pack for the size is recorded.
+    let dir = tempfile::tempdir().unwrap();
+    shipped_packs(dir.path());
+    let mut asker = Asker::default();
+    check_size(&mut asker, dir.path(), UW);
+    assert_eq!(published(dir.path()), ask(UW, false));
+    packs_with(dir.path(), UW);
+    check_size(&mut asker, dir.path(), UW);
+    assert_eq!(published(dir.path()), None, "a pack declares it now");
+
+    // A no is written between two checks of the size.
+    let dir = tempfile::tempdir().unwrap();
+    shipped_packs(dir.path());
+    let mut asker = Asker::default();
+    check_size(&mut asker, dir.path(), UW);
+    assert_eq!(published(dir.path()), ask(UW, false));
+    record_answer(dir.path(), UW, Answer::Dismissed).unwrap();
+    check_size(&mut asker, dir.path(), UW);
+    assert_eq!(published(dir.path()), None, "the member said no");
+}
+
+/// A Clear for one size leaves another size's notice up: only the notice
+/// for the cleared size is taken down. Drop the size guard and this fails.
+#[test]
+fn a_clear_for_one_size_leaves_another_sizes_notice_up() {
+    const P1600: ScreenSize = ScreenSize::new(2560, 1600);
+    let dir = tempfile::tempdir().unwrap();
+    shipped_packs(dir.path());
+    let mut asker = Asker::default();
+    check_size(&mut asker, dir.path(), UW);
+    check_size(&mut asker, dir.path(), P1600);
+    assert_eq!(published(dir.path()), ask(P1600, false));
+    packs_with(dir.path(), UW);
+    check_size(&mut asker, dir.path(), UW);
+    assert_eq!(published(dir.path()), ask(P1600, false), "still up");
+}

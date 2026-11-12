@@ -264,6 +264,68 @@ fn a_reset_keeps_the_old_bytes_and_a_no_and_hides_the_warning() {
     assert_eq!(std::fs::read(&copies[0]).unwrap(), corrupt);
 }
 
+/// Both files unreadable: the answers warning comes first, and a reset
+/// that works shows the pack record warning, which the tracker's unchanged
+/// value would never bring back.
+#[test]
+fn a_reset_with_an_unreadable_pack_record_shows_the_pack_warning() {
+    let dir = tempfile::tempdir().unwrap();
+    unreadable_pack_record(dir.path());
+    std::fs::write(asks_path(dir.path()), b"{\"dismissed\": [").unwrap();
+    let mut notice = VisionNotice::default();
+    observe_in(&mut notice, dir.path(), live(UW, true));
+    assert_eq!(notice.shown, Shown::AnswersUnreadable(UW));
+    reset_in(&mut notice, dir.path(), UW);
+    assert_eq!(notice.failed, None);
+    assert_eq!(notice.shown, Shown::PackUnreadable(UW));
+    // The same tracker value again changes nothing.
+    observe_in(&mut notice, dir.path(), live(UW, true));
+    assert_eq!(notice.shown, Shown::PackUnreadable(UW));
+}
+
+/// Both layouts draw the notice: `sidebar` and `top_tabs` in `chrome.rs`
+/// each call `with_vision_notice` once. No test renders the chrome, so
+/// delete either call and this fails.
+#[test]
+fn both_layouts_draw_the_notice() {
+    let src: String = include_str!("chrome.rs")
+        .split("#[cfg(test)]")
+        .next()
+        .unwrap()
+        .split_whitespace()
+        .collect();
+    let body = |name: &str| -> String {
+        let start = src.find(&format!("fn{name}(")).expect(name);
+        let rest = &src[start + 2..];
+        // Up to the next function head in the file.
+        let next = [
+            "fnsidebar(",
+            "fntop_tabs(",
+            "fntop_tabs_input_notice(",
+            "fnwith_vision_notice<",
+        ]
+        .iter()
+        .filter_map(|f| rest.find(f))
+        .min()
+        .unwrap_or(rest.len());
+        rest[..next].to_string()
+    };
+    assert_eq!(
+        body("sidebar")
+            .matches("with_vision_notice(app,column![widgets::app_header(app)])")
+            .count(),
+        1,
+        "sidebar"
+    );
+    assert_eq!(
+        body("top_tabs")
+            .matches("content=with_vision_notice(app,content);")
+            .count(),
+        1,
+        "top tabs"
+    );
+}
+
 #[test]
 fn a_failed_reset_keeps_the_warning_and_the_unreadable_file() {
     let dir = tempfile::tempdir().unwrap();

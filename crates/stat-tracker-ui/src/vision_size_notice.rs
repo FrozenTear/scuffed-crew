@@ -204,7 +204,9 @@ pub fn close_in(notice: &mut VisionNotice, size: ScreenSize) {
 }
 
 /// Reset the answers file that did not read, keeping a copy of it and a
-/// no for `size`. A failed reset keeps the warning and says so.
+/// no for `size`, then show what is due with the new file (the pack record
+/// warning, if that does not read either). A failed reset keeps the
+/// warning and says so.
 pub fn reset_in(notice: &mut VisionNotice, data_dir: &Path, size: ScreenSize) {
     match reset_unreadable(data_dir, size) {
         Ok(copy) => {
@@ -212,8 +214,11 @@ pub fn reset_in(notice: &mut VisionNotice, data_dir: &Path, size: ScreenSize) {
                 tracing::info!(copy = %copy.display(), "capture size answers reset; the old file was kept");
             }
             notice.failed = None;
+            // Look again with the reset file: a pack record that still does
+            // not read is the next warning. The tracker's value does not
+            // change for it, so `observe_in` would never show it.
             if notice.shown == Shown::AnswersUnreadable(size) {
-                notice.shown = Shown::Nothing;
+                notice.shown = shown_for(data_dir, notice.seen);
             }
         }
         Err(e) => {
