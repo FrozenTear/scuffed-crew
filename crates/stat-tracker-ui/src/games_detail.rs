@@ -396,8 +396,8 @@ pub const MAP_WARN_W: f32 = 12.0;
 /// Iced takes every gap off a row first, then gives each child, in order,
 /// only the width the earlier ones left. An uncapped name that nearly fills
 /// the cell would leave the sign less than its 12 px. So with the sign in
-/// `parts`, the name gets the cell less every gap and the sign, and is cut
-/// on one line instead. The sign always keeps [`MAP_WARN_W`]; the chips get
+/// `parts`, the name gets the cell less every gap and the sign, and wraps
+/// inside that width instead. The sign always keeps [`MAP_WARN_W`]; the chips get
 /// what is left and are clipped first.
 pub fn map_name_max_width(cell: f32, parts: &[MapPart]) -> Option<f32> {
     if !parts.contains(&MapPart::Warn) {

@@ -1085,9 +1085,11 @@ mod tests {
                 }
             }
         }
-        // The list rows of the top tabs table, chips and signs included,
-        // at each grid's window width. This builds the rows; it does not
-        // lay them out, so clipping is not measured here.
+        // The top tabs table at each grid's window width. This builds the
+        // view only: an unsure map's cell is a `responsive` whose name, sign
+        // and chips are built at layout, which
+        // `games_table::tests::the_unsure_map_sign_keeps_its_width_when_laid_out`
+        // runs.
         app.confirm_delete = None;
         app.nav_style = crate::nav::NavStyle::TopTabs;
         for width in [780.0, 1100.0, 1280.0, 1440.0] {

@@ -435,7 +435,7 @@ fn settings_button(link: SettingsLink) -> Element<'static, Message> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::fixtures_games::{LOBBY_ONLY, MIXED, NO_BAN, NORMAL, SIDE, SKIP, UNSURE};
     use crate::snapshot::games_from_snapshot;
@@ -585,7 +585,9 @@ mod tests {
         ));
     }
 
-    fn headless() -> iced::Renderer {
+    /// A tiny-skia renderer with the app's fonts, for laying rows out in
+    /// tests (no display needed).
+    pub(crate) fn headless() -> iced::Renderer {
         use iced::advanced::renderer::Headless;
         let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
             crate::theme::FONT_MEDIUM,
