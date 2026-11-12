@@ -12,12 +12,17 @@ use scuffed_types::api::{DaemonConfigResponse, StatsUploadResponse};
 use super::backoff::parse_retry_after;
 use super::batching::{BatchCaps, RefusedRows};
 use super::errors::{SyncUploadError, parse_upload_error_body, server_error_text};
-use super::visibility::{MAX_BODY_BYTES, StatsVisibility, parse_stats_visibility};
+use super::visibility::{
+    MAX_BODY_BYTES, StatsVisibility, parse_hero_icon_consent, parse_stats_visibility,
+};
 use super::wire::upload_request;
 
 /// Daemon-token route for the member's config. It carries `player_name` and,
 /// on servers that send it, `stats_visibility`.
 const DAEMON_CONFIG_PATH: &str = "/api/stats/daemon-config";
+
+/// Sync-token route for the member's training crop consent. Read only.
+const CROP_CONSENT_PATH: &str = "/api/training-crops/consent";
 
 #[derive(Clone)]
 pub struct SyncClient {
@@ -211,6 +216,31 @@ impl SyncClient {
         parse_stats_visibility(status, std::str::from_utf8(&bytes).ok()?)
     }
 
+    /// The member's `hero_icon` training crop consent, read only: one GET of
+    /// `/api/training-crops/consent` with the saved token. Members change it
+    /// on the website, never here. Any failure (unsafe URL, network, a non
+    /// 2xx answer, a body that is too large or not the consent shape) is
+    /// `None`, which callers take as no consent
+    /// ([`parse_hero_icon_consent`]).
+    pub async fn fetch_hero_icon_consent(&self) -> Option<bool> {
+        self.refuse_unsafe_transport().ok()?;
+        let creds = self.credentials();
+        let url = format!("{}{CROP_CONSENT_PATH}", creds.server_url);
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(&creds.token)
+            .send()
+            .await
+            .ok()?;
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            return None;
+        }
+        let bytes = read_body_capped(resp, MAX_BODY_BYTES).await?;
+        parse_hero_icon_consent(status, &bytes)
+    }
+
     /// POST `/api/stats/upload`.
     ///
     /// HTTP 400 and 422 are returned as [`SyncUploadError`]. The sync pass
@@ -258,6 +288,25 @@ impl SyncClient {
         );
         Ok(result)
     }
+}
+
+/// A response body of at most `max` bytes, read chunk by chunk. A declared
+/// `Content-Length` over `max` is refused before any body is read, and a
+/// body that passes `max` (no length, or a wrong one) is refused at the
+/// chunk that passes it, so no more than `max` bytes are kept. `None` for
+/// either, or for a read that fails.
+pub(super) async fn read_body_capped(mut resp: reqwest::Response, max: usize) -> Option<Vec<u8>> {
+    if resp.content_length().is_some_and(|len| len > max as u64) {
+        return None;
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = resp.chunk().await.ok()? {
+        if body.len().saturating_add(chunk.len()) > max {
+            return None;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Some(body)
 }
 
 /// Honor `Retry-After` only on 429 and 503, the statuses the API uses for

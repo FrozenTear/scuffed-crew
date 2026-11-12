@@ -2,6 +2,8 @@
 
 use super::*;
 
+mod two_accounts;
+
 /// The seed store opens exactly when the new reader is in effect, and
 /// both read one function (F262-5): whatever turns the new reader on,
 /// the store is there. ocr-v1 never opens or creates the private folder.
@@ -78,8 +80,8 @@ fn find_own_row_reads_only_the_switched_source() {
     let found = |row| {
         Some(parse::NameMatch {
             row,
-            window: 0,
             sole_window: true,
+            ..parse::NameMatch::default()
         })
     };
     let seeds = |seed: Option<usize>, lit| OwnRowRead {
@@ -411,8 +413,8 @@ fn with_ocr_off_the_career_hero_names_the_own_row_and_without_it_the_tab_is_held
         asked.set(asked.get() + 1);
         Some(parse::NameMatch {
             row: 6,
-            window: 0,
             sole_window: true,
+            ..parse::NameMatch::default()
         })
     };
     let named = find(&no_pack, &name_read);
@@ -439,43 +441,6 @@ fn the_text_fallback_gets_no_name_when_the_new_reader_has_no_own_row() {
     assert_eq!(text_fallback_names(true, Some(2), &names), names);
     assert_eq!(text_fallback_names(true, None, &names), none);
     assert_eq!(text_fallback_names(true, None, none), none);
-}
-
-/// The raw-text fallback tries every saved name: an alt's line is read
-/// when the main name is on no line, and a name with no line stays a
-/// "row not found".
-#[test]
-fn the_text_fallback_reads_an_alt_names_line() {
-    let raw = "Ana\nBusan\nÖSTER 10 4 2 3,000 800 400";
-    let names = ["FrozenTear".to_string(), "öster".to_string()];
-    let read = read_scoreboard_named(&[], None, raw, "victory", &names).unwrap();
-    assert_eq!((read.matched.elims, read.matched.damage), (10, 3000));
-    let main_only = ["FrozenTear".to_string()];
-    assert!(matches!(
-        read_scoreboard_named(&[], None, raw, "victory", &main_only),
-        Err(parse::ScoreboardMiss::PlayerRowNotFound)
-    ));
-}
-
-/// The main name in a chat line makes that name "found but unreadable"
-/// (the text fallback skips chat). The next saved name is still tried, so
-/// an alt's stat line is read, with no own row and with a highlighted row
-/// whose cells did not parse (`Some(0)` with no OCR rows). With no alt
-/// line the miss stays "unreadable", not "row not found".
-#[test]
-fn a_main_name_in_chat_does_not_hide_the_alts_line() {
-    let raw = "[Team] FrozenTear: 1 2 3 4 5 6\nÖSTER 10 4 2 3,000 800 400";
-    let names = ["FrozenTear".to_string(), "öster".to_string()];
-    let chat_only = "[Team] FrozenTear: 1 2 3 4 5 6";
-    for row in [None, Some(0)] {
-        let read = read_scoreboard_named(&[], row, raw, "victory", &names).unwrap();
-        assert_eq!((read.matched.elims, read.matched.damage), (10, 3000));
-        assert!(!read.trusted_cells);
-        assert!(matches!(
-            read_scoreboard_named(&[], row, chat_only, "victory", &names),
-            Err(parse::ScoreboardMiss::CellsUnreadable)
-        ));
-    }
 }
 
 /// T4 (O9): the vision pass reads names in the per-cell pass only under
