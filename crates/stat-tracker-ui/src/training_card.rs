@@ -150,21 +150,32 @@ pub(crate) fn ask_consent_if_unread(app: &mut TrackerApp) -> Option<Task<Message
 /// Delete every own training crop on the website, then the crops waiting
 /// on this PC. The website's count, or a reason. The delete time is
 /// recorded first for the tracker's send pass (see
-/// `stat_tracker::sync::mark_training_delete`).
+/// `stat_tracker::sync::mark_training_delete`), and after a delete that
+/// worked, that it worked (`record_training_delete_ok`), which ends an ask
+/// to delete again.
 pub(crate) async fn delete_everywhere(
     client: SyncClient,
     data_dir: std::path::PathBuf,
 ) -> Result<u32, String> {
     // First, so a send pass running now drops what it holds and removes
     // again what it stores while this delete runs.
-    if let Err(error) = stat_tracker::sync::mark_training_delete(&data_dir) {
-        tracing::warn!(%error, "could not record the training crop delete");
-    }
+    let marker = match stat_tracker::sync::mark_training_delete(&data_dir) {
+        Ok(marker) => Some(marker),
+        Err(error) => {
+            tracing::warn!(%error, "could not record the training crop delete");
+            None
+        }
+    };
     let deleted = client
         .delete_own_training_crops()
         .await
         .map_err(|e| e.plain_text())?;
     stat_tracker::sync::clear_training_outbox(&data_dir);
+    if let Some(marker) = marker
+        && let Err(error) = stat_tracker::sync::record_training_delete_ok(&data_dir, marker)
+    {
+        tracing::warn!(%error, "could not record that the training crop delete worked");
+    }
     Ok(deleted)
 }
 
@@ -203,6 +214,9 @@ pub(crate) fn update(app: &mut TrackerApp, msg: TrainingMsg) -> Task<Message> {
         TrainingMsg::Deleted(result) => {
             state.deleting = false;
             state.deleted = Some(result);
+            // A delete that worked ends an ask to delete again: show that
+            // now, not at the next refresh.
+            app.daemon.training_warning = stat_tracker::sync::training_warning(&app.data_dir);
         }
     }
     Task::none()
@@ -543,6 +557,12 @@ mod tests {
             "DELETE /api/training-crops/mine HTTP/1.1"
         );
         assert!(!stat_tracker::sync::has_queued_crops(dir.path()));
+        // The delete that worked is recorded under its own marker, which
+        // ends an ask to delete again.
+        let files = dir.path().join("training_crops");
+        let marker = std::fs::read_to_string(files.join("deleted_at")).unwrap();
+        let ok = std::fs::read_to_string(files.join("deleted_ok")).unwrap();
+        assert_eq!(ok, marker);
     }
 
     /// A failed delete says why. The app leaves the waiting crops alone,
@@ -575,5 +595,9 @@ mod tests {
             let kept: i64 = name.split('-').next().unwrap().parse().unwrap();
             assert!(kept < marker, "{name} was kept before the delete");
         }
+        assert!(
+            !dir.path().join("training_crops/deleted_ok").exists(),
+            "a failed delete is not recorded as one that worked"
+        );
     }
 }

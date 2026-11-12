@@ -28,9 +28,9 @@ use super::client::SyncClient;
 use super::training::UploadKind;
 use super::training_client::TrainingCallError;
 use super::training_store::{
-    adopt_training_owner, drop_kind, next_batch, pending_deletes, read_training_status,
-    remove_crops, training_delete_at, training_in_use, while_owner, write_cached_consent,
-    write_pending_deletes, write_training_warning,
+    adopt_training_owner, deleted_again_since, drop_kind, next_batch, pending_deletes,
+    read_training_status, remove_crops, training_delete_at, training_in_use, while_owner,
+    write_cached_consent, write_pending_deletes, write_training_warning,
 };
 
 /// When the next pass may run, as the pass sees it.
@@ -65,7 +65,8 @@ pub(super) const TRAINING_DELETE_OWED: &str = "Training crops: some crops sent w
 
 /// Shown when a send got no answer while the member deleted: the website
 /// may have stored those crops after the delete, and the tracker has no ids
-/// to remove. Stays until the member deletes again.
+/// to remove. Stays until a delete the member presses again works (see
+/// `deleted_again_since`).
 pub(super) const TRAINING_DELETE_AGAIN: &str = "Training crops: the website did not answer a send that ran while you deleted your training crops, so some of those crops may still be on the website. Press Delete my training crops again to remove them.";
 
 fn retry_for(error: &TrainingCallError) -> TrainingRetry {
@@ -175,27 +176,28 @@ pub async fn run_training_pass(client: &SyncClient, data_dir: &Path) -> Training
     // before anything is sent.
     let owner = client.credentials();
     let (url, token) = (owner.server_url.clone(), owner.token.clone());
-    let (changed, pending, asked_at, marker) = on_disk(data_dir, move |dir| {
+    let (changed, pending, asked_at, deleted_again) = on_disk(data_dir, move |dir| {
         let changed = adopt_training_owner(dir, &url, &token);
         let asked_at = read_training_status(dir).and_then(|status| status.delete_again_at);
         (
             changed,
             pending_deletes(dir),
             asked_at,
-            training_delete_at(dir),
+            deleted_again_since(dir, asked_at),
         )
     })
     .await;
     if changed {
         tracing::info!("training crops: website or token changed, waiting crops dropped");
     }
-    // An ask to delete again stays until the member deletes again.
-    let delete_again = asked_at.filter(|at| marker == Some(*at));
+    // An ask to delete again stays until the member deletes again and the
+    // website answers that delete with success.
+    let delete_again = asked_at.filter(|_| !deleted_again);
     let mut end = PassEnd {
         had_pending: !pending.is_empty(),
         pending,
         delete_again,
-        deleted_again: asked_at.is_some() && delete_again.is_none(),
+        deleted_again,
         ..PassEnd::default()
     };
     // Crops an earlier delete left on the website go first, before any
