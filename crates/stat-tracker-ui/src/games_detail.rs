@@ -249,9 +249,11 @@ pub fn format_delta(stat: Stat, d: f64) -> String {
     }
 }
 
-/// The Time block: Tracked, and the Length line from the same span. The
-/// tracker records no game start or end, so the span (first to last Tab
-/// press) is the only length it has, and the game ran at least that long.
+/// The Time block's Tracked line: the span from the first to the last Tab
+/// press. It is also the Length, as a floor, when the game's real length is
+/// not known ([`GameLength::Floor`]): a start or end not seen, stored times
+/// that do not fit, or an older row recorded before the times were stored.
+/// The game ran at least that long.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Tracked {
     /// First to last Tab read, in seconds.
@@ -318,6 +320,8 @@ impl Tracked {
         }
     }
 }
+
+pub use crate::games_length::*;
 
 /// The queue title warning for the map line: the sentence when the game has
 /// a queue title with no confident value (`QueueTitle::confident_value`,
@@ -646,16 +650,16 @@ impl Upload {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::model::{GameOcr, Outcome, Role};
     use chrono::{DateTime, TimeZone, Utc};
 
-    fn at(h: u32, m: u32, s: u32) -> DateTime<Utc> {
+    pub(crate) fn at(h: u32, m: u32, s: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 9, 2, h, m, s).unwrap()
     }
 
-    fn seg(
+    pub(crate) fn seg(
         i: u32,
         hero: &str,
         snaps: u32,
@@ -676,7 +680,7 @@ mod tests {
         }
     }
 
-    fn game(id: &str, hero: &str, e: u32, dmg: u32, when: DateTime<Utc>) -> Game {
+    pub(crate) fn game(id: &str, hero: &str, e: u32, dmg: u32, when: DateTime<Utc>) -> Game {
         Game {
             session_id: id.into(),
             hero: hero.into(),
@@ -712,6 +716,7 @@ mod tests {
             bans_picks: None,
             bans_picks_status: None,
             queue_title: None,
+            match_times: None,
         }
     }
 
@@ -862,9 +867,9 @@ mod tests {
         assert_eq!(tracked(&g).line(), "Tracked: one scoreboard read");
     }
 
-    /// Item 19: the Length line and the LENGTH cell show the one length the
-    /// tracker has, the Tab span, as a floor ("at least"), and say "not
-    /// recorded" (the cell "-") when there is no span.
+    /// Item 19: the Tab span's own Length line and LENGTH cell, the floor a
+    /// game shows when its real length is not known ([`game_length`]): "at
+    /// least", or "not recorded" (the cell "-") when there is no span.
     #[test]
     fn length_is_the_tab_span_as_a_floor_or_not_recorded() {
         let mut g = game("g", "Mei", 24, 1, at(20, 0, 0));

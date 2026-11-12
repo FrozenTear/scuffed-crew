@@ -5,6 +5,10 @@
 //! reach them (`use crate::{main_tests::*, *};`); area files use `use super::*;`.
 
 use super::*;
+pub(crate) use restart_skeletons::{
+    begin_from_persisted, first_tab_after_restart_starts_new_game, persisted_with_hold,
+    restart_skeleton,
+};
 pub(crate) use source_text::{daemon_source, fn_source};
 pub(crate) use std::time::Duration;
 
@@ -73,6 +77,7 @@ pub(crate) fn game(
         rejoin_carry: None,
         outcome_locked: false,
         last_board_pressed_at: None,
+        match_times: Default::default(),
     }
 }
 
@@ -320,6 +325,7 @@ pub(crate) fn test_match(session_id: &str, outcome: &str) -> storage::PersonalMa
         bans_picks: None,
         bans_picks_status: None,
         queue_title: None,
+        match_times: None,
     }
 }
 
@@ -1850,73 +1856,6 @@ pub(crate) fn spawn_upload_sink() -> (u16, std::sync::mpsc::Receiver<String>) {
     (port, rx)
 }
 
-pub(crate) fn persisted_with_hold(
-    session_id: &str,
-    outcome: detect::MatchOutcome,
-    map: Option<&str>,
-    imported: bool,
-    elims: u32,
-    last_activity: chrono::DateTime<Utc>,
-) -> PersistedGame {
-    PersistedGame {
-        rejoin_carry: None,
-        replaced_text_fallback_map: None,
-        best_guess: None,
-        session_id: session_id.into(),
-        outcome,
-        map: map.map(str::to_string),
-        map_source: None,
-        map_candidates: Vec::new(),
-        session_created: false,
-        opened_at: last_activity - chrono::Duration::minutes(20),
-        last_activity,
-        outcome_recorded_at: None,
-        gate: None,
-        last_stats_at: None,
-        hero_auth: HeroAuthState::default(),
-        result_outcome: None,
-        result_confirmed: false,
-        result_seen_at: None,
-        pending_boundary: false,
-        awaiting_first_board: false,
-        reset_streak: 0,
-        reset_baseline: None,
-        baseline_row: None,
-        deferred: Some(fresh_counters(elims)),
-        deferred_hero: Some("Tracer".into()),
-        deferred_at: Some(last_activity),
-        deferred_imported: imported,
-        progressed_boards: 0,
-        baseline_at: None,
-        text_fallback_locked: false,
-    }
-}
-
-/// A game on disk with a stored board, last captured `ago` before now.
-pub(crate) fn restart_skeleton(map: Option<&str>, ago: chrono::Duration) -> PersistedGame {
-    let mut p = persisted_with_hold(
-        "before-crash",
-        detect::MatchOutcome::Unknown,
-        map,
-        false,
-        0,
-        Utc::now() - ago,
-    );
-    p.session_created = true;
-    p.deferred = None;
-    p.deferred_hero = None;
-    p.deferred_at = None;
-    p
-}
-
-/// Restart from `p`, then ask whether the first Tab opens a new game.
-pub(crate) fn first_tab_after_restart_starts_new_game(p: &PersistedGame) -> bool {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(active_game_path(dir.path()), serde_json::to_vec(p).unwrap()).unwrap();
-    let st = startup_session(dir.path());
-    should_start_fresh_session(st.active_game.as_ref(), Instant::now())
-}
-
 /// The Rialto game before the crash: two boards, the second at 9 elims.
 pub(crate) async fn rialto_before_crash(night: &mut Night) -> String {
     night.begin_on("Rialto", "Ana");
@@ -1940,17 +1879,6 @@ pub(crate) async fn rialto_before_crash(night: &mut Night) -> String {
         )
         .await;
     night.id()
-}
-
-pub(crate) async fn begin_from_persisted(
-    dir: &std::path::Path,
-    store: &storage::LocalStore,
-    game: PersistedGame,
-) -> SessionState {
-    std::fs::write(active_game_path(dir), serde_json::to_vec(&game).unwrap()).unwrap();
-    let mut sync_task = None;
-    let backoff = std::sync::Arc::new(std::sync::Mutex::new(sync::SyncBackoff::default()));
-    begin_daemon_session(dir, &mut sync_task, &backoff, store, None).await
 }
 
 // ---- M1: Adlersbrunn on the Tab banner without OCR.
@@ -2220,11 +2148,13 @@ mod commit_and_command_tick;
 mod hero_authority;
 mod local_rows_and_sync;
 mod map_hints;
+mod match_times;
 mod new_reader_capture;
 mod night_replays_quiet_close;
 mod night_sessions;
 mod ocr_off_switch;
 mod own_row_and_hero_seeds;
+mod restart_skeletons;
 mod run_loop_and_shutdown;
 mod session_recovery;
 mod shutdown_and_restart;

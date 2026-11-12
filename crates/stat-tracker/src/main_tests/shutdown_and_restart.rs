@@ -265,6 +265,7 @@ async fn restart_holds_a_stale_unfinished_game_and_keeps_a_fresh_one() {
         progressed_boards: 0,
         baseline_at: None,
         text_fallback_locked: false,
+        match_times: Default::default(),
     };
     std::fs::write(
         active_game_path(dir.path()),
@@ -429,6 +430,7 @@ async fn restart_syncs_a_stale_finished_skeleton_without_losing_rows() {
         progressed_boards: 0,
         baseline_at: None,
         text_fallback_locked: false,
+        match_times: Default::default(),
     };
     std::fs::write(
         active_game_path(dir.path()),
@@ -808,6 +810,7 @@ async fn a_stale_restart_keeps_a_held_board_as_an_unknown_session() {
         progressed_boards: 0,
         baseline_at: None,
         text_fallback_locked: false,
+        match_times: Default::default(),
     };
     std::fs::write(
         active_game_path(dir.path()),
@@ -1468,35 +1471,4 @@ async fn a_resume_within_twenty_minutes_leaves_an_imported_hold_pending() {
         rows.iter().all(|row| row.elims != 4),
         "resume must not write the hold: {rows:?}"
     );
-}
-
-#[tokio::test]
-async fn a_backwards_clock_archives_an_imported_hold_with_its_persisted_map() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = storage::LocalStore::open(dir.path()).await.unwrap();
-    let when = Utc::now() + chrono::Duration::hours(3);
-    begin_from_persisted(
-        dir.path(),
-        &store,
-        persisted_with_hold(
-            "clock-back",
-            detect::MatchOutcome::Defeat,
-            Some("Nepal"),
-            true,
-            8,
-            when,
-        ),
-    )
-    .await;
-    let held = store
-        .get_all_matches()
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|row| row.elims == 8)
-        .expect("a backwards clock archives the hold");
-    assert_eq!(held.session_id, "clock-back");
-    assert_eq!(held.map_name, "Nepal");
-    assert_eq!(held.outcome, "defeat");
-    assert!(!active_game_path(dir.path()).exists());
 }
