@@ -219,8 +219,12 @@ fn section_label(label: &'static str) -> Element<'static, Message> {
         .into()
 }
 
-/// The map, its mode chip, EDITED when set by hand, and "Set map" (or
-/// the open picker) when the field offers Set.
+/// The map, EDITED when set by hand, then its chips ([`detail::map_chips`]:
+/// the mode, then the confident queue), and "Set map" (or the open picker)
+/// when the field offers Set. Under the line: the read vs set note for a
+/// hand fix, then the queue warning ([`detail::queue_warning`]) when the
+/// game has a queue title with no confident value. With the reader off
+/// there is neither the queue chip nor the warning.
 fn map_line(g: &Game, ctx: Ctx, picker: Option<&Picker>) -> Element<'static, Message> {
     if let Some(p) = picker.filter(|p| p.field == Field::Map) {
         return games_picker::view(g, p, ctx.in_progress, ctx.sync_on);
@@ -237,11 +241,8 @@ fn map_line(g: &Game, ctx: Ctx, picker: Option<&Picker>) -> Element<'static, Mes
     if edited(g, Field::Map) {
         r = r.push(games_picker::edited_badge());
     }
-    if let Some(mode) = games_rows::mode_chip(&g.map_name) {
-        r = r.push(small_chip(mode, TEXT_2, BORDER));
-    }
-    if let Some(queue) = detail::queue_value(g) {
-        r = r.push(small_chip_owned(queue, TEXT_2, BORDER));
+    for chip in detail::map_chips(g) {
+        r = r.push(small_chip_owned(chip, TEXT_2, BORDER));
     }
     r = with_set(r, g, Field::Map, ctx.editing);
     let line = with_correction(r.into(), detail::read_vs_set_name(g, "map_name"));
@@ -1052,11 +1053,25 @@ mod tests {
                 .contains(crate::fixtures_games::NORMAL)
         );
         let games = app.games.clone();
+        let find = |sid: &str| games.iter().find(|g| g.session_id == sid).unwrap();
+        // The queue states the panel and the list row draw: a confident
+        // queue chip on a long map name with an unsure map read, and an
+        // unsure queue with its warning and no chip.
+        let sure = find(crate::fixtures_games::QUEUE_SURE);
+        assert!(detail::map_chips(sure).contains(&"OPEN QUEUE".to_string()));
+        assert_eq!(detail::queue_warning(sure), None);
+        let sure_items = games_rows::unsure_items(sure, false);
+        assert!(sure_items.contains(&games_rows::UnsureItem::Map));
+        let unsure_queue = find(crate::fixtures_games::QUEUE_UNSURE);
+        assert_eq!(detail::queue_value(unsure_queue), None);
+        assert!(detail::queue_warning(unsure_queue).is_some());
         for sid in [
             crate::fixtures_games::NORMAL,
             crate::fixtures_games::UNSURE,
             crate::fixtures_games::UNDECIDED,
             crate::fixtures_games::REJECTED_2,
+            crate::fixtures_games::QUEUE_SURE,
+            crate::fixtures_games::QUEUE_UNSURE,
             crate::fixtures_games::HELD,
         ] {
             let g = games.iter().find(|g| g.session_id == sid).unwrap();
@@ -1069,6 +1084,16 @@ mod tests {
                     let _ = panel(&app, g, narrow, in_progress);
                 }
             }
+        }
+        // The top tabs table at each grid's window width. This builds the
+        // view only: an unsure map's cell is a `responsive` whose name, sign
+        // and chips are built at layout, which
+        // `games_table::tests::the_unsure_map_sign_keeps_its_width_when_laid_out`
+        // runs.
+        app.confirm_delete = None;
+        app.nav_style = crate::nav::NavStyle::TopTabs;
+        for width in [780.0, 1100.0, 1280.0, 1440.0] {
+            let _ = crate::games::view(&app, width, width);
         }
     }
 
