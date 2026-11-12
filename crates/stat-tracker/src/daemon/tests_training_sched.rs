@@ -363,9 +363,14 @@ fn labelled_frame_at(width: u32, height: u32) -> image::DynamicImage {
 
 /// The Tab's map crop, written the way the Tab capture writes it once
 /// `prepare_capture_row` decided the row.
-async fn tab_map_crop(dir: &std::path::Path, session: &str, row: PreparedRow) {
+async fn tab_map_crop(
+    dir: &std::path::Path,
+    session: &str,
+    row: PreparedRow,
+    parsed: &storage::PersonalMatch,
+) {
     let crop = prepare_map_label_crop(dir, session, &labelled_frame());
-    commit_tab_map_label_crop(crop, row)
+    commit_tab_map_label_crop(crop, row, parsed)
         .expect("a map crop to write")
         .await
         .unwrap();
@@ -383,11 +388,13 @@ fn debug_crops_of(dir: &std::path::Path, session: &str) -> usize {
 }
 
 /// Only a Tab the tracker keeps for its game (`prepare_capture_row` returns
-/// Store) offers its map crop for training. A Tab
+/// Store) of a tracked mode offers its map crop for training. A Tab
 /// `prepare_capture_row` drops (an untracked map with no open game, a PvE
-/// Adlersbrunn board) keeps its local map crop and queues nothing.
+/// Adlersbrunn board), or one of an untracked mode it keeps locally (a
+/// trusted read of Deathmatch, Workshop and the like), keeps its local map
+/// crop and queues nothing.
 #[tokio::test]
-async fn only_a_stored_tab_offers_its_map_crop_for_training() {
+async fn only_a_kept_tab_of_a_tracked_mode_offers_its_map_crop_for_training() {
     let dir = tempfile::tempdir().unwrap();
     map_name_consent_on(dir.path());
     let queued = || sync::queued_crops(dir.path(), sync::UploadKind::MapName).len();
@@ -400,9 +407,25 @@ async fn only_a_stored_tab_offers_its_map_crop_for_training() {
     );
     let row = prepare_capture_row(&mut parsed, &mut staged, None, None, "", true);
     assert_eq!(row, PreparedRow::Drop);
-    tab_map_crop(dir.path(), "sess-u", row).await;
+    tab_map_crop(dir.path(), "sess-u", row, &parsed).await;
     assert_eq!(debug_crops_of(dir.path(), "sess-u"), 1, "kept locally");
     assert_eq!(queued(), 0, "an untracked map with no open game");
+
+    // A trusted top bar read of an untracked map with no open game: the
+    // row is stored locally, as a Deathmatch game that never uploads, and
+    // its crop is not offered.
+    let (mut staged, mut parsed) = staged_row(
+        "sess-t",
+        "Château Guillard",
+        Some(boundary::MapSource::TopBar),
+    );
+    let row = prepare_capture_row(&mut parsed, &mut staged, None, None, "", true);
+    assert_eq!(row, PreparedRow::Store, "the row is stored");
+    assert_eq!(parsed.game_mode, "Deathmatch");
+    assert!(!offers_map_crop_for_training(row, &parsed));
+    tab_map_crop(dir.path(), "sess-t", row, &parsed).await;
+    assert_eq!(debug_crops_of(dir.path(), "sess-t"), 1, "kept locally");
+    assert_eq!(queued(), 0, "a trusted read of an untracked map");
 
     // A PvE Adlersbrunn board: stats on one team only.
     let (mut staged, mut parsed) =
@@ -416,7 +439,7 @@ async fn only_a_stored_tab_offers_its_map_crop_for_training() {
         false,
     );
     assert_eq!(row, PreparedRow::Drop);
-    tab_map_crop(dir.path(), "sess-p", row).await;
+    tab_map_crop(dir.path(), "sess-p", row, &parsed).await;
     assert_eq!(debug_crops_of(dir.path(), "sess-p"), 1, "kept locally");
     assert_eq!(queued(), 0, "a PvE Adlersbrunn board");
 
@@ -424,7 +447,8 @@ async fn only_a_stored_tab_offers_its_map_crop_for_training() {
     let (mut staged, mut parsed) = staged_row("sess-s", "Busan", Some(boundary::MapSource::TopBar));
     let row = prepare_capture_row(&mut parsed, &mut staged, None, None, "", true);
     assert_eq!(row, PreparedRow::Store);
-    tab_map_crop(dir.path(), "sess-s", row).await;
+    assert!(offers_map_crop_for_training(row, &parsed));
+    tab_map_crop(dir.path(), "sess-s", row, &parsed).await;
     assert_eq!(queued(), 1, "a Tab kept for its game");
 }
 

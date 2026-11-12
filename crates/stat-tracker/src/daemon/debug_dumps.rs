@@ -325,17 +325,31 @@ pub(crate) fn prepare_map_label_crop(
 /// Write a Tab's map-label crop on a blocking thread, once
 /// [`prepare_capture_row`] decided its `row`. The handle is for tests.
 ///
-/// The crop is kept either way. Only for [`PreparedRow::Store`] is it also
-/// offered to the training crop outbox (`sync::keep_map_name_crop`), which
-/// keeps a copy only while the site's last answer has `map_name` consent
-/// on. A Tab whose row is dropped (an untracked map with no open game, a
-/// PvE Adlersbrunn board) is a game the tracker does not record, so its
-/// crop is never offered.
+/// The crop is kept either way. It is also offered to the training crop
+/// outbox (`sync::keep_map_name_crop`), which keeps a copy only while the
+/// site's last answer has `map_name` consent on, only when
+/// [`offers_map_crop_for_training`] says so.
 pub(crate) fn commit_tab_map_label_crop(
     crop: Option<MapLabelCrop>,
     row: PreparedRow,
+    parsed: &storage::PersonalMatch,
 ) -> Option<tokio::task::JoinHandle<()>> {
-    write_map_label_crop(crop, row == PreparedRow::Store)
+    write_map_label_crop(crop, offers_map_crop_for_training(row, parsed))
+}
+
+/// A Tab offers its map crop for training only when the tracker keeps its
+/// row ([`PreparedRow::Store`]) and that row is of a tracked mode, the rows
+/// that can upload. A Tab whose row is dropped (an untracked map with no
+/// open game, a PvE Adlersbrunn board) is a game the tracker does not
+/// record. A row of an untracked mode (Practice, Workshop, Deathmatch,
+/// Stadium and the others in `parse::map_is_untracked`) is stored locally
+/// but never uploads, also after a trusted top bar or accolade read, so
+/// neither offers its crop.
+pub(crate) fn offers_map_crop_for_training(
+    row: PreparedRow,
+    parsed: &storage::PersonalMatch,
+) -> bool {
+    row == PreparedRow::Store && parse::stats_row_is_tracked(&parsed.map_name, &parsed.game_mode)
 }
 
 /// Write `crop` on a blocking thread, and offer it for training only with
@@ -356,7 +370,7 @@ fn write_map_label_crop(
 }
 
 /// [`prepare_map_label_crop`] then [`commit_tab_map_label_crop`] for a Tab
-/// the tracker keeps for its game (`prepare_capture_row` returns Store).
+/// that offers its crop for training ([`offers_map_crop_for_training`]).
 #[cfg(test)]
 pub(crate) fn archive_map_label_crop(
     data_dir: &std::path::Path,
@@ -364,7 +378,7 @@ pub(crate) fn archive_map_label_crop(
     frame: &image::DynamicImage,
 ) -> Option<tokio::task::JoinHandle<()>> {
     let crop = prepare_map_label_crop(data_dir, session_id, frame);
-    commit_tab_map_label_crop(crop, PreparedRow::Store)
+    write_map_label_crop(crop, true)
 }
 
 /// The map-label crop for a capture a trust gate rejected: only with

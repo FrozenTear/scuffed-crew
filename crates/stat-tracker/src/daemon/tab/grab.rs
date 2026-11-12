@@ -1099,9 +1099,10 @@ pub(crate) async fn handle_capture(
                     None => parse::both_teams_have_stats(&rows, team_size),
                 },
             );
-            // The map crop is kept either way; only a stored row offers it
-            // for training.
-            commit_tab_map_label_crop(map_label_crop, prepared);
+            // The map crop is kept either way. Only a Tab
+            // prepare_capture_row keeps (Store) of a tracked mode offers it
+            // for training: untracked modes never upload.
+            commit_tab_map_label_crop(map_label_crop, prepared, &parsed);
             if prepared == PreparedRow::Drop {
                 return Ok(CaptureReport {
                     finished_game_tab,
