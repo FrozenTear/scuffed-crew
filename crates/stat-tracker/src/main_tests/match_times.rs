@@ -628,7 +628,11 @@ fn the_run_loop_stores_the_times_before_the_snapshot() {
 
 /// The shutdown write of an imported hold's times marks the snapshot when
 /// it stores them. For a finished game the close that follows finds the
-/// times already stored and would not mark it.
+/// times already stored and would not mark it. The session save only marks
+/// it: an export there runs before the skeleton and the close are saved, so
+/// a deadline hit inside it leaves the hold pending and the next start
+/// stores the board twice. The snapshot export stage, after the save,
+/// writes a marked snapshot.
 #[test]
 fn the_shutdown_hold_times_write_refreshes_the_snapshot() {
     let body: String = fn_source("close_session_on_shutdown")
@@ -636,9 +640,34 @@ fn the_shutdown_hold_times_write_refreshes_the_snapshot() {
         .collect();
     assert!(
         body.contains(
-            "ifstore_match_times(store,game).await{refresh_snapshot(store,data_dir).await;}"
+            "ifstore_match_times(store,game).await{mark_snapshot(&SNAPSHOT_STATE,false);}"
         ),
         "the times write must mark the snapshot"
+    );
+    for export in [
+        "refresh_snapshot",
+        "flush_snapshot",
+        "export_snapshot",
+        "write_snapshot_if",
+    ] {
+        assert!(
+            !body.contains(export),
+            "the session save must not export the snapshot ({export})"
+        );
+    }
+    let stage = |s: ShutdownStage| SHUTDOWN_STAGES.iter().position(|x| *x == s).unwrap();
+    assert!(
+        stage(ShutdownStage::SessionSave) < stage(ShutdownStage::SnapshotExport),
+        "the export stage runs after the save"
+    );
+    let shutdown: String = fn_source("shutdown_from_signal")
+        .split_whitespace()
+        .collect();
+    assert!(
+        shutdown.contains(
+            "ShutdownStage::SnapshotExport=>{flush_snapshot_if_dirty(store,data_dir).await;"
+        ),
+        "the export stage writes a marked snapshot"
     );
 }
 
