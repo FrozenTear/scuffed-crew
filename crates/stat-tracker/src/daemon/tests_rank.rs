@@ -503,6 +503,10 @@ fn the_poll_loop_wires_the_feed_in_order() {
     let close_at = branch
         .find("daemon::rank::close(feed, store, pregame_dump.as_mut())")
         .expect("close sits in the poll-arm process-stop branch");
+    assert!(
+        !branch[..close_at].contains("continue;"),
+        "close sits before the process-stop branch's continue, not after the branch"
+    );
     let refresh_at = branch
         .find("refresh_snapshot(store, data_dir)")
         .expect("the close's snapshot refresh sits in that branch");

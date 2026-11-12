@@ -241,7 +241,7 @@ impl Drop for RankFeed {
     /// dropped, and the log says so.
     fn drop(&mut self) {
         if let Some(h) = &self.held {
-            tracing::info!(target: "scuffed_stat_tracker", session = %h.session, frames = h.reads.len(), "rank update: shutting down with a rank screen held, dropped");
+            tracing::info!(target: "scuffed_stat_tracker", session = %h.session, entries = h.reads.len(), "rank update: shutting down with a rank screen held, dropped");
         }
         if let Some((s, _)) = &self.unsaved {
             tracing::info!(target: "scuffed_stat_tracker", session = %s.session, "rank update: shutting down with an update the store has not taken, dropped");

@@ -48,7 +48,8 @@ impl PregameDump {
     /// clears it, a new one replaces the one pending (a log line says so).
     /// A call from the pending hint's own source game does neither: that
     /// game's rank screen came back and settled again, no game came after
-    /// it, and the store keeps its first rank, so its first hint stays.
+    /// it, and a game's later settles never replace or clear the hint that
+    /// game handed on.
     /// Nothing happens with the reader off. The rank reader's wiring
     /// (`daemon::rank::tick`) calls this with the banner word it settled.
     pub(crate) fn set_next_mode_hint(
