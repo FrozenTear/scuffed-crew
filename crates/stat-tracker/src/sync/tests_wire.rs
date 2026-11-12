@@ -50,6 +50,7 @@ pub(super) fn row(hero: &str, map: &str, mode: &str) -> PersonalMatch {
         bans_picks_status: None,
         queue_title: None,
         rank_update: None,
+        match_times: None,
     }
 }
 
@@ -191,4 +192,20 @@ fn upload_of_an_ocr_v1_row_adds_only_the_recognizer_tag() {
     blank.game_mode = "Control".into();
     let dropped = crate::sync::upload_request(&[blank], &[]);
     assert!(dropped.matches.is_empty());
+}
+
+/// A game's real start and end stay on this computer: an upload of a row
+/// that has them sends no `match_times` key and neither time.
+#[test]
+fn upload_never_sends_the_game_start_and_end() {
+    let mut timed = row("Ana", "Busan", "Control");
+    timed.match_times = Some(crate::model::MatchTimes {
+        started_at: Some(played()),
+        ended_at: Some(played()),
+    });
+    let body = body_of(&[timed]);
+    let parsed: scuffed_types::api::StatsUploadRequest = serde_json::from_str(&body).unwrap();
+    assert_eq!(parsed.matches.len(), 1, "the row itself uploads");
+    assert!(!body.contains("match_times"), "{body}");
+    assert!(!body.contains("ended_at"), "{body}");
 }

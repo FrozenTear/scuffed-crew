@@ -7,6 +7,7 @@ mod edits;
 mod export;
 mod files;
 pub mod maintain;
+mod match_times;
 mod migrate;
 mod migrate_timeline;
 mod queue_title;
@@ -341,6 +342,9 @@ mod tests_queue_title;
 
 #[cfg(test)]
 mod tests_rank_update;
+
+#[cfg(test)]
+mod tests_match_times;
 
 #[cfg(test)]
 mod tests_rows;

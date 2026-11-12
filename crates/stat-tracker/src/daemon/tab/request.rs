@@ -121,9 +121,10 @@ where
         // Peeked, not taken: the pending outcome is taken when the fresh
         // session opens.
         let mut pending = st.pending_outcome;
+        let seen = pending.map(|(_, at)| at);
         let fresh = tab_opened_game(
             fresh_session.clone(),
-            take_fresh_pending(&mut pending, press),
+            take_fresh_pending(&mut pending, press).zip(seen),
             carried_deferred(Some(old)),
             press,
         );
@@ -279,6 +280,8 @@ pub(crate) async fn unlatch_false_outcome(
     g.outcome = detect::MatchOutcome::Unknown;
     g.outcome_recorded_at = None;
     g.result_mark = None;
+    // The game did not end then.
+    g.match_times.ended_at = None;
     // Cleared with the hint ([`ActiveGame::text_fallback_locked`]).
     g.text_fallback_locked = false;
     g.result_evidence = Default::default();
@@ -297,6 +300,7 @@ pub(crate) async fn unlatch_false_outcome(
     {
         tracing::warn!(target: "scuffed_stat_tracker", error = %e, "failed to clear the session outcome");
     }
+    store_match_times(store, g).await;
     persist_active_game(data_dir, Some(g));
     refresh_snapshot(store, data_dir).await;
 }
@@ -325,19 +329,24 @@ pub(crate) fn carried_deferred(previous: Option<&ActiveGame>) -> Option<CarriedD
 }
 
 /// The game a Tab opens as `session_id` at `now`: the pending outcome
-/// `inherited`, and the deferred board of the game it replaces.
+/// `inherited` and when it was confirmed, and the deferred board of the
+/// game it replaces. An inherited result is a read: its confirm is the
+/// game's end. No pre-game screen opened it, so it has no start.
 pub(crate) fn tab_opened_game(
     session_id: String,
-    inherited: Option<detect::MatchOutcome>,
+    inherited: Option<(detect::MatchOutcome, Instant)>,
     carried: Option<CarriedDeferred>,
     now: Instant,
 ) -> ActiveGame {
     let mut opened = ActiveGame::open_at(
         session_id,
-        inherited.unwrap_or(detect::MatchOutcome::Unknown),
+        inherited.map_or(detect::MatchOutcome::Unknown, |(outcome, _)| outcome),
         Vec::new(),
         now,
     );
+    if let Some((outcome, seen_at)) = inherited {
+        opened.note_match_end(outcome, seen_at, 0);
+    }
     if let Some((counters, hero, at)) = carried {
         opened.deferred = Some(counters);
         opened.deferred_hero = hero;
@@ -357,7 +366,8 @@ pub(crate) async fn open_tab_game(
 ) {
     let carried = carried_deferred(st.active_game.as_ref());
     retire_active_game(st, store, data_dir, None, "superseded by Tab-opened game").await;
-    let inherited = take_fresh_pending(&mut st.pending_outcome, now);
+    let seen = st.pending_outcome.map(|(_, at)| at);
+    let inherited = take_fresh_pending(&mut st.pending_outcome, now).zip(seen);
     st.active_game = Some(tab_opened_game(session_id, inherited, carried, now));
     st.last_game_open = Some(now);
     clear_cadence_wakes(st);
