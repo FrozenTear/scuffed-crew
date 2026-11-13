@@ -224,14 +224,82 @@ pub fn hero_field(read: &str) -> Option<String> {
 /// is no `found_spot` (the tracker sends that only for screen sizes it has
 /// no layout for), and no hero.
 pub fn map_name_meta(game_token: &str, width: u32, height: u32) -> TrainingCropUploadMeta {
+    TrainingCropUploadMeta {
+        game_token: Some(game_token.to_string()),
+        ..tab_meta(width, height)
+    }
+}
+
+/// `meta` every Tab crop starts from: the screen and the capture size when
+/// the server would take it. No game token yet, and no `found_spot`: every
+/// box this tracker cuts from a Tab is placed by its own layout or search
+/// on every screen size, the same rule as [`map_name_meta`].
+fn tab_meta(width: u32, height: u32) -> TrainingCropUploadMeta {
     let edge_ok =
         |v: u32| (TRAINING_CROP_SCREEN_MIN_EDGE..=TRAINING_CROP_SCREEN_MAX_EDGE).contains(&v);
     let size = (edge_ok(width) && edge_ok(height)).then_some((width, height));
     TrainingCropUploadMeta {
         screen: Some("tab".to_string()),
-        game_token: Some(game_token.to_string()),
         screen_width: size.map(|(w, _)| w),
         screen_height: size.map(|(_, h)| h),
         ..TrainingCropUploadMeta::default()
     }
+}
+
+/// `meta` for a `hero_icon` crop of the career panel's portrait on a Tab of
+/// `width` x `height`, without the game token
+/// ([`super::keep_tab_crops`] adds it). `score` is the panel read's best
+/// score and `lead` its lead over the runner-up, so `runner_up` is their
+/// difference; `icon_set` is the hero pack that read it. `None` when `hero`
+/// is not a known hero: the server requires one for this kind.
+pub fn hero_icon_meta(
+    width: u32,
+    height: u32,
+    hero: &str,
+    score: f32,
+    lead: f32,
+    icon_set: &str,
+) -> Option<TrainingCropUploadMeta> {
+    let hero = hero_field(hero)?;
+    let finite = |v: f32| v.is_finite().then_some(f64::from(v));
+    let (score, margin) = (finite(score), finite(lead));
+    Some(TrainingCropUploadMeta {
+        hero: Some(hero),
+        slot_type: Some("career_panel".to_string()),
+        score,
+        runner_up: score.zip(margin).map(|(s, m)| s - m),
+        margin,
+        icon_set_version: Some(icon_set.to_string()),
+        ..tab_meta(width, height)
+    })
+}
+
+/// The stat columns of a Tab row, left to right, as a `stat_digits` crop's
+/// `slot_type`.
+pub const STAT_DIGIT_COLUMNS: [&str; 6] = [
+    "elims",
+    "assists",
+    "deaths",
+    "damage",
+    "healing",
+    "mitigation",
+];
+
+/// `meta` for a `stat_digits` crop: stat column `column` (0 to 5, see
+/// [`STAT_DIGIT_COLUMNS`]) of the member's own row on a Tab of `width` x
+/// `height`, without the game token ([`super::keep_tab_crops`] adds it).
+/// `hero` is the own hero when it is a known hero. `None` for a column past
+/// the six.
+pub fn stat_digits_meta(
+    width: u32,
+    height: u32,
+    column: usize,
+    hero: &str,
+) -> Option<TrainingCropUploadMeta> {
+    let slot = STAT_DIGIT_COLUMNS.get(column)?;
+    Some(TrainingCropUploadMeta {
+        hero: hero_field(hero),
+        slot_type: Some((*slot).to_string()),
+        ..tab_meta(width, height)
+    })
 }

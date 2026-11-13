@@ -7,9 +7,10 @@
 //! - `auth_pause`: `sync_auth.json` and the GUI status text.
 //! - `visibility`: the member's stats visibility, parsed from the site.
 //! - `client`: [`SyncClient`] and its redirect policy (reqwest).
-//! - `training`, `training_store`, `training_client`, `training_pass`:
-//!   opt-in training crops (kinds and caps, the outbox, the routes, one
-//!   send pass). `training_client` is the other reqwest file.
+//! - `training`, `training_store`, `training_client`, `training_pass`,
+//!   `training_collect`: opt-in training crops (kinds and caps, the outbox,
+//!   the routes, one send pass, the Tab crops the daemon offers).
+//!   `training_client` is the other reqwest file.
 //!
 //! Every public item is re-exported here, so `crate::sync::X` paths are
 //! unchanged.
@@ -22,6 +23,7 @@ mod client;
 mod errors;
 mod training;
 mod training_client;
+mod training_collect;
 mod training_pass;
 mod training_store;
 mod visibility;
@@ -50,10 +52,12 @@ pub use client::{
 };
 pub use errors::{SyncUploadError, server_error_text};
 pub use training::{
-    CropRefusal, QueuedCrop, UploadKind, batch_len, check_crop, game_token_ok, hero_field,
-    map_name_meta, meta_json, multipart_body, png_size, random_token,
+    CropRefusal, QueuedCrop, STAT_DIGIT_COLUMNS, UploadKind, batch_len, check_crop, game_token_ok,
+    hero_field, hero_icon_meta, map_name_meta, meta_json, multipart_body, png_size, random_token,
+    stat_digits_meta,
 };
 pub use training_client::TrainingCallError;
+pub use training_collect::{keep_tab_crops, training_kind_on, warn_crop_lost};
 pub use training_pass::{TrainingPassReport, TrainingRetry, run_training_pass};
 pub use training_store::{
     OUTBOX_KEEP_PER_KIND, TrainingStatus, adopt_training_owner, cached_training_consent,
@@ -108,6 +112,9 @@ mod tests_visibility;
 
 #[cfg(test)]
 mod tests_training;
+
+#[cfg(test)]
+mod tests_training_collect;
 
 #[cfg(test)]
 mod tests_training_http;

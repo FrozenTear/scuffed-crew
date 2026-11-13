@@ -32,8 +32,8 @@ pub(crate) const SECTIONS: [(&str, &[&str]); 6] = [
     (
         "Training crops, only the kinds you turn on at the website",
         &[
-            "Small pictures of what the tracker read. In this version only the map name banner from the Tab screen, at its own size.",
-            "With each: a random number for the game, the screen size and which screen it came from. The website also keeps the tracker version (its User-Agent) with each one. No names, chat or whole screens.",
+            "Small pictures of what the tracker read from a Tab it keeps for its game, at their own size: the map name banner, and with the New reader your hero portrait from the career panel and the number cells of your own row.",
+            "With each: a random number for the game, the screen size and which screen it came from. The website also keeps the tracker version (its User-Agent) with each one. With a hero portrait, the hero, the name of the hero picture pack it was matched with, and how sure the reader was. With a number cell, its column and your hero. No names, chat, other players' rows or whole screens.",
             "Sent with your token while Upload games is on. Delete my training crops, under Website account, removes them from the website.",
             "While Upload games is on, the tracker itself asks the website which kinds you allow, with your token, when it starts and every 10 minutes, even with every kind off, and before each send. That question sends no pictures and no games.",
         ],
@@ -57,7 +57,7 @@ pub(crate) const SECTIONS: [(&str, &[&str]); 6] = [
     (
         "Not sent",
         &[
-            "Screen captures, debug images and the stored games stay on this computer, apart from the training crops above. Rank reading, stat pictures and report pictures are not in this version and start off when they come.",
+            "Screen captures, debug images and the stored games stay on this computer, apart from the training crops above. Read my rank after Comp games, Share stat pictures and Report pictures are not read by this version and start off when they come.",
         ],
     ),
 ];

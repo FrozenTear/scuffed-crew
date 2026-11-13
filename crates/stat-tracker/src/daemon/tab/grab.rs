@@ -464,6 +464,7 @@ pub(crate) async fn handle_capture(
         portrait_hero,
         career_hero,
         pack_hero,
+        career_portrait,
         map_from_panel,
         map_panel_raw,
         map_from_banner,
@@ -1282,6 +1283,19 @@ pub(crate) async fn handle_capture(
             }
             let created_this_capture =
                 commit_capture_rows(store, data_dir, &staged, &parsed, now).await?;
+            // Hero icon and stat digit training crops, only from a stored Tab.
+            // Stat digits only from the new reader's own row verdict when it
+            // names this row and is confirmed (Trust::Sure), and with this Tab's own hero
+            // read: a held hero can be the last game's.
+            let crop_source = TabCropSource {
+                panel: career_portrait.as_ref(),
+                pack_hero: pack_hero.as_deref(),
+                row: player_row_idx,
+                own_row,
+                team_size,
+                hero: source.is_authority().then_some(parsed.hero.as_str()),
+            };
+            archive_tab_training_crops(data_dir, &target_session, &frame_img, crop_source);
 
             tracing::info!(
                 target: "scuffed_stat_tracker",

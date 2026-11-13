@@ -210,6 +210,39 @@ pub(super) fn write_training_warning(
     }
 }
 
+/// Leave `warning` as a sticky warning (see [`write_training_warning`]),
+/// keeping an ask to delete again that is still open and a dropped crops
+/// warning a pass left ([`TrainingStatus::dropped`]): their markers, and
+/// their text in front, so the app still shows them and the next pass still
+/// carries them. The read and the write hold `OWNER_LOCK`, the lock a send
+/// pass writes its status under, so an ask a pass leaves meanwhile is never
+/// overwritten.
+pub(super) fn add_sticky_training_warning(data_dir: &Path, warning: &str) {
+    let _owner = OWNER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let earlier = read_training_status(data_dir);
+    let dropped = earlier.as_ref().and_then(|status| status.dropped.clone());
+    let asked = earlier
+        .and_then(|status| status.delete_again_at)
+        .filter(|at| !deleted_again_since(data_dir, Some(*at)));
+    let mut parts = Vec::new();
+    if asked.is_some() {
+        parts.push(super::training_pass::TRAINING_DELETE_AGAIN);
+    }
+    if let Some(text) = dropped.as_deref() {
+        parts.push(text);
+    }
+    parts.push(warning);
+    let text = parts.join(" ");
+    write_training_warning(
+        data_dir,
+        Some(&text),
+        true,
+        false,
+        dropped.as_deref(),
+        asked,
+    );
+}
+
 // ------------------------------------------------------------------- outbox
 
 /// Crop ids sort by the time they were kept: milliseconds, then random.
@@ -250,16 +283,38 @@ pub fn keep_training_crop(
     meta: TrainingCropUploadMeta,
     png: Vec<u8>,
 ) -> bool {
+    keep_crop(data_dir, kind, meta, png) == Kept::Yes
+}
+
+/// What [`keep_crop`] did with one crop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Kept {
+    Yes,
+    /// The cached consent for the kind is off. Nothing was written.
+    NoConsent,
+    /// Over a cap or a `meta` bound ([`check_crop`]): skipped, not shrunk.
+    Refused,
+    /// No crop id or a write error: a consented crop was lost.
+    Failed,
+}
+
+/// [`keep_training_crop`], telling a refusal from an error.
+pub(super) fn keep_crop(
+    data_dir: &Path,
+    kind: UploadKind,
+    meta: TrainingCropUploadMeta,
+    png: Vec<u8>,
+) -> Kept {
     if !kind.consented(&cached_training_consent(data_dir)) {
-        return false;
+        return Kept::NoConsent;
     }
     let Some(id) = new_crop_id() else {
-        return false;
+        return Kept::Failed;
     };
     let crop = QueuedCrop { id, meta, png };
     if let Err(refusal) = check_crop(kind, &crop) {
         tracing::debug!(kind = kind.as_str(), ?refusal, "training crop not kept");
-        return false;
+        return Kept::Refused;
     }
     let dir = kind_dir(data_dir, kind);
     let meta = serde_json::to_vec(&crop.meta).unwrap_or_default();
@@ -268,7 +323,7 @@ pub fn keep_training_crop(
     if let Err(error) = written {
         tracing::warn!(%error, "could not keep a training crop");
         remove_crop(&dir, &crop.id);
-        return false;
+        return Kept::Failed;
     }
     let ids = crop_ids(&dir);
     for old in ids
@@ -277,7 +332,7 @@ pub fn keep_training_crop(
     {
         remove_crop(&dir, old);
     }
-    true
+    Kept::Yes
 }
 
 /// A `map_name` crop for training, from the map-label PNG the tracker just

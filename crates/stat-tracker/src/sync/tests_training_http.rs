@@ -1151,3 +1151,100 @@ async fn a_failed_consent_read_warns_only_when_training_crops_are_in_use() {
     assert!(report.warning.is_some());
     assert!(training_warning(dir.path()).is_some());
 }
+
+/// A crop a Tab could not keep leaves its own warning, but never drops an
+/// open ask to delete again: the next pass still shows that ask.
+#[tokio::test]
+async fn a_lost_tab_crop_keeps_the_ask_to_delete_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let listener = new_listener();
+    let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    adopt_training_owner(dir.path(), &url, "super-secret-token");
+    mark_training_delete(dir.path()).unwrap();
+    let marker = super::training_store::training_delete_at(dir.path());
+    super::training_store::write_training_warning(
+        dir.path(),
+        Some(TRAINING_DELETE_AGAIN),
+        true,
+        false,
+        None,
+        marker,
+    );
+    warn_crop_lost(dir.path(), UploadKind::StatDigits);
+    let status = read_training_status(dir.path()).expect("a warning");
+    let warning = status.warning.as_deref().unwrap();
+    assert!(warning.contains("could not be kept"), "{warning}");
+    assert!(
+        warning.starts_with(TRAINING_DELETE_AGAIN),
+        "the app still shows the ask: {warning}"
+    );
+    assert!(status.sticky);
+    assert_eq!(status.delete_again_at, marker, "the ask is kept");
+
+    let (_, server) = serve_on(
+        listener,
+        vec![http(200, "", &consent_body(TrainingCropConsent::default()))],
+    );
+    let report = run_training_pass(&client(&url), dir.path()).await;
+    server.join().unwrap();
+    assert_eq!(report.warning.as_deref(), Some(TRAINING_DELETE_AGAIN));
+}
+
+/// An ask a delete that worked has met is not carried into a lost crop
+/// warning, and with no ask the warning is the lost crop line alone.
+#[test]
+fn a_lost_tab_crop_does_not_carry_a_met_ask_to_delete_again() {
+    let dir = tempfile::tempdir().unwrap();
+    warn_crop_lost(dir.path(), UploadKind::HeroIcon);
+    let status = read_training_status(dir.path()).expect("a warning");
+    assert!(
+        status
+            .warning
+            .as_deref()
+            .unwrap()
+            .starts_with("Training crops: hero")
+    );
+    assert_eq!(status.delete_again_at, None);
+
+    let asked = mark_training_delete(dir.path()).unwrap();
+    super::training_store::write_training_warning(
+        dir.path(),
+        Some(TRAINING_DELETE_AGAIN),
+        true,
+        false,
+        None,
+        Some(asked),
+    );
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let marker = mark_training_delete(dir.path()).unwrap();
+    record_training_delete_ok(dir.path(), marker).unwrap();
+    warn_crop_lost(dir.path(), UploadKind::StatDigits);
+    let status = read_training_status(dir.path()).expect("a warning");
+    let warning = status.warning.as_deref().unwrap();
+    assert!(!warning.contains(TRAINING_DELETE_AGAIN), "{warning}");
+    assert_eq!(status.delete_again_at, None);
+}
+
+/// A crop a Tab could not keep never drops the dropped crops warning a pass
+/// left: the app still shows it and the next pass still carries it.
+#[test]
+fn a_lost_tab_crop_keeps_the_dropped_crops_warning() {
+    let dir = tempfile::tempdir().unwrap();
+    let dropped = "Training crops: the website refused 1 hero icon (bad). They were dropped.";
+    super::training_store::write_training_warning(
+        dir.path(),
+        Some(dropped),
+        true,
+        false,
+        Some(dropped),
+        None,
+    );
+    warn_crop_lost(dir.path(), UploadKind::StatDigits);
+    let status = read_training_status(dir.path()).expect("a warning");
+    let warning = status.warning.as_deref().unwrap();
+    assert!(warning.starts_with(dropped), "{warning}");
+    assert!(warning.contains("could not be kept"), "{warning}");
+    assert!(status.sticky);
+    assert_eq!(status.dropped.as_deref(), Some(dropped), "still carried");
+    assert_eq!(status.delete_again_at, None);
+}

@@ -222,6 +222,15 @@ Every field is optional unless noted. Unknown fields are refused (400
 Any bound failure is the one stable code 400 `invalid_crop_meta`; the server
 logs the field name at debug level.
 
+The server takes any `slot_type` of that shape. The tracker sends these,
+all with `screen` `tab`:
+
+| Kind | `slot_type` | What the crop is |
+|------|-------------|------------------|
+| `hero_icon` | `career_panel` | The career panel's hero portrait, with `hero`, `score`, `runner_up`, `margin` and the hero pack name as `icon_set_version` |
+| `stat_digits` | `elims`, `assists`, `deaths`, `damage`, `healing`, `mitigation` | One stat cell of the member's own row, named by its column left to right, with `hero` only when that Tab's own read named it |
+| `map_name` | none | The map name banner |
+
 There is no colourblind filter field. It hints at a member's colour vision
 and is not in the agreed field list or the consent text, so it is not
 accepted (a `meta` naming `colorblind_filter` is 400 `invalid_crop_meta`,

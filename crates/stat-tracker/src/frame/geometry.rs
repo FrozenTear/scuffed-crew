@@ -79,7 +79,7 @@ const TEAM2_START_RATIO: f64 = 0.565;
 /// (mic icon + highlighted-hero overlay art) merges into a ~0.37-wide pseudo
 /// group, so a generous 2x margin over the widest real label separates them
 /// cleanly (CG-4).
-pub(crate) const HEADER_LABEL_MAX_W: f64 = 0.05;
+pub const HEADER_LABEL_MAX_W: f64 = 0.05;
 
 /// Plausible spacing between adjacent header label centers. Measured gaps on
 /// the 2026-07-20/23 fixtures (identical for 5v5 and 6v6): 0.034–0.065.
@@ -712,12 +712,29 @@ pub fn crop_player_row(
     row_index: usize,
     team_size: usize,
 ) -> Option<DynamicImage> {
+    let (x, y, w, h) = player_row_rect(
+        scoreboard.width(),
+        scoreboard.height(),
+        row_index,
+        team_size,
+    )?;
+    Some(scoreboard.crop_imm(x, y, w, h))
+}
+
+/// The rectangle [`crop_player_row`] cuts from a `w` x `h` scoreboard crop,
+/// as `(x, y, width, height)`. `None` for a row past the board, or one the
+/// crop cuts to less than half a slot.
+pub fn player_row_rect(
+    w: u32,
+    h: u32,
+    row_index: usize,
+    team_size: usize,
+) -> Option<(u32, u32, u32, u32)> {
     let total_rows = team_size * 2;
     if row_index >= total_rows {
         return None;
     }
 
-    let (w, h) = (scoreboard.width(), scoreboard.height());
     let team1_start = (h as f64 * HEADER_RATIO) as u32;
     let team2_start = (h as f64 * TEAM2_START_RATIO) as u32;
 
@@ -737,7 +754,7 @@ pub fn crop_player_row(
         return None;
     }
 
-    Some(scoreboard.crop_imm(0, y, w, actual_h))
+    Some((0, y, w, actual_h))
 }
 
 /// Pixel height of one scoreboard row slot.

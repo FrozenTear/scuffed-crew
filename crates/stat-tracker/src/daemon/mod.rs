@@ -75,9 +75,12 @@ mod tests_roster_cadence;
 #[cfg(test)]
 mod tests_snapshot_policy;
 #[cfg(test)]
+mod tests_training_crops;
+#[cfg(test)]
 mod tests_training_sched;
 #[cfg(test)]
 mod tests_vision_size;
+mod training_crops;
 
 pub(crate) use debug_dumps::*;
 pub(crate) use event_loop::*;
@@ -88,4 +91,5 @@ pub(crate) use session::*;
 pub(crate) use shutdown::*;
 pub(crate) use sync_sched::*;
 pub(crate) use tab::*;
+pub(crate) use training_crops::*;
 pub(crate) use training_sched::*;
