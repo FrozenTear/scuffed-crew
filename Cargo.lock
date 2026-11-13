@@ -4454,18 +4454,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fast_image_resize"
-version = "6.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9c50201dc184ba6553da1695aac20a042efffbe2d84542cee31917c86c3ab1e"
-dependencies = [
- "cfg-if",
- "document-features",
- "num-traits",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "fastnum"
 version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10773,7 +10761,6 @@ dependencies = [
  "dioxus-ssr",
  "gloo-timers",
  "js-sys",
- "pulldown-cmark",
  "scuffed-api-client",
  "scuffed-types",
  "serde",
@@ -10874,13 +10861,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "fast_image_resize",
  "find_peaks",
  "glam 0.30.10",
  "gltf",
  "image",
  "rayon",
- "rustc-hash 2.1.1",
  "scuffed-types",
  "serde",
  "serde_json",
@@ -10903,7 +10888,6 @@ dependencies = [
  "image",
  "scuffed-map-pipeline",
  "serde",
- "toml 0.8.2",
  "tracing",
 ]
 

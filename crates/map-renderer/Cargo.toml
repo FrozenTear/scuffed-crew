@@ -32,7 +32,6 @@ gltf = { version = "1", features = ["utils", "names"] }
 glam = "0.30"
 
 # Config
-toml = "0.8"
 serde = { workspace = true }
 
 # Error handling + logging

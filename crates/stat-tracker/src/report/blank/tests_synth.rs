@@ -217,9 +217,9 @@ fn draw_number_h(
                     continue;
                 }
                 let p = img.get_pixel_mut(px as u32, py as u32);
-                for ch in 0..3 {
-                    let bg = f64::from(p.0[ch]);
-                    p.0[ch] = (bg + f64::from(paint) * (colour - bg))
+                for ch in &mut p.0 {
+                    let bg = f64::from(*ch);
+                    *ch = (bg + f64::from(paint) * (colour - bg))
                         .round()
                         .clamp(0.0, 255.0) as u8;
                 }
