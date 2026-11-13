@@ -91,14 +91,14 @@ const RANK_UPDATE_CLASS: &str = "rank_update";
 /// Largest declared size of one rank crop (`crops/rank.png` or
 /// `crops/rank_banner.png`), in bytes: 2 MiB.
 ///
-/// Both rank crops at the cap use 4 MiB, which leaves 6 MiB of the
-/// [`MAX_BUNDLE_BYTES`] budget (10 MiB) for the log, the scoreboard, the
-/// outcome crop, and an optional full frame, so an opted-in rank upload can
-/// never crowd the game report out of the bundle. A lossless PNG of a blanked
-/// rank screen region at 4K is well under 2 MiB; even a crop near the
-/// [`MAX_IMAGE_EDGE`] limit (7680 px) only passes this cap when it is mostly
-/// flat fill, which is what blanking leaves. A rank crop over the cap is a
-/// 400, not a 413, because it is a manifest rule and not the body limit.
+/// This is a budget choice, not a measured size. Both rank crops at the cap
+/// use 4 MiB of the [`MAX_BUNDLE_BYTES`] cap (10 MiB). Nothing here checks
+/// that the rest of the report still fits beside them: the app leaves a rank
+/// crop out when it is over this cap or when it would push the bundle over
+/// [`MAX_BUNDLE_BYTES`] (spec section 3). The server checks the declared
+/// size here and ties it to the real bytes later (`file size does not match
+/// the manifest`). A rank crop over the cap is a 400, not a 413, because it
+/// is a manifest rule and not the body limit.
 pub const RANK_CROP_MAX_BYTES: u64 = 2 * 1024 * 1024;
 
 const OCR_ID: &str = "ocr-v1";
@@ -898,8 +898,9 @@ fn valid_rel_path(path: &str) -> bool {
     true
 }
 
-/// Crop paths the spec names. Suspect-cell files are not given names there,
-/// so they are not accepted.
+/// Crop paths the spec names besides the rank crops, which are in
+/// [`RANK_CROP_PATHS`]. Suspect-cell files are not given names there, so
+/// they are not accepted.
 const CROP_PATHS: &[&str] = &["crops/scoreboard.png", "crops/frame.png", OUTCOME_CROP_PATH];
 
 fn is_plain_crop_path(path: &str) -> bool {
@@ -1637,8 +1638,14 @@ mod tests {
             parse(&with_rank_crop(sample_v2(), path, RANK_CROP_MAX_BYTES)).unwrap();
             let over = with_rank_crop(sample_v2(), path, RANK_CROP_MAX_BYTES + 1);
             let err = parse(&over).unwrap_err();
-            assert!(err.contains("rank crop"), "{path}: {err}");
+            assert_eq!(err, "rank crop is over the size limit", "{path}");
         }
+        let both_at_cap = with_rank_crop(
+            with_rank_crop(sample_v2(), "crops/rank.png", RANK_CROP_MAX_BYTES),
+            "crops/rank_banner.png",
+            RANK_CROP_MAX_BYTES,
+        );
+        assert_eq!(parse(&both_at_cap).unwrap().files.len(), 4);
     }
 
     #[test]
