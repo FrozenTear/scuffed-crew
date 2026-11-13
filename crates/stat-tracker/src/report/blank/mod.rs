@@ -275,6 +275,32 @@ pub const OUTCOME_BAND: PlayfieldRegion = PlayfieldRegion {
     h: 80,
 };
 
+/// The rank update screen as the rank reader reads it, in thousandths of
+/// the playfield (`crops/rank.png`, opt in per report): the role line, the
+/// emblem and its tier word, the progress bar with its labels and tags, the
+/// hero column, and the mode banner top right. Measured from the reader's
+/// boxes at 2560x1440 (x 540 to 2440, y 120 to 1310). The result word box
+/// and the left edge of the screen are outside it.
+pub const RANK_BAND: PlayfieldRegion = PlayfieldRegion {
+    id: "rank",
+    x: 210,
+    y: 83,
+    w: 744,
+    h: 827,
+};
+
+/// The rank emblem, its role line and the tier word with the division
+/// digit under it (`crops/rank_banner.png`): the reader's boxes at
+/// 2560x1440 x 1060 to 1500, y 236 to 1020. Cut at full size, so the
+/// division glyphs keep every pixel.
+pub const RANK_BANNER_BAND: PlayfieldRegion = PlayfieldRegion {
+    id: "rank_banner",
+    x: 414,
+    y: 163,
+    w: 172,
+    h: 546,
+};
+
 /// The team size the capture path reported, for the manifest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TeamLayout {
@@ -429,6 +455,20 @@ pub fn outcome_band(frame: &DynamicImage) -> RgbImage {
     let (w, h) = blanked.dimensions();
     let r = playfield_rect(&OUTCOME_BAND, game_rect_16_9(w, h)).clipped(w, h);
     image::imageops::crop_imm(&blanked, r.x, r.y, r.w, r.h).to_image()
+}
+
+/// The three crops of one rank screen frame, cut from one blanked copy:
+/// `outcome.png` ([`OUTCOME_BAND`]), `rank.png` ([`RANK_BAND`]) and
+/// `rank_banner.png` ([`RANK_BANNER_BAND`]). Same rule as [`outcome_band`]:
+/// call it only for a rank-screen outcome on this same frame.
+pub fn rank_screen_bands(frame: &DynamicImage) -> [RgbImage; 3] {
+    let blanked = blank_outcome_frame(frame);
+    let (w, h) = blanked.dimensions();
+    let pf = game_rect_16_9(w, h);
+    [OUTCOME_BAND, RANK_BAND, RANK_BANNER_BAND].map(|region| {
+        let r = playfield_rect(&region, pf).clipped(w, h);
+        image::imageops::crop_imm(&blanked, r.x, r.y, r.w, r.h).to_image()
+    })
 }
 
 /// What happened to one row of the measured grid.

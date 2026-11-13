@@ -24,6 +24,8 @@ mod tests;
 #[cfg(test)]
 mod tests_alt_names;
 #[cfg(test)]
+mod tests_rank_crops;
+#[cfg(test)]
 mod tests_training_labels;
 
 pub use bundle::{

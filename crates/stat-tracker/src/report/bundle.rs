@@ -510,6 +510,9 @@ pub struct GameReportInput {
     pub system: SystemInfo,
     /// Training box. Off unless the member ticked it.
     pub training: bool,
+    /// "Include rank screen" box. Off unless the member ticked it: only
+    /// then do `crops/rank.png` and `crops/rank_banner.png` leave the PC.
+    pub rank_included: bool,
     pub scrub: ScrubContext,
     pub window: LogWindow,
     pub log_dir: PathBuf,
@@ -530,6 +533,22 @@ pub const MAX_FILES: usize = 30;
 
 /// Widest and tallest picture the site accepts, in pixels.
 pub const MAX_IMAGE_SIDE: u32 = 7680;
+
+/// Largest `crops/rank.png` or `crops/rank_banner.png`, in bytes. Mirrors
+/// the site's per-file cap for the rank crops (2 MiB). A bigger crop is
+/// left out of the report with a warning; the report is still built.
+pub const RANK_CROP_MAX_BYTES: usize = 2 * 1024 * 1024;
+
+/// The opt-in rank crop paths, `rank.png` then `rank_banner.png`. These two
+/// always carry `rank_update` ([`RANK_SCREEN_CLASS`]), and no other file does.
+pub const RANK_CROPS: [&str; 2] = ["crops/rank.png", "crops/rank_banner.png"];
+
+/// `screen_class` of [`RANK_CROPS`].
+pub const RANK_SCREEN_CLASS: &str = "rank_update";
+
+/// Room kept in the zip for `manifest.json`, the zip headers and directory,
+/// when [`build_game_report`] checks whether the rank crops still fit.
+const ZIP_SLACK_BYTES: usize = 256 * 1024;
 
 /// The pictures a game report for `kit` would carry, for a preview before
 /// a report is built. Same rule as the report: only a trusted kit with
@@ -616,6 +635,23 @@ pub fn build_game_report(input: &GameReportInput) -> Result<ReportZip, ReportErr
             });
         }
     }
+    if input.rank_included && reads.is_some() {
+        let rank = rank_crop_images(&input.kit);
+        // The rank crops are extra: a report they would push over the size
+        // limit goes without them. Counted uncompressed, so this errs safe.
+        let total: usize = log_text.len()
+            + ZIP_SLACK_BYTES
+            + images
+                .iter()
+                .chain(&rank)
+                .map(|i| i.png.len())
+                .sum::<usize>();
+        if total > MAX_ZIP_BYTES {
+            tracing::warn!("report: rank screen crops left out, the report would be over 10 MB");
+        } else {
+            images.extend(rank);
+        }
+    }
 
     let mut files = vec![ReportFile {
         path: LOG_PATH.to_string(),
@@ -630,7 +666,9 @@ pub fn build_game_report(input: &GameReportInput) -> Result<ReportZip, ReportErr
             sha256: sha256_hex(&img.png),
             bytes: img.png.len() as u64,
             role: "crop",
-            screen_class: Some(if img.path == "crops/outcome.png" {
+            screen_class: Some(if RANK_CROPS.contains(&img.path.as_str()) {
+                RANK_SCREEN_CLASS
+            } else if img.path == "crops/outcome.png" {
                 "outcome"
             } else {
                 "scoreboard"
@@ -740,4 +778,44 @@ pub fn build_game_report(input: &GameReportInput) -> Result<ReportZip, ReportErr
         log_text,
         images,
     })
+}
+
+/// The kit's rank crops for a report with "Include rank screen" ticked. A
+/// crop the kit does not have is left out (debug log only); one that is
+/// not a readable PNG, is over [`MAX_IMAGE_SIDE`] or over
+/// [`RANK_CROP_MAX_BYTES`] is left out with a warning. Never an error.
+pub fn rank_crop_images(kit: &super::kit::Kit) -> Vec<ReportImage> {
+    let mut out = Vec::new();
+    for (path, png) in RANK_CROPS
+        .into_iter()
+        .zip([kit.rank_png.as_ref(), kit.rank_banner_png.as_ref()])
+    {
+        let Some(png) = png else {
+            tracing::debug!(path, "report: no rank screen crop for this game");
+            continue;
+        };
+        if png.len() > RANK_CROP_MAX_BYTES {
+            tracing::warn!(
+                path,
+                bytes = png.len(),
+                "report: rank screen crop left out, over the size cap"
+            );
+            continue;
+        }
+        match png_size(png) {
+            Ok((width, height)) if width <= MAX_IMAGE_SIDE && height <= MAX_IMAGE_SIDE => {
+                out.push(ReportImage {
+                    path: path.to_string(),
+                    png: png.clone(),
+                    width,
+                    height,
+                });
+            }
+            _ => tracing::warn!(
+                path,
+                "report: rank screen crop left out, not a readable picture"
+            ),
+        }
+    }
+    out
 }

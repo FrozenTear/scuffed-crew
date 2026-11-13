@@ -9,6 +9,9 @@
 //!   writes no kit.
 //! - `outcome.png`: the result word box of the competitive rank screen
 //!   ([`super::blank::outcome_band`]), when the tracker saw that screen.
+//! - `rank.png` and `rank_banner.png`: the rank update screen and its emblem
+//!   ([`rank`]), cut from the same frames as `outcome.png`. A report carries
+//!   them only when the member opts in.
 //! - `reads.json`: the reads of the capture `scoreboard.png` came from.
 //!
 //! Up to [`Retention::max_games`] sessions are kept, within
@@ -26,15 +29,19 @@ pub use crate::reader_apply::ReaderRead;
 
 mod blanking;
 mod outcome;
+mod rank;
 mod reads;
 mod store;
 
 pub use blanking::{forget_portraits, record_scoreboard, record_scoreboard_at};
 pub use outcome::{rank_outcome_allowed, rank_outcome_png, record_outcome_png};
+pub use rank::{
+    RANK_CROP_MAX_EDGE, RankScreenPngs, fit_edge, rank_screen_pngs, record_rank_screen_pngs,
+};
 pub use reads::{KitRead, KitReads, result_is_unknown};
 pub use store::{
-    KIT_DIR, MAX_AGE, NAMES_JSON, OUTCOME_PNG, READS_JSON, SCOREBOARD_PNG, encode_png, kit_root,
-    retention, session_dir, set_retention,
+    KIT_DIR, MAX_AGE, NAMES_JSON, OUTCOME_PNG, RANK_BANNER_PNG, RANK_PNG, READS_JSON,
+    SCOREBOARD_PNG, encode_png, kit_root, retention, session_dir, set_retention,
 };
 use store::{
     modified, prune_locked, read_reads, removed, safe_session, was_removed, write_lock,
@@ -46,6 +53,10 @@ use store::{
 pub struct Kit {
     pub scoreboard_png: Option<Vec<u8>>,
     pub outcome_png: Option<Vec<u8>>,
+    /// `rank.png`, when the tracker saw the rank update screen.
+    pub rank_png: Option<Vec<u8>>,
+    /// `rank_banner.png`, from the same frame as `rank_png`.
+    pub rank_banner_png: Option<Vec<u8>>,
     pub reads: Option<KitReads>,
 }
 
@@ -160,6 +171,8 @@ pub fn load(data_dir: &Path, session_id: &str) -> Kit {
             return Kit {
                 scoreboard_png: None,
                 outcome_png: fs::read(dir.join(OUTCOME_PNG)).ok(),
+                rank_png: fs::read(dir.join(RANK_PNG)).ok(),
+                rank_banner_png: fs::read(dir.join(RANK_BANNER_PNG)).ok(),
                 reads: Some(reads),
             };
         }
@@ -174,6 +187,8 @@ pub fn load(data_dir: &Path, session_id: &str) -> Kit {
         return Kit {
             scoreboard_png: Some(png),
             outcome_png: fs::read(dir.join(OUTCOME_PNG)).ok(),
+            rank_png: fs::read(dir.join(RANK_PNG)).ok(),
+            rank_banner_png: fs::read(dir.join(RANK_BANNER_PNG)).ok(),
             reads: Some(reads),
         };
     }
