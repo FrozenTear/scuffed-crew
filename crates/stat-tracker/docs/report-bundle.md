@@ -345,7 +345,7 @@ A kit stores the blank table version it was blanked with (`BLANK_TABLE_VERSION`,
 
 ### Other name regions
 
-Fractions are of the playfield (`x`, `y`, `width`, `height`), in thousandths. The app uses only `overlay_top` and `overlay_bottom` today, to blank the rank screen before the outcome box is cut. The other rows are the plan for screen classes it does not send yet; the scoreboard crop needs none of them, because its allowlist keeps nothing outside the measured cells.
+Fractions are of the playfield (`x`, `y`, `width`, `height`), in thousandths. The app uses only `overlay_top` and `overlay_bottom` today, to blank the rank screen before the outcome box and the rank crops are cut. The other rows are the plan for screen classes it does not send yet; the scoreboard crop needs none of them, because its allowlist keeps nothing outside the measured cells.
 
 | Id | Class | x | y | w | h | Confirmed |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -384,7 +384,7 @@ A kept frame of another class is blanked with the rows for its class, plus `over
 
 ### What is dropped
 
-The app classifies the frame with the detectors it already trusts (scoreboard, POTG nameplate, and the other screen classes above). The `outcome` class is used only for `crops/outcome.png` and has no name region. If no detector accepts the frame, the frame is dropped. If a system notification could cover the game, or the app cannot see that every name on that screen falls inside a blank region for that class, the frame is dropped. If the app is not sure whether the board is 5v5 or 6v6, the blanker keeps nothing of it, so it writes no scoreboard. A dropped frame is not blanked "as best we can" and then sent. It is absent from the zip and from the preview. If every frame is dropped, there is nothing to send, and Save report stays disabled.
+The app classifies the frame with the detectors it already trusts (scoreboard, POTG nameplate, and the other screen classes above). The `outcome` class is used only for `crops/outcome.png` and has no name region. The `rank_update` class is used only for `crops/rank.png` and `crops/rank_banner.png`. It is the same competitive rank screen the `outcome` class uses: the app fills `overlay_top`, `overlay_bottom`, and the bands outside the playfield before cutting, both rank crops are cut from that blanked frame, and the class has no name region. If no detector accepts the frame, the frame is dropped. If a system notification could cover the game, or the app cannot see that every name on that screen falls inside a blank region for that class, the frame is dropped. If the app is not sure whether the board is 5v5 or 6v6, the blanker keeps nothing of it, so it writes no scoreboard. A dropped frame is not blanked "as best we can" and then sent. It is absent from the zip and from the preview. If every frame is dropped, there is nothing to send, and Save report stays disabled.
 
 ## 5. Name read failures
 
