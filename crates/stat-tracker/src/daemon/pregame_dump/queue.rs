@@ -46,9 +46,12 @@ impl PregameDump {
     /// confirms it, one that disagrees drops it, and a weak read or none
     /// expires it. `source_session` itself never settles it. A blank hint
     /// clears it, a new one replaces the one pending (a log line says so).
-    /// Nothing happens with the reader off. The rank reader's wiring calls
-    /// this; until it lands only tests do.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// A call from the pending hint's own source game does neither: that
+    /// game's rank screen came back and settled again, no game came after
+    /// it, and a game's later settles never replace or clear the hint that
+    /// game handed on.
+    /// Nothing happens with the reader off. The rank reader's wiring
+    /// (`daemon::rank::tick`) calls this with the banner word it settled.
     pub(crate) fn set_next_mode_hint(
         &mut self,
         hint: Option<&str>,
@@ -68,10 +71,41 @@ impl PregameDump {
                 target: None,
                 target_folder: None,
             });
+        if feed
+            .pending_hint
+            .as_ref()
+            .is_some_and(|old| old.source == source_session)
+        {
+            return;
+        }
         if let Some(old) = feed.pending_hint.take() {
-            tracing::info!(target: "scuffed_stat_tracker", hint = %old.text, source = %old.source, "queue title: next mode hint replaced before a game settled it");
+            if hint.is_some() {
+                tracing::info!(target: "scuffed_stat_tracker", hint = %old.text, source = %old.source, "queue title: next mode hint replaced before a game settled it");
+            } else {
+                tracing::info!(target: "scuffed_stat_tracker", hint = %old.text, source = %old.source, "queue title: next mode hint cleared before a game settled it");
+            }
         }
         feed.pending_hint = hint;
+    }
+
+    /// Whether the queue title reader is on (its feed came in): without it
+    /// no hint is kept and no game gets a queue title.
+    pub(crate) fn has_queue_reader(&self) -> bool {
+        self.queue.is_some()
+    }
+
+    /// The pending next mode hint's text and source game (tests of other
+    /// wiring that hands one over).
+    #[cfg(test)]
+    pub(crate) fn pending_hint(&self) -> Option<(String, String)> {
+        let hint = self.queue.as_ref()?.pending_hint.as_ref()?;
+        Some((hint.text.clone(), hint.source.clone()))
+    }
+
+    /// When the pending next mode hint's rank screen showed (`shown_at`).
+    #[cfg(test)]
+    pub(crate) fn pending_hint_at(&self) -> Option<DateTime<Utc>> {
+        Some(self.queue.as_ref()?.pending_hint.as_ref()?.at)
     }
 
     /// A game was just recorded as `session_id`: read its queue title once

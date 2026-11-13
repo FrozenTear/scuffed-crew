@@ -301,6 +301,15 @@ pub struct PersonalMatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[surreal(default)]
     pub queue_title: Option<QueueTitle>,
+    /// What Scuffed Vision's rank update reader (`rank-v1`) read on the rank
+    /// screen after this game. Set once, when the screen was read with the
+    /// reader on, and kept on every snapshot of the match; a later read never
+    /// replaces it. `None` with the reader off (the default), when the screen
+    /// was not seen or not read, and on games recorded before the field
+    /// existed. Omitted from JSON when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub rank_update: Option<RankUpdate>,
     /// When the game itself started and ended, as far as the tracker saw
     /// ([`MatchTimes`]). Kept on every snapshot of the match. `None` on games
     /// recorded before the field existed; those time their length from the
@@ -328,6 +337,115 @@ pub struct MatchTimes {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[surreal(default)]
     pub ended_at: Option<SurrealDatetime>,
+}
+
+/// One text value of a [`RankUpdate`] and how sure the reader was (0..1).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SurrealValue)]
+#[surreal(crate = "::surrealdb_types")]
+pub struct RankText {
+    pub value: String,
+    pub confidence: f32,
+}
+
+/// One number of a [`RankUpdate`] and how sure the reader was (0..1).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SurrealValue)]
+#[surreal(crate = "::surrealdb_types")]
+pub struct RankNumber {
+    pub value: i64,
+    pub confidence: f32,
+}
+
+/// The change tags of a [`RankUpdate`] and how sure the reader was (0..1).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SurrealValue)]
+#[surreal(crate = "::surrealdb_types")]
+pub struct RankTags {
+    pub value: Vec<String>,
+    pub confidence: f32,
+}
+
+/// The rank update screen after a game ([`PersonalMatch::rank_update`]), as
+/// the rank reader read it. Each field is `None` when it was not read; each
+/// value has its own confidence (the reader's blend of score and lead, not
+/// the queue title's raw score). The names are the site's `rank` fields.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, SurrealValue)]
+#[surreal(crate = "::surrealdb_types")]
+pub struct RankUpdate {
+    /// `Tank`, `Damage`, `Support` or `Open`, spelled as the site's
+    /// `RankRole`. The upload sends `Open` only when the game's queue title
+    /// names open queue ([`queue_key`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub role: Option<RankText>,
+    /// The tier word as the reader's pack spells it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub role_rank: Option<RankText>,
+    /// 1..=5.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub division: Option<RankNumber>,
+    /// Percent, negative under demotion protection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub progress_pct: Option<RankNumber>,
+    /// Signed percent points.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub progress_change: Option<RankNumber>,
+    /// At most [`RANK_MAX_CHANGE_TAGS`] tags, left to right.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub change_tags: Option<RankTags>,
+    /// "Higher ranked than X% of players", 0..=100.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub higher_than_pct: Option<RankNumber>,
+    /// The SR of the first hero the screen lists (not always the hero of
+    /// the game, after a hero swap).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub hero_sr: Option<RankNumber>,
+    /// That hero's SR change, signed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub hero_sr_change: Option<RankNumber>,
+    /// The mode banner word: a hint for the next game, never this game's
+    /// queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub next_mode_hint: Option<RankText>,
+}
+
+impl RankUpdate {
+    /// No field was read.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// The rank update reader's id (`stat_tracker::shadow::rank` re-exports it
+/// as `RECOGNIZER_ID`). The upload sends one `rank.rank_recognizer` for the
+/// queue title and the rank update, so the two readers share one id.
+pub const RANK_RECOGNIZER_ID: &str = QUEUE_TITLE_RECOGNIZER_ID;
+
+/// Most change tags the site keeps (`scuffed_types::api::RANK_MAX_CHANGE_TAGS`):
+/// a longer list is not stored or sent at all.
+pub const RANK_MAX_CHANGE_TAGS: usize = 8;
+
+/// The queue a title or hint names: upper case, every run of characters
+/// that are not letters or digits as one space, and a last word `QUEUE`
+/// dropped. `OPEN QUEUE`, `Open Queue`, `open_queue` and `OPEN` are all
+/// `OPEN`; `ROLE QUEUE` is `ROLE`; `QUEUE` alone is empty.
+pub fn queue_key(text: &str) -> String {
+    let upper = text.to_uppercase();
+    let mut words: Vec<&str> = upper
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    if words.last() == Some(&"QUEUE") {
+        words.pop();
+    }
+    words.join(" ")
 }
 
 /// The game's queue ([`PersonalMatch::queue_title`]): the confident read,
@@ -390,6 +508,13 @@ impl QueueTitle {
             .as_deref()
             .map(str::trim)
             .filter(|v| sure && !v.is_empty())
+    }
+
+    /// The confident title names open queue: its [`queue_key`] ends in the
+    /// word `OPEN` (`OPEN QUEUE`, `COMPETITIVE: OPEN QUEUE`).
+    pub fn is_open_queue(&self) -> bool {
+        self.confident_value()
+            .is_some_and(|v| queue_key(v).rsplit(' ').next() == Some("OPEN"))
     }
 }
 

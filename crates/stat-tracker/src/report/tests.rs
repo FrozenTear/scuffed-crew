@@ -1101,9 +1101,8 @@ mod game {
         out
     }
 
-    /// QA note on #290: the per-game board names in the kit folder stay on
-    /// this machine. No game report category ever puts `names.json` (or
-    /// any of its names) in the zip.
+    /// QA note: the per-game board names in the kit folder stay on this machine:
+    /// no game report category ever puts `names.json` (or any of its names) in the zip.
     #[test]
     fn names_json_is_never_in_a_built_report_zip() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1442,6 +1441,7 @@ mod game {
                 bans_picks: None,
                 bans_picks_status: None,
                 queue_title: None,
+                rank_update: None,
                 match_times: None,
             }],
             ..crate::storage::Snapshot::default()

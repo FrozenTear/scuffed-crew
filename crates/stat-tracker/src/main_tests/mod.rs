@@ -325,6 +325,7 @@ pub(crate) fn test_match(session_id: &str, outcome: &str) -> storage::PersonalMa
         bans_picks: None,
         bans_picks_status: None,
         queue_title: None,
+        rank_update: None,
         match_times: None,
     }
 }
@@ -1214,8 +1215,7 @@ impl Night {
     }
 
     /// A result confirmed on this tick with no accolade map: the second agreeing end-title or
-    /// rank-screen read, whose first read the test does not need. Production reads the map crop
-    /// only on result-word ticks.
+    /// rank-screen read (no first read needed). Production reads the map crop on result words only.
     pub(crate) async fn confirmed_without_map(&mut self, outcome: detect::MatchOutcome) {
         let tick = ResolvedWordTick {
             signal: Some(outcome),
@@ -2158,7 +2158,7 @@ mod restart_skeletons;
 mod run_loop_and_shutdown;
 mod session_recovery;
 mod shutdown_and_restart;
-mod source_text;
+pub(crate) mod source_text;
 mod tab_keyboard_pid;
 mod test_log;
 mod unread_columns;

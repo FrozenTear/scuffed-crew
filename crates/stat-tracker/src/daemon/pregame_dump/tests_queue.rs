@@ -364,15 +364,24 @@ async fn the_next_game_confirms_drops_or_expires_the_hint() {
     let t = rig.game("g4", true).await.unwrap();
     assert_eq!(t.mode_hint, None, "the expired hint is not g4's");
 
-    // A new hint replaces a pending one; a blank one clears it.
+    // A later game's new hint replaces a pending one; a later game's blank
+    // one clears it.
     rig.dump
         .set_next_mode_hint(Some("open"), "g4", chrono::Utc::now());
     rig.dump
-        .set_next_mode_hint(Some("role"), "g4", chrono::Utc::now());
+        .set_next_mode_hint(Some("role"), "g5", chrono::Utc::now());
     assert_eq!(rig.pending().map(|h| h.text).as_deref(), Some("role"));
     rig.dump
-        .set_next_mode_hint(Some("  "), "g4", chrono::Utc::now());
+        .set_next_mode_hint(Some("  "), "g6", chrono::Utc::now());
     assert_eq!(rig.pending(), None);
+    // The pending hint's own source game neither replaces nor clears it.
+    rig.dump
+        .set_next_mode_hint(Some("open"), "g6", chrono::Utc::now());
+    rig.dump
+        .set_next_mode_hint(Some("role"), "g6", chrono::Utc::now());
+    assert_eq!(rig.pending().map(|h| h.text).as_deref(), Some("open"));
+    rig.dump.set_next_mode_hint(None, "g6", chrono::Utc::now());
+    assert_eq!(rig.pending().map(|h| h.text).as_deref(), Some("open"));
 }
 
 #[tokio::test]

@@ -19,6 +19,7 @@ pub(crate) mod pregame_ban_title;
 pub(crate) mod pregame_dump;
 pub(crate) mod query_server;
 pub(crate) mod queue_title;
+pub(crate) mod rank;
 mod session;
 mod shutdown;
 pub(crate) mod snapshot_policy;

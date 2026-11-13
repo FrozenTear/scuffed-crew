@@ -78,6 +78,7 @@ fn a_confident_value_is_sent_in_the_rank_object() {
                 confidence: crate::model::QUEUE_TITLE_MIN_SCORE,
             }),
             rank_recognizer: RANK_RECOGNIZER_ID,
+            ..UploadRank::none()
         })
     );
     assert_eq!(RANK_RECOGNIZER_ID, crate::model::QUEUE_TITLE_RECOGNIZER_ID);
