@@ -338,16 +338,10 @@ pub(crate) fn confident(read: &Field<String>) -> Option<&str> {
 /// quick play `ROLE QUEUE` (`ROLE`); the rank reader maps its own labels to
 /// this spelling before it sets a hint. A spelling that does not match is
 /// dropped, never confirmed: the safe way to fail.
+/// The key itself is [`stat_tracker::model::queue_key`], shared with the
+/// upload's open queue check.
 pub(crate) fn queue_key(text: &str) -> String {
-    let upper = text.to_uppercase();
-    let mut words: Vec<&str> = upper
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| !w.is_empty())
-        .collect();
-    if words.last() == Some(&"QUEUE") {
-        words.pop();
-    }
-    words.join(" ")
+    stat_tracker::model::queue_key(text)
 }
 
 /// A next mode hint agrees with a queue title when both name the same

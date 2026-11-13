@@ -303,6 +303,7 @@ fn lacks_game_fields(m: &PersonalMatch) -> bool {
         || m.bans_picks.is_none()
         || m.bans_picks_status.is_none()
         || m.queue_title.is_none()
+        || m.rank_update.is_none()
         || m.match_times.is_none()
 }
 
@@ -313,6 +314,7 @@ fn lacks_game_fields(m: &PersonalMatch) -> bool {
 /// * the name recognizer (a resend that omits it clears the server's copy);
 /// * the bans and picks result and its status;
 /// * the queue title;
+/// * the rank update;
 /// * the game's real start and end.
 fn carry_game_fields(m: &mut PersonalMatch, snaps: &[PersonalMatch]) {
     let newest = || snaps.iter().rev();
@@ -334,6 +336,9 @@ fn carry_game_fields(m: &mut PersonalMatch, snaps: &[PersonalMatch]) {
     }
     if m.queue_title.is_none() {
         m.queue_title = newest().find_map(|row| row.queue_title.clone());
+    }
+    if m.rank_update.is_none() {
+        m.rank_update = newest().find_map(|row| row.rank_update.clone());
     }
     if m.match_times.is_none() {
         m.match_times = newest().find_map(|row| row.match_times.clone());

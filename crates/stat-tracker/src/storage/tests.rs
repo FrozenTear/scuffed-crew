@@ -44,6 +44,7 @@ pub(super) fn snap(session_id: &str, elims: u32) -> PersonalMatch {
         bans_picks: None,
         bans_picks_status: None,
         queue_title: None,
+        rank_update: None,
         match_times: None,
     }
 }

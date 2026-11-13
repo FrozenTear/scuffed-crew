@@ -6,13 +6,44 @@
 //! frame goes in; each field comes out as a value with a confidence, and a
 //! value the screen does not show clearly is `None`, never a guess.
 //!
-//! Off by default, and not wired yet: nothing outside the tests calls
-//! [`RankSetting::from_env`] or [`Reader::read`], so setting [`ENV`] changes
-//! nothing until the capture wiring lands. That wiring will run the reader
-//! only when [`ENV`] (or the setting it feeds) is switched on
-//! ([`RankSetting::parse`]) and a template pack is installed ([`templates`]).
-//! The capture wiring (which frame to keep) and any upload field are not part
-//! of this module; see "What a caller must do" below.
+//! Off by default. The tracker's capture wiring (`daemon::rank` in the
+//! binary, through [`game::read_for_game`]) runs the reader only when
+//! [`ENV`] is switched on ([`RankSetting::parse`]) and a template pack is
+//! installed ([`templates`]); it then reads the rank screen's frames after a
+//! game, stores the result on that game and uploads it in the `rank` object.
+//! Which frames to read and how reads are combined are the wiring's; see
+//! "What a caller must do" below, which also says what the wiring does.
+//!
+//! # Spellings
+//!
+//! The strings are the pack's class names, which come from the bench labels:
+//!
+//! * `role`: [`Role`], spelled as the site's `scuffed_types::api::RankRole`
+//!   (`Tank`, `Damage`, `Support`, `Open`; [`game::rank_role`] pins it);
+//! * `role_rank`: the tier word, capitalised (`Master`, `Diamond`);
+//! * `change_tags`: the tag words as the game writes them, one class per tag
+//!   (`Calibration Up` and `Calibration Down` among them; there are no
+//!   streak tags). The reader has no cap; the site keeps at most 8 and nulls
+//!   a longer list, so the wiring sends no list above 8
+//!   ([`crate::model::RANK_MAX_CHANGE_TAGS`]);
+//! * `next_mode_hint`: the banner word as its class is named. A pack should
+//!   name it as the queue title pack spells titles (`OPEN QUEUE`,
+//!   `ROLE QUEUE`): the hint names the next game's queue and only agrees
+//!   with that game's queue title when both reduce to the same key
+//!   (`model::queue_key`); a spelling that does not is dropped, never
+//!   confirmed.
+//!
+//! `hero_sr` and `hero_sr_change` are the first hero listed. After a hero
+//! swap that need not be the hero of the game.
+//!
+//! # Confidence
+//!
+//! A field's confidence blends its weakest glyph's score and lead
+//! ([`MIN_SCORE`], [`MIN_MARGIN`]): an accepted glyph field is at least about
+//! 0.53, an accepted word field about 0.42, and [`Role::Open`] is fixed at
+//! [`OPEN_CONFIDENCE`]. The queue title reader instead reports its raw score
+//! (bar 0.80). The two scales are not comparable; a caller that wants a bar
+//! sets one per field.
 //!
 //! # How it reads
 //!
@@ -48,21 +79,38 @@
 //!   fixed place in the full frame. Any other size (a crop, 16:10, 21:9,
 //!   720p, 4K) is [`ReadError::Unsupported`], so a wiring mistake shows up
 //!   as such and not as "no rank screen".
-//! * Check frames with [`Reader::is_rank_screen`] (the "RANK PROGRESS:"
-//!   label only, cheap) and call [`Reader::read`] once, on the **last**
-//!   frame of the rank update, when the pill and the hero SR have settled.
-//!   Nothing here detects the animation. What is caught: text that is not
+//! * Nothing here detects the animation. What is caught: text that is not
 //!   drawn yet reads `None`, and a glyph caught mid-fade that matches no
 //!   class well makes its field `None`. What is not caught: a frame taken
 //!   while the pill or the SR is still counting shows clean digits of a
 //!   value that is not final yet, and reads as that value with full
-//!   confidence.
+//!   confidence. One read of one frame is never enough to trust a value.
 //! * Install a pack ([`templates::TemplateSet::load`]); without it
 //!   [`Reader::load`] fails and the reader is off.
+//!
+//! The tracker's wiring (`daemon::rank` in the binary) does this: it reads
+//! every frame the end detector flags as the rank screen, 2560x1440 only,
+//! through [`game::read_for_game`], and holds the reads for the open game.
+//! A single tick that misses the screen is a break between reads; two in a
+//! row, another game, or the game closing end the screen. Then each field
+//! is kept only when the newest read that has it agrees with the read right
+//! before it, at the lower confidence, so a value still counting up or one
+//! the screen replaced on its newest read is dropped. What that does not
+//! catch: two frames in a row that both show the same value that is not
+//! final yet (the count paused on one value for two ticks), and a field
+//! whose last agreed pair is followed only by frames that no longer read
+//! it (a fade, or a final value the reader cannot read). A field that
+//! stops reading while others go on keeps that older pair, so the settled
+//! record can mix fields from different moments: reads of division 3 at
+//! 95%, division 3 at 95%, then no division at 5% twice settle to
+//! division 3 at 5%, a record the screen never showed.
+//! [`Reader::is_rank_screen`] (the "RANK PROGRESS:" label only, cheap) is
+//! there for a caller that wants to check frames before a full read.
 //!
 //! A supported frame that does not show the "RANK PROGRESS:" label (another
 //! screen, the placement screen) is [`ReadError::NotRankScreen`].
 
+pub mod game;
 pub mod ink;
 pub mod layout;
 pub mod templates;
@@ -80,8 +128,10 @@ pub use templates::{
     CHEV_LEFT, CHEV_RIGHT, Family, Learner, SR_ICON, TEMPLATE_DIR, TemplateError, TemplateSet,
 };
 
-/// The recognizer id written next to the values.
-pub const RECOGNIZER_ID: &str = "rank-v1";
+/// The recognizer id written next to the values: the one id the upload
+/// sends as `rank.rank_recognizer` for this reader and the queue title
+/// reader alike, defined once in `model`.
+pub use crate::model::RANK_RECOGNIZER_ID as RECOGNIZER_ID;
 /// Environment switch: `rank-v1`, `on`, `1`, `true` or `yes` turns it on.
 pub const ENV: &str = "STAT_TRACKER_RANK_RECOGNIZER";
 /// Lowest glyph score a read may have.
@@ -104,8 +154,8 @@ pub const FRAME_W: u32 = 2560;
 /// Reference frame height the layout was measured at.
 pub const FRAME_H: u32 = 1440;
 
-/// Whether rank-v1 runs. Off unless switched on. Not read by the tracker
-/// yet (see the module docs): the capture wiring will.
+/// Whether rank-v1 runs. Off unless switched on; the capture wiring reads
+/// it from [`ENV`] (see the module docs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum RankSetting {
     #[default]
@@ -206,7 +256,9 @@ pub struct RankRead {
     /// Tags under the bar, left to right.
     pub change_tags: Field<Vec<String>>,
     pub higher_than_pct: Field<u8>,
-    /// SR of the first hero listed.
+    /// SR of the first hero listed (not always the game's hero, after a
+    /// swap). `None` when the entry found may not be the first one or its
+    /// SR may be cut short ([`layout::first_entry`], [`layout::sr_cut_short`]).
     pub hero_sr: Field<u32>,
     /// That hero's SR change, signed by its colour.
     pub hero_sr_change: Field<i32>,
@@ -364,8 +416,9 @@ impl Reader {
             return Err(ReadError::Unsupported { width, height });
         }
         let gate = layout::gate_word(img).ok_or(ReadError::NotRankScreen)?;
+        // only the label's own class: a pack may hold other gate words
         match self.templates.best(Family::Gate, &gate.ink, None) {
-            Some(m) if m.score >= MIN_WORD_SCORE => Ok(r3(m.score)),
+            Some(m) if m.class == GATE_CLASS && m.score >= MIN_WORD_SCORE => Ok(r3(m.score)),
             _ => Err(ReadError::NotRankScreen),
         }
     }
@@ -411,8 +464,10 @@ impl Reader {
             None => Field::none(),
         };
 
+        // a window that may end inside the digits reads no SR, and the
+        // change under it is right aligned to the same wrong edge
         let (hero_sr, hero_sr_change) = match layout::first_entry(img) {
-            Some(e) => {
+            Some(e) if !layout::sr_cut_short(img, &e) => {
                 // a rank icon taller than the digits is left out by shape
                 // (layout::sr_glyphs); one of digit height is matched as
                 // the SR_ICON class and stripped, at the start only.
@@ -433,7 +488,7 @@ impl Reader {
                 };
                 (sr, change)
             }
-            None => (Field::none(), Field::none()),
+            _ => (Field::none(), Field::none()),
         };
 
         let words = layout::tag_words(img);

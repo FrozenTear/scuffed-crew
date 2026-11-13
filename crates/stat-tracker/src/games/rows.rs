@@ -164,6 +164,7 @@ mod tests {
             bans_picks: None,
             bans_picks_status: None,
             queue_title: None,
+            rank_update: None,
             match_times: None,
         }
     }

@@ -23,7 +23,9 @@
 //!
 //! The rank update reader ([`rank`], `rank-v1`) reads the competitive rank
 //! screen after a game. It is off by default; `STAT_TRACKER_RANK_RECOGNIZER=on`
-//! turns it on, and it needs its own pack under `<data_dir>/templates/rank-v1/`.
+//! turns it on for the tracker's capture wiring (`daemon::rank`, which stores
+//! the read on the game and uploads it), and it needs its own pack under
+//! `<data_dir>/templates/rank-v1/`. Only 2560x1440 frames are read there.
 //!
 //! [`reader`] is the single entry point for the main-reader switch
 //! ([`read_board`]: every field with value, confidence and suspect flag). It
