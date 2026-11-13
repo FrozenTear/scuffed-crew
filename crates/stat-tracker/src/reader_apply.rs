@@ -615,7 +615,7 @@ pub fn kit_confidences(
 
 /// A field the new reader wrote, as opposed to the unread placeholder
 /// (`value` none, confidence 0, suspect).
-fn field_attempted(field: &FieldRead) -> bool {
+pub fn field_attempted(field: &FieldRead) -> bool {
     field.value.is_some() || field.confidence > 0.0 || !field.suspect
 }
 

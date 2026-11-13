@@ -292,6 +292,19 @@ async fn handle_capture_new_reader_keeps_11_when_the_next_read_is_1() {
     let saved = ctx.store.get_session_snapshots("held-11").await.unwrap();
     let elims: Vec<u32> = saved.iter().map(|row| row.elims).collect();
     assert_eq!(elims, vec![11, 11], "a read of 1 must not replace 11");
+
+    // The unsure rule's log has one read per taken board: the reader's own
+    // number (1, not the stored 11), unsure where the gate held it.
+    let log = stat_tracker::games::stat_reads::load(&ctx.data_dir);
+    assert_eq!(log.session_id, "held-11");
+    let e: Vec<_> = log.reads[0].iter().map(|r| (r.value, r.unsure)).collect();
+    assert_eq!(e, vec![(Some(11), false), (Some(1), true)]);
+    assert_eq!(log.reads[3].len(), 2);
+    assert!(
+        log.reads[3]
+            .iter()
+            .all(|r| !r.unsure && r.confidence == 0.9)
+    );
 }
 
 /// O1: the same capture, with a sure result in the match's word
