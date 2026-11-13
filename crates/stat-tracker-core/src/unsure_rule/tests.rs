@@ -300,3 +300,54 @@ fn no_read_of_the_shown_value_has_no_confidence() {
         (Verdict::Unsure, None, None)
     );
 }
+
+#[test]
+fn an_agreeing_read_ends_the_run_for_confidence() {
+    // After an agreeing read, an empty read keeps 10 but did not read it.
+    let reads = [
+        sure(10),
+        StatRead::unsure(Some(10), 0.5),
+        StatRead::unsure(None, 0.0),
+    ];
+    let r = confirm_stat(&reads, false);
+    assert_eq!(
+        (r.verdict, r.value, r.confidence),
+        (Verdict::Unsettled, Some(10), None)
+    );
+}
+
+#[test]
+fn reads_before_an_agreeing_read_do_not_count_for_confidence() {
+    // The 0.7 read of 12 is before the agreeing 10.
+    let reads = [
+        sure(10),
+        StatRead::unsure(Some(12), 0.7),
+        StatRead::unsure(Some(10), 0.5),
+        unsure(12),
+    ];
+    let r = confirm_stat(&reads, false);
+    assert_eq!((r.verdict, r.value), (Verdict::Unsettled, Some(12)));
+    assert_conf(r.confidence, 0.2);
+}
+
+#[test]
+fn a_reset_starts_the_confidence_over() {
+    // The 0.8 read of 41 is before the reset; the reset read itself counts.
+    let mut fresh = unsure(41);
+    fresh.reset = true;
+    let reads = [sure(40), StatRead::unsure(Some(41), 0.8), fresh];
+    let r = confirm_stat(&reads, false);
+    assert_eq!(
+        (r.verdict, r.value, r.unsettled_reads),
+        (Verdict::Unsettled, Some(41), 1)
+    );
+    assert_conf(r.confidence, 0.2);
+}
+
+#[test]
+fn unsettled_confidence_is_clamped() {
+    let r = confirm_stat(&[StatRead::unsure(Some(12), 1.5)], false);
+    assert_eq!(r.confidence, Some(1.0));
+    let r = confirm_stat(&[StatRead::unsure(Some(12), f32::NAN)], false);
+    assert_eq!(r.confidence, Some(0.0));
+}

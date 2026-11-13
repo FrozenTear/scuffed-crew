@@ -20,8 +20,11 @@
 //!
 //! **One read** is one taken board (one Tab the tracker took), not one
 //! frame and not one retry of the same Tab. A taken board pushes one read
-//! per own-row stat even when it is not stored (a fresh-match hold, or a
-//! stat column with no sure read yet): the reader still read the cell. A
+//! per own-row stat onto the current game even when a stat column has no
+//! sure read yet: the reader still read the cell. A fresh-match board the
+//! tracker holds (`Effect::Defer`) pushes nothing onto the current game: it
+//! is not this game's board. Its reads carry over to the next game if the
+//! split carries the held board there, and are dropped if the hold drops. A
 //! Tab whose own row is not identified, or whose cell was never attempted,
 //! pushes nothing. [`UNSURE_AFTER_READS`] therefore counts Tabs, not time
 //! or board progress; the tracker's debounce after a taken board keeps
@@ -31,13 +34,14 @@
 //! * A sure read above the real value (the ghost leading "9" that the
 //!   capture gate's rate and jump caps hold) is confirmed, and every right
 //!   read below it after that is unsettled, then unsure. The rule is safe
-//!   only when that gate hold reaches [`StatRead::unsure`].
+//!   only when that gate hold reaches
+//!   [`StatRead::unsure`](field@StatRead::unsure).
 //! * A cell that flaps (10, 12, 10, 12, or an unsure value that keeps
 //!   coming back to the confirmed one) is re-confirmed each time the
 //!   confirmed value is read again, so "in a row" restarts and it never
 //!   flags live. At game end the last read decides.
 //!
-//! The rule is pure and cheap (one pass, no allocation). It does not change
+//! The rule is pure and cheap (linear, no allocation). It does not change
 //! any read, the readers, the capture gate or what is stored or uploaded:
 //! when to show the flag is the tracker's call, built on this verdict.
 

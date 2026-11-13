@@ -38,6 +38,11 @@ pub const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(14 * 24 
 
 pub const SCOREBOARD_PNG: &str = "scoreboard.png";
 pub const OUTCOME_PNG: &str = "outcome.png";
+/// The rank update screen (`kit::rank`). Sent only with the member's opt in.
+pub const RANK_PNG: &str = "rank.png";
+/// The rank screen's top-right mode banner (`kit::rank`). Sent only with
+/// the member's opt in.
+pub const RANK_BANNER_PNG: &str = "rank_banner.png";
 pub const READS_JSON: &str = "reads.json";
 /// Player names read on this session's boards. Local only: never put in a
 /// report zip, only handed to the log scrubber so those names are removed.
