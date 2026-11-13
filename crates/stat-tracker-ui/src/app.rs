@@ -1875,14 +1875,7 @@ impl TrackerApp {
                 category,
             } => {
                 dialog.building = Some(generation);
-                let req = crate::report::GameBuildRequest {
-                    config,
-                    session_id,
-                    category,
-                    text: dialog.text.clone(),
-                    training: dialog.training,
-                    capture_backend,
-                };
+                let req = dialog.game_build_request(config, session_id, category, capture_backend);
                 Task::perform(crate::report::build_game(req), move |result| {
                     Message::Report(crate::report::ReportMessage::Built(generation, result))
                 })
@@ -2007,11 +2000,14 @@ impl TrackerApp {
                 }
                 Task::none()
             }
-            ReportMessage::Training(on) => {
+            ReportMessage::Training(on) | ReportMessage::RankIncluded(on) => {
                 let Some(d) = self.report_dialog_mut() else {
                     return Task::none();
                 };
-                d.training = on;
+                match message {
+                    ReportMessage::Training(_) => d.training = on,
+                    _ => d.rank_included = on,
+                }
                 self.rebuild_report()
             }
             ReportMessage::Text(value) => {

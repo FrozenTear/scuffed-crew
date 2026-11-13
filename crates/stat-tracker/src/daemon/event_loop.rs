@@ -683,9 +683,10 @@ pub(crate) async fn run_loop(
                                 );
                             }
                             // Report kit (spec section 3): the rank screen's
-                            // word box, cut from this same frame, only when
-                            // the rank screen detector fired on it.
-                            let rank_outcome_png = stat_tracker::report::kit::rank_outcome_png(
+                            // word box and the rank update crops, cut from
+                            // this same frame, only when the rank screen
+                            // detector fired on it.
+                            let rank_pngs = stat_tracker::report::kit::rank_screen_pngs(
                                 signal.map(|(_, source)| source),
                                 &img,
                             );
@@ -714,7 +715,7 @@ pub(crate) async fn run_loop(
                                 postgame_want,
                                 signal.is_some() || end_reel,
                             );
-                            (signal, phase, accolade_map, end_reel, end_title_seen, stability, result_read, rank_outcome_png, rank_seen, pregame, postgame)
+                            (signal, phase, accolade_map, end_reel, end_title_seen, stability, result_read, rank_pngs, rank_seen, pregame, postgame)
                         }),
                             stat_tracker::replace::shutdown_notified(),
                             stat_tracker::tab_retry::next_press(&mut kbd, &mut tabs),
@@ -736,7 +737,7 @@ pub(crate) async fn run_loop(
                         // nothing about the rank screen: the rank wiring
                         // skips it, so it is neither a read nor a miss.
                         let analysis_ok = matches!(&analyzed, Ok(Ok(_)));
-                        let (signal, phase, accolade_map, end_reel, end_title_seen, stability, result_read, rank_outcome_png, rank_seen, pregame, postgame) = match analyzed {
+                        let (signal, phase, accolade_map, end_reel, end_title_seen, stability, result_read, rank_pngs, rank_seen, pregame, postgame) = match analyzed {
                             Err(()) => {
                                 shutdown_from_signal(
                                     &mut st,
@@ -769,18 +770,18 @@ pub(crate) async fn run_loop(
                             .await;
                             return Ok(());
                         }
-                        if let Some(png) = rank_outcome_png
+                        if let Some(pngs) = rank_pngs
                             && let Some(game) = st.active_game.as_ref()
                             // the rank screen follows the game it belongs
                             // to: a game quiet for longer gets no outcome crop
                             && game.last_activity.elapsed() <= RANK_OUTCOME_MAX_IDLE
-                            && let Err(e) = stat_tracker::report::kit::record_outcome_png(
+                            && let Err(e) = stat_tracker::report::kit::record_rank_screen_pngs(
                                 data_dir,
                                 &game.session_id,
-                                &png,
+                                &pngs,
                             )
                         {
-                            tracing::debug!(target: "scuffed_stat_tracker", error = %e, "report kit: outcome crop not written");
+                            tracing::debug!(target: "scuffed_stat_tracker", error = %e, "report kit: rank screen crops not written");
                         }
                         // Reader on: hold this tick's rank screen read for the
                         // open game (same idle rule as the outcome crop), or

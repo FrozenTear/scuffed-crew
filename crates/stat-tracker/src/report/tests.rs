@@ -1022,7 +1022,7 @@ fn real_ocr_text_fields_are_dropped_without_a_name_list() {
 
 // --- Game reports ---
 
-mod game {
+pub(super) mod game {
     use super::*;
     use crate::report::blank::tests_synth::{self as synth, Layout};
     use crate::report::bundle::{GameCategory, GameReportInput, build_game_report};
@@ -1030,7 +1030,7 @@ mod game {
     use image::{DynamicImage, Rgb, RgbImage};
     use std::collections::BTreeMap;
 
-    fn reads(team_size: Option<u32>) -> KitReads {
+    pub(in crate::report) fn reads(team_size: Option<u32>) -> KitReads {
         let mut r = BTreeMap::new();
         for key in ["mode", "result", "hero", "e", "a", "d", "dmg", "h", "mit"] {
             r.insert(
@@ -1064,11 +1064,14 @@ mod game {
 
     /// A 2560x1440 frame with a synthetic 6v6 scoreboard whose name cells
     /// hold bright strokes, so a blank miss shows as a non-fill pixel.
-    fn frame() -> DynamicImage {
+    pub(in crate::report) fn frame() -> DynamicImage {
         synth::frame(Layout::L1, &synth::VALUES)
     }
 
-    fn input(dir: &std::path::Path, category: GameCategory) -> GameReportInput {
+    pub(in crate::report) fn input(
+        dir: &std::path::Path,
+        category: GameCategory,
+    ) -> GameReportInput {
         GameReportInput {
             session_id: "sess-1".into(),
             category,
@@ -1080,6 +1083,7 @@ mod game {
             ui_scale: None,
             system: system(),
             training: true,
+            rank_included: false,
             scrub: ctx(),
             window: LogWindow::session(t("2026-10-09T12:00:00Z"), t("2026-10-09T12:10:00Z")),
             log_dir: dir.to_path_buf(),
@@ -1089,7 +1093,7 @@ mod game {
         }
     }
 
-    fn unzip(bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
+    pub(in crate::report) fn unzip(bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
         let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
         let mut out = BTreeMap::new();
         for i in 0..z.len() {
@@ -1528,22 +1532,9 @@ mod own_name_seeds {
 
     fn game_input(dir: &std::path::Path) -> GameReportInput {
         GameReportInput {
-            session_id: "sess-1".into(),
-            category: GameCategory::MissedGame,
             text: "the game was missed".into(),
-            resolution: Resolution {
-                width: 1920,
-                height: 1080,
-            },
-            ui_scale: None,
-            system: system(),
-            training: true,
-            scrub: ctx(),
-            window: LogWindow::session(t("2026-10-09T12:00:00Z"), t("2026-10-09T12:10:00Z")),
-            log_dir: dir.to_path_buf(),
-            kit: kit::load(dir, "sess-1"),
             corrections: BTreeMap::new(),
-            built_at: t("2026-10-09T13:00:00Z"),
+            ..super::game::input(dir, GameCategory::MissedGame)
         }
     }
 

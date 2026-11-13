@@ -34,15 +34,24 @@ pub fn rank_outcome_png(
     source: Option<crate::detect::match_end::OutcomeSource>,
     frame: &DynamicImage,
 ) -> Option<Vec<u8>> {
-    if source != Some(crate::detect::match_end::OutcomeSource::RankScreen) {
-        return None;
-    }
-    let board = crate::ocr::preprocess::crop_scoreboard(frame);
-    let (preflight, scan) = crate::frame::layout::preflight_scoreboard(&board);
-    if !rank_outcome_allowed(source, preflight, scan.looks_like_scoreboard()) {
+    if !rank_frame_allowed(source, frame) {
         return None;
     }
     encode_png(&blank::outcome_band(frame)).ok()
+}
+
+/// [`rank_outcome_allowed`] for one polled frame: the scoreboard checks run
+/// on the frame itself.
+pub(super) fn rank_frame_allowed(
+    source: Option<crate::detect::match_end::OutcomeSource>,
+    frame: &DynamicImage,
+) -> bool {
+    if source != Some(crate::detect::match_end::OutcomeSource::RankScreen) {
+        return false;
+    }
+    let board = crate::ocr::preprocess::crop_scoreboard(frame);
+    let (preflight, scan) = crate::frame::layout::preflight_scoreboard(&board);
+    rank_outcome_allowed(source, preflight, scan.looks_like_scoreboard())
 }
 
 /// Store the bytes from [`rank_outcome_png`] as the session's `outcome.png`.
