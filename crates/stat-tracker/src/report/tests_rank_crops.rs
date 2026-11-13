@@ -9,6 +9,7 @@ use super::bundle::{
     self, GameCategory, GameReportInput, RANK_CROP_MAX_BYTES, RANK_CROPS, RANK_SCREEN_CLASS,
     build_game_report,
 };
+use super::fit::{LeftOut, LeftOutReason};
 use super::kit;
 use super::tests::game::{frame, input, reads, unzip};
 use crate::detect::match_end::OutcomeSource;
@@ -174,6 +175,7 @@ fn ticked_with_a_rank_frame_carries_both_crops_as_rank_update() {
         assert!(files[path].len() <= RANK_CROP_MAX_BYTES);
     }
     assert_eq!(files.len(), 6, "{:?}", files.keys().collect::<Vec<_>>());
+    assert!(zip.left_out.is_empty(), "{:?}", zip.left_out);
 }
 
 #[test]
@@ -194,12 +196,28 @@ fn an_over_cap_or_unreadable_rank_crop_is_left_out_and_the_report_builds() {
     let zip = build_game_report(&inp).unwrap();
     assert_eq!(rank_paths(&zip), vec!["crops/rank_banner.png".to_string()]);
     assert_eq!(unzip(&zip.bytes)["crops/rank_banner.png"], banner);
+    assert_eq!(
+        zip.left_out,
+        vec![LeftOut {
+            path: "crops/rank.png".into(),
+            reason: LeftOutReason::OverSizeLimit,
+        }]
+    );
 
     inp.kit.rank_png = Some(b"not a png".to_vec());
     inp.kit.rank_banner_png = Some(Vec::new());
     let zip = build_game_report(&inp).unwrap();
     assert!(rank_paths(&zip).is_empty());
     assert_eq!(zip.images.len(), 2);
+    let left: Vec<_> = zip
+        .left_out
+        .iter()
+        .map(|l| (l.path.as_str(), l.reason))
+        .collect();
+    assert_eq!(
+        left,
+        RANK_CROPS.map(|p| (p, LeftOutReason::NotReadable)).to_vec()
+    );
 }
 
 #[test]
@@ -215,6 +233,17 @@ fn rank_crops_that_would_push_the_zip_over_10_mb_are_dropped() {
     assert!(rank_paths(&zip).is_empty());
     assert!(zip.bytes.len() <= bundle::MAX_ZIP_BYTES);
     assert_eq!(zip.images.len(), 2);
+    let left: Vec<_> = zip
+        .left_out
+        .iter()
+        .map(|l| (l.path.as_str(), l.reason))
+        .collect();
+    assert_eq!(
+        left,
+        RANK_CROPS
+            .map(|p| (p, LeftOutReason::ReportTooBig))
+            .to_vec()
+    );
 }
 
 #[test]

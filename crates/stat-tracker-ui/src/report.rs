@@ -41,6 +41,11 @@ use crate::theme::{
     SIZE_LABEL, SIZE_META, SIZE_TITLE, TEXT, TEXT_2, TEXT_3,
 };
 
+#[path = "report_rank.rs"]
+mod rank;
+pub use rank::{RANK_BOX_HINT, RANK_BOX_LABEL, left_out_lines};
+use rank::{left_out_text, rank_box};
+
 /// A text edit waits this long before the preview is rebuilt.
 pub const TEXT_REBUILD_DELAY: Duration = Duration::from_millis(700);
 
@@ -1194,33 +1199,6 @@ fn dialog_card(d: &ReportDialog) -> Element<'_, Message> {
     )
 }
 
-/// Label of the "Include rank screen" box.
-pub const RANK_BOX_LABEL: &str = "Include rank screen";
-/// The line under it.
-pub const RANK_BOX_HINT: &str = "Adds two rank screen pictures. They help improve the rank reader.";
-
-/// The "Include rank screen" box of a game report, and its hint.
-fn rank_box(d: &ReportDialog) -> Element<'_, Message> {
-    let mut rank = checkbox(d.rank_included)
-        .label(RANK_BOX_LABEL)
-        .size(18)
-        .text_size(SIZE_META)
-        .font(FONT_SEMIBOLD)
-        .style(crate::uninstall::checkbox_style);
-    if !d.busy() && !d.sent() {
-        rank = rank.on_toggle(|on| msg(ReportMessage::RankIncluded(on)));
-    }
-    column![
-        rank,
-        text(RANK_BOX_HINT)
-            .size(SIZE_LABEL)
-            .font(FONT_MEDIUM)
-            .color(TEXT_3),
-    ]
-    .spacing(2)
-    .into()
-}
-
 fn game_hint(category: GameCategory) -> &'static str {
     match category {
         GameCategory::MissedGame => "A game the tracker never recorded. No pictures are required.",
@@ -1396,6 +1374,9 @@ fn preview_block(d: &ReportDialog) -> Element<'_, Message> {
             ));
             for file in &zip.files {
                 col = col.push(file_line(&file.path, file.bytes, &file.sha256));
+            }
+            for line in left_out_lines(zip) {
+                col = col.push(left_out_text(line));
             }
             col = col.push(
                 btn(
@@ -1657,6 +1638,7 @@ mod tests {
             files: Vec::new(),
             log_text: String::new(),
             images: Vec::new(),
+            left_out: Vec::new(),
         });
         let mut d = ReportDialog::new(Some(LogOnlyCategory::Other), true);
         assert!(!d.can_send() && !d.can_save());

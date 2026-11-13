@@ -190,6 +190,7 @@ async fn send_names_a_refused_off_site_redirect() {
         files: Vec::new(),
         log_text: String::new(),
         images: Vec::new(),
+        left_out: Vec::new(),
     });
 
     let outcome = send(site_url, "tok-must-stay-home".into(), zip).await;

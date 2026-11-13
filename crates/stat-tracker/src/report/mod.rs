@@ -12,6 +12,7 @@
 
 pub mod blank;
 pub mod bundle;
+pub mod fit;
 mod hash;
 mod input;
 pub mod kit;
@@ -24,6 +25,8 @@ mod tests;
 #[cfg(test)]
 mod tests_alt_names;
 #[cfg(test)]
+mod tests_drop_order;
+#[cfg(test)]
 mod tests_rank_crops;
 #[cfg(test)]
 mod tests_training_labels;
@@ -33,6 +36,7 @@ pub use bundle::{
     ReportImage, ReportZip, Resolution, SessionType, SystemInfo, build_game_report,
     build_log_report,
 };
+pub use fit::{LeftOut, LeftOutReason};
 pub use marker::{LastExit, MarkerHeartbeat, RunMarker};
 pub use scrub::{LogWindow, ScrubContext};
 pub use training_labels::{MisreadLabel, misread_labels};

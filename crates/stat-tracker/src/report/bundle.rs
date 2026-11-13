@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
+use super::fit::{CountKind, LeftOut, LeftOutReason, count_drops};
 use super::marker::LastExit;
 use super::scrub::{self, LogWindow, ScrubContext};
 use crate::capture::CaptureBackend;
@@ -153,6 +154,9 @@ pub struct ReportZip {
     pub log_text: String,
     /// Every image in the zip, the same bytes, for the preview.
     pub images: Vec<ReportImage>,
+    /// Files left out to keep within the site's limits (sections 3 and 8),
+    /// for the preview to say so. Empty on a log-only report.
+    pub left_out: Vec<LeftOut>,
 }
 
 /// One image of a [`ReportZip`], as stored in the zip.
@@ -396,6 +400,7 @@ pub fn build_log_report(input: &LogReportInput) -> Result<ReportZip, ReportError
         files,
         log_text,
         images: Vec::new(),
+        left_out: Vec::new(),
     })
 }
 
@@ -635,8 +640,10 @@ pub fn build_game_report(input: &GameReportInput) -> Result<ReportZip, ReportErr
             });
         }
     }
+    let mut left_out = Vec::new();
     if input.rank_included && reads.is_some() {
-        let rank = rank_crop_images(&input.kit);
+        let (rank, dropped) = rank_crop_images(&input.kit);
+        left_out.extend(dropped);
         // The rank crops are extra: a report they would push over the size
         // limit goes without them. Counted uncompressed, so this errs safe.
         let total: usize = log_text.len()
@@ -648,9 +655,40 @@ pub fn build_game_report(input: &GameReportInput) -> Result<ReportZip, ReportErr
                 .sum::<usize>();
         if total > MAX_ZIP_BYTES {
             tracing::warn!("report: rank screen crops left out, the report would be over 10 MB");
+            left_out.extend(rank.iter().map(|i| LeftOut {
+                path: i.path.clone(),
+                reason: LeftOutReason::ReportTooBig,
+            }));
         } else {
             images.extend(rank);
         }
+    }
+
+    // Section 8: the file count is checked before the zip is built. Over
+    // it, files leave in the spec's order (rank crops, then glyph pairs);
+    // the log, scoreboard and outcome crop always stay.
+    let kinds: Vec<CountKind> = std::iter::once(CountKind::Kept)
+        .chain(images.iter().map(|i| {
+            if RANK_CROPS.contains(&i.path.as_str()) {
+                CountKind::Rank
+            } else {
+                CountKind::Kept
+            }
+        }))
+        .collect();
+    let mut drops = count_drops(&kinds, MAX_FILES)?;
+    // Index 0 is the log, which is never dropped; image i is index i + 1.
+    for &i in &drops {
+        let path = images[i - 1].path.clone();
+        tracing::warn!(path, "report: left out, too many files");
+        left_out.push(LeftOut {
+            path,
+            reason: LeftOutReason::TooManyFiles,
+        });
+    }
+    drops.sort_unstable();
+    for i in drops.into_iter().rev() {
+        images.remove(i - 1);
     }
 
     let mut files = vec![ReportFile {
@@ -677,6 +715,7 @@ pub fn build_game_report(input: &GameReportInput) -> Result<ReportZip, ReportErr
     }
 
     if files.len() > MAX_FILES {
+        // Fail-safe: count_drops above already made the count fit.
         return Err(ReportError::InvalidInput("a report holds at most 30 files"));
     }
 
@@ -777,15 +816,18 @@ pub fn build_game_report(input: &GameReportInput) -> Result<ReportZip, ReportErr
         files,
         log_text,
         images,
+        left_out,
     })
 }
 
-/// The kit's rank crops for a report with "Include rank screen" ticked. A
-/// crop the kit does not have is left out (debug log only); one that is
-/// not a readable PNG, is over [`MAX_IMAGE_SIDE`] or over
-/// [`RANK_CROP_MAX_BYTES`] is left out with a warning. Never an error.
-pub fn rank_crop_images(kit: &super::kit::Kit) -> Vec<ReportImage> {
+/// The kit's rank crops for a report with "Include rank screen" ticked,
+/// and the ones left out. A crop the kit does not have is not listed
+/// (debug log only); one that is not a readable PNG, is over
+/// [`MAX_IMAGE_SIDE`] or over [`RANK_CROP_MAX_BYTES`] is left out with a
+/// warning and listed for the preview. Never an error.
+pub fn rank_crop_images(kit: &super::kit::Kit) -> (Vec<ReportImage>, Vec<LeftOut>) {
     let mut out = Vec::new();
+    let mut left_out = Vec::new();
     for (path, png) in RANK_CROPS
         .into_iter()
         .zip([kit.rank_png.as_ref(), kit.rank_banner_png.as_ref()])
@@ -800,6 +842,10 @@ pub fn rank_crop_images(kit: &super::kit::Kit) -> Vec<ReportImage> {
                 bytes = png.len(),
                 "report: rank screen crop left out, over the size cap"
             );
+            left_out.push(LeftOut {
+                path: path.to_string(),
+                reason: LeftOutReason::OverSizeLimit,
+            });
             continue;
         }
         match png_size(png) {
@@ -811,11 +857,17 @@ pub fn rank_crop_images(kit: &super::kit::Kit) -> Vec<ReportImage> {
                     height,
                 });
             }
-            _ => tracing::warn!(
-                path,
-                "report: rank screen crop left out, not a readable picture"
-            ),
+            _ => {
+                tracing::warn!(
+                    path,
+                    "report: rank screen crop left out, not a readable picture"
+                );
+                left_out.push(LeftOut {
+                    path: path.to_string(),
+                    reason: LeftOutReason::NotReadable,
+                });
+            }
         }
     }
-    out
+    (out, left_out)
 }
