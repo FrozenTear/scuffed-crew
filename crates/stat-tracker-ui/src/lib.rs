@@ -98,8 +98,10 @@ mod stat_tiles;
 pub mod tab_bits;
 pub mod theme;
 pub mod tracker_status;
+mod training_card;
 pub mod tray;
 pub mod uninstall;
+mod uninstall_names;
 pub mod update;
 mod update_check;
 #[cfg(test)]

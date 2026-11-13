@@ -245,7 +245,8 @@ pub(crate) enum PreparedRow {
 /// so a fuzzy board cannot rename an open game. A stat split still carries
 /// the previous game on the request, so that fallback is empty and the new
 /// session stays Unknown. A trusted Deathmatch map stays, and the caller
-/// stores that row locally. Adlersbrunn with stats on only one team is not
+/// stores that row locally but offers no map crop for training
+/// (`offers_map_crop_for_training`). Adlersbrunn with stats on only one team is not
 /// stored as Eichenwalde.
 ///
 /// An untrusted read of a local-only map with no open map is dropped,

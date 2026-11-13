@@ -1,5 +1,6 @@
 //! [`SyncClient`]: the HTTP client (reqwest), its redirect policy and the
-//! two endpoints. The only file in `sync` that uses reqwest.
+//! stats endpoints. `training_client` adds the training crop routes on the
+//! same client; no other file in `sync` uses reqwest.
 
 use std::sync::{Arc, Mutex};
 
@@ -27,7 +28,7 @@ const CROP_CONSENT_PATH: &str = "/api/training-crops/consent";
 #[derive(Clone)]
 pub struct SyncClient {
     config: Arc<Mutex<SyncConfig>>,
-    http: reqwest::Client,
+    pub(super) http: reqwest::Client,
     /// Caps learned from HTTP 413. Shared by clones. Never raised.
     batch_caps: Arc<Mutex<BatchCaps>>,
     /// Rows the next pass sends after the others, and when the server last
@@ -333,7 +334,7 @@ async fn error_from_response(
     )
 }
 
-fn retry_after_from_response(resp: &reqwest::Response) -> Option<std::time::Duration> {
+pub(super) fn retry_after_from_response(resp: &reqwest::Response) -> Option<std::time::Duration> {
     let code = resp.status().as_u16();
     if code != 429 && code != 503 {
         return None;
@@ -380,7 +381,7 @@ pub fn token_safe_redirects() -> reqwest::redirect::Policy {
 /// `e` as text. A refused redirect also names why: reqwest's own text is
 /// only "error following redirect for url (...)", and the reason sits in
 /// its source.
-fn send_error_text(e: &reqwest::Error) -> String {
+pub(super) fn send_error_text(e: &reqwest::Error) -> String {
     let mut text = e.to_string();
     if e.is_redirect() {
         let mut source = std::error::Error::source(e);

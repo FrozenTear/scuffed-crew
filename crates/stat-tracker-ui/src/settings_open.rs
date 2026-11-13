@@ -32,12 +32,17 @@ pub enum OpenMsg {
     SignOut,
     /// Open (`true`) or close the "What leaves your PC" dialog.
     WhatLeaves(bool),
+    /// The training crop section ([`crate::training_card`]).
+    Training(crate::training_card::TrainingMsg),
 }
 
 impl OpenMsg {
     /// True for a message that changes a setting.
     pub(crate) fn acts(&self) -> bool {
-        matches!(self, OpenMsg::SignOut)
+        match self {
+            OpenMsg::Training(msg) => msg.acts(),
+            _ => matches!(self, OpenMsg::SignOut),
+        }
     }
 }
 
@@ -59,6 +64,8 @@ pub struct OpenState {
     asking_visibility: Option<(String, String)>,
     /// The "What leaves your PC" dialog is open.
     pub what_leaves_open: bool,
+    /// Training crops: the consent read, and the delete action.
+    pub(crate) training: crate::training_card::TrainingState,
 }
 
 impl OpenState {
@@ -140,6 +147,9 @@ pub fn on_open(app: &mut TrackerApp) -> Task<Message> {
     if let Some(task) = ask_visibility(app) {
         tasks.push(task);
     }
+    if let Some(task) = crate::training_card::ask_consent(app) {
+        tasks.push(task);
+    }
     Task::batch(tasks)
 }
 
@@ -213,10 +223,12 @@ pub fn update(
         }
         OpenMsg::VisibilityChecked { key, value } => state.visibility_checked(key, value),
         OpenMsg::WhatLeaves(open) => state.what_leaves_open = open,
+        OpenMsg::Training(msg) => return crate::training_card::update(app, msg),
         OpenMsg::SignOut => {
             state.account = None;
             state.visibility = None;
             state.asking_visibility = None;
+            state.training.forget();
             app.settings.sync_token.clear();
             return save_sync(app);
         }
