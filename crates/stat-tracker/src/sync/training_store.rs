@@ -132,12 +132,17 @@ pub struct TrainingStatus {
     /// RFC 3339 time of the pass that set the warning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at: Option<String>,
-    /// Crops were dropped, or crops a delete left on the website are still
-    /// there. Such a warning stays until a pass sends something or those
-    /// crops are gone, so a later pass with nothing to send does not hide
-    /// it.
+    /// The warning has a part a later pass with nothing to send must not
+    /// hide: crops were dropped ([`TrainingStatus::dropped`]), crops a
+    /// delete left on the website are still there, or the member is asked
+    /// to delete again ([`TrainingStatus::delete_again_at`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub sticky: bool,
+    /// The part of the warning that says crops were dropped. Each pass
+    /// carries it into its own warning, whatever else that pass warns
+    /// about, until a pass sends something.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dropped: Option<String>,
     /// The delete marker (see [`mark_training_delete`]) under which a send
     /// got no answer while the member deleted. The warning asks the member
     /// to delete again, and stays until a later delete the website answered
@@ -170,14 +175,16 @@ pub fn training_warning(data_dir: &Path) -> Option<String> {
 
 /// Leave `warning` for the desktop app, or clear the last one (`None`).
 /// A clear keeps a sticky warning unless `clear_sticky` (a send worked, the
-/// crops a delete left on the website are gone, or the member deleted
-/// again). `delete_again_at` is saved with the warning (see
+/// crops a delete left on the website are gone, or a delete the member
+/// pressed again worked). `dropped` and `delete_again_at` are saved with
+/// the warning (see [`TrainingStatus::dropped`] and
 /// [`TrainingStatus::delete_again_at`]).
 pub(super) fn write_training_warning(
     data_dir: &Path,
     warning: Option<&str>,
     sticky: bool,
     clear_sticky: bool,
+    dropped: Option<&str>,
     delete_again_at: Option<i64>,
 ) {
     let path = root(data_dir).join(STATUS_FILE);
@@ -192,6 +199,7 @@ pub(super) fn write_training_warning(
         warning: Some(warning.to_string()),
         at: Some(chrono::Utc::now().to_rfc3339()),
         sticky,
+        dropped: dropped.map(str::to_string),
         delete_again_at,
     };
     let written = serde_json::to_vec(&status)

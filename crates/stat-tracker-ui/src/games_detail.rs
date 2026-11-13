@@ -1,7 +1,8 @@
 //! Pure logic for the expanded Games row (UX Spec games-expanded-v2): the
 //! per-stat "vs avg" deltas, the tracked span, the hero split, read vs
-//! corrected values and the upload and reader status. No iced here; the
-//! panel module draws it.
+//! corrected values and the upload and reader status. Also the map chips
+//! and the Map cell order the Games list row draws ([`map_cell_parts`]).
+//! No iced here; the panel and table modules draw it.
 
 use crate::model::{Game, Outcome, SegmentView};
 
@@ -249,9 +250,11 @@ pub fn format_delta(stat: Stat, d: f64) -> String {
     }
 }
 
-/// The Time block: Tracked, and the Length line from the same span. The
-/// tracker records no game start or end, so the span (first to last Tab
-/// press) is the only length it has, and the game ran at least that long.
+/// The Time block's Tracked line: the span from the first to the last Tab
+/// press. It is also the Length, as a floor, when the game's real length is
+/// not known ([`GameLength::Floor`]): a start or end not seen, stored times
+/// that do not fit, or an older row recorded before the times were stored.
+/// The game ran at least that long.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Tracked {
     /// First to last Tab read, in seconds.
@@ -319,6 +322,8 @@ impl Tracked {
     }
 }
 
+pub use crate::games_length::*;
+
 /// The queue title warning for the map line: the sentence when the game has
 /// a queue title with no confident value (`QueueTitle::confident_value`,
 /// the same gate as the upload), `None` when it has one or was never read
@@ -330,14 +335,76 @@ pub fn queue_warning(g: &Game) -> Option<&'static str> {
         .map(|_| stat_tracker::model::QUEUE_TITLE_WARNING)
 }
 
-/// The confident queue ("OPEN QUEUE") for the map line's chip, if any:
+/// The confident queue ("OPEN QUEUE") for the queue chip, if any:
 /// `QueueTitle::confident_value`, so the chip shows exactly what the upload
-/// sends.
+/// sends. The chip is drawn in the Games list row and on the open game's
+/// map line ([`map_chips`]).
 pub fn queue_value(g: &Game) -> Option<String> {
     g.queue_title
         .as_ref()?
         .confident_value()
         .map(str::to_string)
+}
+
+/// The chips after the map name, in order: the map's mode, then the
+/// confident queue ([`queue_value`]). The Games list row and the open
+/// game's map line both draw these, so a closed row shows the queue too.
+/// A weak or failed read adds no chip, and the open game's map line says
+/// the queue is not known ([`queue_warning`]). With the queue title reader
+/// off there is no read at all: no chip and no warning.
+pub fn map_chips(g: &Game) -> Vec<String> {
+    crate::games_rows::mode_chip(&g.map_name)
+        .map(str::to_string)
+        .into_iter()
+        .chain(queue_value(g))
+        .collect()
+}
+
+/// One piece of the Games list row's Map cell ([`map_cell_parts`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MapPart {
+    /// The map's name.
+    Name,
+    /// The amber warning sign for an unsure map read.
+    Warn,
+    /// One of [`map_chips`]: the mode, then the confident queue.
+    Chip(String),
+}
+
+/// The Games list row's Map cell in draw order: the name, the warning sign
+/// when the map read is unsure (`doubt`), then [`map_chips`]. The sign
+/// comes before the chips, so in a narrow Map column the chips are clipped
+/// first. The name is capped ([`map_name_max_width`]) so it cannot squeeze
+/// the sign either.
+pub fn map_cell_parts(g: &Game, doubt: bool) -> Vec<MapPart> {
+    let mut parts = vec![MapPart::Name];
+    if doubt {
+        parts.push(MapPart::Warn);
+    }
+    parts.extend(map_chips(g).into_iter().map(MapPart::Chip));
+    parts
+}
+
+/// The gap between the Map cell's parts, in px.
+pub const MAP_CELL_GAP: f32 = 8.0;
+/// The warning sign's fixed width in the Map cell, in px.
+pub const MAP_WARN_W: f32 = 12.0;
+
+/// The widest the map name may draw in a Map cell `cell` px wide that holds
+/// `parts`, or `None` for no cap when there is no warning sign.
+///
+/// Iced takes every gap off a row first, then gives each child, in order,
+/// only the width the earlier ones left. An uncapped name that nearly fills
+/// the cell would leave the sign less than its 12 px. So with the sign in
+/// `parts`, the name gets the cell less every gap and the sign, and wraps
+/// inside that width instead. The sign always keeps [`MAP_WARN_W`]; the chips get
+/// what is left and are clipped first.
+pub fn map_name_max_width(cell: f32, parts: &[MapPart]) -> Option<f32> {
+    if !parts.contains(&MapPart::Warn) {
+        return None;
+    }
+    let gaps = MAP_CELL_GAP * parts.len().saturating_sub(1) as f32;
+    Some((cell - gaps - MAP_WARN_W).max(0.0))
 }
 
 /// One bar segment of the hero timeline, in time order.
@@ -372,9 +439,25 @@ fn is_unconfirmed(s: &SegmentView) -> bool {
     !s.confirmed && !s.dismissed
 }
 
+/// Whether the player set the hero by hand (Edit or the picker).
+fn hero_set_by_hand(g: &Game) -> bool {
+    g.edited_fields.iter().any(|f| f == "hero")
+}
+
+/// The main hero: the one set by hand, as the row shows it, else
+/// [`read_main_hero`]. Edit stores a hero fix as `corrected_hero` only and
+/// the runs keep what the reader read, so the hand fix wins here.
+pub fn main_hero(g: &Game) -> String {
+    if hero_set_by_hand(g) {
+        g.display_hero()
+    } else {
+        read_main_hero(g)
+    }
+}
+
 /// The hero with the most snapshots (a dismissed run folds into it). Ties
 /// and a game with no runs keep the row's hero.
-pub fn main_hero(g: &Game) -> String {
+fn read_main_hero(g: &Game) -> String {
     let row = g.display_hero();
     let mut best: Option<(String, u32)> = None;
     for seg in g.segments.iter().filter(|s| !s.dismissed) {
@@ -396,12 +479,14 @@ pub fn main_hero(g: &Game) -> String {
 }
 
 /// The timeline bar and the "Hero NN% · Hero NN%" split. Each run is sized
-/// by its snapshots. A dismissed run folds into the main hero.
+/// by its snapshots. A dismissed run folds into the main hero, and with the
+/// hero set by hand so do the runs of the hero the reader had as main.
 pub fn hero_split(g: &Game) -> HeroSplit {
     let main = main_hero(g);
+    let read_main = hero_set_by_hand(g).then(|| read_main_hero(g));
     let mut bar: Vec<BarPart> = Vec::new();
     for s in &g.segments {
-        let hero = if s.dismissed {
+        let hero = if s.dismissed || read_main.as_ref() == Some(&s.hero) {
             main.clone()
         } else {
             s.hero.clone()
@@ -548,9 +633,15 @@ pub fn upload(g: &Game, in_progress: bool, sync_on: bool) -> Upload {
         (false, true) => Some("hero"),
         (false, false) => None,
     };
+    let no_result = g.outcome == Outcome::Unknown && !in_progress;
+    // With no website linked nothing is sent: a live game does not send
+    // once it ends, and a game with no result is not uploaded.
+    if !sync_on && (in_progress || no_result) {
+        return held.map_or(Upload::SyncOff, Upload::Held);
+    }
     // An ended game with no result was never sent, whatever `synced` says:
     // the daemon marks such a row synced without uploading it.
-    if g.outcome == Outcome::Unknown && !in_progress && sync_on {
+    if no_result {
         return held.map_or(Upload::Undecided, Upload::Held);
     }
     if g.synced {
@@ -566,6 +657,17 @@ pub fn upload(g: &Game, in_progress: bool, sync_on: bool) -> Upload {
     } else {
         Upload::Waiting
     }
+}
+
+/// The notice under an uploaded game a map or hero is missing from (an
+/// older build sent it blank), as the classic card says it: "Map is
+/// missing. Pick one to fix it on the site." Its Set control is
+/// [`crate::games_picker::offers_set`]'s. `None` for any other game.
+pub fn site_fix_notice(g: &Game, up: &Upload) -> Option<&'static str> {
+    if *up != Upload::Uploaded || g.session_id.is_empty() {
+        return None;
+    }
+    g.review_notice()
 }
 
 impl Upload {
@@ -611,16 +713,16 @@ impl Upload {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::model::{GameOcr, Outcome, Role};
     use chrono::{DateTime, TimeZone, Utc};
 
-    fn at(h: u32, m: u32, s: u32) -> DateTime<Utc> {
+    pub(crate) fn at(h: u32, m: u32, s: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 9, 2, h, m, s).unwrap()
     }
 
-    fn seg(
+    pub(crate) fn seg(
         i: u32,
         hero: &str,
         snaps: u32,
@@ -641,7 +743,7 @@ mod tests {
         }
     }
 
-    fn game(id: &str, hero: &str, e: u32, dmg: u32, when: DateTime<Utc>) -> Game {
+    pub(crate) fn game(id: &str, hero: &str, e: u32, dmg: u32, when: DateTime<Utc>) -> Game {
         Game {
             session_id: id.into(),
             hero: hero.into(),
@@ -677,6 +779,7 @@ mod tests {
             bans_picks: None,
             bans_picks_status: None,
             queue_title: None,
+            match_times: None,
         }
     }
 
@@ -827,9 +930,9 @@ mod tests {
         assert_eq!(tracked(&g).line(), "Tracked: one scoreboard read");
     }
 
-    /// Item 19: the Length line and the LENGTH cell show the one length the
-    /// tracker has, the Tab span, as a floor ("at least"), and say "not
-    /// recorded" (the cell "-") when there is no span.
+    /// Item 19: the Tab span's own Length line and LENGTH cell, the floor a
+    /// game shows when its real length is not known ([`game_length`]): "at
+    /// least", or "not recorded" (the cell "-") when there is no span.
     #[test]
     fn length_is_the_tab_span_as_a_floor_or_not_recorded() {
         let mut g = game("g", "Mei", 24, 1, at(20, 0, 0));
@@ -875,6 +978,52 @@ mod tests {
         assert!(s.swaps().is_empty());
     }
 
+    /// A hero set by hand wins over the timeline: a game read as Ana for 8
+    /// Tab presses and set to Reinhardt heads, fills the bar and compares
+    /// as Reinhardt, like its row.
+    #[test]
+    fn a_hand_set_hero_wins_over_the_timeline() {
+        let mut g = game("g", "Ana", 24, 9000, at(23, 0, 0));
+        g.segments = vec![seg(0, "Ana", 8, true, at(22, 50, 0), at(23, 0, 0))];
+        g.hero = "Reinhardt".into();
+        g.edited_fields = vec!["hero".into()];
+        assert_eq!(g.ocr.hero, "Ana");
+        assert_eq!(main_hero(&g), "Reinhardt");
+        let s = hero_split(&g);
+        assert_eq!(s.main, "Reinhardt");
+        assert_eq!(s.line(), "Reinhardt 100%");
+        assert_eq!(s.bar.len(), 1);
+        assert!(s.bar[0].main && s.bar[0].hero == "Reinhardt");
+        assert!(s.swaps().is_empty());
+        // vs avg: Reinhardt's games, not Ana's.
+        let mut all: Vec<Game> = (0..12)
+            .map(|i| game(&format!("r{i}"), "Reinhardt", 10, 9000, at(10, i as u32, 0)))
+            .collect();
+        all.extend((0..12).map(|i| game(&format!("a{i}"), "Ana", 30, 9000, at(11, i as u32, 0))));
+        let avg = averages(&g, &all);
+        assert_eq!(avg.hero, "Reinhardt");
+        assert_eq!((avg.games, avg.window), (13, 12));
+        assert_eq!(avg.means.unwrap()[0], Some(10.0));
+        // Without the hand edit the timeline still names the main hero.
+        g.edited_fields.clear();
+        assert_eq!(main_hero(&g), "Ana");
+    }
+
+    /// With the hero set by hand, the read main hero's runs fold into it,
+    /// and another hero's run stays its own.
+    #[test]
+    fn a_hand_set_hero_takes_the_read_main_runs_only() {
+        let mut g = game("g", "Ana", 24, 9000, at(23, 0, 0));
+        g.segments = vec![
+            seg(0, "Ana", 6, true, at(22, 40, 0), at(22, 50, 0)),
+            seg(1, "Mercy", 2, true, at(22, 51, 0), at(22, 55, 0)),
+            seg(2, "Ana", 2, true, at(22, 56, 0), at(23, 0, 0)),
+        ];
+        g.hero = "Reinhardt".into();
+        g.edited_fields = vec!["hero".into()];
+        assert_eq!(hero_split(&g).line(), "Reinhardt 80% · Mercy 20%");
+    }
+
     #[test]
     fn no_runs_reads_the_row_hero_at_100() {
         let g = game("g", "Mei", 12, 1, at(20, 0, 0));
@@ -893,8 +1042,8 @@ mod tests {
     }
 
     /// An ended game with no result reads as not uploaded even when the
-    /// daemon marked its row synced without sending it; a live one, or a
-    /// held one, keeps its own state.
+    /// daemon marked its row synced without sending it, with sync on or
+    /// off; a live one, or a held one, keeps its own state.
     #[test]
     fn an_undecided_game_never_reads_uploaded() {
         let mut g = game("g", "Wrecking Ball", 24, 1, at(20, 0, 0));
@@ -908,9 +1057,12 @@ mod tests {
         );
         assert_eq!(
             upload(&g, false, false),
-            Upload::Uploaded,
-            "sync off: unchanged"
+            Upload::SyncOff,
+            "sync off: not uploaded either"
         );
+        g.map_name.clear();
+        assert_eq!(upload(&g, false, false), Upload::Held("map"));
+        g.map_name = "Ilios".into();
         g.synced = false;
         assert_eq!(upload(&g, true, true), Upload::InProgress);
         g.map_name.clear();
@@ -919,6 +1071,35 @@ mod tests {
         g.outcome = Outcome::Win;
         g.synced = true;
         assert_eq!(upload(&g, false, true), Upload::Uploaded);
+    }
+
+    /// With no website linked a live game never says it sends after the
+    /// game ends, and a held live game's picker never says it uploads once
+    /// it ends.
+    #[test]
+    fn a_live_game_with_sync_off_is_not_uploading() {
+        let mut g = game("g", "Wrecking Ball", 24, 1, at(20, 0, 0));
+        g.outcome = Outcome::Unknown;
+        assert_eq!(upload(&g, true, false), Upload::SyncOff);
+        assert_eq!(upload(&g, true, false).title(), "Not uploading");
+        g.synced = true;
+        assert_eq!(upload(&g, true, false), Upload::SyncOff);
+        g.synced = false;
+        g.outcome = Outcome::Win;
+        assert_eq!(upload(&g, true, false), Upload::SyncOff);
+        assert_eq!(upload(&g, true, true), Upload::InProgress);
+        g.hero = "Unknown".into();
+        assert_eq!(upload(&g, true, false), Upload::Held("hero"));
+        assert_eq!(
+            crate::games_picker::release_line(
+                &g,
+                crate::games_picker::Field::Hero,
+                Some("Mei"),
+                true,
+                false
+            ),
+            "Saving releases this game. It stays on this computer: no website is linked."
+        );
     }
 
     #[test]
@@ -955,6 +1136,33 @@ mod tests {
             u.detail(&g.recognizer),
             "Server: reader version cv-v0 is no longer accepted."
         );
+    }
+
+    /// An uploaded game with a blank map or hero (an older build sent it)
+    /// says what is missing and that a pick fixes it on the site; other
+    /// games get no such notice.
+    #[test]
+    fn an_uploaded_game_missing_a_map_says_to_fix_it_on_the_site() {
+        let mut g = game("g", "Wrecking Ball", 24, 1, at(20, 0, 0));
+        g.synced = true;
+        let up = upload(&g, false, true);
+        assert_eq!(site_fix_notice(&g, &up), None);
+        g.map_name.clear();
+        let up = upload(&g, false, true);
+        assert_eq!(up, Upload::Uploaded);
+        assert_eq!(
+            site_fix_notice(&g, &up),
+            Some("Map is missing. Pick one to fix it on the site.")
+        );
+        g.synced = false;
+        let up = upload(&g, false, true);
+        assert_eq!(up, Upload::Held("map"));
+        assert_eq!(site_fix_notice(&g, &up), None, "the Held box says it");
+        g.synced = true;
+        g.session_id.clear();
+        let up = upload(&g, false, true);
+        assert_eq!(up, Upload::Uploaded);
+        assert_eq!(site_fix_notice(&g, &up), None, "imported: no session id");
     }
 
     /// A game the uploader keeps back says so instead of "Waiting".
@@ -1108,5 +1316,135 @@ mod tests {
         g.queue_title = Some(stored(" OPEN QUEUE ", QUEUE_TITLE_MIN_SCORE));
         assert_eq!(queue_value(&g).as_deref(), Some("OPEN QUEUE"));
         assert_eq!(queue_warning(&g), None);
+    }
+
+    /// The Games list row draws [`map_cell_parts`]: a confident queue shows
+    /// there as a chip after the mode, so a closed row names it. A weak read
+    /// or no read adds no queue chip, and the game still passes the Games
+    /// filters and is a row in the list.
+    #[test]
+    fn the_list_row_shows_a_confident_queue_and_keeps_an_unsure_game() {
+        use crate::aggregate::{GameFilter, filter_games};
+        use crate::games_rows::{Grid, TabState, UnsureItem, layout, mode_chip, unsure_items};
+        use stat_tracker::model::QueueTitle;
+        let mode = mode_chip("Ilios").map(str::to_string);
+        assert!(mode.is_some());
+        let mut sure = game("sure", "Ana", 1, 1, at(20, 0, 0));
+        sure.queue_title = Some(QueueTitle {
+            value: Some("OPEN QUEUE".into()),
+            confidence: 0.93,
+            ..QueueTitle::default()
+        });
+        let mut weak = game("weak", "Ana", 1, 1, at(20, 30, 0));
+        weak.queue_title = Some(QueueTitle {
+            value: Some("OPEN QUEUE".into()),
+            confidence: 0.4,
+            unsure: true,
+            ..QueueTitle::default()
+        });
+        let unread = game("unread", "Ana", 1, 1, at(21, 0, 0));
+        let mut want_sure: Vec<String> = mode.clone().into_iter().collect();
+        want_sure.push("OPEN QUEUE".into());
+        assert_eq!(map_chips(&sure), want_sure);
+        let mode_only: Vec<String> = mode.into_iter().collect();
+        assert_eq!(map_chips(&weak), mode_only);
+        assert_eq!(map_chips(&unread), mode_only);
+        let all = vec![sure, weak, unread];
+        let shown = filter_games(&all, &GameFilter::default());
+        let list = layout(&all, &shown, TabState::default(), Grid::Wide, 0, None);
+        let rows: Vec<&Game> = list
+            .sections
+            .iter()
+            .flat_map(|s| s.rows.iter().copied())
+            .collect();
+        let mut ids: Vec<&str> = rows.iter().map(|g| g.session_id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["sure", "unread", "weak"]);
+        // The Map cell each listed row draws: the queue chip on the
+        // confident game only, with nothing in its place on the others.
+        let mode = MapPart::Chip(mode_chip("Ilios").unwrap().to_string());
+        for g in rows {
+            let doubt = unsure_items(g, false).contains(&UnsureItem::Map);
+            let mut want = vec![MapPart::Name, mode.clone()];
+            if g.session_id == "sure" {
+                want.push(MapPart::Chip("OPEN QUEUE".into()));
+            }
+            assert_eq!(map_cell_parts(g, doubt), want, "{}", g.session_id);
+        }
+    }
+
+    /// The unsure map's warning sign is drawn right after the name, before
+    /// any chip, so a narrow Map column clips the chips first. The name's
+    /// cap keeps it from squeezing the sign (the next test).
+    #[test]
+    fn the_map_warning_comes_before_the_chips() {
+        use stat_tracker::model::QueueTitle;
+        let mut g = game("long", "Ana", 1, 1, at(20, 0, 0));
+        g.map_name = "Watchpoint: Gibraltar".into();
+        g.queue_title = Some(QueueTitle {
+            value: Some("OPEN QUEUE".into()),
+            confidence: 0.93,
+            ..QueueTitle::default()
+        });
+        let parts = map_cell_parts(&g, true);
+        assert_eq!(
+            parts,
+            [
+                MapPart::Name,
+                MapPart::Warn,
+                MapPart::Chip("Escort".into()),
+                MapPart::Chip("OPEN QUEUE".into()),
+            ]
+        );
+        let warn = parts.iter().position(|p| *p == MapPart::Warn).unwrap();
+        let first_chip = parts
+            .iter()
+            .position(|p| matches!(p, MapPart::Chip(_)))
+            .unwrap();
+        assert!(warn < first_chip, "{parts:?}");
+        // A sure map read has no sign; the chips follow the name.
+        assert_eq!(
+            map_cell_parts(&g, false),
+            [
+                MapPart::Name,
+                MapPart::Chip("Escort".into()),
+                MapPart::Chip("OPEN QUEUE".into()),
+            ]
+        );
+    }
+
+    /// With the sign in the Map cell, the name is capped so that, after
+    /// every gap, the sign keeps its full 12 px at every cell width the
+    /// grids use (Mid at 1100 and 1280, Wide at 1440, Narrow at 780), and a
+    /// name at the cap leaves no room the sign has to give up. With no sign
+    /// the name is not capped.
+    #[test]
+    fn the_unsure_map_name_leaves_the_sign_its_full_width() {
+        let chip = |s: &str| MapPart::Chip(s.into());
+        let both = [
+            MapPart::Name,
+            MapPart::Warn,
+            chip("Escort"),
+            chip("OPEN QUEUE"),
+        ];
+        let mode_only = [MapPart::Name, MapPart::Warn, chip("Escort")];
+        let bare = [MapPart::Name, MapPart::Warn];
+        for parts in [&both[..], &mode_only[..], &bare[..]] {
+            let gaps = MAP_CELL_GAP * (parts.len() - 1) as f32;
+            for cell in [176.0, 262.0, 304.0, 322.0] {
+                let name = map_name_max_width(cell, parts).unwrap();
+                assert!(name > 0.0, "{cell} {parts:?}");
+                // What iced leaves the sign after the gaps and a name at
+                // its cap: exactly the sign's width.
+                assert_eq!(cell - gaps - name, MAP_WARN_W, "{cell} {parts:?}");
+            }
+        }
+        assert_eq!(map_name_max_width(176.0, &both), Some(176.0 - 24.0 - 12.0));
+        // A cell too small for the gaps and the sign gives the name nothing.
+        assert_eq!(map_name_max_width(20.0, &both), Some(0.0));
+        // A sure map read has no sign and no cap.
+        let sure = [MapPart::Name, chip("Escort"), chip("OPEN QUEUE")];
+        assert_eq!(map_name_max_width(176.0, &sure), None);
+        assert_eq!(map_name_max_width(176.0, &[MapPart::Name]), None);
     }
 }

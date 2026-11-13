@@ -295,6 +295,16 @@ struct ActiveGame {
     /// board is from before it. Memory only: a restored game has none, and
     /// none is never after a result ([`CaptureRequest::last_board_after_result`]).
     last_board_pressed_at: Option<Instant>,
+    /// The game's real start and end on the wall clock, stored on its rows
+    /// ([`store_match_times`]). The start is set when a pre-game screen (map
+    /// vote, hero select or ban) opens the game; a game a Tab or a stat split
+    /// opened has none. The end is when the result the tracker read itself
+    /// was first seen, if that mark is fresh, else when the read recorded it
+    /// ([`ActiveGame::note_match_end`], [`ActiveGame::note_sealed_end`]); an
+    /// end before the last tracked board is none. A result set in the app
+    /// is no end, and keeps an end already read. Either missing makes the
+    /// app fall back to the first to last Tab span, with a warning.
+    match_times: stat_tracker::model::MatchTimes,
 }
 
 /// On-disk mirror of [`ActiveGame`] (wall-clock timestamps instead of
@@ -371,6 +381,10 @@ struct PersistedGame {
     /// had no rejoin carry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     rejoin_carry: Option<Counters>,
+    /// See [`ActiveGame::match_times`]. Missing on older skeletons: a game
+    /// resumed from one has no start or end, and its length falls back.
+    #[serde(default)]
+    match_times: stat_tracker::model::MatchTimes,
 }
 
 /// Identity of a would-be new session (map-vote, Tab, or stat-regression split).
@@ -461,9 +475,9 @@ struct FrameAnalysis {
     /// and the career hero's row ([`find_own_row`]); by a name read only
     /// when none of them names a row.
     player_row_idx: Option<usize>,
-    /// The name match behind `player_row_idx`, with the name window that
-    /// matched. `None` when the row came from the highlight, a seed, or
-    /// the career hero, and no name was read.
+    /// The name match behind `player_row_idx`, with the name window and the
+    /// saved name (its index in `own_names`) that matched; the text fallback
+    /// searches for that name. `None` when no saved name named the row.
     name_match: Option<parse::NameMatch>,
     /// Which reader produced `name_match`. `None` when this Tab did not
     /// read a name. `names-v1` is the pack. `ocr-v1` is Tesseract.

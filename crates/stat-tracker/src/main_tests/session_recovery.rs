@@ -692,6 +692,7 @@ fn stale_persisted_game_is_not_recovered() {
         progressed_boards: 0,
         baseline_at: None,
         text_fallback_locked: false,
+        match_times: Default::default(),
     };
     std::fs::write(
         active_game_path(dir.path()),

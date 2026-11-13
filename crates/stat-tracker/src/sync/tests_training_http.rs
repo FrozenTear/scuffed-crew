@@ -585,6 +585,9 @@ async fn crops_stored_while_a_delete_runs_are_removed_again() {
     );
 }
 
+/// The dropped crops warning stays until a send works: through a quiet
+/// pass, a pass that warns about something else, a pass that clears the
+/// ids an earlier delete left, and the quiet pass after those.
 #[tokio::test]
 async fn a_dropped_crops_warning_stays_until_a_send_works() {
     let dir = tempfile::tempdir().unwrap();
@@ -598,15 +601,45 @@ async fn a_dropped_crops_warning_stays_until_a_send_works() {
             http(200, "", &consent_body(all_consent())),
             http(409, "", r#"{"error":"crop_limit_reached"}"#),
             http(200, "", &consent_body(all_consent())),
+            http(500, "", r#"{"error":"internal"}"#),
+            http(404, "", r#"{"error":"crop_not_found"}"#),
+            http(200, "", &consent_body(all_consent())),
+            http(200, "", &consent_body(all_consent())),
         ],
     );
     let c = client(&url);
-    run_training_pass(&c, dir.path()).await;
+    let dropped = |what: &str| {
+        let warning = training_warning(dir.path()).expect(what);
+        assert!(warning.contains("map names"), "{what}: {warning}");
+        assert_eq!(
+            warning.matches("Waiting ones were dropped").count(),
+            1,
+            "{what}: {warning}"
+        );
+        warning
+    };
+    let first = run_training_pass(&c, dir.path()).await;
+    assert_eq!(first.sent, 0);
+    dropped("the pass that dropped them");
     // A later pass with nothing to send keeps it.
+    let quiet = run_training_pass(&c, dir.path()).await;
+    assert_eq!(quiet.sent, 0);
+    dropped("a quiet pass");
+    // A pass that warns about something else keeps it too.
+    let failed = run_training_pass(&c, dir.path()).await;
+    assert_eq!(failed.sent, 0);
+    let warning = dropped("a pass with another warning");
+    assert!(warning.contains("consent"), "{warning}");
+    // Clearing the ids an earlier delete left does not end it.
+    write_pending_deletes(dir.path(), &[ID_A.to_string()]);
+    let cleared = run_training_pass(&c, dir.path()).await;
+    assert_eq!(cleared.sent, 0);
+    assert!(pending_deletes(dir.path()).is_empty());
+    let warning = dropped("a pass that cleared what a delete left");
+    assert!(!warning.contains("consent"), "{warning}");
     run_training_pass(&c, dir.path()).await;
     server.join().unwrap();
-    let warning = training_warning(dir.path()).expect("still shown");
-    assert!(warning.contains("map names"), "{warning}");
+    dropped("the quiet pass after those");
 
     queue(dir.path(), UploadKind::MapName, 1);
     let (url, server) = serve_on(
@@ -860,8 +893,9 @@ async fn a_credential_change_mid_pass_sends_nothing_to_the_new_site() {
 /// upload then gets no answer (the connection drops). The site may have
 /// stored the batch after the delete, and the tracker has no ids for it: a
 /// sticky warning asks the member to delete again, no id is made up, and
-/// the warning stays, even after a later send works, until the member
-/// deletes again.
+/// the warning stays, even after a later send works and after a delete
+/// pressed again that failed, until a delete the member pressed again is
+/// answered with success.
 #[tokio::test]
 async fn no_answer_to_a_send_during_a_delete_asks_to_delete_again() {
     let dir = tempfile::tempdir().unwrap();
@@ -953,7 +987,7 @@ fn a_delete_that_worked_leaves_out_only_the_ask_to_delete_again() {
     let dir = tempfile::tempdir().unwrap();
     let asked = mark_training_delete(dir.path()).unwrap();
     let both = format!("{TRAINING_DELETE_AGAIN} {TRAINING_DELETE_OWED}");
-    write_training_warning(dir.path(), Some(&both), true, false, Some(asked));
+    write_training_warning(dir.path(), Some(&both), true, false, None, Some(asked));
     // The website answered the delete the ask was left under, not a new one.
     record_training_delete_ok(dir.path(), asked).unwrap();
     assert_eq!(training_warning(dir.path()), Some(both));
@@ -1014,7 +1048,14 @@ async fn a_new_token_keeps_crops_still_to_delete_another_website_does_not() {
     consent(dir.path(), all_consent());
     queue(dir.path(), UploadKind::MapName, 1);
     write_pending_deletes(dir.path(), &[ID_A.to_string()]);
-    write_training_warning(dir.path(), Some(TRAINING_DELETE_OWED), true, false, None);
+    write_training_warning(
+        dir.path(),
+        Some(TRAINING_DELETE_OWED),
+        true,
+        false,
+        None,
+        None,
+    );
 
     assert!(adopt_training_owner(dir.path(), &url, "token-b"));
     assert!(!has_queued_crops(dir.path()));
@@ -1049,7 +1090,14 @@ async fn a_new_token_keeps_crops_still_to_delete_another_website_does_not() {
 
     // Another website drops the ids and the warning.
     write_pending_deletes(dir.path(), &[ID_B.to_string()]);
-    write_training_warning(dir.path(), Some(TRAINING_DELETE_OWED), true, false, None);
+    write_training_warning(
+        dir.path(),
+        Some(TRAINING_DELETE_OWED),
+        true,
+        false,
+        None,
+        None,
+    );
     assert!(adopt_training_owner(
         dir.path(),
         "https://site-b.example",

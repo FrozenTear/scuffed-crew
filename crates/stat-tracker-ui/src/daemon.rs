@@ -38,7 +38,10 @@ pub struct DaemonView {
     pub service_installed: bool,
     pub autostart: bool,
     /// The tracker's last training crop warning (`training_crops/status.json`),
-    /// shown under Website account until a send works again.
+    /// shown under Website account until a later pass clears it: a plain
+    /// warning goes after a pass with nothing to warn about, dropped crops
+    /// after a send that works, crops a delete left once they are gone, and
+    /// an ask to delete again after a later delete that worked.
     pub training_warning: Option<String>,
 }
 

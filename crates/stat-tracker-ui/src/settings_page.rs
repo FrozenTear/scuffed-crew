@@ -765,6 +765,7 @@ mod tests {
             "Troubleshooting must not draw the Read bans and picks row"
         );
     }
+
     /// Signed in, the Website account card draws the training crop section:
     /// the consent per kind, where to change it, the tracker's warning and
     /// the delete button.

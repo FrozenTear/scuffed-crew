@@ -141,6 +141,7 @@ impl TrackerApp {
         let pid = self.daemon.pid;
         self.ocr_switch.capture_notice = crate::settings::daemon_capture_notice(status, pid);
         self.ocr_switch.input_notice = daemon_input_notice(status, pid);
+        crate::vision_size_notice::observe(self, status);
         self.page_state.focus.observe(live_focus(status, pid), now);
     }
 }

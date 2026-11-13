@@ -39,6 +39,7 @@ mod tests_gui_presence;
 #[cfg(test)]
 mod tests_live_upload;
 mod training_sched;
+pub(crate) mod vision_size;
 // The loading stand-ins shared with `detect/loading_screen.rs`'s tests;
 // the lib's test-only module is not built for the bin's tests.
 #[cfg(test)]
@@ -77,6 +78,8 @@ mod tests_training_crops;
 #[cfg(test)]
 mod tests_training_sched;
 mod training_crops;
+#[cfg(test)]
+mod tests_vision_size;
 
 pub(crate) use debug_dumps::*;
 pub(crate) use event_loop::*;

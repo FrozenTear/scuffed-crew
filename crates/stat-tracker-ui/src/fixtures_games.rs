@@ -1,8 +1,11 @@
-//! The `--fixture games` snapshot: the Games tab's three open-row states
-//! from UX Spec v2 (normal, unsure, undecided), with Wrecking Ball history
-//! so the "vs avg" deltas have 20 games to average. Example data only.
+//! The `--fixture games` snapshot: the Games tab's five open-row states,
+//! the three from UX Spec v2 (normal, unsure, undecided) plus a game held
+//! for its map and hero (the picker's) and a second rejected upload, with
+//! Wrecking Ball history so the "vs avg" deltas have 20 games to average,
+//! and history games with more bans and picks states. Example data only.
 
 use chrono::{TimeZone, Utc};
+use stat_tracker::model::{MatchTimes, QueueTitle};
 use stat_tracker::storage::{HeroSegment, PersonalMatch, Snapshot};
 use surrealdb_types::Datetime as SurrealDatetime;
 
@@ -18,7 +21,10 @@ pub const UNDECIDED: &str = "sess-g-undecided";
 /// Held: the map read as "Ilio5" and the hero as Unknown, so both are
 /// missing and the game stays on this computer (the picker's game).
 pub const HELD: &str = "sess-g-held";
-/// A second rejected upload, so the tab offers Retry all.
+/// A second rejected upload: a rejected game with a result, a map and a
+/// hero (the undecided one has a map and hero but no result), so "2 games couldn't upload" shows
+/// and Retry all has more than one game to queue. The line itself shows
+/// for one rejected game too.
 pub const REJECTED_2: &str = "sess-g-rejected2";
 
 /// History games that carry the extra bans and picks states.
@@ -33,6 +39,14 @@ pub const LOBBY_ONLY: &str = "sess-g-h04";
 /// King's Row: a mixed Bans row with long names (both teams, a ban with no
 /// team read and the lobby ban), the widest row the block draws.
 pub const MIXED: &str = "sess-g-h05";
+
+/// A confident `OPEN QUEUE` on a long map name (Watchpoint: Gibraltar)
+/// with an unsure map read: the list row's name, warning sign, mode chip
+/// and queue chip, the widest Map cell the table draws.
+pub const QUEUE_SURE: &str = "sess-g-h09";
+/// A queue title read that was weak or failed: no queue chip, and the open
+/// game says the queue is not known.
+pub const QUEUE_UNSURE: &str = "sess-g-h07";
 
 /// The server message on the rejected sample upload.
 pub const REJECT: &str =
@@ -209,6 +223,20 @@ pub fn snapshot() -> Snapshot {
     crate::fixtures_bans::reader_off(&mut undecided);
     crate::fixtures_bans::frame_size(&mut rejected_2);
 
+    // The Time block's Length states: a real length (12:10 against a
+    // 9:14 Tab span), a start not seen, an end not seen with one read, and
+    // neither seen with no read kept. The history games are older rows.
+    let both = |start, end| {
+        Some(MatchTimes {
+            started_at: start,
+            ended_at: end,
+        })
+    };
+    normal.match_times = both(Some(dts(18, 22, 14, 30)), Some(dts(18, 22, 26, 40)));
+    unsure.match_times = both(None, Some(dts(18, 22, 41, 0)));
+    undecided.match_times = both(Some(dts(17, 21, 9, 0)), None);
+    rejected_2.match_times = both(None, None);
+
     // Five more states on the newest history games: the team of each ban
     // not read with hero select not seen, no ban screen seen, skipped and
     // not seen ban votes, a lobby ban read with no team ban read, and the
@@ -239,6 +267,31 @@ pub fn snapshot() -> Snapshot {
     );
     crate::fixtures_bans::mixed(&mut mixed);
 
+    // The queue states (with the queue title reader on): a confident queue
+    // on a long map name read unsure, and a weak read with no value.
+    let mut queue_sure = wb(
+        QUEUE_SURE.into(),
+        "Watchpoint: Gibraltar",
+        "defeat",
+        dt(2026, 10, 17, 20, 33),
+    );
+    queue_sure.suspect_fields = vec!["map".into()];
+    queue_sure.queue_title = Some(QueueTitle {
+        value: Some("OPEN QUEUE".into()),
+        confidence: 0.93,
+        ..QueueTitle::default()
+    });
+    let mut queue_unsure = wb(
+        QUEUE_UNSURE.into(),
+        "Colosseo",
+        "defeat",
+        dt(2026, 10, 17, 21, 2),
+    );
+    queue_unsure.queue_title = Some(QueueTitle {
+        unsure: true,
+        ..QueueTitle::default()
+    });
+
     let mut matches = vec![
         held,
         rejected_2,
@@ -256,24 +309,14 @@ pub fn snapshot() -> Snapshot {
             dt(2026, 10, 17, 21, 31),
         ),
         undecided,
-        wb(
-            "sess-g-h07".into(),
-            "Colosseo",
-            "defeat",
-            dt(2026, 10, 17, 21, 2),
-        ),
+        queue_unsure,
         wb(
             "sess-g-h08".into(),
             "Busan",
             "victory",
             dt(2026, 10, 17, 20, 41),
         ),
-        wb(
-            "sess-g-h09".into(),
-            "Dorado",
-            "defeat",
-            dt(2026, 10, 17, 20, 33),
-        ),
+        queue_sure,
     ];
     // Older nights: more Wrecking Ball, and Junker Queen's other three games.
     let maps = [
@@ -395,6 +438,27 @@ mod tests {
         assert_eq!(games_detail::tracked(d), Tracked::OneRead);
         assert!(games_detail::averages(d, &all).means.is_none());
         assert!(games_detail::upload(d, false, true).rejected());
+    }
+
+    /// The stored times reach the Game ([`crate::model::Game::from_match`])
+    /// and give each Length state the panel draws.
+    #[test]
+    fn the_fixture_games_carry_each_length_state() {
+        let all = games();
+        let real = games_detail::game_length(game(&all, NORMAL));
+        assert_eq!(real.length_line(), "Length: 12:10");
+        assert_eq!(real.warning(false), None);
+        let warn = |sid| games_detail::game_length(game(&all, sid)).warning(false);
+        assert_eq!(
+            warn(UNSURE).as_deref(),
+            Some("Game start not seen, so this is not the real length")
+        );
+        assert_eq!(warn(UNDECIDED).as_deref(), Some(games_detail::END_NOT_SEEN));
+        assert_eq!(
+            warn(REJECTED_2).as_deref(),
+            Some(games_detail::START_END_NOT_SEEN)
+        );
+        assert_eq!(warn("sess-g-h06"), None, "an older row");
     }
 
     #[test]

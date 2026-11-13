@@ -4,8 +4,10 @@
 //! the table for as long as any game is rejected. The spec showed that line
 //! only for two or more, which hid it while a game was still rejected once
 //! the others were retried, so it now shows for one too.
-//! A queued retry clears the rejection here at once; the next snapshot
-//! brings it back if the server says no again.
+//! A queued retry clears the rejection here at once, and a reload keeps it
+//! cleared while the retry is still queued ([`crate::snapshot::load_snapshot`]
+//! overlays it); a snapshot brings it back only once the tracker applied
+//! the retry and the server said no again.
 
 use iced::widget::{button, row, text};
 use iced::{Alignment, Border, Element, Padding, Theme};
@@ -160,6 +162,13 @@ mod tests {
         let _ = crate::games_table::update(&mut app, Msg::RetryAll);
         assert_eq!(rejected_count(&app), 0);
         assert!(above_table(&app).is_none());
+        assert!(matches!(
+            crate::commands::queued(&app.data_dir).as_slice(),
+            [
+                StoreCommand::RetryUpload { session_id },
+                StoreCommand::RetryRejectedUploads,
+            ] if session_id == UNSURE
+        ));
     }
 
     fn game_rejected(app: &TrackerApp, sid: &str) -> bool {

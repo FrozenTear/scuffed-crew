@@ -291,6 +291,8 @@ pub(crate) async fn handle_capture(
                             );
                         }
                     };
+                    // Only the size is kept, for the capture size notice.
+                    daemon::vision_size::note_frame(img.width(), img.height());
                     let analysis = tokio::task::spawn_blocking(move || {
                         let started = Instant::now();
                         let cpu_started = stat_tracker::perf::thread_cpu();
@@ -633,6 +635,7 @@ pub(crate) async fn handle_capture(
         None => read_scoreboard_named(
             &rows,
             player_row_idx,
+            name_match,
             &ocr_result.raw_text,
             &outcome_label,
             text_fallback_names(board_reader, player_row_idx, own_names),
@@ -647,8 +650,10 @@ pub(crate) async fn handle_capture(
     };
     match scoreboard_read {
         Ok((mut parsed, trusted_cells, held_cols)) => {
-            // The own-row name reader for this Tab. Absent when the row
-            // came from a highlight, a seed, or the career hero.
+            // The own-row name reader for this Tab: "ocr-v1" also when the
+            // highlighted row's own read named a saved name. Absent when no
+            // name named the row (a highlight alone, a seed, or the career
+            // hero).
             parsed.name_recognizer = name_recognizer.map(|id| id.as_str().to_string());
             // R9-2: a Tab past the grace window of a finished game. This
             // board decides whether it continues that game (then the capture
@@ -1095,9 +1100,10 @@ pub(crate) async fn handle_capture(
                     None => parse::both_teams_have_stats(&rows, team_size),
                 },
             );
-            // The map crop is kept either way; only a stored row offers it
-            // for training.
-            commit_tab_map_label_crop(map_label_crop, prepared);
+            // The map crop is kept either way. Only a Tab
+            // prepare_capture_row keeps (Store) of a tracked mode offers it
+            // for training: untracked modes never upload.
+            commit_tab_map_label_crop(map_label_crop, prepared, &parsed);
             if prepared == PreparedRow::Drop {
                 return Ok(CaptureReport {
                     finished_game_tab,

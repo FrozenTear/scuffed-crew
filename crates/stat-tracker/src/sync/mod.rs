@@ -65,7 +65,7 @@ pub use training_store::{
     keep_map_name_crop, keep_training_crop, mark_training_delete, queued_crops,
     read_training_status, record_training_delete_ok, training_warning,
 };
-pub use visibility::{StatsVisibility, parse_stats_visibility};
+pub use visibility::{StatsVisibility, parse_hero_icon_consent, parse_stats_visibility};
 pub use wire::{UploadEntry, UploadRequest, row_needs_review, upload_request};
 
 // Names the test files saw through `use super::*` before the split: two of
@@ -114,3 +114,6 @@ mod tests_training_collect;
 
 #[cfg(test)]
 mod tests_training_http;
+
+#[cfg(test)]
+mod tests_consent_fetch;

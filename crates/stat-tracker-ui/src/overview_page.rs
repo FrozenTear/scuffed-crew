@@ -6,8 +6,10 @@
 //! Heroes, [`chips_fold`]). The 0.5 sidebar
 //! layout keeps its own Overview ([`crate::overview`]).
 //!
-//! Rank, queue, length and crew are spec example data for fields the
-//! tracker does not store yet, so they are not drawn.
+//! Rank, queue, length and crew are spec example data and are not drawn
+//! here. Rank and crew are not stored yet. Queue (`queue_title`, only
+//! with the queue title reader on) and length (`match_times`) are stored
+//! now and shown on the Games tab, not on this page yet.
 
 use iced::widget::{Column, Row, button, column, row, text};
 use iced::{Alignment, Background, Border, Padding, Theme};
@@ -33,12 +35,16 @@ pub enum Msg {
     ToggleFilters,
     /// Open this game on Games ("Check", a row of Earlier tonight).
     OpenGame(String),
+    /// The capture size notice under the title.
+    VisionSize(crate::vision_size_notice::Msg),
 }
 
 /// What the Overview keeps between frames.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OverviewPage {
     pub filters_open: bool,
+    /// The capture size notice ([`crate::vision_size_notice`]).
+    pub vision: crate::vision_size_notice::VisionNotice,
 }
 
 pub fn update(app: &mut TrackerApp, msg: Msg) -> Task<Message> {
@@ -52,6 +58,7 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> Task<Message> {
             app.expanded = Some(id);
             return task;
         }
+        Msg::VisionSize(msg) => return crate::vision_size_notice::update(app, msg),
     }
     Task::none()
 }
@@ -177,14 +184,13 @@ fn fold_chip(count: usize, open: bool, toggle: Message) -> Element<'static, Mess
 }
 
 /// The gap that splits sessions: the Session window setting, as the spec's
-/// Games footnote says ("Sessions split after 3 hours without a game").
-/// The 0.5 Games page still splits at a fixed 30 minutes. A value too big
-/// for a duration (the field takes any number) is no limit at all.
+/// Games footnote says ("Sessions split after 3 hours without a game"),
+/// the same gap the Games tab splits on
+/// ([`crate::aggregate::session_window_gap`]). The 0.5 Games page still
+/// splits at a fixed 30 minutes. A value too big for a duration (the field
+/// takes any number) is no limit at all; 0 is off.
 pub fn session_gap(window_secs: u64) -> chrono::TimeDelta {
-    i64::try_from(window_secs)
-        .ok()
-        .and_then(chrono::TimeDelta::try_seconds)
-        .unwrap_or(chrono::TimeDelta::MAX)
+    crate::aggregate::session_window_gap(window_secs)
 }
 
 /// `games` less the one still being played: its result is not in, so the
@@ -214,11 +220,40 @@ pub fn shows_filters(app: &TrackerApp) -> bool {
     !crate::games_state::loading(app) && !app.games.is_empty()
 }
 
-/// The latest session of `games` (newest first), split by [`session_gap`].
+/// The latest sitting of all of `app.games`, with only the shown games
+/// (`games`) kept, split by [`session_gap`]. A hero or map filter does
+/// not split a sitting the Games tab keeps together.
 pub fn latest_session(app: &TrackerApp, games: &[&Game]) -> Option<SessionGroup> {
-    group_by_session_gap(games, session_gap(app.saved_config.session_window_secs))
-        .into_iter()
-        .next()
+    latest_session_in(
+        &app.games,
+        games,
+        session_gap(app.saved_config.session_window_secs),
+    )
+}
+
+/// [`latest_session`] for any list and the rows shown from it.
+pub fn latest_session_in(
+    all: &[Game],
+    shown: &[&Game],
+    gap: chrono::TimeDelta,
+) -> Option<SessionGroup> {
+    let shown_at: std::collections::HashSet<*const Game> =
+        shown.iter().map(|g| *g as *const Game).collect();
+    for sitting in crate::games_rows::sittings(all, gap) {
+        let keep: Vec<&Game> = sitting
+            .into_iter()
+            .filter(|g| shown_at.contains(&(*g as *const Game)))
+            .collect();
+        if keep.is_empty() {
+            continue;
+        }
+        // They already share a sitting through any hidden games, so do
+        // not split them again with the same gap.
+        return group_by_session_gap(&keep, chrono::TimeDelta::MAX)
+            .into_iter()
+            .next();
+    }
+    None
 }
 
 pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
@@ -323,6 +358,96 @@ mod tests {
         let (_dir, mut app) = crate::fixtures::test_app();
         app.saved_config.session_window_secs = u64::MAX;
         let _ = view(&app, 1300.0);
+    }
+
+    /// The Overview's latest session and the Games tab's sitting follow one
+    /// rule: at a 30 minute window, a 27 minute game that starts 5 minutes
+    /// after the one before ends is one session on both.
+    #[test]
+    fn overview_and_games_split_sessions_alike() {
+        use crate::model::SegmentView;
+        let (_dir, mut app) = crate::fixtures::test_app();
+        app.saved_config.session_window_secs = 1800;
+        let mut games = crate::snapshot::games_from_snapshot(&crate::fixtures::snapshot(
+            crate::cli::FixtureKind::Sample,
+        ));
+        games.truncate(2);
+        let t = |m: i64| {
+            chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 9, 2, 20, 0, 0).unwrap()
+                + chrono::TimeDelta::minutes(m)
+        };
+        for (g, (start, end)) in games.iter_mut().zip([(25, 52), (0, 20)]) {
+            g.played_at = t(end);
+            g.segments = vec![SegmentView {
+                index: 0,
+                hero: g.hero.clone(),
+                role: g.role,
+                snapshots: 4,
+                confirmed: true,
+                dismissed: false,
+                resolution: None,
+                first_seen: t(start),
+                last_seen: t(end),
+            }];
+        }
+        let refs: Vec<&Game> = games.iter().collect();
+        let gap = session_gap(app.saved_config.session_window_secs);
+        let overview = latest_session_in(&games, &refs, gap).unwrap();
+        assert_eq!(overview.games.len(), 2);
+        let sittings = crate::games_rows::sittings(&games, gap);
+        assert_eq!(sittings.len(), 1);
+        assert_eq!(sittings[0].len(), 2);
+    }
+
+    /// A hero or map filter that hides a middle game of the latest sitting
+    /// keeps that sitting together, as Games does; grouping only the shown
+    /// games would split it.
+    #[test]
+    fn a_filter_does_not_split_the_latest_session() {
+        use crate::model::SegmentView;
+        let t = |m: i64| {
+            chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 9, 2, 20, 0, 0).unwrap()
+                + chrono::TimeDelta::minutes(m)
+        };
+        let seg = |start, end, hero: &str| SegmentView {
+            index: 0,
+            hero: hero.into(),
+            role: Role::Damage,
+            snapshots: 4,
+            confirmed: true,
+            dismissed: false,
+            resolution: None,
+            first_seen: t(start),
+            last_seen: t(end),
+        };
+        let one = |hero: &str, start, end| {
+            let mut g = crate::snapshot::games_from_snapshot(&crate::fixtures::snapshot(
+                crate::cli::FixtureKind::Sample,
+            ))
+            .remove(0);
+            g.hero = hero.into();
+            g.played_at = t(end);
+            g.segments = vec![seg(start, end, hero)];
+            g
+        };
+        // 10 min between games, 40 min from first end to last start if the
+        // middle game is hidden: over a 30 min window that would split.
+        let games = vec![
+            one("Soldier: 76", 60, 80),
+            one("Ana", 30, 50),
+            one("Soldier: 76", 0, 20),
+        ];
+        let shown: Vec<&Game> = vec![&games[0], &games[2]];
+        let gap = chrono::TimeDelta::minutes(30);
+        assert_eq!(
+            group_by_session_gap(&shown, gap).len(),
+            2,
+            "shown-only grouping would split"
+        );
+        let session = latest_session_in(&games, &shown, gap).unwrap();
+        assert_eq!(session.games.len(), 2);
+        assert_eq!(session.games[0].hero, "Soldier: 76");
+        assert_eq!(session.games[1].hero, "Soldier: 76");
     }
 
     #[test]
