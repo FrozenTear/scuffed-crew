@@ -2705,3 +2705,155 @@ async fn unknown_crop_name_is_still_400_next_to_an_outcome_crop() {
     let (status, body) = post_report(&h, MEMBER_TOKEN, built.bytes).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
 }
+
+const RANK_CROPS: [&str; 2] = ["crops/rank.png", "crops/rank_banner.png"];
+
+/// `tiny_png()` padded with one ancillary chunk to exactly `len` bytes. The
+/// server strips the chunk, so the upload is `len` bytes and the stored
+/// copy is small.
+fn png_of_len(len: usize) -> Vec<u8> {
+    let base = tiny_png();
+    let iend_at = base.len() - 12;
+    let pad = len - base.len() - 12;
+    let mut out = base[..iend_at].to_vec();
+    out.extend(png_chunk(b"zPAD", &vec![0u8; pad]));
+    out.extend_from_slice(&base[iend_at..]);
+    assert_eq!(out.len(), len);
+    out
+}
+
+/// v2 game report with the given `(path, screen_class, png, declared bytes)`
+/// crops. Each entry carries the png's true sha256; `declared` is the
+/// manifest's `bytes`, the real length when `None`.
+fn v2_png_crops_bundle(crops: Vec<(&str, &str, Vec<u8>, Option<usize>)>) -> Built {
+    let log = b"synthetic log line\n".to_vec();
+    let mut entries = vec![log_file_entry(&log)];
+    let mut blobs = vec![("log.txt", log)];
+    for (path, class, png, declared) in crops {
+        entries.push(json!({
+            "path": path,
+            "sha256": sha256_hex(&png),
+            "bytes": declared.unwrap_or(png.len()),
+            "role": "crop",
+            "screen_class": class
+        }));
+        blobs.push((path, png));
+    }
+    let mut manifest = manifest_shell(false, false, entries);
+    manifest["bundle_version"] = json!(2);
+    manifest["system"] = system_block();
+    zip_manifest(manifest, blobs)
+}
+
+#[tokio::test]
+async fn rank_crops_with_the_rank_update_class_store() {
+    let h = harness().await;
+    let built = v2_crops_bundle(&[
+        ("crops/scoreboard.png", "scoreboard"),
+        ("crops/outcome.png", "outcome"),
+        ("crops/rank.png", "rank_update"),
+        ("crops/rank_banner.png", "rank_update"),
+    ]);
+    let (status, body) = post_report(&h, MEMBER_TOKEN, built.bytes).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    for path in RANK_CROPS {
+        let built = v2_crops_bundle(&[(path, "rank_update")]);
+        let (status, body) = post_report(&h, MEMBER_TOKEN, built.bytes).await;
+        assert_eq!(status, StatusCode::CREATED, "{path}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn rank_crop_and_rank_update_class_are_pinned_both_ways() {
+    let h = harness().await;
+    for path in RANK_CROPS {
+        for class in ["scoreboard", "outcome"] {
+            let built = v2_crops_bundle(&[(path, class)]);
+            let (status, body) = post_report(&h, MEMBER_TOKEN, built.bytes).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path} {class}: {body}");
+        }
+    }
+    for path in [
+        "crops/scoreboard.png",
+        "crops/frame.png",
+        "crops/outcome.png",
+    ] {
+        let built = v2_crops_bundle(&[(path, "rank_update")]);
+        let (status, body) = post_report(&h, MEMBER_TOKEN, built.bytes).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{path}: {body}");
+    }
+    assert_eq!(zip_count(&h.reports_dir), 0);
+}
+
+#[tokio::test]
+async fn rank_crop_at_the_cap_stores_and_one_byte_more_is_400_not_413() {
+    let h = harness().await;
+    let cap = scuffed_types::RANK_CROP_MAX_BYTES as usize;
+    for path in RANK_CROPS {
+        let built = v2_png_crops_bundle(vec![(path, "rank_update", png_of_len(cap), None)]);
+        let (status, body) = post_report(&h, MEMBER_TOKEN, built.bytes).await;
+        assert_eq!(status, StatusCode::CREATED, "{path} at the cap: {body}");
+
+        let built = v2_png_crops_bundle(vec![(path, "rank_update", png_of_len(cap + 1), None)]);
+        let (status, body) = post_report(&h, MEMBER_TOKEN, built.bytes).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{path} over the cap: {body}"
+        );
+        assert_eq!(
+            body["error"], "Invalid report bundle: rank crop is over the size limit",
+            "{path}"
+        );
+    }
+    assert_eq!(zip_count(&h.reports_dir), 2);
+}
+
+#[tokio::test]
+async fn both_rank_crops_at_the_cap_in_one_report_store() {
+    let h = harness().await;
+    let cap = scuffed_types::RANK_CROP_MAX_BYTES as usize;
+    let built = v2_png_crops_bundle(vec![
+        ("crops/scoreboard.png", "scoreboard", tiny_png(), None),
+        ("crops/rank.png", "rank_update", png_of_len(cap), None),
+        (
+            "crops/rank_banner.png",
+            "rank_update",
+            png_of_len(cap),
+            None,
+        ),
+    ]);
+    let (status, body) = post_report(&h, MEMBER_TOKEN, built.bytes).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+}
+
+#[tokio::test]
+async fn declared_size_that_does_not_match_the_file_is_400() {
+    let h = harness().await;
+    // A rank crop declared under the cap that is really 3 MiB, with its true
+    // sha256: the declared size must not get it past the cap.
+    let big = png_of_len(3 * 1024 * 1024);
+    let built = v2_png_crops_bundle(vec![("crops/rank.png", "rank_update", big, Some(500))]);
+    let (status, body) = post_report(&h, MEMBER_TOKEN, built.bytes).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(
+        body["error"],
+        "Invalid report bundle: file size does not match the manifest"
+    );
+    // Any crop, off by one byte.
+    let png = tiny_png();
+    let declared = png.len() + 1;
+    let built = v2_png_crops_bundle(vec![(
+        "crops/scoreboard.png",
+        "scoreboard",
+        png,
+        Some(declared),
+    )]);
+    let (status, body) = post_report(&h, MEMBER_TOKEN, built.bytes).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(
+        body["error"],
+        "Invalid report bundle: file size does not match the manifest"
+    );
+    assert_eq!(zip_count(&h.reports_dir), 0);
+}
