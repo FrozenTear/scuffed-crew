@@ -13,7 +13,8 @@ use crate::theme::{FONT_MEDIUM, FONT_SEMIBOLD, SIZE_LABEL, SIZE_META, TEXT_2, TE
 /// Label of the "Include rank screen" box.
 pub const RANK_BOX_LABEL: &str = "Include rank screen";
 /// The line under it.
-pub const RANK_BOX_HINT: &str = "Adds two rank screen pictures. They help improve the rank reader.";
+pub const RANK_BOX_HINT: &str =
+    "Sends only two cut-outs of the rank screen: the rank panel and the queue banner. They help improve the rank reader.";
 
 /// The "Include rank screen" box of a game report, and its hint.
 pub(super) fn rank_box(d: &ReportDialog) -> Element<'_, Message> {
@@ -66,6 +67,16 @@ mod tests {
             images: Vec::new(),
             left_out,
         }
+    }
+
+    /// The hint says exactly what leaves the PC: two cut-outs, never the
+    /// whole rank screen.
+    #[test]
+    fn the_rank_box_hint_names_the_two_cut_outs() {
+        assert_eq!(
+            RANK_BOX_HINT,
+            "Sends only two cut-outs of the rank screen: the rank panel and the queue banner. They help improve the rank reader."
+        );
     }
 
     #[test]
