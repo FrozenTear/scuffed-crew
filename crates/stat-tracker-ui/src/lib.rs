@@ -102,6 +102,7 @@ mod training_card;
 pub mod tray;
 pub mod uninstall;
 mod uninstall_names;
+mod unsure_reads;
 pub mod update;
 mod update_check;
 #[cfg(test)]
