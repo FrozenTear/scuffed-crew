@@ -77,9 +77,9 @@ mod tests_snapshot_policy;
 mod tests_training_crops;
 #[cfg(test)]
 mod tests_training_sched;
-mod training_crops;
 #[cfg(test)]
 mod tests_vision_size;
+mod training_crops;
 
 pub(crate) use debug_dumps::*;
 pub(crate) use event_loop::*;

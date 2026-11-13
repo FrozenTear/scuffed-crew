@@ -233,7 +233,14 @@ pub(super) fn add_sticky_training_warning(data_dir: &Path, warning: &str) {
     }
     parts.push(warning);
     let text = parts.join(" ");
-    write_training_warning(data_dir, Some(&text), true, false, dropped.as_deref(), asked);
+    write_training_warning(
+        data_dir,
+        Some(&text),
+        true,
+        false,
+        dropped.as_deref(),
+        asked,
+    );
 }
 
 // ------------------------------------------------------------------- outbox
