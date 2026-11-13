@@ -923,6 +923,12 @@ pub(crate) async fn handle_capture(
                 // A deferred board with a held cell is not carried
                 // (`plan.deferred_counters` is none): no hero or time either.
                 let carried = plan.defer && plan.deferred_counters.is_some();
+                // A held board's reads wait for the next game (unsure rule).
+                if let Some(board) = new_board.as_ref().filter(|_| plan.defer) {
+                    let tab =
+                        board_reads(board, board_row, held_cols, own_row_suspect, trusted_cells);
+                    stat_tracker::games::stat_reads::update(data_dir, |l| l.hold(&tab, carried));
+                }
                 return Ok(CaptureReport {
                     finished_game_tab,
                     ..skipped_capture_report(
@@ -1142,6 +1148,8 @@ pub(crate) async fn handle_capture(
                 )
                 .await;
                 kit_confidences = reader_apply::kit_confidences(&board, board_row);
+                let mut tab =
+                    board_reads(&board, board_row, held_cols, own_row_suspect, trusted_cells);
                 kit_confidences.insert(
                     "result".to_string(),
                     stat_tracker::report::kit::ReaderRead::from_field(&shadow::result_field(
@@ -1183,6 +1191,11 @@ pub(crate) async fn handle_capture(
                     carried_board(staged.carried, staged.carried_at, captured_at),
                     guesses,
                 );
+                mark_gate(&mut tab, &staged.gate, &parsed.suspect_fields);
+                let carried = staged.carried.is_some();
+                stat_tracker::games::stat_reads::update(data_dir, |l| {
+                    l.push(&target_session, carried, &tab)
+                });
                 // A held cell has no read of its own: the kit's `ocr_v1`
                 // repeats the stored value there, never a number carried in
                 // from before a split.

@@ -35,6 +35,7 @@ pub fn load_snapshot(data_dir: &Path) -> Snapshot {
     }
     drop_sessions(&mut snap, &queued);
     overlay_queued(&mut snap, &cmds);
+    crate::unsure_reads::apply(data_dir, &mut snap);
     snap
 }
 

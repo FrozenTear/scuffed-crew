@@ -22,4 +22,5 @@ pub mod replace;
 pub mod sandbox;
 pub mod setup;
 pub mod suspect;
+pub mod unsure_rule;
 pub mod version;

@@ -685,6 +685,12 @@ fn tile(g: &Game, stat: Stat, avg: &detail::Averages, narrow: bool) -> Element<'
             .lines
             .push((detail::read_vs_set_line(stat, read, set), TEXT_2));
     }
+    // An Unsure stat of the latest game says how sure the reader was.
+    if let Some(line) =
+        crate::unsure_reads::line(&g.session_id, stat.flat(), stat.value(g)).filter(|_| unsure)
+    {
+        extras.lines.push((line, TEXT_2));
+    }
     // The delta is neutral (for D a minus is good); "Check first" muted.
     let delta = detail::delta_line(g, stat, avg);
     if let Some(line) = delta.text() {

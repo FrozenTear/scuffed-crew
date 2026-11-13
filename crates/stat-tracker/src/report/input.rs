@@ -204,9 +204,8 @@ impl GameReportInput {
             );
             reads.map = Some(m.display_map_name().to_string()).filter(|s| !s.trim().is_empty());
             kit = super::kit::Kit {
-                scoreboard_png: None,
-                outcome_png: None,
                 reads: Some(reads),
+                ..Default::default()
             };
         }
         // The kit is written at Tab time, usually before the result screen.
@@ -258,6 +257,7 @@ impl GameReportInput {
             ui_scale: None,
             system: SystemInfo::collect(config, capture_backend, daemon_running),
             training: false,
+            rank_included: false,
             scrub,
             window,
             log_dir: config.data_dir.clone(),
