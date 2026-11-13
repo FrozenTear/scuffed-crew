@@ -1167,6 +1167,7 @@ async fn a_lost_tab_crop_keeps_the_ask_to_delete_again() {
         Some(TRAINING_DELETE_AGAIN),
         true,
         false,
+        None,
         marker,
     );
     warn_crop_lost(dir.path(), UploadKind::StatDigits);
@@ -1211,6 +1212,7 @@ fn a_lost_tab_crop_does_not_carry_a_met_ask_to_delete_again() {
         Some(TRAINING_DELETE_AGAIN),
         true,
         false,
+        None,
         Some(asked),
     );
     std::thread::sleep(std::time::Duration::from_millis(5));
@@ -1220,5 +1222,29 @@ fn a_lost_tab_crop_does_not_carry_a_met_ask_to_delete_again() {
     let status = read_training_status(dir.path()).expect("a warning");
     let warning = status.warning.as_deref().unwrap();
     assert!(!warning.contains(TRAINING_DELETE_AGAIN), "{warning}");
+    assert_eq!(status.delete_again_at, None);
+}
+
+/// A crop a Tab could not keep never drops the dropped crops warning a pass
+/// left: the app still shows it and the next pass still carries it.
+#[test]
+fn a_lost_tab_crop_keeps_the_dropped_crops_warning() {
+    let dir = tempfile::tempdir().unwrap();
+    let dropped = "Training crops: the website refused 1 hero icon (bad). They were dropped.";
+    super::training_store::write_training_warning(
+        dir.path(),
+        Some(dropped),
+        true,
+        false,
+        Some(dropped),
+        None,
+    );
+    warn_crop_lost(dir.path(), UploadKind::StatDigits);
+    let status = read_training_status(dir.path()).expect("a warning");
+    let warning = status.warning.as_deref().unwrap();
+    assert!(warning.starts_with(dropped), "{warning}");
+    assert!(warning.contains("could not be kept"), "{warning}");
+    assert!(status.sticky);
+    assert_eq!(status.dropped.as_deref(), Some(dropped), "still carried");
     assert_eq!(status.delete_again_at, None);
 }

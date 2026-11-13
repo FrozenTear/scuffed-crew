@@ -211,20 +211,29 @@ pub(super) fn write_training_warning(
 }
 
 /// Leave `warning` as a sticky warning (see [`write_training_warning`]),
-/// keeping an ask to delete again that is still open: its marker, and its
-/// text in front, so the app still shows it. The read and the write hold
-/// `OWNER_LOCK`, the lock a send pass writes its status under, so an ask a
-/// pass leaves meanwhile is never overwritten.
+/// keeping an ask to delete again that is still open and a dropped crops
+/// warning a pass left ([`TrainingStatus::dropped`]): their markers, and
+/// their text in front, so the app still shows them and the next pass still
+/// carries them. The read and the write hold `OWNER_LOCK`, the lock a send
+/// pass writes its status under, so an ask a pass leaves meanwhile is never
+/// overwritten.
 pub(super) fn add_sticky_training_warning(data_dir: &Path, warning: &str) {
     let _owner = OWNER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let asked = read_training_status(data_dir)
+    let earlier = read_training_status(data_dir);
+    let dropped = earlier.as_ref().and_then(|status| status.dropped.clone());
+    let asked = earlier
         .and_then(|status| status.delete_again_at)
         .filter(|at| !deleted_again_since(data_dir, Some(*at)));
-    let text = match asked {
-        Some(_) => format!("{} {warning}", super::training_pass::TRAINING_DELETE_AGAIN),
-        None => warning.to_string(),
-    };
-    write_training_warning(data_dir, Some(&text), true, false, asked);
+    let mut parts = Vec::new();
+    if asked.is_some() {
+        parts.push(super::training_pass::TRAINING_DELETE_AGAIN);
+    }
+    if let Some(text) = dropped.as_deref() {
+        parts.push(text);
+    }
+    parts.push(warning);
+    let text = parts.join(" ");
+    write_training_warning(data_dir, Some(&text), true, false, dropped.as_deref(), asked);
 }
 
 // ------------------------------------------------------------------- outbox
