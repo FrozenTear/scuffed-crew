@@ -12,9 +12,8 @@
 //!   input,                               ocr_switch, frame
 //!   game_running
 //!          \        |          |           /
-//!     core: config, parse, perf, perf_log, setup, replace, proc_id, fs_mode,
-//!           omp, host_probe, sandbox, hero_auth, model, version, suspect,
-//!           ocr_status, unsure_rule
+//!     core: config, parse, perf, perf_log, setup, replace, proc_id, fs_mode, omp,
+//!           host_probe, sandbox, hero_auth, model, version, suspect, ocr_status, unsure_rule
 //! ```
 //!
 //! The four middle crates do not use each other. The test reads the `src/`
