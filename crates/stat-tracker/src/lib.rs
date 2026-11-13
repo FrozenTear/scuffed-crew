@@ -3,7 +3,7 @@
 // `crate::config::…` keep resolving.
 pub use stat_tracker_core::{
     config, fs_mode, hero_auth, host_probe, model, ocr_status, omp, parse, perf, perf_log, proc_id,
-    replace, sandbox, setup, suspect, version,
+    replace, sandbox, setup, suspect, unsure_rule, version,
 };
 
 pub mod boundary;
