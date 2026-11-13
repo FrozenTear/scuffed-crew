@@ -9,9 +9,9 @@
 //!   writes no kit.
 //! - `outcome.png`: the result word box of the competitive rank screen
 //!   ([`super::blank::outcome_band`]), when the tracker saw that screen.
-//! - `rank.png` and `rank_banner.png`: the rank update screen and its emblem
-//!   ([`rank`]), cut from the same frames as `outcome.png`. A report carries
-//!   them only when the member opts in.
+//! - `rank.png` and `rank_banner.png`: the rank update screen and its
+//!   top-right mode banner ([`rank`]), cut from the same frames as
+//!   `outcome.png`. A report carries them only when the member opts in.
 //! - `reads.json`: the reads of the capture `scoreboard.png` came from.
 //!
 //! Up to [`Retention::max_games`] sessions are kept, within

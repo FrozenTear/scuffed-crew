@@ -19,8 +19,8 @@ use super::store::{
 
 /// Longest side of a stored rank crop, in pixels. A bigger cut is scaled
 /// down to it, so `rank.png` stays well under the report's per-file cap
-/// (`bundle::RANK_CROP_MAX_BYTES`). `rank_banner.png` is smaller than this
-/// at 1440p and is kept at full size.
+/// (`bundle::RANK_CROP_MAX_BYTES`). `rank_banner.png` is never scaled: it
+/// keeps the native pixels of the mode banner (883x173 at 4K).
 pub const RANK_CROP_MAX_EDGE: u32 = 1280;
 
 /// The crops of one rank screen frame.
@@ -30,7 +30,8 @@ pub struct RankScreenPngs {
     pub outcome: Vec<u8>,
     /// `rank.png`, or `None` when it could not be encoded.
     pub rank: Option<Vec<u8>>,
-    /// `rank_banner.png`, or `None` when it could not be encoded.
+    /// `rank_banner.png`, the mode banner at native resolution, or `None`
+    /// when it could not be encoded.
     pub rank_banner: Option<Vec<u8>>,
 }
 
@@ -47,7 +48,7 @@ pub fn rank_screen_pngs(
     Some(RankScreenPngs {
         outcome: encode_png(&outcome).ok()?,
         rank: encode_small_png(&fit_edge(rank, RANK_CROP_MAX_EDGE)),
-        rank_banner: encode_small_png(&fit_edge(banner, RANK_CROP_MAX_EDGE)),
+        rank_banner: encode_small_png(&banner),
     })
 }
 

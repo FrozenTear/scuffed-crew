@@ -2,7 +2,7 @@
 //! off by default, only with the box ticked, `rank_update` only, and never a
 //! reason for a report to fail.
 
-use image::{DynamicImage, Rgb, RgbImage};
+use image::{DynamicImage, GenericImageView, Rgb, RgbImage};
 use serde_json::Value;
 
 use super::bundle::{
@@ -222,7 +222,13 @@ fn rank_screen_crops_follow_the_outcome_rule_and_the_edge_cap() {
     // Not the rank screen: no crops at all.
     assert!(kit::rank_screen_pngs(None, &rank_frame()).is_none());
     assert!(kit::rank_screen_pngs(Some(OutcomeSource::ResultWord), &rank_frame()).is_none());
-    for (w, h) in [(1920, 1080), (2560, 1440), (3840, 2160)] {
+    // rank_banner.png is the top-right mode banner at native resolution:
+    // playfield x 755 to 985, y 70 to 150, never scaled.
+    for (w, h, banner) in [
+        (1920, 1080, (442, 87)),
+        (2560, 1440, (589, 116)),
+        (3840, 2160, (883, 173)),
+    ] {
         let frame = DynamicImage::ImageRgb8(RgbImage::from_pixel(w, h, Rgb([24, 20, 18])));
         let pngs = kit::rank_screen_pngs(Some(OutcomeSource::RankScreen), &frame).unwrap();
         // outcome.png is unchanged by the rank crops
@@ -230,7 +236,10 @@ fn rank_screen_crops_follow_the_outcome_rule_and_the_edge_cap() {
             Some(&pngs.outcome),
             kit::rank_outcome_png(Some(OutcomeSource::RankScreen), &frame).as_ref()
         );
-        for png in [pngs.rank.unwrap(), pngs.rank_banner.unwrap()] {
+        let banner_png = pngs.rank_banner.unwrap();
+        let img = image::load_from_memory(&banner_png).unwrap();
+        assert_eq!(img.dimensions(), banner, "{w}x{h}");
+        for png in [pngs.rank.unwrap(), banner_png] {
             let img = image::load_from_memory(&png).unwrap();
             assert!(
                 img.width().max(img.height()) <= kit::RANK_CROP_MAX_EDGE,

@@ -289,16 +289,17 @@ pub const RANK_BAND: PlayfieldRegion = PlayfieldRegion {
     h: 827,
 };
 
-/// The rank emblem, its role line and the tier word with the division
-/// digit under it (`crops/rank_banner.png`): the reader's boxes at
-/// 2560x1440 x 1060 to 1500, y 236 to 1020. Cut at full size, so the
-/// division glyphs keep every pixel.
+/// The mode banner top right of the rank update screen
+/// (`crops/rank_banner.png`): the "COMPETITIVE: 6V6 OPEN QUEUE" pill and
+/// the timer, in thousandths of the playfield (x 755 to 985, y 70 to 150).
+/// Cut at native resolution with no scaling: 442x87 at 1920x1080, 589x116
+/// at 2560x1440, 883x173 at 3840x2160.
 pub const RANK_BANNER_BAND: PlayfieldRegion = PlayfieldRegion {
     id: "rank_banner",
-    x: 414,
-    y: 163,
-    w: 172,
-    h: 546,
+    x: 755,
+    y: 70,
+    w: 230,
+    h: 80,
 };
 
 /// The team size the capture path reported, for the manifest.
