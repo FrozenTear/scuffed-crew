@@ -87,3 +87,16 @@ fn the_version_constants_are_this_release() {
         format!("scuffed-stat-tracker/{version}")
     );
 }
+
+/// The site reuses a legacy row only for trackers from 0.6.0-alpha.3 on
+/// (`LEGACY_REUSE_MIN_TRACKER` in site-server, read from `USER_AGENT`).
+/// A build at or below 0.6.0-alpha.2.3 would never get that reuse, so this
+/// release must sort above it by the same semver order the tracker uses.
+#[test]
+fn this_release_is_new_enough_for_legacy_row_reuse() {
+    assert!(
+        !crate::report::training_labels::is_role_only_era(crate::version::APP_VERSION),
+        "{} must sort above 0.6.0-alpha.2.3",
+        crate::version::APP_VERSION
+    );
+}

@@ -15,9 +15,9 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
-## Unreleased
+## 0.6.0-alpha.3
 
-A few games the site refuses can no longer hold up the games queued behind them.
+DRAFT SUMMARY, final text after the alpha.3 merges. A few games the site refuses can no longer hold up the games queued behind them.
 
 ### Highlights
 
