@@ -625,8 +625,10 @@ pub(crate) async fn run_loop(
                             // The gate held the rank word back on a first
                             // sighting (the first tick after a focus pause)
                             // while a rank screen is held: rank-v1 reads it.
-                            let rank_held_back = rank_holds
-                                && stability.first_seen(detect::RANK_SCREEN_CONTEXT);
+                            let rank_held_back = daemon::rank::rank_held_back(
+                                rank_holds,
+                                stability.first_seen(detect::RANK_SCREEN_CONTEXT),
+                            );
                             // Cheap wake path: while Tab cell OCR is in
                             // flight, skip the phase and accolade-map reads
                             // so it keeps the pool. Outcome signal and

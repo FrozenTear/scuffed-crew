@@ -8,7 +8,8 @@
 //!
 //! Off by default. The tracker's capture wiring (`daemon::rank` in the
 //! binary, through [`game::read_for_game`]) runs the reader only when
-//! [`ENV`] is switched on ([`RankSetting::parse`]) and a template pack is
+//! config `rank_reader` (Read my rank after Comp games) is on, or [`ENV`]
+//! overrides it to on ([`RankSetting::for_config`]), and a template pack is
 //! installed ([`templates`]); it then reads the rank screen's frames after a
 //! game, stores the result on that game and uploads it in the `rank` object.
 //! Which frames to read and how reads are combined are the wiring's; see
@@ -135,7 +136,8 @@ pub use templates::{
 /// sends as `rank.rank_recognizer` for this reader and the queue title
 /// reader alike, defined once in `model`.
 pub use crate::model::RANK_RECOGNIZER_ID as RECOGNIZER_ID;
-/// Environment switch: `rank-v1`, `on`, `1`, `true` or `yes` turns it on.
+/// Environment override of config `rank_reader` for this reader: `rank-v1`,
+/// `on`, `1`, `true` or `yes` turns it on, any other non-blank value off.
 pub const ENV: &str = "STAT_TRACKER_RANK_RECOGNIZER";
 /// Lowest glyph score a read may have.
 pub const MIN_SCORE: f32 = 0.70;
@@ -157,8 +159,8 @@ pub const FRAME_W: u32 = 2560;
 /// Reference frame height the layout was measured at.
 pub const FRAME_H: u32 = 1440;
 
-/// Whether rank-v1 runs. Off unless switched on; the capture wiring reads
-/// it from [`ENV`] (see the module docs).
+/// Whether rank-v1 runs. Off unless config `rank_reader` or [`ENV`] turns
+/// it on ([`Self::for_config`], see the module docs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum RankSetting {
     #[default]
@@ -181,11 +183,6 @@ impl RankSetting {
         } else {
             Self::Off
         }
-    }
-
-    /// The setting from [`ENV`]; off when it is unset.
-    pub fn from_env() -> Self {
-        std::env::var(ENV).map_or(Self::default(), |v| Self::parse(&v))
     }
 
     /// [`ENV`] as an override: `None` when it is unset or blank, else
@@ -211,12 +208,22 @@ pub fn override_of(value: Option<&str>) -> Option<&str> {
     value.filter(|v| !v.trim().is_empty())
 }
 
+/// How [`pack_warning`] says to turn the rank switch off.
+const RANK_OFF: &str = "turn off Read my rank after Comp games";
+
 /// The warning for the rank readers that are on but have no usable pack:
 /// rank-v1 (`rank_on`, `<data_dir>/templates/rank-v1/`) and the queue
 /// title reader (`queue_on`, `<data_dir>/templates/queue-title-v1/`).
 /// Loads each pack the way the tracker does at start. `None` when every
 /// reader that is on loads. Games still record either way: a reader with
 /// no pack reads nothing.
+///
+/// The line names what is on as the switch shows it: "Read my rank" only
+/// when both readers are on, else the one reader the variables left on
+/// (with the rank switch Off, the queue title reader can still be on).
+/// It says "that pack" or "those packs" by how many fail, and that the
+/// tracker loads packs only at start, so a pack put in place while it runs
+/// reads after a restart.
 pub fn pack_warning(data_dir: &Path, rank_on: bool, queue_on: bool) -> Option<String> {
     use crate::shadow::queue_title;
     let problem = |dir: &str, missing: bool, error: String| {
@@ -238,9 +245,22 @@ pub fn pack_warning(data_dir: &Path, rank_on: bool, queue_on: bool) -> Option<St
     if problems.is_empty() {
         return None;
     }
+    let (lead, off) = match (rank_on, queue_on) {
+        (true, true) => ("Read my rank is on", RANK_OFF.to_string()),
+        (true, false) => ("The rank screen reader is on", RANK_OFF.to_string()),
+        _ => (
+            "The queue title reader is on",
+            format!("set {} to off", queue_title::ENV),
+        ),
+    };
+    let (what, them) = if problems.len() == 1 {
+        ("that pack reads", "the pack")
+    } else {
+        ("those packs read", "the packs")
+    };
     Some(format!(
-        "Read my rank is on, but {}. Games still record, without what that pack reads. \
-         Install the pack or turn off Read my rank after Comp games.",
+        "{lead}, but {}. Games still record, without what {what}. The tracker loads packs \
+         only at start: install {them}, then restart the tracker, or {off}.",
         problems.join(" and ")
     ))
 }
