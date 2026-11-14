@@ -108,14 +108,61 @@ const PAGE_CSS: &str = r#"
         border-radius: 10px;
         padding: 1.5rem;
     }
-    .wiki-content pre {
-        white-space: pre-wrap;
-        word-wrap: break-word;
+    .wiki-content {
         color: var(--text-2);
         font-size: 0.85rem;
         line-height: 1.7;
-        margin: 0;
-        font-family: inherit;
+        overflow-wrap: break-word;
+    }
+    .wiki-content > :first-child {
+        margin-top: 0;
+    }
+    .wiki-content > :last-child {
+        margin-bottom: 0;
+    }
+    .wiki-content h2,
+    .wiki-content h3,
+    .wiki-content h4,
+    .wiki-content h5,
+    .wiki-content h6 {
+        color: var(--text);
+        line-height: 1.3;
+        margin: 1.5rem 0 0.6rem;
+    }
+    .wiki-content p,
+    .wiki-content ul,
+    .wiki-content ol,
+    .wiki-content blockquote,
+    .wiki-content pre,
+    .wiki-content table {
+        margin: 0 0 0.9rem;
+    }
+    .wiki-content a {
+        color: var(--accent);
+    }
+    .wiki-content img {
+        max-width: 100%;
+        height: auto;
+    }
+    .wiki-content blockquote {
+        border-left: 3px solid var(--border);
+        padding-left: 1rem;
+        color: var(--text-3);
+    }
+    .wiki-content pre {
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 0.75rem 1rem;
+        overflow-x: auto;
+    }
+    .wiki-content table {
+        border-collapse: collapse;
+    }
+    .wiki-content th,
+    .wiki-content td {
+        border: 1px solid var(--border);
+        padding: 0.35rem 0.6rem;
     }
     .wiki-revisions {
         margin-top: 2rem;
@@ -387,8 +434,9 @@ pub fn WikiPage(topic: String) -> Element {
                                     }
                                 }
                             } else {
-                                div { class: "wiki-content",
-                                    pre { "{content}" }
+                                div {
+                                    class: "wiki-content",
+                                    dangerous_inner_html: crate::markdown::render_markdown(&content),
                                 }
                             }
 

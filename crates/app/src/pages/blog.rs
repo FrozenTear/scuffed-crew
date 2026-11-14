@@ -3,6 +3,9 @@ use serde::Deserialize;
 
 use scuffed_api_client::ApiClient;
 
+use std::collections::HashMap;
+
+use super::article_author::{author_label, fetch_author_names};
 use crate::components::fetch_error;
 use crate::routes::Route;
 use crate::util::{FetchClass, classify_fetch};
@@ -105,6 +108,15 @@ pub fn Blog() -> Element {
                 .map_err(|e| e.to_string())
         }
     });
+    let author_names = use_resource(move || {
+        let ids: Vec<String> = articles
+            .read()
+            .as_ref()
+            .and_then(|r| r.as_ref().ok())
+            .map(|list| list.iter().map(|a| a.author_member_id.clone()).collect())
+            .unwrap_or_default();
+        fetch_author_names(ids)
+    });
 
     rsx! {
         crate::styles::StyleOnce { id: "scuffed-css-pages-blog-page-css", css: PAGE_CSS }
@@ -129,10 +141,11 @@ pub fn Blog() -> Element {
                         if list.is_some_and(|items| items.is_empty()) {
                             rsx! { p { class: "blog-empty", "No articles yet." } }
                         } else {
+                            let names = author_names.read();
                             rsx! {
                                 div { class: "blog-list",
                                     for a in list.into_iter().flat_map(|items| items.iter()) {
-                                        {render_blog_card(a)}
+                                        {render_blog_card(a, names.as_ref())}
                                     }
                                 }
                             }
@@ -144,7 +157,9 @@ pub fn Blog() -> Element {
     }
 }
 
-fn render_blog_card(a: &BlogArticle) -> Element {
+/// `names` is `None` while the author lookup is in flight; the byline is left
+/// out until then so it does not flash the fallback label.
+fn render_blog_card(a: &BlogArticle, names: Option<&HashMap<String, String>>) -> Element {
     let date: String = a
         .published_at
         .as_deref()
@@ -167,7 +182,9 @@ fn render_blog_card(a: &BlogArticle) -> Element {
             div { class: "blog-card-body",
                 div { class: "blog-card-meta",
                     time { "{date}" }
-                    span { "by {a.author_member_id}" }
+                    if let Some(names) = names {
+                        span { {format!("by {}", author_label(Some(names), &a.author_member_id))} }
+                    }
                 }
                 h2 { class: "blog-card-title", "{a.title}" }
                 if let Some(ref summary) = a.summary {
