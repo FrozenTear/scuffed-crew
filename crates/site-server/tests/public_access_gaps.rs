@@ -1,9 +1,11 @@
-//! HTTP coverage for gaps in public (anonymous and member) read access.
+//! HTTP regression tests for Opus #118 findings M5, M6, M7, M8, L3 and L11,
+//! and for unknown tournament ids.
 //!
-//! Tests prefixed with a finding id (m5 to m9, l3, l11) cover Opus #118 and
-//! are named after the finding they would fail without the fix. The
-//! unknown-tournament-id tests cover the public tournament page routes
-//! returning 500 or 200 for an id that does not exist (PR #675).
+//! The finding tests (m5_ to m8_, l3_, l11_) are each named after the finding
+//! they would fail without the fix. The unknown-tournament-id tests check that
+//! every public GET route the tournament page uses returns 404 for an id that
+//! does not exist (they used to return 500 or 200), and that this 404 matches
+//! the response for a draft the caller may not see.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -869,15 +871,17 @@ async fn l11_register_conflict_does_not_say_username_taken() {
 // ─── Unknown tournament id ──────────────────────────────────────────────────
 
 /// GET `path` as anon (`token` = None) or with a bearer token; returns the
-/// status and the raw body bytes so callers can compare responses exactly.
-async fn get_raw(state: &AppState, path: &str, token: Option<&str>) -> (StatusCode, Vec<u8>) {
+/// status and the body as text so callers can compare responses exactly and
+/// a failing assert prints readable text instead of bytes.
+async fn get_raw(state: &AppState, path: &str, token: Option<&str>) -> (StatusCode, String) {
     let req = match token {
         Some(t) => authed(Method::GET, path, t, None),
         None => anon(Method::GET, path),
     };
     let resp = create_router(state.clone()).oneshot(req).await.unwrap();
     let status = resp.status();
-    (status, body_bytes(resp).await)
+    let body = String::from_utf8(body_bytes(resp).await).expect("UTF-8 response body");
+    (status, body)
 }
 
 fn tournament_page_routes(tid: &str) -> [String; 5] {
@@ -920,6 +924,16 @@ async fn unknown_tournament_id_is_404_on_every_public_route() {
     assert_eq!(created["status"], "draft");
     let draft_id = created["id"].as_str().unwrap().to_string();
 
+    // Officers can see drafts: proves the draft exists, so the parity checks
+    // below compare a missing id against a real hidden row.
+    let (status, body) = get_raw(
+        &state,
+        &format!("/api/tournaments/{draft_id}"),
+        Some(OFFICER_TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "officer draft detail: {body}");
+
     for tid in ["doesnotexist", "does-not-exist"] {
         for (missing, draft) in tournament_page_routes(tid)
             .iter()
@@ -927,7 +941,7 @@ async fn unknown_tournament_id_is_404_on_every_public_route() {
         {
             let (status, body) = get_raw(&state, missing, None).await;
             assert_eq!(status, StatusCode::NOT_FOUND, "anon {missing}");
-            let body_value: Value = serde_json::from_slice(&body).unwrap();
+            let body_value: Value = serde_json::from_str(&body).unwrap();
             assert_eq!(
                 body_value["error"], "Tournament not found",
                 "anon {missing}"
