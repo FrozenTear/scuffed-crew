@@ -108,7 +108,7 @@ impl TemplateSet {
 }
 
 /// Builds a [`TemplateSet`] from labelled frames.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Learner {
     sums: BTreeMap<String, (usize, Vec<f32>)>,
 }
@@ -138,6 +138,20 @@ impl Learner {
         *n += 1;
         for (s, v) in sum.iter_mut().zip(c) {
             *s += v;
+        }
+    }
+
+    /// Add every sum from `other`. Used to combine one learner per session.
+    pub fn merge(&mut self, other: &Self) {
+        for (class, (n, sum)) in &other.sums {
+            let (dest_n, dest_sum) = self
+                .sums
+                .entry(class.clone())
+                .or_insert_with(|| (0, vec![0.0; sum.len()]));
+            *dest_n += n;
+            for (slot, value) in dest_sum.iter_mut().zip(sum) {
+                *slot += value;
+            }
         }
     }
 

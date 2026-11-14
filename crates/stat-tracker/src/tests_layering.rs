@@ -8,7 +8,7 @@
 //!          /        |          |           \
 //!      game      capture     store       vision
 //!   boundary,    capture/*   storage,    ocr, detect, shadow, names,
-//!   capture_gate,            sync        packs, mapcrops, report::blank,
+//!   capture_gate,            sync        packs, pack_cutter, mapcrops, report::blank,
 //!   input,                               ocr_switch, frame
 //!   game_running
 //!          \        |          |           /
@@ -18,7 +18,7 @@
 //!
 //! The four middle crates do not use each other. The test reads the `src/`
 //! of every crate the split has made so far ([`PHYSICAL`]: the lib only,
-//! not `main.rs`, `daemon/`, `main_tests/` or `ocr_bench.rs`), follows every
+//! not `main.rs`, `bin/`, `daemon/`, `main_tests/` or `ocr_bench.rs`), follows every
 //! `crate::`, `super::` and `self::` path (and every path through an
 //! extracted crate's name, such as `stat_tracker_core::`) in `use` trees
 //! and in code, and fails on any path from a module to a crate it may not
@@ -96,6 +96,7 @@ const CRATE_OF: &[(&str, Crate)] = &[
     ("names", Crate::Vision),
     ("ocr", Crate::Vision),
     ("ocr_switch", Crate::Vision),
+    ("pack_cutter", Crate::Vision),
     ("packs", Crate::Vision),
     ("report::blank", Crate::Vision),
     ("shadow", Crate::Vision),
@@ -110,8 +111,7 @@ const CRATE_OF: &[(&str, Crate)] = &[
     ("tests_release_pins", Crate::Top),
 ];
 
-/// The crates split so far: directory under `crates/`, would-be crate, lib
-/// name. `stat-tracker` holds every crate not yet extracted; an extraction
+/// The crates split so far: directory under `crates/`, would-be crate, lib name. `stat-tracker` holds every crate not yet extracted; an extraction
 /// PR adds its crate here and the test then walks its `src/` from `lib.rs`.
 const PHYSICAL: &[(&str, Crate, &str)] = &[
     ("stat-tracker", Crate::Top, "stat_tracker"),
@@ -199,8 +199,7 @@ fn blank(text: &str) -> Vec<char> {
     out
 }
 
-/// The end of the string literal starting at `i` (`"…"`, `b"…"`, `c"…"`,
-/// `r#"…"#`, `br"…"`), or `None` when none starts there.
+/// The end of the string literal starting at `i` (`"…"`, `b"…"`, `c"…"`, `r#"…"#`, `br"…"`), or `None` when none starts there.
 fn string_end(src: &[char], i: usize) -> Option<usize> {
     if i > 0 && is_ident(src[i - 1]) {
         return None;
@@ -1228,12 +1227,13 @@ fn every_module_has_a_crate() {
                         .to_string_lossy()
                         .replace('\\', "/")
                 })
-                // the bin and its tests
+                // the bins and their tests
                 .filter(|n| {
                     dir != "stat-tracker"
                         || (n != "main.rs"
                             && n != "ocr_bench.rs"
                             && !n.starts_with("daemon/")
+                            && !n.starts_with("bin/")
                             && !n.starts_with("main_tests/"))
                 })
                 .map(|n| format!("{dir}/src/{n}")),

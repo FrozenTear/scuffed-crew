@@ -257,15 +257,10 @@ pub struct ClassScore {
     pub dy: usize,
 }
 
-/// The title region of `img` as a padded ink plane of
-/// `(TW + 2*PAD) x (TH + 2*PAD)`, and the frame rectangle it was cut from
-/// (`[x, y, w, h]`). The region is placed in the frame's 16:9 game rect
-/// ([`game_rect_16_9`]), so an ultrawide or 16:10 frame is read from its
-/// playfield and an exact 16:9 frame is read as before. `None` for a game
-/// rect so small that the region would have to be scaled up to the
-/// template size: under 359 px tall, where the crop is 124 x 39.
-pub fn plane(img: &RgbImage, screen: Screen) -> Option<(Gray, [u32; 4])> {
-    let (gx, gy, gw, gh) = game_rect_16_9(img.width(), img.height());
+/// The title crop from frame size alone: `(x, y, width, height)`, or
+/// `None` when [`plane`] would refuse the frame before reading a pixel.
+pub fn title_crop(width: u32, height: u32, screen: Screen) -> Option<(u32, u32, usize, usize)> {
+    let (gx, gy, gw, gh) = game_rect_16_9(width, height);
     let s = gh as f32 / FRAME_H as f32;
     let pad = PAD as u32 * STEP;
     let rx = REF_X - pad;
@@ -286,6 +281,18 @@ pub fn plane(img: &RgbImage, screen: Screen) -> Option<(Gray, [u32; 4])> {
     if cw < TW + 2 * PAD || ch < TH + 2 * PAD {
         return None;
     }
+    Some((x0, y0, cw, ch))
+}
+
+/// The title region of `img` as a padded ink plane of
+/// `(TW + 2*PAD) x (TH + 2*PAD)`, and the frame rectangle it was cut from
+/// (`[x, y, w, h]`). The region is placed in the frame's 16:9 game rect
+/// ([`game_rect_16_9`]), so an ultrawide or 16:10 frame is read from its
+/// playfield and an exact 16:9 frame is read as before. `None` for a game
+/// rect so small that the region would have to be scaled up to the
+/// template size: under 359 px tall, where the crop is 124 x 39.
+pub fn plane(img: &RgbImage, screen: Screen) -> Option<(Gray, [u32; 4])> {
+    let (x0, y0, cw, ch) = title_crop(img.width(), img.height(), screen)?;
     let mut g = Gray::new(cw, ch);
     for y in 0..ch {
         for x in 0..cw {
@@ -305,7 +312,7 @@ pub fn plane(img: &RgbImage, screen: Screen) -> Option<(Gray, [u32; 4])> {
             *v = (*v / peak).min(1.0);
         }
     }
-    Some((g, [x0, y0, x1 - x0, y1 - y0]))
+    Some((g, [x0, y0, cw as u32, ch as u32]))
 }
 
 /// The unpadded centre of a padded plane: what a template is learned from.
@@ -320,6 +327,15 @@ fn window(g: &Gray, dx: usize, dy: usize) -> Vec<f32> {
         v.extend_from_slice(&g.px[row..row + TW]);
     }
     v
+}
+
+/// Mean-centred NCC of two learned title templates (no shift). This is the
+/// score [`ncc_cols`] gives the reader at a zero shift.
+pub fn template_ncc(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != TW * TH || b.len() != TW * TH {
+        return 0.0;
+    }
+    ncc_cols(a, b, 0, TW)
 }
 
 /// Normalised cross correlation over the columns `c0..c1` of two

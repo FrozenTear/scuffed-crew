@@ -100,6 +100,87 @@ and is not in the packgen output. Publishing leaves it alone.
 An `<outdir>` does not have to hold every pack. To change one pack, a folder
 with that one tar and a `manifest.json` that lists it is enough.
 
+### Rank and queue title
+
+`scuffed-pack-cutter` cuts `rank-v1.tar` and `queue-title-v1.tar`
+(`RANK_PACK_NAME` and `QUEUE_TITLE_PACK_NAME` in
+`crates/stat-tracker/src/packs/layout.rs`). Release builds ship only
+`--bin scuffed-stat-tracker`, so run the cutter from a checkout:
+
+```text
+cargo run --release -p scuffed-stat-tracker --bin scuffed-pack-cutter -- cut --kind rank|queue-title --labels FILE [--frames DIR] [--role-labels FILE] [--base DIR] [--replace CLASS ...] [--replace-all] [--allow-near] [--force] --out DIR
+cargo run --release -p scuffed-stat-tracker --bin scuffed-pack-cutter -- pack --kind rank|queue-title --dir DIR --name NAME.tar --version VER --out DIR
+cargo run --release -p scuffed-stat-tracker --bin scuffed-pack-cutter -- eval --kind rank|queue-title --labels FILE [--frames DIR] --baseline DIR --candidate DIR --set-name NAME [--role-labels FILE] [--allow-drop CLASS ...] [--allow-unverified CLASS ...]
+```
+
+The tracker loads both packs. `PACKS` gives them
+`PackLayout::TemplatesJson` (exactly one `templates.json`). A published tar
+unpacks to `templates/rank-v1` (`RANK_PACK_DIR`) or
+`templates/queue-title-v1` (`QUEUE_TITLE_PACK_DIR`). Each reader matches
+the templates in that folder. The load is optional and stays off unless
+`STAT_TRACKER_RANK_RECOGNIZER` or `STAT_TRACKER_QUEUE_TITLE_RECOGNIZER` is
+on, and it happens once at daemon start. The `Learner` is the one the
+ignored benches use to build those templates. It is not what a reader runs
+at match time.
+
+`cut` writes `templates.json`. `--frames` is required for rank. For
+queue-title it is required only when a label path is relative. `--base`,
+`--baseline` and `--candidate` are folders that hold `templates.json`, not
+tars. Extract the published tar, or point at the tracker's
+`templates/rank-v1` or `templates/queue-title-v1` folder. On a conflict the
+default mix is weighted by sample count (`n`), and the summary prints
+`n <base> -> <new>` on every class line. That mix is for new frames. Cutting
+`--base` from the same labelled frames that built the pack mixes each class
+in a second time, so `n` doubles and the vector stays the same
+(`templates.json` differs only in `n`). Recut those frames with
+`--replace-all`, or `--replace` for the classes that should be replaced.
+`--replace CLASS` (repeatable) or `--replace-all` keeps the new cut instead. A numeric class the labels did
+not actually show is not a recut: it stays the base template and prints
+`kept from base (pooled)`. A pooled base template is replaced by an observed
+cut of that class, not averaged into the pool. Pooling fills a class only
+when neither side has it, and that line prints `new (pooled)`. `cut` refuses
+`--out` equal to `--base`, refuses an `--out` that already holds
+`templates.json` unless `--force`, and writes the file by rename. It also
+refuses an existing `--out` or `<out>/packs` that group or other can read,
+and it does not chmod that directory. `pack` checks `--name` against the
+kind (`rank-v1.tar` or `queue-title-v1.tar`), loads the folder with that
+kind's reader, and prints the sha256 of `templates.json`. `eval` diffs the
+two packs first. Every changed class needs a labelled frame that shows that
+class, unless `--allow-unverified CLASS` names it. Rank coverage is per
+class (an `sr/7` needs a labelled SR that contains a 7; a `role/Tank` needs
+a Tank label), the same way a queue class needs a frame of that title. Then
+it scores the candidate pack against the baseline pack on every row,
+including a title the baseline pack does not have. It fails on a new wrong,
+on a frame that was correct and is now unread or wrong, on a dropped
+baseline class, or on a changed class with no labelled frame.
+`--allow-drop CLASS` (repeat it for each class) is the escape for a drop.
+Leave-one-out stays in the report as generalisation and does not gate. The
+report prints `labelled: N`, `regressed frames:`, `allowed drops:`,
+`changed class`, and `candidate templates.json sha256:`. Compare that sha
+with the sha `pack` prints for the same file. `result:` is the last line.
+`regressed frames:` uses the label path, so a queue set with absolute paths
+prints home-folder paths. Trim those before pasting a report into a PR or
+the fleet channel.
+
+`cut` also refuses a title or a rank word (`role_rank`, `next_mode_hint`,
+each `change_tags` entry) with a leading, trailing, or doubled space, and a
+role file that lists the same game twice. A label row may carry extra keys.
+They are ignored, and one line per file lists their names. A duplicate key
+in one row, or a value of the wrong type, is still an error. Two
+classes the reader compares, when one of them is new or re-learned, are
+refused when they correlate above the reader's margin. `--allow-near` is
+the override for that check.
+
+Exit status: 0 when eval passes or help is shown, 1 when the eval gate
+fails, 2 on any other error. `-h` and `--help` are help only as the command
+or in flag-name position. A repeated flag is an error.
+
+Inputs and output stay on the build machine. `cut` and `pack` refuse an
+`--out` inside a git work tree. Any `..` in `--out` is refused, whether or
+not the path would land in a repo. Eval must pass against the published
+pack before a publish. This tool does not publish. Publishing still needs
+FrozenTear's go, then `scripts/publish-packs.sh`.
+
 ## Publish
 
 The examples are bash. Run them from a checkout of this repo, in `bash`.
