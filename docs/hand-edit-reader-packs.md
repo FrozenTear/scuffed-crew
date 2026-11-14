@@ -10,10 +10,12 @@ guide is about publishing a pack to the server. For that, see
 ## Stop and start the tracker
 
 On a standard install, the tracker runs as the
-`scuffed-stat-tracker.service` user unit, and Settings says "Runs as a
-login service." If Settings says "No login service installed", there is
-no unit: the app starts the tracker itself. Either way, closing the app
-window does not stop the tracker.
+`scuffed-stat-tracker.service` user unit. The default Settings page then
+says "Runs as a login service." The older layout says
+"Starts with this computer" or "Installed, will not start on login".
+If Settings says "No login service installed", there is no unit: the
+app starts the tracker itself. Either way, closing the app window does
+not stop the tracker.
 
 - From a terminal, with the login service only:
   `systemctl --user stop scuffed-stat-tracker.service`, then
@@ -148,12 +150,12 @@ login service installed", the drop-in does not apply: the tracker gets
 its environment from the app, so set the variables in the environment
 you start the app from, then restart the tracker.
 
-Settings also has a switch, **Read my rank after Comp games**. When the
-tracker reads that switch, it turns on both the rank reader and the queue
-title reader, and the two environment variables still override it. If
-the switch shows "Not read by this build yet, so this changes nothing
-for now.", it does nothing, and only the environment variables turn the
-readers on.
+The default Settings page also has a switch, **Read my rank after Comp
+games**. The older layout does not. When the tracker reads that switch,
+it turns on both the rank reader and the queue title reader, and the two
+environment variables still override it. If the switch shows "Not read
+by this build yet, so this changes nothing for now.", it does nothing,
+and only the environment variables turn the readers on.
 
 ## Edit a template safely
 
@@ -161,8 +163,10 @@ readers on.
    Most readers load a pack only when the tracker starts. A download of
    an official pack only runs on the next pack sync: a tracker start, or
    the setup guide's **Download reader pack** step. Open the setup guide
-   from Settings, **Open setup guide**. That step is the last one, and you
-   can skip the capture steps before it.
+   from Settings, **Run setup again** (**Open setup guide** on the older
+   layout). That step is the last one. Use **Skip this step** on the
+   Capture and Overwatch steps, and **Continue** on Sign in. The footer
+   **Skip** closes the whole guide.
 2. Copy the folder, or at least the file you will change, to a backup
    outside `<data_dir>/templates/`. A backup `.png` left inside a hero
    folder is loaded as a hero. The tracker itself keeps a copy only for
@@ -396,11 +400,13 @@ nothing is installed.
    missing folder and downloads the pack again.
 3. Get the pack back while the install is linked to a site account (pack
    sync needs the daemon token). Pick one:
-   - With the tracker still stopped, open the setup guide (Settings,
-     **Open setup guide**) and run its last step, **Download reader
-     pack**. You can skip the capture steps before it. Then start the
-     tracker. The pack is in place before the tracker starts, so every
-     reader loads it at that start.
+   - With the tracker still stopped, open the setup guide from Settings,
+     **Run setup again** (**Open setup guide** on the older layout), and
+     run its last step, **Download reader pack**. Use **Skip this step**
+     on the Capture and Overwatch steps, and **Continue** on Sign in.
+     The footer **Skip** closes the whole guide. Then start the tracker.
+     The pack is in place before the tracker starts, so every reader
+     loads it at that start.
    - Or start the tracker, wait for the `reader pack installed` line for
      that pack in the tracker log, then restart the tracker once more. At
      start the tracker downloads only `heroes-v1` before the readers load.
