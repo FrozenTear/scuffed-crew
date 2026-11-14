@@ -933,6 +933,37 @@ async fn unknown_tournament_id_is_404_on_every_public_route() {
     )
     .await;
     assert_eq!(status, StatusCode::OK, "officer draft detail: {body}");
+    let detail: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        detail["id"],
+        draft_id.as_str(),
+        "officer draft detail: {body}"
+    );
+
+    // The sub-routes serve the draft to officers too.
+    let (status, body) = get_raw(
+        &state,
+        &format!("/api/tournaments/{draft_id}/bracket"),
+        Some(OFFICER_TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "officer draft bracket: {body}");
+    let bracket: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        bracket["tournament"]["id"],
+        draft_id.as_str(),
+        "officer draft bracket: {body}"
+    );
+    assert_eq!(
+        bracket["tournament"]["status"], "draft",
+        "officer draft bracket: {body}"
+    );
+    for sub in ["matches", "standings"] {
+        let path = format!("/api/tournaments/{draft_id}/{sub}");
+        let (status, body) = get_raw(&state, &path, Some(OFFICER_TOKEN)).await;
+        assert_eq!(status, StatusCode::OK, "officer {path}: {body}");
+        assert_eq!(body, "[]", "officer {path}: no participants yet");
+    }
 
     for tid in ["doesnotexist", "does-not-exist"] {
         for (missing, draft) in tournament_page_routes(tid)
@@ -1000,8 +1031,38 @@ async fn published_tournament_routes_still_ok() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    for path in tournament_page_routes(&tid) {
-        let (status, _) = get_raw(&state, &path, None).await;
-        assert_eq!(status, StatusCode::OK, "anon {path}");
+    let [detail, bracket, participants, matches, standings] = tournament_page_routes(&tid);
+
+    let (status, body) = get_raw(&state, &detail, None).await;
+    assert_eq!(status, StatusCode::OK, "anon {detail}: {body}");
+    let detail_json: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(detail_json["id"], tid.as_str(), "anon {detail}: {body}");
+    assert_eq!(detail_json["name"], "Open Cup", "anon {detail}: {body}");
+    assert_eq!(
+        detail_json["status"], "registration",
+        "anon {detail}: {body}"
+    );
+
+    let (status, body) = get_raw(&state, &bracket, None).await;
+    assert_eq!(status, StatusCode::OK, "anon {bracket}: {body}");
+    let bracket_json: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(
+        bracket_json["tournament"]["id"],
+        tid.as_str(),
+        "anon {bracket}: {body}"
+    );
+    assert_eq!(
+        bracket_json["tournament"]["status"], "registration",
+        "anon {bracket}: {body}"
+    );
+    for key in ["participants", "rounds", "matches"] {
+        assert_eq!(bracket_json[key], json!([]), "anon {bracket} {key}: {body}");
+    }
+
+    // No participants or matches yet: each list route is a 200 empty array.
+    for path in [participants, matches, standings] {
+        let (status, body) = get_raw(&state, &path, None).await;
+        assert_eq!(status, StatusCode::OK, "anon {path}: {body}");
+        assert_eq!(body, "[]", "anon {path}");
     }
 }
