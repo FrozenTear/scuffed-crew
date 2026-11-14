@@ -94,6 +94,10 @@
 //! The tracker's wiring (`daemon::rank` in the binary) does this: it reads
 //! every frame the end detector flags as the rank screen, 2560x1440 only,
 //! through [`game::read_for_game`], and holds the reads for the open game.
+//! While a screen is held, it also reads a frame whose rank-screen word the
+//! stability gate held back on a first sighting (the first tick after a
+//! focus pause, so the end detector never looked at it); a read there is
+//! held like any other, and a frame it does not read is a miss.
 //! A single tick that misses the screen is a break between reads; two in a
 //! row, another game, or the game closing end the screen. Then each field
 //! is kept only when the newest read that has it agrees with the read right
@@ -224,7 +228,16 @@ const RANK_OFF: &str = "turn off Read my rank after Comp games";
 /// It says "that pack" or "those packs" by how many fail, and that the
 /// tracker loads packs only at start, so a pack put in place while it runs
 /// reads after a restart.
-pub fn pack_warning(data_dir: &Path, rank_on: bool, queue_on: bool) -> Option<String> {
+///
+/// `rank_env` is true when [`ENV`] decides the rank reader: the switch is
+/// then locked, so with the rank reader on the line says to set the
+/// variables to off, not to turn the switch off.
+pub fn pack_warning(
+    data_dir: &Path,
+    rank_on: bool,
+    queue_on: bool,
+    rank_env: bool,
+) -> Option<String> {
     use crate::shadow::queue_title;
     let problem = |dir: &str, missing: bool, error: String| {
         if missing {
@@ -246,7 +259,12 @@ pub fn pack_warning(data_dir: &Path, rank_on: bool, queue_on: bool) -> Option<St
         return None;
     }
     let (lead, off) = match (rank_on, queue_on) {
+        (true, true) if rank_env => (
+            "Read my rank is on",
+            format!("set {ENV} and {} to off", queue_title::ENV),
+        ),
         (true, true) => ("Read my rank is on", RANK_OFF.to_string()),
+        (true, false) if rank_env => ("The rank screen reader is on", format!("set {ENV} to off")),
         (true, false) => ("The rank screen reader is on", RANK_OFF.to_string()),
         _ => (
             "The queue title reader is on",

@@ -538,6 +538,13 @@ fn the_poll_loop_wires_the_feed_in_order() {
     let detect = at("detect::match_end::detect_outcome_signal_polled(");
     let asked = at("stability.first_seen(detect::RANK_SCREEN_CONTEXT)");
     assert!(holds < forget && forget < detect && detect < asked && asked < read);
+    // the held screen is the feed's own, not another flag
+    let holds_stmt = &run_loop[holds..];
+    let holds_stmt = &holds_stmt[..holds_stmt.find(';').expect("rank_holds ends")];
+    assert!(
+        holds_stmt.ends_with("is_some_and(daemon::rank::RankFeed::holds_screen)"),
+        "{holds_stmt}"
+    );
     // the flag is the one gate function, fed the held screen and the
     // first sighting, not an inline `&&` the loop could drift from
     const GATE: &str = "let rank_held_back = daemon::rank::rank_held_back(";
@@ -865,8 +872,11 @@ fn a_reader_on_with_no_usable_pack_records_games_and_warns() {
         let seen = read_rank_screen(None, Some(OutcomeSource::RankScreen), held_back, &frame());
         assert_eq!(seen, None);
     }
-    assert_eq!(pack_warning(dir.path(), false, false), None, "both off");
-    let missing = pack_warning(dir.path(), true, true).expect("a warning");
+    // rank reader on, queue title reader on, the rank variable set
+    let warn = |rank: bool, queue: bool, env: bool| pack_warning(dir.path(), rank, queue, env);
+    assert_eq!(warn(false, false, false), None, "both off");
+    assert_eq!(warn(false, false, true), None, "both off by the env");
+    let missing = warn(true, true, false).expect("a warning");
     // two packs: "those packs", and the restart the start-only load needs
     assert_eq!(
         missing,
@@ -878,7 +888,7 @@ fn a_reader_on_with_no_usable_pack_records_games_and_warns() {
     assert!(!missing.contains('\u{2014}'), "no em dash");
     // the rank switch Off (STAT_TRACKER_RANK_RECOGNIZER=off) with the queue
     // title reader still on: the line never says Read my rank is on
-    let only_queue = pack_warning(dir.path(), false, true).expect("a warning");
+    let only_queue = warn(false, true, true).expect("a warning");
     assert_eq!(
         only_queue,
         "The queue title reader is on, but the pack in templates/queue-title-v1 is not \
@@ -887,7 +897,7 @@ fn a_reader_on_with_no_usable_pack_records_games_and_warns() {
          STAT_TRACKER_QUEUE_TITLE_RECOGNIZER to off."
     );
     // the queue title reader off by its variable: the rank reader alone
-    let only_rank = pack_warning(dir.path(), true, false).expect("a warning");
+    let only_rank = warn(true, false, false).expect("a warning");
     assert_eq!(
         only_rank,
         "The rank screen reader is on, but the pack in templates/rank-v1 is not installed. \
@@ -895,12 +905,34 @@ fn a_reader_on_with_no_usable_pack_records_games_and_warns() {
          start: install the pack, then restart the tracker, or turn off Read my rank after \
          Comp games."
     );
+    // STAT_TRACKER_RANK_RECOGNIZER=on locks the switch: the line points at
+    // the variables, never at the switch it cannot turn
+    let env_rank = warn(true, false, true).expect("a warning");
+    assert_eq!(
+        env_rank,
+        "The rank screen reader is on, but the pack in templates/rank-v1 is not installed. \
+         Games still record, without what that pack reads. The tracker loads packs only at \
+         start: install the pack, then restart the tracker, or set \
+         STAT_TRACKER_RANK_RECOGNIZER to off."
+    );
+    let env_both = warn(true, true, true).expect("a warning");
+    assert_eq!(
+        env_both,
+        "Read my rank is on, but the pack in templates/rank-v1 is not installed and the pack \
+         in templates/queue-title-v1 is not installed. Games still record, without what those \
+         packs read. The tracker loads packs only at start: install the packs, then restart \
+         the tracker, or set STAT_TRACKER_RANK_RECOGNIZER and \
+         STAT_TRACKER_QUEUE_TITLE_RECOGNIZER to off."
+    );
+    for line in [&env_rank, &env_both] {
+        assert!(!line.contains("turn off Read my rank"), "{line}");
+    }
     // a pack file that does not parse: did not load
     let rank_dir = dir.path().join(TEMPLATE_DIR);
     std::fs::create_dir_all(&rank_dir).unwrap();
     std::fs::write(rank_dir.join("templates.json"), "not a pack").unwrap();
     assert!(RankFeed::for_setting(RankSetting::RankV1, dir.path()).is_none());
-    let broken = pack_warning(dir.path(), true, false).expect("a warning");
+    let broken = warn(true, false, false).expect("a warning");
     assert!(
         broken.starts_with(
             "The rank screen reader is on, but the pack in templates/rank-v1 did not load ("
@@ -912,14 +944,14 @@ fn a_reader_on_with_no_usable_pack_records_games_and_warns() {
     // folder) did not load; it is not "not installed"
     let queue_dir = dir.path().join(queue_title::TEMPLATE_DIR);
     std::fs::create_dir_all(queue_dir.join(queue_title::PACK_FILE)).unwrap();
-    let unreadable = pack_warning(dir.path(), false, true).expect("a warning");
+    let unreadable = warn(false, true, false).expect("a warning");
     assert!(
         unreadable.contains("the pack in templates/queue-title-v1 did not load ("),
         "{unreadable}"
     );
     assert!(!unreadable.contains("not installed"), "{unreadable}");
     // both broken: one line, "those packs"
-    let both = pack_warning(dir.path(), true, true).expect("a warning");
+    let both = warn(true, true, false).expect("a warning");
     assert!(both.starts_with("Read my rank is on, but "), "{both}");
     assert_eq!(both.matches("did not load (").count(), 2, "{both}");
     assert!(both.contains("without what those packs read"), "{both}");
@@ -1117,6 +1149,10 @@ fn the_first_tick_after_a_pause_holds_the_rank_word_back() {
     stability.reset();
     assert_eq!(detect(&rgb, &mut stability), None, "deferred: no source");
     assert!(stability.first_seen(RANK_SCREEN_CONTEXT));
+    // the next tick on the same crop has history: the detector looks at it,
+    // so the flag is gone and that tick is not held back
+    let _ = detect(&rgb, &mut stability);
+    assert!(!stability.first_seen(RANK_SCREEN_CONTEXT));
     // a dark frame is never checked, so never a first sighting
     let mut stability = FrameStability::default();
     assert_eq!(detect(&frame(), &mut stability), None);
