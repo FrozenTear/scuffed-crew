@@ -67,7 +67,7 @@ Which names each tracker asks for:
 | 0.5.0-alpha.7 to 0.5.0-alpha.12 | six: `heroes-v1.tar` first, then `heroes-v2.tar`, `heroes-v2-1080.tar`, `bans-v1.tar`, `maps-v1.tar`, `words-v1.tar` |
 | 0.5.0-rc.1 to 0.5.0-rc.9, 0.5.0, and 0.6.0-alpha.1 to 0.6.0-alpha.1.4 | seven: the six, then `names-v1.tar` (optional) |
 | 0.6.0-alpha.2 to 0.6.0-alpha.3, and main | eight: the seven, then `bans-picks-v1.tar` (optional) |
-| wip/0.6 after 0.6.0-alpha.3, from the next 0.6.0-alpha.3 patch release on | ten: the eight, then `rank-v1.tar` (optional) and `queue-title-v1.tar` (optional) |
+| the first release after 0.6.0-alpha.3, and later | ten: the eight, then `rank-v1.tar` (optional) and `queue-title-v1.tar` (optional) |
 
 No tracker pins a pack `version`: each one takes the `version` the list
 gives. `heroes-v1.tar` is the only pack every release needs (it is the one
@@ -623,7 +623,7 @@ inside `PACKS_DIR`.
 | `maps-v1.tar` | `templates/maps-v1/` | `atlas.json`, `g<4 hex digits>.png` | new reader, map and mode from the Tab banner |
 | `words-v1.tar` | `templates/words-v1/` | `<word_id>.png`, `<name>.json` | new reader, match result from result frames, the result word on the accolade and rank screens, and the end title on poll ticks and Tab frames when the pack has end-title templates (hand-installed `templates/result/` is the fallback) |
 | `names-v1.tar` | `templates/names-v1/` | `glyphs.png`, `glyphs.txt`, `marks.png`, `marks.txt`, `compose.txt`, `whiten.f32`. The inner `manifest.json` is kept in the folder too | name reader. Optional. Single-letter templates only, no member data. Loaded at startup, and reloaded after each install by the daemon's pack sync. Until a load finishes, names fall back to Tesseract |
-| `rank-v1.tar` | `templates/rank-v1/` | `templates.json` only | rank screen reader (rank-v1). Optional, and off unless `STAT_TRACKER_RANK_RECOGNIZER` is on. Loaded once at daemon start: a pack that lands later is used from the next start. Banner classes are named as the screen writes them (`COMPETITIVE: OPEN QUEUE`, `COMPETITIVE: ROLE QUEUE`) |
+| `rank-v1.tar` | `templates/rank-v1/` | `templates.json` only | rank screen reader (rank-v1). Optional, and off unless `STAT_TRACKER_RANK_RECOGNIZER` is on. Loaded once at daemon start: a pack that lands later is used from the next start. Banner classes are named as the screen writes them (`COMPETITIVE: 6V6 OPEN QUEUE`, `COMPETITIVE: ROLE QUEUE`) |
 | `queue-title-v1.tar` | `templates/queue-title-v1/` | `templates.json` only | queue title reader. Optional, and off unless `STAT_TRACKER_QUEUE_TITLE_RECOGNIZER` is on. Loaded once at daemon start, like `rank-v1.tar`. Classes `OPEN QUEUE` and `ROLE QUEUE` |
 
 `<hero>` is a file stem from `HERO_NAMES` in `crates/types/src/heroes.rs`
@@ -635,7 +635,15 @@ any one top-level file, or one file in `special/`.
 
 Each pack is checked on its own. A file outside its pack's layout, a bad
 sha256, or a failed download refuses that pack only. The other packs still
-install, and the refused pack's folder is left as it was.
+install, and the refused pack's folder is left as it was. A `rank-v1.tar` or
+`queue-title-v1.tar` whose `templates.json` its reader does not load is
+refused the same way, before the swap.
+
+When no version is recorded for a pack (a folder placed by hand, or one an
+older tracker installed), its first sync moves the old folder, every file in
+it, to `templates-kept/<pack>-<stamp>/` under the data folder (beside
+`templates/`, so the stale folder sweep never removes it) and logs that
+path. If the swap then fails, the folder is put back.
 
 If the list is empty, the tracker does nothing. If the list has entries but
 none is `heroes-v1.tar`, every tracker reports "The reader pack did not match

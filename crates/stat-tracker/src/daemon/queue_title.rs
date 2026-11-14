@@ -93,7 +93,9 @@ pub(crate) type ReadFn = Arc<dyn Fn(&RgbImage, Screen) -> Field<String> + Send +
 /// The next mode hint waiting for the next game's read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PendingHint {
-    /// The mode banner word, trimmed and not empty.
+    /// The hint the rank wiring handed on ([`super::rank::queue_hint`]: the
+    /// mode banner word without its `COMPETITIVE` and team size words),
+    /// trimmed and not empty.
     pub(crate) text: String,
     /// The session whose rank screen showed it: the hint names the game
     /// after this one, so this one never settles it.
@@ -337,8 +339,9 @@ pub(crate) fn confident(read: &Field<String>) -> Option<&str> {
 /// `COMPETITIVE: ROLE QUEUE` (`COMPETITIVE ROLE`) does not agree with a
 /// `ROLE QUEUE` title (`ROLE`); the rank wiring maps its own labels to
 /// this spelling before it sets a hint ([`super::rank::queue_hint`] drops
-/// the `COMPETITIVE:` of the banner). A spelling that does not match is
-/// dropped, never confirmed: the safe way to fail.
+/// the `COMPETITIVE:` of the banner and a `5V5` or `6V6` after it). A
+/// spelling that does not match is dropped, never confirmed: the safe way
+/// to fail.
 /// The key itself is [`stat_tracker::model::queue_key`], shared with the
 /// upload's open queue check.
 pub(crate) fn queue_key(text: &str) -> String {

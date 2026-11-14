@@ -626,6 +626,36 @@ fn the_banner_classes_map_to_the_queue_title_spelling() {
     use crate::daemon::queue_title::hint_agrees;
     for (banner, hint, title, other) in [
         (
+            "COMPETITIVE: 6V6 OPEN QUEUE",
+            "OPEN QUEUE",
+            "OPEN QUEUE",
+            "ROLE QUEUE",
+        ),
+        (
+            "COMPETITIVE-6V6-OPEN-QUEUE",
+            "OPEN-QUEUE",
+            "OPEN QUEUE",
+            "ROLE QUEUE",
+        ),
+        (
+            "COMPETITIVE_6V6_OPEN_QUEUE",
+            "OPEN_QUEUE",
+            "OPEN QUEUE",
+            "ROLE QUEUE",
+        ),
+        (
+            "competitive:6v6_open_queue",
+            "open_queue",
+            "OPEN QUEUE",
+            "ROLE QUEUE",
+        ),
+        (
+            "COMPETITIVE: 5V5 ROLE QUEUE",
+            "ROLE QUEUE",
+            "ROLE QUEUE",
+            "OPEN QUEUE",
+        ),
+        (
             "COMPETITIVE: OPEN QUEUE",
             "OPEN QUEUE",
             "OPEN QUEUE",
@@ -643,30 +673,61 @@ fn the_banner_classes_map_to_the_queue_title_spelling() {
             "ROLE QUEUE",
             "OPEN QUEUE",
         ),
+        ("ROLE QUEUE", "ROLE QUEUE", "ROLE QUEUE", "OPEN QUEUE"),
     ] {
         assert_eq!(queue_hint(banner), hint, "{banner:?}");
         assert!(hint_agrees(queue_hint(banner), title), "{banner:?}");
         assert!(!hint_agrees(queue_hint(banner), other), "{banner:?}");
     }
-    // Anything else is kept as read, trimmed.
+    // Anything else is kept as read, trimmed. A team size word is dropped
+    // only right after a dropped COMPETITIVE.
     for (banner, kept) in [
         ("OPEN QUEUE", "OPEN QUEUE"),
         (" ROLE QUEUE ", "ROLE QUEUE"),
+        ("6V6 OPEN QUEUE", "6V6 OPEN QUEUE"),
         ("COMPETITIVE", "COMPETITIVE"),
         ("COMPETITIVE:", "COMPETITIVE:"),
+        ("COMPETITIVE: 6V6", "COMPETITIVE: 6V6"),
         ("COMPETITIVEROLE QUEUE", "COMPETITIVEROLE QUEUE"),
         ("QUICK PLAY: ROLE QUEUE", "QUICK PLAY: ROLE QUEUE"),
     ] {
         assert_eq!(queue_hint(banner), kept, "{banner:?}");
     }
-    // The upload's open queue check reads the banner word as read.
-    for (banner, open) in [
-        ("COMPETITIVE: OPEN QUEUE", true),
-        ("COMPETITIVE: ROLE QUEUE", false),
+}
+
+#[tokio::test]
+async fn an_open_queue_banner_is_handed_on_without_its_team_size() {
+    let (dir, store) = store_with("g1").await;
+    let queue = QueueTitleFeed::with_read(Arc::new(|_, _| Field::none()));
+    let mut dump = PregameDump::with_readers(
+        false,
+        None,
+        Some(queue),
+        dir.path(),
+        std::time::Duration::from_millis(1_500),
+    )
+    .expect("a saver for the queue title reader");
+    let mut feed = RankFeed::with_read(Arc::new(|_| None));
+    let mut read = full(40);
+    read.next_mode_hint = t("COMPETITIVE: 6V6 OPEN QUEUE", 0.75);
+    for seen in [
+        Some(Some(read.clone())),
+        Some(Some(read.clone())),
+        None,
+        None,
     ] {
-        let key = stat_tracker::model::queue_key(banner);
-        assert_eq!(key.rsplit(' ').next() == Some("OPEN"), open, "{banner:?}");
+        tick(&mut feed, seen, Some("g1"), &store, Some(&mut dump)).await;
     }
+    assert_eq!(
+        dump.pending_hint(),
+        Some(("OPEN QUEUE".to_string(), "g1".to_string()))
+    );
+    let rows = store.get_session_snapshots("g1").await.unwrap();
+    assert_eq!(
+        rows[0].rank_update,
+        Some(read),
+        "the game record keeps the banner word as read"
+    );
 }
 
 #[tokio::test]

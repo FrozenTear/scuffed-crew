@@ -36,10 +36,12 @@
 //! 5. Accept the best class only when its whole score is at least
 //!    [`MIN_SCORE`], its strip score at least [`MIN_STRIP`], and it leads
 //!    the runner-up by [`MIN_MARGIN`]. Otherwise the title is `None`, never
-//!    a guess. Titles the pack does not know (competitive, arcade) are
-//!    expected to come back `None` too, but that is extrapolated from the
-//!    held-out runs (each known title left out of the pack in turn), not
-//!    measured on real competitive or arcade frames: the bench has none.
+//!    a guess. Competitive pre-game titles read the bare queue name
+//!    (`OPEN QUEUE`, `ROLE QUEUE`), which this pack does know. Titles the
+//!    pack does not have (arcade, or any other) are expected to come back
+//!    `None`, but that is extrapolated from the held-out runs (each known
+//!    title left out of the pack in turn), not measured on real arcade
+//!    frames: the bench has none.
 //!
 //! # Thresholds
 //!

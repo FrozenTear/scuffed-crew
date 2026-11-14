@@ -17,13 +17,24 @@
 //! ([`crate::shadow::banner::MapDirs`]) and `words-v1.tar` its result word
 //! pack ([`crate::shadow::result::ResultDirs`]). `names-v1.tar` is the
 //! name reader's letter pack ([`crate::names::pack::dir_in`]). `bans-v1.tar`
-//! is downloaded into a folder no reader opens yet.
+//! is downloaded into a folder no reader opens yet. `rank-v1.tar` and
+//! `queue-title-v1.tar` ([`PackLayout::TemplatesJson`], one `templates.json`
+//! only) land in the folders the rank and queue title readers already load
+//! from ([`crate::shadow::rank::TEMPLATE_DIR`],
+//! [`crate::shadow::queue_title::TEMPLATE_DIR`]). A staged one is loaded with
+//! its reader's `TemplateSet::load_dir` before the swap and refused on an
+//! error, leaving the old folder. Those readers load their pack at daemon
+//! start only, so a restart is needed after the first sync.
 //! Each pack has its own [`PackLayout`]; any path outside it refuses that
 //! pack only.
 //!
 //! Size and sha256 are checked against the list before anything is
 //! unpacked. Each pack is staged and swapped into place on its own, so one
-//! bad or failed pack never blocks, rolls back, or deletes another. A pack
+//! bad or failed pack never blocks, rolls back, or deletes another. When no
+//! version is recorded for a pack, a folder already in its place was put
+//! there by hand (or by an older tracker): the first sync moves it whole to
+//! `<data_dir>/templates-kept/<pack>-<stamp>/`, outside the stale sweep,
+//! logs that path, and puts it back if the swap fails. A pack
 //! the server does not list keeps whatever is installed. The token is never
 //! written to a log.
 //!
@@ -61,6 +72,7 @@ pub mod layout;
 
 // The pack layout lives in `packs/layout.rs` (0.6 lane D V4). Re-exported at
 // the old `packs::` paths.
+pub(crate) use layout::is_glyph_name;
 pub use layout::{
     HEROES_PACK_NAME, HEROES_PORTRAIT_1080_PACK_NAME, HEROES_PORTRAIT_PACK_NAME, PACKS, PackLayout,
     PackSpec, installed_manifest, installed_record, pack_spec, record_paths,
@@ -69,7 +81,6 @@ use layout::{
     MAX_STEM, dir_label, is_sha256, is_word_byte, manifests_path, read_manifests, read_versions,
     unique_suffix, versions_path,
 };
-pub(crate) use layout::{is_glyph_name, swap_dir};
 
 /// `Retry-After` waits stay inside this range. The setup guide uses this
 /// same clamp before it adds a wait to a clock.
@@ -1189,7 +1200,9 @@ async fn run_sync(
             held_back += 1;
             continue;
         } else {
-            let outcome = match sync_one(&fetch, data_dir, spec, entry).await {
+            // No version recorded: a folder there was placed by hand.
+            let hand_placed = !versions.contains_key(spec.name);
+            let outcome = match sync_one(&fetch, data_dir, spec, entry, hand_placed).await {
                 Step::Installed(manifest_sha256) => {
                     installed.push(InstalledPack {
                         name: spec.name,
@@ -1316,12 +1329,14 @@ fn is_current(
 /// folder is not in place, so the next sync downloads the pack again.
 fn in_place(data_dir: &Path, spec: &PackSpec) -> bool {
     let dir = spec.dir_in(data_dir);
+    let is_file = |name: &str| {
+        dir.join(name)
+            .symlink_metadata()
+            .is_ok_and(|meta| meta.is_file())
+    };
     dir.is_dir()
-        && (!spec.layout.keeps_manifest()
-            || dir
-                .join("manifest.json")
-                .symlink_metadata()
-                .is_ok_and(|meta| meta.is_file()))
+        && (!spec.layout.keeps_manifest() || is_file("manifest.json"))
+        && (spec.layout != PackLayout::TemplatesJson || is_file("templates.json"))
 }
 
 /// File locked for the length of one sync, so the daemon and the app never
@@ -1486,6 +1501,7 @@ async fn sync_one(
     data_dir: &Path,
     spec: &'static PackSpec,
     entry: &PackListEntry,
+    hand_placed: bool,
 ) -> Step {
     let parent = pack_parent(data_dir, spec);
     if let Err(message) = std::fs::create_dir_all(&parent) {
@@ -1511,7 +1527,7 @@ async fn sync_one(
         Get::Failed(message) => return Step::Done(PackSync::Failed(message)),
     };
     let (data_dir, entry) = (data_dir.to_path_buf(), entry.clone());
-    let installed = off_runtime(move || install_pack(&data_dir, spec, &entry, &bytes))
+    let installed = off_runtime(move || install_pack(&data_dir, spec, &entry, &bytes, hand_placed))
         .await
         .unwrap_or_else(|| Err(PackSync::Failed(PACK_FAILED.to_string())));
     match installed {
@@ -1528,14 +1544,18 @@ async fn off_runtime<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'stati
 }
 
 /// The file side of one download: check the bytes against the list, unpack
-/// into a staging folder and swap it in. Blocking; see [`off_runtime`].
-/// `Ok` carries the sha256 of the inner manifest; an `Err` is the
-/// [`PackSync::Failed`] to report.
+/// into a staging folder, load a [`PackLayout::TemplatesJson`] pack with
+/// its reader ([`check_staged`]) and swap it in. When no version is
+/// recorded (`hand_placed`), a folder already there is moved to
+/// `templates-kept/` first ([`layout::keep_hand_folder`]) and put back if
+/// the swap fails. Blocking; see [`off_runtime`]. `Ok` carries the sha256
+/// of the inner manifest; an `Err` is the [`PackSync::Failed`] to report.
 fn install_pack(
     data_dir: &Path,
     spec: &PackSpec,
     entry: &PackListEntry,
     bytes: &[u8],
+    hand_placed: bool,
 ) -> Result<String, PackSync> {
     #[cfg(test)]
     tests::note_blocking_work(data_dir);
@@ -1557,12 +1577,53 @@ fn install_pack(
                 return Err(PackSync::Failed(message.to_string()));
             }
         };
-    if let Err(message) = swap_dir(&staging, &live) {
+    if let Err(message) = check_staged(spec, &staging) {
+        let _ = std::fs::remove_dir_all(&staging);
+        tracing::warn!(pack = spec.name, error = %message, "reader pack did not load; the installed pack was left in place");
+        return Err(PackSync::Failed(PACK_UNSAFE.to_string()));
+    }
+    let kept = if hand_placed && live.symlink_metadata().is_ok() {
+        match layout::keep_hand_folder(data_dir, &live) {
+            Ok(kept) => Some(kept),
+            Err(message) => {
+                let _ = std::fs::remove_dir_all(&staging);
+                tracing::warn!(pack = spec.name, error = %message, "reader pack folder placed by hand was not moved aside; it was left in place");
+                return Err(PackSync::Failed(PACK_FAILED.to_string()));
+            }
+        }
+    } else {
+        None
+    };
+    if let Err(message) = layout::swap_or_restore(&staging, &live, kept.as_deref()) {
         let _ = std::fs::remove_dir_all(&staging);
         tracing::warn!(pack = spec.name, error = %message, "reader pack was not swapped into place");
         return Err(PackSync::Failed(PACK_FAILED.to_string()));
     }
+    if let Some(kept) = kept {
+        tracing::warn!(
+            pack = spec.name,
+            kept = %kept.display(),
+            "reader pack folder placed by hand was replaced; the old folder is kept at this path"
+        );
+    }
     Ok(manifest_sha256)
+}
+
+/// A staged [`PackLayout::TemplatesJson`] pack must load with its reader's
+/// `TemplateSet::load_dir`, or it is refused before the swap. Other
+/// layouts pass.
+fn check_staged(spec: &PackSpec, staging: &Path) -> Result<(), String> {
+    match spec.name {
+        layout::RANK_PACK_NAME => crate::shadow::rank::templates::TemplateSet::load_dir(staging)
+            .map(drop)
+            .map_err(|err| err.to_string()),
+        layout::QUEUE_TITLE_PACK_NAME => {
+            crate::shadow::queue_title::templates::TemplateSet::load_dir(staging)
+                .map(drop)
+                .map_err(|err| err.to_string())
+        }
+        _ => Ok(()),
+    }
 }
 
 /// The folder a pack's live, staging and backup folders sit in.
@@ -2977,7 +3038,7 @@ mod tests {
         std::fs::write(live.join("old.txt"), b"old").unwrap();
         std::fs::create_dir(&staging).unwrap();
         std::fs::write(staging.join("new.txt"), b"new").unwrap();
-        swap_dir(&staging, &live).expect("swap");
+        layout::swap_dir(&staging, &live).expect("swap");
         assert_eq!(std::fs::read(live.join("new.txt")).unwrap(), b"new");
         assert!(!live.join("old.txt").exists());
         assert!(!staging.exists());
@@ -2986,7 +3047,7 @@ mod tests {
         let staged = dir.path().join(".heroes-fresh");
         std::fs::create_dir(&staged).unwrap();
         std::fs::write(staged.join("only.txt"), b"only").unwrap();
-        swap_dir(&staged, &fresh).expect("create");
+        layout::swap_dir(&staged, &fresh).expect("create");
         assert_eq!(std::fs::read(fresh.join("only.txt")).unwrap(), b"only");
         assert!(!staged.exists());
     }
@@ -3119,7 +3180,12 @@ mod tests {
     }
 
     /// File names in each pack's own layout, shaped like the real packs.
+    /// rank-v1 and queue-title-v1 carry a `templates.json` their reader
+    /// loads, as install checks that before the swap.
     fn sample_files(name: &str) -> Vec<(String, Vec<u8>)> {
+        if matches!(name, "rank-v1.tar" | "queue-title-v1.tar") {
+            return rank_queue_title::pack_files(name);
+        }
         let names: &[&str] = match name {
             "heroes-v1.tar" => &["ana.png", "special/skull_01.png"],
             "heroes-v2.tar" | "heroes-v2-1080.tar" => {
@@ -3129,7 +3195,6 @@ mod tests {
             "bans-picks-v1.tar" => &["ana.png", "no-preference.png"],
             "maps-v1.tar" => &["atlas.json", "g0041.png", "g003a.png"],
             "words-v1.tar" => &["accolade_victory.png", "end_title_defeat.png", "words.json"],
-            "rank-v1.tar" | "queue-title-v1.tar" => &["templates.json"],
             "names-v1.tar" => &[
                 "glyphs.png",
                 "glyphs.txt",

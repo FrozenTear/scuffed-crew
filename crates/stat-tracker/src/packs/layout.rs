@@ -239,6 +239,44 @@ pub(crate) fn swap_dir(staging: &Path, live: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Folder under the data dir that a pack folder placed by hand is moved
+/// into by its first sync. A sibling of `templates/`, so the stale sweep,
+/// which only walks `templates/`, never removes it.
+pub const KEPT_DIR: &str = "templates-kept";
+
+/// Move `live`, a pack folder with no recorded version (placed by hand),
+/// to `<data_dir>/templates-kept/<pack>-<stamp>/` and return that path.
+/// Nothing moves on an error.
+pub(super) fn keep_hand_folder(data_dir: &Path, live: &Path) -> Result<PathBuf, String> {
+    let root = data_dir.join(KEPT_DIR);
+    std::fs::create_dir_all(&root).map_err(|err| err.to_string())?;
+    let kept = root.join(format!("{}-{}", dir_label(live), unique_suffix()));
+    std::fs::rename(live, &kept).map_err(|err| err.to_string())?;
+    let _ = sync_dir(&root);
+    Ok(kept)
+}
+
+/// [`swap_dir`], and when it fails, rename the folder [`keep_hand_folder`]
+/// moved aside back to `live`, so a failed swap never loses it.
+pub(super) fn swap_or_restore(
+    staging: &Path,
+    live: &Path,
+    kept: Option<&Path>,
+) -> Result<(), String> {
+    let swapped = swap_dir(staging, live);
+    if swapped.is_err()
+        && let Some(kept) = kept
+        && let Err(err) = std::fs::rename(kept, live)
+    {
+        tracing::warn!(
+            kept = %kept.display(),
+            error = %err,
+            "reader pack folder placed by hand was not put back; it is kept at this path"
+        );
+    }
+    swapped
+}
+
 fn sync_dir(path: &Path) -> std::io::Result<()> {
     std::fs::File::open(path)?.sync_all()
 }

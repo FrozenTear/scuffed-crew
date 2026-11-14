@@ -418,23 +418,38 @@ async fn apply(
 
 /// The banner word spelled as the queue title pack spells the queue. The
 /// rank-v1 pack names its banner classes as the screen writes them
-/// (`COMPETITIVE: OPEN QUEUE`, `COMPETITIVE: ROLE QUEUE`), and the next
-/// game's pre-game title reads `OPEN QUEUE` or `ROLE QUEUE`, so a leading
-/// `COMPETITIVE` word (and its colon) is dropped before the hint is handed
-/// on ([`super::queue_title::hint_agrees`]). Anything else is kept as read,
-/// trimmed. The upload still sends the banner word as read.
+/// (`COMPETITIVE: 6V6 OPEN QUEUE`, `COMPETITIVE: ROLE QUEUE`), and the next
+/// game's pre-game title reads `OPEN QUEUE` or `ROLE QUEUE`. So a leading
+/// `COMPETITIVE` word is dropped, then a team size word right after it
+/// (`5V5` or `6V6`), before the hint is handed on
+/// ([`super::queue_title::hint_agrees`], which stays strict). Words are
+/// split as [`stat_tracker::model::queue_key`] splits them, so a colon,
+/// dash or underscore between them works the same. What is left is the rest
+/// of the banner from its first word, as read. With no leading
+/// `COMPETITIVE` word, or nothing after the dropped words, the banner is
+/// kept as read, trimmed. The upload and the game record still keep the
+/// banner word as read.
 pub(crate) fn queue_hint(banner: &str) -> &str {
-    const PREFIX: &str = "COMPETITIVE";
     let text = banner.trim();
-    let rest = match text.get(..PREFIX.len()) {
-        Some(head) if head.eq_ignore_ascii_case(PREFIX) => &text[PREFIX.len()..],
-        _ => return text,
-    };
-    let queue = rest.trim_start_matches(|c: char| c == ':' || c.is_whitespace());
-    if queue.len() == rest.len() || queue.is_empty() {
-        text
-    } else {
-        queue
+    let mut words = text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(|word| (word.as_ptr() as usize - text.as_ptr() as usize, word));
+    if !words
+        .next()
+        .is_some_and(|(_, word)| word.eq_ignore_ascii_case("COMPETITIVE"))
+    {
+        return text;
+    }
+    let mut next = words.next();
+    if next.is_some_and(|(_, word)| {
+        word.eq_ignore_ascii_case("5V5") || word.eq_ignore_ascii_case("6V6")
+    }) {
+        next = words.next();
+    }
+    match next {
+        Some((at, _)) => &text[at..],
+        None => text,
     }
 }
 

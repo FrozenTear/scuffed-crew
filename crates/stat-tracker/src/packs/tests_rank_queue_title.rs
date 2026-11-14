@@ -1,7 +1,8 @@
 //! The rank-v1 and queue-title-v1 packs: a real unpack and sync of tars
 //! built here from tiny synthetic `templates.json` files, the readers
 //! loading what was installed, a folder placed by hand before the packs
-//! were listed, and the cases where no pack arrives.
+//! were listed (kept under `templates-kept/` by the first sync), a pack its
+//! reader refuses, and the cases where no pack arrives.
 
 use super::layout::{QUEUE_TITLE_PACK_DIR, QUEUE_TITLE_PACK_NAME, RANK_PACK_DIR, RANK_PACK_NAME};
 use super::*;
@@ -36,7 +37,8 @@ fn queue_title_json() -> Vec<u8> {
     .expect("json")
 }
 
-fn pack_files(name: &str) -> Vec<(String, Vec<u8>)> {
+/// The one file of each pack, as [`super::sample_files`] serves it too.
+pub(super) fn pack_files(name: &str) -> Vec<(String, Vec<u8>)> {
     let data = match name {
         RANK_PACK_NAME => rank_json(),
         QUEUE_TITLE_PACK_NAME => queue_title_json(),
@@ -145,25 +147,44 @@ async fn real_packs_unpack_into_templates_and_both_readers_load_them() {
     assert_eq!(outcome(&again, QUEUE_TITLE_PACK_NAME), &PackSync::Current);
 }
 
-#[tokio::test]
-async fn a_folder_placed_by_hand_is_replaced_whole_by_the_first_sync() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let hand = dir.path().join(RANK_PACK_DIR);
-    std::fs::create_dir_all(&hand).unwrap();
-    std::fs::write(hand.join("templates.json"), b"{\"hand\":true}").unwrap();
-    std::fs::write(hand.join("templates.json.bak-roles-20261114"), b"old").unwrap();
-    // No version is recorded for a folder placed by hand, so it is fetched.
-    let served = serve_only(&[RANK_PACK_NAME], "full-20261114");
-    let report = sync(&served, dir.path()).await;
-    assert_eq!(outcome(&report, RANK_PACK_NAME), &PackSync::Installed);
-    let mut left: Vec<String> = std::fs::read_dir(&hand)
+/// The folders under `templates-kept/`, by name.
+fn kept_folders(data_dir: &Path) -> Vec<PathBuf> {
+    let mut kept: Vec<PathBuf> = std::fs::read_dir(data_dir.join(layout::KEPT_DIR))
+        .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
+        .unwrap_or_default();
+    kept.sort();
+    kept
+}
+
+fn file_names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
         .unwrap()
         .flatten()
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .collect();
-    left.sort();
+    names.sort();
+    names
+}
+
+/// A rank-v1 folder placed by hand: its `templates.json` and a backup.
+fn plant_hand_rank(data_dir: &Path) -> PathBuf {
+    let hand = data_dir.join(RANK_PACK_DIR);
+    std::fs::create_dir_all(&hand).unwrap();
+    std::fs::write(hand.join("templates.json"), b"{\"hand\":true}").unwrap();
+    std::fs::write(hand.join("templates.json.bak-roles-20261114"), b"old").unwrap();
+    hand
+}
+
+#[tokio::test]
+async fn a_folder_placed_by_hand_is_replaced_whole_by_the_first_sync() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let hand = plant_hand_rank(dir.path());
+    // No version is recorded for a folder placed by hand, so it is fetched.
+    let served = serve_only(&[RANK_PACK_NAME], "full-20261114");
+    let report = sync(&served, dir.path()).await;
+    assert_eq!(outcome(&report, RANK_PACK_NAME), &PackSync::Installed);
     assert_eq!(
-        left,
+        file_names(&hand),
         ["templates.json"],
         "the extra file goes with the old folder"
     );
@@ -172,6 +193,129 @@ async fn a_folder_placed_by_hand_is_replaced_whole_by_the_first_sync() {
         rank_json()
     );
     assert_eq!(leftovers(dir.path()), Vec::<String>::new());
+    // The old folder is kept whole beside `templates/`, not deleted.
+    let kept = kept_folders(dir.path());
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert!(
+        kept[0]
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("rank-v1-"),
+        "{kept:?}"
+    );
+    assert_eq!(
+        file_names(&kept[0]),
+        ["templates.json", "templates.json.bak-roles-20261114"]
+    );
+    assert_eq!(
+        std::fs::read(kept[0].join("templates.json")).unwrap(),
+        b"{\"hand\":true}"
+    );
+    assert_eq!(
+        std::fs::read(kept[0].join("templates.json.bak-roles-20261114")).unwrap(),
+        b"old"
+    );
+
+    // Once a version is recorded, the next new version swaps as before and
+    // keeps nothing more.
+    let served = serve_only(&[RANK_PACK_NAME], "full-20261115");
+    let report = sync(&served, dir.path()).await;
+    assert_eq!(outcome(&report, RANK_PACK_NAME), &PackSync::Installed);
+    assert_eq!(kept_folders(dir.path()), kept);
+}
+
+/// A tar the layout allows whose `templates.json` the reader refuses is
+/// refused before the swap: the folder placed by hand stays where it was,
+/// nothing is kept or staged, and no version is recorded.
+#[tokio::test]
+async fn a_pack_its_reader_cannot_load_is_refused_and_the_hand_folder_stays() {
+    for (name, sub) in [
+        (RANK_PACK_NAME, RANK_PACK_DIR),
+        (QUEUE_TITLE_PACK_NAME, QUEUE_TITLE_PACK_DIR),
+    ] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hand = dir.path().join(sub);
+        std::fs::create_dir_all(&hand).unwrap();
+        std::fs::write(hand.join("templates.json"), b"hand").unwrap();
+        std::fs::write(hand.join("notes.txt"), b"old").unwrap();
+        let bytes = build_pack(name, "2", &[("templates.json".to_string(), b"{}".to_vec())]);
+        let served = serve(
+            vec![entry_json(name, "2", &bytes)],
+            BTreeMap::from([(name.to_string(), (200, bytes))]),
+        );
+        let report = sync(&served, dir.path()).await;
+        assert_eq!(
+            outcome(&report, name),
+            &PackSync::Failed(PACK_UNSAFE.into()),
+            "{name}"
+        );
+        assert_eq!(file_names(&hand), ["notes.txt", "templates.json"], "{name}");
+        assert_eq!(std::fs::read(hand.join("templates.json")).unwrap(), b"hand");
+        assert_eq!(kept_folders(dir.path()), Vec::<PathBuf>::new(), "{name}");
+        assert_eq!(leftovers(dir.path()), Vec::<String>::new(), "{name}");
+        assert!(!read_versions(dir.path()).contains_key(name), "{name}");
+    }
+}
+
+/// The keep moves the whole folder under `templates-kept/`, and a swap that
+/// fails after it puts the folder back where it was.
+#[test]
+fn a_failed_swap_puts_the_kept_hand_folder_back() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let hand = plant_hand_rank(dir.path());
+    let kept = layout::keep_hand_folder(dir.path(), &hand).expect("keep");
+    assert!(!hand.exists());
+    assert_eq!(
+        kept.parent(),
+        Some(dir.path().join(layout::KEPT_DIR).as_path())
+    );
+    assert_eq!(
+        file_names(&kept),
+        ["templates.json", "templates.json.bak-roles-20261114"]
+    );
+    // No staging folder there: the swap's rename fails.
+    let staging = dir.path().join("templates").join(".rank-v1-next-gone");
+    assert!(layout::swap_or_restore(&staging, &hand, Some(&kept)).is_err());
+    assert!(!kept.exists());
+    assert_eq!(
+        file_names(&hand),
+        ["templates.json", "templates.json.bak-roles-20261114"]
+    );
+    assert_eq!(
+        std::fs::read(hand.join("templates.json")).unwrap(),
+        b"{\"hand\":true}"
+    );
+
+    // A swap that works leaves the kept folder alone.
+    let kept = layout::keep_hand_folder(dir.path(), &hand).expect("keep");
+    let staging = dir.path().join("templates").join(".rank-v1-next-1");
+    std::fs::create_dir(&staging).unwrap();
+    std::fs::write(staging.join("templates.json"), rank_json()).unwrap();
+    layout::swap_or_restore(&staging, &hand, Some(&kept)).expect("swap");
+    assert_eq!(file_names(&hand), ["templates.json"]);
+    assert_eq!(file_names(&kept).len(), 2);
+}
+
+/// A templates.json pack is in place only when `templates.json` is a
+/// regular file in its folder.
+#[test]
+fn a_templates_folder_is_in_place_only_with_its_templates_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let spec = pack_spec(RANK_PACK_NAME).unwrap();
+    let live = dir.path().join(RANK_PACK_DIR);
+    assert!(!in_place(dir.path(), spec));
+    std::fs::create_dir_all(&live).unwrap();
+    assert!(!in_place(dir.path(), spec), "an empty folder");
+    std::fs::create_dir(live.join("templates.json")).unwrap();
+    assert!(!in_place(dir.path(), spec), "a folder at that name");
+    std::fs::remove_dir(live.join("templates.json")).unwrap();
+    std::fs::write(live.join("real.json"), rank_json()).unwrap();
+    std::os::unix::fs::symlink(live.join("real.json"), live.join("templates.json")).unwrap();
+    assert!(!in_place(dir.path(), spec), "a link at that name");
+    std::fs::remove_file(live.join("templates.json")).unwrap();
+    std::fs::write(live.join("templates.json"), rank_json()).unwrap();
+    assert!(in_place(dir.path(), spec));
 }
 
 #[tokio::test]

@@ -4,8 +4,10 @@
 //! Templates are cut from the game's own screens, so a pack is never
 //! committed. The reader loads it from
 //! `<data_dir>/templates/queue-title-v1/templates.json` ([`TEMPLATE_DIR`],
-//! [`PACK_FILE`]); a pack is built locally with [`Learner`]. Without a pack
-//! there is no reader.
+//! [`PACK_FILE`]); a pack is built locally with [`Learner`], or arrives in
+//! the same folder through the tracker's pack download
+//! (`queue-title-v1.tar`, [`crate::packs`]). Without a pack there is no
+//! reader.
 //!
 //! A template is the mean of the unpadded ink planes ([`super::centre`]) of
 //! one title, `TW x TH` values, row-major.
