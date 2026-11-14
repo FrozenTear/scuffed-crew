@@ -659,7 +659,7 @@ fn bench_labelled_queue_titles() {
     all.save_dir(&out.join("pack")).unwrap();
     let _ = writeln!(
         md,
-        "\nPack from all {} frames (1440p) written to `pack/{PACK_FILE}`; install under `<data_dir>/{TEMPLATE_DIR}/`.",
+        "\nPack from all {} frames (1440p) written to `pack/{PACK_FILE}`; install under `<data_dir>/{TEMPLATE_DIR}/`. The pack can also arrive there through the tracker's pack download, which moves a folder whose `{PACK_FILE}` is not the one it installed (or that holds other files) to `<data_dir>/templates-kept/` first.",
         items.len()
     );
     std::fs::create_dir_all(&out).unwrap();

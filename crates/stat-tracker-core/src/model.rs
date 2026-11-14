@@ -468,8 +468,9 @@ pub struct QueueTitle {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     #[surreal(default)]
     pub unsure: bool,
-    /// The pending next mode hint this game's read confirmed (the mode
-    /// banner word seen after the game before). `None` when there was none,
+    /// The pending next mode hint this game's read confirmed (the hint the
+    /// rank wiring handed on from the game before's rank screen, not the
+    /// banner word as read). `None` when there was none,
     /// or the read dropped or expired it, or it was not this game's to
     /// settle. Local only: never uploaded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -511,7 +512,7 @@ impl QueueTitle {
     }
 
     /// The confident title names open queue: its [`queue_key`] ends in the
-    /// word `OPEN` (`OPEN QUEUE`, `COMPETITIVE: OPEN QUEUE`).
+    /// word `OPEN` (`OPEN QUEUE`, `COMPETITIVE: 6V6 OPEN QUEUE`).
     pub fn is_open_queue(&self) -> bool {
         self.confident_value()
             .is_some_and(|v| queue_key(v).rsplit(' ').next() == Some("OPEN"))
