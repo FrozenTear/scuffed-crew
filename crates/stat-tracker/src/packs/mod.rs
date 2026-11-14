@@ -95,7 +95,7 @@ pub const PACK_MISMATCH: &str =
 pub const PACK_UNSAFE: &str =
     "The reader pack was not safe to unpack. The installed pack was left in place.";
 pub const PACK_BAD_TEMPLATES: &str = "The reader pack did not load, so it was not saved.";
-pub const PACK_NOT_KEPT: &str = "The reader pack was not saved: a pack folder changed by hand could not be moved to templates-kept, so it was left in place.";
+pub const PACK_NOT_KEPT: &str = "The reader pack was not saved: the old pack folder could not be moved to templates-kept, so it was left in place.";
 pub const PACK_FAILED: &str =
     "Could not download the reader pack. The installed pack was left in place.";
 pub const PACK_AUTH: &str = "Your sync token isn't valid. Sign in again from Settings.";
@@ -802,9 +802,9 @@ impl Tried {
 /// Once the site has answered 429 the job is paced for the rest of its
 /// life: one request per try, [`PACED_GAP_SECS`] apart.
 ///
-/// A pack refused for a fixed reason (size, sha256, layout) is downloaded
-/// once. It is fetched again only when the list shows another entry for
-/// it, or after a restart.
+/// A pack refused for a fixed reason (size, sha256, layout, a pack that does
+/// not load, a keep that cannot happen) is downloaded once. It is fetched
+/// again only when the list shows another entry for it, or after a restart.
 ///
 /// The job stops once every pack is in place or not offered; until then
 /// it waits as `Backoff` says and tries again, one try at a time. Each try
@@ -1518,9 +1518,9 @@ fn install_pack(
         layout::swap_dir(&staging, &live).map_err(KeepSwap::NotSwapped)
     };
     if let Err(failed) = swapped {
-        let _ = std::fs::remove_dir_all(&staging);
+        failed.remove_staging(&staging);
         let (message, error) = match failed {
-            KeepSwap::NotKept(error) => (PACK_NOT_KEPT, error),
+            KeepSwap::NotKept(error) | KeepSwap::Stranded(error) => (PACK_NOT_KEPT, error),
             KeepSwap::NotSwapped(error) => (PACK_FAILED, error),
         };
         tracing::warn!(pack = spec.name, error = %error, "reader pack was not swapped into place");

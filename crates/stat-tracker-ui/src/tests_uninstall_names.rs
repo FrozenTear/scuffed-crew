@@ -52,3 +52,29 @@ fn both_uninstallers_remove_the_training_crops() {
         .expect("the purge prompt");
     assert!(prompt.contains("training crops"), "{prompt}");
 }
+
+/// Neither uninstaller deletes the reader packs (`templates`) or the
+/// folders sync kept aside (`templates-kept`); the member deletes those.
+#[test]
+fn both_uninstallers_skip_the_reader_packs_and_the_kept_folders() {
+    let sh = include_str!("../../stat-tracker/dist/uninstall.sh");
+    let start = sh.find("tracker_data_name() {").expect("the shell list");
+    let end = start + sh[start..].find("\n}\n").expect("end of the shell list");
+    let list = &sh[start..end];
+    let names: Vec<&str> = list
+        .split(['|', ')', '\\', '\n', ' '])
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .collect();
+    for name in ["templates", "templates-kept"] {
+        assert!(!is_tracker_data_name(name), "{name}");
+        assert!(!names.contains(&name), "{name} in {list}");
+        assert!(
+            !names
+                .iter()
+                .any(|pattern| pattern.ends_with('*')
+                    && name.starts_with(pattern.trim_end_matches('*'))),
+            "{name} in {list}"
+        );
+    }
+}

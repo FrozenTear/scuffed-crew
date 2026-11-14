@@ -652,12 +652,19 @@ placed by hand, one installed before this record, one whose
 Kept means moved whole, every file in it, to
 `templates-kept/<pack folder>-<UTC YYYYMMDDTHHMMSSZ>-<pid>/` under the data
 folder (for example `templates-kept/rank-v1-20261114T065156Z-4242/`),
-beside `templates/`, so the stale folder sweep never removes it. The path
-is logged as soon as the folder is moved. Where the kernel allows an atomic
-exchange, the new pack goes in first and the old tree is moved out after,
-so the live folder is never missing (should that move fail, the old tree
-stays beside the live folder under the same name, never deleted); without
-it, the old folder is moved first and put back if the swap fails. An
+beside `templates/`, so the stale folder sweep never removes it. When that
+name is taken, `-2`, `-3` and so on is added. The path is logged as soon as
+the folder is moved. Where the kernel allows an atomic exchange, the new
+pack goes in first and the old tree is moved out after, so the live folder
+is never missing. Should that move fail, the old tree goes beside the live
+folder under `templates/` with the same name (no leading dot, so the stale
+sweep skips it). Should that fail too, the two folders are exchanged back:
+the old folder is live again, the pack is refused as not kept and no
+version is recorded. Only if that exchange back fails as well does the old
+tree stay at its `.<pack folder>-next-*` staging path, with a warning that
+names it; that path is at risk of the stale sweep on a later sync, so copy
+it out by hand. Without the exchange, the old folder is moved first and put
+back if the swap fails. An
 unchanged official folder is replaced and nothing is kept. If
 `templates-kept/` cannot be made, the pack is refused for a fixed reason and
 the folder stays as it was. Only these two packs keep; every other pack
@@ -666,8 +673,9 @@ replaces its folder as before.
 Nothing removes `templates-kept/`: not the tracker, not the app, and not
 `uninstall.sh --purge` (it deletes only the names the tracker writes, and
 neither `templates` nor `templates-kept` is one). Delete it by hand when you
-no longer need what is in it. At daemon start, when it holds folders, the
-tracker logs its path once.
+no longer need what is in it. At each daemon start, when it holds folders
+or a folder was kept beside a live pack folder under `templates/`, the
+tracker logs its path once per start, with both counts.
 
 If the list is empty, the tracker does nothing. If the list has entries but
 none is `heroes-v1.tar`, every tracker reports "The reader pack did not match

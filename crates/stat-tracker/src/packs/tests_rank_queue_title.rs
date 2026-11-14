@@ -217,8 +217,9 @@ async fn a_folder_placed_by_hand_is_replaced_whole_by_the_first_sync() {
         b"old"
     );
 
-    // Once a version is recorded, the next new version swaps as before and
-    // keeps nothing more.
+    // The folder now holds the official file with its hash recorded, so the
+    // next new version replaces it and keeps nothing more. A later hand
+    // edit would be kept again.
     let served = serve_only(&[RANK_PACK_NAME], "full-20261115");
     let report = sync(&served, dir.path()).await;
     assert_eq!(outcome(&report, RANK_PACK_NAME), &PackSync::Installed);
@@ -285,9 +286,26 @@ fn a_failed_swap_puts_the_kept_hand_folder_back() {
     let dir = tempfile::tempdir().expect("tempdir");
     let hand = plant_hand_rank(dir.path());
     let staging = dir.path().join("templates").join(".rank-v1-next-gone");
+    let logs = capture_logs();
     assert!(matches!(
         layout::swap_keeping(dir.path(), RANK_PACK_NAME, &staging, &hand),
         Err(layout::KeepSwap::NotSwapped(_))
+    ));
+    let text = logs.text();
+    let lines = pack_lines(&text);
+    for message in [
+        "reader pack folders were not exchanged",
+        "reader pack folder was put back in place",
+    ] {
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains(message) && line.contains(RANK_PACK_NAME)),
+            "{message}: {lines:#?}"
+        );
+    }
+    assert!(lines.iter().any(
+        |line| line.contains("put back in place") && line.contains(&hand.display().to_string())
     ));
     assert_eq!(kept_folders(dir.path()), Vec::<PathBuf>::new());
     assert_eq!(
@@ -302,7 +320,19 @@ fn a_failed_swap_puts_the_kept_hand_folder_back() {
     let staging = dir.path().join("templates").join(".rank-v1-next-1");
     std::fs::create_dir(&staging).unwrap();
     std::fs::write(staging.join("templates.json"), rank_json()).unwrap();
+    let logs = capture_logs();
     let kept = layout::swap_keeping(dir.path(), RANK_PACK_NAME, &staging, &hand).expect("swap");
+    let text = logs.text();
+    let keep_lines: Vec<&str> = pack_lines(&text)
+        .into_iter()
+        .filter(|line| line.contains("not the one sync installed"))
+        .collect();
+    assert_eq!(keep_lines.len(), 1, "{text}");
+    assert!(keep_lines[0].contains(RANK_PACK_NAME), "{text}");
+    assert!(
+        keep_lines[0].contains(&kept.display().to_string()),
+        "{text}"
+    );
     assert_eq!(kept_folders(dir.path()), std::slice::from_ref(&kept));
     assert_kept_name(&kept);
     assert!(!staging.exists());
@@ -480,4 +510,197 @@ async fn a_pack_with_another_file_is_refused_and_the_old_folder_stays() {
     );
     assert!(!live.join("notes.txt").exists());
     assert!(queue_title::Reader::load(dir.path()).is_ok());
+}
+
+/// The two messages a keep can end in carry no em or en dash.
+#[test]
+fn the_keep_messages_have_no_dashes() {
+    for message in [PACK_BAD_TEMPLATES, PACK_NOT_KEPT] {
+        assert!(!message.contains('\u{2014}'), "{message}");
+        assert!(!message.contains('\u{2013}'), "{message}");
+    }
+}
+
+/// At daemon start one line names `templates-kept/` when it holds folders
+/// or a folder was kept beside a live pack folder, with both counts, and
+/// none when there are none.
+#[test]
+fn the_start_line_counts_kept_folders_and_is_silent_without_any() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let templates = dir.path().join("templates");
+    let root = dir.path().join(layout::KEPT_DIR);
+    let logs = capture_logs();
+    layout::log_kept_folders(dir.path());
+    std::fs::create_dir_all(&root).unwrap();
+    // A folder whose name only starts like a kept one is not counted.
+    std::fs::create_dir_all(templates.join("rank-v1-notes")).unwrap();
+    std::fs::create_dir_all(dir.path().join(RANK_PACK_DIR)).unwrap();
+    layout::log_kept_folders(dir.path());
+    assert_eq!(pack_lines(&logs.text()), Vec::<&str>::new());
+
+    std::fs::create_dir(root.join("rank-v1-20261114T065156Z-4242")).unwrap();
+    layout::log_kept_folders(dir.path());
+    std::fs::create_dir(templates.join("rank-v1-20261114T065156Z-4242-2")).unwrap();
+    std::fs::create_dir(templates.join("queue-title-v1-20261114T065156Z-7")).unwrap();
+    layout::log_kept_folders(dir.path());
+    std::fs::remove_dir(root.join("rank-v1-20261114T065156Z-4242")).unwrap();
+    layout::log_kept_folders(dir.path());
+    let text = logs.text();
+    let lines = pack_lines(&text);
+    assert_eq!(lines.len(), 3, "{text}");
+    for (line, counts) in lines.iter().zip([
+        "folders=1 beside=0",
+        "folders=1 beside=2",
+        "folders=0 beside=2",
+    ]) {
+        assert!(line.contains("nothing removes them"), "{line}");
+        assert!(line.contains(&root.display().to_string()), "{line}");
+        assert!(line.contains(counts), "{counts}: {line}");
+    }
+}
+
+/// A `pack-file-hashes.json` that does not read as a map of hashes is no
+/// record: the next new version keeps the official folder once, then
+/// records a valid hash, so a later new version of the unchanged folder
+/// keeps nothing more.
+#[tokio::test]
+async fn a_broken_hashes_file_keeps_the_official_folder_once() {
+    for broken in [b"not json".as_slice(), b"[1, 2]", b"{\"rank-v1.tar\": 3}"] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let live = dir.path().join(RANK_PACK_DIR);
+        let report = sync(&serve_only(&[RANK_PACK_NAME], "1"), dir.path()).await;
+        assert_eq!(outcome(&report, RANK_PACK_NAME), &PackSync::Installed);
+        std::fs::write(layout::file_hashes_path(dir.path()), broken).unwrap();
+        let report = sync(&serve_only(&[RANK_PACK_NAME], "2"), dir.path()).await;
+        assert_eq!(outcome(&report, RANK_PACK_NAME), &PackSync::Installed);
+        let kept = kept_folders(dir.path());
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert_eq!(file_names(&kept[0]), ["templates.json"]);
+        assert_eq!(
+            std::fs::read(kept[0].join("templates.json")).unwrap(),
+            rank_json()
+        );
+        let hashes = std::fs::read(layout::file_hashes_path(dir.path())).expect("hashes");
+        let hashes: BTreeMap<String, String> = serde_json::from_slice(&hashes).expect("a map");
+        assert_eq!(hashes[RANK_PACK_NAME], sha256_hex(&rank_json()));
+        let report = sync(&serve_only(&[RANK_PACK_NAME], "3"), dir.path()).await;
+        assert_eq!(outcome(&report, RANK_PACK_NAME), &PackSync::Installed);
+        assert_eq!(kept_folders(dir.path()), kept);
+        assert_eq!(file_names(&live), ["templates.json"]);
+        assert_eq!(leftovers(dir.path()), Vec::<String>::new());
+    }
+}
+
+/// Make `templates-kept/` a folder this process cannot write to. `false`
+/// when it still can (running as root), so the caller skips.
+fn lock_kept_root(data_dir: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let root = data_dir.join(layout::KEPT_DIR);
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o555)).unwrap();
+    if std::fs::create_dir(root.join("probe")).is_ok() {
+        eprintln!("skipped: templates-kept is still writable (root?)");
+        unlock_kept_root(data_dir);
+        return false;
+    }
+    true
+}
+
+fn unlock_kept_root(data_dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let root = data_dir.join(layout::KEPT_DIR);
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// When `templates-kept/` exists but cannot take the old tree, it goes
+/// beside the live folder under `templates/` with the kept name (no
+/// leading dot, so the stale sweep skips it, also when it is old). The pack
+/// is installed and the live folder holds it.
+#[tokio::test]
+async fn a_keep_templates_kept_cannot_take_goes_beside_the_live_folder() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let hand = plant_hand_rank(dir.path());
+    if !lock_kept_root(dir.path()) {
+        return;
+    }
+    let report = sync(&serve_only(&[RANK_PACK_NAME], "1"), dir.path()).await;
+    unlock_kept_root(dir.path());
+    assert_eq!(outcome(&report, RANK_PACK_NAME), &PackSync::Installed);
+    assert_eq!(kept_folders(dir.path()), Vec::<PathBuf>::new());
+    assert_eq!(file_names(&hand), ["templates.json"]);
+    assert_eq!(
+        std::fs::read(hand.join("templates.json")).unwrap(),
+        rank_json()
+    );
+    assert_eq!(stored_versions(dir.path())[RANK_PACK_NAME], "1");
+    let left = leftovers(dir.path());
+    assert_eq!(left.len(), 1, "{left:?}");
+    let beside = dir.path().join("templates").join(&left[0]);
+    assert_kept_name(&beside);
+    assert_eq!(
+        file_names(&beside),
+        ["templates.json", "templates.json.bak-roles-20261114"]
+    );
+    // Old by mtime, and still not swept.
+    std::fs::File::open(&beside)
+        .unwrap()
+        .set_modified(std::time::SystemTime::UNIX_EPOCH)
+        .unwrap();
+    layout::sweep_stale_staging(dir.path());
+    assert_eq!(leftovers(dir.path()), left);
+}
+
+/// When after the exchange the old tree can go neither to `templates-kept/`
+/// nor beside the live folder (a full folder holds that name), the two are
+/// exchanged back: the old folder is live again, staging holds only the
+/// new pack, and the keep is refused as not kept.
+#[test]
+fn a_keep_that_lands_nowhere_exchanges_back() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let hand = plant_hand_rank(dir.path());
+    let templates = dir.path().join("templates");
+    // Every name the kept folder can get in the next few seconds is taken
+    // beside the live folder by a folder that is not empty.
+    let now = chrono::Utc::now();
+    for secs in -2..=30 {
+        let at = now + chrono::Duration::seconds(secs);
+        let name = format!(
+            "rank-v1-{}-{}",
+            at.format("%Y%m%dT%H%M%SZ"),
+            std::process::id()
+        );
+        std::fs::create_dir(templates.join(&name)).unwrap();
+        std::fs::write(templates.join(&name).join("taken"), b"x").unwrap();
+    }
+    if !lock_kept_root(dir.path()) {
+        return;
+    }
+    let staging = templates.join(".rank-v1-next-1");
+    std::fs::create_dir(&staging).unwrap();
+    std::fs::write(staging.join("templates.json"), rank_json()).unwrap();
+    let logs = capture_logs();
+    let swapped = layout::swap_keeping(dir.path(), RANK_PACK_NAME, &staging, &hand);
+    unlock_kept_root(dir.path());
+    assert!(
+        matches!(swapped, Err(layout::KeepSwap::NotKept(_))),
+        "{swapped:?}"
+    );
+    assert_eq!(
+        file_names(&hand),
+        ["templates.json", "templates.json.bak-roles-20261114"]
+    );
+    assert_eq!(
+        std::fs::read(hand.join("templates.json")).unwrap(),
+        b"{\"hand\":true}"
+    );
+    assert_eq!(file_names(&staging), ["templates.json"]);
+    assert_eq!(kept_folders(dir.path()), Vec::<PathBuf>::new());
+    let text = logs.text();
+    assert!(
+        pack_lines(&text)
+            .iter()
+            .any(|line| line.contains("put back in place") && line.contains(RANK_PACK_NAME)),
+        "{text}"
+    );
+    assert!(!text.contains("not the one sync installed"), "{text}");
 }

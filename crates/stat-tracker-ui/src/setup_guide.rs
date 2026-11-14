@@ -56,7 +56,8 @@ use crate::theme::{
 pub const CAPTURE_FAILED: &str =
     "Could not capture the screen. Allow screen capture for this app, then try again.";
 
-/// The capture failure line plus the real cause, so a member can send it to us instead of a guess.
+/// The capture failure line plus the real cause, so a member can send it
+/// to us instead of a guess.
 pub fn capture_failed_with(detail: &str) -> String {
     let detail = detail.trim();
     if detail.is_empty() {
@@ -145,8 +146,6 @@ pub fn user_facing_copy() -> &'static [&'static str] {
         stat_tracker::packs::PACK_BUSY,
         stat_tracker::packs::PACK_MISMATCH,
         stat_tracker::packs::PACK_UNSAFE,
-        stat_tracker::packs::PACK_BAD_TEMPLATES,
-        stat_tracker::packs::PACK_NOT_KEPT,
         stat_tracker::packs::PACK_FAILED,
         stat_tracker::packs::PACK_AUTH,
         stat_tracker::packs::PACK_FORBIDDEN,
@@ -1305,7 +1304,8 @@ impl GuideUi {
         }
     }
 
-    /// `(server_url, device_code)` for one poll request. The code is only for that request.
+    /// `(server_url, device_code)` for one poll request. The code is only
+    /// for that request.
     pub fn poll_request_if_due(&mut self, now: Instant) -> Option<(String, String)> {
         if !self.open || self.poll_inflight {
             return None;
