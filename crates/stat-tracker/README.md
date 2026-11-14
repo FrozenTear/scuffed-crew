@@ -594,7 +594,7 @@ only these paths are writable:
 
 `{data_dir}` holds `stats.surrealkv`, `commands/`, `debug/` PNGs, portraits,
 `daemon.pid`, `sync_auth.json`, `live_snapshot.json`, `tracker.sock` (the app's query socket while the tracker runs), `active_game.json`,
-`daemon.log`, and vacuum and hero-timeline backups (`stats.surrealkv.pre-*`). Reader packs land under `{data_dir}/templates/`. A guide to changing one on this PC is in [`docs/hand-edit-reader-packs.md`](../../docs/hand-edit-reader-packs.md). The default directory is already in the
+`daemon.log`, and vacuum and hero-timeline backups (`stats.surrealkv.pre-*`). Reader packs land under `{data_dir}/templates/`, and folders pack sync moves aside under `{data_dir}/templates-kept/`. A guide to changing one on this PC is in [`docs/hand-edit-reader-packs.md`](../../docs/hand-edit-reader-packs.md). The default directory is already in the
 table above. An absolute `data_dir` anywhere else, including another
 folder under `$HOME`, is read-only under the sandbox. `install.sh` writes
 `~/.config/systemd/user/scuffed-stat-tracker.service.d/data-dir.conf` for
