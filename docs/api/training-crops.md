@@ -1,7 +1,7 @@
 # Training crops (opt-in, from the stat tracker)
 
 Alpha.3 item 14. The stat tracker can send small PNG crops of what it read
-(hero icons, stat digits, map name banners) so recognizers can be trained on
+(hero icons, stat digits, map name banners, rank screen regions) so recognizers can be trained on
 real captures. Every kind is opt-in, off by default, and consent is only
 given on the site (with a session). The tracker sends crops itself with its
 sync token and shows the consent read-only, linking to the site. JSON types and error codes live in
@@ -28,6 +28,7 @@ This is the hero icon store generalized, not a second store:
 | `hero_icon` | yes | 500 | `HERO_ICON_MAX_PER_MEMBER` |
 | `stat_digits` | yes | 1000 | `STAT_DIGITS_MAX_PER_MEMBER` |
 | `map_name` | yes | 200 | `MAP_NAME_MAX_PER_MEMBER` |
+| `rank` | yes | 1000 | `RANK_MAX_PER_MEMBER` |
 | `full_screen` | **no**: refused with 422 `full_screen_not_accepted` | 0 | |
 
 `full_screen` uploads are refused before the body is read and nothing is
@@ -41,6 +42,7 @@ consent shapes have no `full_screen` field, a `PUT` naming it is 400
 |------|------------------------|-----------------------|-----------|
 | `hero_icon`, `stat_digits` | 8 to 256 each | 64 KiB | `HERO_ICON_MAX_EDGE`, `HERO_ICON_MAX_BYTES` |
 | `map_name` | 8 to 1536 wide, 8 to 256 tall | 256 KiB | `MAP_NAME_MAX_WIDTH`, `MAP_NAME_MAX_HEIGHT`, `MAP_NAME_MAX_BYTES` |
+| `rank` | 8 to 512 wide, 8 to 256 tall | 128 KiB | `RANK_MAX_WIDTH`, `RANK_MAX_HEIGHT`, `RANK_MAX_BYTES` |
 
 Map name banners are wide and the tracker sends them unscaled (a native 4K
 banner is 1036 px wide), so `map_name` has the wider bound and a byte limit
@@ -49,6 +51,14 @@ about 72 KB at 1440p, about 121 KB estimated at 4K). The whole request
 stays capped at 2 MiB (`HERO_ICON_MAX_REQUEST_BYTES`) for every kind, so a
 request of large banners holds fewer than 20 of them. The bounds live on
 `CropKind::max_edges` and `CropKind::max_crop_bytes`.
+
+`rank` crops are regions of the post-game rank screen: role, tier, SR and
+the percentile line, never a region with player names. The tracker's rank
+reader takes only 1080p and 1440p frames; at 1440p its widest region (the
+mode banner) is 440 px and its tallest (the tier emblem) 200 px, so 512 by
+256 leaves room above both. 128 KiB is twice the hero icon limit for twice
+its widest edge, and half the `map_name` limit for a third of its pixels.
+About four regions per competitive game make the 1000 cap about 250 games.
 
 ## Auth
 
@@ -109,12 +119,12 @@ is present, the Bearer is tried as a sync token.
 `GET /api/training-crops/consent`:
 
 ```json
-{ "hero_icon": false, "stat_digits": false, "map_name": false }
+{ "hero_icon": false, "stat_digits": false, "map_name": false, "rank": false }
 ```
 
 `PUT /api/training-crops/consent` (session only; a sync token is 401) with
-any subset of the three kinds. Kinds left out keep their value. The answer is
-all three as stored.
+any subset of the four kinds. Kinds left out keep their value. The answer is
+all four as stored.
 
 ```json
 { "stat_digits": true, "map_name": false }
@@ -230,6 +240,7 @@ all with `screen` `tab`:
 | `hero_icon` | `career_panel` | The career panel's hero portrait, with `hero`, `score`, `runner_up`, `margin` and the hero pack name as `icon_set_version` |
 | `stat_digits` | `elims`, `assists`, `deaths`, `damage`, `healing`, `mitigation` | One stat cell of the member's own row, named by its column left to right, with `hero` only when that Tab's own read named it |
 | `map_name` | none | The map name banner |
+| `rank` | tracker's choice | One rank screen region (role, tier, SR, percentile). No player names |
 
 There is no colourblind filter field. It hints at a member's colour vision
 and is not in the agreed field list or the consent text, so it is not
@@ -282,11 +293,12 @@ of every kind, consented or not, newest first, with the usual cursor
 
 ```json
 {
-  "consent": { "hero_icon": true, "stat_digits": true, "map_name": false },
+  "consent": { "hero_icon": true, "stat_digits": true, "map_name": false, "rank": false },
   "kinds": [
     { "kind": "hero_icon", "count": 12, "consented": true, "max": 500 },
     { "kind": "stat_digits", "count": 40, "consented": true, "max": 1000 },
-    { "kind": "map_name", "count": 0, "consented": false, "max": 200 }
+    { "kind": "map_name", "count": 0, "consented": false, "max": 200 },
+    { "kind": "rank", "count": 0, "consented": false, "max": 1000 }
   ],
   "crops": [ /* TrainingCropEntry, as in the upload answer */ ],
   "next_cursor": "00000019"
@@ -425,7 +437,7 @@ Every error body is `{"error": "<code>"}`, except the shared 429 body
 | 400 | `unexpected_field` | Part named other than `meta`/`crop`, or pairs out of order |
 | 400 | `no_crops` | No `meta`/`crop` pair |
 | 400 | `invalid_multipart` | Body is not readable multipart |
-| 400 | `icon_bad_dimensions` | PNG width or height outside the kind's bound (8 to 256; `map_name` 8 to 1536 wide, 8 to 256 tall) |
+| 400 | `icon_bad_dimensions` | PNG width or height outside the kind's bound (8 to 256; `map_name` 8 to 1536 wide, 8 to 256 tall; `rank` 8 to 512 wide, 8 to 256 tall) |
 | 400 | `invalid_png` | PNG signature present but the image does not decode |
 | 400 | `invalid_consent` | Consent body not JSON, unknown kind (`full_screen` included), or not a bool |
 | 401 | session error (as for every member route) | `PUT /consent` without a session; a sync token is not a session there |
@@ -433,7 +445,7 @@ Every error body is `{"error": "<code>"}`, except the shared 429 body
 | 403 | `Officer access required` | Member session on `/members` |
 | 404 | `crop_not_found` | Unknown id, malformed id, or a crop the caller may not see |
 | 409 | `crop_limit_reached` | The upload would pass the kind's cap |
-| 413 | `icon_too_large` | A `crop` part over the kind's limit (64 KiB; `map_name` 256 KiB), or the body over 2 MiB |
+| 413 | `icon_too_large` | A `crop` part over the kind's limit (64 KiB; `map_name` 256 KiB; `rank` 128 KiB), or the body over 2 MiB |
 | 413 | `too_many_crops_in_request` | More than 20 pairs |
 | 415 | `not_png` | A `crop` part without the PNG signature |
 | 429 | `rate_limited` | Per-member, per-kind upload limiter, or the per-IP limit of the sync token routes |
@@ -444,7 +456,7 @@ Every error body is `{"error": "<code>"}`, except the shared 429 body
 Additive only (`crates/db/src/migrations.rs`):
 
 - `hero_icon.kind`: `string`, `DEFAULT 'hero_icon'`, asserted to
-  `hero_icon`, `stat_digits` or `map_name`. A fatal startup step
+  `hero_icon`, `stat_digits`, `map_name` or `rank`. A fatal startup step
   (`hero_icon kind backfill`) writes `kind = 'hero_icon'` on rows that have
   none, so existing rows become hero icons. A no-op after the first boot.
 - `hero` keeps its type. `hero_icon` rows keep holding the display name
@@ -463,6 +475,11 @@ Additive only (`crates/db/src/migrations.rs`):
   false`. Older rows read false. `hero_icon_opt_in` is untouched and is the
   `hero_icon` consent. There is no `full_screen_opt_in`: that consent is
   never stored.
+- `member_settings.rank_opt_in`: `bool DEFAULT false`, added with the
+  `rank` kind. Additive: no row is rewritten, rows from before it read
+  false. A build without the `rank` kind ignores the field and skips
+  `rank` rows on read (an unknown stored kind is skipped); to remove them
+  on rollback, use step 1 below, which covers every kind but `hero_icon`.
 
 Take a database snapshot before deploying this change. Restoring it is only
 for a rollback right after the deploy: it rolls back every table, so once

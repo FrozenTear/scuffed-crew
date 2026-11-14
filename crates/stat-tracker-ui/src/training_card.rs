@@ -365,6 +365,7 @@ mod tests {
             hero_icon: false,
             stat_digits: true,
             map_name: true,
+            rank: false,
         };
         assert_eq!(
             consent_lines(&consent),

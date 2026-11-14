@@ -20,6 +20,9 @@ pub enum CropKind {
     StatDigits,
     /// The map name banner.
     MapName,
+    /// A region of the post-game rank screen: role, tier, SR or the
+    /// percentile line. Never a region with player names.
+    Rank,
     /// A whole screen. Uploads are refused for now and consent for it cannot
     /// be stored: the consent shapes have no `full_screen` field.
     FullScreen,
@@ -27,10 +30,11 @@ pub enum CropKind {
 
 impl CropKind {
     /// Every kind, in the order used by lists and counts.
-    pub const ALL: [CropKind; 4] = [
+    pub const ALL: [CropKind; 5] = [
         CropKind::HeroIcon,
         CropKind::StatDigits,
         CropKind::MapName,
+        CropKind::Rank,
         CropKind::FullScreen,
     ];
 
@@ -40,6 +44,7 @@ impl CropKind {
             CropKind::HeroIcon => "hero_icon",
             CropKind::StatDigits => "stat_digits",
             CropKind::MapName => "map_name",
+            CropKind::Rank => "rank",
             CropKind::FullScreen => "full_screen",
         }
     }
@@ -61,6 +66,7 @@ impl CropKind {
             CropKind::HeroIcon => HERO_ICON_MAX_PER_MEMBER,
             CropKind::StatDigits => STAT_DIGITS_MAX_PER_MEMBER,
             CropKind::MapName => MAP_NAME_MAX_PER_MEMBER,
+            CropKind::Rank => RANK_MAX_PER_MEMBER,
             CropKind::FullScreen => 0,
         }
     }
@@ -70,22 +76,25 @@ impl CropKind {
     ///
     /// `map_name` banners are wide and the tracker does not shrink them, so
     /// that kind takes up to [`MAP_NAME_MAX_WIDTH`] by
-    /// [`MAP_NAME_MAX_HEIGHT`]. Every other kind keeps the hero icon bound of
+    /// [`MAP_NAME_MAX_HEIGHT`]. `rank` regions take up to [`RANK_MAX_WIDTH`]
+    /// by [`RANK_MAX_HEIGHT`]. Every other kind keeps the hero icon bound of
     /// `HERO_ICON_MAX_EDGE` on each edge.
     pub fn max_edges(self) -> (u32, u32) {
         match self {
             CropKind::MapName => (MAP_NAME_MAX_WIDTH, MAP_NAME_MAX_HEIGHT),
+            CropKind::Rank => (RANK_MAX_WIDTH, RANK_MAX_HEIGHT),
             _ => (HERO_ICON_MAX_EDGE, HERO_ICON_MAX_EDGE),
         }
     }
 
     /// Largest accepted `crop` part in bytes. [`MAP_NAME_MAX_BYTES`] for
-    /// `map_name` (its larger pixel bound needs it), `HERO_ICON_MAX_BYTES`
-    /// otherwise. The whole request stays capped at
-    /// `HERO_ICON_MAX_REQUEST_BYTES` (2 MiB) for every kind.
+    /// `map_name` (its larger pixel bound needs it), [`RANK_MAX_BYTES`] for
+    /// `rank`, `HERO_ICON_MAX_BYTES` otherwise. The whole request stays
+    /// capped at `HERO_ICON_MAX_REQUEST_BYTES` (2 MiB) for every kind.
     pub fn max_crop_bytes(self) -> usize {
         match self {
             CropKind::MapName => MAP_NAME_MAX_BYTES,
+            CropKind::Rank => RANK_MAX_BYTES,
             _ => HERO_ICON_MAX_BYTES,
         }
     }
@@ -109,6 +118,25 @@ pub const MAP_NAME_MAX_HEIGHT: u32 = 256;
 /// limit of 2 MiB still applies, so a request holds fewer of the largest
 /// banners than the 20-pair maximum.
 pub const MAP_NAME_MAX_BYTES: usize = 256 * 1024;
+
+/// Most `rank` crops one member may have stored at the same time. A rank
+/// screen comes once per competitive game and gives about four regions
+/// (role, tier, SR, percentile), so this holds about 250 games.
+pub const RANK_MAX_PER_MEMBER: u32 = 1000;
+
+/// Widest accepted `rank` crop, in pixels. The widest rank screen region
+/// the tracker reads is the mode banner, 440 px wide at 1440p (the reader
+/// only takes 1080p and 1440p), so this leaves room above that.
+pub const RANK_MAX_WIDTH: u32 = 512;
+
+/// Tallest accepted `rank` crop, in pixels. The tallest region is the tier
+/// emblem, 200 px tall at 1440p.
+pub const RANK_MAX_HEIGHT: u32 = 256;
+
+/// Largest accepted `rank` crop part, in bytes (128 KiB). Twice the hero
+/// icon limit for twice its widest edge, half the `map_name` limit for a
+/// third of its pixels.
+pub const RANK_MAX_BYTES: usize = 128 * 1024;
 
 /// Largest accepted `meta` part, in bytes (4 KiB).
 pub const TRAINING_CROP_META_MAX_BYTES: usize = 4 * 1024;
@@ -160,7 +188,12 @@ mod tests {
     fn only_full_screen_is_refused_and_capped_at_zero() {
         assert!(!CropKind::FullScreen.accepts_uploads());
         assert_eq!(CropKind::FullScreen.max_per_member(), 0);
-        for kind in [CropKind::HeroIcon, CropKind::StatDigits, CropKind::MapName] {
+        for kind in [
+            CropKind::HeroIcon,
+            CropKind::StatDigits,
+            CropKind::MapName,
+            CropKind::Rank,
+        ] {
             assert!(kind.accepts_uploads());
             assert!(kind.max_per_member() > 0);
         }
@@ -178,5 +211,15 @@ mod tests {
             assert_eq!(kind.max_edges(), (HERO_ICON_MAX_EDGE, HERO_ICON_MAX_EDGE));
             assert_eq!(kind.max_crop_bytes(), HERO_ICON_MAX_BYTES);
         }
+    }
+
+    #[test]
+    fn rank_is_its_own_kind_with_a_region_bound() {
+        assert_eq!(CropKind::parse("rank"), Some(CropKind::Rank));
+        assert_eq!(CropKind::Rank.as_str(), "rank");
+        assert_eq!(CropKind::Rank.max_edges(), (512, 256));
+        assert_eq!(CropKind::Rank.max_crop_bytes(), 128 * 1024);
+        assert_eq!(CropKind::Rank.max_per_member(), RANK_MAX_PER_MEMBER);
+        assert!(CropKind::ALL.contains(&CropKind::Rank));
     }
 }

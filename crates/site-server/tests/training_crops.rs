@@ -34,8 +34,8 @@ use scuffed_site_server::hero_icons::HeroIconStore;
 use scuffed_site_server::state::{AppState, OAuthConfig};
 use scuffed_types::{
     CropKind, HERO_ICON_MAX_FILES_PER_UPLOAD, HERO_ICON_MAX_REQUEST_BYTES, HERO_ICON_RATE_BURST,
-    MAP_NAME_MAX_BYTES, MAP_NAME_MAX_PER_MEMBER, MAP_NAME_MAX_WIDTH, STATS_UPLOAD_IP_BURST,
-    TrainingCropMeta,
+    MAP_NAME_MAX_BYTES, MAP_NAME_MAX_PER_MEMBER, MAP_NAME_MAX_WIDTH, RANK_MAX_BYTES,
+    RANK_MAX_HEIGHT, RANK_MAX_PER_MEMBER, RANK_MAX_WIDTH, STATS_UPLOAD_IP_BURST, TrainingCropMeta,
 };
 
 const OWNER: &str = "cropowner";
@@ -428,7 +428,7 @@ async fn sync_token_upload_with_consent_stores_every_field() {
     let consent = set_consent(&w.app, OWNER_SESSION, json!({ "stat_digits": true })).await;
     assert_eq!(
         consent,
-        json!({ "hero_icon": false, "stat_digits": true, "map_name": false })
+        json!({ "hero_icon": false, "stat_digits": true, "map_name": false, "rank": false })
     );
     let (status, read) = get(&w.app, "/api/training-crops/consent", OWNER_TOKEN).await;
     assert_eq!(status, StatusCode::OK);
@@ -483,7 +483,7 @@ async fn sync_token_upload_with_consent_stores_every_field() {
         .collect();
     assert_eq!(listed, vec![ids[1].as_str(), ids[0].as_str()]);
     let kinds = mine["kinds"].as_array().unwrap();
-    assert_eq!(kinds.len(), 3, "full_screen is never stored");
+    assert_eq!(kinds.len(), 4, "full_screen is never stored");
     assert_eq!(kinds[1]["kind"], json!("stat_digits"));
     assert_eq!(kinds[1]["count"], json!(2));
     assert_eq!(kinds[1]["max"], json!(1000));
@@ -618,7 +618,7 @@ async fn full_screen_is_refused_and_stored_nowhere() {
     let (_, consent) = get(&w.app, "/api/training-crops/consent", OWNER_SESSION).await;
     assert_eq!(
         consent,
-        json!({ "hero_icon": false, "stat_digits": false, "map_name": false })
+        json!({ "hero_icon": false, "stat_digits": false, "map_name": false, "rank": false })
     );
     assert!(consent.get("full_screen").is_none());
     let (_, mine) = get(&w.app, "/api/training-crops/mine", OWNER_SESSION).await;
@@ -945,7 +945,7 @@ async fn hero_icon_kind_is_the_hero_icon_store() {
     let (_, consent) = get(&w.app, "/api/training-crops/consent", OWNER_TOKEN).await;
     assert_eq!(
         consent,
-        json!({ "hero_icon": true, "stat_digits": false, "map_name": false })
+        json!({ "hero_icon": true, "stat_digits": false, "map_name": false, "rank": false })
     );
     set_consent(&w.app, OWNER_SESSION, json!({ "stat_digits": true })).await;
 
@@ -1019,12 +1019,12 @@ async fn legacy_opt_in_rows_become_hero_icon_consent_only() {
     let (_, owner) = get(&w.app, "/api/training-crops/consent", OWNER_TOKEN).await;
     assert_eq!(
         owner,
-        json!({ "hero_icon": true, "stat_digits": false, "map_name": false })
+        json!({ "hero_icon": true, "stat_digits": false, "map_name": false, "rank": false })
     );
     let (_, other) = get(&w.app, "/api/training-crops/consent", OTHER_TOKEN).await;
     assert_eq!(
         other,
-        json!({ "hero_icon": false, "stat_digits": false, "map_name": false })
+        json!({ "hero_icon": false, "stat_digits": false, "map_name": false, "rank": false })
     );
     // The migrated opt-in allows hero icons and nothing else.
     let got = upload(
@@ -1262,7 +1262,7 @@ async fn sync_token_cannot_set_consent() {
     assert_eq!(status, StatusCode::OK, "{consent}");
     assert_eq!(
         consent,
-        json!({ "hero_icon": false, "stat_digits": false, "map_name": false })
+        json!({ "hero_icon": false, "stat_digits": false, "map_name": false, "rank": false })
     );
     // A session sets it, and the token sees the change.
     set_consent(&w.app, OWNER_SESSION, json!({ "stat_digits": true })).await;
@@ -1790,5 +1790,350 @@ async fn rows_that_fail_to_parse_are_still_deleted() {
             .is_empty()
     );
     assert!(files_on_disk(w.dir()).is_empty());
+    w.cleanup();
+}
+
+// ---------------------------------------------------------------------------
+// rank kind (rank screen regions: role, tier, SR, percentile)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn rank_upload_needs_rank_consent() {
+    let w = world().await;
+    // No consent row at all.
+    let got = upload(&w.app, OWNER_TOKEN, "rank", &pairs(1, json!({}))).await;
+    assert_error(&got, StatusCode::FORBIDDEN, "crop_consent_required");
+    // Every other kind on is not rank consent.
+    set_consent(
+        &w.app,
+        OWNER_SESSION,
+        json!({ "hero_icon": true, "stat_digits": true, "map_name": true }),
+    )
+    .await;
+    let got = upload(&w.app, OWNER_TOKEN, "rank", &pairs(2, json!({}))).await;
+    assert_error(&got, StatusCode::FORBIDDEN, "crop_consent_required");
+    let got = upload(&w.app, OWNER_SESSION, "rank", &pairs(1, json!({}))).await;
+    assert_error(&got, StatusCode::FORBIDDEN, "crop_consent_required");
+    assert!(w.rows_of(OWNER).await.is_empty());
+    assert!(files_on_disk(w.dir()).is_empty());
+
+    // Consent on: accepted and stored as rank.
+    let consent = set_consent(&w.app, OWNER_SESSION, json!({ "rank": true })).await;
+    assert_eq!(
+        consent,
+        json!({ "hero_icon": true, "stat_digits": true, "map_name": true, "rank": true })
+    );
+    let meta = json!({ "screen": "rank", "slot_type": "tier", "screen_width": 2560, "screen_height": 1440 });
+    let got = upload(&w.app, OWNER_TOKEN, "rank", &pairs(2, meta)).await;
+    let ids = crop_ids(&got);
+    assert_eq!(got.1["kind"], json!("rank"));
+    assert_eq!(got.1["crops"][0]["kind"], json!("rank"));
+    let rows = w.rows_of(OWNER).await;
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| row.kind == CropKind::Rank));
+    assert_eq!(files_on_disk(w.dir()).len(), 2);
+
+    // Consent off again: kept, new uploads refused.
+    set_consent(&w.app, OWNER_SESSION, json!({ "rank": false })).await;
+    let got = upload(&w.app, OWNER_TOKEN, "rank", &pairs(1, json!({}))).await;
+    assert_error(&got, StatusCode::FORBIDDEN, "crop_consent_required");
+    assert_eq!(w.rows_of(OWNER).await.len(), 2);
+
+    // The member can still delete their own rank crops, consent or not.
+    let got = delete(
+        &w.app,
+        &format!("/api/training-crops/{}", ids[0]),
+        OWNER_TOKEN,
+    )
+    .await;
+    assert_eq!(got.1, json!({ "deleted": 1 }));
+    let got = delete(&w.app, "/api/training-crops/mine?kind=rank", OWNER_SESSION).await;
+    assert_eq!(got.1, json!({ "deleted": 1 }));
+    assert!(w.rows_of(OWNER).await.is_empty());
+    assert!(files_on_disk(w.dir()).is_empty());
+    w.cleanup();
+}
+
+#[tokio::test]
+async fn rank_consent_is_session_only_and_listed_on_get() {
+    let w = world().await;
+    let uri = "/api/training-crops/consent";
+    // GET lists rank, off by default, for a session and a sync token.
+    for token in [OWNER_SESSION, OWNER_TOKEN] {
+        let (status, consent) = get(&w.app, uri, token).await;
+        assert_eq!(status, StatusCode::OK, "{consent}");
+        assert_eq!(consent["rank"], json!(false), "{token}: {consent}");
+    }
+    // A sync token cannot turn it on.
+    let got = call(
+        &w.app,
+        Method::PUT,
+        uri,
+        Some(OWNER_TOKEN),
+        Some(json!({ "rank": true })),
+    )
+    .await;
+    assert_eq!(got.0, StatusCode::UNAUTHORIZED, "{}", got.1);
+    let (_, consent) = get(&w.app, uri, OWNER_TOKEN).await;
+    assert_eq!(consent["rank"], json!(false));
+    // A non-bool is refused like any other kind.
+    let got = call(
+        &w.app,
+        Method::PUT,
+        uri,
+        Some(OWNER_SESSION),
+        Some(json!({ "rank": "yes" })),
+    )
+    .await;
+    assert_error(&got, StatusCode::BAD_REQUEST, "invalid_consent");
+    // A session can, and changing rank leaves the other kinds alone.
+    set_consent(&w.app, OWNER_SESSION, json!({ "map_name": true })).await;
+    let consent = set_consent(&w.app, OWNER_SESSION, json!({ "rank": true })).await;
+    assert_eq!(
+        consent,
+        json!({ "hero_icon": false, "stat_digits": false, "map_name": true, "rank": true })
+    );
+    let (_, consent) = get(&w.app, uri, OWNER_TOKEN).await;
+    assert_eq!(consent["rank"], json!(true));
+    let (_, mine) = get(&w.app, "/api/training-crops/mine", OWNER_SESSION).await;
+    assert_eq!(mine["consent"]["rank"], json!(true));
+    let rank_row = mine["kinds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|k| k["kind"] == json!("rank"))
+        .cloned()
+        .expect("rank in own kinds");
+    assert_eq!(
+        rank_row,
+        json!({ "kind": "rank", "count": 0, "consented": true, "max": RANK_MAX_PER_MEMBER })
+    );
+    w.cleanup();
+}
+
+#[tokio::test]
+async fn rank_consent_reads_false_for_an_existing_member_row() {
+    let w = world().await;
+    // A member_settings row from before rank_opt_in existed, with every
+    // other kind on.
+    w.db()
+        .client
+        .query(format!(
+            r#"
+            REMOVE FIELD IF EXISTS rank_opt_in ON member_settings;
+            CREATE member_settings SET member_id = '{OWNER}', player_name = 'Old',
+                stats_visibility = 'public', hero_icon_opt_in = true,
+                stat_digits_opt_in = true, map_name_opt_in = true;
+            "#
+        ))
+        .await
+        .expect("old row")
+        .check()
+        .expect("old row");
+    run_migrations(&w.db().client).await.expect("migrate");
+
+    // The migration does not rewrite the row: the field stays absent.
+    let mut raw = w
+        .db()
+        .client
+        .query(format!(
+            "SELECT VALUE rank_opt_in FROM member_settings WHERE member_id = '{OWNER}'"
+        ))
+        .await
+        .expect("raw read");
+    let stored: Vec<Option<bool>> = raw.take(0).expect("raw rows");
+    assert_eq!(stored, vec![None], "no row rewrite");
+
+    let (_, consent) = get(&w.app, "/api/training-crops/consent", OWNER_TOKEN).await;
+    assert_eq!(
+        consent,
+        json!({ "hero_icon": true, "stat_digits": true, "map_name": true, "rank": false })
+    );
+    let got = upload(&w.app, OWNER_TOKEN, "rank", &pairs(1, json!({}))).await;
+    assert_error(&got, StatusCode::FORBIDDEN, "crop_consent_required");
+    // Turning rank on keeps the old opt-ins.
+    let consent = set_consent(&w.app, OWNER_SESSION, json!({ "rank": true })).await;
+    assert_eq!(
+        consent,
+        json!({ "hero_icon": true, "stat_digits": true, "map_name": true, "rank": true })
+    );
+    w.cleanup();
+}
+
+#[tokio::test]
+async fn rank_crops_have_their_own_bounds() {
+    let w = world().await;
+    let all = json!({ "rank": true, "stat_digits": true });
+    for session in [OWNER_SESSION, OTHER_SESSION, OFFICER_SESSION, ADMIN_SESSION] {
+        set_consent(&w.app, session, all.clone()).await;
+    }
+    assert_eq!((RANK_MAX_WIDTH, RANK_MAX_HEIGHT), (512, 256));
+    // A noise crop over the rank byte limit, inside its edges.
+    let big = noise_png(200, 200, 7);
+    assert!(big.len() > RANK_MAX_BYTES, "{}", big.len());
+    let bad = StatusCode::BAD_REQUEST;
+    let cases: Vec<(Vec<Part>, StatusCode, &str)> = vec![
+        (
+            vec![meta(json!({})), crop(RANK_MAX_WIDTH + 1, 16)],
+            bad,
+            "icon_bad_dimensions",
+        ),
+        (
+            vec![meta(json!({})), crop(64, RANK_MAX_HEIGHT + 1)],
+            bad,
+            "icon_bad_dimensions",
+        ),
+        (
+            vec![meta(json!({})), crop(7, 16)],
+            bad,
+            "icon_bad_dimensions",
+        ),
+        (
+            vec![meta(json!({})), ("crop", big)],
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "icon_too_large",
+        ),
+    ];
+    let tokens = [OWNER_TOKEN, OTHER_TOKEN, OFFICER_TOKEN, ADMIN_TOKEN];
+    for (index, (parts, status, code)) in cases.into_iter().enumerate() {
+        let got = upload(&w.app, tokens[index % tokens.len()], "rank", &parts).await;
+        assert_eq!(got.0, status, "case {index} {code}: {}", got.1);
+        assert_eq!(got.1["error"], json!(code), "case {index}: {}", got.1);
+    }
+    assert!(files_on_disk(w.dir()).is_empty());
+
+    // The wider rank bound does not leak to another kind.
+    let got = upload(
+        &w.app,
+        OWNER_TOKEN,
+        "stat_digits",
+        &[meta(json!({})), crop(RANK_MAX_WIDTH, 16)],
+    )
+    .await;
+    assert_error(&got, bad, "icon_bad_dimensions");
+
+    // The largest rank region and a noise crop under the byte limit pass.
+    let near = noise_png(170, 170, 8);
+    assert!(near.len() <= RANK_MAX_BYTES, "{}", near.len());
+    let ok = vec![
+        meta(json!({})),
+        crop(RANK_MAX_WIDTH, RANK_MAX_HEIGHT),
+        meta(json!({})),
+        ("crop", near),
+    ];
+    let got = upload(&w.app, OWNER_TOKEN, "rank", &ok).await;
+    assert_eq!(got.0, StatusCode::CREATED, "{}", got.1);
+    assert_eq!(got.1["crops"][0]["width"], json!(512));
+    assert_eq!(got.1["crops"][0]["height"], json!(256));
+    assert_eq!(files_on_disk(w.dir()).len(), 2);
+    w.cleanup();
+}
+
+#[tokio::test]
+async fn rank_counts_and_staff_visibility_follow_rank_consent() {
+    let w = world().await;
+    set_consent(
+        &w.app,
+        OWNER_SESSION,
+        json!({ "rank": true, "stat_digits": true }),
+    )
+    .await;
+    let hd = json!({ "screen_width": 1920, "screen_height": 1080 });
+    let ids = crop_ids(&upload(&w.app, OWNER_TOKEN, "rank", &pairs(3, hd.clone())).await);
+    upload(&w.app, OWNER_TOKEN, "stat_digits", &pairs(1, hd)).await;
+
+    // Officers: counts only, rank included.
+    let (status, page) = get(&w.app, "/api/training-crops/members", OFFICER_SESSION).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let rows = page["data"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["member_id"], json!(OWNER));
+    assert_eq!(rows[0]["total"], json!(4));
+    assert_eq!(
+        rows[0]["kinds"],
+        json!([
+            { "kind": "stat_digits", "count": 1, "consented": true, "max": 1000 },
+            { "kind": "rank", "count": 3, "consented": true, "max": RANK_MAX_PER_MEMBER }
+        ])
+    );
+    let image = format!("/api/training-crops/{}/image", ids[0]);
+    let got = get(&w.app, &image, OFFICER_SESSION).await;
+    assert_error(&got, StatusCode::FORBIDDEN, "Admin access required");
+    let got = get(&w.app, "/api/training-crops?kind=rank", OFFICER_SESSION).await;
+    assert_eq!(got.0, StatusCode::FORBIDDEN, "{}", got.1);
+    // Own list counts rank too.
+    let (_, mine) = get(&w.app, "/api/training-crops/mine", OWNER_SESSION).await;
+    let own_rank = mine["kinds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|k| k["kind"] == json!("rank"))
+        .cloned()
+        .expect("rank in own kinds");
+    assert_eq!(own_rank["count"], json!(3));
+    // Admins see them while consented, and they are in the totals.
+    let (_, page) = get(&w.app, "/api/training-crops?kind=rank", ADMIN_SESSION).await;
+    let items = page["data"].as_array().unwrap();
+    assert_eq!(items.len(), 3);
+    assert!(items.iter().all(|i| i["hidden"] != json!(true)), "{page}");
+    let (_, totals) = get(&w.app, "/api/training-crops/resolutions", ADMIN_SESSION).await;
+    let rank_total = totals["resolutions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["kind"] == json!("rank"))
+        .cloned()
+        .expect("rank total");
+    assert_eq!(rank_total["count"], json!(3));
+
+    // Rank consent off: staff lose that kind, the rest stays.
+    set_consent(&w.app, OWNER_SESSION, json!({ "rank": false })).await;
+    let (_, page) = get(&w.app, "/api/training-crops/members", OFFICER_SESSION).await;
+    assert_eq!(
+        page["data"][0]["kinds"],
+        json!([{ "kind": "stat_digits", "count": 1, "consented": true, "max": 1000 }])
+    );
+    let (_, page) = get(&w.app, "/api/training-crops?kind=rank", ADMIN_SESSION).await;
+    let items = page["data"].as_array().unwrap();
+    assert_eq!(items.len(), 3);
+    assert!(items.iter().all(|i| i["hidden"] == json!(true)), "{page}");
+    let got = get(&w.app, &image, ADMIN_SESSION).await;
+    assert_error(&got, StatusCode::NOT_FOUND, "crop_not_found");
+    let (_, totals) = get(&w.app, "/api/training-crops/resolutions", ADMIN_SESSION).await;
+    assert!(
+        !totals["resolutions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["kind"] == json!("rank")),
+        "{totals}"
+    );
+    // The owner still sees and can delete them.
+    let request = base_request(Method::GET, &image, Some(OWNER_SESSION))
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        w.app.clone().oneshot(request).await.unwrap().status(),
+        StatusCode::OK
+    );
+    let got = delete(&w.app, "/api/training-crops/mine?kind=rank", OWNER_TOKEN).await;
+    assert_eq!(got.1, json!({ "deleted": 3 }));
+    w.cleanup();
+}
+
+#[tokio::test]
+async fn rank_cap_is_its_own() {
+    let w = world().await;
+    set_consent(
+        &w.app,
+        OWNER_SESSION,
+        json!({ "rank": true, "map_name": true }),
+    )
+    .await;
+    seed_rows(w.db(), OWNER, CropKind::Rank, RANK_MAX_PER_MEMBER, 1).await;
+    let got = upload(&w.app, OWNER_TOKEN, "rank", &pairs(1, json!({}))).await;
+    assert_error(&got, StatusCode::CONFLICT, "crop_limit_reached");
+    let got = upload(&w.app, OWNER_TOKEN, "map_name", &pairs(1, json!({}))).await;
+    assert_eq!(got.0, StatusCode::CREATED, "{}", got.1);
     w.cleanup();
 }

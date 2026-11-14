@@ -14,7 +14,7 @@ use crate::training_crops::{
     TRAINING_CROP_SLOT_INDEX_MAX, TRAINING_CROP_UI_SCALE_MAX, TRAINING_CROP_VERSION_MAX_LEN,
 };
 
-/// `?kind=` is missing or not one of the four kinds. 400.
+/// `?kind=` is missing or not one of the five kinds. 400.
 pub const TRAINING_CROP_ERR_UNKNOWN_KIND: &str = "unknown_crop_kind";
 /// `?kind=full_screen`. The server does not take whole screens yet, whatever
 /// the consent says. Nothing is read or stored. 422.
@@ -276,6 +276,9 @@ pub struct TrainingCropConsent {
     pub hero_icon: bool,
     pub stat_digits: bool,
     pub map_name: bool,
+    /// Absent in answers from servers before the `rank` kind. Reads as false.
+    #[serde(default)]
+    pub rank: bool,
 }
 
 impl TrainingCropConsent {
@@ -285,6 +288,7 @@ impl TrainingCropConsent {
             CropKind::HeroIcon => self.hero_icon,
             CropKind::StatDigits => self.stat_digits,
             CropKind::MapName => self.map_name,
+            CropKind::Rank => self.rank,
             CropKind::FullScreen => false,
         }
     }
@@ -307,6 +311,8 @@ pub struct TrainingCropConsentUpdate {
     pub stat_digits: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub map_name: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank: Option<bool>,
 }
 
 /// One stored crop.
@@ -674,12 +680,32 @@ mod tests {
             hero_icon: true,
             stat_digits: true,
             map_name: true,
+            rank: true,
         };
         assert!(!all.get(CropKind::FullScreen));
+        assert!(all.get(CropKind::Rank));
         let json = serde_json::to_value(all).unwrap();
         assert_eq!(
             json,
-            serde_json::json!({ "hero_icon": true, "stat_digits": true, "map_name": true })
+            serde_json::json!({
+                "hero_icon": true,
+                "stat_digits": true,
+                "map_name": true,
+                "rank": true
+            })
         );
+    }
+
+    #[test]
+    fn rank_consent_is_off_by_default_and_read_when_absent() {
+        assert!(!TrainingCropConsent::default().rank);
+        // An answer from a server before the rank kind has no rank field.
+        let old: TrainingCropConsent =
+            serde_json::from_str(r#"{"hero_icon":true,"stat_digits":false,"map_name":true}"#)
+                .unwrap();
+        assert!(!old.rank && !old.get(CropKind::Rank));
+        let parsed: TrainingCropConsentUpdate = serde_json::from_str(r#"{"rank":true}"#).unwrap();
+        assert_eq!(parsed.rank, Some(true));
+        assert_eq!(parsed.map_name, None);
     }
 }
