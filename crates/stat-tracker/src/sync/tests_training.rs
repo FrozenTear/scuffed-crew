@@ -44,6 +44,7 @@ pub(super) fn all_consent() -> TrainingCropConsent {
         hero_icon: true,
         stat_digits: true,
         map_name: true,
+        rank: false,
     }
 }
 

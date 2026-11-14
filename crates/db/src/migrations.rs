@@ -1009,7 +1009,7 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         -- Additive only. Rollback: see docs/api/training-crops.md.
         -- ================================================
         DEFINE FIELD OVERWRITE kind ON hero_icon TYPE string DEFAULT 'hero_icon'
-            ASSERT $value IN ['hero_icon', 'stat_digits', 'map_name'];
+            ASSERT $value IN ['hero_icon', 'stat_digits', 'map_name', 'rank'];
         DEFINE FIELD OVERWRITE screen ON hero_icon TYPE option<string>;
         DEFINE FIELD OVERWRITE slot_type ON hero_icon TYPE option<string>;
         DEFINE FIELD OVERWRITE slot_index ON hero_icon TYPE option<int>;
@@ -1041,6 +1041,9 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         -- consent is never stored.
         DEFINE FIELD OVERWRITE stat_digits_opt_in ON member_settings TYPE bool DEFAULT false;
         DEFINE FIELD OVERWRITE map_name_opt_in ON member_settings TYPE bool DEFAULT false;
+        -- rank crop consent (role, tier, SR, percentile regions). Additive:
+        -- off by default, rows from before it read false, no row rewrite.
+        DEFINE FIELD OVERWRITE rank_opt_in ON member_settings TYPE bool DEFAULT false;
     "#,
             )
             .await?

@@ -30,6 +30,11 @@ struct DbMemberSettings {
     #[serde(default)]
     #[surreal(default)]
     map_name_opt_in: Option<bool>,
+    /// `rank` crop consent. Absent on rows from before the kind. Reads as
+    /// false.
+    #[serde(default)]
+    #[surreal(default)]
+    rank_opt_in: Option<bool>,
 }
 
 fn db_to_consent(db: &DbMemberSettings) -> TrainingCropConsent {
@@ -37,6 +42,7 @@ fn db_to_consent(db: &DbMemberSettings) -> TrainingCropConsent {
         hero_icon: db.hero_icon_opt_in.unwrap_or(false),
         stat_digits: db.stat_digits_opt_in.unwrap_or(false),
         map_name: db.map_name_opt_in.unwrap_or(false),
+        rank: db.rank_opt_in.unwrap_or(false),
     }
 }
 
@@ -168,6 +174,7 @@ impl Database {
                         hero_icon_opt_in: Some(false),
                         stat_digits_opt_in: Some(false),
                         map_name_opt_in: Some(false),
+                        rank_opt_in: Some(false),
                     })
                     .await?;
                 Ok(db_to_settings(created.ok_or_else(|| {
@@ -282,6 +289,7 @@ impl Database {
                  hero_icon_opt_in = $hero ?? hero_icon_opt_in ?? false, \
                  stat_digits_opt_in = $digits ?? stat_digits_opt_in ?? false, \
                  map_name_opt_in = $map ?? map_name_opt_in ?? false, \
+                 rank_opt_in = $rank ?? rank_opt_in ?? false, \
                  stats_visibility = stats_visibility ?? 'public' \
                  WHERE member_id = $mid",
             )
@@ -289,6 +297,7 @@ impl Database {
             .bind(("hero", update.hero_icon))
             .bind(("digits", update.stat_digits))
             .bind(("map", update.map_name))
+            .bind(("rank", update.rank))
             .await?;
         let rows: Vec<DbMemberSettings> = result.take(0)?;
         match rows.first() {
@@ -304,7 +313,8 @@ impl Database {
                 .client
                 .query(
                     "SELECT * FROM member_settings WHERE hero_icon_opt_in = true \
-                     OR stat_digits_opt_in = true OR map_name_opt_in = true",
+                     OR stat_digits_opt_in = true OR map_name_opt_in = true \
+                     OR rank_opt_in = true",
                 )
                 .await?;
             let rows: Vec<DbMemberSettings> = result.take(0)?;
@@ -619,6 +629,71 @@ mod tests {
             .await
             .unwrap();
         assert!(set.hero_icon && set.stat_digits && !set.map_name);
+    }
+
+    #[tokio::test]
+    async fn rank_consent_reads_false_on_rows_from_before_it() {
+        let db = test_db().await;
+        db.client
+            .query(
+                r#"
+                REMOVE FIELD IF EXISTS rank_opt_in ON member_settings;
+                CREATE member_settings SET member_id = 'pre-rank', player_name = 'Old',
+                    stats_visibility = 'public', hero_icon_opt_in = true,
+                    stat_digits_opt_in = true, map_name_opt_in = true;
+                "#,
+            )
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        run_migrations(&db.client).await.unwrap();
+
+        let consent = db.get_training_crop_consent("pre-rank").await.unwrap();
+        assert_eq!(
+            consent,
+            TrainingCropConsent {
+                hero_icon: true,
+                stat_digits: true,
+                map_name: true,
+                rank: false,
+            }
+        );
+        // Listed as a consenting member, but not for rank.
+        let all = db.training_crop_consents().await.unwrap();
+        assert!(!all["pre-rank"].rank);
+        // Turning rank on alone keeps the others and is found by the
+        // consenting-members query.
+        let set = db
+            .set_training_crop_consent(
+                "rank-only",
+                TrainingCropConsentUpdate {
+                    rank: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            set,
+            TrainingCropConsent {
+                rank: true,
+                ..Default::default()
+            }
+        );
+        let all = db.training_crop_consents().await.unwrap();
+        assert!(all["rank-only"].rank);
+        let set = db
+            .set_training_crop_consent(
+                "pre-rank",
+                TrainingCropConsentUpdate {
+                    rank: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(set.hero_icon && set.stat_digits && set.map_name && set.rank);
     }
 
     #[tokio::test]

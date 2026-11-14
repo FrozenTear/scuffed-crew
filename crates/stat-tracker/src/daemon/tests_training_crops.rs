@@ -17,6 +17,7 @@ fn set_consent(dir: &Path, hero_icon: bool, stat_digits: bool) {
         hero_icon,
         stat_digits,
         map_name: false,
+        rank: false,
     };
     let path = dir.join("training_crops").join("consent.json");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
