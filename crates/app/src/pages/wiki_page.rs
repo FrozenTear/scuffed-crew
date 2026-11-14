@@ -103,6 +103,7 @@ const PAGE_CSS: &str = r#"
         color: var(--text);
     }
     .wiki-content {
+        --md-block-gap: 0.9rem;
         background: var(--surface);
         border: 1px solid var(--border);
         border-radius: 10px;
@@ -118,7 +119,7 @@ const PAGE_CSS: &str = r#"
     .wiki-content blockquote,
     .wiki-content pre,
     .wiki-content table {
-        margin: 0 0 0.9rem;
+        margin: 0 0 var(--md-block-gap);
     }
     .wiki-content a {
         color: var(--accent);

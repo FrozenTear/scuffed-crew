@@ -42,6 +42,10 @@ pub const MARKDOWN_CSS_ID: &str = "scuffed-css-markdown-body";
 /// no matter which `StyleOnce` mounts first. They also beat page rules like
 /// `.wiki-content p` (0,1,1), so pages must not repeat them.
 ///
+/// The table wrapper's bottom margin follows `--md-block-gap` (default
+/// `1rem`), so a page whose blocks use a different gap sets that property on
+/// its container and tables line up with its other blocks.
+///
 /// Task items drop their marker in both shapes: tight (`li > input`) and
 /// loose (`li > p > input`, where the parser wraps the item text in `<p>`).
 pub const MARKDOWN_CSS: &str = r#"
@@ -107,7 +111,7 @@ pub const MARKDOWN_CSS: &str = r#"
     .md-body .md-table-wrap {
         max-width: 100%;
         overflow-x: auto;
-        margin: 0 0 1rem;
+        margin: 0 0 var(--md-block-gap, 1rem);
     }
     .md-body .md-table-wrap > table {
         margin: 0;
@@ -453,6 +457,31 @@ mod tests {
         assert!(html.contains("<td>&lt;img"), "{html}");
         assert!(!html.contains("<script"), "{html}");
         assert!(!html.contains("<img"), "{html}");
+    }
+
+    #[test]
+    fn table_cells_cannot_forge_the_wrapper_or_unsafe_urls() {
+        let html = render_markdown(concat!(
+            "| <div class=\"md-table-wrap\"> | <!-- note --> |\n",
+            "|---|---|\n",
+            "| [x](javascript:alert(1)) | ![y](data:text/html,x) |\n",
+        ));
+        assert_eq!(html.matches("<div").count(), 1, "{html}");
+        assert_eq!(html.matches("</div>").count(), 1, "{html}");
+        assert!(
+            html.starts_with("<div class=\"md-table-wrap\"><table>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<th>&lt;div class=\"md-table-wrap\"&gt;</th>"),
+            "{html}"
+        );
+        assert!(html.contains("<th>&lt;!-- note --&gt;</th>"), "{html}");
+        assert!(!html.contains("<!--"), "{html}");
+        assert!(html.contains("<td><a href=\"#\">x</a></td>"), "{html}");
+        assert!(html.contains("<img src=\"#\" alt=\"y\""), "{html}");
+        assert!(!html.contains("javascript:"), "{html}");
+        assert!(!html.contains("data:"), "{html}");
     }
 
     #[test]
