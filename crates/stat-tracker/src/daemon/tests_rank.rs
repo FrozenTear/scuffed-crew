@@ -441,6 +441,7 @@ fn a_feed_with_a_pack_on_disk_is_on_and_reads_frames() {
             class: GATE_CLASS.to_string(),
             aspect: 1.0,
             n: 1,
+            pooled: false,
             vector: vec![0.5; w * h],
         }],
     );

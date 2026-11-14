@@ -16,9 +16,14 @@ use serde_json::Value;
 use super::cli::{CutArgs, EvalArgs};
 use super::report::{self, EvalDone, Item, Outcome, ScoreRow};
 use super::util::{self, ClassFate, ClassNote, CountChange, Loaded};
-use crate::shadow::queue_title::{Learner, Reader, Screen, TemplateSet, plane};
+use crate::shadow::queue_title::{Learner, Reader, Screen, TemplateSet, template_ncc, title_crop};
 
 pub fn cut(args: &CutArgs, out: &Path) -> Result<String, String> {
+    super::output::refuse_templates(out, args.base.as_deref(), args.force)?;
+    let base = match &args.base {
+        Some(dir) => Some(TemplateSet::load_dir(dir).map_err(|e| format!("base pack: {e}"))?),
+        None => None,
+    };
     let loaded = load(&args.labels, args.frames.as_deref())?;
     let mut learner = Learner::new();
     for sample in &loaded.samples {
@@ -26,13 +31,9 @@ pub fn cut(args: &CutArgs, out: &Path) -> Result<String, String> {
         learner.add_frame(&image, sample.screen, &sample.title);
     }
     let learned = learner.build();
-    let base = match &args.base {
-        Some(dir) => Some(TemplateSet::load_dir(dir).map_err(|e| format!("base pack: {e}"))?),
-        None => None,
-    };
     let replace: BTreeSet<String> = args.replace.iter().cloned().collect();
     let (set, classes) = merge(learned, base, &replace, args.replace_all)?;
-    reject_near(&set)?;
+    reject_near(&set, &classes, args.allow_near)?;
     set.check()
         .map_err(|e| format!("refusing to write an unloadable queue-title pack: {e}"))?;
     let dest = super::output::prepare_templates(out, args.base.as_deref(), args.force)?;
@@ -72,9 +73,17 @@ pub fn eval(args: &EvalArgs) -> Result<EvalDone, String> {
     let base_reader = Reader::new(baseline);
     let pack_reader = Reader::new(candidate);
     let base_names = names_of(&base_reader);
-    let mut sessions: Vec<&str> = loaded.samples.iter().map(|s| s.session.as_str()).collect();
-    sessions.sort_unstable();
+    let mut sessions: Vec<String> = loaded.samples.iter().map(|s| s.session.clone()).collect();
+    sessions.sort();
     sessions.dedup();
+    let mut session_learners: BTreeMap<String, Learner> = BTreeMap::new();
+    for sample in &loaded.samples {
+        let image = util::open_rgb(&sample.path)?;
+        session_learners
+            .entry(sample.session.clone())
+            .or_default()
+            .add_frame(&image, sample.screen, &sample.title);
+    }
     let titles = titles_of(&loaded.samples);
     let mut items: BTreeMap<String, Vec<Item>> = titles
         .iter()
@@ -84,14 +93,15 @@ pub fn eval(args: &EvalArgs) -> Result<EvalDone, String> {
         .iter()
         .map(|title| (title.clone(), BTreeSet::new()))
         .collect();
-    for session in sessions {
+    for session in &sessions {
         let mut learner = Learner::new();
-        for sample in loaded.samples.iter().filter(|s| s.session != session) {
-            let image = util::open_rgb(&sample.path)?;
-            learner.add_frame(&image, sample.screen, &sample.title);
+        for (other, part) in &session_learners {
+            if other != session {
+                learner.merge(part);
+            }
         }
         let fold = Reader::new(learner.build());
-        for sample in loaded.samples.iter().filter(|s| s.session == session) {
+        for sample in loaded.samples.iter().filter(|s| s.session == *session) {
             let image = util::open_rgb(&sample.path)?;
             folds
                 .get_mut(&sample.title)
@@ -299,11 +309,29 @@ fn mix_queue(
     }
 }
 
-fn reject_near(set: &TemplateSet) -> Result<(), String> {
+fn reject_near(set: &TemplateSet, notes: &[ClassNote], allow: bool) -> Result<(), String> {
+    if allow {
+        return Ok(());
+    }
+    let hot: BTreeSet<&str> = notes
+        .iter()
+        .filter(|(_, fate, _, _)| {
+            matches!(
+                fate,
+                ClassFate::New | ClassFate::NewPooled | ClassFate::Learned | ClassFate::Replaced
+            )
+        })
+        .map(|(name, _, _, _)| name.as_str())
+        .collect();
     let limit = 1.0 - crate::shadow::queue_title::MIN_MARGIN;
     for i in 0..set.classes.len() {
         for j in (i + 1)..set.classes.len() {
-            let dot = cosine(&set.classes[i].vector, &set.classes[j].vector);
+            if !hot.contains(set.classes[i].class.as_str())
+                && !hot.contains(set.classes[j].class.as_str())
+            {
+                continue;
+            }
+            let dot = template_ncc(&set.classes[i].vector, &set.classes[j].vector);
             if dot > limit {
                 return Err(format!(
                     "class {} correlates {dot:.3} with {}, above {limit:.3}",
@@ -313,17 +341,6 @@ fn reject_near(set: &TemplateSet) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-fn cosine(a: &[f32], b: &[f32]) -> f32 {
-    let (mut dot, mut na, mut nb) = (0.0f32, 0.0f32, 0.0f32);
-    for (x, y) in a.iter().zip(b) {
-        dot += x * y;
-        na += x * x;
-        nb += y * y;
-    }
-    let denom = (na * nb).sqrt();
-    if denom < 1e-8 { 0.0 } else { dot / denom }
 }
 
 struct Sample {
@@ -393,8 +410,9 @@ fn load(labels: &Path, frames: Option<&Path>) -> Result<Loaded<Sample>, String> 
     let mut skipped = 0usize;
     for (label_path, screen, title) in &rows {
         let path = resolve_frame(frames, label_path)?;
-        let image = util::open_rgb(&path)?;
-        if plane(&image, *screen).is_none() {
+        let (width, height) = image::image_dimensions(&path)
+            .map_err(|e| format!("reading {}: {e}", path.display()))?;
+        if title_crop(width, height, *screen).is_none() {
             skipped += 1;
             continue;
         }

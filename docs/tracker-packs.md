@@ -105,7 +105,7 @@ with that one tar and a `manifest.json` that lists it is enough.
 `--bin scuffed-stat-tracker`, so run the cutter from a checkout:
 
 ```text
-cargo run --release -p scuffed-stat-tracker --bin scuffed-pack-cutter -- cut --kind rank|queue-title --labels FILE [--frames DIR] [--role-labels FILE] [--base DIR] [--replace CLASS ...] [--replace-all] [--force] --out DIR
+cargo run --release -p scuffed-stat-tracker --bin scuffed-pack-cutter -- cut --kind rank|queue-title --labels FILE [--frames DIR] [--role-labels FILE] [--base DIR] [--replace CLASS ...] [--replace-all] [--allow-near] [--force] --out DIR
 cargo run --release -p scuffed-stat-tracker --bin scuffed-pack-cutter -- pack --kind rank|queue-title --dir DIR --name NAME.tar --version VER --out DIR
 cargo run --release -p scuffed-stat-tracker --bin scuffed-pack-cutter -- eval --kind rank|queue-title --labels FILE [--frames DIR] --baseline DIR --candidate DIR --set-name NAME [--role-labels FILE] [--allow-drop CLASS ...] [--allow-unverified CLASS ...]
 ```
@@ -129,31 +129,48 @@ default mix is weighted by sample count (`n`), and the summary prints
 `n <base> -> <new>` on every class line. `--replace CLASS` (repeatable) or
 `--replace-all` keeps the new cut instead. A numeric class the labels did
 not actually show is not a recut: it stays the base template and prints
-`kept from base (pooled)`. Pooling fills a class only when neither side has
-it. `cut` refuses `--out` equal to `--base`, refuses an `--out` that
-already holds `templates.json` unless `--force`, and writes the file by
-rename. `pack` checks `--name` against the kind (`rank-v1.tar` or
-`queue-title-v1.tar`), loads the folder with that kind's reader, and prints
-the sha256 of `templates.json`. `eval` diffs the two packs first. Every
-changed class needs a labelled frame that exercises it, unless
-`--allow-unverified CLASS` names it. Then it scores the candidate pack
-against the baseline pack on every row, including a title the baseline pack
-does not have. It fails on a new wrong, on a frame that was correct and is
-now unread or wrong, on a dropped baseline class, or on a changed class
-with no labelled frame. `--allow-drop CLASS` (repeat it for each class) is
-the escape for a drop. Leave-one-out stays in the report as generalisation
-and does not gate. The report prints `labelled: N`, `regressed frames:`,
-`allowed drops:` and `changed class`, and `result:` is the last line.
+`kept from base (pooled)`. A pooled base template is replaced by an observed
+cut of that class, not averaged into the pool. Pooling fills a class only
+when neither side has it, and that line prints `new (pooled)`. `cut` refuses
+`--out` equal to `--base`, refuses an `--out` that already holds
+`templates.json` unless `--force`, and writes the file by rename. It also
+refuses an existing `--out` or `<out>/packs` that group or other can read,
+and it does not chmod that directory. `pack` checks `--name` against the
+kind (`rank-v1.tar` or `queue-title-v1.tar`), loads the folder with that
+kind's reader, and prints the sha256 of `templates.json`. `eval` diffs the
+two packs first. Every changed class needs a labelled frame that shows that
+class, unless `--allow-unverified CLASS` names it. Rank coverage is per
+class (an `sr/7` needs a labelled SR that contains a 7; a `role/Tank` needs
+a Tank label), the same way a queue class needs a frame of that title. Then
+it scores the candidate pack against the baseline pack on every row,
+including a title the baseline pack does not have. It fails on a new wrong,
+on a frame that was correct and is now unread or wrong, on a dropped
+baseline class, or on a changed class with no labelled frame.
+`--allow-drop CLASS` (repeat it for each class) is the escape for a drop.
+Leave-one-out stays in the report as generalisation and does not gate. The
+report prints `labelled: N`, `regressed frames:`, `allowed drops:`,
+`changed class`, and `candidate templates.json sha256:`. Compare that sha
+with the sha `pack` prints for the same file. `result:` is the last line.
+`regressed frames:` uses the label path, so a queue set with absolute paths
+prints home-folder paths. Trim those before pasting a report into a PR or
+the fleet channel.
+
+`cut` also refuses a title or a rank word (`role_rank`, `next_mode_hint`,
+each `change_tags` entry) with a leading, trailing, or doubled space, an
+unknown label key, and a role file that lists the same game twice. Two
+classes the reader compares, when one of them is new or re-learned, are
+refused when they correlate above the reader's margin. `--allow-near` is
+the override for that check.
 
 Exit status: 0 when eval passes or help is shown, 1 when the eval gate
 fails, 2 on any other error. `-h` and `--help` are help only as the command
-or in flag-name position.
+or in flag-name position. A repeated flag is an error.
 
 Inputs and output stay on the build machine. `cut` and `pack` refuse an
-`--out` inside a git work tree, including a path that reaches one through
-`..`. Eval must pass against the published pack before a publish. This tool
-does not publish. Publishing still needs FrozenTear's go, then
-`scripts/publish-packs.sh`.
+`--out` inside a git work tree. Any `..` in `--out` is refused, whether or
+not the path would land in a repo. Eval must pass against the published
+pack before a publish. This tool does not publish. Publishing still needs
+FrozenTear's go, then `scripts/publish-packs.sh`.
 
 ## Publish
 

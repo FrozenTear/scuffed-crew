@@ -22,7 +22,6 @@ use super::*;
 #[path = "tests_game.rs"]
 mod game_wiring;
 
-// ---- 5x7 dot font ----
 pub(crate) use super::tests_synth::*;
 
 /// The pack learned from [`training`], built once for all tests.
@@ -35,6 +34,41 @@ fn trained() -> &'static TemplateSet {
         }
         l.build()
     })
+}
+
+#[test]
+fn published_templates_json_without_pooled_still_loads() {
+    use std::collections::BTreeMap;
+    let (w, h, _) = Family::Gate.shape();
+    let set = TemplateSet {
+        recognizer: super::RECOGNIZER_ID.to_string(),
+        families: BTreeMap::from([(
+            Family::Gate,
+            vec![super::templates::ClassTemplate {
+                class: super::GATE_CLASS.to_string(),
+                aspect: 1.0,
+                n: 1,
+                pooled: false,
+                vector: vec![0.0; w * h],
+            }],
+        )]),
+    };
+    let value = serde_json::to_value(&set).unwrap();
+    assert!(
+        value["families"]["gate"][0].get("pooled").is_none(),
+        "a false pooled flag stays out of the file: {value}"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("templates.json"),
+        serde_json::to_vec(&value).unwrap(),
+    )
+    .unwrap();
+    let loaded = TemplateSet::load_dir(dir.path()).unwrap();
+    let gate = &loaded.families[&Family::Gate][0];
+    assert!(!gate.pooled);
+    assert_eq!(gate.vector, vec![0.0; w * h]);
+    let _reader = super::Reader::new(loaded);
 }
 
 fn reader() -> &'static Reader {

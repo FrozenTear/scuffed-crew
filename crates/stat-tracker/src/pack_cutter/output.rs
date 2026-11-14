@@ -148,21 +148,31 @@ fn reject_loose(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Refuse writing a templates file over the base folder, or over an existing
-/// file unless `force` is set. Creates `--out` when it is missing.
-pub fn prepare_templates(out: &Path, base: Option<&Path>, force: bool) -> Result<PathBuf, String> {
+/// The refusals in [`prepare_templates`], without creating a directory.
+/// `cut` calls this before it learns any frame.
+pub fn refuse_templates(out: &Path, base: Option<&Path>, force: bool) -> Result<(), String> {
     if let Some(base) = base
         && same_dir(out, base)
     {
         return Err("--out is the same folder as --base".into());
     }
-    let dest = out.join("templates.json");
-    if dest.exists() && !force {
+    if out.join("templates.json").exists() && !force {
         return Err(format!(
             "{} already holds templates.json; pass --force to replace it",
             out.display()
         ));
     }
+    if out.exists() {
+        reject_loose(out)?;
+    }
+    Ok(())
+}
+
+/// Refuse writing a templates file over the base folder, or over an existing
+/// file unless `force` is set. Creates `--out` when it is missing.
+pub fn prepare_templates(out: &Path, base: Option<&Path>, force: bool) -> Result<PathBuf, String> {
+    refuse_templates(out, base, force)?;
+    let dest = out.join("templates.json");
     private_dir(out)?;
     recheck_out(out)?;
     Ok(dest)

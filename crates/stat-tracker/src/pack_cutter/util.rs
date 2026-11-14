@@ -26,6 +26,8 @@ pub enum ClassFate {
     KeptPooled,
     /// The labels produced it and the base pack did not have it.
     New,
+    /// Numeric pooling filled it, and the base pack did not have it.
+    NewPooled,
 }
 
 /// One cut-summary line: class, what happened to it, base `n`, written `n`.
@@ -89,6 +91,10 @@ pub fn summary(
             ClassFate::New => {
                 n_new += 1;
                 "new"
+            }
+            ClassFate::NewPooled => {
+                n_new += 1;
+                "new (pooled)"
             }
         };
         text.push_str(&format!("class {name}: {word} n {n_base} -> {n_new_n}\n"));

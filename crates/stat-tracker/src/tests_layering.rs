@@ -16,7 +16,9 @@
 //!           host_probe, sandbox, hero_auth, model, version, suspect, ocr_status, unsure_rule
 //! ```
 //!
-//! The four middle crates do not use each other. The test reads the `src/` of every crate the split has made so far ([`PHYSICAL`]: the lib only, not `main.rs`, `bin/`, `daemon/`, `main_tests/` or `ocr_bench.rs`), follows every
+//! The four middle crates do not use each other. The test reads the `src/`
+//! of every crate the split has made so far ([`PHYSICAL`]: the lib only,
+//! not `main.rs`, `bin/`, `daemon/`, `main_tests/` or `ocr_bench.rs`), follows every
 //! `crate::`, `super::` and `self::` path (and every path through an
 //! extracted crate's name, such as `stat_tracker_core::`) in `use` trees
 //! and in code, and fails on any path from a module to a crate it may not
@@ -109,8 +111,7 @@ const CRATE_OF: &[(&str, Crate)] = &[
     ("tests_release_pins", Crate::Top),
 ];
 
-/// The crates split so far: directory under `crates/`, would-be crate, lib
-/// name. `stat-tracker` holds every crate not yet extracted; an extraction
+/// The crates split so far: directory under `crates/`, would-be crate, lib name. `stat-tracker` holds every crate not yet extracted; an extraction
 /// PR adds its crate here and the test then walks its `src/` from `lib.rs`.
 const PHYSICAL: &[(&str, Crate, &str)] = &[
     ("stat-tracker", Crate::Top, "stat_tracker"),
@@ -198,8 +199,7 @@ fn blank(text: &str) -> Vec<char> {
     out
 }
 
-/// The end of the string literal starting at `i` (`"…"`, `b"…"`, `c"…"`,
-/// `r#"…"#`, `br"…"`), or `None` when none starts there.
+/// The end of the string literal starting at `i` (`"…"`, `b"…"`, `c"…"`, `r#"…"#`, `br"…"`), or `None` when none starts there.
 fn string_end(src: &[char], i: usize) -> Option<usize> {
     if i > 0 && is_ident(src[i - 1]) {
         return None;

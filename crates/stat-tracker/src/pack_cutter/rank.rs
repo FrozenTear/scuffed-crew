@@ -20,6 +20,11 @@ use crate::shadow::rank::layout::Scale;
 use crate::shadow::rank::{Family, Labels, Learner, RankRead, Reader, Role, TemplateSet};
 
 pub fn cut(args: &CutArgs, out: &Path) -> Result<String, String> {
+    super::output::refuse_templates(out, args.base.as_deref(), args.force)?;
+    let base = match &args.base {
+        Some(dir) => Some(TemplateSet::load_dir(dir).map_err(|e| format!("base pack: {e}"))?),
+        None => None,
+    };
     let frames = args.frames.as_deref().ok_or("missing --frames")?;
     let loaded = load(&args.labels, Some(frames), args.role_labels.as_deref())?;
     let mut learner = Learner::new();
@@ -34,13 +39,9 @@ pub fn cut(args: &CutArgs, out: &Path) -> Result<String, String> {
     }
     let observed = learner.observed();
     let learned = learner.build();
-    let base = match &args.base {
-        Some(dir) => Some(TemplateSet::load_dir(dir).map_err(|e| format!("base pack: {e}"))?),
-        None => None,
-    };
     let replace: BTreeSet<String> = args.replace.iter().cloned().collect();
     let (set, classes) = merge(learned, &observed, base, &replace, args.replace_all)?;
-    reject_near(&set)?;
+    reject_near(&set, &classes, args.allow_near)?;
     set.check()
         .map_err(|e| format!("refusing to write an unloadable rank pack: {e}"))?;
     let dest = super::output::prepare_templates(out, args.base.as_deref(), args.force)?;
@@ -83,17 +84,22 @@ pub fn eval(args: &EvalArgs) -> Result<EvalDone, String> {
     let mut days: Vec<String> = loaded.samples.iter().map(|s| s.day.clone()).collect();
     days.sort();
     days.dedup();
+    let mut day_learners: BTreeMap<String, Learner> = BTreeMap::new();
+    for sample in loaded.samples.iter().filter(|s| s.readable) {
+        let image = util::open_rgb(&sample.path)?;
+        day_learners
+            .entry(sample.day.clone())
+            .or_default()
+            .add_frame(&image, &sample.labels);
+    }
 
     let mut bag = Bag::new();
     for day in &days {
         let mut learner = Learner::new();
-        for sample in loaded
-            .samples
-            .iter()
-            .filter(|s| s.readable && s.day != *day)
-        {
-            let image = util::open_rgb(&sample.path)?;
-            learner.add_frame(&image, &sample.labels);
+        for (other, part) in &day_learners {
+            if other != day {
+                learner.merge(part);
+            }
         }
         let fold = Reader::new(learner.build());
         for sample in loaded.samples.iter().filter(|s| s.day == *day) {
@@ -116,7 +122,7 @@ pub fn eval(args: &EvalArgs) -> Result<EvalDone, String> {
         labelled: loaded.samples.len(),
         items: bag.gate,
     });
-    let folds = class_folds(&loaded.samples)?;
+    let folds = class_folds_from(&day_learners);
     Ok(report::finish(&report::Inputs {
         set_name: &args.set_name,
         frames: loaded.rows,
@@ -296,7 +302,7 @@ fn changed_classes(
             continue;
         }
         changed.push((name.clone(), before, template.n));
-        if !exercised(key.0, samples) && !allow_set.contains(name.as_str()) {
+        if !exercised(key.0, &key.1, samples) && !allow_set.contains(name.as_str()) {
             unverified.push(name);
         }
     }
@@ -317,21 +323,76 @@ fn changed_classes(
     Ok((changed, unverified))
 }
 
-fn exercised(family: Family, samples: &[Sample]) -> bool {
-    let labelled =
-        |pred: fn(&Labels) -> bool| samples.iter().any(|s| s.readable && pred(&s.labels));
+fn exercised(family: Family, class: &str, samples: &[Sample]) -> bool {
+    if family == Family::Gate {
+        return !samples.is_empty();
+    }
+    samples
+        .iter()
+        .any(|sample| sample.readable && class_shown(family, class, &sample.labels))
+}
+
+fn class_shown(family: Family, class: &str, labels: &Labels) -> bool {
+    let digits = |v: i64| -> Vec<String> {
+        v.unsigned_abs()
+            .to_string()
+            .chars()
+            .map(|c| c.to_string())
+            .collect()
+    };
     match family {
-        Family::Gate => !samples.is_empty(),
-        Family::Pct => labelled(|l| l.progress_pct.is_some()),
-        Family::Higher => labelled(|l| l.higher_than_pct.is_some()),
-        Family::Pill => labelled(|l| l.progress_change.is_some()),
-        Family::Sr => labelled(|l| l.hero_sr.is_some()),
-        Family::Change => labelled(|l| l.hero_sr_change.is_some()),
-        Family::Tag => labelled(|l| l.change_tags.is_some()),
-        Family::Banner => labelled(|l| l.next_mode_hint.is_some()),
-        Family::Tier => labelled(|l| l.role_rank.is_some()),
-        Family::Division | Family::Emblem => labelled(|l| l.division.is_some()),
-        Family::Role => labelled(|l| l.role.is_some()),
+        Family::Gate => true,
+        Family::Pct => labels.progress_pct.is_some_and(|v| {
+            let mut chars = Vec::new();
+            if v < 0 {
+                chars.push("-".to_string());
+            }
+            chars.extend(digits(i64::from(v)));
+            chars.push("%".to_string());
+            chars.iter().any(|c| c == class)
+        }),
+        Family::Higher => labels.higher_than_pct.is_some_and(|v| {
+            let mut chars = digits(i64::from(v));
+            chars.push("%".to_string());
+            chars.iter().any(|c| c == class)
+        }),
+        Family::Pill => labels.progress_change.is_some_and(|v| {
+            if class == crate::shadow::rank::CHEV_LEFT {
+                return v < 0;
+            }
+            if class == crate::shadow::rank::CHEV_RIGHT || class == "+" {
+                return v > 0;
+            }
+            if class == "%" {
+                return true;
+            }
+            digits(i64::from(v)).iter().any(|c| c == class)
+        }),
+        Family::Sr => {
+            if class == crate::shadow::rank::SR_ICON {
+                return labels.hero_sr.is_some();
+            }
+            labels
+                .hero_sr
+                .is_some_and(|v| digits(i64::from(v)).iter().any(|c| c == class))
+        }
+        Family::Change => labels
+            .hero_sr_change
+            .is_some_and(|v| digits(i64::from(v)).iter().any(|c| c == class)),
+        Family::Tag => labels
+            .change_tags
+            .as_ref()
+            .is_some_and(|tags| tags.iter().any(|tag| tag == class)),
+        Family::Banner => labels.next_mode_hint.as_deref() == Some(class),
+        Family::Tier => labels.role_rank.as_deref() == Some(class),
+        Family::Role => labels.role.is_some_and(|role| role.as_str() == class),
+        Family::Division | Family::Emblem => labels.division.is_some_and(|d| {
+            if !(1..=5).contains(&d) {
+                return false;
+            }
+            let (left, right) = crate::shadow::rank::neighbours(d);
+            class == d.to_string() || class == left.to_string() || class == right.to_string()
+        }),
     }
 }
 
@@ -444,6 +505,11 @@ fn merge(
                 let n_new = learned_t.n;
                 (ClassFate::Replaced, learned_t, n_base, n_new)
             }
+            (Some(base_t), Some(learned_t), true, false) if base_t.pooled => {
+                let n_base = base_t.n;
+                let n_new = learned_t.n;
+                (ClassFate::Replaced, learned_t, n_base, n_new)
+            }
             (Some(base_t), Some(learned_t), true, false) => {
                 let mixed = mix_rank(&base_t, &learned_t);
                 let n_base = base_t.n;
@@ -460,7 +526,12 @@ fn merge(
             }
             (None, Some(learned_t), _, _) => {
                 let n = learned_t.n;
-                (ClassFate::New, learned_t, 0, n)
+                let fate = if learned_t.pooled {
+                    ClassFate::NewPooled
+                } else {
+                    ClassFate::New
+                };
+                (fate, learned_t, 0, n)
             }
             (None, None, _, _) => continue,
         };
@@ -496,6 +567,7 @@ fn mix_rank(
         aspect,
         n: base.n.saturating_add(learned.n),
         vector: unit(mixed),
+        pooled: false,
     }
 }
 
@@ -506,7 +578,20 @@ fn split_key(name: &str) -> Result<(Family, String), String> {
     Ok((parse_family(family)?, class.to_string()))
 }
 
-fn reject_near(set: &TemplateSet) -> Result<(), String> {
+fn reject_near(set: &TemplateSet, notes: &[ClassNote], allow: bool) -> Result<(), String> {
+    if allow {
+        return Ok(());
+    }
+    let hot: BTreeSet<&str> = notes
+        .iter()
+        .filter(|(_, fate, _, _)| {
+            matches!(
+                fate,
+                ClassFate::New | ClassFate::NewPooled | ClassFate::Learned | ClassFate::Replaced
+            )
+        })
+        .map(|(name, _, _, _)| name.as_str())
+        .collect();
     for (family, templates) in &set.families {
         let limit = if family.is_glyph() {
             1.0 - crate::shadow::rank::MIN_MARGIN
@@ -515,6 +600,14 @@ fn reject_near(set: &TemplateSet) -> Result<(), String> {
         };
         for i in 0..templates.len() {
             for j in (i + 1)..templates.len() {
+                let left = class_key(*family, &templates[i].class);
+                let right = class_key(*family, &templates[j].class);
+                if !hot.contains(left.as_str()) && !hot.contains(right.as_str()) {
+                    continue;
+                }
+                if !competes(*family, &templates[i].class, &templates[j].class) {
+                    continue;
+                }
                 let dot: f32 = templates[i]
                     .vector
                     .iter()
@@ -534,19 +627,54 @@ fn reject_near(set: &TemplateSet) -> Result<(), String> {
     Ok(())
 }
 
-fn class_folds(samples: &[Sample]) -> Result<Vec<(String, usize)>, String> {
-    let mut by_day: BTreeMap<&str, Vec<&Sample>> = BTreeMap::new();
-    for sample in samples.iter().filter(|s| s.readable) {
-        by_day.entry(sample.day.as_str()).or_default().push(sample);
-    }
+fn competes(family: Family, a: &str, b: &str) -> bool {
+    let digits = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
+    let division = ["1", "2", "3", "4", "5"];
+    let allowed: &[&str] = match family {
+        Family::Pct => &[
+            "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "%", "-", "+",
+        ],
+        Family::Higher => &["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "%"],
+        Family::Pill => &[
+            "0",
+            "1",
+            "2",
+            "3",
+            "4",
+            "5",
+            "6",
+            "7",
+            "8",
+            "9",
+            "%",
+            "+",
+            crate::shadow::rank::CHEV_LEFT,
+            crate::shadow::rank::CHEV_RIGHT,
+        ],
+        Family::Sr => &[
+            "0",
+            "1",
+            "2",
+            "3",
+            "4",
+            "5",
+            "6",
+            "7",
+            "8",
+            "9",
+            crate::shadow::rank::SR_ICON,
+        ],
+        Family::Change => &digits,
+        Family::Division | Family::Emblem => &division,
+        Family::Gate | Family::Tag | Family::Banner | Family::Tier | Family::Role => return true,
+    };
+    allowed.contains(&a) && allowed.contains(&b)
+}
+
+fn class_folds_from(days: &BTreeMap<String, Learner>) -> Vec<(String, usize)> {
     let mut folds: BTreeMap<String, usize> = BTreeMap::new();
-    for group in by_day.values() {
-        let mut learner = Learner::new();
-        for sample in group {
-            let image = util::open_rgb(&sample.path)?;
-            learner.add_frame(&image, &sample.labels);
-        }
-        let set = learner.build();
+    for learner in days.values() {
+        let set = learner.clone().build();
         let mut seen = BTreeSet::new();
         for (family, templates) in &set.families {
             for template in templates {
@@ -557,7 +685,7 @@ fn class_folds(samples: &[Sample]) -> Result<Vec<(String, usize)>, String> {
             *folds.entry(key).or_default() += 1;
         }
     }
-    Ok(folds.into_iter().collect())
+    folds.into_iter().collect()
 }
 
 const RANK_KEYS: &[&str] = &[
@@ -632,8 +760,9 @@ fn load(
         reject_name("file", &row.file)?;
         let rel = Path::new(&row.game).join(&row.file);
         let path = util::under_root(frames, &rel)?;
-        let image = util::open_rgb(&path)?;
-        if Scale::from_img(&image).is_none() {
+        let (width, height) = image::image_dimensions(&path)
+            .map_err(|e| format!("reading {}: {e}", path.display()))?;
+        if Scale::from_dims(width, height).is_none() {
             skipped += 1;
             continue;
         }

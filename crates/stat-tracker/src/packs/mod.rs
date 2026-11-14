@@ -60,6 +60,9 @@ use std::time::Duration;
 use crate::config::validate_sync_server_url;
 
 pub mod layout;
+mod ustar;
+
+pub(crate) use ustar::read_ustar;
 
 // Pack layout: `packs/layout.rs` (0.6 lane D V4), re-exported at old paths.
 pub(crate) use layout::is_glyph_name;
@@ -1804,7 +1807,7 @@ fn is_version(value: &str) -> bool {
 /// heroes-v1: a template is one file next to `manifest.json`, or one file in
 /// `special/`. Unchanged from alpha.6.
 fn heroes_v1_file_path(raw: &str) -> Result<String, &'static str> {
-    let path = safe_rel_path(raw).ok_or(PACK_UNSAFE)?;
+    let path = ustar::safe_rel_path(raw).ok_or(PACK_UNSAFE)?;
     let mut parts = path.split('/');
     match (parts.next(), parts.next(), parts.next()) {
         (Some(_), None, None) => Ok(path),
@@ -1847,7 +1850,7 @@ impl PackLayout {
     /// does not allow it. `manifest.json` is accepted at the top level for
     /// every layout; [`unpack_pack`] reads it and writes it only for a
     /// layout that [`Self::keeps_manifest`].
-    fn file_path(self, raw: &str) -> Result<String, &'static str> {
+    pub(crate) fn file_path(self, raw: &str) -> Result<String, &'static str> {
         if self == Self::HeroesV1 {
             return heroes_v1_file_path(raw);
         }
@@ -1877,141 +1880,16 @@ impl PackLayout {
     }
 
     /// The one directory entry a layout may carry: `special/` for hero packs.
-    fn allows_dir(self, raw: &str) -> bool {
+    pub(crate) fn allows_dir(self, raw: &str) -> bool {
         match self {
-            Self::HeroesV1 | Self::Portraits => safe_rel_path(raw).as_deref() == Some("special"),
+            Self::HeroesV1 | Self::Portraits => {
+                ustar::safe_rel_path(raw).as_deref() == Some("special")
+            }
             Self::BanIcons | Self::MapGlyphs | Self::Words | Self::Names | Self::TemplatesJson => {
                 false
             }
         }
     }
-}
-
-fn safe_rel_path(raw: &str) -> Option<String> {
-    if raw.is_empty() || raw.starts_with('/') || raw.starts_with('\\') {
-        return None;
-    }
-    if raw.as_bytes().get(1) == Some(&b':') {
-        return None;
-    }
-    let mut parts = Vec::new();
-    for part in raw.split(['/', '\\']) {
-        if part.is_empty() || part == "." {
-            continue;
-        }
-        if part == ".." || part.contains('\0') {
-            return None;
-        }
-        parts.push(part);
-    }
-    if parts.is_empty() {
-        return None;
-    }
-    Some(parts.join("/"))
-}
-#[rustfmt::skip]
-pub(crate) fn read_ustar(bytes: &[u8], layout: PackLayout) -> Result<Vec<(String, Vec<u8>)>, &'static str> {
-    let mut offset = 0usize;
-    let mut files = Vec::new();
-    while offset + 512 <= bytes.len() {
-        let header = &bytes[offset..offset + 512];
-        if header.iter().all(|byte| *byte == 0) {
-            break;
-        }
-        if !checksum_ok(header) {
-            return Err(PACK_UNSAFE);
-        }
-        let typeflag = header[156];
-        if header[124] & 0x80 != 0 {
-            return Err(PACK_UNSAFE);
-        }
-        let size = parse_octal(&header[124..136]).map_err(|_| PACK_UNSAFE)?;
-        let name = entry_name(header).ok_or(PACK_UNSAFE)?;
-        offset += 512;
-        let data_end = offset.saturating_add(size as usize);
-        if data_end > bytes.len() {
-            return Err(PACK_UNSAFE);
-        }
-        let data = bytes[offset..data_end].to_vec();
-        let padded = size.div_ceil(512) * 512;
-        offset = offset.saturating_add(padded as usize);
-        match typeflag {
-            b'0' | b'\0' => {
-                let path = layout.file_path(&name)?;
-                files.push((path, data));
-            }
-            b'5' => {
-                if !layout.allows_dir(&name) {
-                    return Err(PACK_UNSAFE);
-                }
-            }
-            _ => return Err(PACK_UNSAFE),
-        }
-    }
-    if files.is_empty() {
-        return Err(PACK_MISMATCH);
-    }
-    Ok(files)
-}
-
-fn entry_name(header: &[u8]) -> Option<String> {
-    let name = c_string(&header[..100]);
-    let prefix = c_string(&header[345..500]);
-    let joined = if prefix.is_empty() {
-        name
-    } else {
-        format!("{prefix}/{name}")
-    };
-    if joined.is_empty() {
-        None
-    } else {
-        Some(joined)
-    }
-}
-
-fn c_string(bytes: &[u8]) -> String {
-    let end = bytes
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(bytes.len());
-    String::from_utf8_lossy(&bytes[..end]).trim().to_string()
-}
-
-fn parse_octal(field: &[u8]) -> Result<u64, ()> {
-    let mut value = 0u64;
-    let mut saw = false;
-    for &byte in field {
-        if byte == 0 || byte == b' ' {
-            if saw {
-                break;
-            }
-            continue;
-        }
-        if !byte.is_ascii_digit() || byte > b'7' {
-            return Err(());
-        }
-        saw = true;
-        value = value
-            .checked_mul(8)
-            .ok_or(())?
-            .checked_add(u64::from(byte - b'0'))
-            .ok_or(())?;
-    }
-    Ok(value)
-}
-
-fn checksum_ok(header: &[u8]) -> bool {
-    let Ok(recorded) = parse_octal(&header[148..156]) else {
-        return false;
-    };
-    let sum = header.iter().enumerate().fold(0u64, |sum, (index, byte)| {
-        sum + u64::from(if (148..156).contains(&index) {
-            b' '
-        } else {
-            *byte
-        })
-    });
-    sum == recorded
 }
 
 #[cfg(test)]

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 pub const USAGE: &str = "\
 usage:
-  scuffed-pack-cutter cut --kind rank|queue-title --labels FILE [--frames DIR] [--role-labels FILE] [--base DIR] [--replace CLASS ...] [--replace-all] [--force] --out DIR
+  scuffed-pack-cutter cut --kind rank|queue-title --labels FILE [--frames DIR] [--role-labels FILE] [--base DIR] [--replace CLASS ...] [--replace-all] [--allow-near] [--force] --out DIR
   scuffed-pack-cutter pack --kind rank|queue-title --dir DIR --name NAME.tar --version VER --out DIR
   scuffed-pack-cutter eval --kind rank|queue-title --labels FILE [--frames DIR] --baseline DIR --candidate DIR --set-name NAME [--role-labels FILE] [--allow-drop CLASS ...] [--allow-unverified CLASS ...]
   scuffed-pack-cutter help
@@ -15,6 +15,7 @@ usage:
 --base, --baseline and --candidate are folders that hold templates.json (extract the published tar, or use the tracker's templates/rank-v1 or templates/queue-title-v1 folder).
 --name must be rank-v1.tar or queue-title-v1.tar, matching --kind.
 --replace CLASS (repeatable) or --replace-all makes a re-learned class replace the base template. The default mixes them by sample count.
+--allow-near keeps a cut whose new classes correlate above the reader's margin.
 --allow-drop CLASS lets eval accept a baseline class the candidate does not have.
 --allow-unverified CLASS lets eval accept a changed class the label set does not exercise.
 Rank class names are family/class (role/Tank). Queue-title class names are the title text.
@@ -53,6 +54,7 @@ pub struct CutArgs {
     pub out: PathBuf,
     pub replace: Vec<String>,
     pub replace_all: bool,
+    pub allow_near: bool,
     pub force: bool,
 }
 
@@ -89,6 +91,7 @@ struct Parsed {
     allow_unverified: Vec<String>,
     replace: Vec<String>,
     replace_all: bool,
+    allow_near: bool,
     force: bool,
 }
 
@@ -131,6 +134,7 @@ fn cut_args(mut flags: Parsed) -> Result<CutArgs, String> {
         out: take_path(&mut flags.values, "out")?,
         replace: flags.replace,
         replace_all: flags.replace_all,
+        allow_near: flags.allow_near,
         force: flags.force,
     };
     finish(&flags.values)?;
@@ -142,6 +146,7 @@ fn pack_args(mut flags: Parsed) -> Result<PackArgs, String> {
         || !flags.allow_unverified.is_empty()
         || !flags.replace.is_empty()
         || flags.replace_all
+        || flags.allow_near
         || flags.force
     {
         return Err("pack only takes --kind, --dir, --name, --version and --out".into());
@@ -170,8 +175,10 @@ fn pack_args(mut flags: Parsed) -> Result<PackArgs, String> {
 }
 
 fn eval_args(mut flags: Parsed) -> Result<EvalArgs, String> {
-    if !flags.replace.is_empty() || flags.replace_all || flags.force {
-        return Err("--replace, --replace-all and --force are only used with cut".into());
+    if !flags.replace.is_empty() || flags.replace_all || flags.allow_near || flags.force {
+        return Err(
+            "--replace, --replace-all, --allow-near and --force are only used with cut".into(),
+        );
     }
     let args = EvalArgs {
         kind: kind(&take_str(&mut flags.values, "kind")?)?,
@@ -258,7 +265,7 @@ fn flags(args: &[OsString]) -> Result<Option<Parsed>, String> {
             }
             None => (body, None),
         };
-        if key == "force" || key == "replace-all" {
+        if key == "force" || key == "replace-all" || key == "allow-near" {
             if inline.is_some() {
                 return Err(format!("--{key} does not take a value"));
             }
@@ -289,7 +296,9 @@ fn flags(args: &[OsString]) -> Result<Option<Parsed>, String> {
                         | "baseline"
                         | "candidate"
                 ) {
-                    values.insert(key.to_string(), v.clone());
+                    if values.insert(key.to_string(), v.clone()).is_some() {
+                        return Err(format!("duplicate --{key}"));
+                    }
                     i += 1;
                     continue;
                 }
@@ -317,6 +326,7 @@ fn flags(args: &[OsString]) -> Result<Option<Parsed>, String> {
         allow_unverified,
         replace,
         replace_all: switches.contains("replace-all"),
+        allow_near: switches.contains("allow-near"),
         force: switches.contains("force"),
     }))
 }

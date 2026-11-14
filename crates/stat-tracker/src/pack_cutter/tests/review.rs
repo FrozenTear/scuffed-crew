@@ -3,7 +3,7 @@
 use image::{Rgb, RgbImage};
 
 use super::{
-    Family, RankSet, assert_posix_ustar, block, cut_queue, cut_rank, draw, member_bytes,
+    Family, QueueSet, RankSet, assert_posix_ustar, block, cut_queue, cut_rank, draw, member_bytes,
     paint_gate, queue_row, rank_row, role_row, run, save, scratch, write, write_queue, write_rank,
 };
 
@@ -553,4 +553,363 @@ fn archive_refuses_duplicates_and_round_trips_through_read_ustar() {
             .unwrap_or_else(|e| panic!("len {len}: {e}"));
         assert_eq!(member_bytes(&files, "templates.json"), data);
     }
+}
+
+fn queue_vector(dir: &std::path::Path, class: &str) -> (usize, Vec<f32>) {
+    let set = QueueSet::load_dir(dir).unwrap();
+    let class = set.classes.into_iter().find(|c| c.class == class).unwrap();
+    (class.n, class.vector)
+}
+
+#[test]
+fn cut_mixes_queue_templates_by_n_and_replace_keeps_the_new_cut() {
+    let root = scratch();
+    let base_files = write_queue(&[("s1/a.png", 0, "ALPHA QUEUE")], false);
+    let next_files = write_queue(&[("s2/a.png", 1, "ALPHA QUEUE")], false);
+    let base = root.path().join("base");
+    let alone = root.path().join("alone");
+    let mixed = root.path().join("mixed");
+    let replaced = root.path().join("replaced");
+    assert_eq!(cut_queue(&base_files, &base).code, 0);
+    assert_eq!(cut_queue(&next_files, &alone).code, 0);
+    let mix = run(&[
+        "cut",
+        "--kind",
+        "queue-title",
+        "--labels",
+        next_files.labels.to_str().unwrap(),
+        "--frames",
+        next_files.frames.to_str().unwrap(),
+        "--base",
+        base.to_str().unwrap(),
+        "--out",
+        mixed.to_str().unwrap(),
+    ]);
+    assert_eq!(mix.code, 0, "{}", mix.stderr);
+    assert!(
+        mix.stdout.contains("class ALPHA QUEUE: learned n 1 -> 2"),
+        "{}",
+        mix.stdout
+    );
+    let (n_base, v_base) = queue_vector(&base, "ALPHA QUEUE");
+    let (n_new, v_new) = queue_vector(&alone, "ALPHA QUEUE");
+    let (n_mix, v_mix) = queue_vector(&mixed, "ALPHA QUEUE");
+    assert_eq!((n_base, n_new, n_mix), (1, 1, 2));
+    let mean: Vec<f32> = v_base
+        .iter()
+        .zip(&v_new)
+        .map(|(b, l)| (b + l) / 2.0)
+        .collect();
+    assert_eq!(v_mix, mean);
+    let with_replace = run(&[
+        "cut",
+        "--kind",
+        "queue-title",
+        "--labels",
+        next_files.labels.to_str().unwrap(),
+        "--frames",
+        next_files.frames.to_str().unwrap(),
+        "--base",
+        base.to_str().unwrap(),
+        "--replace",
+        "ALPHA QUEUE",
+        "--out",
+        replaced.to_str().unwrap(),
+    ]);
+    assert_eq!(with_replace.code, 0, "{}", with_replace.stderr);
+    assert!(
+        with_replace
+            .stdout
+            .contains("class ALPHA QUEUE: replaced n 1 -> 1"),
+        "{}",
+        with_replace.stdout
+    );
+    assert_eq!(queue_vector(&replaced, "ALPHA QUEUE"), (1, v_new));
+    let missing = run(&[
+        "cut",
+        "--kind",
+        "queue-title",
+        "--labels",
+        next_files.labels.to_str().unwrap(),
+        "--frames",
+        next_files.frames.to_str().unwrap(),
+        "--base",
+        base.to_str().unwrap(),
+        "--replace",
+        "BRAVO QUEUE",
+        "--out",
+        root.path().join("bad").to_str().unwrap(),
+    ]);
+    assert_eq!(missing.code, 2, "{}", missing.stderr);
+    assert!(
+        missing.stderr.contains("was not learned"),
+        "{}",
+        missing.stderr
+    );
+}
+
+#[test]
+fn eval_rank_sr_change_without_hero_sr_labels_is_unverified() {
+    use crate::shadow::rank::tests_synth::{self, Scene};
+    let root = scratch();
+    let frames = root.path().join("frames");
+    let sc = Scene::default();
+    save(&frames, "20260101-a/a.png", &tests_synth::paint(&sc));
+    let full = root.path().join("full.jsonl");
+    let mut value = serde_json::to_value(tests_synth::labels(&sc)).unwrap();
+    value["game"] = serde_json::json!("20260101-a");
+    value["file"] = serde_json::json!("a.png");
+    value["readable"] = serde_json::json!(true);
+    write(&full, &format!("{value}\n"));
+    let baseline = root.path().join("baseline");
+    assert_eq!(
+        run(&[
+            "cut",
+            "--kind",
+            "rank",
+            "--labels",
+            full.to_str().unwrap(),
+            "--frames",
+            frames.to_str().unwrap(),
+            "--out",
+            baseline.to_str().unwrap(),
+        ])
+        .code,
+        0
+    );
+    let candidate = root.path().join("candidate");
+    std::fs::create_dir_all(&candidate).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut pack: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(baseline.join("templates.json")).unwrap()).unwrap();
+    let classes = pack["families"]["sr"].as_array_mut().unwrap();
+    let name = classes[0]["class"].as_str().unwrap().to_string();
+    let first = classes[0]["vector"][0].as_f64().unwrap();
+    classes[0]["vector"][0] = serde_json::json!(first + 0.25);
+    std::fs::write(
+        candidate.join("templates.json"),
+        serde_json::to_vec(&pack).unwrap(),
+    )
+    .unwrap();
+    let mut bare = value.clone();
+    bare["hero_sr"] = serde_json::Value::Null;
+    let labels = root.path().join("bare.jsonl");
+    write(&labels, &format!("{bare}\n"));
+    let eval = |extra: &[&str]| {
+        let mut args = vec![
+            "eval",
+            "--kind",
+            "rank",
+            "--labels",
+            labels.to_str().unwrap(),
+            "--frames",
+            frames.to_str().unwrap(),
+            "--baseline",
+            baseline.to_str().unwrap(),
+            "--candidate",
+            candidate.to_str().unwrap(),
+            "--set-name",
+            "sr-unverified",
+        ];
+        args.extend(extra);
+        run(&args)
+    };
+    let denied = eval(&[]);
+    assert_eq!(denied.code, 1, "{}\n{}", denied.stderr, denied.stdout);
+    assert!(
+        denied
+            .stdout
+            .contains(&format!("unverified classes: sr/{name}")),
+        "{}",
+        denied.stdout
+    );
+    let allowed = eval(&["--allow-unverified", &format!("sr/{name}")]);
+    assert_eq!(allowed.code, 0, "{}\n{}", allowed.stderr, allowed.stdout);
+}
+
+#[test]
+fn eval_queue_changed_class_with_no_frame_is_unverified() {
+    let root = scratch();
+    let alpha = write_queue(&[("s1/a.png", 0, "ALPHA QUEUE")], false);
+    let both = write_queue(
+        &[
+            ("s1/a.png", 0, "ALPHA QUEUE"),
+            ("s2/b.png", 1, "BRAVO QUEUE"),
+        ],
+        false,
+    );
+    let baseline = root.path().join("baseline");
+    let candidate = root.path().join("candidate");
+    assert_eq!(cut_queue(&alpha, &baseline).code, 0);
+    assert_eq!(cut_queue(&both, &candidate).code, 0);
+    let got = run(&[
+        "eval",
+        "--kind",
+        "queue-title",
+        "--labels",
+        alpha.labels.to_str().unwrap(),
+        "--frames",
+        alpha.frames.to_str().unwrap(),
+        "--baseline",
+        baseline.to_str().unwrap(),
+        "--candidate",
+        candidate.to_str().unwrap(),
+        "--set-name",
+        "unseen-class",
+    ]);
+    assert_eq!(got.code, 1, "{}\n{}", got.stderr, got.stdout);
+    assert!(
+        got.stdout.contains("unverified classes: BRAVO QUEUE"),
+        "{}",
+        got.stdout
+    );
+}
+
+#[test]
+fn pack_rank_refuses_a_queue_cut_and_writes_nothing() {
+    let files = write_queue(&[("s1/a.png", 0, "ALPHA QUEUE")], false);
+    let src = files.dir.path().join("src");
+    assert_eq!(cut_queue(&files, &src).code, 0);
+    let out = files.dir.path().join("build");
+    let got = run(&[
+        "pack",
+        "--kind",
+        "rank",
+        "--dir",
+        src.to_str().unwrap(),
+        "--name",
+        "rank-v1.tar",
+        "--version",
+        "1",
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(got.code, 2, "{}", got.stderr);
+    assert!(got.stderr.contains("rank pack:"), "{}", got.stderr);
+    assert!(!out.join("packs").join("rank-v1.tar").exists());
+    assert!(!out.join("packs").join("manifest.json").exists());
+}
+
+#[test]
+fn a_repeated_flag_is_an_error_in_both_forms() {
+    for args in [
+        vec!["eval", "--baseline", "one", "--baseline", "two"],
+        vec!["eval", "--baseline=one", "--baseline=two"],
+    ] {
+        let got = run(&args);
+        assert_eq!(got.code, 2, "{args:?} {}", got.stderr);
+        assert!(
+            got.stderr.contains("duplicate --baseline"),
+            "{args:?} {}",
+            got.stderr
+        );
+    }
+}
+
+#[test]
+fn an_observed_cut_replaces_a_pooled_base_template() {
+    use crate::shadow::rank::tests_synth::{self, Scene};
+    let root = scratch();
+    let base_frames = root.path().join("base-frames");
+    let next_frames = root.path().join("next-frames");
+    let base_sc = Scene {
+        pct: 47,
+        sr_change: Some(12),
+        ..Scene::default()
+    };
+    let next_sc = Scene {
+        pct: 10,
+        sr_change: Some(7),
+        ..Scene::default()
+    };
+    save(
+        &base_frames,
+        "20260101-a/a.png",
+        &tests_synth::paint(&base_sc),
+    );
+    save(
+        &next_frames,
+        "20260102-b/a.png",
+        &tests_synth::paint(&next_sc),
+    );
+    let labelled = |sc: &Scene, game: &str| {
+        let mut value = serde_json::to_value(tests_synth::labels(sc)).unwrap();
+        value["game"] = serde_json::json!(game);
+        value["file"] = serde_json::json!("a.png");
+        value["readable"] = serde_json::json!(true);
+        format!("{value}\n")
+    };
+    let base_labels = root.path().join("base.jsonl");
+    let next_labels = root.path().join("next.jsonl");
+    write(&base_labels, &labelled(&base_sc, "20260101-a"));
+    let mut only_change = serde_json::to_value(tests_synth::labels(&next_sc)).unwrap();
+    for (key, value) in only_change.as_object_mut().unwrap() {
+        if key != "hero_sr_change" {
+            *value = serde_json::Value::Null;
+        }
+    }
+    only_change["game"] = serde_json::json!("20260102-b");
+    only_change["file"] = serde_json::json!("a.png");
+    only_change["readable"] = serde_json::json!(true);
+    write(&next_labels, &format!("{only_change}\n"));
+    let base = root.path().join("base");
+    let alone = root.path().join("alone");
+    let out = root.path().join("out");
+    for (labels, frames, dest) in [
+        (&base_labels, &base_frames, &base),
+        (&next_labels, &next_frames, &alone),
+    ] {
+        let got = run(&[
+            "cut",
+            "--kind",
+            "rank",
+            "--labels",
+            labels.to_str().unwrap(),
+            "--frames",
+            frames.to_str().unwrap(),
+            "--out",
+            dest.to_str().unwrap(),
+        ]);
+        assert_eq!(got.code, 0, "{}", got.stderr);
+    }
+    let pooled = |dir: &std::path::Path| {
+        let set = RankSet::load_dir(dir).unwrap();
+        set.families
+            .get(&Family::Change)
+            .unwrap()
+            .iter()
+            .find(|t| t.class == "7")
+            .unwrap()
+            .clone()
+    };
+    assert!(pooled(&base).pooled, "change/7 should be a pooled fill");
+    let fresh = pooled(&alone);
+    assert!(!fresh.pooled);
+    let recut = run(&[
+        "cut",
+        "--kind",
+        "rank",
+        "--labels",
+        next_labels.to_str().unwrap(),
+        "--frames",
+        next_frames.to_str().unwrap(),
+        "--base",
+        base.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(recut.code, 0, "{}", recut.stderr);
+    assert!(
+        recut.stdout.contains("class change/7: replaced n "),
+        "{}",
+        recut.stdout
+    );
+    let kept = pooled(&out);
+    assert_eq!(kept.n, fresh.n);
+    assert_eq!(kept.vector, fresh.vector);
+    assert!(!kept.pooled);
 }
