@@ -1,6 +1,11 @@
-//! HTTP coverage for Opus #118 findings M5–M9, L3, and L11.
+//! HTTP regression tests for Opus #118 findings M5, M6, M7, M8, L3 and L11,
+//! and for unknown tournament ids.
 //!
-//! Each test is named after the finding it would fail without the fix.
+//! The finding tests (m5_ to m8_, l3_, l11_) are each named after the finding
+//! they would fail without the fix. The unknown-tournament-id tests check that
+//! every public GET route the tournament page uses returns 404 for an id that
+//! does not exist (they used to return 500 or 200), and that this 404 matches
+//! the response for a draft the caller may not see.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -861,4 +866,142 @@ async fn l11_register_conflict_does_not_say_username_taken() {
         !msg.to_lowercase().contains("taken") && !msg.to_lowercase().contains("username"),
         "conflict message still enumerates: {msg}"
     );
+}
+
+// ─── Unknown tournament id ──────────────────────────────────────────────────
+
+/// GET `path` as anon (`token` = None) or with a bearer token; returns the
+/// status and the body as text so callers can compare responses exactly and
+/// a failing assert prints readable text instead of bytes.
+async fn get_raw(state: &AppState, path: &str, token: Option<&str>) -> (StatusCode, String) {
+    let req = match token {
+        Some(t) => authed(Method::GET, path, t, None),
+        None => anon(Method::GET, path),
+    };
+    let resp = create_router(state.clone()).oneshot(req).await.unwrap();
+    let status = resp.status();
+    let body = String::from_utf8(body_bytes(resp).await).expect("UTF-8 response body");
+    (status, body)
+}
+
+fn tournament_page_routes(tid: &str) -> [String; 5] {
+    [
+        format!("/api/tournaments/{tid}"),
+        format!("/api/tournaments/{tid}/bracket"),
+        format!("/api/tournaments/{tid}/participants"),
+        format!("/api/tournaments/{tid}/matches"),
+        format!("/api/tournaments/{tid}/standings"),
+    ]
+}
+
+/// `/tournaments/doesnotexist` used to show "HTTP error 500": the bracket
+/// route turned the DB's "tournament not found" into a 500, and the list
+/// sub-routes answered 200 with an empty set. Every public GET route the
+/// tournament page uses must 404 for an id that does not exist, for every
+/// caller (officers skip the draft check, so they hit the missing-row path too).
+///
+/// A missing id must also be indistinguishable from a draft the caller may
+/// not see: same status and same body. Anon and members compare against a
+/// hidden draft directly. Officers can see drafts, so an officer hitting a
+/// missing id must get exactly what a member gets for a hidden draft.
+#[tokio::test]
+async fn unknown_tournament_id_is_404_on_every_public_route() {
+    let state = test_state().await;
+    seed_staff(&state.db).await;
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed(
+            Method::POST,
+            "/api/tournaments",
+            OFFICER_TOKEN,
+            Some(json!({ "name": "Hidden Cup", "format": "single_elim" })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let created = body_json(resp).await;
+    assert_eq!(created["status"], "draft");
+    let draft_id = created["id"].as_str().unwrap().to_string();
+
+    // Officers can see drafts: proves the draft exists, so the parity checks
+    // below compare a missing id against a real hidden row.
+    let (status, body) = get_raw(
+        &state,
+        &format!("/api/tournaments/{draft_id}"),
+        Some(OFFICER_TOKEN),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "officer draft detail: {body}");
+
+    for tid in ["doesnotexist", "does-not-exist"] {
+        for (missing, draft) in tournament_page_routes(tid)
+            .iter()
+            .zip(tournament_page_routes(&draft_id).iter())
+        {
+            let (status, body) = get_raw(&state, missing, None).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "anon {missing}");
+            let body_value: Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(
+                body_value["error"], "Tournament not found",
+                "anon {missing}"
+            );
+            assert_eq!(
+                (status, body),
+                get_raw(&state, draft, None).await,
+                "anon: missing {missing} vs hidden draft {draft}"
+            );
+
+            let member_draft = get_raw(&state, draft, Some(MEMBER_TOKEN)).await;
+            assert_eq!(member_draft.0, StatusCode::NOT_FOUND, "member {draft}");
+            assert_eq!(
+                get_raw(&state, missing, Some(MEMBER_TOKEN)).await,
+                member_draft,
+                "member: missing {missing} vs hidden draft {draft}"
+            );
+            assert_eq!(
+                get_raw(&state, missing, Some(OFFICER_TOKEN)).await,
+                member_draft,
+                "officer missing {missing} vs member hidden draft {draft}"
+            );
+        }
+    }
+}
+
+/// The 404 guard must not hide a tournament that exists: a published
+/// tournament still answers 200 on every public GET route.
+#[tokio::test]
+async fn published_tournament_routes_still_ok() {
+    let state = test_state().await;
+    seed_staff(&state.db).await;
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed(
+            Method::POST,
+            "/api/tournaments",
+            OFFICER_TOKEN,
+            Some(json!({ "name": "Open Cup", "format": "swiss", "swiss_rounds": 3 })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let tid = body_json(resp).await["id"].as_str().unwrap().to_string();
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed(
+            Method::PATCH,
+            &format!("/api/tournaments/{tid}/status"),
+            OFFICER_TOKEN,
+            Some(json!({ "status": "registration" })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    for path in tournament_page_routes(&tid) {
+        let (status, _) = get_raw(&state, &path, None).await;
+        assert_eq!(status, StatusCode::OK, "anon {path}");
+    }
 }

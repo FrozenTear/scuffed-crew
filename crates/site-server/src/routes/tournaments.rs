@@ -68,16 +68,25 @@ fn manages_tournaments(member: &Option<Member>) -> bool {
         .is_some_and(|m| m.org_role.is_at_least(OrgRole::Officer))
 }
 
-/// 404 when this id is a draft the caller is not allowed to see.
-/// A missing row is left to the handler (list endpoints return an empty set).
-async fn reject_hidden_draft(state: &AppState, id: &str, member: &Option<Member>) -> ApiResult<()> {
-    let Some(tournament) = state.db.get_tournament(id).await.map_err(internal_err)? else {
-        return Ok(());
-    };
+/// Load a tournament the caller is allowed to see.
+///
+/// 404 when no tournament has this id, or when it is a draft and the caller
+/// does not manage tournaments. A real DB error stays a 500.
+async fn load_visible_tournament(
+    state: &AppState,
+    id: &str,
+    member: &Option<Member>,
+) -> ApiResult<Tournament> {
+    let tournament = state
+        .db
+        .get_tournament(id)
+        .await
+        .map_err(internal_err)?
+        .ok_or_else(|| not_found("Tournament not found"))?;
     if tournament.status == TournamentStatus::Draft && !manages_tournaments(member) {
         return Err(not_found("Tournament not found"));
     }
-    Ok(())
+    Ok(tournament)
 }
 
 #[derive(Deserialize)]
@@ -134,16 +143,9 @@ pub async fn get_tournament(
     OptionalOrgMember(member): OptionalOrgMember,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Tournament>> {
-    let tournament = state
-        .db
-        .get_tournament(&id)
+    load_visible_tournament(&state, &id, &member)
         .await
-        .map_err(internal_err)?
-        .ok_or_else(|| not_found("Tournament not found"))?;
-    if tournament.status == TournamentStatus::Draft && !manages_tournaments(&member) {
-        return Err(not_found("Tournament not found"));
-    }
-    Ok(Json(tournament))
+        .map(Json)
 }
 
 // ─── CRUD (Officer+) ───
@@ -367,13 +369,16 @@ pub async fn get_bracket(
     OptionalOrgMember(member): OptionalOrgMember,
     Path(id): Path<String>,
 ) -> ApiResult<Json<TournamentBracket>> {
-    reject_hidden_draft(&state, &id, &member).await?;
+    load_visible_tournament(&state, &id, &member).await?;
     state
         .db
         .get_tournament_bracket(&id)
         .await
         .map(Json)
-        .map_err(internal_err)
+        .map_err(|e| match e {
+            scuffed_db::DbError::NotFound(_) => not_found("Tournament not found"),
+            e => internal_err(e),
+        })
 }
 
 /// POST /api/tournaments/:id/generate-bracket
@@ -436,7 +441,10 @@ pub async fn generate_bracket(
         .get_tournament_bracket(&id)
         .await
         .map(Json)
-        .map_err(internal_err)
+        .map_err(|e| match e {
+            scuffed_db::DbError::NotFound(_) => not_found("Tournament not found"),
+            e => internal_err(e),
+        })
 }
 
 // ─── Participants ───
@@ -447,7 +455,7 @@ pub async fn list_participants(
     OptionalOrgMember(member): OptionalOrgMember,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Vec<TournamentParticipant>>> {
-    reject_hidden_draft(&state, &id, &member).await?;
+    load_visible_tournament(&state, &id, &member).await?;
     state
         .db
         .list_tournament_participants(&id)
@@ -603,7 +611,7 @@ pub async fn list_matches(
     OptionalOrgMember(member): OptionalOrgMember,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Vec<TournamentMatch>>> {
-    reject_hidden_draft(&state, &id, &member).await?;
+    load_visible_tournament(&state, &id, &member).await?;
     state
         .db
         .list_tournament_matches(&id)
@@ -782,7 +790,7 @@ pub async fn get_standings(
     OptionalOrgMember(member): OptionalOrgMember,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Vec<SwissStanding>>> {
-    reject_hidden_draft(&state, &id, &member).await?;
+    load_visible_tournament(&state, &id, &member).await?;
     state
         .db
         .get_swiss_standings(&id)
