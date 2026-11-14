@@ -7,12 +7,12 @@ use std::path::{Path, PathBuf};
 use image::{Rgb, RgbImage};
 use sha2::{Digest, Sha256};
 
-use super::execute;
 use crate::shadow::queue_title::TemplateSet as QueueSet;
 use crate::shadow::rank::{Family, GATE_CLASS, TemplateSet as RankSet};
 
 fn run(args: &[&str]) -> super::Outcome {
-    execute(args.iter().copied())
+    let owned: Vec<std::ffi::OsString> = args.iter().map(|s| (*s).into()).collect();
+    super::execute(&owned)
 }
 
 fn scratch() -> tempfile::TempDir {
@@ -384,15 +384,17 @@ fn cut_queue_title_1080_pack_still_loads() {
 #[test]
 fn pack_writes_ustar_and_a_second_pack_keeps_the_first() {
     let dir = scratch();
+    let rank_files = write_rank(&["20260101"], (2560, 1440), false);
+    let queue_files = write_queue(&[("s1/a.png", 0, "ALPHA QUEUE")], false);
     let one = dir.path().join("one");
     let two = dir.path().join("two");
-    std::fs::create_dir_all(&one).unwrap();
-    std::fs::create_dir_all(&two).unwrap();
-    std::fs::write(one.join("templates.json"), br#"{"synthetic":"one"}"#).unwrap();
-    std::fs::write(two.join("templates.json"), br#"{"synthetic":"two"}"#).unwrap();
+    assert_eq!(cut_rank(&rank_files, &one).code, 0);
+    assert_eq!(cut_queue(&queue_files, &two).code, 0);
     let out = dir.path().join("build");
     let first = run(&[
         "pack",
+        "--kind",
+        "rank",
         "--dir",
         one.to_str().unwrap(),
         "--name",
@@ -403,8 +405,15 @@ fn pack_writes_ustar_and_a_second_pack_keeps_the_first() {
         out.to_str().unwrap(),
     ]);
     assert_eq!(first.code, 0, "{}", first.stderr);
+    assert!(
+        first.stdout.contains("templates.json sha256:"),
+        "{}",
+        first.stdout
+    );
     let second = run(&[
         "pack",
+        "--kind",
+        "queue-title",
         "--dir",
         two.to_str().unwrap(),
         "--name",
@@ -415,6 +424,25 @@ fn pack_writes_ustar_and_a_second_pack_keeps_the_first() {
         out.to_str().unwrap(),
     ]);
     assert_eq!(second.code, 0, "{}", second.stderr);
+    let refused = run(&[
+        "pack",
+        "--kind",
+        "rank",
+        "--dir",
+        one.to_str().unwrap(),
+        "--name",
+        "heroes-v1.tar",
+        "--version",
+        "1",
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(refused.code, 2, "{}", refused.stderr);
+    assert!(
+        refused.stderr.contains("does not match --kind"),
+        "{}",
+        refused.stderr
+    );
 
     let packs = out.join("packs");
     #[cfg(unix)]
@@ -436,22 +464,18 @@ fn pack_writes_ustar_and_a_second_pack_keeps_the_first() {
     ] {
         let tar_path = packs.join(name);
         let tar_bytes = std::fs::read(&tar_path).unwrap();
-        assert!(tar_bytes.ends_with(&[0u8; 1024]), "{name} trailer");
-        let header = &tar_bytes[..512];
-        assert_eq!(&header[100..107], b"0000644");
-        assert_eq!(&header[108..115], b"0000000");
-        assert_eq!(&header[116..123], b"0000000");
-        assert_eq!(&header[136..147], b"00000000000");
-        assert_eq!(header[156], b'0');
-        assert_eq!(&header[257..262], b"ustar");
+        assert_posix_ustar(&tar_bytes);
+        let unpacked =
+            crate::packs::read_ustar(&tar_bytes, crate::packs::PackLayout::TemplatesJson)
+                .unwrap_or_else(|e| panic!("{name} read_ustar: {e}"));
         let entry = list.iter().find(|e| e["name"] == name).expect(name);
         assert_eq!(entry["version"], version);
         assert_eq!(entry["sha256"], sha256_hex(&tar_bytes));
         assert_eq!(entry["size"], tar_bytes.len() as u64);
         assert_eq!(entry.as_object().unwrap().len(), 4, "list keys");
 
-        let inner = tar_member(&tar_path, "manifest.json");
-        let packed = tar_member(&tar_path, "templates.json");
+        let inner = member_bytes(&unpacked, "manifest.json");
+        let packed = member_bytes(&unpacked, "templates.json");
         let want = std::fs::read(templates.join("templates.json")).unwrap();
         assert_eq!(packed, want);
         let inner: serde_json::Value = serde_json::from_slice(&inner).unwrap();
@@ -465,26 +489,58 @@ fn pack_writes_ustar_and_a_second_pack_keeps_the_first() {
     }
 }
 
-fn tar_member(tar: &Path, name: &str) -> Vec<u8> {
-    let out = std::process::Command::new("tar")
-        .args(["-xOf", tar.to_str().unwrap(), name])
-        .output()
-        .expect("tar");
-    assert!(
-        out.status.success(),
-        "tar {name}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    out.stdout
+fn member_bytes(files: &[(String, Vec<u8>)], name: &str) -> Vec<u8> {
+    files
+        .iter()
+        .find(|(path, _)| path == name)
+        .unwrap_or_else(|| panic!("missing {name}"))
+        .1
+        .clone()
+}
+
+fn octal(field: &[u8]) -> u64 {
+    let digits: Vec<u8> = field
+        .iter()
+        .copied()
+        .take_while(|b| *b != 0 && *b != b' ')
+        .collect();
+    u64::from_str_radix(std::str::from_utf8(&digits).unwrap(), 8).unwrap()
+}
+
+fn assert_posix_ustar(tar: &[u8]) {
+    assert!(tar.ends_with(&[0u8; 1024]), "trailer");
+    let mut off = 0;
+    let mut headers = 0;
+    while off + 512 <= tar.len() {
+        let h = &tar[off..off + 512];
+        if h.iter().all(|b| *b == 0) {
+            break;
+        }
+        let size = octal(&h[124..136]);
+        assert_eq!(&h[100..108], b"0000644\0", "mode");
+        assert_eq!(&h[108..116], b"0000000\0", "uid");
+        assert_eq!(&h[116..124], b"0000000\0", "gid");
+        assert_eq!(&h[124..136], format!("{size:011o}\0").as_bytes(), "size");
+        assert_eq!(&h[136..148], b"00000000000\0", "mtime");
+        assert_eq!(h[156], b'0', "typeflag");
+        assert_eq!(&h[257..263], b"ustar\0", "magic");
+        assert_eq!(&h[263..265], b"00", "version");
+        assert_eq!(h[154], 0, "chksum NUL");
+        assert_eq!(h[155], b' ', "chksum space");
+        headers += 1;
+        off += 512 + (size as usize).div_ceil(512) * 512;
+    }
+    assert!(headers >= 2, "manifest and templates.json");
 }
 
 #[test]
 fn cut_and_pack_refuse_an_out_dir_inside_a_git_work_tree() {
-    let probe = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("pack-cutter-probe");
-    let _ = std::fs::remove_dir_all(&probe);
+    let repo = scratch();
+    std::fs::create_dir(repo.path().join(".git")).unwrap();
+    let probe = repo.path().join("pack-cutter-probe");
     let files = write_rank(&["20260101"], (2560, 1440), false);
     let cut = cut_rank(&files, &probe);
-    assert_ne!(cut.code, 0);
+    assert_eq!(cut.code, 2, "{}", cut.stderr);
     assert!(
         cut.stderr.contains("inside a git work tree"),
         "{}",
@@ -494,6 +550,8 @@ fn cut_and_pack_refuse_an_out_dir_inside_a_git_work_tree() {
 
     let pack = run(&[
         "pack",
+        "--kind",
+        "rank",
         "--dir",
         files.dir.path().to_str().unwrap(),
         "--name",
@@ -503,7 +561,7 @@ fn cut_and_pack_refuse_an_out_dir_inside_a_git_work_tree() {
         "--out",
         probe.to_str().unwrap(),
     ]);
-    assert_ne!(pack.code, 0);
+    assert_eq!(pack.code, 2, "{}", pack.stderr);
     assert!(
         pack.stderr.contains("inside a git work tree"),
         "{}",
@@ -513,7 +571,7 @@ fn cut_and_pack_refuse_an_out_dir_inside_a_git_work_tree() {
 }
 
 #[test]
-fn eval_queue_title_regression_exits_nonzero() {
+fn eval_queue_title_dropped_class_exits_nonzero() {
     let root = scratch();
     let full = write_queue(
         &[
@@ -542,7 +600,7 @@ fn eval_queue_title_regression_exits_nonzero() {
         "--set-name",
         "queue-held-out",
     ]);
-    assert_ne!(got.code, 0, "{}", got.stdout);
+    assert_eq!(got.code, 1, "{}", got.stdout);
     assert!(got.stdout.contains("set: queue-held-out"), "{}", got.stdout);
     assert!(got.stdout.contains("frames: 2 scored: 2"), "{}", got.stdout);
     assert!(
@@ -699,7 +757,7 @@ fn eval_empty_label_set_and_missing_baseline_exit_nonzero() {
         "--set-name",
         "empty",
     ]);
-    assert_ne!(got.code, 0);
+    assert_eq!(got.code, 2, "{}", got.stderr);
     assert!(got.stderr.contains("empty label set"), "{}", got.stderr);
 
     let missing = files.dir.path().join("no-such-pack");
@@ -718,7 +776,7 @@ fn eval_empty_label_set_and_missing_baseline_exit_nonzero() {
         "--set-name",
         "missing",
     ]);
-    assert_ne!(got.code, 0);
+    assert_eq!(got.code, 2, "{}", got.stderr);
     assert!(got.stderr.contains("baseline pack"), "{}", got.stderr);
 }
 
@@ -1068,3 +1126,5 @@ fn cut_rank_keeps_a_banner_the_new_labels_do_not_cut() {
     ]);
     assert_eq!(allowed.code, 0, "{}\n{}", allowed.stderr, allowed.stdout);
 }
+
+mod review;

@@ -15,8 +15,20 @@ struct ListEntry {
 }
 
 /// Absolute `--out`, or an error when that path sits inside a git work tree.
+/// A `..` component is refused before anything is created.
 pub fn check_out(path: &Path) -> Result<PathBuf, String> {
-    let resolved = resolve(path)?;
+    let abs =
+        std::path::absolute(path).map_err(|e| format!("resolving {}: {e}", path.display()))?;
+    if abs
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(format!(
+            "refusing to write {}: the path contains ..",
+            abs.display()
+        ));
+    }
+    let resolved = resolve(&abs)?;
     if inside_git(&resolved) {
         return Err(format!(
             "refusing to write {}: it is inside a git work tree",
@@ -24,6 +36,21 @@ pub fn check_out(path: &Path) -> Result<PathBuf, String> {
         ));
     }
     Ok(resolved)
+}
+
+/// After the directory exists, confirm its canonical path is still outside git.
+pub fn recheck_out(path: &Path) -> Result<(), String> {
+    let canon = path
+        .canonicalize()
+        .map_err(|e| format!("resolving {}: {e}", path.display()))?;
+    if inside_git(&canon) {
+        Err(format!(
+            "refusing to write {}: it is inside a git work tree",
+            canon.display()
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 pub fn check_version(version: &str) -> Result<(), String> {
@@ -37,28 +64,6 @@ pub fn check_version(version: &str) -> Result<(), String> {
     } else {
         Err(format!(
             "version {version:?} must be 1 to 32 of A-Z, a-z, 0-9, '.', '_' or '-'"
-        ))
-    }
-}
-
-/// Publish accepts a pack name of `[a-z0-9][a-z0-9-]*.tar`.
-pub fn check_pack_name(name: &str) -> Result<(), String> {
-    let Some(stem) = name.strip_suffix(".tar") else {
-        return Err(format!("pack name {name:?} must end in .tar"));
-    };
-    let bytes = stem.as_bytes();
-    let ok = name.len() <= 64
-        && bytes.split_first().is_some_and(|(first, rest)| {
-            (first.is_ascii_lowercase() || first.is_ascii_digit())
-                && rest
-                    .iter()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
-        });
-    if ok {
-        Ok(())
-    } else {
-        Err(format!(
-            "pack name {name:?} must match [a-z0-9][a-z0-9-]*.tar"
         ))
     }
 }
@@ -104,11 +109,73 @@ pub fn install_pack(out: &Path, name: &str, version: &str, bytes: &[u8]) -> Resu
 }
 
 pub fn private_dir(path: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(path).map_err(|e| format!("creating {}: {e}", path.display()))?;
-    chmod_owner(path, 0o700)
+    if path.exists() {
+        return reject_loose(path);
+    }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+        && !parent.exists()
+    {
+        private_dir(parent)?;
+    }
+    std::fs::create_dir(path).map_err(|e| format!("creating {}: {e}", path.display()))?;
+    chmod_owner(path, 0o700)?;
+    recheck_out(path)
 }
 
-fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
+/// An existing directory keeps its mode. Group or other read is an error,
+/// so naming `--out ~` cannot lock that folder down.
+fn reject_loose(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path)
+            .map_err(|e| format!("reading {}: {e}", path.display()))?
+            .permissions()
+            .mode()
+            & 0o077;
+        if mode != 0 {
+            return Err(format!(
+                "{} is readable by group or other; refusing to change its mode",
+                path.display()
+            ));
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
+}
+
+/// Refuse writing a templates file over the base folder, or over an existing
+/// file unless `force` is set. Creates `--out` when it is missing.
+pub fn prepare_templates(out: &Path, base: Option<&Path>, force: bool) -> Result<PathBuf, String> {
+    if let Some(base) = base
+        && same_dir(out, base)
+    {
+        return Err("--out is the same folder as --base".into());
+    }
+    let dest = out.join("templates.json");
+    if dest.exists() && !force {
+        return Err(format!(
+            "{} already holds templates.json; pass --force to replace it",
+            out.display()
+        ));
+    }
+    private_dir(out)?;
+    recheck_out(out)?;
+    Ok(dest)
+}
+
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let tmp = path.with_file_name(format!(
         ".{}.partial",
         path.file_name().and_then(|s| s.to_str()).unwrap_or("pack")

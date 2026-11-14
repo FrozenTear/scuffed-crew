@@ -1,8 +1,8 @@
 //! Scores for one labelled set. The pass/fail gate compares the candidate
-//! pack to the baseline pack on the same frames: no new wrong, and no frame
-//! that was correct on the baseline and is unread or wrong on the candidate.
-//! Leave-one-out learning is printed as generalisation and is not the gate.
-//! A class the baseline pack does not contain is reported and is not gated.
+//! pack to the baseline pack on every labelled row: no new wrong, and no
+//! frame that was correct on the baseline and is unread or wrong on the
+//! candidate. Leave-one-out learning is printed as generalisation and is
+//! not the gate.
 
 use std::fmt::Write as _;
 
@@ -23,7 +23,7 @@ impl Counts {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
     Correct,
     Wrong,
@@ -32,8 +32,10 @@ pub enum Outcome {
 
 /// One frame, scored by the baseline pack, the leave-one-out learner, and
 /// the candidate pack.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct Item {
+    /// Rank `game/file`, or the queue-title label path.
+    pub frame: String,
     pub baseline: Outcome,
     pub learned: Outcome,
     pub packed: Outcome,
@@ -60,9 +62,9 @@ impl Item {
 pub struct ScoreRow {
     pub label: String,
     pub folds: usize,
+    /// Frames whose label exercises this row.
+    pub labelled: usize,
     pub items: Vec<Item>,
-    /// False for a class the baseline pack does not contain.
-    pub gated: bool,
 }
 
 pub struct EvalDone {
@@ -70,45 +72,65 @@ pub struct EvalDone {
     pub pass: bool,
 }
 
-pub fn finish(
-    set_name: &str,
-    frames: usize,
-    scored: usize,
-    skipped: usize,
-    rows: &[ScoreRow],
-    dropped: &[String],
-) -> EvalDone {
-    let pass = dropped.is_empty() && !regressed(rows);
+/// Everything `finish` prints, borrowed from the caller.
+pub struct Inputs<'a> {
+    pub set_name: &'a str,
+    pub frames: usize,
+    pub scored: usize,
+    pub skipped: usize,
+    pub rows: &'a [ScoreRow],
+    pub dropped: &'a [String],
+    pub allowed: &'a [String],
+    pub unverified: &'a [String],
+    pub changed: &'a [super::util::CountChange],
+    pub class_folds: &'a [(String, usize)],
+    pub candidate_sha: &'a str,
+}
+
+pub fn finish(inp: &Inputs<'_>) -> EvalDone {
+    let pass = inp.dropped.is_empty() && inp.unverified.is_empty() && !regressed(inp.rows);
     EvalDone {
-        report: render(set_name, frames, scored, skipped, rows, dropped, pass),
+        report: render(inp, pass),
         pass,
     }
 }
 
 fn regressed(rows: &[ScoreRow]) -> bool {
     rows.iter()
-        .filter(|row| row.gated)
         .any(|row| row.items.iter().any(Item::pack_regressed))
 }
 
-fn render(
-    set_name: &str,
-    frames: usize,
-    scored: usize,
-    skipped: usize,
-    rows: &[ScoreRow],
-    dropped: &[String],
-    pass: bool,
-) -> String {
+fn render(inp: &Inputs<'_>, pass: bool) -> String {
     let mut out = String::new();
-    let _ = writeln!(out, "set: {set_name}");
-    let _ = writeln!(out, "frames: {frames} scored: {scored} skipped: {skipped}");
-    if !dropped.is_empty() {
-        let _ = writeln!(out, "dropped classes: {}", dropped.join(", "));
+    let _ = writeln!(out, "set: {}", inp.set_name);
+    let _ = writeln!(
+        out,
+        "frames: {} scored: {} skipped: {}",
+        inp.frames, inp.scored, inp.skipped
+    );
+    if !inp.candidate_sha.is_empty() {
+        let _ = writeln!(
+            out,
+            "candidate templates.json sha256: {}",
+            inp.candidate_sha
+        );
     }
-    for row in rows {
+    if !inp.dropped.is_empty() {
+        let _ = writeln!(out, "dropped classes: {}", inp.dropped.join(", "));
+    }
+    if !inp.allowed.is_empty() {
+        let _ = writeln!(out, "allowed drops: {}", inp.allowed.join(", "));
+    }
+    if !inp.unverified.is_empty() {
+        let _ = writeln!(out, "unverified classes: {}", inp.unverified.join(", "));
+    }
+    for (name, before, after) in inp.changed {
+        let _ = writeln!(out, "changed class {name}: n {before} -> {after}");
+    }
+    for row in inp.rows {
         let _ = writeln!(out, "{}", row.label);
         let _ = writeln!(out, "folds: {}", row.folds);
+        let _ = writeln!(out, "labelled: {}", row.labelled);
         let baseline = Item::counts(&row.items, |item| item.baseline);
         let candidate = Item::counts(&row.items, |item| item.packed);
         let learned = Item::counts(&row.items, |item| item.learned);
@@ -124,11 +146,21 @@ fn render(
             baseline.wrong,
             baseline.unread
         );
+        let bad: Vec<&Item> = row
+            .items
+            .iter()
+            .filter(|item| Item::pack_regressed(item))
+            .collect();
+        let _ = writeln!(out, "regressed: {}", bad.len());
+        if !bad.is_empty() {
+            let ids: Vec<&str> = bad.iter().map(|item| item.frame.as_str()).collect();
+            let _ = writeln!(out, "regressed frames: {}", ids.join(", "));
+        }
     }
     let _ = writeln!(out, "overall");
-    let baseline = total(rows, |item| item.baseline);
-    let candidate = total(rows, |item| item.packed);
-    let learned = total(rows, |item| item.learned);
+    let baseline = total(inp.rows, |item| item.baseline);
+    let candidate = total(inp.rows, |item| item.packed);
+    let learned = total(inp.rows, |item| item.learned);
     write_counts(&mut out, "baseline", baseline);
     write_counts(&mut out, "candidate", candidate);
     let _ = writeln!(
@@ -141,6 +173,10 @@ fn render(
         baseline.wrong,
         baseline.unread
     );
+    for (key, n) in inp.class_folds {
+        let _ = writeln!(out, "template class {key}");
+        let _ = writeln!(out, "folds: {n}");
+    }
     let _ = writeln!(out, "result: {}", if pass { "pass" } else { "fail" });
     out
 }

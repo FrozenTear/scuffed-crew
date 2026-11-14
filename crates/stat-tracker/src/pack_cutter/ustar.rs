@@ -35,8 +35,20 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// A ustar whose first member is the inner manifest and whose later members
-/// are `files`, in order. The manifest lists those files, not itself.
+/// are `files`, sorted by path. The manifest lists those files, not itself.
 pub fn archive(name: &str, version: &str, files: &[Member]) -> Result<Vec<u8>, String> {
+    let mut files: Vec<&Member> = files.iter().collect();
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    let mut seen = std::collections::BTreeSet::new();
+    for file in &files {
+        if file.path == "manifest.json" {
+            return Err("tar member \"manifest.json\" is reserved for the inner manifest".into());
+        }
+        if !seen.insert(file.path.as_str()) {
+            return Err(format!("duplicate tar member {:?}", file.path));
+        }
+        check_member(&file.path)?;
+    }
     let listed: Vec<InnerFile> = files
         .iter()
         .map(|file| InnerFile {
@@ -62,7 +74,6 @@ pub fn archive(name: &str, version: &str, files: &[Member]) -> Result<Vec<u8>, S
     }));
     let mut bytes = Vec::new();
     for member in &members {
-        check_member(&member.path)?;
         bytes.extend(ustar_file(&member.path, &member.bytes)?);
     }
     bytes.extend(std::iter::repeat_n(0u8, 1024));
@@ -70,21 +81,32 @@ pub fn archive(name: &str, version: &str, files: &[Member]) -> Result<Vec<u8>, S
 }
 
 fn check_member(name: &str) -> Result<(), String> {
-    let bad = name.is_empty()
-        || name.len() > 100
-        || name.starts_with('/')
-        || name.starts_with('\\')
-        || name.as_bytes().get(1) == Some(&b':')
-        || name.contains('\0');
-    let bad = bad
-        || name
-            .split(['/', '\\'])
-            .any(|part| part.is_empty() || part == "." || part == "..");
-    if bad {
-        Err(format!("refusing tar member {name:?}"))
-    } else {
-        Ok(())
+    if name.is_empty() {
+        return Err("refusing tar member \"\": empty name".into());
     }
+    if name.len() > 100 {
+        return Err(format!(
+            "refusing tar member {name:?}: longer than 100 bytes"
+        ));
+    }
+    if name.starts_with('/') || name.starts_with('\\') {
+        return Err(format!("refusing tar member {name:?}: absolute path"));
+    }
+    if name.as_bytes().get(1) == Some(&b':') {
+        return Err(format!("refusing tar member {name:?}: drive letter"));
+    }
+    if name.contains('\0') {
+        return Err(format!("refusing tar member {name:?}: contains NUL"));
+    }
+    if name
+        .split(['/', '\\'])
+        .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err(format!(
+            "refusing tar member {name:?}: empty, '.' or '..' path component"
+        ));
+    }
+    Ok(())
 }
 
 fn ustar_file(name: &str, data: &[u8]) -> Result<Vec<u8>, String> {

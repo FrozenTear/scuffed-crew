@@ -3,7 +3,6 @@
 use std::path::{Component, Path};
 
 use image::RgbImage;
-use serde::de::DeserializeOwned;
 
 pub struct Loaded<T> {
     pub rows: usize,
@@ -17,28 +16,23 @@ pub struct Loaded<T> {
 /// What happened to one template class while cutting.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ClassFate {
-    /// The labels produced this class, and the base pack had it too.
+    /// Labels produced it and it was merged with the base by sample count.
     Learned,
-    /// The labels did not produce this class, so the base copy was kept.
+    /// `--replace` kept the newly cut template and dropped the base one.
+    Replaced,
+    /// The labels did not produce it, so the base copy was kept.
     Kept,
-    /// The labels produced this class and the base pack did not have it.
+    /// Numeric pooling invented it, but the base already had a real cut.
+    KeptPooled,
+    /// The labels produced it and the base pack did not have it.
     New,
 }
 
-pub fn read_jsonl<T: DeserializeOwned>(path: &Path) -> Result<Vec<T>, String> {
-    let text =
-        std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
-    let mut out = Vec::new();
-    for (n, line) in text.lines().enumerate() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let row =
-            serde_json::from_str(line).map_err(|e| format!("{}:{}: {e}", path.display(), n + 1))?;
-        out.push(row);
-    }
-    Ok(out)
-}
+/// One cut-summary line: class, what happened to it, base `n`, written `n`.
+pub type ClassNote = (String, ClassFate, usize, usize);
+
+/// A class whose template changed: name, baseline `n`, candidate `n`.
+pub type CountChange = (String, usize, usize);
 
 pub fn open_rgb(path: &Path) -> Result<RgbImage, String> {
     image::open(path)
@@ -66,7 +60,7 @@ pub fn summary(
     learned: usize,
     unreadable: usize,
     skipped: usize,
-    classes: &[(String, ClassFate)],
+    classes: &[ClassNote],
 ) -> String {
     let mut text = format!(
         "cut {kind}\nrows: {rows}\nlearned: {learned}\nunreadable: {unreadable}\nlayout-skipped: {skipped}\n"
@@ -74,22 +68,30 @@ pub fn summary(
     let mut n_learned = 0usize;
     let mut n_kept = 0usize;
     let mut n_new = 0usize;
-    for (name, fate) in classes {
+    for (name, fate, n_base, n_new_n) in classes {
         let word = match fate {
             ClassFate::Learned => {
                 n_learned += 1;
                 "learned"
             }
-            ClassFate::Kept => {
+            ClassFate::Replaced => {
+                n_learned += 1;
+                "replaced"
+            }
+            ClassFate::Kept | ClassFate::KeptPooled => {
                 n_kept += 1;
-                "kept from base"
+                if *fate == ClassFate::KeptPooled {
+                    "kept from base (pooled)"
+                } else {
+                    "kept from base"
+                }
             }
             ClassFate::New => {
                 n_new += 1;
                 "new"
             }
         };
-        text.push_str(&format!("class {name}: {word}\n"));
+        text.push_str(&format!("class {name}: {word} n {n_base} -> {n_new_n}\n"));
     }
     text.push_str(&format!(
         "classes: learned {n_learned}, kept from base {n_kept}, new {n_new}\nwrote: {}\n",

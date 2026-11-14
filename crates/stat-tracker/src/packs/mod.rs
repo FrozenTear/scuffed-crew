@@ -1909,8 +1909,8 @@ fn safe_rel_path(raw: &str) -> Option<String> {
     }
     Some(parts.join("/"))
 }
-
-fn read_ustar(bytes: &[u8], layout: PackLayout) -> Result<Vec<(String, Vec<u8>)>, &'static str> {
+#[rustfmt::skip]
+pub(crate) fn read_ustar(bytes: &[u8], layout: PackLayout) -> Result<Vec<(String, Vec<u8>)>, &'static str> {
     let mut offset = 0usize;
     let mut files = Vec::new();
     while offset + 512 <= bytes.len() {

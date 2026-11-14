@@ -55,7 +55,7 @@ impl Outcome {
 
     fn err(msg: impl Into<String>) -> Self {
         Self {
-            code: 1,
+            code: 2,
             stdout: String::new(),
             stderr: msg.into(),
         }
@@ -63,13 +63,17 @@ impl Outcome {
 }
 
 /// Run the pack cutter. Prints the report or the error and returns the
-/// process status.
+/// process status: 0 pass, 1 gate failure, 2 any other error.
 pub fn run<I, S>(args: I) -> i32
 where
     I: IntoIterator<Item = S>,
-    S: AsRef<str>,
+    S: AsRef<std::ffi::OsStr>,
 {
-    let outcome = execute(args);
+    let args: Vec<std::ffi::OsString> = args
+        .into_iter()
+        .map(|s| s.as_ref().to_os_string())
+        .collect();
+    let outcome = execute(&args);
     if !outcome.stdout.is_empty() {
         print!("{}", outcome.stdout);
     }
@@ -79,13 +83,8 @@ where
     outcome.code
 }
 
-fn execute<I, S>(args: I) -> Outcome
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<str>,
-{
-    let args: Vec<String> = args.into_iter().map(|s| s.as_ref().to_string()).collect();
-    let command = match cli::parse(&args) {
+fn execute(args: &[std::ffi::OsString]) -> Outcome {
+    let command = match cli::parse(args) {
         Ok(c) => c,
         Err(e) => return Outcome::err(format!("{e}\n{}", cli::USAGE)),
     };
@@ -108,39 +107,41 @@ where
 
 fn cut(args: &CutArgs) -> Result<String, String> {
     let out = output::check_out(&args.out)?;
-    if let Some(v) = &args.version {
-        output::check_version(v)?;
-    }
     if args.kind == Kind::QueueTitle && args.role_labels.is_some() {
         return Err("--role-labels is only used with --kind rank".into());
     }
     require_rank_frames(args.kind, &args.frames)?;
-    let body = match args.kind {
-        Kind::Rank => rank::cut(args, &out)?,
-        Kind::QueueTitle => queue::cut(args, &out)?,
-    };
-    let mut text = body;
-    if let Some(v) = &args.version {
-        text.push_str(&format!(
-            "version: {v} (stored by pack, not written into templates.json)\n"
-        ));
+    match args.kind {
+        Kind::Rank => rank::cut(args, &out),
+        Kind::QueueTitle => queue::cut(args, &out),
     }
-    Ok(text)
 }
 
 fn pack(args: &PackArgs) -> Result<String, String> {
     let out = output::check_out(&args.out)?;
     output::check_version(&args.version)?;
-    output::check_pack_name(&args.name)?;
     let templates = args.dir.join("templates.json");
+    match args.kind {
+        Kind::Rank => {
+            crate::shadow::rank::TemplateSet::load_dir(&args.dir)
+                .map_err(|e| format!("rank pack: {e}"))?;
+        }
+        Kind::QueueTitle => {
+            crate::shadow::queue_title::TemplateSet::load_dir(&args.dir)
+                .map_err(|e| format!("queue-title pack: {e}"))?;
+        }
+    }
     let bytes =
         std::fs::read(&templates).map_err(|e| format!("reading {}: {e}", templates.display()))?;
+    let sha = ustar::sha256_hex(&bytes);
     let members = [ustar::Member {
         path: "templates.json".into(),
         bytes,
     }];
     let tar = ustar::archive(&args.name, &args.version, &members)?;
-    output::install_pack(&out, &args.name, &args.version, &tar)
+    let mut text = output::install_pack(&out, &args.name, &args.version, &tar)?;
+    text.push_str(&format!("templates.json sha256: {sha}\n"));
+    Ok(text)
 }
 
 fn eval(args: &EvalArgs) -> Result<report::EvalDone, String> {

@@ -1,20 +1,21 @@
 //! Rank cut and leave-one-day-out report. The day is `game[..8]`, the same
 //! split as `bench_labelled_rank_screens`. Learning uses
 //! [`Learner::add_frame`](crate::shadow::rank::Learner::add_frame). Scoring
-//! uses [`Reader::read`](crate::shadow::rank::Reader::read).
+//! uses one [`Reader::read`](crate::shadow::rank::Reader::read) per reader.
 //!
 //! The pass/fail gate is the candidate pack against the baseline pack.
-//! Leave-one-day-out is printed and does not gate, so a class that exists
-//! on only one day can still pass when the packs agree.
+//! Leave-one-day-out is printed and does not gate.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use serde_json::Value;
 
 use super::cli::{CutArgs, EvalArgs};
 use super::report::{self, EvalDone, Item, Outcome, ScoreRow};
-use super::util::{self, ClassFate, Loaded};
+use super::util::{self, ClassFate, ClassNote, CountChange, Loaded};
+use crate::shadow::rank::ink::unit;
 use crate::shadow::rank::layout::Scale;
 use crate::shadow::rank::{Family, Labels, Learner, RankRead, Reader, Role, TemplateSet};
 
@@ -24,22 +25,27 @@ pub fn cut(args: &CutArgs, out: &Path) -> Result<String, String> {
     let mut learner = Learner::new();
     let mut learned_rows = 0usize;
     for sample in &loaded.samples {
-        if sample.readable {
-            learner.add_frame(&sample.image, &sample.labels);
-            learned_rows += 1;
+        if !sample.readable {
+            continue;
         }
+        let image = util::open_rgb(&sample.path)?;
+        learner.add_frame(&image, &sample.labels);
+        learned_rows += 1;
     }
+    let observed = learner.observed();
     let learned = learner.build();
     let base = match &args.base {
         Some(dir) => Some(TemplateSet::load_dir(dir).map_err(|e| format!("base pack: {e}"))?),
         None => None,
     };
-    let (set, classes) = merge(learned, base)?;
+    let replace: BTreeSet<String> = args.replace.iter().cloned().collect();
+    let (set, classes) = merge(learned, &observed, base, &replace, args.replace_all)?;
+    reject_near(&set)?;
     set.check()
         .map_err(|e| format!("refusing to write an unloadable rank pack: {e}"))?;
-    super::output::private_dir(out)?;
-    set.save_dir(out)
-        .map_err(|e| format!("writing {}: {e}", out.display()))?;
+    let dest = super::output::prepare_templates(out, args.base.as_deref(), args.force)?;
+    let bytes = serde_json::to_vec(&set).map_err(|e| e.to_string())?;
+    super::output::write_private(&dest, &bytes)?;
     Ok(util::summary(
         "rank",
         out,
@@ -57,6 +63,7 @@ pub fn eval(args: &EvalArgs) -> Result<EvalDone, String> {
         TemplateSet::load_dir(&args.baseline).map_err(|e| format!("baseline pack: {e}"))?;
     let candidate =
         TemplateSet::load_dir(&args.candidate).map_err(|e| format!("candidate pack: {e}"))?;
+    let sha = file_sha(&args.candidate.join("templates.json"))?;
     let dropped = dropped_classes(&baseline, &candidate, &args.allow_drop)?;
     let loaded = load(&args.labels, Some(frames), args.role_labels.as_deref())?;
     if loaded.samples.is_empty() {
@@ -65,6 +72,12 @@ pub fn eval(args: &EvalArgs) -> Result<EvalDone, String> {
             loaded.rows, loaded.skipped
         ));
     }
+    let (changed, unverified) = changed_classes(
+        &baseline,
+        &candidate,
+        &loaded.samples,
+        &args.allow_unverified,
+    )?;
     let base_reader = Reader::new(baseline);
     let pack_reader = Reader::new(candidate);
     let mut days: Vec<String> = loaded.samples.iter().map(|s| s.day.clone()).collect();
@@ -79,82 +92,97 @@ pub fn eval(args: &EvalArgs) -> Result<EvalDone, String> {
             .iter()
             .filter(|s| s.readable && s.day != *day)
         {
-            learner.add_frame(&sample.image, &sample.labels);
+            let image = util::open_rgb(&sample.path)?;
+            learner.add_frame(&image, &sample.labels);
         }
         let fold = Reader::new(learner.build());
         for sample in loaded.samples.iter().filter(|s| s.day == *day) {
-            record(&base_reader, &fold, &pack_reader, sample, &mut bag);
+            let image = util::open_rgb(&sample.path)?;
+            record(&base_reader, &fold, &pack_reader, sample, &image, &mut bag);
         }
     }
-
     let mut rows = Vec::new();
     for name in Labels::NAMES {
         rows.push(ScoreRow {
             label: format!("field {name}"),
             folds: bag.folds[name].len(),
+            labelled: bag.labelled[name],
             items: bag.fields.remove(name).unwrap_or_default(),
-            gated: true,
         });
     }
     rows.push(ScoreRow {
         label: "screen gate".into(),
         folds: bag.gate_days.len(),
+        labelled: loaded.samples.len(),
         items: bag.gate,
-        gated: true,
     });
-    let mut done = report::finish(
-        &args.set_name,
-        loaded.rows,
-        loaded.samples.len(),
-        loaded.skipped,
-        &rows,
-        &dropped,
-    );
-    done.report.push_str(&class_fold_report(&loaded.samples));
-    Ok(done)
+    let folds = class_folds(&loaded.samples)?;
+    Ok(report::finish(&report::Inputs {
+        set_name: &args.set_name,
+        frames: loaded.rows,
+        scored: loaded.samples.len(),
+        skipped: loaded.skipped,
+        rows: &rows,
+        dropped: &dropped,
+        allowed: &args.allow_drop,
+        unverified: &unverified,
+        changed: &changed,
+        class_folds: &folds,
+        candidate_sha: &sha,
+    }))
 }
 
-fn record(base: &Reader, learned: &Reader, packed: &Reader, sample: &Sample, bag: &mut Bag) {
-    let item = Item {
-        baseline: gate_outcome(base, sample),
-        learned: gate_outcome(learned, sample),
-        packed: gate_outcome(packed, sample),
-    };
-    bag.gate.push(item);
+fn record(
+    base: &Reader,
+    learned: &Reader,
+    packed: &Reader,
+    sample: &Sample,
+    image: &image::RgbImage,
+    bag: &mut Bag,
+) {
+    let b = score(base, image, sample);
+    let l = score(learned, image, sample);
+    let p = score(packed, image, sample);
+    bag.gate.push(Item {
+        frame: sample.id.clone(),
+        baseline: b.0,
+        learned: l.0,
+        packed: p.0,
+    });
     bag.gate_days.insert(sample.day.clone());
     if !sample.readable {
         return;
     }
-    let base_fields = field_outcomes(base, sample);
-    let learned_fields = field_outcomes(learned, sample);
-    let packed_fields = field_outcomes(packed, sample);
     for (name, want) in sample.labels.values() {
         if want.is_some() {
             bag.folds
                 .get_mut(name)
                 .expect("field")
                 .insert(sample.day.clone());
+            *bag.labelled.get_mut(name).expect("field") += 1;
         }
         bag.fields.get_mut(name).expect("field").push(Item {
-            baseline: base_fields[name],
-            learned: learned_fields[name],
-            packed: packed_fields[name],
+            frame: sample.id.clone(),
+            baseline: b.1[name],
+            learned: l.1[name],
+            packed: p.1[name],
         });
     }
 }
 
-fn gate_outcome(reader: &Reader, sample: &Sample) -> Outcome {
-    if reader.read(&sample.image).is_ok() == sample.readable {
+fn score(
+    reader: &Reader,
+    image: &image::RgbImage,
+    sample: &Sample,
+) -> (Outcome, BTreeMap<&'static str, Outcome>) {
+    let read = reader.read(image);
+    let gate = if read.is_ok() == sample.readable {
         Outcome::Correct
     } else {
         Outcome::Wrong
-    }
-}
-
-fn field_outcomes(reader: &Reader, sample: &Sample) -> BTreeMap<&'static str, Outcome> {
-    let read = reader.read(&sample.image).ok();
-    let got = read.as_ref().map(RankRead::values).unwrap_or_default();
-    let mut out = BTreeMap::new();
+    };
+    let got = read.ok().as_ref().map(RankRead::values).unwrap_or_default();
+    let mut fields = BTreeMap::new();
     for (name, want) in sample.labels.values() {
         let value = got
             .iter()
@@ -165,21 +193,23 @@ fn field_outcomes(reader: &Reader, sample: &Sample) -> BTreeMap<&'static str, Ou
             Some(_) => Outcome::Wrong,
             None => Outcome::Unread,
         };
-        out.insert(name, outcome);
+        fields.insert(name, outcome);
     }
-    out
+    (gate, fields)
 }
 
 struct Sample {
+    id: String,
     day: String,
+    path: PathBuf,
     readable: bool,
     labels: Labels,
-    image: image::RgbImage,
 }
 
 struct Bag {
     fields: BTreeMap<&'static str, Vec<Item>>,
     folds: BTreeMap<&'static str, BTreeSet<String>>,
+    labelled: BTreeMap<&'static str, usize>,
     gate: Vec<Item>,
     gate_days: BTreeSet<String>,
 }
@@ -188,20 +218,27 @@ impl Bag {
     fn new() -> Self {
         let mut fields = BTreeMap::new();
         let mut folds = BTreeMap::new();
+        let mut labelled = BTreeMap::new();
         for name in Labels::NAMES {
             fields.insert(name, Vec::new());
             folds.insert(name, BTreeSet::new());
+            labelled.insert(name, 0);
         }
         Self {
             fields,
             folds,
+            labelled,
             gate: Vec::new(),
             gate_days: BTreeSet::new(),
         }
     }
 }
 
-/// Classes in `base` that `candidate` does not have, minus `--allow-drop`.
+fn file_sha(path: &Path) -> Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    Ok(super::ustar::sha256_hex(&bytes))
+}
+
 fn dropped_classes(
     baseline: &TemplateSet,
     candidate: &TemplateSet,
@@ -231,14 +268,90 @@ fn dropped_classes(
     Ok(dropped)
 }
 
-fn class_keys(set: &TemplateSet) -> BTreeSet<String> {
-    let mut keys = BTreeSet::new();
-    for (family, templates) in &set.families {
-        for template in templates {
-            keys.insert(class_key(*family, &template.class));
+fn changed_classes(
+    baseline: &TemplateSet,
+    candidate: &TemplateSet,
+    samples: &[Sample],
+    allow: &[String],
+) -> Result<(Vec<CountChange>, Vec<String>), String> {
+    let base = index(baseline);
+    let cand = index(candidate);
+    let mut changed = Vec::new();
+    let mut unverified = Vec::new();
+    let allow_set: BTreeSet<&str> = allow.iter().map(String::as_str).collect();
+    let mut known = BTreeSet::new();
+    for (key, template) in &cand {
+        known.insert(class_key(key.0, &key.1));
+        let name = class_key(key.0, &key.1);
+        let (before, differs) = match base.get(key) {
+            Some(old) => (
+                old.n,
+                old.n != template.n
+                    || old.aspect != template.aspect
+                    || old.vector != template.vector,
+            ),
+            None => (0, true),
+        };
+        if !differs {
+            continue;
+        }
+        changed.push((name.clone(), before, template.n));
+        if !exercised(key.0, samples) && !allow_set.contains(name.as_str()) {
+            unverified.push(name);
         }
     }
-    keys
+    let mut unknown = Vec::new();
+    for name in allow {
+        if !known.contains(name) && !changed.iter().any(|(n, _, _)| n == name) {
+            unknown.push(name.as_str());
+        }
+    }
+    if !unknown.is_empty() {
+        return Err(format!(
+            "--allow-unverified is not a candidate class: {}",
+            unknown.join(", ")
+        ));
+    }
+    changed.sort();
+    unverified.sort();
+    Ok((changed, unverified))
+}
+
+fn exercised(family: Family, samples: &[Sample]) -> bool {
+    let labelled =
+        |pred: fn(&Labels) -> bool| samples.iter().any(|s| s.readable && pred(&s.labels));
+    match family {
+        Family::Gate => !samples.is_empty(),
+        Family::Pct => labelled(|l| l.progress_pct.is_some()),
+        Family::Higher => labelled(|l| l.higher_than_pct.is_some()),
+        Family::Pill => labelled(|l| l.progress_change.is_some()),
+        Family::Sr => labelled(|l| l.hero_sr.is_some()),
+        Family::Change => labelled(|l| l.hero_sr_change.is_some()),
+        Family::Tag => labelled(|l| l.change_tags.is_some()),
+        Family::Banner => labelled(|l| l.next_mode_hint.is_some()),
+        Family::Tier => labelled(|l| l.role_rank.is_some()),
+        Family::Division | Family::Emblem => labelled(|l| l.division.is_some()),
+        Family::Role => labelled(|l| l.role.is_some()),
+    }
+}
+
+fn index(
+    set: &TemplateSet,
+) -> BTreeMap<(Family, String), crate::shadow::rank::templates::ClassTemplate> {
+    let mut out = BTreeMap::new();
+    for (family, templates) in &set.families {
+        for template in templates {
+            out.insert((*family, template.class.clone()), template.clone());
+        }
+    }
+    out
+}
+
+fn class_keys(set: &TemplateSet) -> BTreeSet<String> {
+    index(set)
+        .keys()
+        .map(|(family, class)| class_key(*family, class))
+        .collect()
 }
 
 fn class_key(family: Family, class: &str) -> String {
@@ -262,46 +375,166 @@ fn family_name(family: Family) -> &'static str {
     }
 }
 
-/// Re-learned classes stay. Classes the labels did not produce are copied
-/// from `base` unchanged.
+fn parse_family(name: &str) -> Result<Family, String> {
+    Ok(match name {
+        "gate" => Family::Gate,
+        "pct" => Family::Pct,
+        "higher" => Family::Higher,
+        "pill" => Family::Pill,
+        "sr" => Family::Sr,
+        "change" => Family::Change,
+        "tag" => Family::Tag,
+        "banner" => Family::Banner,
+        "tier" => Family::Tier,
+        "division" => Family::Division,
+        "emblem" => Family::Emblem,
+        "role" => Family::Role,
+        other => return Err(format!("unknown rank family {other:?}")),
+    })
+}
+
 fn merge(
-    mut learned: TemplateSet,
+    learned: TemplateSet,
+    observed: &BTreeSet<(Family, String)>,
     base: Option<TemplateSet>,
-) -> Result<(TemplateSet, Vec<(String, ClassFate)>), String> {
-    let mut notes: Vec<(String, ClassFate)> = Vec::new();
-    let base_keys = base.as_ref().map(class_keys).unwrap_or_default();
-    for (family, templates) in &learned.families {
-        for template in templates {
-            let key = class_key(*family, &template.class);
-            let fate = if base_keys.contains(&key) {
-                ClassFate::Learned
-            } else {
-                ClassFate::New
-            };
-            notes.push((key, fate));
+    replace: &BTreeSet<String>,
+    replace_all: bool,
+) -> Result<(TemplateSet, Vec<ClassNote>), String> {
+    for name in replace {
+        let (family, class) = split_key(name)?;
+        if !observed.contains(&(family, class)) {
+            return Err(format!("--replace {name} was not learned from the labels"));
         }
     }
-    if let Some(base) = base {
-        let have = class_keys(&learned);
-        for (family, templates) in base.families {
+    let Some(base) = base else {
+        let mut notes = Vec::new();
+        for (family, templates) in &learned.families {
             for template in templates {
-                let key = class_key(family, &template.class);
-                if have.contains(&key) {
-                    continue;
+                notes.push((
+                    class_key(*family, &template.class),
+                    ClassFate::New,
+                    0,
+                    template.n,
+                ));
+            }
+        }
+        notes.sort_by(|a, b| a.0.cmp(&b.0));
+        return Ok((learned, notes));
+    };
+    let mut base_map = index(&base);
+    let mut learned_map = index(&learned);
+    let mut keys: BTreeSet<(Family, String)> = BTreeSet::new();
+    keys.extend(base_map.keys().cloned());
+    keys.extend(learned_map.keys().cloned());
+    let mut families: BTreeMap<Family, Vec<crate::shadow::rank::templates::ClassTemplate>> =
+        BTreeMap::new();
+    let mut notes = Vec::new();
+    for key in keys {
+        let name = class_key(key.0, &key.1);
+        let obs = observed.contains(&key);
+        let do_replace = replace_all || replace.contains(&name);
+        let (fate, template, n_base, n_new) = match (
+            base_map.remove(&key),
+            learned_map.remove(&key),
+            obs,
+            do_replace,
+        ) {
+            (Some(base_t), Some(learned_t), true, true) => {
+                let n_base = base_t.n;
+                let n_new = learned_t.n;
+                (ClassFate::Replaced, learned_t, n_base, n_new)
+            }
+            (Some(base_t), Some(learned_t), true, false) => {
+                let mixed = mix_rank(&base_t, &learned_t);
+                let n_base = base_t.n;
+                let n_new = mixed.n;
+                (ClassFate::Learned, mixed, n_base, n_new)
+            }
+            (Some(base_t), Some(_), false, _) => {
+                let n = base_t.n;
+                (ClassFate::KeptPooled, base_t, n, n)
+            }
+            (Some(base_t), None, _, _) => {
+                let n = base_t.n;
+                (ClassFate::Kept, base_t, n, n)
+            }
+            (None, Some(learned_t), _, _) => {
+                let n = learned_t.n;
+                (ClassFate::New, learned_t, 0, n)
+            }
+            (None, None, _, _) => continue,
+        };
+        notes.push((name, fate, n_base, n_new));
+        families.entry(key.0).or_default().push(template);
+    }
+    notes.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok((
+        TemplateSet {
+            recognizer: learned.recognizer,
+            families,
+        },
+        notes,
+    ))
+}
+
+fn mix_rank(
+    base: &crate::shadow::rank::templates::ClassTemplate,
+    learned: &crate::shadow::rank::templates::ClassTemplate,
+) -> crate::shadow::rank::templates::ClassTemplate {
+    let nb = base.n as f32;
+    let nl = learned.n as f32;
+    let mut mixed = vec![0.0; base.vector.len()];
+    for (slot, (b, l)) in mixed
+        .iter_mut()
+        .zip(base.vector.iter().zip(&learned.vector))
+    {
+        *slot = nb * b + nl * l;
+    }
+    let aspect = ((nb * base.aspect.ln() + nl * learned.aspect.ln()) / (nb + nl)).exp();
+    crate::shadow::rank::templates::ClassTemplate {
+        class: base.class.clone(),
+        aspect,
+        n: base.n.saturating_add(learned.n),
+        vector: unit(mixed),
+    }
+}
+
+fn split_key(name: &str) -> Result<(Family, String), String> {
+    let Some((family, class)) = name.split_once('/') else {
+        return Err(format!("rank class {name:?} must be family/class"));
+    };
+    Ok((parse_family(family)?, class.to_string()))
+}
+
+fn reject_near(set: &TemplateSet) -> Result<(), String> {
+    for (family, templates) in &set.families {
+        let limit = if family.is_glyph() {
+            1.0 - crate::shadow::rank::MIN_MARGIN
+        } else {
+            1.0 - crate::shadow::rank::MIN_WORD_MARGIN
+        };
+        for i in 0..templates.len() {
+            for j in (i + 1)..templates.len() {
+                let dot: f32 = templates[i]
+                    .vector
+                    .iter()
+                    .zip(&templates[j].vector)
+                    .map(|(a, b)| a * b)
+                    .sum();
+                if dot > limit {
+                    return Err(format!(
+                        "class {} correlates {dot:.3} with {}, above {limit:.3}",
+                        class_key(*family, &templates[i].class),
+                        class_key(*family, &templates[j].class)
+                    ));
                 }
-                learned.families.entry(family).or_default().push(template);
-                notes.push((key, ClassFate::Kept));
             }
         }
     }
-    notes.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok((learned, notes))
+    Ok(())
 }
 
-/// Distinct days that produced each template class, from a one-day learn.
-/// A class that shows up on a single day is visible here. Leave-one-day-out
-/// cannot learn it, which is why that score does not gate.
-fn class_fold_report(samples: &[Sample]) -> String {
+fn class_folds(samples: &[Sample]) -> Result<Vec<(String, usize)>, String> {
     let mut by_day: BTreeMap<&str, Vec<&Sample>> = BTreeMap::new();
     for sample in samples.iter().filter(|s| s.readable) {
         by_day.entry(sample.day.as_str()).or_default().push(sample);
@@ -310,7 +543,8 @@ fn class_fold_report(samples: &[Sample]) -> String {
     for group in by_day.values() {
         let mut learner = Learner::new();
         for sample in group {
-            learner.add_frame(&sample.image, &sample.labels);
+            let image = util::open_rgb(&sample.path)?;
+            learner.add_frame(&image, &sample.labels);
         }
         let set = learner.build();
         let mut seen = BTreeSet::new();
@@ -323,12 +557,24 @@ fn class_fold_report(samples: &[Sample]) -> String {
             *folds.entry(key).or_default() += 1;
         }
     }
-    let mut text = String::new();
-    for (key, n) in folds {
-        text.push_str(&format!("template class {key}\nfolds: {n}\n"));
-    }
-    text
+    Ok(folds.into_iter().collect())
 }
+
+const RANK_KEYS: &[&str] = &[
+    "game",
+    "file",
+    "readable",
+    "role",
+    "role_rank",
+    "division",
+    "progress_pct",
+    "progress_change",
+    "change_tags",
+    "higher_than_pct",
+    "hero_sr",
+    "hero_sr_change",
+    "next_mode_hint",
+];
 
 #[derive(Deserialize)]
 struct Row {
@@ -351,11 +597,27 @@ fn load(
     role_labels: Option<&Path>,
 ) -> Result<Loaded<Sample>, String> {
     let frames = frames.ok_or("missing --frames")?;
-    let mut rows: Vec<Row> = util::read_jsonl(labels)?;
+    let values = read_objects(labels, RANK_KEYS)?;
+    let mut rows: Vec<Row> = values
+        .iter()
+        .map(|value| serde_json::from_value(fill_label_nulls(value)))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("{}: {e}", labels.display()))?;
     if let Some(path) = role_labels {
-        let roles: Vec<RoleRow> = util::read_jsonl(path)?;
+        let role_values = read_objects(path, &["game", "role"])?;
+        let roles: Vec<RoleRow> = role_values
+            .iter()
+            .map(|value| serde_json::from_value(value.clone()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("{}: {e}", path.display()))?;
+        let mut seen = BTreeSet::new();
+        for role in &roles {
+            if !seen.insert(role.game.as_str()) {
+                return Err(format!("role labels list {} twice", role.game));
+            }
+        }
         for row in &mut rows {
-            if let Some(role) = roles.iter().rev().find(|r| r.game == row.game) {
+            if let Some(role) = roles.iter().find(|r| r.game == row.game) {
                 row.labels.role = role.role;
             }
         }
@@ -364,6 +626,7 @@ fn load(
     let mut skipped = 0usize;
     let mut unreadable = 0usize;
     for row in &rows {
+        check_words(&row.labels)?;
         let day = day_of(&row.game)?;
         reject_name("game", &row.game)?;
         reject_name("file", &row.file)?;
@@ -378,10 +641,11 @@ fn load(
             unreadable += 1;
         }
         samples.push(Sample {
+            id: format!("{}/{}", row.game, row.file),
             day,
+            path,
             readable: row.readable,
             labels: row.labels.clone(),
-            image,
         });
     }
     Ok(Loaded {
@@ -390,6 +654,69 @@ fn load(
         skipped,
         samples,
     })
+}
+
+/// `Labels` options have no `serde(default)`, so a row that omits a field
+/// is filled with null before it is decoded. Null and a missing field are
+/// the same: the field was not labelled.
+fn fill_label_nulls(value: &Value) -> Value {
+    let mut value = value.clone();
+    if let Some(obj) = value.as_object_mut() {
+        for key in RANK_KEYS {
+            if *key != "game" && *key != "file" && *key != "readable" {
+                obj.entry((*key).to_string()).or_insert(Value::Null);
+            }
+        }
+    }
+    value
+}
+
+fn read_objects(path: &Path, keys: &[&str]) -> Result<Vec<Value>, String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let mut out = Vec::new();
+    for (n, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: Value =
+            serde_json::from_str(line).map_err(|e| format!("{}:{}: {e}", path.display(), n + 1))?;
+        let obj = value
+            .as_object()
+            .ok_or_else(|| format!("{}:{}: expected an object", path.display(), n + 1))?;
+        for key in obj.keys() {
+            if !keys.contains(&key.as_str()) {
+                return Err(format!("{}:{}: unknown key {key:?}", path.display(), n + 1));
+            }
+        }
+        out.push(value);
+    }
+    Ok(out)
+}
+
+fn check_words(labels: &Labels) -> Result<(), String> {
+    if let Some(text) = &labels.role_rank {
+        bad_word("role_rank", text)?;
+    }
+    if let Some(text) = &labels.next_mode_hint {
+        bad_word("next_mode_hint", text)?;
+    }
+    if let Some(tags) = &labels.change_tags {
+        for tag in tags {
+            bad_word("change_tags", tag)?;
+        }
+    }
+    Ok(())
+}
+
+fn bad_word(field: &str, text: &str) -> Result<(), String> {
+    if text.is_empty() || text != text.trim() || text.contains("  ") {
+        Err(format!(
+            "{field} {text:?} has leading, trailing or doubled spaces"
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 fn day_of(game: &str) -> Result<String, String> {

@@ -118,6 +118,8 @@ pub mod layout;
 pub mod templates;
 
 #[cfg(test)]
+pub(crate) mod synth;
+#[cfg(test)]
 mod tests;
 
 use std::path::Path;

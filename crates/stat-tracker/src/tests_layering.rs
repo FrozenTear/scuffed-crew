@@ -16,9 +16,7 @@
 //!           host_probe, sandbox, hero_auth, model, version, suspect, ocr_status, unsure_rule
 //! ```
 //!
-//! The four middle crates do not use each other. The test reads the `src/`
-//! of every crate the split has made so far ([`PHYSICAL`]: the lib only,
-//! not `main.rs`, `bin/`, `daemon/`, `main_tests/` or `ocr_bench.rs`), follows every
+//! The four middle crates do not use each other. The test reads the `src/` of every crate the split has made so far ([`PHYSICAL`]: the lib only, not `main.rs`, `bin/`, `daemon/`, `main_tests/` or `ocr_bench.rs`), follows every
 //! `crate::`, `super::` and `self::` path (and every path through an
 //! extracted crate's name, such as `stat_tracker_core::`) in `use` trees
 //! and in code, and fails on any path from a module to a crate it may not
@@ -130,6 +128,7 @@ fn crate_of(module: &[String]) -> Option<Crate> {
         .max_by_key(|(prefix, _)| prefix.len())
         .map(|(_, krate)| *krate)
 }
+
 // ------------------------------------------------------------------ lexer
 
 fn is_ident(c: char) -> bool {
@@ -1228,6 +1227,7 @@ fn every_module_has_a_crate() {
                         .to_string_lossy()
                         .replace('\\', "/")
                 })
+                // the bins and their tests
                 .filter(|n| {
                     dir != "stat-tracker"
                         || (n != "main.rs"
