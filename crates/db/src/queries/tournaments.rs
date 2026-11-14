@@ -977,7 +977,7 @@ impl Database {
         let participants = self.list_tournament_participants(tournament_id).await?;
         let n = participants.len();
         if n < 2 {
-            return Err(crate::DbError::NotFound(
+            return Err(crate::DbError::Invalid(
                 "Need at least 2 participants".into(),
             ));
         }
@@ -1112,7 +1112,7 @@ impl Database {
         let participants = self.list_tournament_participants(tournament_id).await?;
         let n = participants.len();
         if n < 2 {
-            return Err(crate::DbError::NotFound(
+            return Err(crate::DbError::Invalid(
                 "Need at least 2 participants".into(),
             ));
         }
@@ -1342,7 +1342,7 @@ impl Database {
         let participants = self.list_tournament_participants(tournament_id).await?;
         let n = participants.len();
         if n < 2 {
-            return Err(crate::DbError::NotFound(
+            return Err(crate::DbError::Invalid(
                 "Need at least 2 participants".into(),
             ));
         }
@@ -1412,6 +1412,11 @@ impl Database {
     }
 
     pub async fn generate_swiss_round(&self, tournament_id: &str) -> DbResult<TournamentRound> {
+        if self.count_tournament_participants(tournament_id).await? < 2 {
+            return Err(crate::DbError::Invalid(
+                "Need at least 2 participants".into(),
+            ));
+        }
         let rounds = self.list_tournament_rounds(tournament_id).await?;
         let round_number = rounds.len() as u32 + 1;
 

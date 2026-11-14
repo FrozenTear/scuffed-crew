@@ -114,6 +114,7 @@ async fn require_participant(
 fn db_err(e: scuffed_db::DbError) -> (StatusCode, Json<ErrorResponse>) {
     match e {
         scuffed_db::DbError::NotFound(msg) => not_found(&msg),
+        scuffed_db::DbError::Invalid(msg) => bad_request(&msg),
         other => internal_err(other),
     }
 }
@@ -434,29 +435,25 @@ pub async fn generate_bracket(
                 .db
                 .generate_single_elim_bracket(&id)
                 .await
-                .map_err(internal_err)?;
+                .map_err(db_err)?;
         }
         TournamentFormat::DoubleElim => {
             state
                 .db
                 .generate_double_elim_bracket(&id)
                 .await
-                .map_err(internal_err)?;
+                .map_err(db_err)?;
         }
         TournamentFormat::RoundRobin => {
             state
                 .db
                 .generate_round_robin_pairings(&id)
                 .await
-                .map_err(internal_err)?;
+                .map_err(db_err)?;
         }
         TournamentFormat::Swiss => {
             // Swiss generates one round at a time; for initial bracket, generate round 1
-            state
-                .db
-                .generate_swiss_round(&id)
-                .await
-                .map_err(internal_err)?;
+            state.db.generate_swiss_round(&id).await.map_err(db_err)?;
         }
     }
 
@@ -839,11 +836,7 @@ pub async fn generate_next_round(
     Path(id): Path<String>,
 ) -> ApiResult<(StatusCode, Json<TournamentRound>)> {
     require_tournament(&state, &id).await?;
-    let round = state
-        .db
-        .generate_swiss_round(&id)
-        .await
-        .map_err(internal_err)?;
+    let round = state.db.generate_swiss_round(&id).await.map_err(db_err)?;
 
     audit(
         &state.db,

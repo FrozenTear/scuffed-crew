@@ -404,3 +404,48 @@ async fn round_robin_b_win_needs_b_to_outscore_a() {
     assert_eq!(body["winner_id"], b);
     assert_eq!(body["status"], "completed");
 }
+
+/// Generating a bracket with 0 or 1 participants is a bad request (400 with a
+/// clear body), not a 500, for every format. Nothing is written.
+#[tokio::test]
+async fn generate_bracket_with_under_two_participants_is_400() {
+    let state = seeded().await;
+    for format in ["single_elim", "double_elim", "round_robin", "swiss"] {
+        let tid = create_tournament(&state, &format!("Small {format}"), format).await;
+        for n in 0..2 {
+            if n == 1 {
+                add_participant(&state, &tid, "Lonely Team").await;
+            }
+            let before = snapshot(&state).await;
+            let (status, body) = call(
+                &state,
+                Method::POST,
+                &format!("/api/tournaments/{tid}/generate-bracket"),
+                None,
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{format} with {n} participant(s): {body}"
+            );
+            assert_eq!(
+                body["error"], "Need at least 2 participants",
+                "{format} with {n} participant(s)"
+            );
+            assert_eq!(snapshot(&state).await, before, "{format} n={n}: no writes");
+        }
+        if format == "swiss" {
+            let (status, body) = call(
+                &state,
+                Method::POST,
+                &format!("/api/tournaments/{tid}/next-round"),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "swiss next-round: {body}");
+            assert_eq!(body["error"], "Need at least 2 participants");
+        }
+    }
+    assert_eq!(count(&state, "tournament_round").await, 0);
+}
