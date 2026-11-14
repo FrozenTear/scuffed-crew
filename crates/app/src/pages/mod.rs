@@ -1,4 +1,5 @@
 mod apply;
+mod article_author;
 mod blog;
 mod blog_post;
 mod chat;
