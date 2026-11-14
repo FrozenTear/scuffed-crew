@@ -771,8 +771,8 @@ impl Tried {
 /// [`PACKS`] current, and keep trying while the daemon runs.
 ///
 /// Its first try carries on from [`sync_on_startup`]: with that run's list
-/// it syncs the other packs, so a first install is still eight requests
-/// (the list, then every pack).
+/// it syncs the other packs, so a first install is still one request per
+/// pack plus the list (the list, then every pack).
 /// If startup did not get that far (busy lock, 429, packs switched off, a
 /// network error, a refused token) nothing is sent now and that outcome
 /// sets the first wait.
@@ -1920,6 +1920,7 @@ impl PackLayout {
                     || is_plain_name(raw, ".json", is_word_byte)
             }
             Self::Names => is_names_v1_file(raw),
+            Self::TemplatesJson => raw == "templates.json",
         };
         if ok {
             Ok(raw.to_string())
@@ -1932,7 +1933,9 @@ impl PackLayout {
     fn allows_dir(self, raw: &str) -> bool {
         match self {
             Self::HeroesV1 | Self::Portraits => safe_rel_path(raw).as_deref() == Some("special"),
-            Self::BanIcons | Self::MapGlyphs | Self::Words | Self::Names => false,
+            Self::BanIcons | Self::MapGlyphs | Self::Words | Self::Names | Self::TemplatesJson => {
+                false
+            }
         }
     }
 }
@@ -3126,6 +3129,7 @@ mod tests {
             "bans-picks-v1.tar" => &["ana.png", "no-preference.png"],
             "maps-v1.tar" => &["atlas.json", "g0041.png", "g003a.png"],
             "words-v1.tar" => &["accolade_victory.png", "end_title_defeat.png", "words.json"],
+            "rank-v1.tar" | "queue-title-v1.tar" => &["templates.json"],
             "names-v1.tar" => &[
                 "glyphs.png",
                 "glyphs.txt",
@@ -3291,6 +3295,8 @@ mod tests {
             ("words-v1.tar", "templates/words-v1"),
             ("names-v1.tar", "templates/names-v1"),
             ("bans-picks-v1.tar", "templates/bans-picks-v1"),
+            ("rank-v1.tar", "templates/rank-v1"),
+            ("queue-title-v1.tar", "templates/queue-title-v1"),
         ];
         assert_eq!(PACKS.len(), expected.len() + 1);
         for (name, dir) in expected {
@@ -3298,9 +3304,8 @@ mod tests {
             assert_eq!(spec.dir_in(data), data.join(dir), "{name}");
             assert!(!spec.required, "{name} is optional");
         }
-        // Reader neutrality: the hero packs, maps-v1, words-v1, names-v1 and
-        // bans-picks-v1 land in a folder a reader opens. bans-v1 does not. The
-        // hand-installed maps and result folders are not pack folders.
+        // Reader neutrality: every pack but bans-v1 lands in a folder a reader
+        // opens. The hand-installed maps and result folders are not pack folders.
         let reader_dirs = [
             crate::shadow::heroes::TEMPLATE_SUBDIR,
             crate::shadow::heroes::TEMPLATE_SUBDIR_V2,
@@ -3311,6 +3316,8 @@ mod tests {
             crate::shadow::banner::TEMPLATE_SUBDIR_V1,
             "templates/names-v1",
             "templates/bans-picks-v1",
+            crate::shadow::rank::TEMPLATE_DIR,
+            crate::shadow::queue_title::TEMPLATE_DIR,
         ];
         let mut seen = BTreeSet::new();
         for spec in PACKS {
@@ -3319,21 +3326,7 @@ mod tests {
             assert_ne!(dir, data.join("templates"));
             assert!(!versions_path(data).starts_with(&dir));
             let used_by_reader = reader_dirs.iter().any(|sub| dir == data.join(sub));
-            assert_eq!(
-                used_by_reader,
-                matches!(
-                    spec.name,
-                    HEROES_PACK_NAME
-                        | "heroes-v2.tar"
-                        | "heroes-v2-1080.tar"
-                        | "maps-v1.tar"
-                        | "words-v1.tar"
-                        | "names-v1.tar"
-                        | "bans-picks-v1.tar"
-                ),
-                "{}",
-                spec.name
-            );
+            assert_eq!(used_by_reader, spec.name != "bans-v1.tar", "{}", spec.name);
             assert_ne!(
                 dir,
                 data.join(crate::shadow::banner::TEMPLATE_SUBDIR),
@@ -3417,6 +3410,7 @@ mod tests {
             PackLayout::MapGlyphs,
             PackLayout::Words,
             PackLayout::Names,
+            PackLayout::TemplatesJson,
         ] {
             assert_eq!(
                 layout.file_path("manifest.json").as_deref(),
@@ -3491,7 +3485,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn all_seven_extra_packs_install_into_a_fresh_data_dir() {
+    async fn all_nine_extra_packs_install_into_a_fresh_data_dir() {
         let (list, files, contents) = all_packs();
         let served = serve(list, files);
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3535,10 +3529,10 @@ mod tests {
             .filter(|name| name.starts_with('.') && name != ".pack-sync.lock")
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
-        assert_eq!(report.extras_ready(), (7, 7));
+        assert_eq!(report.extras_ready(), (9, 9));
         assert_eq!(
             report.guide_result(),
-            Ok("Reader pack saved. Extra reader packs ready: 7 of 7.".to_string())
+            Ok("Reader pack saved. Extra reader packs ready: 9 of 9.".to_string())
         );
     }
 
@@ -3570,7 +3564,7 @@ mod tests {
         );
         assert_eq!(
             second.guide_result(),
-            Ok("The reader pack is already installed. Extra reader packs ready: 7 of 7.".into())
+            Ok("The reader pack is already installed. Extra reader packs ready: 9 of 9.".into())
         );
     }
 
@@ -3599,7 +3593,7 @@ mod tests {
         let versions = stored_versions(dir.path());
         assert!(!versions.contains_key("bans-v1.tar"));
         assert_eq!(versions.len(), PACKS.len() - 1);
-        assert_eq!(report.extras_ready(), (6, 7));
+        assert_eq!(report.extras_ready(), (8, 9));
     }
 
     #[tokio::test]
@@ -3997,11 +3991,11 @@ mod tests {
             assert_eq!(outcome(&report, spec.name), &expected, "{}", spec.name);
         }
         assert_eq!(served.downloaded(), vec!["heroes-v2.tar".to_string()]);
-        assert_eq!(report.extras_ready(), (6, 7));
+        assert_eq!(report.extras_ready(), (8, 9));
         assert_eq!(
             report.guide_result(),
             Ok(format!(
-                "The reader pack is already installed. Extra reader packs ready: 6 of 7. {limited}."
+                "The reader pack is already installed. Extra reader packs ready: 8 of 9. {limited}."
             ))
         );
     }
@@ -4052,11 +4046,13 @@ mod tests {
             "maps-v1.tar",
             "names-v1.tar",
             "bans-picks-v1.tar",
+            "rank-v1.tar",
+            "queue-title-v1.tar",
         ] {
             assert_eq!(outcome(&report, name), &limited, "{name}");
         }
         assert_eq!(outcome(&report, "words-v1.tar"), &PackSync::Missing);
-        assert_eq!(report.extras_ready(), (0, 6));
+        assert_eq!(report.extras_ready(), (0, 8));
     }
 
     fn age_folder(path: &Path, age: std::time::Duration) {
@@ -5241,26 +5237,17 @@ mod tests {
         let logs = capture_logs();
         let startup = sync_on_startup_capped(&served.base, TOKEN, dir.path(), PACK_MAX_BYTES).await;
         assert!(startup.goes_on());
-        let (finished, waits) = rig(&served.base, dir.path(), Some(startup), 8, no_nap)
+        let (finished, waits) = rig(&served.base, dir.path(), Some(startup), 10, no_nap)
             .run()
             .await;
         let logs = logs.text();
         assert!(finished);
         // What the server asked for, then one download every 10 s.
-        assert_eq!(
-            waits,
-            [
-                secs(7) + TEST_JITTER,
-                secs(10),
-                secs(10),
-                secs(10),
-                secs(10),
-                secs(10),
-                secs(10)
-            ]
-        );
+        let mut expected_waits = vec![secs(7) + TEST_JITTER];
+        expected_waits.extend([secs(10); 8]);
+        assert_eq!(waits, expected_waits);
         assert_all_installed(dir.path(), &contents);
-        // Startup (2), the refused download, then the seven downloads. The
+        // Startup (2), the refused download, then the nine downloads. The
         // list is not asked for again.
         let mut expected = list_then(&[HEROES_PACK_NAME, "heroes-v2.tar"]);
         expected.extend(tar_paths(&pack_names()[1..]));
@@ -5274,14 +5261,14 @@ mod tests {
         );
         let done = lines_with(&logs, SAID_DONE);
         assert_eq!(done.len(), 1, "{logs}");
-        assert!(done[0].contains("tries=8"), "{logs}");
+        assert!(done[0].contains("tries=10"), "{logs}");
         assert!(
             done[0].contains(&format!("arrived=\"{}\"", pack_names().join(", "))),
             "{logs}"
         );
-        // Eight installs, the 429 line and the closing line. The paced waits
+        // Ten installs, the 429 line and the closing line. The paced waits
         // are not written for a member.
-        assert_eq!(pack_lines(&logs).len(), 10, "{logs}");
+        assert_eq!(pack_lines(&logs).len(), 12, "{logs}");
         assert_no_secrets(&logs);
     }
 
@@ -5305,16 +5292,19 @@ mod tests {
             sent.lock().unwrap().push(paths.lock().unwrap().len());
             no_nap(nap)
         };
-        let (finished, waits) = rig(&served.base, dir.path(), Some(startup), 9, on_nap)
+        let (finished, waits) = rig(&served.base, dir.path(), Some(startup), 11, on_nap)
             .run()
             .await;
         assert!(finished);
         // 300 s is cut to 120 s. Then one request per try: the list, and
         // each pack 10 s after the one before.
         let mut expected_waits = vec![secs(120) + TEST_JITTER];
-        expected_waits.extend([secs(10); 8]);
+        expected_waits.extend([secs(10); 10]);
         assert_eq!(waits, expected_waits);
-        assert_eq!(*sent_by_nap.lock().unwrap(), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(
+            *sent_by_nap.lock().unwrap(),
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        );
         assert_all_installed(dir.path(), &contents);
         let mut expected = vec![LIST_PATH.to_string()];
         expected.extend(list_then(&pack_names()));
@@ -5579,12 +5569,12 @@ mod tests {
         for spec in PACKS {
             assert_eq!(fetched(&format!("/{}", spec.name)), 1, "{}", spec.name);
         }
-        // Startup and the first try are 9 requests. The next try reads the
+        // Startup and the first try are 11 requests. The next try reads the
         // list again, because the download did not match it. After that
         // the list is read only once it is 30 minutes old.
-        assert_eq!(*sent_by_nap.lock().unwrap(), [9, 10, 10, 10, 11]);
+        assert_eq!(*sent_by_nap.lock().unwrap(), [11, 12, 12, 12, 13]);
         assert_eq!(list_requests(&served), 4);
-        assert_eq!(asked.len(), 12);
+        assert_eq!(asked.len(), 14);
         assert!(
             !pack_spec("heroes-v2.tar")
                 .unwrap()
@@ -5653,13 +5643,13 @@ mod tests {
         assert_eq!(waits, [secs(60), secs(300), secs(900), secs(1800)]);
         assert_all_installed(dir.path(), &contents);
         assert_eq!(stored_versions(dir.path())["heroes-v2.tar"], "154088.2");
-        // Startup 2, the first try 7, the list after the mismatch, the
+        // Startup 2, the first try 9, the list after the mismatch, the
         // list at 30 minutes, and the pack again under its new entry.
         let asked = requests(&served);
         let fetched = |name: &str| asked.iter().filter(|path| path.ends_with(name)).count();
         assert_eq!(fetched("/heroes-v2.tar"), 2);
         assert_eq!(list_requests(&served), 3);
-        assert_eq!(asked.len(), 12);
+        assert_eq!(asked.len(), 14);
         assert_eq!(lines_with(&logs, SAID_MISSING).len(), 1, "{logs}");
         let done = lines_with(&logs, SAID_DONE);
         assert_eq!(done.len(), 1, "{logs}");
@@ -6190,6 +6180,8 @@ mod tests {
 
     #[path = "tests_bans_picks.rs"]
     mod bans_picks;
+    #[path = "tests_rank_queue_title.rs"]
+    mod rank_queue_title;
     #[path = "tests_real_limit.rs"]
     mod real_limit;
 

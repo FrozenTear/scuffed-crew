@@ -408,12 +408,34 @@ async fn apply(
             // pending hint: a screen with no banner clears that hint, as it
             // no longer names the next game's queue. A second settle of the
             // hint's own game leaves it (`set_next_mode_hint` checks).
-            let hint = s.rank.next_mode_hint.as_ref().map(|h| h.value.as_str());
+            let hint = s.rank.next_mode_hint.as_ref().map(|h| queue_hint(&h.value));
             dump.set_next_mode_hint(hint, &s.session, s.at);
         }
         stored |= store_rank(feed, store, s, RANK_STORE_TRIES).await;
     }
     stored
+}
+
+/// The banner word spelled as the queue title pack spells the queue. The
+/// rank-v1 pack names its banner classes as the screen writes them
+/// (`COMPETITIVE: OPEN QUEUE`, `COMPETITIVE: ROLE QUEUE`), and the next
+/// game's pre-game title reads `OPEN QUEUE` or `ROLE QUEUE`, so a leading
+/// `COMPETITIVE` word (and its colon) is dropped before the hint is handed
+/// on ([`super::queue_title::hint_agrees`]). Anything else is kept as read,
+/// trimmed. The upload still sends the banner word as read.
+pub(crate) fn queue_hint(banner: &str) -> &str {
+    const PREFIX: &str = "COMPETITIVE";
+    let text = banner.trim();
+    let rest = match text.get(..PREFIX.len()) {
+        Some(head) if head.eq_ignore_ascii_case(PREFIX) => &text[PREFIX.len()..],
+        _ => return text,
+    };
+    let queue = rest.trim_start_matches(|c: char| c == ':' || c.is_whitespace());
+    if queue.len() == rest.len() || queue.is_empty() {
+        text
+    } else {
+        queue
+    }
 }
 
 async fn store_rank(feed: &mut RankFeed, store: &impl RankStore, s: Settled, tries: u8) -> bool {

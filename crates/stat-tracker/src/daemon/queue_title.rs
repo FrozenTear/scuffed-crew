@@ -335,8 +335,9 @@ pub(crate) fn confident(read: &Field<String>) -> Option<&str> {
 /// queue title pack spells the title (`OPEN QUEUE`, `ROLE QUEUE`, with or
 /// without the last `QUEUE`). A word in front of it is part of the key, so
 /// `COMPETITIVE: ROLE QUEUE` (`COMPETITIVE ROLE`) does not agree with a
-/// quick play `ROLE QUEUE` (`ROLE`); the rank reader maps its own labels to
-/// this spelling before it sets a hint. A spelling that does not match is
+/// `ROLE QUEUE` title (`ROLE`); the rank wiring maps its own labels to
+/// this spelling before it sets a hint ([`super::rank::queue_hint`] drops
+/// the `COMPETITIVE:` of the banner). A spelling that does not match is
 /// dropped, never confirmed: the safe way to fail.
 /// The key itself is [`stat_tracker::model::queue_key`], shared with the
 /// upload's open queue check.

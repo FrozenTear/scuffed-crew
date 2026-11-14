@@ -26,10 +26,12 @@
 //!   streak tags). The reader has no cap; the site keeps at most 8 and nulls
 //!   a longer list, so the wiring sends no list above 8
 //!   ([`crate::model::RANK_MAX_CHANGE_TAGS`]);
-//! * `next_mode_hint`: the banner word as its class is named. A pack should
-//!   name it as the queue title pack spells titles (`OPEN QUEUE`,
-//!   `ROLE QUEUE`): the hint names the next game's queue and only agrees
-//!   with that game's queue title when both reduce to the same key
+//! * `next_mode_hint`: the banner word as its class is named. The shipped
+//!   pack names it as the screen writes it (`COMPETITIVE: OPEN QUEUE`,
+//!   `COMPETITIVE: ROLE QUEUE`). The hint names the next game's queue; the
+//!   daemon's rank wiring drops the `COMPETITIVE:` before it hands the hint
+//!   on, and the hint only agrees with that game's queue title (`OPEN
+//!   QUEUE`, `ROLE QUEUE`) when both reduce to the same key
 //!   (`model::queue_key`); a spelling that does not is dropped, never
 //!   confirmed.
 //!

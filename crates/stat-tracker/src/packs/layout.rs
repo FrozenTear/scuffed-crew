@@ -37,6 +37,22 @@ pub const BANS_PICKS_PACK_NAME: &str = "bans-picks-v1.tar";
 /// (`shadow::bans_picks::TEMPLATE_DIR`).
 pub const BANS_PICKS_PACK_DIR: &str = "templates/bans-picks-v1";
 
+/// File name of the rank-v1 pack on the pack list: the glyph and word
+/// templates of the rank update reader, one `templates.json`.
+pub const RANK_PACK_NAME: &str = "rank-v1.tar";
+
+/// Folder of the rank-v1 pack under the data dir
+/// (`shadow::rank::TEMPLATE_DIR`).
+pub const RANK_PACK_DIR: &str = "templates/rank-v1";
+
+/// File name of the queue-title-v1 pack on the pack list: the title
+/// templates of the queue title reader, one `templates.json`.
+pub const QUEUE_TITLE_PACK_NAME: &str = "queue-title-v1.tar";
+
+/// Folder of the queue-title-v1 pack under the data dir
+/// (`shadow::queue_title::TEMPLATE_DIR`).
+pub const QUEUE_TITLE_PACK_DIR: &str = "templates/queue-title-v1";
+
 /// File name of the hero template pack on the pack list.
 pub const HEROES_PACK_NAME: &str = "heroes-v1.tar";
 
@@ -67,6 +83,8 @@ pub enum PackLayout {
     /// Letter templates: the six files [`crate::names::pack`] loads, and
     /// nothing else. No subdirectory.
     Names,
+    /// One `templates.json` and nothing else (rank-v1, queue-title-v1).
+    TemplatesJson,
 }
 
 /// One pack the tracker installs.
@@ -93,9 +111,12 @@ impl PackSpec {
 /// The hero packs are read by a reader today (heroes-v1 by the shadow log and
 /// as the new reader's fallback, heroes-v2 and heroes-v2-1080 by the new
 /// reader), and so are maps-v1 (the new reader's map banner), words-v1 (its
-/// result words), names-v1 (the name reader's letter pack) and
-/// bans-picks-v1 (the cv-v1 bans and picks reader). bans-v1 is not opened by
-/// a reader yet.
+/// result words), names-v1 (the name reader's letter pack),
+/// bans-picks-v1 (the cv-v1 bans and picks reader), rank-v1 (the rank
+/// update reader) and queue-title-v1 (the queue title reader). bans-v1 is
+/// not opened by a reader yet. rank-v1 and queue-title-v1 are read once,
+/// when the daemon starts, so a pack that lands later is used from the
+/// next start.
 pub const PACKS: &[PackSpec] = &[
     PackSpec {
         name: HEROES_PACK_NAME,
@@ -143,6 +164,18 @@ pub const PACKS: &[PackSpec] = &[
         name: BANS_PICKS_PACK_NAME,
         dir: |data_dir| data_dir.join(BANS_PICKS_PACK_DIR),
         layout: PackLayout::BanIcons,
+        required: false,
+    },
+    PackSpec {
+        name: RANK_PACK_NAME,
+        dir: |data_dir| data_dir.join(RANK_PACK_DIR),
+        layout: PackLayout::TemplatesJson,
+        required: false,
+    },
+    PackSpec {
+        name: QUEUE_TITLE_PACK_NAME,
+        dir: |data_dir| data_dir.join(QUEUE_TITLE_PACK_DIR),
+        layout: PackLayout::TemplatesJson,
         required: false,
     },
 ];

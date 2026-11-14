@@ -15,6 +15,17 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## Unreleased
+
+The rank screen and queue title readers now get their template packs from the site, the same way as the other reader packs, so they no longer have to be copied into the data folder by hand.
+
+### Highlights
+
+- The tracker downloads `rank-v1.tar` and `queue-title-v1.tar` with the other reader packs once the site lists them. Both are optional: until the site has them, the tracker logs them as not listed and keeps any folder you placed by hand.
+- The rank screen's queue banner (`COMPETITIVE: OPEN QUEUE`, `COMPETITIVE: ROLE QUEUE`) now agrees with the next game's queue title (`OPEN QUEUE`, `ROLE QUEUE`), so the next mode hint can be confirmed for both queues.
+
+Technical detail. The two packs land in `templates/rank-v1/` and `templates/queue-title-v1/` under the data folder, each holding one `templates.json` and nothing else; a pack with any other file is refused and the old folder stays. Both readers stay off by default (`STAT_TRACKER_RANK_RECOGNIZER`, `STAT_TRACKER_QUEUE_TITLE_RECOGNIZER`) and load their pack once when the tracker starts, so a pack that arrives while it runs is used from the next start. The first sync replaces a folder that was placed by hand, extra files in it included, because no version was recorded for it. A first install of all ten packs is eleven requests, inside the site's burst of 16. The banner word is still stored and uploaded as read; only the hint handed to the queue title reader drops the leading `COMPETITIVE:`.
+
 ## 0.6.0-alpha.3
 
 This alpha adds real game lengths and queue chips on the Games tab, opt-in training crops and optional rank screen cut-outs in bug reports, and multi-Tab stat confirmation so single-Tab misreads stop flagging stats orange right away. Refused uploads now sit aside without blocking newer games behind them, classic multi-account matching sticks to a clearly highlighted row, and unsupported screen sizes prompt to share hero icons.

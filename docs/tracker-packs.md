@@ -22,6 +22,8 @@ folder on the machine that made them, and `PACKS_DIR` on the server.
 | `words-v1.tar` | result words | 90 KiB |
 | `names-v1.tar` | optional. Single-letter templates only, no member data. Version `full-20261019`. The name reader uses it for the player's own row and falls back to Tesseract until it has loaded | 1.9 MB |
 | `bans-picks-v1.tar` | optional. Hero icons for the bans and picks reader (cv-v1): one 100 by 96 `<hero>.png` for each of the 54 heroes, plus an optional `no-preference.png`. Game art, built from real frames, so it is private like the others | live |
+| `rank-v1.tar` | optional. One `templates.json`: the glyph and word templates of the rank screen reader (rank-v1), cut from real rank screens | 1.4 MB |
+| `queue-title-v1.tar` | optional. One `templates.json`: the title templates of the queue title reader, cut from real pre-game screens | 80 KiB |
 
 Which folder each one lands in, what may be inside, and which reader uses it
 are in [Reference: inside a pack](#reference-inside-a-pack).
@@ -64,13 +66,16 @@ Which names each tracker asks for:
 | 0.5.0-alpha.2 to 0.5.0-alpha.6 | `heroes-v1.tar` only |
 | 0.5.0-alpha.7 to 0.5.0-alpha.12 | six: `heroes-v1.tar` first, then `heroes-v2.tar`, `heroes-v2-1080.tar`, `bans-v1.tar`, `maps-v1.tar`, `words-v1.tar` |
 | 0.5.0-rc.1 to 0.5.0-rc.9, 0.5.0, and 0.6.0-alpha.1 to 0.6.0-alpha.1.4 | seven: the six, then `names-v1.tar` (optional) |
-| 0.6.0-alpha.2 to 0.6.0-alpha.2.3, and main | eight: the seven, then `bans-picks-v1.tar` (optional) |
+| 0.6.0-alpha.2 to 0.6.0-alpha.3, and main | eight: the seven, then `bans-picks-v1.tar` (optional) |
+| wip/0.6 after 0.6.0-alpha.3, from the next 0.6.0-alpha.3 patch release on | ten: the eight, then `rank-v1.tar` (optional) and `queue-title-v1.tar` (optional) |
 
 No tracker pins a pack `version`: each one takes the `version` the list
 gives. `heroes-v1.tar` is the only pack every release needs (it is the one
 marked `required` in `PACKS`): without it every released tracker reports
 "The reader pack did not match the site" for the hero pack. All eight names
-are asked for by a released tracker, so all eight must stay. A name may
+are asked for by a released tracker, so all eight must stay. `rank-v1.tar`
+and `queue-title-v1.tar` join them once a release that asks for them ships;
+until then they may be listed, and older trackers ignore them. A name may
 leave the list only when no tracker release that members still run asks for
 it. The publish script warns when the list has no `heroes-v1.tar`.
 
@@ -322,7 +327,7 @@ repeated. Without a token the script says `Authenticated check: SKIPPED`.
 
 The pack routes allow 16 requests in a burst per client IP, then one every
 10 seconds, and answer 429 with the seconds to wait. One check is seven
-requests for six packs (a tracker with `names-v1.tar` and `bans-picks-v1.tar` asks for eight, so nine requests). A second check within a minute is not a failure: the
+requests for six packs (a tracker with `names-v1.tar` and `bans-picks-v1.tar` asks for eight, so nine requests; one that also asks for `rank-v1.tar` and `queue-title-v1.tar` asks for ten, so eleven requests). A second check within a minute is not a failure: the
 script waits as long as each 429 asks (up to six times per request) and goes
 on, so it is slower, about ten seconds per pack.
 
@@ -419,7 +424,7 @@ depends on the tracker release.
 **Released trackers, 0.5.0-alpha.2 to alpha.6**, know one pack name:
 
 - They read the list and look for `heroes-v1.tar`. Every other entry is
-  ignored. The seven newer packs do nothing for these members until they
+  ignored. The newer packs do nothing for these members until they
   install a tracker that names them.
 - `heroes-v1.tar` is downloaded when its folder is missing, or when the
   listed `version` differs from the one recorded in
@@ -427,8 +432,8 @@ depends on the tracker release.
 - A list with entries but without `heroes-v1.tar` is reported as "The reader
   pack did not match the site". The hero folder they have is kept.
 
-**The tracker on main** knows all eight (see the table above for which
-names each release asks for):
+**The tracker on main** knows all eight, and the tracker on wip/0.6 all ten
+(see the table above for which names each release asks for):
 
 - **Daemon start** syncs `heroes-v1.tar` only (the list and one file) and
   then starts capture. The other packs are synced in the background
@@ -436,7 +441,7 @@ names each release asks for):
 - **While the daemon runs**, that background job keeps trying until every
   pack is in place or not on the list. See
   [The daemon's background job](#the-daemons-background-job).
-- **Setup guide** ("Download reader pack") syncs all eight, once per click.
+- **Setup guide** ("Download reader pack") syncs all of them, once per click.
 - **`--vacuum`** does the start sync (the list and `heroes-v1.tar`), then
   compacts and exits. It never starts the background job, so nothing is
   tried again, and a pack sync that failed in that run is not logged.
@@ -469,7 +474,8 @@ More detail on a sync, for the tracker on main:
   current is still reported as current. The setup guide tries again on the
   next click. The daemon's background job tries again by itself.
 - A first install of all eight is nine requests (the list and eight files),
-  inside the burst of 16 (`PACK_IP_BURST` in `crates/types`).
+  and of all ten eleven requests, inside the burst of 16 (`PACK_IP_BURST` in
+  `crates/types`).
 - An install that is not linked to a site account has no sync token and runs
   no pack sync at all, so `bans-picks-v1.tar` never arrives. The bans and
   picks reader then reads nothing, the game is still recorded, and the app
@@ -617,6 +623,8 @@ inside `PACKS_DIR`.
 | `maps-v1.tar` | `templates/maps-v1/` | `atlas.json`, `g<4 hex digits>.png` | new reader, map and mode from the Tab banner |
 | `words-v1.tar` | `templates/words-v1/` | `<word_id>.png`, `<name>.json` | new reader, match result from result frames, the result word on the accolade and rank screens, and the end title on poll ticks and Tab frames when the pack has end-title templates (hand-installed `templates/result/` is the fallback) |
 | `names-v1.tar` | `templates/names-v1/` | `glyphs.png`, `glyphs.txt`, `marks.png`, `marks.txt`, `compose.txt`, `whiten.f32`. The inner `manifest.json` is kept in the folder too | name reader. Optional. Single-letter templates only, no member data. Loaded at startup, and reloaded after each install by the daemon's pack sync. Until a load finishes, names fall back to Tesseract |
+| `rank-v1.tar` | `templates/rank-v1/` | `templates.json` only | rank screen reader (rank-v1). Optional, and off unless `STAT_TRACKER_RANK_RECOGNIZER` is on. Loaded once at daemon start: a pack that lands later is used from the next start. Banner classes are named as the screen writes them (`COMPETITIVE: OPEN QUEUE`, `COMPETITIVE: ROLE QUEUE`) |
+| `queue-title-v1.tar` | `templates/queue-title-v1/` | `templates.json` only | queue title reader. Optional, and off unless `STAT_TRACKER_QUEUE_TITLE_RECOGNIZER` is on. Loaded once at daemon start, like `rank-v1.tar`. Classes `OPEN QUEUE` and `ROLE QUEUE` |
 
 `<hero>` is a file stem from `HERO_NAMES` in `crates/types/src/heroes.rs`
 (`ana`, `wrecking-ball`). For the v2 hero packs and `bans-v1.tar` a stem is
