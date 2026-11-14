@@ -16,11 +16,13 @@
 //! for the open game while the screen lasts ([`RankFeed::observe`]). One
 //! analyzed tick that misses the screen does not end it: it is held as a
 //! break between reads. A tick whose rank-screen word crop the stability
-//! gate held back on a first sighting (the focus pause dropped the
-//! history, so the first tick after an alt-tab) is not a miss by itself: a
-//! crop that only moved still is. While a screen
-//! is held, rank-v1 reads that frame, and only a frame it does not read
-//! counts as a miss ([`read_rank_screen`]). Focus-paused ticks read nothing
+//! gate held back on a first sighting (the history was dropped: by a focus
+//! pause, so the first tick after an alt-tab, or by a tick whose analysis
+//! failed) is not a miss by itself: a crop that only moved still is. While
+//! a screen is held, rank-v1 reads that frame, and only a frame it does not
+//! read counts as a miss ([`read_rank_screen`]). Such a frame never starts
+//! a screen, not even when the tick ends a held screen because the open
+//! game changed ([`RankFeed::observe_tick`]). Focus-paused ticks read nothing
 //! and reach none of this. The screen is gone after [`RANK_SETTLE_MISSES`]
 //! analyzed ticks in a row miss it, when another game's screen starts or
 //! the open game changes or closes, or when the game process stops
@@ -229,6 +231,27 @@ impl RankFeed {
         done
     }
 
+    /// [`Self::observe`] for one tick of the poll loop, with the tick's
+    /// held-back flag ([`rank_held_back`]). A held-back frame is read only
+    /// because a screen was held before the tick, and the end detector never
+    /// classified it. So when that screen is for another game than `game`
+    /// (or `game` is `None`), the tick finishes it, and the frame starts no
+    /// screen for the new game: it counts as no read.
+    pub(crate) fn observe_tick(
+        &mut self,
+        seen: Option<Option<RankUpdate>>,
+        held_back: bool,
+        game: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Option<Settled> {
+        let other_game = self
+            .held
+            .as_ref()
+            .is_some_and(|h| game != Some(h.session.as_str()));
+        let seen = if held_back && other_game { None } else { seen };
+        self.observe(seen, game, now)
+    }
+
     /// Settle the held reads now, whatever the misses: the game process
     /// stopped.
     pub(crate) fn close(&mut self) -> Option<Settled> {
@@ -274,9 +297,11 @@ impl Drop for RankFeed {
 /// only when a rank screen is held (`holds_screen`, taken before this
 /// tick's outcome detector runs) and the stability gate held this tick's
 /// rank-screen word crop back on a first sighting (`first_seen`, asked
-/// after it). Either alone is false: with no screen held a held-back frame
-/// is not read, and a held screen with a crop the gate looked at reads
-/// only what the end detector classified.
+/// after it). Either alone is false: with no screen held before the tick a
+/// held-back frame is not read, and a held screen with a crop the gate
+/// looked at reads only what the end detector classified. A held-back frame
+/// read while the held screen is another game's starts nothing: the tick
+/// finishes that screen ([`RankFeed::observe_tick`]).
 pub(crate) fn rank_held_back(holds_screen: bool, first_seen: bool) -> bool {
     holds_screen && first_seen
 }
@@ -291,9 +316,10 @@ pub(crate) fn rank_held_back(holds_screen: bool, first_seen: bool) -> bool {
 /// ([`RankFeed::holds_screen`], the gate is [`rank_held_back`]). The
 /// detector then never looked at the word, so the frame is no miss by
 /// itself: rank-v1, whose own gate needs the RANK PROGRESS label, reads it.
-/// A read is `Some(read)`; a frame it does not read is `None`, a miss. The
-/// first tick after a focus pause is such a tick, as the pause drops the
-/// stability history.
+/// A read is `Some(read)`; a frame it does not read is `None`, a miss. Any
+/// tick after the stability history was dropped can be such a tick: the
+/// first one after a focus pause, or the one after a tick whose analysis
+/// failed (its join error leaves a fresh history).
 pub(crate) fn read_rank_screen(
     read: Option<&RankReadFn>,
     source: Option<OutcomeSource>,
@@ -317,7 +343,7 @@ pub(crate) fn read_rank_screen(
         }
     };
     if !classified {
-        tracing::info!(target: "scuffed_stat_tracker", read = read.is_some(), "rank update: read a frame whose rank word was held back on a first sighting (first tick after a focus pause)");
+        tracing::info!(target: "scuffed_stat_tracker", read = read.is_some(), "rank update: read a frame whose rank word was held back on a first sighting (the stability history was reset, as by a focus pause or a failed analysis)");
     }
     if classified {
         Some(read)
@@ -403,30 +429,33 @@ pub(crate) fn rank_game(game: Option<&crate::ActiveGame>) -> Option<&str> {
 }
 
 /// One analyzed poll tick of the wiring: hold the rank screen read or
-/// settle the held ones ([`RankFeed::observe`]), store a settled update on
-/// its game and hand its mode banner word to the queue title wiring, and
-/// try an update the store refused again. `true` when an update was stored
-/// on its game (the live snapshot is then out of date).
+/// settle the held ones ([`RankFeed::observe_tick`], with the tick's
+/// `held_back` flag), store a settled update on its game and hand its mode
+/// banner word to the queue title wiring, and try an update the store
+/// refused again. `true` when an update was stored on its game (the live
+/// snapshot is then out of date).
 pub(crate) async fn tick(
     feed: &mut RankFeed,
     seen: Option<Option<RankUpdate>>,
+    held_back: bool,
     game: Option<&str>,
     store: &impl RankStore,
     dump: Option<&mut PregameDump>,
 ) -> bool {
-    tick_at(feed, seen, game, store, dump, Utc::now()).await
+    tick_at(feed, seen, held_back, game, store, dump, Utc::now()).await
 }
 
 /// [`tick`] with the time of this tick's read.
 pub(crate) async fn tick_at(
     feed: &mut RankFeed,
     seen: Option<Option<RankUpdate>>,
+    held_back: bool,
     game: Option<&str>,
     store: &impl RankStore,
     dump: Option<&mut PregameDump>,
     now: DateTime<Utc>,
 ) -> bool {
-    let settled = feed.observe(seen, game, now);
+    let settled = feed.observe_tick(seen, held_back, game, now);
     apply(feed, settled, store, dump).await
 }
 

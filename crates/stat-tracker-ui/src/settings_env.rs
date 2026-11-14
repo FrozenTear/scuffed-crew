@@ -162,9 +162,9 @@ pub(crate) struct RankSwitch {
 }
 
 /// What a rank pack warning was worked out from: the readers on, whether
-/// the rank variable decides the rank reader, and each pack file's time
+/// each variable decides its reader, and each pack file's time
 /// and size.
-pub(crate) type RankPackKey = (bool, bool, bool, PackStamp, PackStamp);
+pub(crate) type RankPackKey = (bool, bool, bool, bool, PackStamp, PackStamp);
 
 /// A pack file's time and size, `None` when it is not there.
 pub(crate) type PackStamp = Option<(Option<std::time::SystemTime>, u64)>;
@@ -286,6 +286,7 @@ impl TrackerApp {
             switch.rank_on,
             switch.queue_on,
             switch.rank_env,
+            switch.queue_env,
             stamp(rank::TEMPLATE_DIR, rank::PACK_FILE),
             stamp(queue_title::TEMPLATE_DIR, queue_title::PACK_FILE),
         );
@@ -300,6 +301,7 @@ impl TrackerApp {
             switch.rank_on,
             switch.queue_on,
             switch.rank_env,
+            switch.queue_env,
         );
         *memo = Some((key, warning.clone()));
         warning
@@ -555,6 +557,24 @@ mod tests {
             "{split}"
         );
         assert!(!split.contains("Read my rank is on"), "{split}");
+        // the switch saved on with the queue title variable on: the switch
+        // alone would leave that reader on, so the line names the variable
+        app.outside_env = Some(OutsideEnv {
+            vars: vec![(QUEUE_TITLE_ENV, "on".to_string())],
+            ..OutsideEnv::default()
+        });
+        let queue_env = app.rank_pack_warning().expect("both readers are on");
+        assert!(
+            queue_env.starts_with("Read my rank is on, but "),
+            "{queue_env}"
+        );
+        assert!(
+            queue_env.ends_with(
+                "or turn off Read my rank after Comp games and set \
+                 STAT_TRACKER_QUEUE_TITLE_RECOGNIZER to off."
+            ),
+            "{queue_env}"
+        );
         // the rank variable on with the switch saved off: the switch is
         // locked, so the warning points at the variable, not the switch
         app.saved_config.rank_reader = false;
@@ -583,6 +603,11 @@ mod tests {
         let broken = app.rank_pack_warning().expect("still no usable pack");
         assert!(
             broken.contains("templates/queue-title-v1 did not load"),
+            "{broken}"
+        );
+        // the rank pack is still not installed: fix the one, wait for the other
+        assert!(
+            broken.contains("replace or remove the pack folder that did not load"),
             "{broken}"
         );
         // the env turning both readers off clears it

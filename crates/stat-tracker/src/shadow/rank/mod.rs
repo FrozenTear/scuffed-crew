@@ -227,58 +227,75 @@ const RANK_OFF: &str = "turn off Read my rank after Comp games";
 /// (with the rank switch Off, the queue title reader can still be on).
 /// It says "that pack" or "those packs" by how many fail, and that the
 /// tracker loads packs only at start, so a pack put in place while it runs
-/// reads after a restart.
+/// reads after a restart. A pack that is not installed comes with the next
+/// sync, so the line says to restart once it has downloaded. A pack that
+/// did not load is a file edited or placed by hand, which the sync does not
+/// download again while it is in place, so the line says to replace or
+/// remove the pack folder, then restart.
 ///
-/// `rank_env` is true when [`ENV`] decides the rank reader: the switch is
-/// then locked, so with the rank reader on the line says to set the
-/// variables to off, not to turn the switch off.
+/// `rank_env` is true when [`ENV`] decides the rank reader, and
+/// `queue_env` when the queue title variable decides that reader. A reader
+/// a variable keeps on cannot be turned off with the switch, so the line
+/// names that variable: with both readers on and only the queue title
+/// variable set, it says to turn off the switch and set that variable to
+/// off.
 pub fn pack_warning(
     data_dir: &Path,
     rank_on: bool,
     queue_on: bool,
     rank_env: bool,
+    queue_env: bool,
 ) -> Option<String> {
     use crate::shadow::queue_title;
-    let problem = |dir: &str, missing: bool, error: String| {
+    let mut problems = Vec::new();
+    let mut broken = 0;
+    let mut problem = |dir: &str, missing: bool, error: String| {
         if missing {
-            format!("the pack in {dir} is not installed")
+            problems.push(format!("the pack in {dir} is not installed"));
         } else {
-            format!("the pack in {dir} did not load ({error})")
+            broken += 1;
+            problems.push(format!("the pack in {dir} did not load ({error})"));
         }
     };
-    let mut problems = Vec::new();
     if rank_on && let Err(e) = Reader::load(data_dir) {
         let missing = matches!(e, TemplateError::Missing(_));
-        problems.push(problem(TEMPLATE_DIR, missing, e.to_string()));
+        problem(TEMPLATE_DIR, missing, e.to_string());
     }
     if queue_on && let Err(e) = queue_title::Reader::load(data_dir) {
         let missing = matches!(e, queue_title::TemplateError::Missing(_));
-        problems.push(problem(queue_title::TEMPLATE_DIR, missing, e.to_string()));
+        problem(queue_title::TEMPLATE_DIR, missing, e.to_string());
     }
     if problems.is_empty() {
         return None;
     }
+    let queue_off = format!("set {} to off", queue_title::ENV);
     let (lead, off) = match (rank_on, queue_on) {
         (true, true) if rank_env => (
             "Read my rank is on",
             format!("set {ENV} and {} to off", queue_title::ENV),
         ),
+        (true, true) if queue_env => ("Read my rank is on", format!("{RANK_OFF} and {queue_off}")),
         (true, true) => ("Read my rank is on", RANK_OFF.to_string()),
         (true, false) if rank_env => ("The rank screen reader is on", format!("set {ENV} to off")),
         (true, false) => ("The rank screen reader is on", RANK_OFF.to_string()),
-        _ => (
-            "The queue title reader is on",
-            format!("set {} to off", queue_title::ENV),
-        ),
+        _ => ("The queue title reader is on", queue_off),
     };
     let (what, them) = if problems.len() == 1 {
         ("that pack reads", "the pack")
     } else {
         ("those packs read", "the packs")
     };
+    let fix = match (broken, problems.len()) {
+        (0, _) => format!("restart it once it has downloaded {them} from the site"),
+        (1, 1) => "replace or remove the pack folder, then restart the tracker".to_string(),
+        (1, _) => "replace or remove the pack folder that did not load, then restart the \
+                   tracker once it has downloaded the other pack from the site"
+            .to_string(),
+        _ => "replace or remove the pack folders, then restart the tracker".to_string(),
+    };
     Some(format!(
         "{lead}, but {}. Games still record, without what {what}. The tracker loads packs \
-         only at start: restart it once it has downloaded {them} from the site, or {off}.",
+         only at start: {fix}, or {off}.",
         problems.join(" and ")
     ))
 }

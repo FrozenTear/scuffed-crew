@@ -623,8 +623,9 @@ pub(crate) async fn run_loop(
                                 &words,
                             );
                             // The gate held the rank word back on a first
-                            // sighting (the first tick after a focus pause)
-                            // while a rank screen is held: rank-v1 reads it.
+                            // sighting (the history was reset, as by a focus
+                            // pause or a failed analysis) while a rank screen
+                            // is held: rank-v1 reads it.
                             let rank_held_back = daemon::rank::rank_held_back(
                                 rank_holds,
                                 stability.first_seen(detect::RANK_SCREEN_CONTEXT),
@@ -729,7 +730,7 @@ pub(crate) async fn run_loop(
                                 postgame_want,
                                 signal.is_some() || end_reel,
                             );
-                            (signal, phase, accolade_map, end_reel, end_title_seen, stability, result_read, rank_pngs, rank_seen, pregame, postgame)
+                            (signal, phase, accolade_map, end_reel, end_title_seen, stability, result_read, rank_pngs, rank_seen, rank_held_back, pregame, postgame)
                         }),
                             stat_tracker::replace::shutdown_notified(),
                             stat_tracker::tab_retry::next_press(&mut kbd, &mut tabs),
@@ -751,7 +752,7 @@ pub(crate) async fn run_loop(
                         // nothing about the rank screen: the rank wiring
                         // skips it, so it is neither a read nor a miss.
                         let analysis_ok = matches!(&analyzed, Ok(Ok(_)));
-                        let (signal, phase, accolade_map, end_reel, end_title_seen, stability, result_read, rank_pngs, rank_seen, pregame, postgame) = match analyzed {
+                        let (signal, phase, accolade_map, end_reel, end_title_seen, stability, result_read, rank_pngs, rank_seen, rank_held_back, pregame, postgame) = match analyzed {
                             Err(()) => {
                                 shutdown_from_signal(
                                     &mut st,
@@ -767,7 +768,7 @@ pub(crate) async fn run_loop(
                                 return Ok(());
                             }
                             Ok(joined) => joined.unwrap_or_else(|_| {
-                                (None, detect::GamePhase::Unknown, None, false, false, detect::stability::FrameStability::default(), None, None, None, None, None)
+                                (None, detect::GamePhase::Unknown, None, false, false, detect::stability::FrameStability::default(), None, None, None, false, None, None)
                             }),
                         };
                         if stat_tracker::replace::shutdown_requested() {
@@ -810,6 +811,7 @@ pub(crate) async fn run_loop(
                             && daemon::rank::tick(
                                 feed,
                                 rank_seen,
+                                rank_held_back,
                                 daemon::rank::rank_game(st.active_game.as_ref()),
                                 store,
                                 pregame_dump.as_mut(),
