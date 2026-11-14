@@ -141,13 +141,15 @@ pub fn rotate_daemon_log(data_dir: &Path, max_bytes: u64) -> std::io::Result<boo
 /// and grown more than [`AUTO_VACUUM_REGROW_BYTES`] past that size. So a
 /// vacuum that left the store near or over the threshold is not repeated at
 /// the next start, only once dead versions have built up again. A recorded
-/// size larger than `size` is not trusted (a store only grows after a
-/// vacuum; such a value is hand-edited or belongs to another store) and
-/// counts as `None`, so the threshold alone decides.
+/// size more than twice `size` is not trusted (a hand-edited value, or one
+/// left by another store) and counts as `None`, so the threshold alone
+/// decides. The headroom matters: a real store can sit a few KB under the
+/// size its last vacuum recorded, and treating that as untrusted would
+/// vacuum it again at every start.
 pub fn auto_vacuum_due(size: u64, last_after: Option<u64>) -> bool {
     size > AUTO_VACUUM_THRESHOLD_BYTES
         && last_after
-            .filter(|&after| after <= size)
+            .filter(|&after| after <= size.saturating_mul(2))
             .is_none_or(|after| size > after.saturating_add(AUTO_VACUUM_REGROW_BYTES))
 }
 
@@ -481,10 +483,23 @@ mod tests {
         // A hand-edited u64::MAX would otherwise turn auto-vacuum off for
         // good: the threshold rule applies, as with nothing recorded.
         assert!(auto_vacuum_due(mb(34.1), Some(u64::MAX)));
-        assert!(auto_vacuum_due(mb(34.1), Some(mb(34.1) + 1)));
+        assert!(auto_vacuum_due(mb(34.1), Some(mb(34.1) * 2 + 1)));
         assert!(!auto_vacuum_due(mb(30.0), Some(u64::MAX)));
         // Equal to the live size is a store that did not grow: trusted.
         assert!(!auto_vacuum_due(mb(34.1), Some(mb(34.1))));
+    }
+
+    #[test]
+    fn a_store_a_few_kb_under_its_recorded_size_is_not_vacuumed_again() {
+        // A real store can sit a few KB under the size its last vacuum
+        // recorded. That size is still trusted, so no vacuum runs.
+        let after = AUTO_VACUUM_THRESHOLD_BYTES + 2_000_000;
+        assert!(!auto_vacuum_due(after - 4_096, Some(after)));
+        assert!(!auto_vacuum_due(after - 1, Some(after)));
+        // Twice the live size is the edge of the trusted range.
+        let size = AUTO_VACUUM_THRESHOLD_BYTES + 1;
+        assert!(!auto_vacuum_due(size, Some(size * 2)));
+        assert!(auto_vacuum_due(size, Some(size * 2 + 1)));
     }
 
     #[test]
