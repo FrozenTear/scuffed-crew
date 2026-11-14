@@ -92,6 +92,26 @@ and is not in the packgen output. Publishing leaves it alone.
 An `<outdir>` does not have to hold every pack. To change one pack, a folder
 with that one tar and a `manifest.json` that lists it is enough.
 
+### Rank and queue title
+
+`scuffed-pack-cutter` cuts `rank-v1` and `queue-title-v1`. It is a second
+binary of `scuffed-stat-tracker`:
+
+```text
+scuffed-pack-cutter cut --kind rank|queue-title --labels FILE --frames DIR [--role-labels FILE] --out DIR [--version VER]
+scuffed-pack-cutter pack --dir DIR --name NAME.tar --version VER --out DIR
+scuffed-pack-cutter eval --kind rank|queue-title --labels FILE --frames DIR --baseline DIR --candidate DIR --set-name NAME [--role-labels FILE]
+```
+
+`cut` learns with the same rank and queue-title `Learner` the readers use
+at match time, and writes `templates.json`. `pack` writes
+`<out>/packs/<name>` as a plain ustar and updates `<out>/packs/manifest.json`.
+`eval` scores a held-out learn against the published pack folder and exits
+non-zero if a field or class regresses. Inputs and output stay on the build
+machine. `cut` and `pack` refuse an `--out` inside a git work tree. Eval
+must pass against the published pack before a publish. This tool does not
+publish. Publishing still needs Robert's go, then `scripts/publish-packs.sh`.
+
 ## Publish
 
 The examples are bash. Run them from a checkout of this repo, in `bash`.
