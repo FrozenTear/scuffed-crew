@@ -320,30 +320,45 @@ fn the_bans_picks_switch_maps_to_its_config_key_both_ways() {
     assert_eq!(read, defaults, "only the switch changed");
 }
 
-/// Read bans and picks moved from Troubleshooting to the end of Capture and
-/// reading. Only Capture and reading lists its key now, and Troubleshooting
-/// keeps the debug switches and the extra number reader.
+/// Every reader switch sits under READERS in Capture and reading: Read
+/// bans and picks (from Troubleshooting in alpha.2.3, then CAPTURE), Read
+/// my rank after Comp games (from Website account) and the extra number
+/// reader (from Troubleshooting). Only Capture and reading lists their
+/// keys, after every capture key, and Troubleshooting keeps the two debug
+/// switches.
 #[test]
-fn the_bans_picks_key_moved_to_capture_and_reading() {
+fn the_reader_keys_sit_together_in_capture_and_reading() {
     use crate::settings_model::AdvancedSection;
 
-    let holders: Vec<AdvancedSection> = AdvancedSection::ALL
-        .into_iter()
-        .filter(|s| s.keys().contains(&"bans_picks_reader"))
-        .collect();
-    assert_eq!(holders, [AdvancedSection::CaptureReading]);
+    let readers = [
+        "reader",
+        "ocr",
+        "name_reader",
+        "bans_picks_reader",
+        "rank_reader",
+        "shadow_recognizer",
+    ];
+    let keys = AdvancedSection::CaptureReading.keys();
+    for key in readers {
+        let holders: Vec<AdvancedSection> = AdvancedSection::ALL
+            .into_iter()
+            .filter(|s| s.keys().contains(&key))
+            .collect();
+        assert_eq!(holders, [AdvancedSection::CaptureReading], "{key}");
+    }
+    let first_reader = keys.iter().position(|k| readers.contains(k)).unwrap();
     assert_eq!(
-        AdvancedSection::CaptureReading.keys().last(),
-        Some(&"bans_picks_reader"),
+        keys[first_reader..first_reader + readers.len()],
+        readers,
+        "the reader keys are one block"
+    );
+    assert!(
+        keys[..first_reader].contains(&"capture_only_on_screen"),
         "after the capture keys, the focus gate included"
     );
     assert_eq!(
         AdvancedSection::Troubleshooting.keys(),
-        [
-            "debug_ocr",
-            "debug_save_pregame_screens",
-            "shadow_recognizer"
-        ]
+        ["debug_ocr", "debug_save_pregame_screens"]
     );
     assert_eq!(
         crate::settings_cards::BANS_PICKS_LABEL,

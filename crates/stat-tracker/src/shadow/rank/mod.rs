@@ -127,7 +127,8 @@ use serde::{Deserialize, Serialize};
 
 use ink::Glyph;
 pub use templates::{
-    CHEV_LEFT, CHEV_RIGHT, Family, Learner, SR_ICON, TEMPLATE_DIR, TemplateError, TemplateSet,
+    CHEV_LEFT, CHEV_RIGHT, Family, Learner, PACK_FILE, SR_ICON, TEMPLATE_DIR, TemplateError,
+    TemplateSet,
 };
 
 /// The recognizer id written next to the values: the one id the upload
@@ -187,9 +188,61 @@ impl RankSetting {
         std::env::var(ENV).map_or(Self::default(), |v| Self::parse(&v))
     }
 
+    /// [`ENV`] as an override: `None` when it is unset or blank, else
+    /// [`Self::parse`] of it (on or off).
+    pub fn env_override() -> Option<Self> {
+        override_of(std::env::var(ENV).ok().as_deref()).map(Self::parse)
+    }
+
+    /// The setting the tracker runs: `env` ([`Self::env_override`]) when
+    /// set, else config `rank_reader`.
+    pub fn for_config(rank_reader: bool, env: Option<Self>) -> Self {
+        env.unwrap_or(if rank_reader { Self::RankV1 } else { Self::Off })
+    }
+
     pub fn is_on(self) -> bool {
         self == Self::RankV1
     }
+}
+
+/// An env value that overrides the config: `None` when unset or blank.
+/// Shared with the queue title reader's switch and the app's lock line.
+pub fn override_of(value: Option<&str>) -> Option<&str> {
+    value.filter(|v| !v.trim().is_empty())
+}
+
+/// The warning for the rank readers that are on but have no usable pack:
+/// rank-v1 (`rank_on`, `<data_dir>/templates/rank-v1/`) and the queue
+/// title reader (`queue_on`, `<data_dir>/templates/queue-title-v1/`).
+/// Loads each pack the way the tracker does at start. `None` when every
+/// reader that is on loads. Games still record either way: a reader with
+/// no pack reads nothing.
+pub fn pack_warning(data_dir: &Path, rank_on: bool, queue_on: bool) -> Option<String> {
+    use crate::shadow::queue_title;
+    let problem = |dir: &str, missing: bool, error: String| {
+        if missing {
+            format!("the pack in {dir} is not installed")
+        } else {
+            format!("the pack in {dir} did not load ({error})")
+        }
+    };
+    let mut problems = Vec::new();
+    if rank_on && let Err(e) = Reader::load(data_dir) {
+        let missing = matches!(e, TemplateError::Missing(_));
+        problems.push(problem(TEMPLATE_DIR, missing, e.to_string()));
+    }
+    if queue_on && let Err(e) = queue_title::Reader::load(data_dir) {
+        let missing = matches!(e, queue_title::TemplateError::Missing(_));
+        problems.push(problem(queue_title::TEMPLATE_DIR, missing, e.to_string()));
+    }
+    if problems.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "Read my rank is on, but {}. Games still record, without what that pack reads. \
+         Install the pack or turn off Read my rank after Comp games.",
+        problems.join(" and ")
+    ))
 }
 
 /// The queue role a rank update is for.
