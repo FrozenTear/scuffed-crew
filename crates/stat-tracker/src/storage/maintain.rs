@@ -24,6 +24,17 @@ pub const PRE_VACUUM_BACKUP_PREFIX: &str = "stats.surrealkv.pre-vacuum-";
 /// above a compact store and well below the painful zone.
 pub const AUTO_VACUUM_THRESHOLD_BYTES: u64 = 32 * 1024 * 1024;
 
+/// File under `data_dir` holding the live store's size in bytes right after
+/// the last vacuum (auto or `--vacuum`).
+pub const LAST_VACUUM_SIZE_FILE: &str = "vacuum.last-size";
+
+/// The next auto-vacuum also waits until the store has grown this much past
+/// the size the last vacuum left. A store whose live rows sit near
+/// [`AUTO_VACUUM_THRESHOLD_BYTES`] otherwise crossed it again after a few
+/// writes and was vacuumed at every start (34.1 MB down to 33.2 MB, about
+/// 2.5 minutes, each restart).
+pub const AUTO_VACUUM_REGROW_BYTES: u64 = 8 * 1024 * 1024;
+
 /// Rotate `daemon.log` when it exceeds this size (GUI-spawned daemons append
 /// here; systemd units use the journal instead).
 pub const DAEMON_LOG_MAX_BYTES: u64 = 32 * 1024 * 1024;
@@ -125,6 +136,53 @@ pub fn rotate_daemon_log(data_dir: &Path, max_bytes: u64) -> std::io::Result<boo
     Ok(true)
 }
 
+/// Whether a live store of `size` bytes is auto-vacuumed at start, given the
+/// size the last vacuum left (`None` when not recorded): over the threshold,
+/// and grown more than [`AUTO_VACUUM_REGROW_BYTES`] past that size. So a
+/// vacuum that left the store near or over the threshold is not repeated at
+/// the next start, only once dead versions have built up again. A recorded
+/// size larger than `size` is not trusted (a store only grows after a
+/// vacuum; such a value is hand-edited or belongs to another store) and
+/// counts as `None`, so the threshold alone decides.
+pub fn auto_vacuum_due(size: u64, last_after: Option<u64>) -> bool {
+    size > AUTO_VACUUM_THRESHOLD_BYTES
+        && last_after
+            .filter(|&after| after <= size)
+            .is_none_or(|after| size > after.saturating_add(AUTO_VACUUM_REGROW_BYTES))
+}
+
+/// The size the last vacuum left, from [`LAST_VACUUM_SIZE_FILE`]; `None`
+/// when the file is missing or does not hold a number.
+pub fn last_vacuum_size(data_dir: &Path) -> Option<u64> {
+    std::fs::read_to_string(data_dir.join(LAST_VACUUM_SIZE_FILE))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Record the size a vacuum left. A failed write is a warn line: the next
+/// start reads whatever file is there, an older size from an earlier vacuum
+/// or none (then the threshold alone decides).
+fn record_vacuum_size(data_dir: &Path, after: u64) {
+    if let Err(e) = std::fs::write(data_dir.join(LAST_VACUUM_SIZE_FILE), after.to_string()) {
+        tracing::warn!(error = %e, "could not record the store size after vacuum");
+    }
+}
+
+/// Drop the recorded post-vacuum size. Called by every clear path: the size
+/// belongs to the cleared store, and left behind it held the next
+/// auto-vacuum back until the new store grew past it plus
+/// [`AUTO_VACUUM_REGROW_BYTES`]. A missing file is fine; a failed remove is
+/// a warn line.
+pub fn forget_last_vacuum_size(data_dir: &Path) {
+    match std::fs::remove_file(data_dir.join(LAST_VACUUM_SIZE_FILE)) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!(error = %e, "could not remove the recorded vacuum size"),
+    }
+}
+
 /// Run non-blocking-ish maintenance under the pid guard, before the daemon
 /// opens the store: log rotation, backup prune, optional auto-vacuum.
 pub async fn startup_maintenance(
@@ -158,6 +216,23 @@ pub async fn startup_maintenance(
             size_mb = size as f64 / 1e6,
             threshold_mb = AUTO_VACUUM_THRESHOLD_BYTES as f64 / 1e6,
             "store under auto-vacuum threshold"
+        );
+        return Ok(());
+    }
+    let last_after = last_vacuum_size(data_dir);
+    if !auto_vacuum_due(size, last_after) {
+        let last_mb = last_after.unwrap_or_default() as f64 / 1e6;
+        tracing::info!(
+            size_mb = format!("{:.1}", size as f64 / 1e6),
+            last_vacuum_mb = format!("{last_mb:.1}"),
+            next_over_mb = format!(
+                "{:.1}",
+                last_after
+                    .unwrap_or_default()
+                    .saturating_add(AUTO_VACUUM_REGROW_BYTES) as f64
+                    / 1e6
+            ),
+            "auto-vacuum skipped: the store is over the threshold but has not grown much since the last vacuum"
         );
         return Ok(());
     }
@@ -274,6 +349,8 @@ impl LocalStore {
         std::fs::rename(&live_path, &backup)?;
         std::fs::rename(fresh_dir.join("stats.surrealkv"), &live_path)?;
         let _ = std::fs::remove_dir_all(&fresh_dir);
+        // What the next start's auto-vacuum compares against.
+        record_vacuum_size(data_dir, store_size_bytes(data_dir));
         // Keep only the newest pre-vacuum backup (this one) so data_dir does
         // not accumulate multi-hundred-MB copies across repeated vacua.
         if let Ok(n) = prune_pre_vacuum_backups(data_dir, PRE_VACUUM_BACKUPS_KEEP)
@@ -375,6 +452,72 @@ mod tests {
         std::fs::write(root.join("daemon.log"), b"hi").unwrap();
         assert!(!rotate_daemon_log(root, 100).unwrap());
         assert!(root.join("daemon.log").exists());
+    }
+
+    #[test]
+    fn auto_vacuum_does_not_repeat_until_the_store_really_grows() {
+        let mb = |x: f64| (x * 1e6) as u64;
+        // Under the threshold: never.
+        assert!(!auto_vacuum_due(mb(30.0), None));
+        // Over it with nothing recorded, or well past a compact vacuum.
+        assert!(auto_vacuum_due(mb(34.1), None));
+        assert!(auto_vacuum_due(mb(34.1), Some(mb(8.0))));
+        // The field case: 34.1 MB vacuumed to 33.2 MB, then a few writes put
+        // it back over the threshold. The next start is not another 2.5
+        // minute vacuum.
+        assert!(mb(34.1) > AUTO_VACUUM_THRESHOLD_BYTES);
+        assert!(!auto_vacuum_due(mb(34.1), Some(mb(33.2))));
+        // Nor is a vacuum that left the store over the threshold repeated.
+        assert!(!auto_vacuum_due(mb(36.0), Some(mb(35.0))));
+        let regrown = mb(33.2) + AUTO_VACUUM_REGROW_BYTES;
+        assert!(!auto_vacuum_due(regrown, Some(mb(33.2))));
+        // Real growth past the size it left: vacuumed again.
+        assert!(auto_vacuum_due(regrown + 1, Some(mb(33.2))));
+    }
+
+    #[test]
+    fn a_recorded_size_over_the_live_size_is_not_trusted() {
+        let mb = |x: f64| (x * 1e6) as u64;
+        // A hand-edited u64::MAX would otherwise turn auto-vacuum off for
+        // good: the threshold rule applies, as with nothing recorded.
+        assert!(auto_vacuum_due(mb(34.1), Some(u64::MAX)));
+        assert!(auto_vacuum_due(mb(34.1), Some(mb(34.1) + 1)));
+        assert!(!auto_vacuum_due(mb(30.0), Some(u64::MAX)));
+        // Equal to the live size is a store that did not grow: trusted.
+        assert!(!auto_vacuum_due(mb(34.1), Some(mb(34.1))));
+    }
+
+    #[test]
+    fn the_last_vacuum_size_reads_back_and_junk_is_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        assert_eq!(last_vacuum_size(root), None);
+        record_vacuum_size(root, 33_200_000);
+        assert_eq!(last_vacuum_size(root), Some(33_200_000));
+        std::fs::write(root.join(LAST_VACUUM_SIZE_FILE), "not a size").unwrap();
+        assert_eq!(last_vacuum_size(root), None);
+        std::fs::write(root.join(LAST_VACUUM_SIZE_FILE), " 42\n").unwrap();
+        assert_eq!(last_vacuum_size(root), Some(42));
+    }
+
+    #[tokio::test]
+    async fn startup_skips_the_vacuum_a_store_over_the_threshold_already_had() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        // A live store of 34.1 MB (a sparse file: only its length counts).
+        // It is no real store, so a vacuum would fail to open it.
+        let live = store_live_path(root);
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::File::create(live.join("data"))
+            .unwrap()
+            .set_len(34_100_000)
+            .unwrap();
+        record_vacuum_size(root, 33_200_000);
+        startup_maintenance(root)
+            .await
+            .expect("no vacuum runs, so nothing fails");
+        assert_eq!(store_size_bytes(root), 34_100_000);
+        assert!(list_pre_vacuum_backups(root).is_empty(), "no vacuum ran");
     }
 
     #[test]

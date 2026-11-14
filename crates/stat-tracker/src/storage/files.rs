@@ -124,6 +124,7 @@ pub fn force_clear_data_dir(data_dir: &Path) -> Result<(), Box<dyn std::error::E
     }
     clear_match_log(data_dir);
     super::remove_pre_timeline_backups(data_dir);
+    super::maintain::forget_last_vacuum_size(data_dir);
     tracing::info!("force-cleared data directory");
     Ok(())
 }

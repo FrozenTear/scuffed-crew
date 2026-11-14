@@ -33,7 +33,7 @@ use stat_tracker::shadow::bans_picks::{
     Layout, RECOGNIZER_ID, Read, Reader, SlotState, TEMPLATE_DIR, VoteSlotRead, self_ring_colour,
 };
 
-use super::pregame_dump::{BAN_RESULTS_NAME, PregameOp, PregamePhase};
+use super::pregame_dump::{BAN_RESULTS_NAME, PregameOp, PregamePhase, RejectLabel};
 
 /// How long after the last read screen a game may start and still be the
 /// one that was read. Longer, and the game is another one whose own screens
@@ -137,11 +137,50 @@ struct Frames {
     results: Option<Arc<DynamicImage>>,
     /// Ban results the saver staged and has not promoted yet.
     staged: Option<Arc<DynamicImage>>,
+    /// Earlier stable ban-results frames, oldest first, at most
+    /// [`BAN_FALLBACK_FRAMES`]: each was staged (a later results frame
+    /// confirmed it), then replaced by a newer stage or deleted when the
+    /// saver kept another frame. Read only when `results` has fewer than
+    /// [`BANS_KEPT_MIN`] bans set ([`read_ban_results`]).
+    earlier: Vec<Arc<DynamicImage>>,
+    /// Ban-results candidates the saver turned down
+    /// (`rejected_ban_results.png`), oldest first, at most
+    /// [`BAN_FALLBACK_FRAMES`]. The fallback when no stable frame has
+    /// [`BANS_KEPT_MIN`] bans set.
+    rejected: Vec<Arc<DynamicImage>>,
+}
+
+/// A stable ban-results frame with at least this many of its four bans set
+/// is stored as read. With fewer, the other candidates are read too.
+pub(crate) const BANS_KEPT_MIN: usize = 3;
+
+/// The most earlier stable frames, and the most turned-down frames, held
+/// for the fallback (the newest), so at most this many of each (2 + 2),
+/// about 11 to 15 MB a frame at 1440p. They are released at the read, or
+/// when the next game folder opens (its first save or stage), or at exit:
+/// a game that is not read (no fit, or never recorded) keeps them until one
+/// of the other two.
+pub(crate) const BAN_FALLBACK_FRAMES: usize = 2;
+
+/// Keep `frame` as the newest of `held`, dropping the oldest past
+/// [`BAN_FALLBACK_FRAMES`].
+fn hold_newest(held: &mut Vec<Arc<DynamicImage>>, frame: Arc<DynamicImage>) {
+    held.push(frame);
+    if held.len() > BAN_FALLBACK_FRAMES {
+        held.remove(0);
+    }
 }
 
 impl Frames {
+    /// A frame the reader would read: the ban results fallback lists count
+    /// too, so a game with only earlier or turned-down ban results frames is
+    /// read rather than recorded without frames.
     fn any(&self) -> bool {
-        self.vote.is_some() || self.select.is_some() || self.results.is_some()
+        self.vote.is_some()
+            || self.select.is_some()
+            || self.results.is_some()
+            || !self.earlier.is_empty()
+            || !self.rejected.is_empty()
     }
 
     /// The hero select's first frame, when it is to be read for the team
@@ -231,10 +270,12 @@ impl BansPicksFeed {
                 PregameOp::Save(shot) | PregameOp::Stage(shot) => {
                     self.enter(&shot.folder);
                     let staged = matches!(op, PregameOp::Stage(_));
+                    let rejected = shot.name == RejectLabel::BanResults.file_name();
                     let read = shot.name == PregamePhase::HeroBan.last_name()
                         || shot.name == PregamePhase::HeroSelect.last_name()
                         || shot.name == PregamePhase::HeroSelect.first_name()
-                        || shot.name == BAN_RESULTS_NAME;
+                        || shot.name == BAN_RESULTS_NAME
+                        || rejected;
                     if self.done {
                         // One line per frame the reader would have taken; a
                         // staged frame is replaced every poll, so not those.
@@ -254,8 +295,15 @@ impl BansPicksFeed {
                         self.frames.select_first = Some(frame);
                         "select_first"
                     } else if shot.name == BAN_RESULTS_NAME && staged {
-                        self.frames.staged = Some(frame);
+                        // The stage it replaces was confirmed too: kept
+                        // as an earlier stable frame.
+                        if let Some(older) = self.frames.staged.replace(frame) {
+                            hold_newest(&mut self.frames.earlier, older);
+                        }
                         "staged"
+                    } else if rejected {
+                        hold_newest(&mut self.frames.rejected, frame);
+                        "rejected"
                     } else if shot.name == BAN_RESULTS_NAME {
                         self.frames.results = Some(frame);
                         "results"
@@ -277,8 +325,13 @@ impl BansPicksFeed {
                     }
                 }
                 PregameOp::Discard { folder, name } => {
-                    if self.folder.as_deref() == Some(folder) && *name == BAN_RESULTS_NAME {
-                        self.frames.staged = None;
+                    // Not the frame saved, but a confirmed results frame
+                    // still: kept as an earlier stable frame.
+                    if self.folder.as_deref() == Some(folder)
+                        && *name == BAN_RESULTS_NAME
+                        && let Some(frame) = self.frames.staged.take()
+                    {
+                        hold_newest(&mut self.frames.earlier, frame);
                     }
                 }
                 PregameOp::Adopt { .. } => {}
@@ -478,7 +531,7 @@ fn read_frames(
     match read {
         Ok(Some(stored)) => {
             let json = serde_json::to_string(&stored).ok();
-            let missing = missing_screens(&frames);
+            let missing = missing_screens(&frames, stored.layout.is_some());
             let status = if json.is_none() {
                 BansPicksStatus::ReaderFailed
             } else if missing.is_empty() {
@@ -517,7 +570,10 @@ fn read_frames(
 
 /// The screens this game has no frame for. A hero select with only a first
 /// frame counts as missing: that frame gives the team ring and no picks.
-fn missing_screens(frames: &Frames) -> Vec<BansPicksMissing> {
+/// The ban results count as there when a frame of them was stored
+/// (`results_read`, [`read_ban_results`]), so a saved frame that was
+/// unrevealed with no other frame to take is missing.
+fn missing_screens(frames: &Frames, results_read: bool) -> Vec<BansPicksMissing> {
     let mut missing = Vec::new();
     if frames.vote.is_none() {
         missing.push(BansPicksMissing::BanVote);
@@ -525,7 +581,7 @@ fn missing_screens(frames: &Frames) -> Vec<BansPicksMissing> {
     if frames.select.is_none() {
         missing.push(BansPicksMissing::HeroSelect);
     }
-    if frames.results.is_none() {
+    if !results_read {
         missing.push(BansPicksMissing::BanResults);
     }
     missing
@@ -569,10 +625,7 @@ fn read_with(engine: &dyn Engine, frames: &Frames) -> Option<Stored> {
         .filter(|f| f.dimensions() == (FRAME_W, FRAME_H))
         .map(|f| self_ring_colour(&f));
     let rings: Vec<[u8; 3]> = select_ring.into_iter().chain(vote_ring).collect();
-    let results = match &frames.results {
-        Some(f) => Some(engine.bans(&rgb(f), &rings)?),
-        None => None,
-    };
+    let results = read_ban_results(engine, frames, &rings)?;
     let vote = match &frames.vote {
         Some(f) => Some(engine.vote(&rgb(f))?),
         None => None,
@@ -595,6 +648,101 @@ fn read_with(engine: &dyn Engine, frames: &Frames) -> Option<Stored> {
         ban_score,
         bans_picks_recognizer: RECOGNIZER_ID,
     })
+}
+
+/// Where the stored ban results were read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BanSource {
+    /// `ban_results.png`, the frame the saver kept.
+    Saved,
+    /// An earlier stable frame (`Frames::earlier`).
+    Earlier,
+    /// A turned-down frame, `rejected_ban_results.png` (`Frames::rejected`).
+    Rejected,
+}
+
+/// The ban results to store, by Scuffed Vision's rule. The saved frame is
+/// read first and kept when it has [`BANS_KEPT_MIN`] or more bans set.
+/// Otherwise the earlier stable frames and the turned-down frames are read
+/// too, newest first, and [`choose_ban_results`] picks one. `Some(None)`
+/// when no frame shows a revealed ban: an unrevealed frame is never stored,
+/// so the game gets no bans rather than four empty ones. `None` when the
+/// saved frame could not be read (the read fails, as before); an earlier or
+/// turned-down frame that cannot be read is skipped.
+fn read_ban_results(
+    engine: &dyn Engine,
+    frames: &Frames,
+    rings: &[[u8; 3]],
+) -> Option<Option<BanResults>> {
+    let rgb = |f: &Arc<DynamicImage>| f.to_rgb8();
+    let saved = match &frames.results {
+        Some(f) => Some(engine.bans(&rgb(f), rings)?),
+        None => None,
+    };
+    if saved
+        .as_ref()
+        .is_some_and(|r| r.bans_set() >= BANS_KEPT_MIN)
+    {
+        return Some(saved);
+    }
+    let saved_set = saved.as_ref().map(BanResults::bans_set);
+    let mut candidates: Vec<(BanSource, BanResults)> =
+        saved.map(|r| (BanSource::Saved, r)).into_iter().collect();
+    let others = frames
+        .earlier
+        .iter()
+        .rev()
+        .map(|f| (BanSource::Earlier, f))
+        .chain(
+            frames
+                .rejected
+                .iter()
+                .rev()
+                .map(|f| (BanSource::Rejected, f)),
+        );
+    for (source, f) in others {
+        if let Some(r) = engine.bans(&rgb(f), rings) {
+            candidates.push((source, r));
+        }
+    }
+    let read = candidates.len();
+    let chosen = choose_ban_results(candidates);
+    if saved_set.is_some() || chosen.is_some() {
+        tracing::info!(
+            target: "scuffed_stat_tracker",
+            saved_bans_set = ?saved_set,
+            frames_read = read,
+            chosen = ?chosen.as_ref().map(|(s, _)| *s),
+            bans_set = chosen.as_ref().map_or(0, |(_, r)| r.bans_set()),
+            "bans and picks: ban results frame chosen by bans set (the saved one had too few, or none was saved)"
+        );
+    }
+    Some(chosen.map(|(_, r)| r))
+}
+
+/// Pick the ban results from `candidates`, in order: the saved frame, the
+/// earlier stable frames newest first, then the turned-down frames newest
+/// first. The first stable frame with [`BANS_KEPT_MIN`] or more bans set;
+/// else the frame with the most bans set, the first of them on a tie; else
+/// `None`: every frame is unrevealed ([`BanResults::unrevealed`]).
+pub(crate) fn choose_ban_results(
+    candidates: Vec<(BanSource, BanResults)>,
+) -> Option<(BanSource, BanResults)> {
+    let stable = candidates
+        .iter()
+        .position(|(s, r)| *s != BanSource::Rejected && r.bans_set() >= BANS_KEPT_MIN);
+    let at = stable.or_else(|| {
+        // `max_by_key` keeps the last of equals, so walk from the back to
+        // keep the first.
+        candidates
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, (_, r))| !r.unrevealed())
+            .max_by_key(|(_, (_, r))| r.bans_set())
+            .map(|(i, _)| i)
+    })?;
+    candidates.into_iter().nth(at)
 }
 
 /// One line on what the ban vote screen read: each own slot as

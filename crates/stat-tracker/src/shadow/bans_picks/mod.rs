@@ -224,12 +224,28 @@ pub struct BanResults {
     pub lobby_ban: Option<Read>,
 }
 
+impl BanResults {
+    /// How many of the ban slots hold a hero (a read value).
+    pub fn bans_set(&self) -> usize {
+        self.bans.iter().filter(|b| b.read.value.is_some()).count()
+    }
+
+    /// A frame from before the bans reveal (Scuffed Vision's rule): no ban
+    /// slot reads a value. The lobby ban and the layout are not looked at:
+    /// the lobby layout is a real one, and its probe can flip on such an
+    /// empty frame.
+    pub fn unrevealed(&self) -> bool {
+        self.bans_set() == 0
+    }
+}
+
 /// Everything cv-v1 reads before a game.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BansPicks {
     pub bans: Vec<BanRead>,
     pub lobby_ban: Option<Read>,
-    /// The six own-team rows of the hero select, top (the local player) first.
+    /// The preferred hero on each of the hero select's six own-team rows,
+    /// top (the local player) first.
     pub picks: Vec<Read>,
     pub bans_picks_recognizer: String,
 }
@@ -495,8 +511,10 @@ impl Reader {
         )
     }
 
-    /// The hero select: the six own-team picks and the own-team ring colour.
-    /// Pass the last frame of the screen. `None` when the frame is not 2560x1440.
+    /// The hero select: each own-team player's preferred hero, read from the
+    /// six rows of the left column (not a locked pick, so two players can
+    /// show the same hero), and the own-team ring colour. Pass the last
+    /// frame of the screen. `None` when the frame is not 2560x1440.
     pub fn read_hero_select(&self, img: &RgbImage) -> Option<HeroSelect> {
         Some(HeroSelect {
             picks: self.read_rows(img, &HS_Y)?,

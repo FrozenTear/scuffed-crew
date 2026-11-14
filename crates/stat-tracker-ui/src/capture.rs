@@ -130,6 +130,7 @@ pub async fn clear_store(data_dir: std::path::PathBuf) -> Result<String, String>
                 store.clear_all_data().await.map_err(|e| e.to_string())?;
                 stat_tracker::storage::clear_match_log(&data_dir);
                 stat_tracker::storage::remove_pre_timeline_backups(&data_dir);
+                stat_tracker::storage::maintain::forget_last_vacuum_size(&data_dir);
             }
             Err(e) if stat_tracker::storage::is_store_busy(e.as_ref()) => {
                 return Err("Stop the tracker before deleting stored data".into());
@@ -229,6 +230,10 @@ mod tests {
             .join("stats.surrealkv.pre-timeline-20261029_101500");
         std::fs::create_dir_all(&backup).unwrap();
         std::fs::write(backup.join("db"), "games").unwrap();
+        let last_size = dir
+            .path()
+            .join(stat_tracker::storage::maintain::LAST_VACUUM_SIZE_FILE);
+        std::fs::write(&last_size, "33200000").unwrap();
         assert!(stat_tracker::capture::share_restorable(dir.path()));
 
         clear_store(dir.path().to_path_buf())
@@ -239,6 +244,10 @@ mod tests {
         assert!(!token.exists(), "restore token left behind");
         assert!(!tmp.exists(), "restore token temp file left behind");
         assert!(!backup.exists(), "the hero-timeline backup holds games too");
+        assert!(
+            !last_size.exists(),
+            "the old store's vacuum size would hold back auto-vacuum"
+        );
     }
 
     #[tokio::test]
