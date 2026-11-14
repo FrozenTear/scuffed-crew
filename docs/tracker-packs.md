@@ -653,7 +653,7 @@ Kept means moved whole, every file in it, to
 `templates-kept/<pack folder>-<UTC YYYYMMDDTHHMMSSZ>-<pid>/` under the data
 folder (for example `templates-kept/rank-v1-20261114T065156Z-4242/`),
 beside `templates/`, so the stale folder sweep never removes it. When that
-name is taken, `-2`, `-3` and so on is added. The path is logged as soon as
+name is taken, `-2`, `-3` and so on are added. The path is logged as soon as
 the folder is moved. Where the kernel allows an atomic exchange, the new
 pack goes in first and the old tree is moved out after, so the live folder
 is never missing. Should that move fail, the old tree goes beside the live
@@ -664,11 +664,10 @@ version is recorded. Only if that exchange back fails as well does the old
 tree stay at its `.<pack folder>-next-*` staging path, with a warning that
 names it; that path is at risk of the stale sweep on a later sync, so copy
 it out by hand. Without the exchange, the old folder is moved first and put
-back if the swap fails. An
-unchanged official folder is replaced and nothing is kept. If
-`templates-kept/` cannot be made, the pack is refused for a fixed reason and
-the folder stays as it was. Only these two packs keep; every other pack
-replaces its folder as before.
+back if the swap fails. An unchanged official folder is replaced and
+nothing is kept. If `templates-kept/` cannot be made, the pack is refused
+for a fixed reason and the folder stays as it was. Only these two packs
+keep; every other pack replaces its folder as before.
 
 Nothing removes `templates-kept/`: not the tracker, not the app, and not
 `uninstall.sh --purge` (it deletes only the names the tracker writes, and

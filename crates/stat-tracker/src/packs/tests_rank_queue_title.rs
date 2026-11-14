@@ -407,6 +407,7 @@ async fn a_keep_that_cannot_happen_refuses_the_pack_and_leaves_the_folder() {
         &PackSync::Failed(PACK_NOT_KEPT.into())
     );
     assert!(is_fixed_refusal(PACK_NOT_KEPT));
+    assert!(is_fixed_refusal(PACK_STRANDED));
     assert_eq!(
         file_names(&hand),
         ["templates.json", "templates.json.bak-roles-20261114"]
@@ -512,13 +513,37 @@ async fn a_pack_with_another_file_is_refused_and_the_old_folder_stays() {
     assert!(queue_title::Reader::load(dir.path()).is_ok());
 }
 
-/// The two messages a keep can end in carry no em or en dash.
+/// The messages a keep can end in carry no em or en dash.
 #[test]
 fn the_keep_messages_have_no_dashes() {
-    for message in [PACK_BAD_TEMPLATES, PACK_NOT_KEPT] {
+    for message in [PACK_BAD_TEMPLATES, PACK_NOT_KEPT, PACK_STRANDED] {
         assert!(!message.contains('\u{2014}'), "{message}");
         assert!(!message.contains('\u{2013}'), "{message}");
     }
+}
+
+/// `remove_staging` keeps a stranded staging folder (it holds the old
+/// tree) and removes it after any other failed swap.
+#[test]
+fn remove_staging_leaves_a_stranded_folder_and_removes_the_others() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let staging = dir.path().join(".rank-v1-next-1");
+    let plant = || {
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("templates.json"), b"old tree").unwrap();
+    };
+    plant();
+    layout::KeepSwap::Stranded("e".into()).remove_staging(&staging);
+    assert!(staging.is_dir());
+    assert_eq!(
+        std::fs::read(staging.join("templates.json")).unwrap(),
+        b"old tree"
+    );
+    layout::KeepSwap::NotKept("e".into()).remove_staging(&staging);
+    assert!(!staging.exists());
+    plant();
+    layout::KeepSwap::NotSwapped("e".into()).remove_staging(&staging);
+    assert!(!staging.exists());
 }
 
 /// At daemon start one line names `templates-kept/` when it holds folders

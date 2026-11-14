@@ -26,11 +26,10 @@
 //! Each pack has its own [`PackLayout`]; any path outside it refuses that
 //! pack only.
 //!
-//! Size and sha256 are checked against the list before anything is
-//! unpacked. Each pack is staged and swapped into place on its own, so one
-//! bad or failed pack never blocks, rolls back, or deletes another. A pack
-//! the server does not list keeps whatever is installed. The token is never
-//! written to a log.
+//! Size and sha256 are checked before anything is unpacked. Each pack is
+//! staged and swapped into place on its own, so one bad or failed pack never
+//! blocks, rolls back, or deletes another. A pack the server does not list
+//! keeps whatever is installed. The token is never written to a log.
 //!
 //! Daemon startup ([`sync_on_startup`]) syncs `heroes-v1.tar` only and hands
 //! its result to [`PackKeeper`], which runs in the background, so capture
@@ -49,9 +48,9 @@
 //! checks the installed files against the manifest sync verified and swaps
 //! the pack in only when they match. The daemon does not wait. It reads
 //! with the Tesseract rows already in hand until a load finishes. The setup
-//! guide ([`sync_reader_packs`]) syncs all of them. Every run
-//! holds an exclusive `flock` on `templates/.pack-sync.lock`; a second run
-//! at the same time is [`PackSync::Busy`] and sends no request.
+//! guide ([`sync_reader_packs`]) syncs all of them. Every run holds an
+//! exclusive `flock` on `templates/.pack-sync.lock`; a second run at the
+//! same time is [`PackSync::Busy`] and sends no request.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -62,8 +61,7 @@ use crate::config::validate_sync_server_url;
 
 pub mod layout;
 
-// The pack layout lives in `packs/layout.rs` (0.6 lane D V4). Re-exported at
-// the old `packs::` paths.
+// Pack layout: `packs/layout.rs` (0.6 lane D V4), re-exported at old paths.
 pub(crate) use layout::is_glyph_name;
 pub use layout::{
     HEROES_PACK_NAME, HEROES_PORTRAIT_1080_PACK_NAME, HEROES_PORTRAIT_PACK_NAME, PACKS, PackLayout,
@@ -96,6 +94,7 @@ pub const PACK_UNSAFE: &str =
     "The reader pack was not safe to unpack. The installed pack was left in place.";
 pub const PACK_BAD_TEMPLATES: &str = "The reader pack did not load, so it was not saved.";
 pub const PACK_NOT_KEPT: &str = "The reader pack was not saved: the old pack folder could not be moved to templates-kept, so it was left in place.";
+pub const PACK_STRANDED: &str = "The reader pack is in the live folder, but the old pack folder could not be moved to templates-kept and could not be put back, so it was left at the staging path.";
 pub const PACK_FAILED: &str =
     "Could not download the reader pack. The installed pack was left in place.";
 pub const PACK_AUTH: &str = "Your sync token isn't valid. Sign in again from Settings.";
@@ -388,8 +387,7 @@ impl StartupSync {
     }
 }
 
-/// Waits, in seconds, while another process holds the pack sync lock. The
-/// last one repeats.
+/// Seconds to wait while another process holds the sync lock; last repeats.
 const BUSY_WAITS_SECS: [u64; 3] = [5, 15, 60];
 /// Waits, in seconds, after packs switched off (503), a network error, a
 /// refused token or a refused download. The last one repeats.
@@ -425,8 +423,8 @@ fn pid_jitter(pid: u32) -> Duration {
 }
 
 /// True for a refusal the same bytes would get again: wrong size or
-/// sha256, a layout the tracker does not accept, too large, a pack its
-/// reader does not load, or a folder `templates-kept/` cannot take.
+/// sha256, a bad layout, too large, a pack its reader does not load, or a
+/// folder `templates-kept/` cannot take (a keep that fails or strands).
 fn is_fixed_refusal(message: &str) -> bool {
     [
         PACK_MISMATCH,
@@ -434,6 +432,7 @@ fn is_fixed_refusal(message: &str) -> bool {
         PACK_TOO_BIG,
         PACK_BAD_TEMPLATES,
         PACK_NOT_KEPT,
+        PACK_STRANDED,
     ]
     .contains(&message)
 }
@@ -734,8 +733,7 @@ impl Voice {
     }
 }
 
-/// The server URL and token for one try. It has no `Debug`, so the token
-/// cannot reach a log.
+/// URL and token for one try. No `Debug`, so the token cannot reach a log.
 pub struct PackCredentials {
     pub server_url: String,
     pub token: String,
@@ -787,10 +785,9 @@ impl Tried {
 ///
 /// Its first try carries on from [`sync_on_startup`]: with that run's list
 /// it syncs the other packs, so a first install is still one request per
-/// pack plus the list (the list, then every pack).
-/// If startup did not get that far (busy lock, 429, packs switched off, a
-/// network error, a refused token) nothing is sent now and that outcome
-/// sets the first wait.
+/// pack plus the list (the list, then every pack). If startup did not get
+/// that far (busy lock, 429, packs switched off, a network error, a refused
+/// token) nothing is sent now and that outcome sets the first wait.
 ///
 /// A later try downloads only the packs that are missing or out of date.
 /// It reuses the list it has: the list is read again only when it is
@@ -1520,7 +1517,11 @@ fn install_pack(
     if let Err(failed) = swapped {
         failed.remove_staging(&staging);
         let (message, error) = match failed {
-            KeepSwap::NotKept(error) | KeepSwap::Stranded(error) => (PACK_NOT_KEPT, error),
+            KeepSwap::Stranded(error) => {
+                tracing::warn!(pack = spec.name, error = %error, "reader pack is in the live folder, but the old folder was left at the staging path");
+                return Err(PackSync::Failed(PACK_STRANDED.to_string()));
+            }
+            KeepSwap::NotKept(error) => (PACK_NOT_KEPT, error),
             KeepSwap::NotSwapped(error) => (PACK_FAILED, error),
         };
         tracing::warn!(pack = spec.name, error = %error, "reader pack was not swapped into place");
@@ -1533,8 +1534,7 @@ fn install_pack(
 }
 
 /// A staged [`PackLayout::TemplatesJson`] pack must load with its reader's
-/// `TemplateSet::load_dir`, or it is refused before the swap. Other
-/// layouts pass.
+/// `TemplateSet::load_dir` or is refused before the swap; others pass.
 fn check_staged(spec: &PackSpec, staging: &Path) -> Result<(), String> {
     match spec.name {
         layout::RANK_PACK_NAME => crate::shadow::rank::templates::TemplateSet::load_dir(staging)
