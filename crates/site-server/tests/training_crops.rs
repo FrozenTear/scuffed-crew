@@ -1967,19 +1967,20 @@ async fn rank_crops_have_their_own_bounds() {
     for session in [OWNER_SESSION, OTHER_SESSION, OFFICER_SESSION, ADMIN_SESSION] {
         set_consent(&w.app, session, all.clone()).await;
     }
-    assert_eq!((RANK_MAX_WIDTH, RANK_MAX_HEIGHT), (512, 256));
+    assert_eq!((RANK_MAX_WIDTH, RANK_MAX_HEIGHT), (1536, 720));
+    assert_eq!(RANK_MAX_BYTES, 384 * 1024);
     // A noise crop over the rank byte limit, inside its edges.
-    let big = noise_png(200, 200, 7);
+    let big = noise_png(330, 330, 7);
     assert!(big.len() > RANK_MAX_BYTES, "{}", big.len());
     let bad = StatusCode::BAD_REQUEST;
     let cases: Vec<(Vec<Part>, StatusCode, &str)> = vec![
         (
-            vec![meta(json!({})), crop(RANK_MAX_WIDTH + 1, 16)],
+            vec![meta(json!({})), crop(1537, 16)],
             bad,
             "icon_bad_dimensions",
         ),
         (
-            vec![meta(json!({})), crop(64, RANK_MAX_HEIGHT + 1)],
+            vec![meta(json!({})), crop(64, 721)],
             bad,
             "icon_bad_dimensions",
         ),
@@ -2012,10 +2013,27 @@ async fn rank_crops_have_their_own_bounds() {
     .await;
     assert_error(&got, bad, "icon_bad_dimensions");
 
-    // The largest rank region and a noise crop under the byte limit pass.
-    let near = noise_png(170, 170, 8);
+    // Nor does the taller one: map_name stays at 256 tall.
+    set_consent(&w.app, OWNER_SESSION, json!({ "map_name": true })).await;
+    let got = upload(
+        &w.app,
+        OWNER_TOKEN,
+        "map_name",
+        &[meta(json!({})), crop(64, RANK_MAX_HEIGHT)],
+    )
+    .await;
+    assert_error(&got, bad, "icon_bad_dimensions");
+
+    // The real 1440p regions (rank bar 1500x184, tier 420x680), the largest
+    // bound and a noise crop just under the byte limit all pass.
+    let near = noise_png(300, 300, 8);
     assert!(near.len() <= RANK_MAX_BYTES, "{}", near.len());
+    assert!(near.len() > 216 * 1024, "{}", near.len());
     let ok = vec![
+        meta(json!({})),
+        crop(1500, 184),
+        meta(json!({})),
+        crop(420, 680),
         meta(json!({})),
         crop(RANK_MAX_WIDTH, RANK_MAX_HEIGHT),
         meta(json!({})),
@@ -2023,9 +2041,22 @@ async fn rank_crops_have_their_own_bounds() {
     ];
     let got = upload(&w.app, OWNER_TOKEN, "rank", &ok).await;
     assert_eq!(got.0, StatusCode::CREATED, "{}", got.1);
-    assert_eq!(got.1["crops"][0]["width"], json!(512));
-    assert_eq!(got.1["crops"][0]["height"], json!(256));
-    assert_eq!(files_on_disk(w.dir()).len(), 2);
+    let sizes: Vec<(Value, Value)> = got.1["crops"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| (c["width"].clone(), c["height"].clone()))
+        .collect();
+    assert_eq!(
+        sizes,
+        vec![
+            (json!(1500), json!(184)),
+            (json!(420), json!(680)),
+            (json!(1536), json!(720)),
+            (json!(300), json!(300)),
+        ]
+    );
+    assert_eq!(files_on_disk(w.dir()).len(), 4);
     w.cleanup();
 }
 

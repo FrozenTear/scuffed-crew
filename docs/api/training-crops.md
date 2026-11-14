@@ -42,7 +42,7 @@ consent shapes have no `full_screen` field, a `PUT` naming it is 400
 |------|------------------------|-----------------------|-----------|
 | `hero_icon`, `stat_digits` | 8 to 256 each | 64 KiB | `HERO_ICON_MAX_EDGE`, `HERO_ICON_MAX_BYTES` |
 | `map_name` | 8 to 1536 wide, 8 to 256 tall | 256 KiB | `MAP_NAME_MAX_WIDTH`, `MAP_NAME_MAX_HEIGHT`, `MAP_NAME_MAX_BYTES` |
-| `rank` | 8 to 512 wide, 8 to 256 tall | 128 KiB | `RANK_MAX_WIDTH`, `RANK_MAX_HEIGHT`, `RANK_MAX_BYTES` |
+| `rank` | 8 to 1536 wide, 8 to 720 tall | 384 KiB | `RANK_MAX_WIDTH`, `RANK_MAX_HEIGHT`, `RANK_MAX_BYTES` |
 
 Map name banners are wide and the tracker sends them unscaled (a native 4K
 banner is 1036 px wide), so `map_name` has the wider bound and a byte limit
@@ -52,13 +52,16 @@ stays capped at 2 MiB (`HERO_ICON_MAX_REQUEST_BYTES`) for every kind, so a
 request of large banners holds fewer than 20 of them. The bounds live on
 `CropKind::max_edges` and `CropKind::max_crop_bytes`.
 
-`rank` crops are regions of the post-game rank screen: role, tier, SR and
-the percentile line, never a region with player names. The tracker's rank
-reader takes only 1080p and 1440p frames; at 1440p its widest region (the
-mode banner) is 440 px and its tallest (the tier emblem) 200 px, so 512 by
-256 leaves room above both. 128 KiB is twice the hero icon limit for twice
-its widest edge, and half the `map_name` limit for a third of its pixels.
-About four regions per competitive game make the 1000 cap about 250 games.
+`rank` crops are regions of the post-game rank screen (role, tier, rank
+bar, result, SR), never a region with player names. The tracker's rank
+reader takes only 1080p and 1440p frames. At 1440p the regions are
+`rank_role` 440x90, `rank_tier` 420x680, `rank_bar` 1500x184,
+`rank_result` 700x170 and `rank_sr` 222 wide with a variable height, so
+1536 by 720 leaves room above the widest (bar) and the tallest (tier).
+The largest measured PNG is a tier at 216 KiB (bar 131 KiB, result 90 KiB,
+role 20 KiB, SR about 19 KiB), so 384 KiB leaves room above it; with the
+2 MiB request limit a request holds at most five crops of that size.
+About five crops per competitive game make the 1000 cap about 200 games.
 
 ## Auth
 
@@ -240,7 +243,7 @@ all with `screen` `tab`:
 | `hero_icon` | `career_panel` | The career panel's hero portrait, with `hero`, `score`, `runner_up`, `margin` and the hero pack name as `icon_set_version` |
 | `stat_digits` | `elims`, `assists`, `deaths`, `damage`, `healing`, `mitigation` | One stat cell of the member's own row, named by its column left to right, with `hero` only when that Tab's own read named it |
 | `map_name` | none | The map name banner |
-| `rank` | tracker's choice | One rank screen region (role, tier, SR, percentile). No player names |
+| `rank` | tracker's choice | One rank screen region (role, tier, bar, result, SR). No player names |
 
 There is no colourblind filter field. It hints at a member's colour vision
 and is not in the agreed field list or the consent text, so it is not
@@ -437,7 +440,7 @@ Every error body is `{"error": "<code>"}`, except the shared 429 body
 | 400 | `unexpected_field` | Part named other than `meta`/`crop`, or pairs out of order |
 | 400 | `no_crops` | No `meta`/`crop` pair |
 | 400 | `invalid_multipart` | Body is not readable multipart |
-| 400 | `icon_bad_dimensions` | PNG width or height outside the kind's bound (8 to 256; `map_name` 8 to 1536 wide, 8 to 256 tall; `rank` 8 to 512 wide, 8 to 256 tall) |
+| 400 | `icon_bad_dimensions` | PNG width or height outside the kind's bound (8 to 256; `map_name` 8 to 1536 wide, 8 to 256 tall; `rank` 8 to 1536 wide, 8 to 720 tall) |
 | 400 | `invalid_png` | PNG signature present but the image does not decode |
 | 400 | `invalid_consent` | Consent body not JSON, unknown kind (`full_screen` included), or not a bool |
 | 401 | session error (as for every member route) | `PUT /consent` without a session; a sync token is not a session there |
@@ -445,7 +448,7 @@ Every error body is `{"error": "<code>"}`, except the shared 429 body
 | 403 | `Officer access required` | Member session on `/members` |
 | 404 | `crop_not_found` | Unknown id, malformed id, or a crop the caller may not see |
 | 409 | `crop_limit_reached` | The upload would pass the kind's cap |
-| 413 | `icon_too_large` | A `crop` part over the kind's limit (64 KiB; `map_name` 256 KiB; `rank` 128 KiB), or the body over 2 MiB |
+| 413 | `icon_too_large` | A `crop` part over the kind's limit (64 KiB; `map_name` 256 KiB; `rank` 384 KiB), or the body over 2 MiB |
 | 413 | `too_many_crops_in_request` | More than 20 pairs |
 | 415 | `not_png` | A `crop` part without the PNG signature |
 | 429 | `rate_limited` | Per-member, per-kind upload limiter, or the per-IP limit of the sync token routes |

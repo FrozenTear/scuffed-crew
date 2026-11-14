@@ -20,8 +20,8 @@ pub enum CropKind {
     StatDigits,
     /// The map name banner.
     MapName,
-    /// A region of the post-game rank screen: role, tier, SR or the
-    /// percentile line. Never a region with player names.
+    /// A region of the post-game rank screen: role, tier, rank bar, result
+    /// or SR. Never a region with player names.
     Rank,
     /// A whole screen. Uploads are refused for now and consent for it cannot
     /// be stored: the consent shapes have no `full_screen` field.
@@ -120,23 +120,26 @@ pub const MAP_NAME_MAX_HEIGHT: u32 = 256;
 pub const MAP_NAME_MAX_BYTES: usize = 256 * 1024;
 
 /// Most `rank` crops one member may have stored at the same time. A rank
-/// screen comes once per competitive game and gives about four regions
-/// (role, tier, SR, percentile), so this holds about 250 games.
+/// screen comes once per competitive game and gives about five regions
+/// (role, tier, bar, result, SR), so this holds about 200 games.
 pub const RANK_MAX_PER_MEMBER: u32 = 1000;
 
-/// Widest accepted `rank` crop, in pixels. The widest rank screen region
-/// the tracker reads is the mode banner, 440 px wide at 1440p (the reader
-/// only takes 1080p and 1440p), so this leaves room above that.
-pub const RANK_MAX_WIDTH: u32 = 512;
+/// Widest accepted `rank` crop, in pixels. The widest rank region the
+/// tracker cuts is the rank bar, 1500 px wide at 1440p (the reader only
+/// takes 1080p and 1440p), so this leaves room above that. The same width
+/// as `map_name`.
+pub const RANK_MAX_WIDTH: u32 = 1536;
 
 /// Tallest accepted `rank` crop, in pixels. The tallest region is the tier
-/// emblem, 200 px tall at 1440p.
-pub const RANK_MAX_HEIGHT: u32 = 256;
+/// emblem, 680 px tall at 1440p.
+pub const RANK_MAX_HEIGHT: u32 = 720;
 
-/// Largest accepted `rank` crop part, in bytes (128 KiB). Twice the hero
-/// icon limit for twice its widest edge, half the `map_name` limit for a
-/// third of its pixels.
-pub const RANK_MAX_BYTES: usize = 128 * 1024;
+/// Largest accepted `rank` crop part, in bytes (384 KiB). The largest
+/// measured rank crop is a tier emblem at 216 KiB (bar 131 KiB, result
+/// 90 KiB, role 20 KiB, SR about 19 KiB), so this leaves room above it.
+/// The request limit of 2 MiB still applies, so a request holds at most
+/// five crops of this size.
+pub const RANK_MAX_BYTES: usize = 384 * 1024;
 
 /// Largest accepted `meta` part, in bytes (4 KiB).
 pub const TRAINING_CROP_META_MAX_BYTES: usize = 4 * 1024;
@@ -217,8 +220,8 @@ mod tests {
     fn rank_is_its_own_kind_with_a_region_bound() {
         assert_eq!(CropKind::parse("rank"), Some(CropKind::Rank));
         assert_eq!(CropKind::Rank.as_str(), "rank");
-        assert_eq!(CropKind::Rank.max_edges(), (512, 256));
-        assert_eq!(CropKind::Rank.max_crop_bytes(), 128 * 1024);
+        assert_eq!(CropKind::Rank.max_edges(), (1536, 720));
+        assert_eq!(CropKind::Rank.max_crop_bytes(), 384 * 1024);
         assert_eq!(CropKind::Rank.max_per_member(), RANK_MAX_PER_MEMBER);
         assert!(CropKind::ALL.contains(&CropKind::Rank));
     }
