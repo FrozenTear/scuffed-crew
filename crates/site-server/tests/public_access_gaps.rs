@@ -1,6 +1,9 @@
-//! HTTP coverage for Opus #118 findings M5–M9, L3, and L11.
+//! HTTP coverage for gaps in public (anonymous and member) read access.
 //!
-//! Each test is named after the finding it would fail without the fix.
+//! Tests prefixed with a finding id (m5 to m9, l3, l11) cover Opus #118 and
+//! are named after the finding they would fail without the fix. The
+//! unknown-tournament-id tests cover the public tournament page routes
+//! returning 500 or 200 for an id that does not exist (PR #675).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -865,41 +868,88 @@ async fn l11_register_conflict_does_not_say_username_taken() {
 
 // ─── Unknown tournament id ──────────────────────────────────────────────────
 
+/// GET `path` as anon (`token` = None) or with a bearer token; returns the
+/// status and the raw body bytes so callers can compare responses exactly.
+async fn get_raw(state: &AppState, path: &str, token: Option<&str>) -> (StatusCode, Vec<u8>) {
+    let req = match token {
+        Some(t) => authed(Method::GET, path, t, None),
+        None => anon(Method::GET, path),
+    };
+    let resp = create_router(state.clone()).oneshot(req).await.unwrap();
+    let status = resp.status();
+    (status, body_bytes(resp).await)
+}
+
+fn tournament_page_routes(tid: &str) -> [String; 5] {
+    [
+        format!("/api/tournaments/{tid}"),
+        format!("/api/tournaments/{tid}/bracket"),
+        format!("/api/tournaments/{tid}/participants"),
+        format!("/api/tournaments/{tid}/matches"),
+        format!("/api/tournaments/{tid}/standings"),
+    ]
+}
+
 /// `/tournaments/doesnotexist` used to show "HTTP error 500": the bracket
 /// route turned the DB's "tournament not found" into a 500, and the list
 /// sub-routes answered 200 with an empty set. Every public GET route the
 /// tournament page uses must 404 for an id that does not exist, for every
 /// caller (officers skip the draft check, so they hit the missing-row path too).
+///
+/// A missing id must also be indistinguishable from a draft the caller may
+/// not see: same status and same body. Anon and members compare against a
+/// hidden draft directly. Officers can see drafts, so an officer hitting a
+/// missing id must get exactly what a member gets for a hidden draft.
 #[tokio::test]
 async fn unknown_tournament_id_is_404_on_every_public_route() {
     let state = test_state().await;
     seed_staff(&state.db).await;
 
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed(
+            Method::POST,
+            "/api/tournaments",
+            OFFICER_TOKEN,
+            Some(json!({ "name": "Hidden Cup", "format": "single_elim" })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let created = body_json(resp).await;
+    assert_eq!(created["status"], "draft");
+    let draft_id = created["id"].as_str().unwrap().to_string();
+
     for tid in ["doesnotexist", "does-not-exist"] {
-        for path in [
-            format!("/api/tournaments/{tid}"),
-            format!("/api/tournaments/{tid}/bracket"),
-            format!("/api/tournaments/{tid}/participants"),
-            format!("/api/tournaments/{tid}/matches"),
-            format!("/api/tournaments/{tid}/standings"),
-        ] {
-            let app = create_router(state.clone());
-            let resp = app.oneshot(anon(Method::GET, &path)).await.unwrap();
-            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "anon {path}");
+        for (missing, draft) in tournament_page_routes(tid)
+            .iter()
+            .zip(tournament_page_routes(&draft_id).iter())
+        {
+            let (status, body) = get_raw(&state, missing, None).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "anon {missing}");
+            let body_value: Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(
-                body_json(resp).await["error"],
-                "Tournament not found",
-                "anon {path}"
+                body_value["error"], "Tournament not found",
+                "anon {missing}"
+            );
+            assert_eq!(
+                (status, body),
+                get_raw(&state, draft, None).await,
+                "anon: missing {missing} vs hidden draft {draft}"
             );
 
-            for (who, token) in [("member", MEMBER_TOKEN), ("officer", OFFICER_TOKEN)] {
-                let app = create_router(state.clone());
-                let resp = app
-                    .oneshot(authed(Method::GET, &path, token, None))
-                    .await
-                    .unwrap();
-                assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{who} {path}");
-            }
+            let member_draft = get_raw(&state, draft, Some(MEMBER_TOKEN)).await;
+            assert_eq!(member_draft.0, StatusCode::NOT_FOUND, "member {draft}");
+            assert_eq!(
+                get_raw(&state, missing, Some(MEMBER_TOKEN)).await,
+                member_draft,
+                "member: missing {missing} vs hidden draft {draft}"
+            );
+            assert_eq!(
+                get_raw(&state, missing, Some(OFFICER_TOKEN)).await,
+                member_draft,
+                "officer missing {missing} vs member hidden draft {draft}"
+            );
         }
     }
 }
@@ -936,15 +986,8 @@ async fn published_tournament_routes_still_ok() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    for path in [
-        format!("/api/tournaments/{tid}"),
-        format!("/api/tournaments/{tid}/bracket"),
-        format!("/api/tournaments/{tid}/participants"),
-        format!("/api/tournaments/{tid}/matches"),
-        format!("/api/tournaments/{tid}/standings"),
-    ] {
-        let app = create_router(state.clone());
-        let resp = app.oneshot(anon(Method::GET, &path)).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK, "anon {path}");
+    for path in tournament_page_routes(&tid) {
+        let (status, _) = get_raw(&state, &path, None).await;
+        assert_eq!(status, StatusCode::OK, "anon {path}");
     }
 }
