@@ -539,7 +539,7 @@ mod tests {
         assert!(both.contains(rank::TEMPLATE_DIR) && both.contains(queue_title::TEMPLATE_DIR));
         assert!(both.contains("Games still record"), "{both}");
         assert!(both.starts_with("Read my rank is on, but "), "{both}");
-        assert!(both.contains("then restart the tracker"), "{both}");
+        assert!(both.contains("restart it once it has downloaded"), "{both}");
         // the rank variable off with the switch saved on: the row shows Off,
         // so the warning names the queue title reader, not Read my rank
         app.outside_env = Some(OutsideEnv {
