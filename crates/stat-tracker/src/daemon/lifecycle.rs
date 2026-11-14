@@ -772,8 +772,12 @@ pub(crate) async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
         let within = stat_tracker::replace::shutdown_time_left().saturating_sub(STORE_CLOSE_WAIT);
         let flush = async {
             if daemon::rank::finish_on_shutdown(feed, &ctx.store, pregame_dump.as_mut()).await {
-                // The Games tab reads the rank from the snapshot.
+                // The Games tab reads the rank from the snapshot. The
+                // loop's forced shutdown write has run already, so force
+                // this one too: no GUI, or the 2 s debounce, would leave
+                // live_snapshot.json without the rank until the next start.
                 refresh_snapshot(&ctx.store, &ctx.data_dir).await;
+                flush_snapshot_if_dirty(&ctx.store, &ctx.data_dir).await;
             }
         };
         if tokio::time::timeout(within, flush).await.is_err() {

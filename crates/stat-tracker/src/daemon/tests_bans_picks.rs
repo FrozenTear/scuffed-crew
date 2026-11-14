@@ -439,3 +439,76 @@ async fn the_fallback_holds_only_the_newest_turned_down_frames() {
     assert_eq!(stored["bans"], serde_json::json!([]), "{stored}");
     assert_eq!(engine.0.load(Ordering::SeqCst), 1 + BAN_FALLBACK_FRAMES);
 }
+
+#[tokio::test]
+async fn the_fallback_holds_only_the_newest_earlier_frames() {
+    let engine = Arc::new(Marked::default());
+    let (_dir, mut feed) = marked_feed(&engine);
+    // the only revealed stable frame is the oldest stage: each newer stage
+    // pushes the one it replaces into the earlier list, which keeps the
+    // newest two, so the revealed one is dropped
+    feed.observe(&[PregameOp::Stage(shot(BAN_RESULTS_NAME, &marked(4, false)))]);
+    for _ in 0..=BAN_FALLBACK_FRAMES {
+        feed.observe(&[PregameOp::Stage(shot(BAN_RESULTS_NAME, &marked(0, false)))]);
+    }
+    assert_eq!(feed.frames.earlier.len(), BAN_FALLBACK_FRAMES);
+    feed.observe(&[PregameOp::Save(shot(BAN_RESULTS_NAME, &marked(0, false)))]);
+    let (stored, _) = read_bans(&mut feed).await;
+    assert_eq!(stored["bans"], serde_json::json!([]), "{stored}");
+    assert_eq!(engine.0.load(Ordering::SeqCst), 1 + BAN_FALLBACK_FRAMES);
+}
+
+#[tokio::test]
+async fn a_game_with_only_turned_down_ban_results_is_read() {
+    let engine = Arc::new(Marked::default());
+    let (_dir, mut feed) = marked_feed(&engine);
+    feed.observe(&[rejected(&marked(4, false))]);
+    assert!(feed.has_frames(), "not a game without frames");
+    let (stored, _) = read_bans(&mut feed).await;
+    assert_eq!(set_count(&stored), 4, "{stored}");
+}
+
+#[tokio::test]
+async fn a_game_with_only_earlier_ban_results_is_read() {
+    let engine = Arc::new(Marked::default());
+    let (_dir, mut feed) = marked_feed(&engine);
+    // a stage replaced by a newer one, which the saver then deleted: both
+    // are earlier stable frames and nothing was saved
+    feed.observe(&[PregameOp::Stage(shot(BAN_RESULTS_NAME, &marked(3, false)))]);
+    feed.observe(&[PregameOp::Stage(shot(BAN_RESULTS_NAME, &marked(1, false)))]);
+    feed.observe(&[PregameOp::Discard {
+        folder: FOLDER.to_string(),
+        name: BAN_RESULTS_NAME,
+    }]);
+    assert!(feed.frames.results.is_none() && feed.frames.staged.is_none());
+    assert!(feed.has_frames(), "not a game without frames");
+    let (stored, _) = read_bans(&mut feed).await;
+    assert_eq!(set_count(&stored), 3, "{stored}");
+}
+
+#[test]
+fn a_new_game_folder_drops_the_held_fallback_frames() {
+    let engine = Arc::new(Marked::default());
+    let (_dir, mut feed) = marked_feed(&engine);
+    feed.observe(&[PregameOp::Stage(shot(BAN_RESULTS_NAME, &marked(3, false)))]);
+    feed.observe(&[PregameOp::Stage(shot(BAN_RESULTS_NAME, &marked(1, false)))]);
+    feed.observe(&[rejected(&marked(4, false))]);
+    assert_eq!(feed.frames.earlier.len(), 1);
+    assert_eq!(feed.frames.rejected.len(), 1);
+    assert!(feed.frames.staged.is_some());
+    // the next game's first save; the old game was never read
+    feed.observe(&[PregameOp::Save(PregameShot {
+        folder: "20261113_235901".to_string(),
+        name: PregamePhase::HeroBan.last_name(),
+        frame: marked(0, false),
+    })]);
+    assert_eq!(feed.folder.as_deref(), Some("20261113_235901"));
+    assert!(feed.frames.earlier.is_empty(), "earlier frames dropped");
+    assert!(
+        feed.frames.rejected.is_empty(),
+        "turned-down frames dropped"
+    );
+    assert!(feed.frames.staged.is_none(), "the stage dropped");
+    assert!(feed.frames.vote.is_some(), "the new game's frame is held");
+    assert_eq!(engine.0.load(Ordering::SeqCst), 0, "nothing was read");
+}

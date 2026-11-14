@@ -140,10 +140,15 @@ pub fn rotate_daemon_log(data_dir: &Path, max_bytes: u64) -> std::io::Result<boo
 /// size the last vacuum left (`None` when not recorded): over the threshold,
 /// and grown more than [`AUTO_VACUUM_REGROW_BYTES`] past that size. So a
 /// vacuum that left the store near or over the threshold is not repeated at
-/// the next start, only once dead versions have built up again.
+/// the next start, only once dead versions have built up again. A recorded
+/// size larger than `size` is not trusted (a store only grows after a
+/// vacuum; such a value is hand-edited or belongs to another store) and
+/// counts as `None`, so the threshold alone decides.
 pub fn auto_vacuum_due(size: u64, last_after: Option<u64>) -> bool {
     size > AUTO_VACUUM_THRESHOLD_BYTES
-        && last_after.is_none_or(|after| size > after.saturating_add(AUTO_VACUUM_REGROW_BYTES))
+        && last_after
+            .filter(|&after| after <= size)
+            .is_none_or(|after| size > after.saturating_add(AUTO_VACUUM_REGROW_BYTES))
 }
 
 /// The size the last vacuum left, from [`LAST_VACUUM_SIZE_FILE`]; `None`
@@ -157,7 +162,8 @@ pub fn last_vacuum_size(data_dir: &Path) -> Option<u64> {
 }
 
 /// Record the size a vacuum left. A failed write is a warn line: the next
-/// start then falls back to the threshold alone.
+/// start reads whatever file is there, an older size from an earlier vacuum
+/// or none (then the threshold alone decides).
 fn record_vacuum_size(data_dir: &Path, after: u64) {
     if let Err(e) = std::fs::write(data_dir.join(LAST_VACUUM_SIZE_FILE), after.to_string()) {
         tracing::warn!(error = %e, "could not record the store size after vacuum");
@@ -467,6 +473,18 @@ mod tests {
         assert!(!auto_vacuum_due(regrown, Some(mb(33.2))));
         // Real growth past the size it left: vacuumed again.
         assert!(auto_vacuum_due(regrown + 1, Some(mb(33.2))));
+    }
+
+    #[test]
+    fn a_recorded_size_over_the_live_size_is_not_trusted() {
+        let mb = |x: f64| (x * 1e6) as u64;
+        // A hand-edited u64::MAX would otherwise turn auto-vacuum off for
+        // good: the threshold rule applies, as with nothing recorded.
+        assert!(auto_vacuum_due(mb(34.1), Some(u64::MAX)));
+        assert!(auto_vacuum_due(mb(34.1), Some(mb(34.1) + 1)));
+        assert!(!auto_vacuum_due(mb(30.0), Some(u64::MAX)));
+        // Equal to the live size is a store that did not grow: trusted.
+        assert!(!auto_vacuum_due(mb(34.1), Some(mb(34.1))));
     }
 
     #[test]

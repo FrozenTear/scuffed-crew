@@ -429,14 +429,24 @@ async fn a_shutdown_on_the_rank_screen_stores_the_held_screen() {
     // game close, nothing settled yet
     tick(&mut feed, Some(Some(full(40))), Some("g1"), &store, None).await;
     tick(&mut feed, Some(Some(full(40))), Some("g1"), &store, None).await;
-    assert_eq!(
-        store.get_session_snapshots("g1").await.unwrap()[0].rank_update,
-        None
+    let before = store.get_session_snapshots("g1").await.unwrap();
+    assert_eq!(before[0].rank_update, None);
+    // No upload runs in this test, so a new row is unsynced whether or not
+    // the rank write queues it. Mark the game uploaded first: then
+    // `!synced` below shows the stored rank queued it again for the next
+    // upload. The upload itself is not run here.
+    store
+        .mark_synced(&crate::storage::SyncClaim::capture(&before))
+        .await
+        .unwrap();
+    assert!(
+        store.get_session_snapshots("g1").await.unwrap()[0].synced,
+        "uploaded before the shutdown"
     );
     assert!(finish_on_shutdown(&mut feed, &store, None).await);
     let rows = store.get_session_snapshots("g1").await.unwrap();
     assert_eq!(rows[0].rank_update, Some(full(40)));
-    assert!(!rows[0].synced, "queued for the next upload");
+    assert!(!rows[0].synced, "the stored rank queues the next upload");
     assert!(
         feed.held.is_none(),
         "nothing left for the drop to throw away"
@@ -486,6 +496,15 @@ fn the_caller_builds_the_feed_and_settles_it_after_the_loop() {
     assert!(settle < flush && flush < pregame && pregame < close);
     // bounded by the shutdown deadline
     assert!(lifecycle[flush..pregame].contains("tokio::time::timeout(within,flush)"));
+    // a stored rank marks the snapshot dirty and then forces the write: the
+    // loop's own forced shutdown write has run already, and the marking
+    // alone writes only with a GUI running and the debounce passed
+    let wrote = at("flush_snapshot_if_dirty(&ctx.store,&ctx.data_dir).await;");
+    let marked = lifecycle[flush..]
+        .find("refresh_snapshot(&ctx.store,&ctx.data_dir).await;")
+        .map(|i| flush + i)
+        .expect("the snapshot is marked after the rank is stored");
+    assert!(flush < marked && marked < wrote && wrote < pregame);
 }
 
 // ---- the live feed and the event loop ----

@@ -155,8 +155,11 @@ struct Frames {
 pub(crate) const BANS_KEPT_MIN: usize = 3;
 
 /// The most earlier stable frames, and the most turned-down frames, held
-/// for the fallback (the newest), so at most this many of each, about 11 to
-/// 15 MB a frame at 1440p, until the game is first recorded.
+/// for the fallback (the newest), so at most this many of each (2 + 2),
+/// about 11 to 15 MB a frame at 1440p. They are released at the read, or
+/// when the next game folder opens (its first save or stage), or at exit:
+/// a game that is not read (no fit, or never recorded) keeps them until one
+/// of the other two.
 pub(crate) const BAN_FALLBACK_FRAMES: usize = 2;
 
 /// Keep `frame` as the newest of `held`, dropping the oldest past
@@ -169,8 +172,15 @@ fn hold_newest(held: &mut Vec<Arc<DynamicImage>>, frame: Arc<DynamicImage>) {
 }
 
 impl Frames {
+    /// A frame the reader would read: the ban results fallback lists count
+    /// too, so a game with only earlier or turned-down ban results frames is
+    /// read rather than recorded without frames.
     fn any(&self) -> bool {
-        self.vote.is_some() || self.select.is_some() || self.results.is_some()
+        self.vote.is_some()
+            || self.select.is_some()
+            || self.results.is_some()
+            || !self.earlier.is_empty()
+            || !self.rejected.is_empty()
     }
 
     /// The hero select's first frame, when it is to be read for the team
