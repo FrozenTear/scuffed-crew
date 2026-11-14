@@ -5,7 +5,9 @@
 /// Files and folders the tracker writes in its saved-games folder (`stats.surrealkv.pre-*`:
 /// store backups, `training_crops`: the opt-in training crop outbox and its
 /// consent, owner and status files). Anything else stays, also in
-/// `~/.config`, `~/Documents` or `~/Games`.
+/// `~/.config`, `~/Documents` or `~/Games`. Never add `templates` or
+/// `templates-kept`: reader packs and the folders sync kept aside stay, and
+/// the member deletes `templates-kept` by hand (both lists skip them).
 pub(crate) fn is_tracker_data_name(name: &str) -> bool {
     matches!(
         name,

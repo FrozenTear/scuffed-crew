@@ -22,6 +22,8 @@ folder on the machine that made them, and `PACKS_DIR` on the server.
 | `words-v1.tar` | result words | 90 KiB |
 | `names-v1.tar` | optional. Single-letter templates only, no member data. Version `full-20261019`. The name reader uses it for the player's own row and falls back to Tesseract until it has loaded | 1.9 MB |
 | `bans-picks-v1.tar` | optional. Hero icons for the bans and picks reader (cv-v1): one 100 by 96 `<hero>.png` for each of the 54 heroes, plus an optional `no-preference.png`. Game art, built from real frames, so it is private like the others | live |
+| `rank-v1.tar` | optional. One `templates.json`: the glyph and word templates of the rank screen reader (rank-v1), cut from real rank screens | 1.4 MB |
+| `queue-title-v1.tar` | optional. One `templates.json`: the title templates of the queue title reader, cut from real pre-game screens | 80 KiB |
 
 Which folder each one lands in, what may be inside, and which reader uses it
 are in [Reference: inside a pack](#reference-inside-a-pack).
@@ -64,13 +66,16 @@ Which names each tracker asks for:
 | 0.5.0-alpha.2 to 0.5.0-alpha.6 | `heroes-v1.tar` only |
 | 0.5.0-alpha.7 to 0.5.0-alpha.12 | six: `heroes-v1.tar` first, then `heroes-v2.tar`, `heroes-v2-1080.tar`, `bans-v1.tar`, `maps-v1.tar`, `words-v1.tar` |
 | 0.5.0-rc.1 to 0.5.0-rc.9, 0.5.0, and 0.6.0-alpha.1 to 0.6.0-alpha.1.4 | seven: the six, then `names-v1.tar` (optional) |
-| 0.6.0-alpha.2 to 0.6.0-alpha.2.3, and main | eight: the seven, then `bans-picks-v1.tar` (optional) |
+| 0.6.0-alpha.2 to 0.6.0-alpha.3, and main | eight: the seven, then `bans-picks-v1.tar` (optional) |
+| the first release after 0.6.0-alpha.3, and later | ten: the eight, then `rank-v1.tar` (optional) and `queue-title-v1.tar` (optional) |
 
 No tracker pins a pack `version`: each one takes the `version` the list
 gives. `heroes-v1.tar` is the only pack every release needs (it is the one
 marked `required` in `PACKS`): without it every released tracker reports
 "The reader pack did not match the site" for the hero pack. All eight names
-are asked for by a released tracker, so all eight must stay. A name may
+are asked for by a released tracker, so all eight must stay. `rank-v1.tar`
+and `queue-title-v1.tar` join them once a release that asks for them ships;
+until then they may be listed, and older trackers ignore them. A name may
 leave the list only when no tracker release that members still run asks for
 it. The publish script warns when the list has no `heroes-v1.tar`.
 
@@ -322,7 +327,7 @@ repeated. Without a token the script says `Authenticated check: SKIPPED`.
 
 The pack routes allow 16 requests in a burst per client IP, then one every
 10 seconds, and answer 429 with the seconds to wait. One check is seven
-requests for six packs (a tracker with `names-v1.tar` and `bans-picks-v1.tar` asks for eight, so nine requests). A second check within a minute is not a failure: the
+requests for six packs (a tracker with `names-v1.tar` and `bans-picks-v1.tar` asks for eight, so nine requests; one that also asks for `rank-v1.tar` and `queue-title-v1.tar` asks for ten, so eleven requests). A second check within a minute is not a failure: the
 script waits as long as each 429 asks (up to six times per request) and goes
 on, so it is slower, about ten seconds per pack.
 
@@ -419,7 +424,7 @@ depends on the tracker release.
 **Released trackers, 0.5.0-alpha.2 to alpha.6**, know one pack name:
 
 - They read the list and look for `heroes-v1.tar`. Every other entry is
-  ignored. The seven newer packs do nothing for these members until they
+  ignored. The newer packs do nothing for these members until they
   install a tracker that names them.
 - `heroes-v1.tar` is downloaded when its folder is missing, or when the
   listed `version` differs from the one recorded in
@@ -427,8 +432,8 @@ depends on the tracker release.
 - A list with entries but without `heroes-v1.tar` is reported as "The reader
   pack did not match the site". The hero folder they have is kept.
 
-**The tracker on main** knows all eight (see the table above for which
-names each release asks for):
+**The tracker on main** knows all eight, and the tracker on wip/0.6 all ten
+(see the table above for which names each release asks for):
 
 - **Daemon start** syncs `heroes-v1.tar` only (the list and one file) and
   then starts capture. The other packs are synced in the background
@@ -436,11 +441,12 @@ names each release asks for):
 - **While the daemon runs**, that background job keeps trying until every
   pack is in place or not on the list. See
   [The daemon's background job](#the-daemons-background-job).
-- **Setup guide** ("Download reader pack") syncs all eight, once per click.
+- **Setup guide** ("Download reader pack") syncs all of them, once per click.
 - **`--vacuum`** does the start sync (the list and `heroes-v1.tar`), then
   compacts and exits. It never starts the background job, so nothing is
   tried again, and a pack sync that failed in that run is not logged.
-- A pack is downloaded when its folder is missing, or when the listed
+- A pack is downloaded when its folder is missing (for `rank-v1.tar` and
+  `queue-title-v1.tar`, or `templates.json` missing), or when the listed
   `version` differs from the one recorded in
   `<data_dir>/templates/pack-versions.json`. Otherwise it is left alone.
 - A name the tracker does not know is ignored. A name it knows that the
@@ -469,14 +475,17 @@ More detail on a sync, for the tracker on main:
   current is still reported as current. The setup guide tries again on the
   next click. The daemon's background job tries again by itself.
 - A first install of all eight is nine requests (the list and eight files),
-  inside the burst of 16 (`PACK_IP_BURST` in `crates/types`).
+  and of all ten eleven requests, inside the burst of 16 (`PACK_IP_BURST` in
+  `crates/types`).
 - An install that is not linked to a site account has no sync token and runs
   no pack sync at all, so `bans-picks-v1.tar` never arrives. The bans and
   picks reader then reads nothing, the game is still recorded, and the app
   shows a warning that says to link a site account in Settings.
 - Staging (`.<pack>-next-*`) and backup (`.<pack>-prev-*`) folders left under
   `templates/` by a killed sync are removed by the next sync once they are
-  an hour old.
+  an hour old. A `rank-v1` or `queue-title-v1` staging folder that holds
+  files and is not exactly the recorded official `templates.json` (an old
+  tree a keep could not move out) is moved to `templates-kept/` instead.
 
 ### The daemon's background job
 
@@ -506,7 +515,8 @@ the same data folder exits at the pid check before it sends anything.
   job takes no more than comes back and other trackers behind the same
   address get theirs. Five missing packs then take under a minute.
 - **A pack the tracker refuses for a fixed reason** (size, sha256, layout,
-  too large) is downloaded once. The job logs one warning with the pack's
+  too large, does not load, or a changed folder `templates-kept/` cannot
+  take) is downloaded once. The job logs one warning with the pack's
   name and does not fetch it again until the list shows another `version`,
   `sha256` or `size` for it, or the tracker is restarted. It reads the list
   every 30 minutes to notice.
@@ -617,6 +627,8 @@ inside `PACKS_DIR`.
 | `maps-v1.tar` | `templates/maps-v1/` | `atlas.json`, `g<4 hex digits>.png` | new reader, map and mode from the Tab banner |
 | `words-v1.tar` | `templates/words-v1/` | `<word_id>.png`, `<name>.json` | new reader, match result from result frames, the result word on the accolade and rank screens, and the end title on poll ticks and Tab frames when the pack has end-title templates (hand-installed `templates/result/` is the fallback) |
 | `names-v1.tar` | `templates/names-v1/` | `glyphs.png`, `glyphs.txt`, `marks.png`, `marks.txt`, `compose.txt`, `whiten.f32`. The inner `manifest.json` is kept in the folder too | name reader. Optional. Single-letter templates only, no member data. Loaded at startup, and reloaded after each install by the daemon's pack sync. Until a load finishes, names fall back to Tesseract |
+| `rank-v1.tar` | `templates/rank-v1/` | `templates.json` only | rank screen reader (rank-v1). Optional, and off unless `STAT_TRACKER_RANK_RECOGNIZER` is on. Loaded once at daemon start: a pack that lands later is used from the next start. Banner classes are named as the screen writes them (`COMPETITIVE: 6V6 OPEN QUEUE`, `COMPETITIVE: ROLE QUEUE`) |
+| `queue-title-v1.tar` | `templates/queue-title-v1/` | `templates.json` only | queue title reader. Optional, and off unless `STAT_TRACKER_QUEUE_TITLE_RECOGNIZER` is on. Loaded once at daemon start, like `rank-v1.tar`. Classes `OPEN QUEUE` and `ROLE QUEUE` |
 
 `<hero>` is a file stem from `HERO_NAMES` in `crates/types/src/heroes.rs`
 (`ana`, `wrecking-ball`). For the v2 hero packs and `bans-v1.tar` a stem is
@@ -627,7 +639,48 @@ any one top-level file, or one file in `special/`.
 
 Each pack is checked on its own. A file outside its pack's layout, a bad
 sha256, or a failed download refuses that pack only. The other packs still
-install, and the refused pack's folder is left as it was.
+install, and the refused pack's folder is left as it was. A `rank-v1.tar` or
+`queue-title-v1.tar` whose `templates.json` its reader does not load is
+refused the same way, before the swap.
+
+After each `rank-v1.tar` or `queue-title-v1.tar` install the tracker
+records the sha256 of the installed `templates.json` in
+`templates/pack-file-hashes.json` (`pack-versions.json` keeps its format).
+When a new version is about to replace one of those folders, the folder is
+kept unless it is exactly one regular file named `templates.json` whose
+sha256 is the recorded one. A missing record never matches, so a folder
+placed by hand, one installed before this record, one whose
+`templates.json` was edited, and one with an added file are all kept once.
+Kept means moved whole, every file in it, to
+`templates-kept/<pack folder>-<UTC YYYYMMDDTHHMMSSZ>-<pid>/` under the data
+folder (for example `templates-kept/rank-v1-20261114T065156Z-4242/`),
+beside `templates/`, so the stale folder sweep never removes it. When that
+name is taken, `-2`, `-3` and so on are added. The path is logged as soon as
+the folder is moved. Where the kernel allows an atomic exchange, the new
+pack goes in first and the old tree is moved out after, so the live folder
+is never missing. Should that move fail, the old tree goes beside the live
+folder under `templates/` with the same name (no leading dot, so the stale
+sweep skips it). Should that fail too, the two folders are exchanged back:
+the old folder is live again, the pack is refused as not kept and no
+version is recorded. If that exchange back fails as well, the old tree goes
+beside the live folder under a kept name no folder has yet; only if that
+fails too does it stay at its `.<pack folder>-next-*` staging path, with a
+warning that names it. The new pack is live then, and the hash of its
+`templates.json` is recorded, so its next download keeps no copy of it. The
+stale sweep never removes an old tree left at a staging path: once it is an
+hour old, a later sync moves it to `templates-kept/` (or beside the live
+folder) and logs where. Without the exchange, the old folder is moved first
+and put back if the swap fails. An unchanged official folder is replaced and
+nothing is kept. If `templates-kept/` cannot be made, the pack is refused
+for a fixed reason and the folder stays as it was. Only these two packs
+keep; every other pack replaces its folder as before.
+
+Nothing removes `templates-kept/`: not the tracker, not the app, and not
+`uninstall.sh --purge` (it deletes only the names the tracker writes, and
+neither `templates` nor `templates-kept` is one). Delete it by hand when you
+no longer need what is in it. At each daemon start, when it holds folders
+or a folder was kept beside a live pack folder under `templates/`, the
+tracker logs its path once per start, with both counts.
 
 If the list is empty, the tracker does nothing. If the list has entries but
 none is `heroes-v1.tar`, every tracker reports "The reader pack did not match

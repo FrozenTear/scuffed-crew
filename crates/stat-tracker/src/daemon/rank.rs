@@ -408,12 +408,49 @@ async fn apply(
             // pending hint: a screen with no banner clears that hint, as it
             // no longer names the next game's queue. A second settle of the
             // hint's own game leaves it (`set_next_mode_hint` checks).
-            let hint = s.rank.next_mode_hint.as_ref().map(|h| h.value.as_str());
+            let hint = s.rank.next_mode_hint.as_ref().map(|h| queue_hint(&h.value));
             dump.set_next_mode_hint(hint, &s.session, s.at);
         }
         stored |= store_rank(feed, store, s, RANK_STORE_TRIES).await;
     }
     stored
+}
+
+/// The banner word spelled as the queue title pack spells the queue. The
+/// rank-v1 pack names its banner classes as the screen writes them
+/// (`COMPETITIVE: 6V6 OPEN QUEUE`, `COMPETITIVE: ROLE QUEUE`), and the next
+/// game's pre-game title reads `OPEN QUEUE` or `ROLE QUEUE`. So a leading
+/// `COMPETITIVE` word is dropped, then a team size word right after it
+/// (`5V5` or `6V6`), before the hint is handed on
+/// ([`super::queue_title::hint_agrees`], which stays strict). Words are
+/// split as [`stat_tracker::model::queue_key`] splits them, so a colon,
+/// dash or underscore between them works the same. What is left is the rest
+/// of the banner from its first word, as read. With no leading
+/// `COMPETITIVE` word, or nothing after the dropped words, the banner is
+/// kept as read, trimmed. The upload and the game record still keep the
+/// banner word as read.
+pub(crate) fn queue_hint(banner: &str) -> &str {
+    let text = banner.trim();
+    let mut words = text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(|word| (word.as_ptr() as usize - text.as_ptr() as usize, word));
+    if !words
+        .next()
+        .is_some_and(|(_, word)| word.eq_ignore_ascii_case("COMPETITIVE"))
+    {
+        return text;
+    }
+    let mut next = words.next();
+    if next.is_some_and(|(_, word)| {
+        word.eq_ignore_ascii_case("5V5") || word.eq_ignore_ascii_case("6V6")
+    }) {
+        next = words.next();
+    }
+    match next {
+        Some((at, _)) => &text[at..],
+        None => text,
+    }
 }
 
 async fn store_rank(feed: &mut RankFeed, store: &impl RankStore, s: Settled, tries: u8) -> bool {
