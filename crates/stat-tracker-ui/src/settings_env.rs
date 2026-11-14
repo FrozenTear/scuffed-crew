@@ -161,9 +161,10 @@ pub(crate) struct RankSwitch {
     pub queue_env: bool,
 }
 
-/// What a rank pack warning was worked out from: the readers on and each
-/// pack file's time and size.
-pub(crate) type RankPackKey = (bool, bool, PackStamp, PackStamp);
+/// What a rank pack warning was worked out from: the readers on, whether
+/// the rank variable decides the rank reader, and each pack file's time
+/// and size.
+pub(crate) type RankPackKey = (bool, bool, bool, PackStamp, PackStamp);
 
 /// A pack file's time and size, `None` when it is not there.
 pub(crate) type PackStamp = Option<(Option<std::time::SystemTime>, u64)>;
@@ -284,6 +285,7 @@ impl TrackerApp {
         let key = (
             switch.rank_on,
             switch.queue_on,
+            switch.rank_env,
             stamp(rank::TEMPLATE_DIR, rank::PACK_FILE),
             stamp(queue_title::TEMPLATE_DIR, queue_title::PACK_FILE),
         );
@@ -293,7 +295,12 @@ impl TrackerApp {
         {
             return warning.clone();
         }
-        let warning = rank::pack_warning(&self.data_dir, switch.rank_on, switch.queue_on);
+        let warning = rank::pack_warning(
+            &self.data_dir,
+            switch.rank_on,
+            switch.queue_on,
+            switch.rank_env,
+        );
         *memo = Some((key, warning.clone()));
         warning
     }
@@ -548,6 +555,26 @@ mod tests {
             "{split}"
         );
         assert!(!split.contains("Read my rank is on"), "{split}");
+        // the rank variable on with the switch saved off: the switch is
+        // locked, so the warning points at the variable, not the switch
+        app.saved_config.rank_reader = false;
+        app.outside_env = Some(OutsideEnv {
+            vars: vec![(RANK_ENV, "on".to_string())],
+            ..OutsideEnv::default()
+        });
+        let locked = app.rank_switch();
+        assert!(locked.rank_on && locked.rank_env && !locked.queue_on);
+        let env_on = app.rank_pack_warning().expect("the rank reader is on");
+        assert!(
+            env_on.starts_with("The rank screen reader is on, but "),
+            "{env_on}"
+        );
+        assert!(
+            env_on.ends_with("or set STAT_TRACKER_RANK_RECOGNIZER to off."),
+            "{env_on}"
+        );
+        assert!(!env_on.contains("turn off Read my rank"), "{env_on}");
+        app.saved_config.rank_reader = true;
         app.outside_env = Some(OutsideEnv::default());
         // a broken queue title pack is named as not loading
         let queue_dir = dir.path().join(queue_title::TEMPLATE_DIR);
