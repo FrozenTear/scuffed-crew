@@ -3,7 +3,7 @@ use serde::Deserialize;
 
 use scuffed_api_client::ApiClient;
 
-use super::article_author::{author_label, fetch_author_names};
+use super::article_author::{author_byline, fetch_author_names};
 use crate::components::is_http_status;
 use crate::markdown::render_markdown;
 use crate::routes::Route;
@@ -206,9 +206,7 @@ pub fn BlogPost(slug: String) -> Element {
                                             .map(|d| d.chars().take(10).collect::<String>())
                                             .unwrap_or_else(|| "Draft".to_string())}
                                     }
-                                    if let Some(names) = author_names.read().as_ref() {
-                                        span { {format!("by {}", author_label(Some(names), &a.author_member_id))} }
-                                    }
+                                    {author_byline(author_names.read().as_ref(), &a.author_member_id)}
                                 }
                                 div {
                                     class: "blog-post-content",

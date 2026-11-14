@@ -3,9 +3,7 @@ use serde::Deserialize;
 
 use scuffed_api_client::ApiClient;
 
-use std::collections::HashMap;
-
-use super::article_author::{author_label, fetch_author_names};
+use super::article_author::{AuthorNames, author_byline, fetch_author_names};
 use crate::components::fetch_error;
 use crate::routes::Route;
 use crate::util::{FetchClass, classify_fetch};
@@ -157,9 +155,9 @@ pub fn Blog() -> Element {
     }
 }
 
-/// `names` is `None` while the author lookup is in flight; the byline is left
-/// out until then so it does not flash the fallback label.
-fn render_blog_card(a: &BlogArticle, names: Option<&HashMap<String, String>>) -> Element {
+/// The byline stays out until the lookup for this card's author has finished,
+/// so it never flashes the fallback label.
+fn render_blog_card(a: &BlogArticle, names: Option<&AuthorNames>) -> Element {
     let date: String = a
         .published_at
         .as_deref()
@@ -182,9 +180,7 @@ fn render_blog_card(a: &BlogArticle, names: Option<&HashMap<String, String>>) ->
             div { class: "blog-card-body",
                 div { class: "blog-card-meta",
                     time { "{date}" }
-                    if let Some(names) = names {
-                        span { {format!("by {}", author_label(Some(names), &a.author_member_id))} }
-                    }
+                    {author_byline(names, &a.author_member_id)}
                 }
                 h2 { class: "blog-card-title", "{a.title}" }
                 if let Some(ref summary) = a.summary {

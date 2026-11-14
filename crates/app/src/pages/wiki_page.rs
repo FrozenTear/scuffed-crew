@@ -107,8 +107,6 @@ const PAGE_CSS: &str = r#"
         border: 1px solid var(--border);
         border-radius: 10px;
         padding: 1.5rem;
-    }
-    .wiki-content {
         color: var(--text-2);
         font-size: 0.85rem;
         line-height: 1.7;
