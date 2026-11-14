@@ -910,6 +910,70 @@ async fn rejects_oversize_body_and_uncompressed_bomb() {
     assert_eq!(zip_count(&h.reports_dir), 0);
 }
 
+/// A valid bundle whose stored (uncompressed) log.txt is `log_bytes` long,
+/// so the zip body is a little over `log_bytes`.
+fn bundle_with_big_log(log_bytes: usize) -> Vec<u8> {
+    let png = tiny_png();
+    let log = vec![b'a'; log_bytes];
+    let crop = json!({
+        "path": "crops/scoreboard.png",
+        "sha256": sha256_hex(&png),
+        "bytes": png.len(),
+        "role": "crop",
+        "screen_class": "scoreboard"
+    });
+    let manifest = manifest_shell(false, false, vec![log_file_entry(&log), crop]);
+    zip_manifest(
+        manifest,
+        vec![("log.txt", log), ("crops/scoreboard.png", png)],
+    )
+    .bytes
+}
+
+/// POST /api/stat-reports has its own 10 MiB body limit on top of the 6 MiB
+/// router-wide one. A body between the two is stored. A body over 10 MiB is
+/// refused with 413 and nothing is stored.
+#[tokio::test]
+async fn upload_body_limit_is_ten_mib_not_six() {
+    const MIB: usize = 1024 * 1024;
+    let h = harness().await;
+
+    let seven = bundle_with_big_log(7 * MIB);
+    assert!(
+        seven.len() > 6 * MIB,
+        "fixture must be over the 6 MiB router limit"
+    );
+    assert!(
+        (seven.len() as u64) < MAX_BUNDLE_BYTES,
+        "fixture must be under the 10 MiB route limit"
+    );
+    let (status, created) = send(
+        &h.app,
+        Method::POST,
+        "/api/stat-reports",
+        Some(MEMBER_TOKEN),
+        Some(seven),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "7 MiB bundle: {created}");
+    let id = created["id"].as_str().unwrap();
+    assert!(h.reports_dir.join(format!("{id}.zip")).exists());
+    assert_eq!(zip_count(&h.reports_dir), 1);
+
+    let eleven = bundle_with_big_log(10 * MIB + MIB / 2);
+    assert!(eleven.len() as u64 > MAX_BUNDLE_BYTES);
+    let (status, _) = send(
+        &h.app,
+        Method::POST,
+        "/api/stat-reports",
+        Some(MEMBER_TOKEN),
+        Some(eleven),
+    )
+    .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(zip_count(&h.reports_dir), 1, "nothing stored over 10 MiB");
+}
+
 #[tokio::test]
 async fn rejects_duplicate_json_keys() {
     let h = harness().await;
