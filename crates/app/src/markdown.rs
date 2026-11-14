@@ -217,7 +217,7 @@ mod tests {
     #[test]
     fn encoded_and_mixed_case_schemes_are_neutralised() {
         for src in [
-            "[x](&#106;avascript:alert(1))",
+            concat!("[x](&#", "106;avascript:alert(1))"),
             "[x](&#x6A;avascript:alert(1))",
             "[x](javascript&colon;alert(1))",
             "[x](%6Aavascript:alert(1))",
@@ -268,7 +268,7 @@ mod tests {
             ("```x\"onclick=\"alert(1)\nx\n```\n", None),
             ("```a.b\nx\n```\n", None),
             ("```a&#9;evil\nx\n```\n", Some("language-a")),
-            ("```ru&#115;t\nx\n```\n", Some("language-rust")),
+            (concat!("```ru&#", "115;t\nx\n```\n"), Some("language-rust")),
             ("```<script>\nx\n```\n", None),
             ("```\u{a0}nbsp\nx\n```\n", None),
         ];
