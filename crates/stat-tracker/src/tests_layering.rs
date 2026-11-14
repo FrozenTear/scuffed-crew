@@ -8,7 +8,7 @@
 //!          /        |          |           \
 //!      game      capture     store       vision
 //!   boundary,    capture/*   storage,    ocr, detect, shadow, names,
-//!   capture_gate,            sync        packs, mapcrops, report::blank,
+//!   capture_gate,            sync        packs, pack_cutter, mapcrops, report::blank,
 //!   input,                               ocr_switch, frame
 //!   game_running
 //!          \        |          |           /
@@ -18,7 +18,7 @@
 //!
 //! The four middle crates do not use each other. The test reads the `src/`
 //! of every crate the split has made so far ([`PHYSICAL`]: the lib only,
-//! not `main.rs`, `daemon/`, `main_tests/` or `ocr_bench.rs`), follows every
+//! not `main.rs`, `bin/`, `daemon/`, `main_tests/` or `ocr_bench.rs`), follows every
 //! `crate::`, `super::` and `self::` path (and every path through an
 //! extracted crate's name, such as `stat_tracker_core::`) in `use` trees
 //! and in code, and fails on any path from a module to a crate it may not
@@ -96,6 +96,7 @@ const CRATE_OF: &[(&str, Crate)] = &[
     ("names", Crate::Vision),
     ("ocr", Crate::Vision),
     ("ocr_switch", Crate::Vision),
+    ("pack_cutter", Crate::Vision),
     ("packs", Crate::Vision),
     ("report::blank", Crate::Vision),
     ("shadow", Crate::Vision),
@@ -129,7 +130,6 @@ fn crate_of(module: &[String]) -> Option<Crate> {
         .max_by_key(|(prefix, _)| prefix.len())
         .map(|(_, krate)| *krate)
 }
-
 // ------------------------------------------------------------------ lexer
 
 fn is_ident(c: char) -> bool {
@@ -1228,12 +1228,12 @@ fn every_module_has_a_crate() {
                         .to_string_lossy()
                         .replace('\\', "/")
                 })
-                // the bin and its tests
                 .filter(|n| {
                     dir != "stat-tracker"
                         || (n != "main.rs"
                             && n != "ocr_bench.rs"
                             && !n.starts_with("daemon/")
+                            && !n.starts_with("bin/")
                             && !n.starts_with("main_tests/"))
                 })
                 .map(|n| format!("{dir}/src/{n}")),

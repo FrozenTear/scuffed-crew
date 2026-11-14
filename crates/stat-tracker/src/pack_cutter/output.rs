@@ -105,7 +105,7 @@ pub fn install_pack(out: &Path, name: &str, version: &str, bytes: &[u8]) -> Resu
 
 pub fn private_dir(path: &Path) -> Result<(), String> {
     std::fs::create_dir_all(path).map_err(|e| format!("creating {}: {e}", path.display()))?;
-    set_mode(path, 0o700)
+    chmod_owner(path, 0o700)
 }
 
 fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -130,7 +130,7 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
             file.sync_all()
                 .map_err(|e| format!("writing {}: {e}", tmp.display()))?;
         }
-        set_mode(&tmp, 0o600)?;
+        chmod_owner(&tmp, 0o600)?;
         std::fs::rename(&tmp, path).map_err(|e| format!("writing {}: {e}", path.display()))?;
         Ok(())
     })();
@@ -165,7 +165,7 @@ fn write_list(path: &Path, entries: &[ListEntry]) -> Result<(), String> {
     write
 }
 
-fn set_mode(path: &Path, mode: u32) -> Result<(), String> {
+fn chmod_owner(path: &Path, mode: u32) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
