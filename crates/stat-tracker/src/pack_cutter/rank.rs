@@ -47,7 +47,8 @@ pub fn cut(args: &CutArgs, out: &Path) -> Result<String, String> {
     let dest = super::output::prepare_templates(out, args.base.as_deref(), args.force)?;
     let bytes = serde_json::to_vec(&set).map_err(|e| e.to_string())?;
     super::output::write_private(&dest, &bytes)?;
-    Ok(util::summary(
+    let mut text = loaded.ignored;
+    text.push_str(&util::summary(
         "rank",
         out,
         loaded.rows,
@@ -55,7 +56,8 @@ pub fn cut(args: &CutArgs, out: &Path) -> Result<String, String> {
         loaded.unreadable,
         loaded.skipped,
         &classes,
-    ))
+    ));
+    Ok(text)
 }
 
 pub fn eval(args: &EvalArgs) -> Result<EvalDone, String> {
@@ -123,7 +125,7 @@ pub fn eval(args: &EvalArgs) -> Result<EvalDone, String> {
         items: bag.gate,
     });
     let folds = class_folds_from(&day_learners);
-    Ok(report::finish(&report::Inputs {
+    let mut done = report::finish(&report::Inputs {
         set_name: &args.set_name,
         frames: loaded.rows,
         scored: loaded.samples.len(),
@@ -135,7 +137,9 @@ pub fn eval(args: &EvalArgs) -> Result<EvalDone, String> {
         changed: &changed,
         class_folds: &folds,
         candidate_sha: &sha,
-    }))
+    });
+    done.report.insert_str(0, &loaded.ignored);
+    Ok(done)
 }
 
 fn record(
@@ -725,14 +729,15 @@ fn load(
     role_labels: Option<&Path>,
 ) -> Result<Loaded<Sample>, String> {
     let frames = frames.ok_or("missing --frames")?;
-    let values = read_objects(labels, RANK_KEYS)?;
+    let (values, mut ignored) = read_objects(labels, RANK_KEYS)?;
     let mut rows: Vec<Row> = values
         .iter()
         .map(|value| serde_json::from_value(fill_label_nulls(value)))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("{}: {e}", labels.display()))?;
     if let Some(path) = role_labels {
-        let role_values = read_objects(path, &["game", "role"])?;
+        let (role_values, role_ignored) = read_objects(path, &["game", "role"])?;
+        ignored.push_str(&role_ignored);
         let roles: Vec<RoleRow> = role_values
             .iter()
             .map(|value| serde_json::from_value(value.clone()))
@@ -782,6 +787,7 @@ fn load(
         unreadable,
         skipped,
         samples,
+        ignored,
     })
 }
 
@@ -800,27 +806,9 @@ fn fill_label_nulls(value: &Value) -> Value {
     value
 }
 
-fn read_objects(path: &Path, keys: &[&str]) -> Result<Vec<Value>, String> {
-    let text =
-        std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
-    let mut out = Vec::new();
-    for (n, line) in text.lines().enumerate() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let value: Value =
-            serde_json::from_str(line).map_err(|e| format!("{}:{}: {e}", path.display(), n + 1))?;
-        let obj = value
-            .as_object()
-            .ok_or_else(|| format!("{}:{}: expected an object", path.display(), n + 1))?;
-        for key in obj.keys() {
-            if !keys.contains(&key.as_str()) {
-                return Err(format!("{}:{}: unknown key {key:?}", path.display(), n + 1));
-            }
-        }
-        out.push(value);
-    }
-    Ok(out)
+fn read_objects(path: &Path, keys: &[&str]) -> Result<(Vec<Value>, String), String> {
+    let (rows, ignored) = util::read_jsonl(path, keys)?;
+    Ok((rows.into_iter().map(Value::Object).collect(), ignored))
 }
 
 fn check_words(labels: &Labels) -> Result<(), String> {

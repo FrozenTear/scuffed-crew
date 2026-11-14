@@ -436,7 +436,7 @@ fn cut_refuses_spaced_titles_unknown_keys_and_duplicate_roles() {
         &bad,
         &format!(
             "{}\n",
-            serde_json::json!({"game": "20260101-game", "file": "a.png", "readable": true, "hero_sr_typo": 1})
+            serde_json::json!({"game": "20260101-game", "file": "a.png", "readable": "yes"})
         ),
     );
     let got = run(&[
@@ -451,7 +451,26 @@ fn cut_refuses_spaced_titles_unknown_keys_and_duplicate_roles() {
         rank.dir.path().join("bad-out").to_str().unwrap(),
     ]);
     assert_eq!(got.code, 2, "{}", got.stderr);
-    assert!(got.stderr.contains("unknown key"), "{}", got.stderr);
+    assert!(got.stderr.contains("invalid type"), "{}", got.stderr);
+
+    let dup = rank.dir.path().join("dup-key.jsonl");
+    write(
+        &dup,
+        "{\"game\":\"20260101-game\",\"game\":\"20260101-game\",\"file\":\"a.png\",\"readable\":true}\n",
+    );
+    let got = run(&[
+        "cut",
+        "--kind",
+        "rank",
+        "--labels",
+        dup.to_str().unwrap(),
+        "--frames",
+        rank.frames.to_str().unwrap(),
+        "--out",
+        rank.dir.path().join("dup-key-out").to_str().unwrap(),
+    ]);
+    assert_eq!(got.code, 2, "{}", got.stderr);
+    assert!(got.stderr.contains("duplicate key"), "{}", got.stderr);
 
     let roles = rank.dir.path().join("dup-roles.jsonl");
     write(
@@ -473,6 +492,126 @@ fn cut_refuses_spaced_titles_unknown_keys_and_duplicate_roles() {
     ]);
     assert_eq!(got.code, 2, "{}", got.stderr);
     assert!(got.stderr.contains("twice"), "{}", got.stderr);
+}
+
+#[test]
+fn extra_label_keys_are_ignored() {
+    let rank = write_rank(&["20260101"], (2560, 1440), false);
+    let labels = rank.dir.path().join("extra.jsonl");
+    write(
+        &labels,
+        &format!(
+            "{}\n",
+            serde_json::json!({
+                "game": "20260101-game",
+                "file": "a.png",
+                "readable": true,
+                "index": 1,
+                "screen": "rank",
+                "hero": "Ana",
+                "notes": "ok",
+                "labeler": "soot",
+                "placement_progress": false,
+            })
+        ),
+    );
+    let roles = rank.dir.path().join("extra-roles.jsonl");
+    write(
+        &roles,
+        &format!(
+            "{}\n",
+            serde_json::json!({
+                "game": "20260101-game",
+                "role": "Open",
+                "index": 1,
+                "file": "a.png",
+                "evidence": "icon",
+                "labeler": "soot",
+            })
+        ),
+    );
+    let out = rank.dir.path().join("extra-out");
+    let got = run(&[
+        "cut",
+        "--kind",
+        "rank",
+        "--labels",
+        labels.to_str().unwrap(),
+        "--frames",
+        rank.frames.to_str().unwrap(),
+        "--role-labels",
+        roles.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(got.code, 0, "{}", got.stderr);
+    assert!(
+        got.stdout.contains(&format!(
+            "ignored keys in {}: hero, index, labeler, notes, placement_progress, screen",
+            labels.display()
+        )),
+        "{}",
+        got.stdout
+    );
+    assert!(
+        got.stdout.contains(&format!(
+            "ignored keys in {}: evidence, file, index, labeler",
+            roles.display()
+        )),
+        "{}",
+        got.stdout
+    );
+    assert!(RankSet::load_dir(&out).is_ok());
+
+    let queue = write_queue(&[("s1/a.png", 0, "ALPHA QUEUE")], false);
+    let qlabels = queue.dir.path().join("extra.jsonl");
+    write(
+        &qlabels,
+        &format!(
+            "{}\n",
+            serde_json::json!({
+                "path": "s1/a.png",
+                "screen": "heroban",
+                "frame": "last",
+                "title_text": "ALPHA QUEUE",
+                "width": 2560,
+                "height": 1440,
+                "title_box": [1, 2, 3, 4],
+                "visible": true,
+                "note": "ok",
+                "set": "soot",
+            })
+        ),
+    );
+    let qout = queue.dir.path().join("extra-out");
+    let got = run(&[
+        "cut",
+        "--kind",
+        "queue-title",
+        "--labels",
+        qlabels.to_str().unwrap(),
+        "--frames",
+        queue.frames.to_str().unwrap(),
+        "--out",
+        qout.to_str().unwrap(),
+    ]);
+    assert_eq!(got.code, 0, "{}", got.stderr);
+    assert!(
+        got.stdout.contains(&format!(
+            "ignored keys in {}: height, note, set, title_box, visible, width",
+            qlabels.display()
+        )),
+        "{}",
+        got.stdout
+    );
+    assert_eq!(queue_classes_of(&qout), vec!["ALPHA QUEUE".to_string()]);
+}
+
+fn queue_classes_of(dir: &std::path::Path) -> Vec<String> {
+    let set = QueueSet::load_dir(dir).unwrap();
+    let mut names: Vec<String> = set.classes.into_iter().map(|c| c.class).collect();
+    names.sort();
+    names
 }
 
 #[test]

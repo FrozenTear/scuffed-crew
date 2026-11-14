@@ -39,7 +39,8 @@ pub fn cut(args: &CutArgs, out: &Path) -> Result<String, String> {
     let dest = super::output::prepare_templates(out, args.base.as_deref(), args.force)?;
     let bytes = serde_json::to_vec(&set).map_err(|e| e.to_string())?;
     super::output::write_private(&dest, &bytes)?;
-    Ok(util::summary(
+    let mut text = loaded.ignored;
+    text.push_str(&util::summary(
         "queue-title",
         out,
         loaded.rows,
@@ -47,7 +48,8 @@ pub fn cut(args: &CutArgs, out: &Path) -> Result<String, String> {
         loaded.unreadable,
         loaded.skipped,
         &classes,
-    ))
+    ));
+    Ok(text)
 }
 
 pub fn eval(args: &EvalArgs) -> Result<EvalDone, String> {
@@ -128,7 +130,7 @@ pub fn eval(args: &EvalArgs) -> Result<EvalDone, String> {
             items: items.remove(title).unwrap_or_default(),
         })
         .collect::<Vec<_>>();
-    Ok(report::finish(&report::Inputs {
+    let mut done = report::finish(&report::Inputs {
         set_name: &args.set_name,
         frames: loaded.rows,
         scored: loaded.samples.len(),
@@ -140,7 +142,9 @@ pub fn eval(args: &EvalArgs) -> Result<EvalDone, String> {
         changed: &changed,
         class_folds: &[],
         candidate_sha: &sha,
-    }))
+    });
+    done.report.insert_str(0, &loaded.ignored);
+    Ok(done)
 }
 
 fn outcome(reader: &Reader, image: &image::RgbImage, sample: &Sample) -> Outcome {
@@ -359,32 +363,26 @@ fn titles_of(samples: &[Sample]) -> Vec<String> {
 }
 
 fn load(labels: &Path, frames: Option<&Path>) -> Result<Loaded<Sample>, String> {
-    let text = std::fs::read_to_string(labels)
-        .map_err(|e| format!("reading {}: {e}", labels.display()))?;
+    let (rows_in, ignored) = util::read_jsonl(labels, &["path", "screen", "frame", "title_text"])?;
     let mut rows = Vec::new();
-    for (n, line) in text.lines().enumerate() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let value: Value = serde_json::from_str(line)
-            .map_err(|e| format!("{}:{}: {e}", labels.display(), n + 1))?;
-        let obj = value
-            .as_object()
-            .ok_or_else(|| format!("{}:{}: expected an object", labels.display(), n + 1))?;
-        for key in obj.keys() {
-            if !["path", "screen", "frame", "title_text"].contains(&key.as_str()) {
+    for (n, obj) in rows_in.iter().enumerate() {
+        let title = match obj.get("title_text") {
+            Some(Value::String(text)) => text.clone(),
+            Some(_) => {
                 return Err(format!(
-                    "{}:{}: unknown key {key:?}",
+                    "{}:{}: title_text must be a string",
                     labels.display(),
                     n + 1
                 ));
             }
-        }
-        let title = obj
-            .get("title_text")
-            .and_then(Value::as_str)
-            .ok_or_else(|| format!("{}:{}: missing title_text", labels.display(), n + 1))?
-            .to_string();
+            None => {
+                return Err(format!(
+                    "{}:{}: missing title_text",
+                    labels.display(),
+                    n + 1
+                ));
+            }
+        };
         if title.is_empty() || title != title.trim() || title.contains("  ") {
             return Err(format!(
                 "{}:{}: title_text {title:?} has leading, trailing or doubled spaces",
@@ -392,17 +390,34 @@ fn load(labels: &Path, frames: Option<&Path>) -> Result<Loaded<Sample>, String> 
                 n + 1
             ));
         }
-        let path = obj
-            .get("path")
-            .and_then(Value::as_str)
-            .ok_or_else(|| format!("{}:{}: missing path", labels.display(), n + 1))?
-            .to_string();
-        let screen = obj
-            .get("screen")
-            .and_then(Value::as_str)
-            .ok_or_else(|| format!("{}:{}: missing screen", labels.display(), n + 1))?;
+        let path = match obj.get("path") {
+            Some(Value::String(text)) => text.clone(),
+            Some(_) => {
+                return Err(format!(
+                    "{}:{}: path must be a string",
+                    labels.display(),
+                    n + 1
+                ));
+            }
+            None => {
+                return Err(format!("{}:{}: missing path", labels.display(), n + 1));
+            }
+        };
+        let screen = match obj.get("screen") {
+            Some(Value::String(text)) => text.clone(),
+            Some(_) => {
+                return Err(format!(
+                    "{}:{}: screen must be a string",
+                    labels.display(),
+                    n + 1
+                ));
+            }
+            None => {
+                return Err(format!("{}:{}: missing screen", labels.display(), n + 1));
+            }
+        };
         let frame = obj.get("frame").and_then(Value::as_str).unwrap_or("");
-        let screen = Screen::parse(screen)
+        let screen = Screen::parse(&screen)
             .ok_or_else(|| format!("queue title frame {frame} has unknown screen {screen:?}"))?;
         rows.push((path, screen, title));
     }
@@ -430,6 +445,7 @@ fn load(labels: &Path, frames: Option<&Path>) -> Result<Loaded<Sample>, String> 
         unreadable: 0,
         skipped,
         samples,
+        ignored,
     })
 }
 

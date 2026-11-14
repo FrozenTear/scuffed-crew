@@ -126,8 +126,12 @@ queue-title it is required only when a label path is relative. `--base`,
 tars. Extract the published tar, or point at the tracker's
 `templates/rank-v1` or `templates/queue-title-v1` folder. On a conflict the
 default mix is weighted by sample count (`n`), and the summary prints
-`n <base> -> <new>` on every class line. `--replace CLASS` (repeatable) or
-`--replace-all` keeps the new cut instead. A numeric class the labels did
+`n <base> -> <new>` on every class line. That mix is for new frames. Cutting
+`--base` from the same labelled frames that built the pack mixes each class
+in a second time, so `n` doubles and the vector stays the same
+(`templates.json` differs only in `n`). Recut those frames with
+`--replace-all`, or `--replace` for the classes that should be replaced.
+`--replace CLASS` (repeatable) or `--replace-all` keeps the new cut instead. A numeric class the labels did
 not actually show is not a recut: it stays the base template and prints
 `kept from base (pooled)`. A pooled base template is replaced by an observed
 cut of that class, not averaged into the pool. Pooling fills a class only
@@ -156,8 +160,10 @@ prints home-folder paths. Trim those before pasting a report into a PR or
 the fleet channel.
 
 `cut` also refuses a title or a rank word (`role_rank`, `next_mode_hint`,
-each `change_tags` entry) with a leading, trailing, or doubled space, an
-unknown label key, and a role file that lists the same game twice. Two
+each `change_tags` entry) with a leading, trailing, or doubled space, and a
+role file that lists the same game twice. A label row may carry extra keys.
+They are ignored, and one line per file lists their names. A duplicate key
+in one row, or a value of the wrong type, is still an error. Two
 classes the reader compares, when one of them is new or re-learned, are
 refused when they correlate above the reader's margin. `--allow-near` is
 the override for that check.

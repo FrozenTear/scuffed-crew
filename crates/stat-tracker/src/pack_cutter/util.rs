@@ -1,8 +1,11 @@
 //! JSONL and image loading shared by the two kinds.
 
+use std::collections::BTreeSet;
 use std::path::{Component, Path};
 
 use image::RgbImage;
+use serde::de::{self, Deserializer, MapAccess, Visitor};
+use serde_json::{Map, Value};
 
 pub struct Loaded<T> {
     pub rows: usize,
@@ -11,6 +14,9 @@ pub struct Loaded<T> {
     /// Rows the layout refused (rank scale, or queue-title plane).
     pub skipped: usize,
     pub samples: Vec<T>,
+    /// One line per label file whose rows carried keys this tool does not
+    /// read. Empty when every key was known.
+    pub ignored: String,
 }
 
 /// What happened to one template class while cutting.
@@ -35,6 +41,68 @@ pub type ClassNote = (String, ClassFate, usize, usize);
 
 /// A class whose template changed: name, baseline `n`, candidate `n`.
 pub type CountChange = (String, usize, usize);
+
+/// Read JSONL objects. A repeated key in one row is an error. Keys outside
+/// `known` are dropped and named in the returned note, one line for the file.
+pub fn read_jsonl(
+    path: &Path,
+    known: &[&str],
+) -> Result<(Vec<Map<String, Value>>, String), String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let mut rows = Vec::new();
+    let mut ignored = BTreeSet::new();
+    for (n, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let StrictObject(mut obj) =
+            serde_json::from_str(line).map_err(|e| format!("{}:{}: {e}", path.display(), n + 1))?;
+        obj.retain(|key, _| {
+            if known.contains(&key.as_str()) {
+                true
+            } else {
+                ignored.insert(key.clone());
+                false
+            }
+        });
+        rows.push(obj);
+    }
+    let note = if ignored.is_empty() {
+        String::new()
+    } else {
+        let names: Vec<&str> = ignored.iter().map(String::as_str).collect();
+        format!("ignored keys in {}: {}\n", path.display(), names.join(", "))
+    };
+    Ok((rows, note))
+}
+
+struct StrictObject(Map<String, Value>);
+
+impl<'de> serde::Deserialize<'de> for StrictObject {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visit;
+        impl<'de> Visitor<'de> for Visit {
+            type Value = Map<String, Value>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a JSON object")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
+                let mut map = Map::new();
+                while let Some(key) = access.next_key::<String>()? {
+                    if map.contains_key(&key) {
+                        return Err(de::Error::custom(format!("duplicate key {key:?}")));
+                    }
+                    map.insert(key, access.next_value()?);
+                }
+                Ok(map)
+            }
+        }
+        Ok(StrictObject(deserializer.deserialize_map(Visit)?))
+    }
+}
 
 pub fn open_rgb(path: &Path) -> Result<RgbImage, String> {
     image::open(path)
