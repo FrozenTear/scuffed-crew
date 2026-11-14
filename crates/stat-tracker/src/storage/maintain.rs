@@ -164,6 +164,19 @@ fn record_vacuum_size(data_dir: &Path, after: u64) {
     }
 }
 
+/// Drop the recorded post-vacuum size. Called by every clear path: the size
+/// belongs to the cleared store, and left behind it held the next
+/// auto-vacuum back until the new store grew past it plus
+/// [`AUTO_VACUUM_REGROW_BYTES`]. A missing file is fine; a failed remove is
+/// a warn line.
+pub fn forget_last_vacuum_size(data_dir: &Path) {
+    match std::fs::remove_file(data_dir.join(LAST_VACUUM_SIZE_FILE)) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!(error = %e, "could not remove the recorded vacuum size"),
+    }
+}
+
 /// Run non-blocking-ish maintenance under the pid guard, before the daemon
 /// opens the store: log rotation, backup prune, optional auto-vacuum.
 pub async fn startup_maintenance(
