@@ -21,20 +21,14 @@
 //! `queue-title-v1.tar` ([`PackLayout::TemplatesJson`], one `templates.json`
 //! only) land in the folders the rank and queue title readers already load
 //! from ([`crate::shadow::rank::TEMPLATE_DIR`],
-//! [`crate::shadow::queue_title::TEMPLATE_DIR`]). A staged one is loaded with
-//! its reader's `TemplateSet::load_dir` before the swap and refused on an
-//! error, leaving the old folder. Those readers load their pack at daemon
-//! start only, so a restart is needed after the first sync.
+//! [`crate::shadow::queue_title::TEMPLATE_DIR`]), loaded at daemon start
+//! only. Load check and keep: [`install_pack`], [`layout::needs_keep`].
 //! Each pack has its own [`PackLayout`]; any path outside it refuses that
 //! pack only.
 //!
 //! Size and sha256 are checked against the list before anything is
 //! unpacked. Each pack is staged and swapped into place on its own, so one
-//! bad or failed pack never blocks, rolls back, or deletes another. When no
-//! version is recorded for a pack, a folder already in its place was put
-//! there by hand (or by an older tracker): the first sync moves it whole to
-//! `<data_dir>/templates-kept/<pack>-<stamp>/`, outside the stale sweep,
-//! logs that path, and puts it back if the swap fails. A pack
+//! bad or failed pack never blocks, rolls back, or deletes another. A pack
 //! the server does not list keeps whatever is installed. The token is never
 //! written to a log.
 //!
@@ -64,8 +58,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use sha2::{Digest, Sha256};
-
 use crate::config::validate_sync_server_url;
 
 pub mod layout;
@@ -78,8 +70,9 @@ pub use layout::{
     PackSpec, installed_manifest, installed_record, pack_spec, record_paths,
 };
 use layout::{
-    MAX_STEM, dir_label, is_sha256, is_word_byte, manifests_path, read_manifests, read_versions,
-    unique_suffix, versions_path,
+    KeepSwap, MANIFESTS_TMP_PREFIX, MAX_STEM, VERSIONS_TMP_PREFIX, dir_label, is_sha256,
+    is_word_byte, manifests_path, read_manifests, read_versions, sha256_hex, unique_suffix,
+    versions_path,
 };
 
 /// `Retry-After` waits stay inside this range. The setup guide uses this
@@ -101,6 +94,8 @@ pub const PACK_MISMATCH: &str =
     "The reader pack did not match the site. The installed pack was left in place.";
 pub const PACK_UNSAFE: &str =
     "The reader pack was not safe to unpack. The installed pack was left in place.";
+pub const PACK_BAD_TEMPLATES: &str = "The reader pack did not load, so it was not saved.";
+pub const PACK_NOT_KEPT: &str = "The reader pack was not saved: a pack folder changed by hand could not be moved to templates-kept, so it was left in place.";
 pub const PACK_FAILED: &str =
     "Could not download the reader pack. The installed pack was left in place.";
 pub const PACK_AUTH: &str = "Your sync token isn't valid. Sign in again from Settings.";
@@ -350,6 +345,7 @@ fn log_installed(report: &PackReport) {
 /// Only an install is logged here. What went wrong, and that there will be
 /// another try, is the keeper's line to write. Never logs the token.
 pub async fn sync_on_startup(server_url: &str, token: &str, data_dir: &Path) -> StartupSync {
+    layout::log_kept_folders(data_dir);
     sync_on_startup_capped(server_url, token, data_dir, PACK_MAX_BYTES).await
 }
 
@@ -429,9 +425,17 @@ fn pid_jitter(pid: u32) -> Duration {
 }
 
 /// True for a refusal the same bytes would get again: wrong size or
-/// sha256, a layout the tracker does not accept, or too large.
+/// sha256, a layout the tracker does not accept, too large, a pack its
+/// reader does not load, or a folder `templates-kept/` cannot take.
 fn is_fixed_refusal(message: &str) -> bool {
-    message == PACK_MISMATCH || message == PACK_UNSAFE || message == PACK_TOO_BIG
+    [
+        PACK_MISMATCH,
+        PACK_UNSAFE,
+        PACK_TOO_BIG,
+        PACK_BAD_TEMPLATES,
+        PACK_NOT_KEPT,
+    ]
+    .contains(&message)
 }
 
 /// Downloads the tracker refused for a fixed reason in this daemon run, by
@@ -1135,7 +1139,7 @@ async fn run_sync(
             return SyncRun::early(scope, outcome, plan.listed);
         }
     };
-    sweep_stale_staging(data_dir);
+    layout::sweep_stale_staging(data_dir);
     let client = match reqwest::Client::builder()
         .user_agent(crate::version::USER_AGENT)
         .timeout(std::time::Duration::from_secs(60))
@@ -1200,9 +1204,7 @@ async fn run_sync(
             held_back += 1;
             continue;
         } else {
-            // No version recorded: a folder there was placed by hand.
-            let hand_placed = !versions.contains_key(spec.name);
-            let outcome = match sync_one(&fetch, data_dir, spec, entry, hand_placed).await {
+            let outcome = match sync_one(&fetch, data_dir, spec, entry).await {
                 Step::Installed(manifest_sha256) => {
                     installed.push(InstalledPack {
                         name: spec.name,
@@ -1336,7 +1338,7 @@ fn in_place(data_dir: &Path, spec: &PackSpec) -> bool {
     };
     dir.is_dir()
         && (!spec.layout.keeps_manifest() || is_file("manifest.json"))
-        && (spec.layout != PackLayout::TemplatesJson || is_file("templates.json"))
+        && (spec.layout != PackLayout::TemplatesJson || is_file(layout::TEMPLATES_JSON))
 }
 
 /// File locked for the length of one sync, so the daemon and the app never
@@ -1408,75 +1410,6 @@ impl SyncLock {
     }
 }
 
-/// A `.<pack>-next-*` or `.<pack>-prev-*` folder this old is left from a
-/// sync that was killed. Live syncs hold the lock, so none of theirs is here.
-const STALE_STAGING: std::time::Duration = std::time::Duration::from_secs(3600);
-
-/// Remove staging and backup folders left by a killed sync. Runs under the
-/// sync lock. Only names this module makes, only real folders (not links),
-/// and only when older than [`STALE_STAGING`]. Also removes versions tmp
-/// files left by a kill.
-fn sweep_stale_staging(data_dir: &Path) {
-    let templates = data_dir.join("templates");
-    let Ok(entries) = std::fs::read_dir(&templates) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        let path = entry.path();
-        if name.starts_with(VERSIONS_TMP_PREFIX) || name.starts_with(MANIFESTS_TMP_PREFIX) {
-            // Only a run holding this lock writes one, so this one is left.
-            if path.symlink_metadata().is_ok_and(|meta| meta.is_file())
-                && let Err(err) = std::fs::remove_file(&path)
-            {
-                tracing::warn!(file = %name, error = %err, "left reader pack versions file was not removed");
-            }
-            continue;
-        }
-        // The pack this name belongs to, and whether it is a `-prev-` backup.
-        let owner = name.strip_prefix('.').and_then(|rest| {
-            PACKS.iter().find_map(|spec| {
-                let tail = rest.strip_prefix(dir_label(&spec.dir_in(data_dir)).as_str())?;
-                if tail.starts_with("-next-") {
-                    Some((spec, false))
-                } else if tail.starts_with("-prev-") {
-                    Some((spec, true))
-                } else {
-                    None
-                }
-            })
-        });
-        let Some((spec, backup)) = owner else {
-            continue;
-        };
-        // A `-prev-` folder is the old live folder renamed, so its mtime is
-        // the old pack's. While the live folder is missing (a kill inside
-        // the fallback swap) it is the only copy of that pack: keep it.
-        if backup && !spec.dir_in(data_dir).exists() {
-            continue;
-        }
-        let Ok(meta) = path.symlink_metadata() else {
-            continue;
-        };
-        let stale = meta
-            .modified()
-            .ok()
-            .and_then(|modified| modified.elapsed().ok())
-            .is_some_and(|age| age >= STALE_STAGING);
-        if meta.is_dir() && stale {
-            match std::fs::remove_dir_all(&path) {
-                Ok(()) => {
-                    tracing::info!(folder = %name, "removed a reader pack folder left by a stopped sync")
-                }
-                Err(err) => {
-                    tracing::warn!(folder = %name, error = %err, "left reader pack folder was not removed")
-                }
-            }
-        }
-    }
-}
-
 /// [`sync_one`] result. `Stop` also ends the loop for the packs after it.
 enum Step {
     /// Swapped into place. Carries the sha256 of the inner manifest.
@@ -1501,7 +1434,6 @@ async fn sync_one(
     data_dir: &Path,
     spec: &'static PackSpec,
     entry: &PackListEntry,
-    hand_placed: bool,
 ) -> Step {
     let parent = pack_parent(data_dir, spec);
     if let Err(message) = std::fs::create_dir_all(&parent) {
@@ -1527,7 +1459,7 @@ async fn sync_one(
         Get::Failed(message) => return Step::Done(PackSync::Failed(message)),
     };
     let (data_dir, entry) = (data_dir.to_path_buf(), entry.clone());
-    let installed = off_runtime(move || install_pack(&data_dir, spec, &entry, &bytes, hand_placed))
+    let installed = off_runtime(move || install_pack(&data_dir, spec, &entry, &bytes))
         .await
         .unwrap_or_else(|| Err(PackSync::Failed(PACK_FAILED.to_string())));
     match installed {
@@ -1545,17 +1477,15 @@ async fn off_runtime<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'stati
 
 /// The file side of one download: check the bytes against the list, unpack
 /// into a staging folder, load a [`PackLayout::TemplatesJson`] pack with
-/// its reader ([`check_staged`]) and swap it in. When no version is
-/// recorded (`hand_placed`), a folder already there is moved to
-/// `templates-kept/` first ([`layout::keep_hand_folder`]) and put back if
-/// the swap fails. Blocking; see [`off_runtime`]. `Ok` carries the sha256
-/// of the inner manifest; an `Err` is the [`PackSync::Failed`] to report.
+/// its reader ([`check_staged`]) and swap it in, keeping the old folder
+/// when [`layout::needs_keep`] ([`layout::swap_keeping`]). Blocking; see
+/// [`off_runtime`]. `Ok` carries the sha256 of the inner manifest; an
+/// `Err` is the [`PackSync::Failed`] to report.
 fn install_pack(
     data_dir: &Path,
     spec: &PackSpec,
     entry: &PackListEntry,
     bytes: &[u8],
-    hand_placed: bool,
 ) -> Result<String, PackSync> {
     #[cfg(test)]
     tests::note_blocking_work(data_dir);
@@ -1579,32 +1509,25 @@ fn install_pack(
         };
     if let Err(message) = check_staged(spec, &staging) {
         let _ = std::fs::remove_dir_all(&staging);
-        tracing::warn!(pack = spec.name, error = %message, "reader pack did not load; the installed pack was left in place");
-        return Err(PackSync::Failed(PACK_UNSAFE.to_string()));
+        tracing::warn!(pack = spec.name, error = %message, "reader pack did not load; it was not installed");
+        return Err(PackSync::Failed(PACK_BAD_TEMPLATES.to_string()));
     }
-    let kept = if hand_placed && live.symlink_metadata().is_ok() {
-        match layout::keep_hand_folder(data_dir, &live) {
-            Ok(kept) => Some(kept),
-            Err(message) => {
-                let _ = std::fs::remove_dir_all(&staging);
-                tracing::warn!(pack = spec.name, error = %message, "reader pack folder placed by hand was not moved aside; it was left in place");
-                return Err(PackSync::Failed(PACK_FAILED.to_string()));
-            }
-        }
+    let swapped = if layout::needs_keep(data_dir, spec, &live) {
+        layout::swap_keeping(data_dir, spec.name, &staging, &live).map(drop)
     } else {
-        None
+        layout::swap_dir(&staging, &live).map_err(KeepSwap::NotSwapped)
     };
-    if let Err(message) = layout::swap_or_restore(&staging, &live, kept.as_deref()) {
+    if let Err(failed) = swapped {
         let _ = std::fs::remove_dir_all(&staging);
-        tracing::warn!(pack = spec.name, error = %message, "reader pack was not swapped into place");
-        return Err(PackSync::Failed(PACK_FAILED.to_string()));
+        let (message, error) = match failed {
+            KeepSwap::NotKept(error) => (PACK_NOT_KEPT, error),
+            KeepSwap::NotSwapped(error) => (PACK_FAILED, error),
+        };
+        tracing::warn!(pack = spec.name, error = %error, "reader pack was not swapped into place");
+        return Err(PackSync::Failed(message.to_string()));
     }
-    if let Some(kept) = kept {
-        tracing::warn!(
-            pack = spec.name,
-            kept = %kept.display(),
-            "reader pack folder placed by hand was replaced; the old folder is kept at this path"
-        );
+    if spec.layout == PackLayout::TemplatesJson {
+        layout::record_templates_hash(data_dir, spec.name, &live);
     }
     Ok(manifest_sha256)
 }
@@ -1859,51 +1782,14 @@ struct InnerFile {
     size: u64,
 }
 
-/// Start of every tmp file [`write_versions`] makes. Only a run holding the
-/// sync lock writes one, so any found at the start of a run was left by a kill.
-const VERSIONS_TMP_PREFIX: &str = "pack-versions.json.tmp-";
-
 fn write_versions(data_dir: &Path, versions: &BTreeMap<String, String>) -> Result<(), String> {
     #[cfg(test)]
     tests::note_blocking_work(data_dir);
-    write_map(&versions_path(data_dir), VERSIONS_TMP_PREFIX, versions)
+    layout::write_map(&versions_path(data_dir), VERSIONS_TMP_PREFIX, versions)
 }
-
-/// Start of every tmp file [`write_manifests`] makes; swept like
-/// [`VERSIONS_TMP_PREFIX`].
-const MANIFESTS_TMP_PREFIX: &str = "pack-manifests.json.tmp-";
 
 fn write_manifests(data_dir: &Path, manifests: &BTreeMap<String, String>) -> Result<(), String> {
-    write_map(&manifests_path(data_dir), MANIFESTS_TMP_PREFIX, manifests)
-}
-
-/// Write `map` as JSON to `path` through a tmp file named `<prefix><n>`.
-fn write_map(path: &Path, prefix: &str, map: &BTreeMap<String, String>) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
-    }
-    // A name of its own, so two writers never share one tmp file.
-    let tmp = path.with_file_name(format!("{prefix}{}", unique_suffix()));
-    let bytes = serde_json::to_vec(map).map_err(|err| err.to_string())?;
-    let written = (|| -> std::io::Result<()> {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        std::fs::rename(&tmp, path)
-    })();
-    if let Err(err) = written {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(err.to_string());
-    }
-    Ok(())
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    layout::write_map(&manifests_path(data_dir), MANIFESTS_TMP_PREFIX, manifests)
 }
 
 fn is_version(value: &str) -> bool {
@@ -4262,7 +4148,7 @@ mod tests {
             .unwrap()
             .elapsed()
             .unwrap();
-        assert!(link_age >= STALE_STAGING, "link aged: {link_age:?}");
+        assert!(link_age >= layout::STALE_STAGING, "link aged: {link_age:?}");
     }
 
     #[tokio::test]
@@ -4721,6 +4607,7 @@ mod tests {
             !live.contains(name)
                 && name != "pack-versions.json"
                 && name != "pack-manifests.json"
+                && name != "pack-file-hashes.json"
                 && name != ".pack-sync.lock"
         });
         left.sort();

@@ -693,6 +693,15 @@ fn the_banner_classes_map_to_the_queue_title_spelling() {
     ] {
         assert_eq!(queue_hint(banner), kept, "{banner:?}");
     }
+    // QUICK PLAY stays fail-closed: it never agrees with a queue title.
+    assert!(!hint_agrees(
+        queue_hint("QUICK PLAY: ROLE QUEUE"),
+        "ROLE QUEUE"
+    ));
+    assert!(!hint_agrees(
+        queue_hint("QUICK PLAY: OPEN QUEUE"),
+        "OPEN QUEUE"
+    ));
 }
 
 #[tokio::test]

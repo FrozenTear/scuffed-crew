@@ -445,7 +445,8 @@ depends on the tracker release.
 - **`--vacuum`** does the start sync (the list and `heroes-v1.tar`), then
   compacts and exits. It never starts the background job, so nothing is
   tried again, and a pack sync that failed in that run is not logged.
-- A pack is downloaded when its folder is missing, or when the listed
+- A pack is downloaded when its folder is missing (for `rank-v1.tar` and
+  `queue-title-v1.tar`, or `templates.json` missing), or when the listed
   `version` differs from the one recorded in
   `<data_dir>/templates/pack-versions.json`. Otherwise it is left alone.
 - A name the tracker does not know is ignored. A name it knows that the
@@ -512,7 +513,8 @@ the same data folder exits at the pid check before it sends anything.
   job takes no more than comes back and other trackers behind the same
   address get theirs. Five missing packs then take under a minute.
 - **A pack the tracker refuses for a fixed reason** (size, sha256, layout,
-  too large) is downloaded once. The job logs one warning with the pack's
+  too large, does not load, or a changed folder `templates-kept/` cannot
+  take) is downloaded once. The job logs one warning with the pack's
   name and does not fetch it again until the list shows another `version`,
   `sha256` or `size` for it, or the tracker is restarted. It reads the list
   every 30 minutes to notice.
@@ -639,11 +641,33 @@ install, and the refused pack's folder is left as it was. A `rank-v1.tar` or
 `queue-title-v1.tar` whose `templates.json` its reader does not load is
 refused the same way, before the swap.
 
-When no version is recorded for a pack (a folder placed by hand, or one an
-older tracker installed), its first sync moves the old folder, every file in
-it, to `templates-kept/<pack>-<stamp>/` under the data folder (beside
-`templates/`, so the stale folder sweep never removes it) and logs that
-path. If the swap then fails, the folder is put back.
+After each `rank-v1.tar` or `queue-title-v1.tar` install the tracker
+records the sha256 of the installed `templates.json` in
+`templates/pack-file-hashes.json` (`pack-versions.json` keeps its format).
+When a new version is about to replace one of those folders, the folder is
+kept unless it is exactly one regular file named `templates.json` whose
+sha256 is the recorded one. A missing record never matches, so a folder
+placed by hand, one installed before this record, one whose
+`templates.json` was edited, and one with an added file are all kept once.
+Kept means moved whole, every file in it, to
+`templates-kept/<pack folder>-<UTC YYYYMMDDTHHMMSSZ>-<pid>/` under the data
+folder (for example `templates-kept/rank-v1-20261114T065156Z-4242/`),
+beside `templates/`, so the stale folder sweep never removes it. The path
+is logged as soon as the folder is moved. Where the kernel allows an atomic
+exchange, the new pack goes in first and the old tree is moved out after,
+so the live folder is never missing (should that move fail, the old tree
+stays beside the live folder under the same name, never deleted); without
+it, the old folder is moved first and put back if the swap fails. An
+unchanged official folder is replaced and nothing is kept. If
+`templates-kept/` cannot be made, the pack is refused for a fixed reason and
+the folder stays as it was. Only these two packs keep; every other pack
+replaces its folder as before.
+
+Nothing removes `templates-kept/`: not the tracker, not the app, and not
+`uninstall.sh --purge` (it deletes only the names the tracker writes, and
+neither `templates` nor `templates-kept` is one). Delete it by hand when you
+no longer need what is in it. At daemon start, when it holds folders, the
+tracker logs its path once.
 
 If the list is empty, the tracker does nothing. If the list has entries but
 none is `heroes-v1.tar`, every tracker reports "The reader pack did not match

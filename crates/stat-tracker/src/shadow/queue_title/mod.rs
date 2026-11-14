@@ -7,7 +7,8 @@
 //! `<data_dir>/templates/queue-title-v1/` ([`templates`]). The pack is cut
 //! from the game's own screens, so it is never committed: it is built
 //! locally with [`Learner`] from labelled frames (the ignored bench in
-//! `tests.rs` writes one).
+//! `tests.rs` writes one), or arrives in the same folder through the
+//! tracker's pack download (`queue-title-v1.tar`, [`crate::packs`]).
 //!
 //! # How it reads
 //!

@@ -427,6 +427,9 @@ if [[ $PURGE -eq 0 && $ASSUME_YES -eq 0 && -t 0 && -t 2 ]]; then
 fi
 
 # Direct children the tracker writes. Other names in the folder stay.
+# templates and templates-kept are deliberately not listed: templates-kept
+# holds pack folders the member placed or edited by hand, which pack sync
+# moved aside instead of deleting. Do not add either name here.
 tracker_data_name() {
     case "$1" in
         stats.surrealkv|vacuum.tmp|live_snapshot.json|live_snapshot.json.tmp|\
