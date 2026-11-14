@@ -12,17 +12,131 @@
 //!
 //! Headings are shifted down one level (`#` becomes `h2`) because the page
 //! title is already the `h1`.
+//!
+//! Layout rules:
+//! - A single line break inside a paragraph becomes `<br>`, so posts written
+//!   as plain text (shown with `pre-wrap` before markdown) keep their lines.
+//! - Each table is wrapped in `<div class="md-table-wrap">` so a wide table
+//!   scrolls sideways inside the content card instead of overflowing it.
+//!
+//! Containers that hold rendered markdown add the `md-body` class and inject
+//! [`MARKDOWN_CSS`] once, so blog and wiki share one set of element styles.
 
 use pulldown_cmark::{
     CodeBlockKind, CowStr, Event, HeadingLevel, Options, Parser, Tag, TagEnd, html,
 };
 
+/// `StyleOnce` id for [`MARKDOWN_CSS`].
+pub const MARKDOWN_CSS_ID: &str = "scuffed-css-markdown-body";
+
+/// Element styles for rendered markdown inside an `.md-body` container.
+///
+/// Tailwind preflight resets headings to body size and weight and removes
+/// list markers and indent, so this restores them. Colors, fonts and sizes
+/// come from the design tokens only. Page CSS keeps the container's own look
+/// (font size, paragraph spacing, `pre` background).
+pub const MARKDOWN_CSS: &str = r#"
+    .md-body h1,
+    .md-body h2,
+    .md-body h3,
+    .md-body h4,
+    .md-body h5,
+    .md-body h6 {
+        color: var(--text);
+        line-height: 1.3;
+        margin: 1.6em 0 0.6em;
+    }
+    .md-body h1,
+    .md-body h2,
+    .md-body h3 {
+        font-family: var(--font-head);
+    }
+    .md-body h1 { font-size: var(--text-3xl); font-weight: 700; }
+    .md-body h2 { font-size: var(--text-2xl); font-weight: 700; }
+    .md-body h3 { font-size: var(--text-xl); font-weight: 600; }
+    .md-body h4 { font-size: var(--text-lg); font-weight: 600; }
+    .md-body h5 { font-size: var(--text-base); font-weight: 600; }
+    .md-body h6 {
+        font-size: var(--text-sm);
+        font-weight: 600;
+        color: var(--text-2);
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+    }
+    .md-body ul {
+        list-style: disc;
+        padding-left: 1.5rem;
+    }
+    .md-body ol {
+        list-style: decimal;
+        padding-left: 1.5rem;
+    }
+    .md-body ul ul {
+        list-style: circle;
+    }
+    .md-body ul ul ul {
+        list-style: square;
+    }
+    .md-body li > ul,
+    .md-body li > ol {
+        margin: 0.25rem 0;
+    }
+    .md-body li + li {
+        margin-top: 0.25rem;
+    }
+    .md-body li:has(> input[type="checkbox"]) {
+        list-style: none;
+    }
+    .md-body li > input[type="checkbox"] {
+        margin-right: 0.5rem;
+        vertical-align: middle;
+    }
+    .md-body .md-table-wrap {
+        max-width: 100%;
+        overflow-x: auto;
+        margin: 0 0 1rem;
+    }
+    .md-body .md-table-wrap > table {
+        margin: 0;
+    }
+    .md-body th {
+        color: var(--text);
+        font-weight: 600;
+        text-align: left;
+    }
+"#;
+
 /// Render untrusted markdown to HTML that is safe to inject.
 pub fn render_markdown(source: &str) -> String {
     let options =
         Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-    let events = Parser::new_ext(source, options).map(|event| match event {
+    let events = Parser::new_ext(source, options).flat_map(|event| match event {
+        // Our own wrapper markup. Author HTML is never emitted as HTML: the
+        // parser reports it as `Html`/`InlineHtml`, which `sanitize` turns
+        // into escaped text.
+        Event::Start(Tag::Table(align)) => [
+            Some(Event::Html(CowStr::Borrowed(TABLE_WRAP_OPEN))),
+            Some(Event::Start(Tag::Table(align))),
+        ],
+        Event::End(TagEnd::Table) => [
+            Some(Event::End(TagEnd::Table)),
+            Some(Event::Html(CowStr::Borrowed(TABLE_WRAP_CLOSE))),
+        ],
+        other => [Some(sanitize(other)), None],
+    });
+    let mut out = String::with_capacity(source.len() * 3 / 2);
+    html::push_html(&mut out, events.flatten());
+    out
+}
+
+const TABLE_WRAP_OPEN: &str = "<div class=\"md-table-wrap\">";
+const TABLE_WRAP_CLOSE: &str = "</div>";
+
+/// Per-event safety and layout rewrites (everything except table wrapping).
+fn sanitize(event: Event<'_>) -> Event<'_> {
+    match event {
         Event::Html(raw) | Event::InlineHtml(raw) => Event::Text(raw),
+        Event::SoftBreak => Event::HardBreak,
         // Heading attributes are off in `options`; clear them anyway so
         // turning that option on later cannot let authors set ids or classes.
         Event::Start(Tag::Heading { level, .. }) => Event::Start(Tag::Heading {
@@ -58,10 +172,7 @@ pub fn render_markdown(source: &str) -> String {
             id,
         }),
         other => other,
-    });
-    let mut out = String::with_capacity(source.len() * 3 / 2);
-    html::push_html(&mut out, events);
-    out
+    }
 }
 
 fn demote(level: HeadingLevel) -> HeadingLevel {
@@ -284,6 +395,34 @@ mod tests {
         }
         let html = render_markdown("    indented\n");
         assert!(html.starts_with("<pre><code>"), "{html}");
+    }
+
+    #[test]
+    fn single_line_breaks_are_kept() {
+        let html = render_markdown("line one\nline two\n\nnext para\n");
+        assert!(html.contains("line one<br />\nline two"), "{html}");
+        assert_eq!(html.matches("<br").count(), 1, "{html}");
+        assert!(html.contains("<p>next para</p>"), "{html}");
+    }
+
+    #[test]
+    fn tables_are_wrapped_for_sideways_scroll() {
+        let html = render_markdown("| a | b |\n|---|---|\n| 1 | 2 |\n\nafter\n");
+        assert!(
+            html.starts_with("<div class=\"md-table-wrap\"><table>"),
+            "{html}"
+        );
+        assert!(html.contains("</table>\n</div>"), "{html}");
+        assert_eq!(html.matches("<div").count(), 1, "{html}");
+        assert_eq!(html.matches("</div>").count(), 1, "{html}");
+        assert!(html.contains("<p>after</p>"), "{html}");
+    }
+
+    #[test]
+    fn author_div_markup_is_still_escaped() {
+        let html = render_markdown("<div class=\"md-table-wrap\">x</div>\n");
+        assert!(!html.contains("<div"), "{html}");
+        assert!(html.contains("&lt;div"), "{html}");
     }
 
     #[test]

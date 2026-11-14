@@ -73,15 +73,6 @@ const PAGE_CSS: &str = r#"
         line-height: 1.85;
         overflow-wrap: break-word;
     }
-    .blog-post-content h2,
-    .blog-post-content h3,
-    .blog-post-content h4,
-    .blog-post-content h5,
-    .blog-post-content h6 {
-        color: var(--text);
-        line-height: 1.3;
-        margin: 1.75rem 0 0.75rem;
-    }
     .blog-post-content p,
     .blog-post-content ul,
     .blog-post-content ol,
@@ -159,6 +150,7 @@ pub fn BlogPost(slug: String) -> Element {
 
     rsx! {
         crate::styles::StyleOnce { id: "scuffed-css-pages-blog_post-page-css", css: PAGE_CSS }
+        crate::styles::StyleOnce { id: crate::markdown::MARKDOWN_CSS_ID, css: crate::markdown::MARKDOWN_CSS }
 
         main { class: "blog-post-page",
             Link { to: Route::Blog {}, class: "blog-post-back",
@@ -209,7 +201,7 @@ pub fn BlogPost(slug: String) -> Element {
                                     {author_byline(author_names.read().as_ref(), &a.author_member_id)}
                                 }
                                 div {
-                                    class: "blog-post-content",
+                                    class: "blog-post-content md-body",
                                     dangerous_inner_html: render_markdown(&a.content_markdown),
                                 }
                             },

@@ -118,15 +118,6 @@ const PAGE_CSS: &str = r#"
     .wiki-content > :last-child {
         margin-bottom: 0;
     }
-    .wiki-content h2,
-    .wiki-content h3,
-    .wiki-content h4,
-    .wiki-content h5,
-    .wiki-content h6 {
-        color: var(--text);
-        line-height: 1.3;
-        margin: 1.5rem 0 0.6rem;
-    }
     .wiki-content p,
     .wiki-content ul,
     .wiki-content ol,
@@ -299,6 +290,7 @@ pub fn WikiPage(topic: String) -> Element {
 
     rsx! {
         crate::styles::StyleOnce { id: "scuffed-css-pages-wiki_page-page-css", css: PAGE_CSS }
+        crate::styles::StyleOnce { id: crate::markdown::MARKDOWN_CSS_ID, css: crate::markdown::MARKDOWN_CSS }
 
         main { class: "wiki-detail",
             Link { to: Route::Wiki {}, class: "wiki-back", "< Back to Wiki" }
@@ -433,7 +425,7 @@ pub fn WikiPage(topic: String) -> Element {
                                 }
                             } else {
                                 div {
-                                    class: "wiki-content",
+                                    class: "wiki-content md-body",
                                     dangerous_inner_html: crate::markdown::render_markdown(&content),
                                 }
                             }
