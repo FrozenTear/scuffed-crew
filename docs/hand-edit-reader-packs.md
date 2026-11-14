@@ -70,8 +70,9 @@ as the foreground mask when the file has one. The exact pixel size of
 each official portrait is not fixed in the pack layout. Keep the same
 size as the file you replace.
 
-Every `.png` at the top of a hero folder is loaded as a hero, named after
-the file. Keep no other `.png` there, not even a backup such as
+Every `.png` at the top of a hero folder is loaded as a class, named after
+the file (placeholder, skull and empty icons are special classes, not
+heroes). Keep no other `.png` there, not even a backup such as
 `ana-old.png`: store backups outside the `templates/` folder. In
 `special/`, only files whose names start with `placeholder`, `skull` or
 `empty` are used; other names there are ignored.
@@ -162,14 +163,14 @@ It depends on the pack.
 - **Hero packs.** A file that is not a readable PNG is skipped and
   logged at debug. In `heroes-v1`, the rest of the folder still loads,
   and a missing or skipped hero is not matched. `heroes-v2` and
-  `heroes-v2-1080` are used only when they have every hero that
-  `heroes-v1` has. One missing or unreadable hero in a v2 pack means the
-  whole v2 pack is not used, with the WARN line "hero pack incomplete,
-  not used". The 1440p reader then uses `heroes-v1`, and the 1080p
-  reader uses the 1440p set. An extra `.png` in `templates/heroes/` (for
-  example `ana-old.png`) is a hero the v2 packs do not have, so it turns
-  off both v2 packs. An extra `.png` in a v2 folder is a made-up hero the
-  reader can return.
+  `heroes-v2-1080` are used only when they have every hero and special
+  class that `heroes-v1` has. One missing or unreadable hero or special
+  class in a v2 pack means the whole v2 pack is not used, with the WARN
+  line "hero pack incomplete, not used". The 1440p reader then uses
+  `heroes-v1`, and the 1080p reader uses the 1440p set. An extra
+  `.png` in `templates/heroes/` (for example `ana-old.png`) is a hero
+  the v2 packs do not have, so it turns off both v2 packs. An extra
+  `.png` in a v2 folder is a made-up hero the reader can return.
 - **Map glyphs.** The whole `maps-v1` folder is refused when
   `atlas.json` is missing or is not JSON, when its `height` is not 32, or
   when it names a file that is not `g`, 4 lowercase hex digits and
