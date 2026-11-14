@@ -270,6 +270,17 @@ impl Drop for RankFeed {
     }
 }
 
+/// The held-back gate, the `held_back` flag of [`read_rank_screen`]: true
+/// only when a rank screen is held (`holds_screen`, taken before this
+/// tick's outcome detector runs) and the stability gate held this tick's
+/// rank-screen word crop back on a first sighting (`first_seen`, asked
+/// after it). Either alone is false: with no screen held a held-back frame
+/// is not read, and a held screen with a crop the gate looked at reads
+/// only what the end detector classified.
+pub(crate) fn rank_held_back(holds_screen: bool, first_seen: bool) -> bool {
+    holds_screen && first_seen
+}
+
 /// The rank screen read of one poll frame: `None` when the reader is off
 /// (`read` is `None`) or the end detector did not read the frame as the
 /// rank screen; else the frame's read, where a reader that panics or reads
@@ -277,7 +288,7 @@ impl Drop for RankFeed {
 ///
 /// `held_back` is true when the stability gate held this tick's rank-screen
 /// word crop back on a first sighting (no history) while a screen is held
-/// ([`RankFeed::holds_screen`]). The
+/// ([`RankFeed::holds_screen`], the gate is [`rank_held_back`]). The
 /// detector then never looked at the word, so the frame is no miss by
 /// itself: rank-v1, whose own gate needs the RANK PROGRESS label, reads it.
 /// A read is `Some(read)`; a frame it does not read is `None`, a miss. The

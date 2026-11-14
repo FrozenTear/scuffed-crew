@@ -2,8 +2,9 @@
 //! "ROLE QUEUE") drawn top left on the pregame screens (map vote, hero
 //! select, hero ban), so a game record can carry the queue that was played.
 //!
-//! Off by default. It runs only when [`ENV`] is switched on
-//! ([`QueueTitleSetting::parse`]) and a template pack is installed under
+//! Off by default. It runs only when config `rank_reader` (Read my rank
+//! after Comp games) is on, or [`ENV`] overrides it to on
+//! ([`QueueTitleSetting::for_config`]), and a template pack is installed under
 //! `<data_dir>/templates/queue-title-v1/` ([`templates`]). The pack is cut
 //! from the game's own screens, so it is never committed: it is built
 //! locally with [`Learner`] from labelled frames (the ignored bench in
@@ -96,8 +97,9 @@ pub use templates::{Learner, PACK_FILE, TEMPLATE_DIR, TemplateError, TemplateSet
 /// The recognizer id written next to the value (`rank-v1`). Defined in
 /// `model` so the upload sends the same id without using the readers.
 pub use crate::model::QUEUE_TITLE_RECOGNIZER_ID as RECOGNIZER_ID;
-/// Environment switch: `on`, `1`, `true`, `yes` or [`RECOGNIZER_ID`] turns
-/// it on. Anything else, or unset, is off.
+/// Environment override of config `rank_reader` for this reader: `on`, `1`,
+/// `true`, `yes` or [`RECOGNIZER_ID`] turns it on, any other non-blank value
+/// off. Unset or blank leaves the config in charge.
 pub const ENV: &str = "STAT_TRACKER_QUEUE_TITLE_RECOGNIZER";
 /// Lowest whole title score a read may have (0.80). Defined in `model` so
 /// the upload checks the same bar.
@@ -135,7 +137,8 @@ const SAT_MAX: f32 = 0.35;
 /// Below this 99th percentile the region holds no text worth scaling up.
 const MIN_PEAK: f32 = 0.08;
 
-/// Whether the reader runs. Off unless switched on.
+/// Whether the reader runs. Off unless config `rank_reader` or [`ENV`]
+/// turns it on ([`Self::for_config`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum QueueTitleSetting {
     #[default]
@@ -158,11 +161,6 @@ impl QueueTitleSetting {
         } else {
             Self::Off
         }
-    }
-
-    /// The setting from [`ENV`]; off when it is unset.
-    pub fn from_env() -> Self {
-        std::env::var(ENV).map_or(Self::default(), |v| Self::parse(&v))
     }
 
     /// [`ENV`] as an override: `None` when it is unset or blank, else
@@ -432,12 +430,9 @@ impl Reader {
         TemplateSet::load(data_dir).map(Self::new)
     }
 
-    /// The gated entry point: a reader only when [`ENV`] is on and a pack
-    /// loads. Off, or no pack, is `None` and nothing runs.
-    pub fn from_env(data_dir: &Path) -> Option<Self> {
-        Self::for_setting(QueueTitleSetting::from_env(), data_dir)
-    }
-
+    /// The gated entry point: a reader only when `setting` is on
+    /// ([`QueueTitleSetting::for_config`]) and a pack loads. Off, or no
+    /// pack, is `None` and nothing runs.
     pub fn for_setting(setting: QueueTitleSetting, data_dir: &Path) -> Option<Self> {
         if !setting.is_on() {
             return None;

@@ -18,6 +18,9 @@ use crate::theme::{
 
 const TITLE: &str = "What leaves your PC";
 
+/// The rank fields in the game upload: read values only, never a picture.
+pub(crate) const RANK_LINE: &str = "With Read my rank after Comp games on: what the tracker read on the rank screen after the game (role, rank, division, progress and its change, its labels, the share of players you rank above, hero SR and its change, the next mode banner) and on the queue title before it, each with how sure the reader was. Only the values it read are sent, never a picture of either screen.";
+
 /// Heading and lines for each thing that is sent.
 pub(crate) const SECTIONS: [(&str, &[&str]); 6] = [
     (
@@ -25,7 +28,7 @@ pub(crate) const SECTIONS: [(&str, &[&str]); 6] = [
         &[
             "After each game, your own row only: hero, role, map, mode, result, eliminations, deaths, assists, damage, healing, mitigation and when it was played.",
             "With it: whether you edited the game, which reader read it and which numbers it was not sure of.",
-            "With Read my rank after Comp games on: the rank screen after the game (role, rank, division, progress and its change, its labels, the share of players you rank above, hero SR and its change, the next mode banner) and the queue title before it, each with how sure the reader was.",
+            RANK_LINE,
             "Games you delete here are deleted on the website too.",
             "No pictures, and no other player's name or stats. It goes only to the website you connected, with your token.",
         ],
@@ -154,6 +157,28 @@ mod tests {
         ] {
             assert!(upload.contains(field), "{field}");
         }
+    }
+
+    /// The rank line sits under Game uploads, says the rank fields are what
+    /// was read (not a picture), and matches the switch's help.
+    #[test]
+    fn the_rank_line_says_the_read_values_go_with_uploads_not_a_picture() {
+        assert!(SECTIONS[0].0.starts_with("Game uploads"));
+        assert_eq!(SECTIONS[0].1[2], RANK_LINE);
+        assert_eq!(
+            RANK_LINE,
+            "With Read my rank after Comp games on: what the tracker read on the rank screen \
+             after the game (role, rank, division, progress and its change, its labels, the \
+             share of players you rank above, hero SR and its change, the next mode banner) \
+             and on the queue title before it, each with how sure the reader was. Only the \
+             values it read are sent, never a picture of either screen."
+        );
+        let help = crate::settings_keys::RANK_HELP;
+        assert!(
+            help.contains("uploads") && help.contains("never a picture"),
+            "{help}"
+        );
+        assert!(SECTIONS[0].1[4].starts_with("No pictures"));
     }
 
     /// The training crop lines say what goes with each crop, and that the

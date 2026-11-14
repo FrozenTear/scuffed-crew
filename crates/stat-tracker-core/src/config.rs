@@ -224,9 +224,11 @@ pub struct Config {
     /// change and its label from the next game. Off (also when missing) and
     /// not written while off.
     ///
-    /// TODO(0.6): nothing reads this key yet. The rank update reader that
-    /// exists is switched by the `STAT_TRACKER_RANK_RECOGNIZER` env var
-    /// only; this key and its Settings toggle do not turn it on.
+    /// The daemon reads it at start and it drives both rank-v1 readers, the
+    /// rank update screen and the queue title. `STAT_TRACKER_RANK_RECOGNIZER`
+    /// and `STAT_TRACKER_QUEUE_TITLE_RECOGNIZER`, when set and not blank,
+    /// override it for their reader (`RankSetting::for_config` and
+    /// `QueueTitleSetting::for_config` in the stat-tracker crate).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub rank_reader: bool,
     /// Opt-in "Share stat pictures": upload the grayscale stat area after

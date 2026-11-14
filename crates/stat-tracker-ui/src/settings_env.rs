@@ -266,6 +266,11 @@ impl TrackerApp {
     /// switch. The packs are loaded again only when a reader turns on or
     /// off or a pack file changes, so a frame costs two file looks. A
     /// fixture shows none.
+    ///
+    /// This follows the pack files on disk, not what the running tracker
+    /// loaded: the tracker loads them only at start, so the warning says a
+    /// restart is needed after installing, and a pack put in place while
+    /// the tracker runs clears the warning before it reads.
     pub(crate) fn rank_pack_warning(&self) -> Option<String> {
         use stat_tracker::shadow::{queue_title, rank};
         if self.fixture.is_some() {
@@ -526,6 +531,24 @@ mod tests {
         let both = app.rank_pack_warning().expect("no packs");
         assert!(both.contains(rank::TEMPLATE_DIR) && both.contains(queue_title::TEMPLATE_DIR));
         assert!(both.contains("Games still record"), "{both}");
+        assert!(both.starts_with("Read my rank is on, but "), "{both}");
+        assert!(both.contains("then restart the tracker"), "{both}");
+        // the rank variable off with the switch saved on: the row shows Off,
+        // so the warning names the queue title reader, not Read my rank
+        app.outside_env = Some(OutsideEnv {
+            vars: vec![(RANK_ENV, "off".to_string())],
+            ..OutsideEnv::default()
+        });
+        assert!(!app.rank_switch().rank_on, "the switch shows Off");
+        let split = app
+            .rank_pack_warning()
+            .expect("the queue title reader is on");
+        assert!(
+            split.starts_with("The queue title reader is on, but "),
+            "{split}"
+        );
+        assert!(!split.contains("Read my rank is on"), "{split}");
+        app.outside_env = Some(OutsideEnv::default());
         // a broken queue title pack is named as not loading
         let queue_dir = dir.path().join(queue_title::TEMPLATE_DIR);
         std::fs::create_dir_all(&queue_dir).unwrap();

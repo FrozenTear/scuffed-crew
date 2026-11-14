@@ -79,7 +79,7 @@ pub const HIDDEN_KEYS: [&str; 1] = ["live_upload"];
 
 /// Shown rows whose key nothing reads yet: the row says so, has no After
 /// restart tag, and a change to it is not counted as waiting. `rank_reader`
-/// left in alpha.3: the tracker reads it at start.
+/// left after 0.6.0-alpha.3: the tracker reads it at start.
 pub const NOT_READ_KEYS: [&str; 2] = ["share_stat_pictures", "share_report_pictures"];
 
 /// Whether the Settings row for config key `key` is shown.

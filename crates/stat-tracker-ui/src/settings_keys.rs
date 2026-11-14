@@ -235,7 +235,7 @@ fn rank_lines<'a>(
 pub(crate) const RANK_LABEL: &str = "Read my rank after Comp games";
 
 /// Help under [`RANK_LABEL`].
-pub(crate) const RANK_HELP: &str = "Reads the rank screen after each Comp game and the queue title before it, and saves your rank, its change and its label with the game. Needs the rank-v1 and queue-title-v1 packs. Starts off.";
+pub(crate) const RANK_HELP: &str = "Reads the rank screen after each Comp game and the queue title before it, saves your rank, its change and its label with the game, and sends them with your game uploads. Only what it read is sent, never a picture. Needs the rank-v1 and queue-title-v1 packs, loaded when the tracker starts. Starts off.";
 
 /// Read my rank after Comp games, under READERS in Capture and reading
 /// with the other reader switches. `None` while hidden.

@@ -538,6 +538,34 @@ fn the_poll_loop_wires_the_feed_in_order() {
     let detect = at("detect::match_end::detect_outcome_signal_polled(");
     let asked = at("stability.first_seen(detect::RANK_SCREEN_CONTEXT)");
     assert!(holds < forget && forget < detect && detect < asked && asked < read);
+    // the flag is the one gate function, fed the held screen and the
+    // first sighting, not an inline `&&` the loop could drift from
+    const GATE: &str = "let rank_held_back = daemon::rank::rank_held_back(";
+    let gate = at(GATE);
+    assert!(
+        detect < gate && gate < asked,
+        "the gate is built after the detector"
+    );
+    let gate_call = &run_loop[gate + GATE.len()..];
+    let gate_call = &gate_call[..gate_call.find(");").expect("the gate call ends")];
+    let args: Vec<&str> = gate_call
+        .split(',')
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+        .collect();
+    assert_eq!(
+        args,
+        [
+            "rank_holds",
+            "stability.first_seen(detect::RANK_SCREEN_CONTEXT)"
+        ],
+        "{gate_call}"
+    );
+    assert_eq!(
+        run_loop.matches("stability.first_seen(").count(),
+        1,
+        "first_seen is asked only through the gate"
+    );
     let call = &run_loop[read..];
     let call = &call[..call.find(");").expect("the read call ends")];
     assert!(call.contains("rank_held_back"), "{call}");
@@ -839,15 +867,34 @@ fn a_reader_on_with_no_usable_pack_records_games_and_warns() {
     }
     assert_eq!(pack_warning(dir.path(), false, false), None, "both off");
     let missing = pack_warning(dir.path(), true, true).expect("a warning");
+    // two packs: "those packs", and the restart the start-only load needs
     assert_eq!(
         missing,
         "Read my rank is on, but the pack in templates/rank-v1 is not installed and the pack \
-         in templates/queue-title-v1 is not installed. Games still record, without what that \
-         pack reads. Install the pack or turn off Read my rank after Comp games."
+         in templates/queue-title-v1 is not installed. Games still record, without what those \
+         packs read. The tracker loads packs only at start: install the packs, then restart \
+         the tracker, or turn off Read my rank after Comp games."
     );
     assert!(!missing.contains('\u{2014}'), "no em dash");
+    // the rank switch Off (STAT_TRACKER_RANK_RECOGNIZER=off) with the queue
+    // title reader still on: the line never says Read my rank is on
     let only_queue = pack_warning(dir.path(), false, true).expect("a warning");
-    assert!(only_queue.contains("queue-title-v1") && !only_queue.contains("rank-v1 is"));
+    assert_eq!(
+        only_queue,
+        "The queue title reader is on, but the pack in templates/queue-title-v1 is not \
+         installed. Games still record, without what that pack reads. The tracker loads packs \
+         only at start: install the pack, then restart the tracker, or set \
+         STAT_TRACKER_QUEUE_TITLE_RECOGNIZER to off."
+    );
+    // the queue title reader off by its variable: the rank reader alone
+    let only_rank = pack_warning(dir.path(), true, false).expect("a warning");
+    assert_eq!(
+        only_rank,
+        "The rank screen reader is on, but the pack in templates/rank-v1 is not installed. \
+         Games still record, without what that pack reads. The tracker loads packs only at \
+         start: install the pack, then restart the tracker, or turn off Read my rank after \
+         Comp games."
+    );
     // a pack file that does not parse: did not load
     let rank_dir = dir.path().join(TEMPLATE_DIR);
     std::fs::create_dir_all(&rank_dir).unwrap();
@@ -855,9 +902,27 @@ fn a_reader_on_with_no_usable_pack_records_games_and_warns() {
     assert!(RankFeed::for_setting(RankSetting::RankV1, dir.path()).is_none());
     let broken = pack_warning(dir.path(), true, false).expect("a warning");
     assert!(
-        broken.starts_with("Read my rank is on, but the pack in templates/rank-v1 did not load ("),
+        broken.starts_with(
+            "The rank screen reader is on, but the pack in templates/rank-v1 did not load ("
+        ),
         "{broken}"
     );
+    assert!(broken.contains("without what that pack reads"), "{broken}");
+    // a queue title pack file that is there but cannot be read (here a
+    // folder) did not load; it is not "not installed"
+    let queue_dir = dir.path().join(queue_title::TEMPLATE_DIR);
+    std::fs::create_dir_all(queue_dir.join(queue_title::PACK_FILE)).unwrap();
+    let unreadable = pack_warning(dir.path(), false, true).expect("a warning");
+    assert!(
+        unreadable.contains("the pack in templates/queue-title-v1 did not load ("),
+        "{unreadable}"
+    );
+    assert!(!unreadable.contains("not installed"), "{unreadable}");
+    // both broken: one line, "those packs"
+    let both = pack_warning(dir.path(), true, true).expect("a warning");
+    assert!(both.starts_with("Read my rank is on, but "), "{both}");
+    assert_eq!(both.matches("did not load (").count(), 2, "{both}");
+    assert!(both.contains("without what those packs read"), "{both}");
 }
 
 // ---- Numbani 2026-11-13: a focus pause must not cost the rank ----
@@ -881,18 +946,19 @@ fn rank_v1(calls: &Arc<AtomicUsize>) -> RankReadFn {
     })
 }
 
-/// One analyzed poll tick as the loop runs it: the held-back flag counts
-/// only while a screen is held. `fixed` false replays the old wiring,
-/// which never read a held-back frame.
+/// One analyzed poll tick as the loop runs it: `first_seen` goes through
+/// the loop's own gate ([`rank_held_back`]), with the held screen taken
+/// before the tick. `fixed` false replays the old wiring, which never read
+/// a held-back frame.
 fn poll(
     feed: &mut RankFeed,
     source: Option<OutcomeSource>,
-    held_back: bool,
+    first_seen: bool,
     img: &RgbImage,
     fixed: bool,
 ) -> Option<Settled> {
     let read = feed.reader();
-    let held_back = fixed && held_back && feed.holds_screen();
+    let held_back = fixed && rank_held_back(feed.holds_screen(), first_seen);
     let seen = read_rank_screen(Some(&read), source, held_back, img);
     feed.observe(seen, Some("g1"), Utc::now())
 }
@@ -935,6 +1001,41 @@ fn a_held_back_tick_after_a_focus_pause_keeps_the_rank() {
     let (settled, calls) = numbani(false);
     assert!(settled.iter().all(Option::is_none), "{settled:?}");
     assert_eq!(calls, 2);
+}
+
+/// The gate the loop and the replay share: both halves, or no held-back
+/// read.
+#[test]
+fn a_frame_is_held_back_only_with_a_screen_held_and_a_first_sighting() {
+    assert!(rank_held_back(true, true));
+    assert!(!rank_held_back(true, false), "the gate looked at the crop");
+    assert!(!rank_held_back(false, true), "no screen held");
+    assert!(!rank_held_back(false, false));
+    // through the gate, a first sighting with no screen held reads nothing,
+    // and the same frame with a screen held is read
+    let calls = Arc::new(AtomicUsize::new(0));
+    let read = rank_v1(&calls);
+    let mut feed = RankFeed::with_read(Arc::clone(&read));
+    let gated = |feed: &RankFeed| rank_held_back(feed.holds_screen(), true);
+    assert_eq!(
+        read_rank_screen(Some(&read), None, gated(&feed), &shows(RANK)),
+        None
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    feed.observe(Some(Some(full(40))), Some("g1"), Utc::now());
+    assert_eq!(
+        read_rank_screen(Some(&read), None, gated(&feed), &shows(RANK)),
+        Some(Some(full(40)))
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    // a crop the gate looked at on a held screen is not read unless the
+    // detector classified it
+    let looked = rank_held_back(feed.holds_screen(), false);
+    assert_eq!(
+        read_rank_screen(Some(&read), None, looked, &shows(RANK)),
+        None
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 #[test]
