@@ -278,7 +278,7 @@ pub fn pack_warning(
     };
     Some(format!(
         "{lead}, but {}. Games still record, without what {what}. The tracker loads packs \
-         only at start: install {them}, then restart the tracker, or {off}.",
+         only at start: restart it once it has downloaded {them} from the site, or {off}.",
         problems.join(" and ")
     ))
 }

@@ -882,8 +882,8 @@ fn a_reader_on_with_no_usable_pack_records_games_and_warns() {
         missing,
         "Read my rank is on, but the pack in templates/rank-v1 is not installed and the pack \
          in templates/queue-title-v1 is not installed. Games still record, without what those \
-         packs read. The tracker loads packs only at start: install the packs, then restart \
-         the tracker, or turn off Read my rank after Comp games."
+         packs read. The tracker loads packs only at start: restart it once it has downloaded \
+         the packs from the site, or turn off Read my rank after Comp games."
     );
     assert!(!missing.contains('\u{2014}'), "no em dash");
     // the rank switch Off (STAT_TRACKER_RANK_RECOGNIZER=off) with the queue
@@ -893,7 +893,7 @@ fn a_reader_on_with_no_usable_pack_records_games_and_warns() {
         only_queue,
         "The queue title reader is on, but the pack in templates/queue-title-v1 is not \
          installed. Games still record, without what that pack reads. The tracker loads packs \
-         only at start: install the pack, then restart the tracker, or set \
+         only at start: restart it once it has downloaded the pack from the site, or set \
          STAT_TRACKER_QUEUE_TITLE_RECOGNIZER to off."
     );
     // the queue title reader off by its variable: the rank reader alone
@@ -902,8 +902,8 @@ fn a_reader_on_with_no_usable_pack_records_games_and_warns() {
         only_rank,
         "The rank screen reader is on, but the pack in templates/rank-v1 is not installed. \
          Games still record, without what that pack reads. The tracker loads packs only at \
-         start: install the pack, then restart the tracker, or turn off Read my rank after \
-         Comp games."
+         start: restart it once it has downloaded the pack from the site, or turn off Read my \
+         rank after Comp games."
     );
     // STAT_TRACKER_RANK_RECOGNIZER=on locks the switch: the line points at
     // the variables, never at the switch it cannot turn
@@ -912,7 +912,7 @@ fn a_reader_on_with_no_usable_pack_records_games_and_warns() {
         env_rank,
         "The rank screen reader is on, but the pack in templates/rank-v1 is not installed. \
          Games still record, without what that pack reads. The tracker loads packs only at \
-         start: install the pack, then restart the tracker, or set \
+         start: restart it once it has downloaded the pack from the site, or set \
          STAT_TRACKER_RANK_RECOGNIZER to off."
     );
     let env_both = warn(true, true, true).expect("a warning");
@@ -920,8 +920,8 @@ fn a_reader_on_with_no_usable_pack_records_games_and_warns() {
         env_both,
         "Read my rank is on, but the pack in templates/rank-v1 is not installed and the pack \
          in templates/queue-title-v1 is not installed. Games still record, without what those \
-         packs read. The tracker loads packs only at start: install the packs, then restart \
-         the tracker, or set STAT_TRACKER_RANK_RECOGNIZER and \
+         packs read. The tracker loads packs only at start: restart it once it has downloaded \
+         the packs from the site, or set STAT_TRACKER_RANK_RECOGNIZER and \
          STAT_TRACKER_QUEUE_TITLE_RECOGNIZER to off."
     );
     for line in [&env_rank, &env_both] {
