@@ -862,3 +862,89 @@ async fn l11_register_conflict_does_not_say_username_taken() {
         "conflict message still enumerates: {msg}"
     );
 }
+
+// ─── Unknown tournament id ──────────────────────────────────────────────────
+
+/// `/tournaments/doesnotexist` used to show "HTTP error 500": the bracket
+/// route turned the DB's "tournament not found" into a 500, and the list
+/// sub-routes answered 200 with an empty set. Every public GET route the
+/// tournament page uses must 404 for an id that does not exist, for every
+/// caller (officers skip the draft check, so they hit the missing-row path too).
+#[tokio::test]
+async fn unknown_tournament_id_is_404_on_every_public_route() {
+    let state = test_state().await;
+    seed_staff(&state.db).await;
+
+    for tid in ["doesnotexist", "does-not-exist"] {
+        for path in [
+            format!("/api/tournaments/{tid}"),
+            format!("/api/tournaments/{tid}/bracket"),
+            format!("/api/tournaments/{tid}/participants"),
+            format!("/api/tournaments/{tid}/matches"),
+            format!("/api/tournaments/{tid}/standings"),
+        ] {
+            let app = create_router(state.clone());
+            let resp = app.oneshot(anon(Method::GET, &path)).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "anon {path}");
+            assert_eq!(
+                body_json(resp).await["error"],
+                "Tournament not found",
+                "anon {path}"
+            );
+
+            for (who, token) in [("member", MEMBER_TOKEN), ("officer", OFFICER_TOKEN)] {
+                let app = create_router(state.clone());
+                let resp = app
+                    .oneshot(authed(Method::GET, &path, token, None))
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{who} {path}");
+            }
+        }
+    }
+}
+
+/// The 404 guard must not hide a tournament that exists: a published
+/// tournament still answers 200 on every public GET route.
+#[tokio::test]
+async fn published_tournament_routes_still_ok() {
+    let state = test_state().await;
+    seed_staff(&state.db).await;
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed(
+            Method::POST,
+            "/api/tournaments",
+            OFFICER_TOKEN,
+            Some(json!({ "name": "Open Cup", "format": "swiss", "swiss_rounds": 3 })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+    let tid = body_json(resp).await["id"].as_str().unwrap().to_string();
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed(
+            Method::PATCH,
+            &format!("/api/tournaments/{tid}/status"),
+            OFFICER_TOKEN,
+            Some(json!({ "status": "registration" })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    for path in [
+        format!("/api/tournaments/{tid}"),
+        format!("/api/tournaments/{tid}/bracket"),
+        format!("/api/tournaments/{tid}/participants"),
+        format!("/api/tournaments/{tid}/matches"),
+        format!("/api/tournaments/{tid}/standings"),
+    ] {
+        let app = create_router(state.clone());
+        let resp = app.oneshot(anon(Method::GET, &path)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "anon {path}");
+    }
+}
