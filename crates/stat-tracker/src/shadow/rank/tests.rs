@@ -23,7 +23,7 @@ use super::*;
 mod game_wiring;
 
 // ---- 5x7 dot font ----
-pub(crate) use super::synth::*;
+pub(crate) use super::tests_synth::*;
 
 /// The pack learned from [`training`], built once for all tests.
 fn trained() -> &'static TemplateSet {

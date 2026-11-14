@@ -30,7 +30,7 @@ fn family_vectors(set: &RankSet, family: Family) -> Vec<(String, Vec<f32>)> {
 
 #[test]
 fn cut_base_does_not_replace_unobserved_numeric_classes() {
-    use crate::shadow::rank::synth::{self, Scene};
+    use crate::shadow::rank::tests_synth::{self as synth, Scene};
     let root = scratch();
     let frames = root.path().join("frames");
     let sc = Scene::default();

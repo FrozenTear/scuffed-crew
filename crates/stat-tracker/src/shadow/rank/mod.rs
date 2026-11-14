@@ -118,7 +118,7 @@ pub mod layout;
 pub mod templates;
 
 #[cfg(test)]
-pub(crate) mod synth;
+pub(crate) mod tests_synth;
 #[cfg(test)]
 mod tests;
 
