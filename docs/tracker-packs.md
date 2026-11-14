@@ -10,6 +10,9 @@ release, a PR, or a comment. Do not put them in fixtures or under
 `crates/stat-tracker/test-data/`. They live in two places only: the build
 folder on the machine that made them, and `PACKS_DIR` on the server.
 
+To change a pack on your own PC, see
+[Hand-edit a reader pack](hand-edit-reader-packs.md).
+
 ## The packs
 
 | Pack | What it is for | Size on 2026-10-13 |
@@ -642,6 +645,10 @@ sha256, or a failed download refuses that pack only. The other packs still
 install, and the refused pack's folder is left as it was. A `rank-v1.tar` or
 `queue-title-v1.tar` whose `templates.json` its reader does not load is
 refused the same way, before the swap.
+
+A short member guide to editing a pack on your own PC, including how
+these two packs are kept, is in
+[Hand-edit a reader pack](hand-edit-reader-packs.md).
 
 After each `rank-v1.tar` or `queue-title-v1.tar` install the tracker
 records the sha256 of the installed `templates.json` in

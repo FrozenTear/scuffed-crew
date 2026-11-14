@@ -594,7 +594,7 @@ only these paths are writable:
 
 `{data_dir}` holds `stats.surrealkv`, `commands/`, `debug/` PNGs, portraits,
 `daemon.pid`, `sync_auth.json`, `live_snapshot.json`, `tracker.sock` (the app's query socket while the tracker runs), `active_game.json`,
-`daemon.log`, and vacuum and hero-timeline backups (`stats.surrealkv.pre-*`). The default directory is already in the
+`daemon.log`, and vacuum and hero-timeline backups (`stats.surrealkv.pre-*`). Reader packs land under `{data_dir}/templates/`, and folders pack sync moves aside under `{data_dir}/templates-kept/`. A guide to changing one on this PC is in [`docs/hand-edit-reader-packs.md`](../../docs/hand-edit-reader-packs.md). The default directory is already in the
 table above. An absolute `data_dir` anywhere else, including another
 folder under `$HOME`, is read-only under the sandbox. `install.sh` writes
 `~/.config/systemd/user/scuffed-stat-tracker.service.d/data-dir.conf` for
@@ -679,6 +679,12 @@ per capture and rewritten only for rare corrections; the app does not read
 it.
 
 ## Troubleshooting
+
+**I want to replace or edit a reader pack on this PC.** See
+[`docs/hand-edit-reader-packs.md`](../../docs/hand-edit-reader-packs.md).
+It covers where each pack lives under the data folder, how to edit a
+template without losing the official copy, and how to get the official
+pack back.
 
 **The tracker crashes or keeps restarting right after start, or warns that it
 cannot read the keyboard.** Check that you are in the `input` group in the
