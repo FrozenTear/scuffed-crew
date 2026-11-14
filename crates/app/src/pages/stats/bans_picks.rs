@@ -10,8 +10,11 @@
 //!
 //! Hero values are hero pack keys, or null when a slot could not be read or
 //! the hero is unknown to the server. `team` is `own`, `enemy` or null. Bans
-//! are up to 4. Picks are the uploader's own team only, own row first, up to 6
-//! because the reader checks six rows (the extra is null in a 5 player game).
+//! are up to 4. `picks` holds each player's preferred hero as read from hero
+//! select, not a locked pick, so the same hero can show up twice on one team.
+//! They are the uploader's own team only, own row first, up to 6 because the
+//! reader checks six rows (the extra is null in a 5 player game). The page
+//! labels them "Preferred heroes".
 //! `ban_vote` is accepted but not shown. The shape is the shared
 //! [`scuffed_types::BansPicks`], the same type the server returns.
 //!
@@ -37,8 +40,9 @@ const ENEMY_BANS_TITLE: &str = "Enemy team's bans";
 const OTHER_BANS_TITLE: &str = "Bans";
 const OTHER_BANS_SIDE_UNKNOWN_TITLE: &str = "Bans, side not known";
 const LOBBY_BAN_TITLE: &str = "Lobby ban";
-// Picks are the uploader's own team only.
-const PICKS_TITLE: &str = "Team picks";
+// Preferred heroes from hero select, the uploader's own team only. Not locked
+// picks, so duplicates are legal and are all listed.
+const PICKS_TITLE: &str = "Preferred heroes";
 /// Shown for a slot that holds the no preference key.
 pub(super) const NO_PREFERENCE_TEXT: &str = "No preference";
 /// A slot with no hero: not read, or a hero the server does not know.
@@ -142,7 +146,8 @@ pub(super) struct Group {
 }
 
 fn group(key: &'static str, title: &'static str, items: Vec<Shown>) -> Option<Group> {
-    // Slots keep their place (the picks list starts with the local player),
+    // Slots keep their place (the preferred heroes list starts with the local
+    // player),
     // but a list where nothing was read has nothing to show.
     items
         .iter()
@@ -185,7 +190,8 @@ impl BansPicksGroups for BansPicks {
             .iter()
             .map(|key| Shown::from_key(key.as_deref()))
             // The reader checks six rows, so a 5 player game ends in a null.
-            // Only heroes that were read are listed.
+            // Only heroes that were read are listed. Duplicates stay: these
+            // are preferred heroes, so two players can want the same one.
             .filter(Shown::is_read)
             .collect();
         [
@@ -319,7 +325,7 @@ fn card_label(g: &Group) -> &'static str {
         "bans-other" if g.title == OTHER_BANS_TITLE => "Bans",
         "bans-other" => "Other bans",
         "lobby-ban" => "Lobby ban",
-        _ => "Team picks",
+        _ => PICKS_TITLE,
     }
 }
 
@@ -692,7 +698,7 @@ mod tests {
             "Wrecking Ball",
             "Soldier: 76",
             "Lobby ban",
-            "Team picks",
+            PICKS_TITLE,
             UNKNOWN_TEXT,
         ] {
             assert!(html.contains(text), "{text}: {html}");
@@ -756,7 +762,12 @@ mod tests {
         let html = render_line("rec:Abc 1", parse(FULL));
         assert!(html.contains("id=\"bans-picks-rec_abc_1-card\""), "{html}");
         assert!(html.contains("aria-label=\"Bans and picks\""), "{html}");
-        for label in ["Your bans:", "Enemy bans:", "Lobby ban:", "Team picks:"] {
+        for label in [
+            "Your bans:",
+            "Enemy bans:",
+            "Lobby ban:",
+            "Preferred heroes:",
+        ] {
             assert!(html.contains(label), "{label}: {html}");
         }
         for name in [
@@ -769,7 +780,8 @@ mod tests {
         ] {
             assert!(html.contains(name), "{name}: {html}");
         }
-        // The null ban and the null pick are skipped, never shown as Unknown.
+        // The null ban and the null preferred hero are skipped, never shown as
+        // Unknown.
         assert!(!html.contains(UNKNOWN_TEXT), "{html}");
         assert_eq!(
             html.matches("<li class=\"match-bp-pill").count(),
@@ -800,6 +812,39 @@ mod tests {
         assert_eq!(html.matches("No preference").count(), 1, "{html}");
         assert_eq!(html.matches("match-bp-pill-muted").count(), 1, "{html}");
         assert!(!html.contains(UNKNOWN_TEXT), "{html}");
+    }
+
+    #[test]
+    fn duplicate_preferred_heroes_are_all_shown() {
+        // Hero select reads are preferences, not locks: two Moiras is legal.
+        let field = parse(r#"{"bans_picks": {"picks": ["moira", "ana", "moira", null]}}"#).unwrap();
+
+        let groups = field.groups();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].title, PICKS_TITLE);
+        let words: Vec<&str> = groups[0].items.iter().map(Shown::text).collect();
+        assert_eq!(words, ["Moira", "Ana", "Moira"]);
+        let html = render("m1", Some(field.clone()));
+        assert!(html.contains(PICKS_TITLE), "{html}");
+        assert_eq!(html.matches(">Moira</li>").count(), 2, "{html}");
+        assert_eq!(html.matches("<li").count(), 3, "{html}");
+
+        let cards = card_groups(Some(&field));
+        assert_eq!(
+            cards,
+            [(
+                PICKS_TITLE,
+                vec!["Moira".to_string(), "Ana".into(), "Moira".into()]
+            )]
+        );
+        let line = render_line("m1", Some(field));
+        assert!(line.contains("Preferred heroes:"), "{line}");
+        assert_eq!(line.matches(">Moira</li>").count(), 2, "{line}");
+        assert_eq!(
+            line.matches("<li class=\"match-bp-pill").count(),
+            3,
+            "{line}"
+        );
     }
 
     #[test]
