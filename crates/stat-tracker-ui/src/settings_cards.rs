@@ -2,9 +2,10 @@
 //! everyday cards on the left (Player and sessions, Companion, Website
 //! account, Updates), the bodies of the ADVANCED rows other than
 //! Capture and reading (Tracker service, Stored data, Website connection,
-//! Troubleshooting), and the Read bans and picks row Capture and reading
-//! ends its CAPTURE rows with. Rows are divided by hairlines with the control on
-//! the right; switches are On/Off. Every control applies at once
+//! Troubleshooting), and the Read bans and picks and Extra number reader
+//! rows Capture and reading holds under READERS with the other reader
+//! switches. Rows are divided by hairlines with the control on the right;
+//! switches are On/Off. Every control applies at once
 //! ([`crate::settings_update`]).
 
 use iced::widget::{Row, button, checkbox, column, container, image, row, space, text, text_input};
@@ -37,10 +38,9 @@ const SYNC_ENV_NOTE: &str =
     "That token is used instead of one saved here, so the website and token are locked.";
 /// Under Upload games after each match (spec).
 const UPLOAD_HELP: &str = "Only your own stats are sent.";
-/// Sub-heading of the Sharing rows inside Website account.
-const SHARING_HEADING: &str = "Sharing · both start off";
-/// "Read my rank after Comp games" help.
-const RANK_HELP: &str = "Saves rank, rank change and its label. Applies from the next game.";
+/// Sub-heading of the Sharing row inside Website account. Read my rank
+/// after Comp games moved to READERS in Capture and reading.
+const SHARING_HEADING: &str = "Sharing · starts off";
 /// "Share stat pictures" help.
 const STAT_PICTURES_HELP: &str = "Uploads the grayscale stat area after each game to help train the reader. No names. Kept 30 days. Report pictures are a separate setting in Capture and reading.";
 /// Help under Get alpha updates (spec).
@@ -198,7 +198,7 @@ pub(crate) fn website_account(app: &TrackerApp) -> Element<'_, Message> {
     let demo = app.fixture.is_some();
     let uploads = crate::settings_keys::upload_row(app, demo, UPLOAD_HELP, !rejected);
     // The Sharing heading only while a sharing row shows.
-    let shared = crate::settings_keys::sharing_rows(app, demo, RANK_HELP, STAT_PICTURES_HELP);
+    let shared = crate::settings_keys::sharing_rows(app, demo, STAT_PICTURES_HELP);
     let mut sharing = column![].spacing(12);
     if !shared.is_empty() {
         sharing = sharing
@@ -454,8 +454,8 @@ pub(crate) const PREGAME_SCREENS_LABEL: &str = "Save screens around each game";
 /// times that at 4K), 20 games.
 pub(crate) const PREGAME_SCREENS_HELP: &str = "Saves pictures of the map vote, hero bans, ban results, roster, hero select and loading screen of each game and the screens after it in debug/pregame, keeping the newest 20 games (up to about 4 to 7 GB at 1440p, about 9 to 15 GB at 4K). They show other players' names and stay on this PC only. Turning it off keeps the saved pictures. Leave it off unless someone asked for them.";
 
-/// The Capture and reading switch for `bans_picks_reader`, the last row
-/// of CAPTURE ([`crate::capture_reading`]). Game rows that point to it use
+/// The Capture and reading switch for `bans_picks_reader`, under READERS
+/// ([`crate::capture_reading`]). Game rows that point to it use
 /// this label as it is.
 pub(crate) const BANS_PICKS_LABEL: &str = "Read bans and picks";
 
@@ -520,9 +520,9 @@ pub(crate) fn bans_picks_row(app: &TrackerApp, demo: bool) -> Element<'_, Messag
         .into()
 }
 
-/// Troubleshooting: debug images, screens around each game, the extra number
-/// reader, then Report a problem, About and Uninstall. Demo draws them
-/// without actions.
+/// Troubleshooting: debug images and screens around each game, then Report
+/// a problem, About and Uninstall. Demo draws them without actions. The
+/// extra number reader moved to READERS ([`shadow_reader_row`]).
 pub(crate) fn troubleshooting(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     // STAT_TRACKER_DEBUG_OCR turns them on whatever the file says, so the
     // row shows On and locks, as OCR workers does.
@@ -554,21 +554,6 @@ pub(crate) fn troubleshooting(app: &TrackerApp, demo: bool) -> Element<'_, Messa
             ConfigEdit::SavePregameScreens,
         ),
     );
-    let locked = app.settings.shadow.locked;
-    let mut shadow_help = vec![hint(SHADOW_READER_HINT)];
-    if locked {
-        shadow_help.push(hint(SHADOW_READER_ENV_NOTE));
-    }
-    let shadow = setting_row(
-        title_line(SHADOW_READER_LABEL, false, &[]),
-        shadow_help,
-        switch(
-            app.settings.displayed_reader().file_flag(),
-            toggle(!demo && settings::shadow_toggle_interactive(locked), |v| {
-                apply(Message::SettingsToggle(SettingsToggle::ShadowRecognizer, v))
-            }),
-        ),
-    );
     let report = |label: &'static str, msg: Message| -> Element<'static, Message> {
         let mut b = button(text(label).size(SIZE_META).font(FONT_SEMIBOLD).color(TEXT))
             .padding(Padding::from([7, 14]))
@@ -596,7 +581,28 @@ pub(crate) fn troubleshooting(app: &TrackerApp, demo: bool) -> Element<'_, Messa
             .push(uninstall),
     ]
     .spacing(8);
-    divided(vec![debug, pregame, shadow, actions.into()])
+    divided(vec![debug, pregame, actions.into()])
+}
+
+/// The extra number reader (`shadow_recognizer`), under READERS in Capture
+/// and reading with the other reader switches. SCUFFED_SHADOW_RECOGNIZER
+/// locks it and says so under the row.
+pub(crate) fn shadow_reader_row(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
+    let locked = app.settings.shadow.locked;
+    let mut shadow_help = vec![hint(SHADOW_READER_HINT)];
+    if locked {
+        shadow_help.push(hint(SHADOW_READER_ENV_NOTE));
+    }
+    setting_row(
+        title_line(SHADOW_READER_LABEL, false, &[]),
+        shadow_help,
+        switch(
+            app.settings.displayed_reader().file_flag(),
+            toggle(!demo && settings::shadow_toggle_interactive(locked), |v| {
+                apply(Message::SettingsToggle(SettingsToggle::ShadowRecognizer, v))
+            }),
+        ),
+    )
 }
 
 /// Stored data keeps the classic body: its buttons are the same.
@@ -616,7 +622,7 @@ mod tests {
             SYNC_ENV_NOTE,
             UPLOAD_HELP,
             SHARING_HEADING,
-            RANK_HELP,
+            crate::settings_keys::RANK_HELP,
             STAT_PICTURES_HELP,
             crate::account_card::WHAT_LEAVES_LINK,
             ALPHA_HELP,

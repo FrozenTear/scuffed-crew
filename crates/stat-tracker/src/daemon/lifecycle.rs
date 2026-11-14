@@ -738,9 +738,10 @@ pub(crate) async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
         &ctx.data_dir,
         site_linked,
     );
-    // The queue title reader: off unless its env switch is on and the pack
-    // loads; off leaves the saver as it is.
-    let queue_title = daemon::queue_title::QueueTitleFeed::from_env(&ctx.data_dir);
+    // The queue title reader: off unless config `rank_reader` (or its env
+    // override) is on and the pack loads; off leaves the saver as it is.
+    let queue_title =
+        daemon::queue_title::QueueTitleFeed::for_config(config.rank_reader, &ctx.data_dir);
     let mut pregame_dump = daemon::pregame_dump::PregameDump::with_readers(
         ctx.save_pregame_screens,
         bans_picks,
@@ -754,6 +755,7 @@ pub(crate) async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
         &mut sync_task,
         &mut restart_to,
         &mut pregame_dump,
+        config.rank_reader,
     )
     .await;
     daemon::focus::shutdown().await;

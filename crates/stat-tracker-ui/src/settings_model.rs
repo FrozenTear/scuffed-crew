@@ -78,12 +78,9 @@ pub const APP_ONLY_KEYS: [&str; 5] = [
 pub const HIDDEN_KEYS: [&str; 1] = ["live_upload"];
 
 /// Shown rows whose key nothing reads yet: the row says so, has no After
-/// restart tag, and a change to it is not counted as waiting.
-pub const NOT_READ_KEYS: [&str; 3] = [
-    "rank_reader",
-    "share_stat_pictures",
-    "share_report_pictures",
-];
+/// restart tag, and a change to it is not counted as waiting. `rank_reader`
+/// left in alpha.3: the tracker reads it at start.
+pub const NOT_READ_KEYS: [&str; 2] = ["share_stat_pictures", "share_report_pictures"];
 
 /// Whether the Settings row for config key `key` is shown.
 pub fn row_shown(key: &str) -> bool {
@@ -165,7 +162,8 @@ impl AdvancedSection {
         }
     }
 
-    /// The config keys this row's controls write.
+    /// The config keys this row's controls write. Capture and reading
+    /// lists its CAPTURE keys, then every reader switch (READERS).
     pub fn keys(self) -> &'static [&'static str] {
         match self {
             AdvancedSection::CaptureReading => &[
@@ -174,22 +172,20 @@ impl AdvancedSection {
                 "game_process_names",
                 "screencast_pause_between_grabs",
                 "screencast_max_fps",
+                "capture_only_on_screen",
                 "reader",
                 "ocr",
                 "name_reader",
+                "bans_picks_reader",
+                "rank_reader",
+                "shadow_recognizer",
                 "ocr_threads",
                 "share_report_pictures",
-                "capture_only_on_screen",
-                "bans_picks_reader",
             ],
             AdvancedSection::TrackerService => &["auto_detect"],
             AdvancedSection::StoredData => &[],
             AdvancedSection::WebsiteConnection => &["sync"],
-            AdvancedSection::Troubleshooting => &[
-                "debug_ocr",
-                "debug_save_pregame_screens",
-                "shadow_recognizer",
-            ],
+            AdvancedSection::Troubleshooting => &["debug_ocr", "debug_save_pregame_screens"],
         }
     }
 
@@ -200,10 +196,11 @@ impl AdvancedSection {
         match self {
             AdvancedSection::CaptureReading => {
                 let mut line = format!(
-                    "{} capture on {}, {}",
+                    "{} capture on {}, {}, extra number reader {}",
                     v.route,
                     v.monitor,
-                    lower_first(v.reader.label())
+                    lower_first(v.reader.label()),
+                    on_off(v.extra_reader)
                 );
                 if row_shown("share_report_pictures") {
                     line.push_str(&format!(", report pictures {}", on_off(v.report_pictures)));
@@ -249,7 +246,6 @@ impl AdvancedSection {
                 if let Some(frames) = v.compare_frames {
                     parts.push(format!("KDE compare frames {}", on_off(frames)));
                 }
-                parts.push(format!("extra number reader {}", on_off(v.extra_reader)));
                 parts.push("report a problem, about, uninstall".to_string());
                 parts.join(", ")
             }
@@ -1002,6 +998,7 @@ mod tests {
         config.ocr = stat_tracker::config::OcrSetting::Off;
         config.share_report_pictures = true;
         config.capture_only_on_screen = false;
+        config.rank_reader = true;
         // Keys left out while they hold their default are set above.
         let serde_json::Value::Object(map) = serde_json::to_value(&config).unwrap() else {
             panic!("config is a table");
@@ -1080,8 +1077,11 @@ mod tests {
         let running = Config::default();
         let mut saved = running.clone();
         (saved.live_upload, saved.share_report_pictures) = (false, true);
-        (saved.rank_reader, saved.share_stat_pictures) = (true, true);
+        saved.share_stat_pictures = true;
         assert_eq!(changes_waiting(&running, &saved), 0);
+        saved.rank_reader = true;
+        assert_eq!(changes_waiting(&running, &saved), 1, "read at start");
+        saved.rank_reader = false;
         saved.player_names = vec!["Alt".into()];
         assert_eq!(changes_waiting(&running, &saved), 1);
         let mut main = running.clone();
@@ -1089,7 +1089,8 @@ mod tests {
         let mut same = main.clone();
         same.player_names = vec!["öster".into()];
         assert_eq!(changes_waiting(&main, &same), 0, "one name");
-        assert!(needs_restart("player_names") && !needs_restart("rank_reader"));
+        assert!(needs_restart("player_names") && needs_restart("rank_reader"));
+        assert!(!needs_restart("share_stat_pictures"));
         assert!(AdvancedSection::CaptureReading.after_restart());
     }
 
@@ -1098,7 +1099,7 @@ mod tests {
         let mut v = values();
         assert_eq!(
             AdvancedSection::CaptureReading.summary(&v),
-            "Automatic capture on DP-3, new reader with OCR backup, report pictures off"
+            "Automatic capture on DP-3, new reader with OCR backup, extra number reader off, report pictures off"
         );
         assert_eq!(
             AdvancedSection::TrackerService.summary(&v),
@@ -1113,6 +1114,11 @@ mod tests {
             "Uploads to ow.example.no. Manual server and token, has its own Apply"
         );
         assert!(!AdvancedSection::Troubleshooting.summary(&v).contains("KDE"));
+        assert!(
+            !AdvancedSection::Troubleshooting
+                .summary(&v)
+                .contains("number reader")
+        );
         assert!(
             AdvancedSection::Troubleshooting
                 .summary(&v)

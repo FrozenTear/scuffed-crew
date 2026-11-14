@@ -25,6 +25,7 @@ pub(crate) const SECTIONS: [(&str, &[&str]); 6] = [
         &[
             "After each game, your own row only: hero, role, map, mode, result, eliminations, deaths, assists, damage, healing, mitigation and when it was played.",
             "With it: whether you edited the game, which reader read it and which numbers it was not sure of.",
+            "With Read my rank after Comp games on: the rank screen after the game (role, rank, division, progress and its change, its labels, the share of players you rank above, hero SR and its change, the next mode banner) and the queue title before it, each with how sure the reader was.",
             "Games you delete here are deleted on the website too.",
             "No pictures, and no other player's name or stats. It goes only to the website you connected, with your token.",
         ],
@@ -57,7 +58,7 @@ pub(crate) const SECTIONS: [(&str, &[&str]); 6] = [
     (
         "Not sent",
         &[
-            "Screen captures, debug images and the stored games stay on this computer, apart from the training crops above. Read my rank after Comp games, Share stat pictures and Report pictures are not read by this version and start off when they come.",
+            "Screen captures, debug images and the stored games stay on this computer, apart from the training crops above. Share stat pictures and Report pictures are not read by this version and start off when they come.",
         ],
     ),
 ];

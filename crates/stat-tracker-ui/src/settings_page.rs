@@ -766,6 +766,73 @@ mod tests {
         );
     }
 
+    /// Every reader switch sits together under READERS in Capture and
+    /// reading, below every CAPTURE row: names, bans and picks, rank and
+    /// the extra number reader. Website account and Troubleshooting no
+    /// longer draw the rank and extra number reader rows.
+    #[test]
+    fn the_reader_rows_sit_together_under_readers() {
+        use crate::settings::SHADOW_READER_LABEL;
+        use crate::settings_cards::BANS_PICKS_LABEL;
+        use crate::settings_keys::RANK_LABEL;
+
+        let width = 976.0;
+        let (_dir, mut page) = app();
+        page.fixture = None;
+        page.outside_env = Some(crate::settings_env::OutsideEnv::default());
+        page.page_state
+            .show_section(AdvancedSection::CaptureReading);
+        let found = operate_page(&page, width);
+        let y_of = |label: &str| {
+            found
+                .texts
+                .iter()
+                .find(|(text, _)| text == label)
+                .map(|(_, b)| b.y)
+                .unwrap_or_else(|| panic!("{label} is drawn"))
+        };
+        let heading = y_of("READERS");
+        let gate = found
+            .ids
+            .iter()
+            .find(|(id, _)| *id == Id::new(crate::focus_status::ROW_ID))
+            .map(|(_, b)| b.y)
+            .expect("the focus gate, the last CAPTURE row");
+        assert!(gate < heading, "CAPTURE ends before READERS");
+        let mut last = heading;
+        for label in [
+            "Name reader",
+            BANS_PICKS_LABEL,
+            RANK_LABEL,
+            SHADOW_READER_LABEL,
+        ] {
+            let y = y_of(label);
+            assert!(last < y, "{label} at {y} follows {last}");
+            last = y;
+        }
+        // The bans and picks row keeps its id, so its deep link and
+        // outline still find it.
+        let row_id = Id::new(crate::bans_picks_setting::ROW_ID);
+        assert!(found.ids.iter().any(|(id, _)| *id == row_id));
+
+        let (_dir_closed, mut closed) = app();
+        closed.fixture = None;
+        closed.outside_env = Some(crate::settings_env::OutsideEnv::default());
+        let everyday = operate_page(&closed, width);
+        assert!(
+            everyday.texts.iter().all(|(text, _)| text != RANK_LABEL),
+            "Website account no longer draws the rank row"
+        );
+        closed
+            .page_state
+            .show_section(AdvancedSection::Troubleshooting);
+        let ts = operate_page(&closed, width);
+        assert!(
+            ts.texts.iter().all(|(text, _)| text != SHADOW_READER_LABEL),
+            "Troubleshooting no longer draws the extra number reader"
+        );
+    }
+
     /// Signed in, the Website account card draws the training crop section:
     /// the consent per kind, where to change it, the tracker's warning and
     /// the delete button.

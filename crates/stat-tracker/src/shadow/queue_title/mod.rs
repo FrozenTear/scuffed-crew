@@ -165,6 +165,19 @@ impl QueueTitleSetting {
         std::env::var(ENV).map_or(Self::default(), |v| Self::parse(&v))
     }
 
+    /// [`ENV`] as an override: `None` when it is unset or blank, else
+    /// [`Self::parse`] of it (on or off).
+    pub fn env_override() -> Option<Self> {
+        crate::shadow::rank::override_of(std::env::var(ENV).ok().as_deref()).map(Self::parse)
+    }
+
+    /// The setting the tracker runs: `env` ([`Self::env_override`]) when
+    /// set, else config `rank_reader`, the one switch for both rank-v1
+    /// readers (Open queue and the next mode hint need this one).
+    pub fn for_config(rank_reader: bool, env: Option<Self>) -> Self {
+        env.unwrap_or(if rank_reader { Self::On } else { Self::Off })
+    }
+
     pub fn is_on(self) -> bool {
         self == Self::On
     }
