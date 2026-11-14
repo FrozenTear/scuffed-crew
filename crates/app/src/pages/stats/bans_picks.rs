@@ -147,8 +147,7 @@ pub(super) struct Group {
 
 fn group(key: &'static str, title: &'static str, items: Vec<Shown>) -> Option<Group> {
     // Slots keep their place (the preferred heroes list starts with the local
-    // player),
-    // but a list where nothing was read has nothing to show.
+    // player), but a list where nothing was read has nothing to show.
     items
         .iter()
         .any(Shown::is_read)
