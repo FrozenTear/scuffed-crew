@@ -35,6 +35,15 @@ pub const MARKDOWN_CSS_ID: &str = "scuffed-css-markdown-body";
 /// list markers and indent, so this restores them. Colors, fonts and sizes
 /// come from the design tokens only. Page CSS keeps the container's own look
 /// (font size, paragraph spacing, `pre` background).
+///
+/// The first/last-child margin resets sit last on purpose: they tie on
+/// specificity with `.md-body .md-table-wrap` (0,2,0), and inside one sheet
+/// the later rule wins, so a leading or trailing table loses its outer margin
+/// no matter which `StyleOnce` mounts first. They also beat page rules like
+/// `.wiki-content p` (0,1,1), so pages must not repeat them.
+///
+/// Task items drop their marker in both shapes: tight (`li > input`) and
+/// loose (`li > p > input`, where the parser wraps the item text in `<p>`).
 pub const MARKDOWN_CSS: &str = r#"
     .md-body h1,
     .md-body h2,
@@ -84,10 +93,14 @@ pub const MARKDOWN_CSS: &str = r#"
     .md-body li + li {
         margin-top: 0.25rem;
     }
-    .md-body li:has(> input[type="checkbox"]) {
+    .md-body li:has(
+        > input[type="checkbox"],
+        > p:first-child > input[type="checkbox"]:first-child
+    ) {
         list-style: none;
     }
-    .md-body li > input[type="checkbox"] {
+    .md-body li > input[type="checkbox"],
+    .md-body li > p:first-child > input[type="checkbox"]:first-child {
         margin-right: 0.5rem;
         vertical-align: middle;
     }
@@ -103,6 +116,12 @@ pub const MARKDOWN_CSS: &str = r#"
         color: var(--text);
         font-weight: 600;
         text-align: left;
+    }
+    .md-body > :first-child {
+        margin-top: 0;
+    }
+    .md-body > :last-child {
+        margin-bottom: 0;
     }
 "#;
 
@@ -423,6 +442,55 @@ mod tests {
         let html = render_markdown("<div class=\"md-table-wrap\">x</div>\n");
         assert!(!html.contains("<div"), "{html}");
         assert!(html.contains("&lt;div"), "{html}");
+    }
+
+    #[test]
+    fn author_html_in_table_cells_is_escaped() {
+        let html = render_markdown(
+            "| a | b |\n|---|---|\n| <script>x</script> | <img src=x onerror=alert(1)> |\n",
+        );
+        assert!(html.contains("<td>&lt;script&gt;"), "{html}");
+        assert!(html.contains("<td>&lt;img"), "{html}");
+        assert!(!html.contains("<script"), "{html}");
+        assert!(!html.contains("<img"), "{html}");
+    }
+
+    #[test]
+    fn code_block_newlines_stay_newlines() {
+        let html = render_markdown("```\nline one\nline two\n```\n\n    a\n    b\n");
+        assert!(
+            html.contains("<pre><code>line one\nline two\n</code></pre>"),
+            "{html}"
+        );
+        assert!(html.contains("<pre><code>a\nb\n</code></pre>"), "{html}");
+        assert!(!html.contains("<br"), "{html}");
+    }
+
+    #[test]
+    fn edge_margin_resets_come_after_the_table_wrap_rule() {
+        // Equal specificity, so source order decides; keep the resets last.
+        let wrap = MARKDOWN_CSS.find(".md-body .md-table-wrap {").unwrap();
+        let first = MARKDOWN_CSS.find(".md-body > :first-child {").unwrap();
+        let last = MARKDOWN_CSS.find(".md-body > :last-child {").unwrap();
+        assert!(wrap < first && wrap < last);
+    }
+
+    #[test]
+    fn task_list_shapes_match_the_css() {
+        // Tight: the checkbox is a direct child of the `li`.
+        let html = render_markdown("- [ ] todo\n- [x] done\n");
+        assert!(
+            html.contains("<li><input disabled=\"\" type=\"checkbox\"/>\ntodo</li>"),
+            "{html}"
+        );
+        // Loose: the parser wraps the item in `<p>` and the checkbox is that
+        // paragraph's first child, which is what MARKDOWN_CSS matches.
+        let html = render_markdown("- [ ] todo\n\n- [x] done\n");
+        assert!(
+            html.contains("<li>\n<p><input disabled=\"\" type=\"checkbox\"/>\ntodo</p>\n</li>"),
+            "{html}"
+        );
+        assert!(MARKDOWN_CSS.contains("> p:first-child > input[type=\"checkbox\"]:first-child"));
     }
 
     #[test]

@@ -112,12 +112,6 @@ const PAGE_CSS: &str = r#"
         line-height: 1.7;
         overflow-wrap: break-word;
     }
-    .wiki-content > :first-child {
-        margin-top: 0;
-    }
-    .wiki-content > :last-child {
-        margin-bottom: 0;
-    }
     .wiki-content p,
     .wiki-content ul,
     .wiki-content ol,
