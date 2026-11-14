@@ -9,25 +9,40 @@ guide is about publishing a pack to the server. For that, see
 
 ## Stop and start the tracker
 
-The tracker runs as the `scuffed-stat-tracker.service` user unit. Closing
-the app window does not stop it.
+On a standard install, the tracker runs as the
+`scuffed-stat-tracker.service` user unit, and Settings says "Runs as a
+login service." If Settings says "No login service installed", there is
+no unit: the app starts the tracker itself. Either way, closing the app
+window does not stop the tracker.
 
-- From a terminal: `systemctl --user stop scuffed-stat-tracker.service`,
-  then `systemctl --user start scuffed-stat-tracker.service` (or
-  `restart` to do both).
-- In the app: **Stop** on the tracker status row in Settings, then
-  **Start tracker** (or **Restart tracker**) on the Settings status strip.
+- From a terminal, with the login service only:
+  `systemctl --user stop scuffed-stat-tracker.service`, then
+  `systemctl --user start scuffed-stat-tracker.service` (or `restart` to
+  do both).
+- In the app, with or without the login service: **Stop** on the tracker
+  status row in Settings, then **Start tracker** (or **Restart tracker**)
+  on the Settings status strip. On the older Settings layout, the
+  **Tracker service** card has **Stop**, **Restart** and **Start**.
 
 "Stop the tracker" and "start the tracker" below mean one of these.
 
-The tracker writes its log to `daemon.log` in the data folder.
+### Where the tracker log is
+
+- With the login service, the log goes to the journal:
+  `journalctl --user -u scuffed-stat-tracker.service`.
+- With "No login service installed", the log is `daemon.log` in the data
+  folder.
+
+"The tracker log" below means whichever of these applies to you.
 
 ## Where the packs live
 
-The data folder is `$XDG_DATA_HOME/scuffed-stat-tracker` when
-`XDG_DATA_HOME` is set, and `~/.local/share/scuffed-stat-tracker` when it
-is not. If `config.toml` sets `data_dir` to an absolute path, the packs
-are under that path instead. Below, `<data_dir>` means that folder.
+The data folder is `~/.local/share/scuffed-stat-tracker`. It is
+`$XDG_DATA_HOME/scuffed-stat-tracker` only when the tracker's own
+environment sets `XDG_DATA_HOME`, which the user unit normally does not,
+whatever your shell has. If `config.toml` sets `data_dir` to an absolute
+path, the packs are under that path instead. Below, `<data_dir>` means
+that folder.
 
 Each pack lands in a folder under `<data_dir>/templates/`:
 
@@ -58,9 +73,9 @@ install.
 
 Keep the same file names the reader already uses. The maps and words
 readers check names and layout files in the live folder when they load
-it, and can refuse the whole folder. The hero reader loads any `.png`
-name it finds, so a stray file there is used, not refused. Details per
-pack follow.
+it, and can refuse the whole folder. The hero reader loads any `.png` at
+the top of a hero folder, so a stray file there is used, not refused.
+Details per pack follow.
 
 **Hero packs** (`heroes-v1`, `heroes-v2`, `heroes-v2-1080`): one
 `<hero-key>.png` per hero (for example `ana.png`, `wrecking-ball.png`),
@@ -128,18 +143,26 @@ environment:
 
 `1`, `true` and `yes` also count as on. For the user unit, set them in a
 drop-in: `systemctl --user edit scuffed-stat-tracker`, then add an
-`Environment=` line under `[Service]`, and restart the tracker.
+`Environment=` line under `[Service]`, and restart the tracker. With "No
+login service installed", the drop-in does not apply: the tracker gets
+its environment from the app, so set the variables in the environment
+you start the app from, then restart the tracker.
 
-If your Settings page has a **Readers** group, the switch there turns the
-rank and queue title readers on, and is the one that applies. The two
-environment variables still override it.
+Settings also has a switch, **Read my rank after Comp games**. When the
+tracker reads that switch, it turns on both the rank reader and the queue
+title reader, and the two environment variables still override it. If
+the switch shows "Not read by this build yet, so this changes nothing
+for now.", it does nothing, and only the environment variables turn the
+readers on.
 
 ## Edit a template safely
 
 1. Stop the tracker first (see [Stop and start the tracker](#stop-and-start-the-tracker)).
    Most readers load a pack only when the tracker starts. A download of
    an official pack only runs on the next pack sync: a tracker start, or
-   the setup guide's reader pack step.
+   the setup guide's **Download reader pack** step. Open the setup guide
+   from Settings, **Open setup guide**. That step is the last one, and you
+   can skip the capture steps before it.
 2. Copy the folder, or at least the file you will change, to a backup
    outside `<data_dir>/templates/`. A backup `.png` left inside a hero
    folder is loaded as a hero. The tracker itself keeps a copy only for
@@ -150,11 +173,23 @@ environment variables still override it.
    as the official file you are replacing.
 4. Start the tracker again. See [When the reader uses your edit](#when-the-reader-uses-your-edit).
 
-With `ocr = "off"` in `config.toml`, the tracker needs a hero pack,
-`maps-v1` and `words-v1` that load. If one of those is missing at start,
-the tracker waits up to 45 seconds for it, then keeps OCR on for that run
-if it is still missing. If one goes away while the tracker runs, what
-that pack reads is held until it is back.
+With `ocr = "off"` in `config.toml`, the tracker turns classic OCR off
+only when all of these load:
+
+- a main hero set: `heroes-v1`, or a complete `heroes-v2`
+  (`heroes-v2-1080` alone does not count);
+- `maps-v1` itself (a hand-installed `templates/maps/` does not count);
+- `words-v1`, with VICTORY and DEFEAT for both the accolade and rank
+  screens, every match-start title, and the end-title templates. An edit
+  that breaks one of those title templates keeps OCR on, even if the rest
+  of the folder still loads.
+
+If one of those is missing at start, the install is linked, and startup
+got the site's pack list, the tracker waits up to 45 seconds for the
+download, then keeps OCR on for that run if it is still missing. In any
+other case there is no wait: OCR stays on for that run. If a pack goes
+away while the tracker runs, what that pack reads is held until it is
+back.
 
 ### What a bad file does
 
@@ -172,10 +207,12 @@ It depends on the pack.
   the v2 packs do not have, so it turns off both v2 packs. An extra
   `.png` in a v2 folder is a made-up hero the reader can return.
 - **Map glyphs.** The whole `maps-v1` folder is refused when
-  `atlas.json` is missing or is not JSON, when its `height` is not 32, or
-  when it names a file that is not `g`, 4 lowercase hex digits and
-  `.png`. A refused `maps-v1` falls back to `templates/maps/` if you have
-  one. Files `atlas.json` does not name are ignored. A named glyph that
+  `atlas.json` is missing or is not JSON, when it lacks one of `height`,
+  `gap`, `space` or `glyphs`, when its `height` is not 32, when it names
+  a file that is not `g`, 4 lowercase hex digits and `.png`, or when none
+  of the glyphs it names load. A refused `maps-v1` falls back to
+  `templates/maps/` if you have one. Files `atlas.json` does not name
+  are ignored. A named glyph that
   is missing, unreadable or not 32 pixels high is skipped without a
   message, and maps that need that glyph get no template.
 - **Result words.** A `layouts.json` that cannot be read or parsed, that
@@ -235,7 +272,7 @@ an empty one, or one installed before this hash was recorded, is kept.
 for example `templates-kept/rank-v1-20261114T065156Z-4242/`. That sits
 beside `templates/`, not inside it. When that name is already taken,
 `-2`, `-3` and so on are added. When the tracker ran the sync, the move
-is logged in `daemon.log` with the WARN line "reader pack folder that
+is logged in the tracker log with the WARN line "reader pack folder that
 was not the one sync installed was moved aside", and the kept path. When
 the setup guide ran it, that line goes to the app's own output instead,
 and the setup guide shows only the hero pack result and "Extra reader
@@ -359,19 +396,25 @@ nothing is installed.
    missing folder and downloads the pack again.
 3. Get the pack back while the install is linked to a site account (pack
    sync needs the daemon token). Pick one:
-   - With the tracker still stopped, run the setup guide's "Download
-     reader pack" step, then start the tracker. The pack is in place
-     before the tracker starts, so every reader loads it at that start.
+   - With the tracker still stopped, open the setup guide (Settings,
+     **Open setup guide**) and run its last step, **Download reader
+     pack**. You can skip the capture steps before it. Then start the
+     tracker. The pack is in place before the tracker starts, so every
+     reader loads it at that start.
    - Or start the tracker, wait for the `reader pack installed` line for
-     that pack in `daemon.log`, then restart the tracker once more. At
+     that pack in the tracker log, then restart the tracker once more. At
      start the tracker downloads only `heroes-v1` before the readers load.
      The other packs come from a background job, and the rank and queue
      title readers load before that job can finish, so they use the
      official `templates.json` only from the restart.
 
-With `ocr = "off"`, removing a hero, maps or words pack means the next
-start waits up to 45 seconds for it and keeps OCR on for that run if it
-is still missing. The first way above avoids that.
+With `ocr = "off"`, removing a pack the tracker needs to turn OCR off
+(see [Edit a template safely](#edit-a-template-safely)) means the next
+start keeps OCR on for that run if the pack is still missing, after a
+wait of up to 45 seconds when the install is linked and startup got the
+pack list. Removing `heroes-v2` while `heroes-v1` loads does not count:
+the main hero set is still there. The first way above avoids all of
+that.
 
 If a newer official pack already replaced your edit, the live folder is
 already the official one. Your copy is under `templates-kept/` (or, in
@@ -390,10 +433,10 @@ tracker writes, and neither `templates` nor `templates-kept` is one of
 them.
 
 At each tracker start that runs pack sync (the install is linked to a
-site account and its sync token is not paused), when `templates-kept/`
-holds folders, or a kept folder sits beside a live pack folder under
-`templates/`, the tracker logs the `templates-kept/` path once in
-`daemon.log`, with both counts.
+site account and its sync token was not rejected and has not expired),
+when `templates-kept/` holds folders, or a kept folder sits beside a live
+pack folder under `templates/`, the tracker logs the `templates-kept/`
+path once in the tracker log, with both counts.
 
 Delete `templates-kept/` by hand when you no longer need what is in it.
 A kept folder is only a backup. Removing it does not change the live
