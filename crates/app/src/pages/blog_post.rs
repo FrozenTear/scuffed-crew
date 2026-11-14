@@ -3,7 +3,9 @@ use serde::Deserialize;
 
 use scuffed_api_client::ApiClient;
 
+use super::article_author::{author_byline, fetch_author_names};
 use crate::components::is_http_status;
+use crate::markdown::render_markdown;
 use crate::routes::Route;
 use crate::util::{FetchClass, classify_fetch};
 
@@ -69,8 +71,42 @@ const PAGE_CSS: &str = r#"
         color: var(--text-2);
         font-size: 0.9rem;
         line-height: 1.85;
-        white-space: pre-wrap;
-        word-wrap: break-word;
+        overflow-wrap: break-word;
+    }
+    .blog-post-content p,
+    .blog-post-content ul,
+    .blog-post-content ol,
+    .blog-post-content blockquote,
+    .blog-post-content pre,
+    .blog-post-content table {
+        margin: 0 0 1rem;
+    }
+    .blog-post-content a {
+        color: var(--accent);
+    }
+    .blog-post-content img {
+        max-width: 100%;
+        height: auto;
+    }
+    .blog-post-content blockquote {
+        border-left: 3px solid var(--border);
+        padding-left: 1rem;
+        color: var(--text-3);
+    }
+    .blog-post-content pre {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 0.75rem 1rem;
+        overflow-x: auto;
+    }
+    .blog-post-content table {
+        border-collapse: collapse;
+    }
+    .blog-post-content th,
+    .blog-post-content td {
+        border: 1px solid var(--border);
+        padding: 0.35rem 0.6rem;
     }
     .blog-post-loading, .blog-post-error {
         color: var(--text-3);
@@ -101,9 +137,20 @@ pub fn BlogPost(slug: String) -> Element {
                 .map_err(|e| e.to_string())
         }
     });
+    // Articles carry only the author id; resolve it once the article loads.
+    let author_names = use_resource(move || {
+        let ids: Vec<String> = article
+            .read()
+            .as_ref()
+            .and_then(|r| r.as_ref().ok())
+            .map(|a| vec![a.author_member_id.clone()])
+            .unwrap_or_default();
+        fetch_author_names(ids)
+    });
 
     rsx! {
         crate::styles::StyleOnce { id: "scuffed-css-pages-blog_post-page-css", css: PAGE_CSS }
+        crate::styles::StyleOnce { id: crate::markdown::MARKDOWN_CSS_ID, css: crate::markdown::MARKDOWN_CSS }
 
         main { class: "blog-post-page",
             Link { to: Route::Blog {}, class: "blog-post-back",
@@ -151,10 +198,11 @@ pub fn BlogPost(slug: String) -> Element {
                                             .map(|d| d.chars().take(10).collect::<String>())
                                             .unwrap_or_else(|| "Draft".to_string())}
                                     }
-                                    span { "by {a.author_member_id}" }
+                                    {author_byline(author_names.read().as_ref(), &a.author_member_id)}
                                 }
-                                div { class: "blog-post-content",
-                                    "{a.content_markdown}"
+                                div {
+                                    class: "blog-post-content md-body",
+                                    dangerous_inner_html: render_markdown(&a.content_markdown),
                                 }
                             },
                             None => rsx! { p { class: "blog-post-loading", "Loading..." } },

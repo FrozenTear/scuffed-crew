@@ -103,19 +103,50 @@ const PAGE_CSS: &str = r#"
         color: var(--text);
     }
     .wiki-content {
+        --md-block-gap: 0.9rem;
         background: var(--surface);
         border: 1px solid var(--border);
         border-radius: 10px;
         padding: 1.5rem;
-    }
-    .wiki-content pre {
-        white-space: pre-wrap;
-        word-wrap: break-word;
         color: var(--text-2);
         font-size: 0.85rem;
         line-height: 1.7;
-        margin: 0;
-        font-family: inherit;
+        overflow-wrap: break-word;
+    }
+    .wiki-content p,
+    .wiki-content ul,
+    .wiki-content ol,
+    .wiki-content blockquote,
+    .wiki-content pre,
+    .wiki-content table {
+        margin: 0 0 var(--md-block-gap);
+    }
+    .wiki-content a {
+        color: var(--accent);
+    }
+    .wiki-content img {
+        max-width: 100%;
+        height: auto;
+    }
+    .wiki-content blockquote {
+        border-left: 3px solid var(--border);
+        padding-left: 1rem;
+        color: var(--text-3);
+    }
+    .wiki-content pre {
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 0.75rem 1rem;
+        overflow-x: auto;
+    }
+    .wiki-content table {
+        border-collapse: collapse;
+    }
+    .wiki-content th,
+    .wiki-content td {
+        border: 1px solid var(--border);
+        padding: 0.35rem 0.6rem;
     }
     .wiki-revisions {
         margin-top: 2rem;
@@ -254,6 +285,7 @@ pub fn WikiPage(topic: String) -> Element {
 
     rsx! {
         crate::styles::StyleOnce { id: "scuffed-css-pages-wiki_page-page-css", css: PAGE_CSS }
+        crate::styles::StyleOnce { id: crate::markdown::MARKDOWN_CSS_ID, css: crate::markdown::MARKDOWN_CSS }
 
         main { class: "wiki-detail",
             Link { to: Route::Wiki {}, class: "wiki-back", "< Back to Wiki" }
@@ -387,8 +419,9 @@ pub fn WikiPage(topic: String) -> Element {
                                     }
                                 }
                             } else {
-                                div { class: "wiki-content",
-                                    pre { "{content}" }
+                                div {
+                                    class: "wiki-content md-body",
+                                    dangerous_inner_html: crate::markdown::render_markdown(&content),
                                 }
                             }
 
