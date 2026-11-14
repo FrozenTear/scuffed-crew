@@ -8,7 +8,8 @@
 //!
 //! Off by default. The tracker's capture wiring (`daemon::rank` in the
 //! binary, through [`game::read_for_game`]) runs the reader only when
-//! [`ENV`] is switched on ([`RankSetting::parse`]) and a template pack is
+//! config `rank_reader` (Read my rank after Comp games) is on, or [`ENV`]
+//! overrides it to on ([`RankSetting::for_config`]), and a template pack is
 //! installed ([`templates`]); it then reads the rank screen's frames after a
 //! game, stores the result on that game and uploads it in the `rank` object.
 //! Which frames to read and how reads are combined are the wiring's; see
@@ -93,6 +94,10 @@
 //! The tracker's wiring (`daemon::rank` in the binary) does this: it reads
 //! every frame the end detector flags as the rank screen, 2560x1440 only,
 //! through [`game::read_for_game`], and holds the reads for the open game.
+//! While a screen is held, it also reads a frame whose rank-screen word the
+//! stability gate held back on a first sighting (the first tick after a
+//! focus pause, so the end detector never looked at it); a read there is
+//! held like any other, and a frame it does not read is a miss.
 //! A single tick that misses the screen is a break between reads; two in a
 //! row, another game, or the game closing end the screen. Then each field
 //! is kept only when the newest read that has it agrees with the read right
@@ -127,14 +132,16 @@ use serde::{Deserialize, Serialize};
 
 use ink::Glyph;
 pub use templates::{
-    CHEV_LEFT, CHEV_RIGHT, Family, Learner, SR_ICON, TEMPLATE_DIR, TemplateError, TemplateSet,
+    CHEV_LEFT, CHEV_RIGHT, Family, Learner, PACK_FILE, SR_ICON, TEMPLATE_DIR, TemplateError,
+    TemplateSet,
 };
 
 /// The recognizer id written next to the values: the one id the upload
 /// sends as `rank.rank_recognizer` for this reader and the queue title
 /// reader alike, defined once in `model`.
 pub use crate::model::RANK_RECOGNIZER_ID as RECOGNIZER_ID;
-/// Environment switch: `rank-v1`, `on`, `1`, `true` or `yes` turns it on.
+/// Environment override of config `rank_reader` for this reader: `rank-v1`,
+/// `on`, `1`, `true` or `yes` turns it on, any other non-blank value off.
 pub const ENV: &str = "STAT_TRACKER_RANK_RECOGNIZER";
 /// Lowest glyph score a read may have.
 pub const MIN_SCORE: f32 = 0.70;
@@ -156,8 +163,8 @@ pub const FRAME_W: u32 = 2560;
 /// Reference frame height the layout was measured at.
 pub const FRAME_H: u32 = 1440;
 
-/// Whether rank-v1 runs. Off unless switched on; the capture wiring reads
-/// it from [`ENV`] (see the module docs).
+/// Whether rank-v1 runs. Off unless config `rank_reader` or [`ENV`] turns
+/// it on ([`Self::for_config`], see the module docs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum RankSetting {
     #[default]
@@ -182,14 +189,98 @@ impl RankSetting {
         }
     }
 
-    /// The setting from [`ENV`]; off when it is unset.
-    pub fn from_env() -> Self {
-        std::env::var(ENV).map_or(Self::default(), |v| Self::parse(&v))
+    /// [`ENV`] as an override: `None` when it is unset or blank, else
+    /// [`Self::parse`] of it (on or off).
+    pub fn env_override() -> Option<Self> {
+        override_of(std::env::var(ENV).ok().as_deref()).map(Self::parse)
+    }
+
+    /// The setting the tracker runs: `env` ([`Self::env_override`]) when
+    /// set, else config `rank_reader`.
+    pub fn for_config(rank_reader: bool, env: Option<Self>) -> Self {
+        env.unwrap_or(if rank_reader { Self::RankV1 } else { Self::Off })
     }
 
     pub fn is_on(self) -> bool {
         self == Self::RankV1
     }
+}
+
+/// An env value that overrides the config: `None` when unset or blank.
+/// Shared with the queue title reader's switch and the app's lock line.
+pub fn override_of(value: Option<&str>) -> Option<&str> {
+    value.filter(|v| !v.trim().is_empty())
+}
+
+/// How [`pack_warning`] says to turn the rank switch off.
+const RANK_OFF: &str = "turn off Read my rank after Comp games";
+
+/// The warning for the rank readers that are on but have no usable pack:
+/// rank-v1 (`rank_on`, `<data_dir>/templates/rank-v1/`) and the queue
+/// title reader (`queue_on`, `<data_dir>/templates/queue-title-v1/`).
+/// Loads each pack the way the tracker does at start. `None` when every
+/// reader that is on loads. Games still record either way: a reader with
+/// no pack reads nothing.
+///
+/// The line names what is on as the switch shows it: "Read my rank" only
+/// when both readers are on, else the one reader the variables left on
+/// (with the rank switch Off, the queue title reader can still be on).
+/// It says "that pack" or "those packs" by how many fail, and that the
+/// tracker loads packs only at start, so a pack put in place while it runs
+/// reads after a restart.
+///
+/// `rank_env` is true when [`ENV`] decides the rank reader: the switch is
+/// then locked, so with the rank reader on the line says to set the
+/// variables to off, not to turn the switch off.
+pub fn pack_warning(
+    data_dir: &Path,
+    rank_on: bool,
+    queue_on: bool,
+    rank_env: bool,
+) -> Option<String> {
+    use crate::shadow::queue_title;
+    let problem = |dir: &str, missing: bool, error: String| {
+        if missing {
+            format!("the pack in {dir} is not installed")
+        } else {
+            format!("the pack in {dir} did not load ({error})")
+        }
+    };
+    let mut problems = Vec::new();
+    if rank_on && let Err(e) = Reader::load(data_dir) {
+        let missing = matches!(e, TemplateError::Missing(_));
+        problems.push(problem(TEMPLATE_DIR, missing, e.to_string()));
+    }
+    if queue_on && let Err(e) = queue_title::Reader::load(data_dir) {
+        let missing = matches!(e, queue_title::TemplateError::Missing(_));
+        problems.push(problem(queue_title::TEMPLATE_DIR, missing, e.to_string()));
+    }
+    if problems.is_empty() {
+        return None;
+    }
+    let (lead, off) = match (rank_on, queue_on) {
+        (true, true) if rank_env => (
+            "Read my rank is on",
+            format!("set {ENV} and {} to off", queue_title::ENV),
+        ),
+        (true, true) => ("Read my rank is on", RANK_OFF.to_string()),
+        (true, false) if rank_env => ("The rank screen reader is on", format!("set {ENV} to off")),
+        (true, false) => ("The rank screen reader is on", RANK_OFF.to_string()),
+        _ => (
+            "The queue title reader is on",
+            format!("set {} to off", queue_title::ENV),
+        ),
+    };
+    let (what, them) = if problems.len() == 1 {
+        ("that pack reads", "the pack")
+    } else {
+        ("those packs read", "the packs")
+    };
+    Some(format!(
+        "{lead}, but {}. Games still record, without what {what}. The tracker loads packs \
+         only at start: restart it once it has downloaded {them} from the site, or {off}.",
+        problems.join(" and ")
+    ))
 }
 
 /// The queue role a rank update is for.

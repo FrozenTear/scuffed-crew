@@ -166,6 +166,9 @@ pub struct PageState {
     /// The last changes waiting count with the baseline and saved config it
     /// was counted from, so a frame recounts only after one of them moved.
     waiting_memo: RefCell<Option<(Config, Config, usize)>>,
+    /// The rank pack warning and what it was worked out from
+    /// ([`TrackerApp::rank_pack_warning`]).
+    pub(crate) rank_pack_memo: RefCell<Option<(crate::settings_env::RankPackKey, Option<String>)>>,
 }
 
 impl PageState {
@@ -193,6 +196,7 @@ impl PageState {
             bans_picks_row: crate::bans_picks_setting::RowMark::default(),
             opened: crate::settings_open::OpenState::default(),
             waiting_memo: RefCell::new(None),
+            rank_pack_memo: RefCell::new(None),
         }
     }
 

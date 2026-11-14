@@ -40,6 +40,11 @@ pub struct FrameStability {
     prev: HashMap<&'static str, Vec<u8>>,
     /// The value each [`Self::repeats`] key held on the previous tick.
     values: HashMap<&'static str, u8>,
+    /// Keys whose crop [`Self::check`] held back on a first sighting (no
+    /// history: a new screen region, or the first check after
+    /// [`Self::reset`], such as the first tick after a focus pause) since
+    /// the last [`Self::forget_first_seen`]. A crop that moved is not one.
+    first_seen: Vec<&'static str>,
 }
 
 impl FrameStability {
@@ -48,6 +53,10 @@ impl FrameStability {
     /// of a region (or a resolution change) is never stable.
     pub fn check(&mut self, key: &'static str, crop: &DynamicImage) -> bool {
         let thumb = crop.thumbnail_exact(THUMB_W, THUMB_H).to_luma8().into_raw();
+        self.first_seen.retain(|k| *k != key);
+        if !self.prev.contains_key(key) {
+            self.first_seen.push(key);
+        }
         let stable = self.prev.get(key).is_some_and(|prev| {
             prev.len() == thumb.len() && {
                 let sum: u64 = prev
@@ -60,6 +69,19 @@ impl FrameStability {
         });
         self.prev.insert(key, thumb);
         stable
+    }
+
+    /// Whether the newest [`Self::check`] of `key` since the last
+    /// [`Self::forget_first_seen`] held its crop back as a first sighting.
+    /// False when `key` was not checked since then (a dark crop is never
+    /// checked) or had history (a stable crop, or one that moved).
+    pub fn first_seen(&self, key: &str) -> bool {
+        self.first_seen.contains(&key)
+    }
+
+    /// Start a new tick for [`Self::first_seen`]: no key is first seen yet.
+    pub fn forget_first_seen(&mut self) {
+        self.first_seen.clear();
     }
 
     /// The same gate for a read that is already made: record this tick's
@@ -82,6 +104,7 @@ impl FrameStability {
     pub fn reset(&mut self) {
         self.prev.clear();
         self.values.clear();
+        self.first_seen.clear();
     }
 }
 
@@ -130,6 +153,27 @@ mod tests {
         );
         // Holding still again re-establishes stability on the next tick.
         assert!(stab.check("k", &checker(16)));
+    }
+
+    /// A first sighting (also after a reset: the focus pause drops the
+    /// history) is named for that tick only; a crop that moved is not.
+    #[test]
+    fn a_first_sighting_is_named_until_the_next_tick() {
+        let mut stab = FrameStability::default();
+        assert!(!stab.first_seen("k"), "never checked");
+        assert!(!stab.check("k", &checker(0)));
+        assert!(stab.first_seen("k") && !stab.first_seen("other"));
+        stab.forget_first_seen();
+        assert!(!stab.first_seen("k"), "a new tick forgets it");
+        assert!(stab.check("k", &checker(0)));
+        assert!(!stab.first_seen("k"), "a stable crop is not");
+        assert!(!stab.check("k", &checker(16)));
+        assert!(!stab.first_seen("k"), "a crop that moved is not");
+        stab.reset();
+        assert!(!stab.check("k", &checker(0)));
+        assert!(stab.first_seen("k"), "first sighting after a reset");
+        stab.reset();
+        assert!(!stab.first_seen("k"));
     }
 
     #[test]

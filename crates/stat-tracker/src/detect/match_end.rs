@@ -1571,7 +1571,7 @@ const RANK_WORD: WordScreen = WordScreen {
     y_pm: 145,
     w_pm: 240,
     h_pm: 80,
-    context: "rank screen",
+    context: super::RANK_SCREEN_CONTEXT,
     screen: ResultScreen::RankScreen,
 };
 

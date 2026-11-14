@@ -14,6 +14,8 @@ use std::path::Path;
 
 use stat_tracker::config::{CAPTURE_ENV, Config, EnvOverlay, OCR_ENV, OcrControl};
 use stat_tracker::shadow::bans_picks::BansPicksSetting;
+use stat_tracker::shadow::queue_title::QueueTitleSetting;
+use stat_tracker::shadow::rank::{RankSetting, override_of};
 
 use crate::app::TrackerApp;
 
@@ -139,6 +141,34 @@ pub(crate) const DEBUG_OCR_ENV: &str = "STAT_TRACKER_DEBUG_OCR";
 /// The variable that turns the bans and picks reader off outside the app.
 pub(crate) const BANS_PICKS_ENV: &str = stat_tracker::shadow::bans_picks::ENV;
 
+/// The variable that turns the rank update reader on or off outside the app.
+pub(crate) const RANK_ENV: &str = stat_tracker::shadow::rank::ENV;
+
+/// The variable that turns the queue title reader on or off outside the app.
+pub(crate) const QUEUE_TITLE_ENV: &str = stat_tracker::shadow::queue_title::ENV;
+
+/// "Read my rank after Comp games" (`rank_reader`, one switch for both
+/// rank-v1 readers) as the tracker runs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RankSwitch {
+    /// The rank update reader reads. The switch shows this.
+    pub rank_on: bool,
+    /// The queue title reader reads.
+    pub queue_on: bool,
+    /// [`RANK_ENV`] decides the rank reader: the switch locks.
+    pub rank_env: bool,
+    /// [`QUEUE_TITLE_ENV`] decides the queue title reader.
+    pub queue_env: bool,
+}
+
+/// What a rank pack warning was worked out from: the readers on, whether
+/// the rank variable decides the rank reader, and each pack file's time
+/// and size.
+pub(crate) type RankPackKey = (bool, bool, bool, PackStamp, PackStamp);
+
+/// A pack file's time and size, `None` when it is not there.
+pub(crate) type PackStamp = Option<(Option<std::time::SystemTime>, u64)>;
+
 /// The variables that set the website token (and URL) outside the app,
 /// for a lock line. `None` when no token comes from outside: a server
 /// without a token changes nothing.
@@ -214,6 +244,65 @@ impl TrackerApp {
             .outside_var(BANS_PICKS_ENV)
             .is_some_and(|v| !BansPicksSetting::parse(&v).is_on());
         (self.saved_config.bans_picks_reader && !env_off, env_off)
+    }
+
+    /// The "Read my rank after Comp games" switch as the tracker runs it.
+    /// Each variable, set to on or off (not blank), decides its reader
+    /// whatever the file says, as the tracker does.
+    pub(crate) fn rank_switch(&self) -> RankSwitch {
+        let saved = self.saved_config.rank_reader;
+        let rank = override_of(self.outside_var(RANK_ENV).as_deref()).map(RankSetting::parse);
+        let queue =
+            override_of(self.outside_var(QUEUE_TITLE_ENV).as_deref()).map(QueueTitleSetting::parse);
+        RankSwitch {
+            rank_on: RankSetting::for_config(saved, rank).is_on(),
+            queue_on: QueueTitleSetting::for_config(saved, queue).is_on(),
+            rank_env: rank.is_some(),
+            queue_env: queue.is_some(),
+        }
+    }
+
+    /// The warning for a rank reader that is on with no usable pack
+    /// ([`stat_tracker::shadow::rank::pack_warning`]), shown under the
+    /// switch. The packs are loaded again only when a reader turns on or
+    /// off or a pack file changes, so a frame costs two file looks. A
+    /// fixture shows none.
+    ///
+    /// This follows the pack files on disk, not what the running tracker
+    /// loaded: the tracker loads them only at start, so the warning says a
+    /// restart is needed after installing, and a pack put in place while
+    /// the tracker runs clears the warning before it reads.
+    pub(crate) fn rank_pack_warning(&self) -> Option<String> {
+        use stat_tracker::shadow::{queue_title, rank};
+        if self.fixture.is_some() {
+            return None;
+        }
+        let switch = self.rank_switch();
+        let stamp = |dir: &str, file: &str| {
+            let meta = std::fs::metadata(self.data_dir.join(dir).join(file)).ok()?;
+            Some((meta.modified().ok(), meta.len()))
+        };
+        let key = (
+            switch.rank_on,
+            switch.queue_on,
+            switch.rank_env,
+            stamp(rank::TEMPLATE_DIR, rank::PACK_FILE),
+            stamp(queue_title::TEMPLATE_DIR, queue_title::PACK_FILE),
+        );
+        let mut memo = self.page_state.rank_pack_memo.borrow_mut();
+        if let Some((k, warning)) = memo.as_ref()
+            && *k == key
+        {
+            return warning.clone();
+        }
+        let warning = rank::pack_warning(
+            &self.data_dir,
+            switch.rank_on,
+            switch.queue_on,
+            switch.rank_env,
+        );
+        *memo = Some((key, warning.clone()));
+        warning
     }
 
     /// `SCUFFED_TOKEN` (or `--token`) sets the website token outside the
@@ -395,6 +484,118 @@ mod tests {
         let loaded = load(Some(&path), false);
         assert_eq!(loaded.file, Config::read_at(&path).expect("missing file"));
         assert!(!path.exists(), "loading never writes the file");
+    }
+
+    /// `rank_reader` drives both rank-v1 readers; each variable, on or off,
+    /// decides its own reader both ways, and only the rank one locks.
+    #[test]
+    fn the_rank_switch_shows_the_readers_in_effect() {
+        let (_dir, mut app) = crate::fixtures::test_app();
+        let fixture = app.fixture.take();
+        let mut with = |saved: bool, rank: Option<&str>, queue: Option<&str>| {
+            app.saved_config.rank_reader = saved;
+            let mut vars = Vec::new();
+            vars.extend(rank.map(|v| (RANK_ENV, v.to_string())));
+            vars.extend(queue.map(|v| (QUEUE_TITLE_ENV, v.to_string())));
+            app.outside_env = Some(OutsideEnv {
+                vars,
+                ..OutsideEnv::default()
+            });
+            let s = app.rank_switch();
+            (s.rank_on, s.queue_on, s.rank_env, s.queue_env)
+        };
+        assert_eq!(with(false, None, None), (false, false, false, false));
+        assert_eq!(with(true, None, None), (true, true, false, false));
+        assert_eq!(with(false, Some("on"), None), (true, false, true, false));
+        assert_eq!(with(true, Some("off"), None), (false, true, true, false));
+        assert_eq!(with(true, None, Some("0")), (true, false, false, true));
+        assert_eq!(with(false, None, Some("yes")), (false, true, false, true));
+        assert_eq!(
+            with(true, Some(" "), Some("")),
+            (true, true, false, false),
+            "blank"
+        );
+        assert_eq!(RANK_ENV, "STAT_TRACKER_RANK_RECOGNIZER");
+        assert_eq!(QUEUE_TITLE_ENV, "STAT_TRACKER_QUEUE_TITLE_RECOGNIZER");
+        // A fixture never reads the variables.
+        app.fixture = fixture;
+        app.saved_config.rank_reader = false;
+        assert!(!app.rank_switch().rank_env && !app.rank_switch().rank_on);
+    }
+
+    /// A reader that is on with no pack warns under the switch; the warning
+    /// follows the switch and the pack file, and a fixture shows none.
+    #[test]
+    fn the_rank_row_warns_while_a_reader_is_on_without_its_pack() {
+        use stat_tracker::shadow::{queue_title, rank};
+        let (dir, mut app) = crate::fixtures::test_app();
+        let fixture = app.fixture.take();
+        app.data_dir = dir.path().to_path_buf();
+        app.outside_env = Some(OutsideEnv::default());
+        app.saved_config.rank_reader = false;
+        assert_eq!(app.rank_pack_warning(), None, "off: nothing to warn");
+        app.saved_config.rank_reader = true;
+        let both = app.rank_pack_warning().expect("no packs");
+        assert!(both.contains(rank::TEMPLATE_DIR) && both.contains(queue_title::TEMPLATE_DIR));
+        assert!(both.contains("Games still record"), "{both}");
+        assert!(both.starts_with("Read my rank is on, but "), "{both}");
+        assert!(both.contains("restart it once it has downloaded"), "{both}");
+        // the rank variable off with the switch saved on: the row shows Off,
+        // so the warning names the queue title reader, not Read my rank
+        app.outside_env = Some(OutsideEnv {
+            vars: vec![(RANK_ENV, "off".to_string())],
+            ..OutsideEnv::default()
+        });
+        assert!(!app.rank_switch().rank_on, "the switch shows Off");
+        let split = app
+            .rank_pack_warning()
+            .expect("the queue title reader is on");
+        assert!(
+            split.starts_with("The queue title reader is on, but "),
+            "{split}"
+        );
+        assert!(!split.contains("Read my rank is on"), "{split}");
+        // the rank variable on with the switch saved off: the switch is
+        // locked, so the warning points at the variable, not the switch
+        app.saved_config.rank_reader = false;
+        app.outside_env = Some(OutsideEnv {
+            vars: vec![(RANK_ENV, "on".to_string())],
+            ..OutsideEnv::default()
+        });
+        let locked = app.rank_switch();
+        assert!(locked.rank_on && locked.rank_env && !locked.queue_on);
+        let env_on = app.rank_pack_warning().expect("the rank reader is on");
+        assert!(
+            env_on.starts_with("The rank screen reader is on, but "),
+            "{env_on}"
+        );
+        assert!(
+            env_on.ends_with("or set STAT_TRACKER_RANK_RECOGNIZER to off."),
+            "{env_on}"
+        );
+        assert!(!env_on.contains("turn off Read my rank"), "{env_on}");
+        app.saved_config.rank_reader = true;
+        app.outside_env = Some(OutsideEnv::default());
+        // a broken queue title pack is named as not loading
+        let queue_dir = dir.path().join(queue_title::TEMPLATE_DIR);
+        std::fs::create_dir_all(&queue_dir).unwrap();
+        std::fs::write(queue_dir.join(queue_title::PACK_FILE), "not a pack").unwrap();
+        let broken = app.rank_pack_warning().expect("still no usable pack");
+        assert!(
+            broken.contains("templates/queue-title-v1 did not load"),
+            "{broken}"
+        );
+        // the env turning both readers off clears it
+        app.outside_env = Some(OutsideEnv {
+            vars: vec![
+                (RANK_ENV, "off".to_string()),
+                (QUEUE_TITLE_ENV, "off".to_string()),
+            ],
+            ..OutsideEnv::default()
+        });
+        assert_eq!(app.rank_pack_warning(), None);
+        app.fixture = fixture;
+        assert_eq!(app.rank_pack_warning(), None, "a fixture shows none");
     }
 
     /// The env var can turn the reader off, never on: the switch reads

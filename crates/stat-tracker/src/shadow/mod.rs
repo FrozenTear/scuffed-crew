@@ -16,16 +16,21 @@
 //!
 //! The queue title reader ([`queue_title`], `rank-v1`) reads the queue title
 //! (for example OPEN QUEUE or ROLE QUEUE) at the top left of the map vote,
-//! hero ban and hero select screens. It is off by default;
-//! `STAT_TRACKER_QUEUE_TITLE_RECOGNIZER=on` turns it on. It needs its own
-//! template pack under `<data_dir>/templates/queue-title-v1/` and returns
-//! `None` for any title the pack does not know.
+//! hero ban and hero select screens. It is off by default; config
+//! `rank_reader` ("Read my rank after Comp games") turns it on, and
+//! `STAT_TRACKER_QUEUE_TITLE_RECOGNIZER` set to on or off overrides that.
+//! It needs its own template pack under
+//! `<data_dir>/templates/queue-title-v1/` and returns `None` for any title
+//! the pack does not know.
 //!
 //! The rank update reader ([`rank`], `rank-v1`) reads the competitive rank
-//! screen after a game. It is off by default; `STAT_TRACKER_RANK_RECOGNIZER=on`
-//! turns it on for the tracker's capture wiring (`daemon::rank`, which stores
-//! the read on the game and uploads it), and it needs its own pack under
+//! screen after a game. It is off by default; config `rank_reader` turns it
+//! on for the tracker's capture wiring (`daemon::rank`, which stores the
+//! read on the game and uploads it), and `STAT_TRACKER_RANK_RECOGNIZER` set
+//! to on or off overrides that. It needs its own pack under
 //! `<data_dir>/templates/rank-v1/`. Only 2560x1440 frames are read there.
+//! [`rank::pack_warning`] is the line the app shows when a reader is on
+//! with no usable pack.
 //!
 //! [`reader`] is the single entry point for the main-reader switch
 //! ([`read_board`]: every field with value, confidence and suspect flag). It
