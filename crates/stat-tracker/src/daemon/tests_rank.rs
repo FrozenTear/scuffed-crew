@@ -421,6 +421,73 @@ async fn the_game_process_stopping_stores_the_held_screen() {
     assert!(!close(&mut feed, &store, None).await, "nothing held");
 }
 
+#[tokio::test]
+async fn a_shutdown_on_the_rank_screen_stores_the_held_screen() {
+    let (_dir, store) = store_with("g1").await;
+    let mut feed = RankFeed::with_read(Arc::new(|_| None));
+    // the tracker stops while the rank screen still shows: no miss, no
+    // game close, nothing settled yet
+    tick(&mut feed, Some(Some(full(40))), Some("g1"), &store, None).await;
+    tick(&mut feed, Some(Some(full(40))), Some("g1"), &store, None).await;
+    assert_eq!(
+        store.get_session_snapshots("g1").await.unwrap()[0].rank_update,
+        None
+    );
+    assert!(finish_on_shutdown(&mut feed, &store, None).await);
+    let rows = store.get_session_snapshots("g1").await.unwrap();
+    assert_eq!(rows[0].rank_update, Some(full(40)));
+    assert!(!rows[0].synced, "queued for the next upload");
+    assert!(
+        feed.held.is_none(),
+        "nothing left for the drop to throw away"
+    );
+    assert!(!finish_on_shutdown(&mut feed, &store, None).await);
+}
+
+#[tokio::test]
+async fn a_shutdown_gives_an_update_the_store_refused_one_last_try() {
+    let (_dir, store) = store_with("g1").await;
+    let failing = Failing {
+        store: &store,
+        fail: Mutex::new(true),
+    };
+    let mut feed = RankFeed::with_read(Arc::new(|_| None));
+    for seen in [Some(Some(full(40))), Some(Some(full(40))), None, None] {
+        tick(&mut feed, seen, Some("g1"), &failing, None).await;
+    }
+    assert!(feed.unsaved.is_some());
+    *failing.fail.lock().unwrap() = false;
+    assert!(finish_on_shutdown(&mut feed, &failing, None).await);
+    assert!(feed.unsaved.is_none());
+    let rows = store.get_session_snapshots("g1").await.unwrap();
+    assert_eq!(rows[0].rank_update, Some(full(40)));
+}
+
+#[test]
+fn the_caller_builds_the_feed_and_settles_it_after_the_loop() {
+    let lifecycle: String = include_str!("lifecycle.rs").split_whitespace().collect();
+    let at = |needle: &str| {
+        assert_eq!(lifecycle.matches(needle).count(), 1, "{needle} once");
+        lifecycle.find(needle).expect("counted above")
+    };
+    let made = at("letmutrank_feed=daemon::rank::RankFeed::from_env(&ctx.data_dir);");
+    let looped = at("letresult=run_loop(");
+    let handed = at("&mutpregame_dump,&mutrank_feed,)");
+    let settle = at("finish_or_abort_sync(");
+    let flush = at("daemon::rank::finish_on_shutdown(feed,&ctx.store,pregame_dump.as_mut())");
+    let pregame = at("dump.finish(within).await");
+    let close = lifecycle
+        .rfind("close_store_before_exit(ctx).await")
+        .expect("store close");
+    // built before the loop and handed to it; after the loop, settled and
+    // stored before the pre-game flush takes the saver, and before the
+    // store closes
+    assert!(made < looped && looped < handed && handed < settle);
+    assert!(settle < flush && flush < pregame && pregame < close);
+    // bounded by the shutdown deadline
+    assert!(lifecycle[flush..pregame].contains("tokio::time::timeout(within,flush)"));
+}
+
 // ---- the live feed and the event loop ----
 
 #[test]
@@ -487,8 +554,10 @@ fn the_poll_loop_wires_the_feed_in_order() {
             .find(needle)
             .unwrap_or_else(|| panic!("run_loop must contain {needle:?}"))
     };
-    // built once from the env switch; off is `None`
-    let feed = at("daemon::rank::RankFeed::from_env(data_dir)");
+    // built once from the env switch, by the caller (off is `None`), and
+    // handed in; the loop never builds its own
+    assert!(!run_loop.contains("RankFeed::from_env("));
+    let feed = at("if rank_feed.is_some()");
     // the game process stopping settles a held screen at once (the poll
     // arm, not the keyboard arm's earlier `if !running`)
     let poll = at("poll_timer.tick()");
@@ -513,6 +582,17 @@ fn the_poll_loop_wires_the_feed_in_order() {
     assert!(
         close_at < refresh_at,
         "refresh_snapshot follows close in the process-stop branch"
+    );
+    // and before the branch's own `continue;`: a refresh after it would sit
+    // outside the branch and run on every poll tick, not when close stored
+    // a rank
+    let continue_at = close_at
+        + branch[close_at..]
+            .find("continue;")
+            .expect("the process-stop branch ends in continue");
+    assert!(
+        refresh_at < continue_at,
+        "refresh_snapshot sits before the process-stop branch's continue"
     );
     // read in the analysis thread, after the poll analysis perf sample
     let perf = at("stat_tracker::perf::Stage::PollAnalyze");

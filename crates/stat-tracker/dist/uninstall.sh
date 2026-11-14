@@ -432,7 +432,7 @@ fi
 # moved aside instead of deleting. Do not add either name here.
 tracker_data_name() {
     case "$1" in
-        stats.surrealkv|vacuum.tmp|live_snapshot.json|live_snapshot.json.tmp|\
+        stats.surrealkv|vacuum.tmp|vacuum.last-size|live_snapshot.json|live_snapshot.json.tmp|\
         matches.jsonl|commands|daemon.pid|daemon.log|daemon.log.1|debug|shadow|\
         tessdata|active_game.json|sync_auth.json|portraits|ui_state.json|\
         report-kit|run.marker|last_crash.marker|ocr_switch.json|ocr_switch.json.tmp|\

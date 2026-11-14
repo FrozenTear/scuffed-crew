@@ -9,7 +9,7 @@ use image::{DynamicImage, RgbImage};
 use stat_tracker::model::{BansPicksMissing, BansPicksStatus};
 use stat_tracker::ocr_status::{publish_bans_picks_notice, read_status};
 use stat_tracker::shadow::bans_picks::{
-    BanResults, BanVote, BansPicksSetting, Choice, HeroSelect, Layout, Read, SlotState,
+    BanRead, BanResults, BanVote, BansPicksSetting, Choice, HeroSelect, Layout, Read, SlotState,
     VoteSlotRead,
 };
 use std::sync::Mutex;
@@ -77,9 +77,16 @@ impl Engine for Fake {
     }
     fn bans(&self, _: &RgbImage, rings: &[[u8; 3]]) -> Option<BanResults> {
         self.rings.lock().unwrap().push(rings.first().copied());
+        // A revealed screen: all four bans read, as the real reader gives
+        // four slots (a frame with none set is unrevealed and not stored).
         self.go().then(|| BanResults {
             layout: Layout::Plain,
-            bans: Vec::new(),
+            bans: ["reaper", "sombra", "tracer", "zarya"]
+                .map(|hero| BanRead {
+                    read: read(hero),
+                    team: None,
+                })
+                .to_vec(),
             lobby_ban: Some(read("genji")),
         })
     }

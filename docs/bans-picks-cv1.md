@@ -46,10 +46,24 @@ its first record, it reads those frames once and stores the result as one JSON
 string on the game record (`bans_picks`, with `bans_picks_recognizer: "cv-v1"`).
 A game that has no such screens, or whose screens are older than the game by
 more than the 30 minute binding window, gets nothing. The frames are held in
-memory only (about 3 to 4 full frames), and the reader runs even when
-`debug_save_pregame_screens` is off. The upload carries the values of it as an
-optional `bans_picks` object on the match (see the next section). The stored
-JSON, with its confidences, stays on this computer.
+memory only (about 3 to 4 full frames, plus up to 2 earlier ban-results frames
+and up to 2 turned-down ones for the reveal check below), and the reader runs
+even when `debug_save_pregame_screens` is off. The upload carries the values of
+it as an optional `bans_picks` object on the match (see the next section). The
+stored JSON, with its confidences, stays on this computer.
+
+Reveal check (Scuffed Vision's rule). A ban-results frame is unrevealed when
+none of its four bans reads a value; the lobby ban and the layout are not
+looked at (the lobby layout is a real one, and its probe can flip on an empty
+frame). The saved frame is stored as read when 3 or more of its 4 bans are
+set. Otherwise the earlier frames the saver staged (each confirmed by a later
+results frame) are read, newest first, and the first with 3 or more is
+stored; failing that, the frame with the most bans set among the saved, the
+earlier and the turned-down (`rejected_ban_results.png`) frames. An
+unrevealed frame is never stored: with no revealed frame the game gets no
+bans and the ban results count as missing, not four empty bans. There is no
+duplicate-hero check (duplicate preferred heroes are legal). The saved PNGs on
+disk are not renamed.
 
 The game is always recorded. When the reader cannot run, `bans_picks` stays
 empty and the app status shows a warning:
@@ -78,7 +92,7 @@ preferred hero. Without all 54 hero files there is no reader.
 | Screen | Call | Output |
 |---|---|---|
 | Ban results | `read_ban_results_rings` | four bans with team side, the lobby ban when the lobby layout shows |
-| Hero select | `read_hero_select` | six own-team picks and the own ring colour |
+| Hero select | `read_hero_select` | each own-team player's preferred hero from the six rows of the left column (not locked picks, so a hero can show twice) and the own ring colour |
 | Ban vote | `read_ban_vote` | the local player's three vote slots (hero, skipped, empty) and the TEAM BAN SCORE strip (three heroes with vote counts) |
 
 Every value is `{value, confidence}`. A position that cannot be read is

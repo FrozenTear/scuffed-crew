@@ -13,6 +13,7 @@ pub(crate) fn is_tracker_data_name(name: &str) -> bool {
         name,
         "stats.surrealkv"
             | "vacuum.tmp"
+            | "vacuum.last-size"
             | "live_snapshot.json"
             | "live_snapshot.json.tmp"
             | "matches.jsonl"
