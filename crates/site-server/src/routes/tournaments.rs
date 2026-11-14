@@ -80,6 +80,44 @@ async fn reject_hidden_draft(state: &AppState, id: &str, member: &Option<Member>
     Ok(())
 }
 
+/// Load a tournament for an officer write. 404 when no tournament has this
+/// id, so the handler refuses before writing anything. A real DB error stays
+/// a 500. May be unified with the public-route loader from PR 675.
+async fn require_tournament(state: &AppState, id: &str) -> ApiResult<Tournament> {
+    state
+        .db
+        .get_tournament(id)
+        .await
+        .map_err(internal_err)?
+        .ok_or_else(|| not_found("Tournament not found"))
+}
+
+/// Load a participant that belongs to tournament `id`. 404 when the
+/// tournament is missing, the participant is missing, or the participant
+/// belongs to a different tournament.
+async fn require_participant(
+    state: &AppState,
+    id: &str,
+    pid: &str,
+) -> ApiResult<TournamentParticipant> {
+    require_tournament(state, id).await?;
+    state
+        .db
+        .list_tournament_participants(id)
+        .await
+        .map_err(internal_err)?
+        .into_iter()
+        .find(|p| p.id == pid)
+        .ok_or_else(|| not_found("Participant not found"))
+}
+
+fn db_err(e: scuffed_db::DbError) -> (StatusCode, Json<ErrorResponse>) {
+    match e {
+        scuffed_db::DbError::NotFound(msg) => not_found(&msg),
+        other => internal_err(other),
+    }
+}
+
 #[derive(Deserialize)]
 pub struct ListTournamentsQuery {
     pub status: Option<String>,
@@ -236,6 +274,7 @@ pub async fn update_tournament(
     Path(id): Path<String>,
     Json(body): Json<UpdateTournamentRequest>,
 ) -> ApiResult<Json<Tournament>> {
+    require_tournament(&state, &id).await?;
     let tournament = state
         .db
         .update_tournament(
@@ -255,7 +294,7 @@ pub async fn update_tournament(
             body.ends_at,
         )
         .await
-        .map_err(internal_err)?;
+        .map_err(db_err)?;
 
     audit(
         &state.db,
@@ -546,6 +585,7 @@ pub async fn update_participant(
         _ => ParticipantStatus::Registered,
     });
 
+    require_participant(&state, &id, &pid).await?;
     let result = state
         .db
         .update_tournament_participant(
@@ -555,7 +595,7 @@ pub async fn update_participant(
             body.group_label.as_ref().map(|g| g.as_deref()),
         )
         .await
-        .map_err(internal_err)?;
+        .map_err(db_err)?;
 
     audit(
         &state.db,
@@ -576,6 +616,7 @@ pub async fn remove_participant(
     officer: OfficerUser,
     Path((id, pid)): Path<(String, String)>,
 ) -> ApiResult<StatusCode> {
+    require_participant(&state, &id, &pid).await?;
     state
         .db
         .remove_tournament_participant(&pid)
@@ -797,6 +838,7 @@ pub async fn generate_next_round(
     officer: OfficerUser,
     Path(id): Path<String>,
 ) -> ApiResult<(StatusCode, Json<TournamentRound>)> {
+    require_tournament(&state, &id).await?;
     let round = state
         .db
         .generate_swiss_round(&id)
