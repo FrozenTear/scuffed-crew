@@ -1,6 +1,8 @@
-//! Held-out counts. The gate compares the learned candidate to the baseline
-//! pack. A class the baseline pack does not contain is printed and is not
-//! part of the gate.
+//! Scores for one labelled set. The pass/fail gate compares the candidate
+//! pack to the baseline pack on the same frames: no new wrong, and no frame
+//! that was correct on the baseline and is unread or wrong on the candidate.
+//! Leave-one-out learning is printed as generalisation and is not the gate.
+//! A class the baseline pack does not contain is reported and is not gated.
 
 use std::fmt::Write as _;
 
@@ -21,18 +23,44 @@ impl Counts {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
     Correct,
     Wrong,
     Unread,
 }
 
+/// One frame, scored by the baseline pack, the leave-one-out learner, and
+/// the candidate pack.
+#[derive(Clone, Copy)]
+pub struct Item {
+    pub baseline: Outcome,
+    pub learned: Outcome,
+    pub packed: Outcome,
+}
+
+impl Item {
+    pub fn counts(items: &[Item], pick: impl Fn(&Item) -> Outcome) -> Counts {
+        let mut counts = Counts::default();
+        for item in items {
+            counts.add(pick(item));
+        }
+        counts
+    }
+
+    /// Candidate pack versus baseline pack. A correct that becomes unread or
+    /// wrong is a regression, and so is any new wrong.
+    pub fn pack_regressed(item: &Item) -> bool {
+        let lost_correct = item.baseline == Outcome::Correct && item.packed != Outcome::Correct;
+        let new_wrong = item.packed == Outcome::Wrong && item.baseline != Outcome::Wrong;
+        lost_correct || new_wrong
+    }
+}
+
 pub struct ScoreRow {
     pub label: String,
-    pub baseline: Counts,
-    pub learned: Counts,
-    pub packed: Counts,
+    pub folds: usize,
+    pub items: Vec<Item>,
     /// False for a class the baseline pack does not contain.
     pub gated: bool,
 }
@@ -48,18 +76,19 @@ pub fn finish(
     scored: usize,
     skipped: usize,
     rows: &[ScoreRow],
+    dropped: &[String],
 ) -> EvalDone {
-    let pass = !regressed(rows);
+    let pass = dropped.is_empty() && !regressed(rows);
     EvalDone {
-        report: render(set_name, frames, scored, skipped, rows, pass),
+        report: render(set_name, frames, scored, skipped, rows, dropped, pass),
         pass,
     }
 }
 
 fn regressed(rows: &[ScoreRow]) -> bool {
-    rows.iter().filter(|row| row.gated).any(|row| {
-        row.learned.wrong > row.baseline.wrong || row.learned.correct < row.baseline.correct
-    })
+    rows.iter()
+        .filter(|row| row.gated)
+        .any(|row| row.items.iter().any(Item::pack_regressed))
 }
 
 fn render(
@@ -68,21 +97,50 @@ fn render(
     scored: usize,
     skipped: usize,
     rows: &[ScoreRow],
+    dropped: &[String],
     pass: bool,
 ) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "set: {set_name}");
     let _ = writeln!(out, "frames: {frames} scored: {scored} skipped: {skipped}");
+    if !dropped.is_empty() {
+        let _ = writeln!(out, "dropped classes: {}", dropped.join(", "));
+    }
     for row in rows {
         let _ = writeln!(out, "{}", row.label);
-        write_counts(&mut out, "baseline", row.baseline);
-        write_counts(&mut out, "candidate", row.learned);
-        write_counts(&mut out, "candidate pack", row.packed);
+        let _ = writeln!(out, "folds: {}", row.folds);
+        let baseline = Item::counts(&row.items, |item| item.baseline);
+        let candidate = Item::counts(&row.items, |item| item.packed);
+        let learned = Item::counts(&row.items, |item| item.learned);
+        write_counts(&mut out, "baseline", baseline);
+        write_counts(&mut out, "candidate", candidate);
+        let _ = writeln!(
+            out,
+            "generalisation: learned {} / {} / {}, baseline {} / {} / {}",
+            learned.correct,
+            learned.wrong,
+            learned.unread,
+            baseline.correct,
+            baseline.wrong,
+            baseline.unread
+        );
     }
     let _ = writeln!(out, "overall");
-    write_counts(&mut out, "baseline", total(rows, |row| row.baseline));
-    write_counts(&mut out, "candidate", total(rows, |row| row.learned));
-    write_counts(&mut out, "candidate pack", total(rows, |row| row.packed));
+    let baseline = total(rows, |item| item.baseline);
+    let candidate = total(rows, |item| item.packed);
+    let learned = total(rows, |item| item.learned);
+    write_counts(&mut out, "baseline", baseline);
+    write_counts(&mut out, "candidate", candidate);
+    let _ = writeln!(
+        out,
+        "generalisation: learned {} / {} / {}, baseline {} / {} / {}",
+        learned.correct,
+        learned.wrong,
+        learned.unread,
+        baseline.correct,
+        baseline.wrong,
+        baseline.unread
+    );
     let _ = writeln!(out, "result: {}", if pass { "pass" } else { "fail" });
     out
 }
@@ -95,10 +153,10 @@ fn write_counts(out: &mut String, name: &str, counts: Counts) {
     );
 }
 
-fn total(rows: &[ScoreRow], pick: impl Fn(&ScoreRow) -> Counts) -> Counts {
+fn total(rows: &[ScoreRow], pick: impl Fn(&Item) -> Outcome) -> Counts {
     let mut sum = Counts::default();
     for row in rows {
-        let counts = pick(row);
+        let counts = Item::counts(&row.items, &pick);
         sum.correct += counts.correct;
         sum.wrong += counts.wrong;
         sum.unread += counts.unread;

@@ -98,19 +98,28 @@ with that one tar and a `manifest.json` that lists it is enough.
 binary of `scuffed-stat-tracker`:
 
 ```text
-scuffed-pack-cutter cut --kind rank|queue-title --labels FILE --frames DIR [--role-labels FILE] --out DIR [--version VER]
+scuffed-pack-cutter cut --kind rank|queue-title --labels FILE [--frames DIR] [--role-labels FILE] [--base DIR] --out DIR [--version VER]
 scuffed-pack-cutter pack --dir DIR --name NAME.tar --version VER --out DIR
-scuffed-pack-cutter eval --kind rank|queue-title --labels FILE --frames DIR --baseline DIR --candidate DIR --set-name NAME [--role-labels FILE]
+scuffed-pack-cutter eval --kind rank|queue-title --labels FILE [--frames DIR] --baseline DIR --candidate DIR --set-name NAME [--role-labels FILE] [--allow-drop CLASS ...]
 ```
 
 `cut` learns with the same rank and queue-title `Learner` the readers use
-at match time, and writes `templates.json`. `pack` writes
+at match time, and writes `templates.json`. `--frames` is required for rank.
+For queue-title it is required only when a label path is relative. `--base`
+is an optional published pack: classes the labels produce are re-learned,
+and classes they do not produce are copied from that pack unchanged. `cut`
+prints each class as learned, kept from base, or new. `pack` writes
 `<out>/packs/<name>` as a plain ustar and updates `<out>/packs/manifest.json`.
-`eval` scores a held-out learn against the published pack folder and exits
-non-zero if a field or class regresses. Inputs and output stay on the build
-machine. `cut` and `pack` refuse an `--out` inside a git work tree. Eval
-must pass against the published pack before a publish. This tool does not
-publish. Publishing still needs Robert's go, then `scripts/publish-packs.sh`.
+`eval` scores the candidate pack against the baseline pack on the same
+frames and exits non-zero on a new wrong, on a frame that was correct and
+is now unread or wrong, or when the candidate drops a baseline class.
+`--allow-drop CLASS` (repeat it for each class) is the escape for a drop.
+Leave-one-out stays in the report as generalisation and does not gate.
+`--frames` on eval follows the same rule as `cut`. Inputs and output stay
+on the build machine. `cut` and `pack` refuse an `--out` inside a git work
+tree. Eval must pass against the published pack before a publish. This tool
+does not publish. Publishing still needs Robert's go, then
+`scripts/publish-packs.sh`.
 
 ## Publish
 

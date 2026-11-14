@@ -109,6 +109,19 @@ fn paint_gate(w: u32, h: u32) -> RgbImage {
     img
 }
 
+/// Gate plus a mode banner, at 2560x1440. `word` uses the stand-in font.
+fn paint_gate_banner(word: &str) -> RgbImage {
+    let mut img = paint_gate(2560, 1440);
+    let red = Rgb([208, 59, 97]);
+    for y in 120..200 {
+        for x in 1952..2540 {
+            img.put_pixel(x, y, red);
+        }
+    }
+    draw(&mut img, word, 2068, 150, 3, Rgb([250, 250, 250]));
+    img
+}
+
 fn rank_row(game: &str, file: &str, readable: bool) -> String {
     format!(
         "{}\n",
@@ -300,7 +313,8 @@ fn cut_rank_frames_write_a_pack_the_reader_accepts() {
     let got = cut_rank(&files, &out);
     assert_eq!(got.code, 0, "{}", got.stderr);
     assert!(got.stdout.contains("learned: 2"), "{}", got.stdout);
-    assert!(got.stdout.contains("skipped: 1"), "{}", got.stdout);
+    assert!(got.stdout.contains("unreadable: 0"), "{}", got.stdout);
+    assert!(got.stdout.contains("layout-skipped: 1"), "{}", got.stdout);
     let set = RankSet::load_dir(&out).expect("rank pack loads and checks");
     assert!(set.has_class(Family::Gate, GATE_CLASS));
     assert_eq!(set.recognizer, crate::shadow::rank::RECOGNIZER_ID);
@@ -313,7 +327,8 @@ fn cut_rank_1080_pack_still_loads() {
     let got = cut_rank(&files, &out);
     assert_eq!(got.code, 0, "{}", got.stderr);
     assert!(
-        got.stdout.contains("learned: 2\nskipped: 0"),
+        got.stdout
+            .contains("learned: 2\nunreadable: 0\nlayout-skipped: 0"),
         "{}",
         got.stdout
     );
@@ -334,7 +349,8 @@ fn cut_queue_title_frames_write_expected_classes() {
     let got = cut_queue(&files, &out);
     assert_eq!(got.code, 0, "{}", got.stderr);
     assert!(got.stdout.contains("learned: 2"), "{}", got.stdout);
-    assert!(got.stdout.contains("skipped: 1"), "{}", got.stdout);
+    assert!(got.stdout.contains("unreadable: 0"), "{}", got.stdout);
+    assert!(got.stdout.contains("layout-skipped: 1"), "{}", got.stdout);
     assert_eq!(
         queue_classes(&out),
         vec!["ALPHA QUEUE".to_string(), "BRAVO QUEUE".to_string()]
@@ -358,7 +374,7 @@ fn cut_queue_title_1080_pack_still_loads() {
     let out = files.dir.path().join("out");
     let got = cut_queue(&files, &out);
     assert_eq!(got.code, 0, "{}", got.stderr);
-    assert!(got.stdout.contains("skipped: 0"), "{}", got.stdout);
+    assert!(got.stdout.contains("layout-skipped: 0"), "{}", got.stdout);
     assert_eq!(
         queue_classes(&out),
         vec!["ALPHA QUEUE".to_string(), "BRAVO QUEUE".to_string()]
@@ -529,10 +545,15 @@ fn eval_queue_title_regression_exits_nonzero() {
     assert_ne!(got.code, 0, "{}", got.stdout);
     assert!(got.stdout.contains("set: queue-held-out"), "{}", got.stdout);
     assert!(got.stdout.contains("frames: 2 scored: 2"), "{}", got.stdout);
-    let alpha = block(&got.stdout, "class ALPHA QUEUE\n");
     assert!(
-        alpha.contains("baseline: 1 / 0 / 0\ncandidate: 0 / 0 / 1"),
-        "{alpha}"
+        got.stdout.contains("dropped classes: BRAVO QUEUE"),
+        "{}",
+        got.stdout
+    );
+    let bravo = block(&got.stdout, "class BRAVO QUEUE\n");
+    assert!(
+        bravo.contains("baseline: 1 / 0 / 0\ncandidate: 0 / 0 / 1"),
+        "{bravo}"
     );
     assert!(got.stdout.contains("result: fail"), "{}", got.stdout);
 }
@@ -612,9 +633,10 @@ fn eval_rank_match_exits_zero() {
 }
 
 #[test]
-fn eval_rank_held_out_gate_regression_exits_nonzero() {
-    // One day: the held-out learner sees no other day, so it misses the
-    // gate the baseline pack (cut from that frame) still reads.
+fn eval_rank_single_day_pack_match_does_not_fail_loso() {
+    // One day: leave-one-day-out has nothing to learn from, so the
+    // generalisation line misses the gate. The candidate pack is the
+    // baseline pack, so the gate passes. folds: 1 shows the single day.
     let files = write_rank(&["20260101"], (2560, 1440), false);
     let pack = files.dir.path().join("pack");
     assert_eq!(cut_rank(&files, &pack).code, 0);
@@ -633,21 +655,26 @@ fn eval_rank_held_out_gate_regression_exits_nonzero() {
         "--candidate",
         pack.to_str().unwrap(),
         "--set-name",
-        "rank-held-out",
+        "rank-one-day",
     ]);
-    assert_ne!(got.code, 0, "{}", got.stdout);
-    assert!(got.stdout.contains("set: rank-held-out"), "{}", got.stdout);
+    assert_eq!(got.code, 0, "{}\n{}", got.stderr, got.stdout);
     let gate = block(&got.stdout, "screen gate\n");
+    assert!(gate.contains("folds: 1"), "{gate}");
     assert!(
-        gate.contains("baseline: 1 / 0 / 0\ncandidate: 0 / 1 / 0"),
+        gate.contains("baseline: 1 / 0 / 0\ncandidate: 1 / 0 / 0"),
         "{gate}"
     );
-    let role = block(&got.stdout, "field role\n");
     assert!(
-        role.contains("baseline: 1 / 0 / 0\ncandidate: 0 / 0 / 1"),
-        "{role}"
+        gate.contains("generalisation: learned 0 / 1 / 0, baseline 1 / 0 / 0"),
+        "{gate}"
     );
-    assert!(got.stdout.contains("result: fail"), "{}", got.stdout);
+    assert!(
+        got.stdout
+            .contains("template class gate/rank_progress\nfolds: 1"),
+        "{}",
+        got.stdout
+    );
+    assert!(got.stdout.contains("result: pass"), "{}", got.stdout);
 }
 
 #[test]
@@ -693,4 +720,351 @@ fn eval_empty_label_set_and_missing_baseline_exit_nonzero() {
     ]);
     assert_ne!(got.code, 0);
     assert!(got.stderr.contains("baseline pack"), "{}", got.stderr);
+}
+
+#[test]
+fn help_exits_zero() {
+    for args in [
+        vec!["--help"],
+        vec!["-h"],
+        vec!["help"],
+        vec!["cut", "--help"],
+    ] {
+        let got = run(&args);
+        assert_eq!(got.code, 0, "{args:?} {}", got.stderr);
+        assert!(
+            got.stdout.contains("scuffed-pack-cutter cut"),
+            "{args:?} {}",
+            got.stdout
+        );
+    }
+}
+
+#[test]
+fn cut_prints_unreadable_rows_apart_from_layout_skips() {
+    let files = write_rank(&["20260101"], (2560, 1440), true);
+    let game = "20260104-blank";
+    save(
+        &files.frames,
+        &format!("{game}/a.png"),
+        &RgbImage::from_pixel(2560, 1440, Rgb([40, 44, 60])),
+    );
+    let mut labels = std::fs::read_to_string(&files.labels).unwrap();
+    labels.push_str(&rank_row(game, "a.png", false));
+    write(&files.labels, &labels);
+    let out = files.dir.path().join("out");
+    let got = cut_rank(&files, &out);
+    assert_eq!(got.code, 0, "{}", got.stderr);
+    assert!(got.stdout.contains("rows: 3\n"), "{}", got.stdout);
+    assert!(got.stdout.contains("learned: 1\n"), "{}", got.stdout);
+    assert!(got.stdout.contains("unreadable: 1\n"), "{}", got.stdout);
+    assert!(got.stdout.contains("layout-skipped: 1\n"), "{}", got.stdout);
+}
+
+#[test]
+fn cut_keeps_base_classes_the_labels_do_not_produce() {
+    let root = scratch();
+    let both = write_queue(
+        &[
+            ("s1/a.png", 0, "ALPHA QUEUE"),
+            ("s2/b.png", 1, "BRAVO QUEUE"),
+        ],
+        false,
+    );
+    let only = write_queue(&[("s1/a.png", 0, "ALPHA QUEUE")], false);
+    let base = root.path().join("base");
+    let out = root.path().join("out");
+    assert_eq!(cut_queue(&both, &base).code, 0);
+    let got = run(&[
+        "cut",
+        "--kind",
+        "queue-title",
+        "--labels",
+        only.labels.to_str().unwrap(),
+        "--frames",
+        only.frames.to_str().unwrap(),
+        "--base",
+        base.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(got.code, 0, "{}", got.stderr);
+    assert!(
+        got.stdout.contains("class ALPHA QUEUE: learned"),
+        "{}",
+        got.stdout
+    );
+    assert!(
+        got.stdout.contains("class BRAVO QUEUE: kept from base"),
+        "{}",
+        got.stdout
+    );
+    assert!(
+        got.stdout
+            .contains("classes: learned 1, kept from base 1, new 0"),
+        "{}",
+        got.stdout
+    );
+    let kept = QueueSet::load_dir(&out).unwrap();
+    let base_set = QueueSet::load_dir(&base).unwrap();
+    let bravo = |set: &QueueSet| {
+        set.classes
+            .iter()
+            .find(|c| c.class == "BRAVO QUEUE")
+            .unwrap()
+            .vector
+            .clone()
+    };
+    assert_eq!(bravo(&kept), bravo(&base_set));
+}
+
+#[test]
+fn cut_queue_title_allows_absolute_paths_without_frames() {
+    let files = write_queue(&[("s1/a.png", 0, "ALPHA QUEUE")], false);
+    let abs = files.frames.join("s1/a.png");
+    let labels = files.dir.path().join("abs.jsonl");
+    write(&labels, &queue_row(abs.to_str().unwrap(), "ALPHA QUEUE"));
+    let out = files.dir.path().join("out");
+    let got = run(&[
+        "cut",
+        "--kind",
+        "queue-title",
+        "--labels",
+        labels.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(got.code, 0, "{}", got.stderr);
+    assert_eq!(queue_classes(&out), vec!["ALPHA QUEUE".to_string()]);
+}
+
+#[test]
+fn eval_fails_when_the_candidate_drops_a_baseline_class() {
+    let root = scratch();
+    let both = write_queue(
+        &[
+            ("s1/a.png", 0, "ALPHA QUEUE"),
+            ("s2/b.png", 1, "BRAVO QUEUE"),
+        ],
+        false,
+    );
+    let only = write_queue(
+        &[
+            ("s1/a.png", 0, "ALPHA QUEUE"),
+            ("s3/c.png", 0, "ALPHA QUEUE"),
+        ],
+        false,
+    );
+    let baseline = root.path().join("baseline");
+    let candidate = root.path().join("candidate");
+    assert_eq!(cut_queue(&both, &baseline).code, 0);
+    assert_eq!(cut_queue(&only, &candidate).code, 0);
+    let eval = |extra: &[&str]| {
+        let mut args = vec![
+            "eval",
+            "--kind",
+            "queue-title",
+            "--labels",
+            only.labels.to_str().unwrap(),
+            "--frames",
+            only.frames.to_str().unwrap(),
+            "--baseline",
+            baseline.to_str().unwrap(),
+            "--candidate",
+            candidate.to_str().unwrap(),
+            "--set-name",
+            "drop-class",
+        ];
+        args.extend(extra);
+        run(&args)
+    };
+    let denied = eval(&[]);
+    assert_ne!(denied.code, 0, "{}", denied.stdout);
+    assert!(
+        denied.stdout.contains("dropped classes: BRAVO QUEUE"),
+        "{}",
+        denied.stdout
+    );
+    let allowed = eval(&["--allow-drop", "BRAVO QUEUE"]);
+    assert_eq!(allowed.code, 0, "{}\n{}", allowed.stderr, allowed.stdout);
+    assert!(
+        allowed.stdout.contains("result: pass"),
+        "{}",
+        allowed.stdout
+    );
+}
+
+#[test]
+fn eval_single_fold_classes_do_not_fail_when_the_packs_match() {
+    let files = write_queue(
+        &[
+            ("s1/a.png", 0, "ALPHA QUEUE"),
+            ("s2/b.png", 1, "BRAVO QUEUE"),
+        ],
+        false,
+    );
+    let pack = files.dir.path().join("pack");
+    assert_eq!(cut_queue(&files, &pack).code, 0);
+    let got = run(&[
+        "eval",
+        "--kind",
+        "queue-title",
+        "--labels",
+        files.labels.to_str().unwrap(),
+        "--frames",
+        files.frames.to_str().unwrap(),
+        "--baseline",
+        pack.to_str().unwrap(),
+        "--candidate",
+        pack.to_str().unwrap(),
+        "--set-name",
+        "one-session-each",
+    ]);
+    assert_eq!(got.code, 0, "{}\n{}", got.stderr, got.stdout);
+    let alpha = block(&got.stdout, "class ALPHA QUEUE\n");
+    assert!(alpha.contains("folds: 1"), "{alpha}");
+    assert!(
+        alpha.contains("baseline: 1 / 0 / 0\ncandidate: 1 / 0 / 0"),
+        "{alpha}"
+    );
+    assert!(
+        alpha.contains("generalisation: learned 0 / 0 / 1, baseline 1 / 0 / 0"),
+        "{alpha}"
+    );
+    assert!(got.stdout.contains("result: pass"), "{}", got.stdout);
+}
+
+#[test]
+fn cut_rank_keeps_a_banner_the_new_labels_do_not_cut() {
+    let root = scratch();
+    let base_frames = root.path().join("base-frames");
+    let next_frames = root.path().join("next-frames");
+    save(
+        &base_frames,
+        "20260101-a/a.png",
+        &paint_gate_banner("HELLO"),
+    );
+    save(&next_frames, "20260102-b/a.png", &paint_gate(2560, 1440));
+    let base_labels = root.path().join("base.jsonl");
+    let next_labels = root.path().join("next.jsonl");
+    write(
+        &base_labels,
+        &format!(
+            "{}\n",
+            serde_json::json!({
+                "game": "20260101-a",
+                "file": "a.png",
+                "readable": true,
+                "next_mode_hint": "HELLO",
+            })
+        ),
+    );
+    write(&next_labels, &rank_row("20260102-b", "a.png", true));
+    let base = root.path().join("base");
+    let out = root.path().join("out");
+    let first = run(&[
+        "cut",
+        "--kind",
+        "rank",
+        "--labels",
+        base_labels.to_str().unwrap(),
+        "--frames",
+        base_frames.to_str().unwrap(),
+        "--out",
+        base.to_str().unwrap(),
+    ]);
+    assert_eq!(first.code, 0, "{}", first.stderr);
+    assert!(
+        first.stdout.contains("class banner/HELLO: new"),
+        "{}",
+        first.stdout
+    );
+    let second = run(&[
+        "cut",
+        "--kind",
+        "rank",
+        "--labels",
+        next_labels.to_str().unwrap(),
+        "--frames",
+        next_frames.to_str().unwrap(),
+        "--base",
+        base.to_str().unwrap(),
+        "--out",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(second.code, 0, "{}", second.stderr);
+    assert!(
+        second.stdout.contains("class banner/HELLO: kept from base"),
+        "{}",
+        second.stdout
+    );
+    let kept = RankSet::load_dir(&out).unwrap();
+    let base_set = RankSet::load_dir(&base).unwrap();
+    let banner = |set: &RankSet| {
+        set.families
+            .get(&Family::Banner)
+            .unwrap()
+            .iter()
+            .find(|t| t.class == "HELLO")
+            .unwrap()
+            .vector
+            .clone()
+    };
+    assert_eq!(banner(&kept), banner(&base_set));
+
+    let gate_only = root.path().join("gate-only");
+    assert_eq!(
+        run(&[
+            "cut",
+            "--kind",
+            "rank",
+            "--labels",
+            next_labels.to_str().unwrap(),
+            "--frames",
+            next_frames.to_str().unwrap(),
+            "--out",
+            gate_only.to_str().unwrap(),
+        ])
+        .code,
+        0
+    );
+    let denied = run(&[
+        "eval",
+        "--kind",
+        "rank",
+        "--labels",
+        next_labels.to_str().unwrap(),
+        "--frames",
+        next_frames.to_str().unwrap(),
+        "--baseline",
+        base.to_str().unwrap(),
+        "--candidate",
+        gate_only.to_str().unwrap(),
+        "--set-name",
+        "rank-drop",
+    ]);
+    assert_ne!(denied.code, 0, "{}", denied.stdout);
+    assert!(
+        denied.stdout.contains("dropped classes: banner/HELLO"),
+        "{}",
+        denied.stdout
+    );
+    let allowed = run(&[
+        "eval",
+        "--kind",
+        "rank",
+        "--labels",
+        next_labels.to_str().unwrap(),
+        "--frames",
+        next_frames.to_str().unwrap(),
+        "--baseline",
+        base.to_str().unwrap(),
+        "--candidate",
+        gate_only.to_str().unwrap(),
+        "--set-name",
+        "rank-drop",
+        "--allow-drop",
+        "banner/HELLO",
+    ]);
+    assert_eq!(allowed.code, 0, "{}\n{}", allowed.stderr, allowed.stdout);
 }

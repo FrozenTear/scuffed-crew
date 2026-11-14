@@ -21,6 +21,14 @@ mod tests;
 
 use cli::{Command, CutArgs, EvalArgs, Kind, PackArgs};
 
+fn require_rank_frames(kind: Kind, frames: &Option<std::path::PathBuf>) -> Result<(), String> {
+    if kind == Kind::Rank && frames.is_none() {
+        Err("missing --frames".into())
+    } else {
+        Ok(())
+    }
+}
+
 /// What `run` prints and the status it returns.
 struct Outcome {
     code: i32,
@@ -82,6 +90,7 @@ where
         Err(e) => return Outcome::err(format!("{e}\n{}", cli::USAGE)),
     };
     match command {
+        Command::Help => Outcome::ok(format!("{}\n", cli::USAGE)),
         Command::Cut(args) => match cut(&args) {
             Ok(text) => Outcome::ok(text),
             Err(e) => Outcome::err(e),
@@ -105,6 +114,7 @@ fn cut(args: &CutArgs) -> Result<String, String> {
     if args.kind == Kind::QueueTitle && args.role_labels.is_some() {
         return Err("--role-labels is only used with --kind rank".into());
     }
+    require_rank_frames(args.kind, &args.frames)?;
     let body = match args.kind {
         Kind::Rank => rank::cut(args, &out)?,
         Kind::QueueTitle => queue::cut(args, &out)?,
@@ -140,6 +150,7 @@ fn eval(args: &EvalArgs) -> Result<report::EvalDone, String> {
     if args.kind == Kind::QueueTitle && args.role_labels.is_some() {
         return Err("--role-labels is only used with --kind rank".into());
     }
+    require_rank_frames(args.kind, &args.frames)?;
     match args.kind {
         Kind::Rank => rank::eval(args),
         Kind::QueueTitle => queue::eval(args),

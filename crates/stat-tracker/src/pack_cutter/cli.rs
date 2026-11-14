@@ -5,9 +5,15 @@ use std::path::PathBuf;
 
 pub const USAGE: &str = "\
 usage:
-  scuffed-pack-cutter cut --kind rank|queue-title --labels FILE --frames DIR [--role-labels FILE] --out DIR [--version VER]
+  scuffed-pack-cutter cut --kind rank|queue-title --labels FILE [--frames DIR] [--role-labels FILE] [--base DIR] --out DIR [--version VER]
   scuffed-pack-cutter pack --dir DIR --name NAME.tar --version VER --out DIR
-  scuffed-pack-cutter eval --kind rank|queue-title --labels FILE --frames DIR --baseline DIR --candidate DIR --set-name NAME [--role-labels FILE]";
+  scuffed-pack-cutter eval --kind rank|queue-title --labels FILE [--frames DIR] --baseline DIR --candidate DIR --set-name NAME [--role-labels FILE] [--allow-drop CLASS ...]
+  scuffed-pack-cutter help
+
+--frames is required for rank, and for queue-title when a label path is relative.
+--base on cut keeps classes the labels do not produce.
+--allow-drop CLASS (repeatable) lets eval accept a baseline class the candidate does not have.
+Rank class names are family/class (role/Tank). Queue-title class names are the title text.";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -28,8 +34,9 @@ impl Kind {
 pub struct CutArgs {
     pub kind: Kind,
     pub labels: PathBuf,
-    pub frames: PathBuf,
+    pub frames: Option<PathBuf>,
     pub role_labels: Option<PathBuf>,
+    pub base: Option<PathBuf>,
     pub out: PathBuf,
     pub version: Option<String>,
 }
@@ -44,20 +51,30 @@ pub struct PackArgs {
 pub struct EvalArgs {
     pub kind: Kind,
     pub labels: PathBuf,
-    pub frames: PathBuf,
+    pub frames: Option<PathBuf>,
     pub role_labels: Option<PathBuf>,
     pub baseline: PathBuf,
     pub candidate: PathBuf,
     pub set_name: String,
+    pub allow_drop: Vec<String>,
 }
 
 pub enum Command {
+    Help,
     Cut(CutArgs),
     Pack(PackArgs),
     Eval(EvalArgs),
 }
 
+struct Parsed {
+    values: BTreeMap<String, String>,
+    allow_drop: Vec<String>,
+}
+
 pub fn parse(args: &[String]) -> Result<Command, String> {
+    if wants_help(args) {
+        return Ok(Command::Help);
+    }
     let (cmd, rest) = args
         .split_first()
         .ok_or_else(|| "missing command".to_string())?;
@@ -70,41 +87,56 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     }
 }
 
-fn cut_args(mut flags: BTreeMap<String, String>) -> Result<CutArgs, String> {
+fn wants_help(args: &[String]) -> bool {
+    match args.first().map(String::as_str) {
+        Some("help" | "--help" | "-h") => true,
+        _ => args.iter().any(|arg| arg == "--help" || arg == "-h"),
+    }
+}
+
+fn cut_args(mut flags: Parsed) -> Result<CutArgs, String> {
+    if !flags.allow_drop.is_empty() {
+        return Err("--allow-drop is only used with eval".into());
+    }
     let args = CutArgs {
-        kind: kind(&take(&mut flags, "kind")?)?,
-        labels: path(take(&mut flags, "labels")?),
-        frames: path(take(&mut flags, "frames")?),
-        role_labels: take_opt(&mut flags, "role-labels").map(path),
-        out: path(take(&mut flags, "out")?),
-        version: take_opt(&mut flags, "version"),
+        kind: kind(&take(&mut flags.values, "kind")?)?,
+        labels: path(take(&mut flags.values, "labels")?),
+        frames: take_opt(&mut flags.values, "frames").map(path),
+        role_labels: take_opt(&mut flags.values, "role-labels").map(path),
+        base: take_opt(&mut flags.values, "base").map(path),
+        out: path(take(&mut flags.values, "out")?),
+        version: take_opt(&mut flags.values, "version"),
     };
-    finish(flags)?;
+    finish(flags.values)?;
     Ok(args)
 }
 
-fn pack_args(mut flags: BTreeMap<String, String>) -> Result<PackArgs, String> {
+fn pack_args(mut flags: Parsed) -> Result<PackArgs, String> {
+    if !flags.allow_drop.is_empty() {
+        return Err("--allow-drop is only used with eval".into());
+    }
     let args = PackArgs {
-        dir: path(take(&mut flags, "dir")?),
-        name: take(&mut flags, "name")?,
-        version: take(&mut flags, "version")?,
-        out: path(take(&mut flags, "out")?),
+        dir: path(take(&mut flags.values, "dir")?),
+        name: take(&mut flags.values, "name")?,
+        version: take(&mut flags.values, "version")?,
+        out: path(take(&mut flags.values, "out")?),
     };
-    finish(flags)?;
+    finish(flags.values)?;
     Ok(args)
 }
 
-fn eval_args(mut flags: BTreeMap<String, String>) -> Result<EvalArgs, String> {
+fn eval_args(mut flags: Parsed) -> Result<EvalArgs, String> {
     let args = EvalArgs {
-        kind: kind(&take(&mut flags, "kind")?)?,
-        labels: path(take(&mut flags, "labels")?),
-        frames: path(take(&mut flags, "frames")?),
-        role_labels: take_opt(&mut flags, "role-labels").map(path),
-        baseline: path(take(&mut flags, "baseline")?),
-        candidate: path(take(&mut flags, "candidate")?),
-        set_name: take(&mut flags, "set-name")?,
+        kind: kind(&take(&mut flags.values, "kind")?)?,
+        labels: path(take(&mut flags.values, "labels")?),
+        frames: take_opt(&mut flags.values, "frames").map(path),
+        role_labels: take_opt(&mut flags.values, "role-labels").map(path),
+        baseline: path(take(&mut flags.values, "baseline")?),
+        candidate: path(take(&mut flags.values, "candidate")?),
+        set_name: take(&mut flags.values, "set-name")?,
+        allow_drop: flags.allow_drop,
     };
-    finish(flags)?;
+    finish(flags.values)?;
     Ok(args)
 }
 
@@ -131,8 +163,9 @@ fn finish(flags: BTreeMap<String, String>) -> Result<(), String> {
     Ok(())
 }
 
-fn flags(args: &[String]) -> Result<BTreeMap<String, String>, String> {
-    let mut out = BTreeMap::new();
+fn flags(args: &[String]) -> Result<Parsed, String> {
+    let mut values = BTreeMap::new();
+    let mut allow_drop = Vec::new();
     let mut i = 0;
     while i < args.len() {
         let arg = &args[i];
@@ -164,10 +197,15 @@ fn flags(args: &[String]) -> Result<BTreeMap<String, String>, String> {
                 v.clone()
             }
         };
-        if out.insert(key.to_string(), value).is_some() {
+        if key == "allow-drop" {
+            if value.is_empty() {
+                return Err("--allow-drop needs a class".into());
+            }
+            allow_drop.push(value);
+        } else if values.insert(key.to_string(), value).is_some() {
             return Err(format!("duplicate --{key}"));
         }
         i += 1;
     }
-    Ok(out)
+    Ok(Parsed { values, allow_drop })
 }
