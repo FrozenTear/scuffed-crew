@@ -351,3 +351,56 @@ async fn existing_participant_update_and_delete_still_work() {
             .is_empty()
     );
 }
+
+/// Dev-seed regression (site-server main.rs, "Failed to report RR match 1"):
+/// the seed reported a B win as 2-1. The report path is right to refuse that
+/// (DB-009, the winner must outscore the loser). A B win reported 1-2 on a
+/// round-robin match goes through.
+#[tokio::test]
+async fn round_robin_b_win_needs_b_to_outscore_a() {
+    let state = seeded().await;
+    let tid = create_tournament(&state, "RR Cup", "round_robin").await;
+    for name in ["Alpha", "Bravo", "Charlie", "Echo"] {
+        add_participant(&state, &tid, name).await;
+    }
+    let (status, body) = call(
+        &state,
+        Method::POST,
+        &format!("/api/tournaments/{tid}/generate-bracket"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let matches = state.db.list_tournament_matches(&tid).await.unwrap();
+    let pending: Vec<_> = matches
+        .iter()
+        .filter(|m| m.participant_a_id.is_some() && m.participant_b_id.is_some())
+        .collect();
+    assert_eq!(pending.len(), 6, "4 teams play 6 round-robin matches");
+    let m = pending[1];
+    let b = m.participant_b_id.clone().unwrap();
+    let uri = format!("/api/tournaments/{tid}/matches/{}/report", m.id);
+
+    // The old seed data: B named winner with A's score higher. Still refused.
+    let (status, body) = call(
+        &state,
+        Method::PATCH,
+        &uri,
+        Some(json!({ "score_a": 2, "score_b": 1, "winner_id": b })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+
+    // The fixed seed data: B wins 1-2.
+    let (status, body) = call(
+        &state,
+        Method::PATCH,
+        &uri,
+        Some(json!({ "score_a": 1, "score_b": 2, "winner_id": b })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["winner_id"], b);
+    assert_eq!(body["status"], "completed");
+}

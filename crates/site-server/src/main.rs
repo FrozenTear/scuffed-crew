@@ -387,19 +387,21 @@ async fn main() {
             .collect();
 
         // Report first 3 matches of the round robin
+        // Alternate the winner. The winner's score must exceed the loser's
+        // (DB-009), so a B win is reported as 1-2, not 2-1.
         for (i, m) in rr_pending.iter().take(3).enumerate() {
-            let winner = if i % 2 == 0 {
-                m.participant_a_id.as_ref().unwrap()
+            let (winner, score_a, score_b) = if i % 2 == 0 {
+                (m.participant_a_id.as_ref().unwrap(), 2, 1)
             } else {
-                m.participant_b_id.as_ref().unwrap()
+                (m.participant_b_id.as_ref().unwrap(), 1, 2)
             };
             let codes = vec![
                 format!("RR{}{}", (b'A' + i as u8) as char, "001"),
                 format!("RR{}{}", (b'A' + i as u8) as char, "002"),
             ];
-            db.report_tournament_match(&m.id, 2, 1, winner, None, codes)
+            db.report_tournament_match(&m.id, score_a, score_b, winner, None, codes)
                 .await
-                .unwrap_or_else(|_| panic!("Failed to report RR match {i}"));
+                .unwrap_or_else(|e| panic!("Failed to report RR match {i}: {e}"));
         }
 
         tracing::info!("Round robin seeded: 4 teams, 3 matches reported");
@@ -475,7 +477,7 @@ async fn main() {
             ];
             db.report_tournament_match(&m.id, 2, 0, winner, None, codes)
                 .await
-                .unwrap_or_else(|_| panic!("Failed to report Swiss match {i}"));
+                .unwrap_or_else(|e| panic!("Failed to report Swiss match {i}: {e}"));
         }
 
         // Generate round 2 (pairs by standings now)
