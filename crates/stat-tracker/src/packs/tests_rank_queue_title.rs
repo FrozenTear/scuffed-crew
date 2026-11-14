@@ -729,3 +729,57 @@ fn a_keep_that_lands_nowhere_exchanges_back() {
     );
     assert!(!text.contains("not the one sync installed"), "{text}");
 }
+
+/// A stranded old tree (an edited `templates.json` left at its `-next-`
+/// staging name, old by mtime) is moved to `templates-kept/` by the next
+/// sync's stale sweep, bytes unchanged, and never removed. An empty stale
+/// staging folder and one holding the recorded official file are still
+/// removed.
+#[tokio::test]
+async fn a_stranded_old_tree_survives_the_next_sweep_in_templates_kept() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let templates = dir.path().join("templates");
+    let report = sync(&serve_only(&[RANK_PACK_NAME], "1"), dir.path()).await;
+    assert_eq!(outcome(&report, RANK_PACK_NAME), &PackSync::Installed);
+    let two_hours = std::time::Duration::from_secs(2 * 3600);
+    let edit = b"{\"edit\":\"mine\"}".to_vec();
+    let stranded = templates.join(".rank-v1-next-1-2");
+    std::fs::create_dir(&stranded).unwrap();
+    std::fs::write(stranded.join("templates.json"), &edit).unwrap();
+    std::fs::write(stranded.join("templates.json.bak-roles-20261114"), b"old").unwrap();
+    let empty = templates.join(".rank-v1-next-3-4");
+    std::fs::create_dir(&empty).unwrap();
+    let official = templates.join(".rank-v1-next-5-6");
+    std::fs::create_dir(&official).unwrap();
+    std::fs::write(official.join("templates.json"), rank_json()).unwrap();
+    for path in [&stranded, &empty, &official] {
+        age_folder(path, two_hours);
+    }
+
+    let logs = capture_logs();
+    let report = sync(&serve_only(&[RANK_PACK_NAME], "1"), dir.path()).await;
+    assert_eq!(outcome(&report, RANK_PACK_NAME), &PackSync::Current);
+    let text = logs.text();
+    assert_eq!(leftovers(dir.path()), Vec::<String>::new());
+    let kept = kept_folders(dir.path());
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_kept_name(&kept[0]);
+    assert_eq!(
+        file_names(&kept[0]),
+        ["templates.json", "templates.json.bak-roles-20261114"]
+    );
+    assert_eq!(std::fs::read(kept[0].join("templates.json")).unwrap(), edit);
+    let moved: Vec<&str> = pack_lines(&text)
+        .into_iter()
+        .filter(|line| line.contains("left at a staging path was moved aside"))
+        .collect();
+    assert_eq!(moved.len(), 1, "{text}");
+    assert!(moved[0].contains(RANK_PACK_NAME), "{text}");
+    assert!(moved[0].contains(&kept[0].display().to_string()), "{text}");
+    assert!(!text.contains("left by a stopped sync"), "{text}");
+
+    // Moved out, it is out of the sweep's reach for good.
+    layout::sweep_stale_staging(dir.path());
+    assert_eq!(kept_folders(dir.path()), kept);
+    assert_eq!(std::fs::read(kept[0].join("templates.json")).unwrap(), edit);
+}

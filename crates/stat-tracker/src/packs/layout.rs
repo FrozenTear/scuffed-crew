@@ -318,7 +318,8 @@ pub(super) enum KeepSwap {
     NotSwapped(String),
     /// After the exchange the old tree could be neither kept nor swapped
     /// back: it is still at `staging`, so `staging` must not be removed.
-    /// The live folder holds the new pack.
+    /// The live folder holds the new pack, with its hash recorded. A later
+    /// sync's stale sweep moves the old tree to `templates-kept/`.
     Stranded(String),
 }
 
@@ -340,9 +341,12 @@ impl KeepSwap {
 /// move fail, the old tree goes beside the live folder under the same
 /// name (same disk, a name the stale sweep skips). Should that fail too,
 /// the two folders are exchanged back and the pack is not installed
-/// ([`KeepSwap::NotKept`]); if even that fails, the old tree stays at the
-/// staging path, which the stale sweep may remove, and a warning names it
-/// ([`KeepSwap::Stranded`]). Without the exchange, the old folder is moved
+/// ([`KeepSwap::NotKept`]); if even that fails, the old tree goes beside
+/// the live folder under a kept name no folder has yet ([`kept_path`]),
+/// else it stays at the staging path, the hash of the live new pack is
+/// recorded, and a warning names that path ([`KeepSwap::Stranded`]). The
+/// stale sweep never removes it there: it moves it to `templates-kept/`
+/// ([`sweep_stale_staging`]). Without the exchange, the old folder is moved
 /// to `templates-kept/` first, then the new one into place, and back if
 /// that fails. Returns where the old tree is kept.
 pub(super) fn swap_keeping(
@@ -388,11 +392,22 @@ pub(super) fn swap_keeping(
                 }
             }
             if let Err(back) = exchange_paths(staging, live) {
+                // Last try: beside the live folder under a kept name no
+                // folder has yet, which the sweep skips.
+                let free = kept_path(parent, live);
+                if std::fs::rename(staging, &free).is_ok() {
+                    log_kept(&free);
+                    let _ = sync_dir(parent);
+                    return Ok(free);
+                }
+                // The new pack is live: record its hash, so the next sync
+                // does not keep a copy of the official folder.
+                record_templates_hash(data_dir, pack, live);
                 tracing::warn!(
                     pack,
                     at = %staging.display(),
                     error = %back,
-                    "reader pack folder was not put back; the old folder is still at this staging path, which a later sync may remove as stale"
+                    "reader pack folder was not put back; the old folder is still at this staging path, and a later sync moves it to templates-kept instead of removing it"
                 );
                 return Err(KeepSwap::Stranded(err.to_string()));
             }
@@ -516,7 +531,10 @@ pub(super) const STALE_STAGING: std::time::Duration = std::time::Duration::from_
 /// sync lock. Only names this module makes, only real folders (not links),
 /// and only when older than [`STALE_STAGING`]. Also removes record tmp
 /// files left by a kill. Never `templates-kept/` (outside `templates/`) nor
-/// a kept folder beside a live one (no leading dot).
+/// a kept folder beside a live one (no leading dot). A `-next-` folder that
+/// is not empty and that [`needs_keep`] would keep (an old tree a keep left
+/// at its staging name, [`KeepSwap::Stranded`]) is moved out with
+/// [`keep_left_tree`], not removed.
 pub(super) fn sweep_stale_staging(data_dir: &Path) {
     let templates = data_dir.join("templates");
     let Ok(entries) = std::fs::read_dir(&templates) else {
@@ -566,9 +584,18 @@ pub(super) fn sweep_stale_staging(data_dir: &Path) {
             .and_then(|modified| modified.elapsed().ok())
             .is_some_and(|age| age >= STALE_STAGING);
         if meta.is_dir() && stale {
+            // An old tree a keep left at its staging name (a keep that could
+            // not land, or a kill right after the exchange) is the folder
+            // [`needs_keep`] keeps: move it out, never remove it. An empty
+            // folder holds nothing to keep.
+            let empty = std::fs::read_dir(&path).is_ok_and(|mut entries| entries.next().is_none());
+            if !backup && !empty && needs_keep(data_dir, spec, &path) {
+                keep_left_tree(data_dir, spec, &path);
+                continue;
+            }
             match std::fs::remove_dir_all(&path) {
                 Ok(()) => {
-                    tracing::info!(folder = %name, "removed a reader pack folder left by a stopped sync")
+                    tracing::info!(folder = %name, "removed an old reader pack staging or backup folder")
                 }
                 Err(err) => {
                     tracing::warn!(folder = %name, error = %err, "left reader pack folder was not removed")
@@ -576,6 +603,39 @@ pub(super) fn sweep_stale_staging(data_dir: &Path) {
             }
         }
     }
+}
+
+/// Move an old tree [`sweep_stale_staging`] found at a `-next-` name to
+/// `templates-kept/` under a kept name ([`kept_path`]), else beside the live
+/// folder under one (a name the sweep skips). When neither works it stays
+/// where it is and the next sweep tries again; it is never removed.
+fn keep_left_tree(data_dir: &Path, spec: &PackSpec, at: &Path) {
+    let live = spec.dir_in(data_dir);
+    let root = data_dir.join(KEPT_DIR);
+    let parent = live.parent().unwrap_or_else(|| Path::new("."));
+    let mut last = None;
+    for dir in [root.as_path(), parent] {
+        let kept = kept_path(dir, &live);
+        match std::fs::create_dir_all(dir).and_then(|()| std::fs::rename(at, &kept)) {
+            Ok(()) => {
+                let _ = sync_dir(dir);
+                let _ = sync_dir(parent);
+                tracing::warn!(
+                    pack = spec.name,
+                    kept = %kept.display(),
+                    "reader pack folder that a keep left at a staging path was moved aside; the old folder is kept at this path"
+                );
+                return;
+            }
+            Err(err) => last = Some(err),
+        }
+    }
+    tracing::warn!(
+        pack = spec.name,
+        at = %at.display(),
+        error = %last.map(|err| err.to_string()).unwrap_or_default(),
+        "reader pack folder that a keep left at a staging path was not moved aside; it stays at this path and is not removed"
+    );
 }
 
 /// Start of the tmp files the record writers make. Only a run holding the

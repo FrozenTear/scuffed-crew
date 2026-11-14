@@ -483,7 +483,9 @@ More detail on a sync, for the tracker on main:
   shows a warning that says to link a site account in Settings.
 - Staging (`.<pack>-next-*`) and backup (`.<pack>-prev-*`) folders left under
   `templates/` by a killed sync are removed by the next sync once they are
-  an hour old.
+  an hour old. A `rank-v1` or `queue-title-v1` staging folder that holds
+  files and is not exactly the recorded official `templates.json` (an old
+  tree a keep could not move out) is moved to `templates-kept/` instead.
 
 ### The daemon's background job
 
@@ -660,11 +662,15 @@ is never missing. Should that move fail, the old tree goes beside the live
 folder under `templates/` with the same name (no leading dot, so the stale
 sweep skips it). Should that fail too, the two folders are exchanged back:
 the old folder is live again, the pack is refused as not kept and no
-version is recorded. Only if that exchange back fails as well does the old
-tree stay at its `.<pack folder>-next-*` staging path, with a warning that
-names it; that path is at risk of the stale sweep on a later sync, so copy
-it out by hand. Without the exchange, the old folder is moved first and put
-back if the swap fails. An unchanged official folder is replaced and
+version is recorded. If that exchange back fails as well, the old tree goes
+beside the live folder under a kept name no folder has yet; only if that
+fails too does it stay at its `.<pack folder>-next-*` staging path, with a
+warning that names it. The new pack is live then, and the hash of its
+`templates.json` is recorded, so its next download keeps no copy of it. The
+stale sweep never removes an old tree left at a staging path: once it is an
+hour old, a later sync moves it to `templates-kept/` (or beside the live
+folder) and logs where. Without the exchange, the old folder is moved first
+and put back if the swap fails. An unchanged official folder is replaced and
 nothing is kept. If `templates-kept/` cannot be made, the pack is refused
 for a fixed reason and the folder stays as it was. Only these two packs
 keep; every other pack replaces its folder as before.

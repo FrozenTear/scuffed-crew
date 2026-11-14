@@ -94,7 +94,7 @@ pub const PACK_UNSAFE: &str =
     "The reader pack was not safe to unpack. The installed pack was left in place.";
 pub const PACK_BAD_TEMPLATES: &str = "The reader pack did not load, so it was not saved.";
 pub const PACK_NOT_KEPT: &str = "The reader pack was not saved: the old pack folder could not be moved to templates-kept, so it was left in place.";
-pub const PACK_STRANDED: &str = "The reader pack is in the live folder, but the old pack folder could not be moved to templates-kept and could not be put back, so it was left at the staging path.";
+pub const PACK_STRANDED: &str = "The reader pack is in the live folder, but the old pack folder could not be moved to templates-kept and could not be put back, so it was left at the staging path. A later sync moves it to templates-kept; it is not removed.";
 pub const PACK_FAILED: &str =
     "Could not download the reader pack. The installed pack was left in place.";
 pub const PACK_AUTH: &str = "Your sync token isn't valid. Sign in again from Settings.";
@@ -1518,7 +1518,7 @@ fn install_pack(
         failed.remove_staging(&staging);
         let (message, error) = match failed {
             KeepSwap::Stranded(error) => {
-                tracing::warn!(pack = spec.name, error = %error, "reader pack is in the live folder, but the old folder was left at the staging path");
+                tracing::warn!(pack = spec.name, error = %error, "reader pack is in the live folder, but the old folder was left at the staging path; a later sync moves it to templates-kept");
                 return Err(PackSync::Failed(PACK_STRANDED.to_string()));
             }
             KeepSwap::NotKept(error) => (PACK_NOT_KEPT, error),
