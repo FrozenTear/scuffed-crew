@@ -137,25 +137,22 @@ else. It must be JSON the queue title reader can load: `width` 120,
 Both readers start off. With them off, `templates.json` is never loaded,
 so an edit there changes nothing.
 
-Each one is turned on by an environment variable in the tracker's service
-environment:
+Turn both on with the **Read my rank after Comp games** switch under
+**Readers** on the Settings page. The older layout does not have it.
 
-- `STAT_TRACKER_RANK_RECOGNIZER=on` for the rank reader.
-- `STAT_TRACKER_QUEUE_TITLE_RECOGNIZER=on` for the queue title reader.
+An environment variable in the tracker's service environment overrides
+the switch for each reader:
 
-`1`, `true` and `yes` also count as on. For the user unit, set them in a
+- `STAT_TRACKER_RANK_RECOGNIZER` for the rank reader.
+- `STAT_TRACKER_QUEUE_TITLE_RECOGNIZER` for the queue title reader.
+
+`on`, `1`, `true`, `yes` and `rank-v1` turn the reader on (any case). Any other non-blank
+value, a typo included, turns it off. For the user unit, set them in a
 drop-in: `systemctl --user edit scuffed-stat-tracker`, then add an
 `Environment=` line under `[Service]`, and restart the tracker. With "No
 login service installed", the drop-in does not apply: the tracker gets
 its environment from the app, so set the variables in the environment
 you start the app from, then restart the tracker.
-
-The default Settings page also has a switch, **Read my rank after Comp
-games**. The older layout does not. When the tracker reads that switch,
-it turns on both the rank reader and the queue title reader, and the two
-environment variables still override it. If the switch shows "Not read
-by this build yet, so this changes nothing for now.", it does nothing,
-and only the environment variables turn the readers on.
 
 ## Edit a template safely
 
