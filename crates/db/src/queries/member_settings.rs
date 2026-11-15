@@ -691,6 +691,100 @@ mod tests {
         assert!(!db.set_hero_icon_opt_in("old-a", false).await.unwrap());
     }
 
+    /// The rollback backfill in `docs/api/training-crops.md`, run on rows
+    /// from before `stats_visibility` and every opt-in field. The statement
+    /// is read from the doc, so the doc and this test cannot drift apart.
+    #[tokio::test]
+    async fn rollback_backfill_fills_old_rows_including_stats_visibility() {
+        const DOC: &str = include_str!("../../../../docs/api/training-crops.md");
+        const BACKFILL: &str = "UPDATE member_settings SET stats_visibility = stats_visibility ?? 'public', hero_icon_opt_in = hero_icon_opt_in ?? false, stat_digits_opt_in = stat_digits_opt_in ?? false, map_name_opt_in = map_name_opt_in ?? false, rank_opt_in = rank_opt_in ?? false;";
+        // Without stats_visibility, as the doc had it before.
+        const WITHOUT_VISIBILITY: &str = "UPDATE member_settings SET hero_icon_opt_in = hero_icon_opt_in ?? false, stat_digits_opt_in = stat_digits_opt_in ?? false, map_name_opt_in = map_name_opt_in ?? false, rank_opt_in = rank_opt_in ?? false;";
+        assert!(DOC.contains(BACKFILL), "the doc runs this exact statement");
+        assert!(!DOC.contains(WITHOUT_VISIBILITY));
+
+        let db = test_db().await;
+        // 'chose' is written while the fields exist (stored values outlive
+        // a removed definition); 'bare' after, so it has none of them.
+        db.client
+            .query(
+                r#"
+                CREATE member_settings SET member_id = 'chose', player_name = 'Old',
+                    stats_visibility = 'private', hero_icon_opt_in = true,
+                    map_name_opt_in = true;
+                REMOVE FIELD IF EXISTS stats_visibility ON member_settings;
+                REMOVE FIELD IF EXISTS hero_icon_opt_in ON member_settings;
+                REMOVE FIELD IF EXISTS stat_digits_opt_in ON member_settings;
+                REMOVE FIELD IF EXISTS map_name_opt_in ON member_settings;
+                REMOVE FIELD IF EXISTS rank_opt_in ON member_settings;
+                CREATE member_settings SET member_id = 'bare', player_name = 'Old';
+                "#,
+            )
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        run_migrations(&db.client).await.unwrap();
+
+        // The old statement fails on the row without stats_visibility and
+        // the whole UPDATE is lost.
+        let error = db
+            .client
+            .query(WITHOUT_VISIBILITY)
+            .await
+            .unwrap()
+            .check()
+            .expect_err("a row without stats_visibility fails the UPDATE");
+        assert!(error.to_string().contains("stats_visibility"), "{error}");
+
+        db.client
+            .query(BACKFILL)
+            .await
+            .unwrap()
+            .check()
+            .expect("the doc's backfill runs");
+        #[derive(Debug, Deserialize, SurrealValue, PartialEq)]
+        struct Raw {
+            member_id: String,
+            stats_visibility: Option<String>,
+            hero_icon_opt_in: Option<bool>,
+            stat_digits_opt_in: Option<bool>,
+            map_name_opt_in: Option<bool>,
+            rank_opt_in: Option<bool>,
+        }
+        let mut result = db
+            .client
+            .query(
+                "SELECT member_id, stats_visibility, hero_icon_opt_in, stat_digits_opt_in, \
+                 map_name_opt_in, rank_opt_in FROM member_settings ORDER BY member_id",
+            )
+            .await
+            .unwrap();
+        let rows: Vec<Raw> = result.take(0).unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                Raw {
+                    member_id: "bare".into(),
+                    stats_visibility: Some("public".into()),
+                    hero_icon_opt_in: Some(false),
+                    stat_digits_opt_in: Some(false),
+                    map_name_opt_in: Some(false),
+                    rank_opt_in: Some(false),
+                },
+                // Stored choices are kept.
+                Raw {
+                    member_id: "chose".into(),
+                    stats_visibility: Some("private".into()),
+                    hero_icon_opt_in: Some(true),
+                    stat_digits_opt_in: Some(false),
+                    map_name_opt_in: Some(true),
+                    rank_opt_in: Some(false),
+                },
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn rank_consent_reads_false_on_rows_from_before_it() {
         let db = test_db().await;

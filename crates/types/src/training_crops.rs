@@ -149,8 +149,10 @@ pub const RANK_MAX_WIDTH: u32 = 1536;
 pub const RANK_MAX_HEIGHT: u32 = 720;
 
 /// Smallest screen width a `rank` crop must report. The tracker's rank
-/// reader takes 1080p within 2% (16:9), so its smallest client area is
-/// about 1882x1059; this is that, rounded down.
+/// reader takes 1080p with the height within 2% (down to 1059) and the
+/// aspect within 0.02 of 16:9, so it accepts widths down to about 1862 at
+/// that height. This sits just below that, so every screen the reader
+/// takes passes.
 pub const RANK_MIN_SCREEN_WIDTH: u32 = 1856;
 
 /// Smallest screen height a `rank` crop must report. See

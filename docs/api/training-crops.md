@@ -3,8 +3,12 @@
 Alpha.3 item 14. The stat tracker can send small PNG crops of what it read
 (hero icons, stat digits, map name banners, rank screen regions) so recognizers can be trained on
 real captures. Every kind is opt-in, off by default, and consent is only
-given on the site (with a session). The tracker sends crops itself with its
-sync token and shows the consent read-only, linking to the site. JSON types and error codes live in
+given with a session, never with the tracker's sync token. The site has a
+switch for `hero_icon`, `stat_digits` and `map_name`. **`rank` has no switch
+on the site yet**: the only way to turn it on is a session
+`PUT /api/training-crops/consent` with `{"rank": true}` (see Consent). The
+tracker sends crops itself with its sync token and shows the consent
+read-only, linking to the site. JSON types and error codes live in
 `crates/types/src/api/training_crops.rs`; kinds and caps live in
 `crates/types/src/training_crops.rs`.
 
@@ -67,9 +71,10 @@ A `rank` bound of 1536 by 720 is large enough to hold a whole 1280x720
 screen, and members are told crops are never whole screens. So every
 `rank` crop's `meta` must carry `screen_width` and `screen_height`, at
 least `RANK_MIN_SCREEN_WIDTH` (1856) by `RANK_MIN_SCREEN_HEIGHT` (1056);
-otherwise the crop is 400 `invalid_crop_meta`. That is the smallest 1080p
-client area the tracker's rank reader takes (1080 tall within 2%, 16:9),
-rounded down, and it is larger than the largest `rank` crop on both
+otherwise the crop is 400 `invalid_crop_meta`. The tracker's rank reader
+takes 1080p with the height within 2% (down to 1059) and the aspect within
+0.02 of 16:9, so its smallest client area is about 1862x1059; 1856x1056 is
+just below that, and it is larger than the largest `rank` crop on both
 edges, so a `rank` crop is never the whole screen it reports. The screen
 size is what the tracker reports; the server cannot see the screen.
 
@@ -103,7 +108,8 @@ or banned). It is accepted, besides a session, on exactly these routes:
 
 Setting consent is session only, so a leaked or misused sync token can never
 turn a kind on. The tracker shows the consent read-only and links to the site
-to change it.
+to change it. The site has no `rank` switch yet, so `rank` consent is only
+set through the API `PUT` with a session.
 
 The four routes that take the sync token share one per-IP limit: burst 40
 requests, then one every 2 s (`STATS_UPLOAD_IP_BURST`,
@@ -135,6 +141,11 @@ is present, the Bearer is tried as a sync token.
 | 403 | `Member not found`, `Membership inactive`, `Member is suspended or banned` | Sync token checks, as for stats sync |
 
 ## Consent
+
+The site's consent page has switches for `hero_icon`, `stat_digits` and
+`map_name` only. `rank` has no switch on the site yet: it stays off unless
+the member sends `PUT /api/training-crops/consent` with `{"rank": true}`
+from a session.
 
 `GET /api/training-crops/consent`:
 
@@ -244,7 +255,7 @@ Every field is optional unless noted. Unknown fields are refused (400
 | `spot_version` | string | Same as `icon_set_version` |
 | `vote_card_filled` | bool | |
 | `locked_in` | bool | |
-| `screen_width`, `screen_height` | int | Game resolution. Both or neither, each 320 to 16384 |
+| `screen_width`, `screen_height` | int | Game resolution. Both or neither, each 320 to 16384. **Required for `rank`**: both, at least 1856x1056 (`RANK_MIN_SCREEN_WIDTH`, `RANK_MIN_SCREEN_HEIGHT`), else 400 `invalid_crop_meta`. Optional for the other kinds |
 | `ui_scale` | float | Above 0, at most 200 (same range as the report bundle) |
 | `found_spot` | object `{x, y, w, h}` | Unsigned ints, `w` and `h` at least 1, the box inside the resolution when one is given (inside 16384 otherwise). Unknown keys refused. Sending it only for unknown screen sizes is the tracker's rule: the server accepts it at any resolution, since it cannot know the tracker's layouts |
 | `found_confidence` | float | 0 to 1. `found_spot` and `found_confidence` come together or not at all |
@@ -508,36 +519,76 @@ Additive only (`crates/db/src/migrations.rs`):
   that does not set the field fails the `TYPE bool` check. `DEFAULT
   ALWAYS` fills an absent value on every write (it never replaces a stored
   one), so every writer works on old rows. Redefining a field's default
-  touches no row. A build without the `rank` kind ignores the field and skips
-  `rank` rows on read (an unknown stored kind is skipped); to remove them
-  on rollback, use step 1 below, which covers every kind but `hero_icon`.
+  touches no row.
+- A build without the `rank` kind ignores `rank_opt_in` and skips `rank`
+  rows on read (an unknown stored kind is skipped). See Rollback A.
 
 Take a database snapshot before deploying this change. Restoring it is only
 for a rollback right after the deploy: it rolls back every table, so once
 members have used the site it loses their new data (members, applications,
 stats). Later, roll back with the steps below instead.
 
-Rollback to the build before this change:
+There are two rollback targets. Pick the one you need; they are not steps
+of one procedure.
 
-1. Before deploying the old build, remove crops of the new kinds, files
-   first. This deletes members' contributed `stat_digits`, `map_name` and
-   `rank` crops for good, so it needs FrozenTear's yes first: list `SELECT id, file_name FROM hero_icon WHERE kind != 'hero_icon'`,
+The opt-in backfill used by both (it touches only rows missing a field):
+
+```sql
+UPDATE member_settings SET stats_visibility = stats_visibility ?? 'public', hero_icon_opt_in = hero_icon_opt_in ?? false, stat_digits_opt_in = stat_digits_opt_in ?? false, map_name_opt_in = map_name_opt_in ?? false, rank_opt_in = rank_opt_in ?? false;
+```
+
+It only fills absent fields (`stats_visibility` with `'public'`, the
+opt-ins with false) and changes no member's choice. `stats_visibility` is
+in it because that field has a plain `DEFAULT` too: on a row from before
+it, an `UPDATE` that leaves it absent fails with "Expected string but found
+NONE", and one failing row stops the whole statement, so nothing would be
+filled. The db test
+`rollback_backfill_fills_old_rows_including_stats_visibility` runs this
+exact statement on rows missing every one of these fields.
+
+### Rollback A: undo only the `rank` kind (back to the build before PR 682)
+
+The build before PR 682 already has `stat_digits` and `map_name`, so their
+crops and consent stay as they are.
+
+1. Rank crops can stay. The old build skips rows of a kind it does not
+   know on every list and count, and a member's own delete-all
+   (`DELETE /api/training-crops/mine`) still finds and removes them (base
+   db test `unknown_stored_kind_is_found_by_owner_and_deleted`). They keep
+   their disk space until then. To remove them instead (needs FrozenTear's
+   yes; members' contributed `rank` crops are deleted for good): list
+   `SELECT id, file_name FROM hero_icon WHERE kind = 'rank'`, delete those
+   files from `HERO_ICONS_DIR`, then `DELETE hero_icon WHERE kind = 'rank'`.
+   Never use `kind != 'hero_icon'` here: that also deletes every member's
+   `stat_digits` and `map_name` crops.
+2. Before deploying the old build, run the backfill above. The old build
+   redefines `hero_icon_opt_in`, `stat_digits_opt_in` and `map_name_opt_in`
+   with a plain `DEFAULT false`, which SurrealDB applies only when a row is
+   created: on a row that lacks one of them, the old build's stats settings
+   and hero icon opt-in saves would fail the `TYPE bool` check (500).
+3. Deploy the old build. Its migrations put back the `hero_icon.kind`
+   assert without `'rank'` (stored `rank` rows stay; the assert is checked
+   only when a row is written) and the plain defaults above. `rank_opt_in`
+   stays defined with `DEFAULT ALWAYS false` and unused, so it never blocks
+   a write.
+4. Optional cleanup, once no `rank` rows are left:
+   `REMOVE FIELD rank_opt_in ON member_settings;`.
+
+### Rollback B: undo the whole training crops feature (back to the build before #653)
+
+1. Before deploying the old build, remove crops of every kind but
+   `hero_icon`, files first. This deletes members' contributed
+   `stat_digits`, `map_name` and `rank` crops for good, so it needs
+   FrozenTear's yes first: list `SELECT id, file_name FROM hero_icon WHERE kind != 'hero_icon'`,
    delete those files from `HERO_ICONS_DIR`, then
-   `DELETE hero_icon WHERE kind != 'hero_icon'`. The old build has no kind
+   `DELETE hero_icon WHERE kind != 'hero_icon'`. That build has no kind
    filter and would otherwise show them as hero icons with an empty hero.
-   (Files left behind are also removed by the old build's orphan sweep after
-   one hour once their rows are gone.)
-2. Before deploying the old build, give every `member_settings` row its
-   opt-in fields:
-   `UPDATE member_settings SET hero_icon_opt_in = hero_icon_opt_in ?? false, stat_digits_opt_in = stat_digits_opt_in ?? false, map_name_opt_in = map_name_opt_in ?? false, rank_opt_in = rank_opt_in ?? false;`
-   It only fills absent fields with false and changes no member's choice.
-   It is needed because the old build redefines `stat_digits_opt_in` and
-   `map_name_opt_in` (and `hero_icon_opt_in`) with a plain `DEFAULT
-   false`, which SurrealDB applies only when a row is created: on a row
-   that lacks one of them, the old build's stats settings and hero icon
-   opt-in saves would fail the `TYPE bool` check (500). A build from
-   before those fields existed does not redefine them and needs no
-   backfill, but it does no harm there.
+   (Files left behind are also removed by its orphan sweep after one hour
+   once their rows are gone.)
+2. Run the backfill above. That build does not define the
+   `stat_digits`, `map_name` or `rank` consent fields, so they keep
+   `DEFAULT ALWAYS false`; the backfill still fills `stats_visibility` and
+   `hero_icon_opt_in` on rows that lack them, and is harmless otherwise.
 3. Deploy the old build. Its migrations redefine only the old fields; the new
    columns, the index and the consent fields stay defined and unused, and
    hero icon rows keep working: the old build reads rows with its own row
@@ -549,7 +600,7 @@ Rollback to the build before this change:
 4. Optional cleanup:
    `REMOVE INDEX hero_icon_member_kind_idx ON hero_icon;` and
    `REMOVE FIELD <name> ON hero_icon;` / `ON member_settings` for each new
-   field. Not needed for the old build to run once step 2 has run.
+   field. Not needed for the old build to run once steps 1 and 2 have run.
 
 Hero icon opt-ins are never rewritten, so a rollback keeps every member's
 hero icon choice.
