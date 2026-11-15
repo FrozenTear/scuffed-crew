@@ -63,6 +63,23 @@ role 20 KiB, SR about 19 KiB), so 384 KiB leaves room above it; with the
 2 MiB request limit a request holds at most five crops of that size.
 About five crops per competitive game make the 1000 cap about 200 games.
 
+A `rank` bound of 1536 by 720 is large enough to hold a whole 1280x720
+screen, and members are told crops are never whole screens. So every
+`rank` crop's `meta` must carry `screen_width` and `screen_height`, at
+least `RANK_MIN_SCREEN_WIDTH` (1856) by `RANK_MIN_SCREEN_HEIGHT` (1056);
+otherwise the crop is 400 `invalid_crop_meta`. That is the smallest 1080p
+client area the tracker's rank reader takes (1080 tall within 2%, 16:9),
+rounded down, and it is larger than the largest `rank` crop on both
+edges, so a `rank` crop is never the whole screen it reports. The screen
+size is what the tracker reports; the server cannot see the screen.
+
+Worst-case disk use per consenting member, at every cap with every crop at
+its byte limit: `hero_icon` 500 x 64 KiB (about 31 MiB), `stat_digits`
+1000 x 64 KiB (about 62 MiB), `map_name` 200 x 256 KiB (50 MiB), `rank`
+1000 x 384 KiB (375 MiB). `rank` is the largest by far. Real crops are
+smaller (the measured `rank` maximums average about 95 KiB across the five
+regions), and stored files are the server's re-encode, not the upload.
+
 ## Auth
 
 The tracker's sync token is the same daemon token stats sync uses
@@ -235,8 +252,12 @@ Every field is optional unless noted. Unknown fields are refused (400
 Any bound failure is the one stable code 400 `invalid_crop_meta`; the server
 logs the field name at debug level.
 
-The server takes any `slot_type` of that shape. The tracker sends these,
-all with `screen` `tab`:
+The server takes any `slot_type` of that shape. The tracker sends these.
+`hero_icon`, `stat_digits` and `map_name` crops come from the Tab screen
+and carry `screen` `tab`. `rank` crops come from the post-game rank
+screen, not the Tab: the tracker picks their `screen` and `slot_type`
+(for example `screen` `rank`), and they must carry the screen size (see
+Crop size per kind).
 
 | Kind | `slot_type` | What the crop is |
 |------|-------------|------------------|
@@ -435,7 +456,7 @@ Every error body is `{"error": "<code>"}`, except the shared 429 body
 | 400 | `unknown_crop_kind` | `kind` missing or unknown (upload), or unknown (`?kind=` filters) |
 | 422 | `full_screen_not_accepted` | Upload with `kind=full_screen`, with or without consent (wins over 403, see Check order). Nothing read or stored |
 | 403 | `crop_consent_required` | Upload of a kind the caller does not consent to. Nothing stored |
-| 400 | `invalid_crop_meta` | A `meta` part that is not JSON, over 4 KiB, has an unknown field (`colorblind_filter` included), or a value out of bounds |
+| 400 | `invalid_crop_meta` | A `meta` part that is not JSON, over 4 KiB, has an unknown field (`colorblind_filter` included), or a value out of bounds; or a `rank` crop's `meta` without a screen size of at least 1856x1056 |
 | 400 | `unknown_hero` | `hero` not a known hero, or missing on a `hero_icon` crop |
 | 400 | `unexpected_field` | Part named other than `meta`/`crop`, or pairs out of order |
 | 400 | `no_crops` | No `meta`/`crop` pair |
@@ -475,12 +496,19 @@ Additive only (`crates/db/src/migrations.rs`):
   store it empty when no hero was sent.
 - Index `hero_icon_member_kind_idx` on `(member_id, kind)`.
 - `member_settings.stat_digits_opt_in`, `map_name_opt_in`: `bool DEFAULT
-  false`. Older rows read false. `hero_icon_opt_in` is untouched and is the
-  `hero_icon` consent. There is no `full_screen_opt_in`: that consent is
-  never stored.
-- `member_settings.rank_opt_in`: `bool DEFAULT false`, added with the
-  `rank` kind. Additive: no row is rewritten, rows from before it read
-  false. A build without the `rank` kind ignores the field and skips
+  ALWAYS false`. Older rows read false. `hero_icon_opt_in` (also `DEFAULT
+  ALWAYS false` now) keeps its values and is the `hero_icon` consent.
+  There is no `full_screen_opt_in`: that consent is never stored.
+- `member_settings.rank_opt_in`: `bool DEFAULT ALWAYS false`, added with
+  the `rank` kind. Additive: no row is rewritten, rows from before it read
+  false.
+- Why `DEFAULT ALWAYS`: the migration does not rewrite rows, so a row from
+  before a field lacks it until it is next written. SurrealDB 3.2.3 applies
+  a plain `DEFAULT` only when a row is created, so an update of such a row
+  that does not set the field fails the `TYPE bool` check. `DEFAULT
+  ALWAYS` fills an absent value on every write (it never replaces a stored
+  one), so every writer works on old rows. Redefining a field's default
+  touches no row. A build without the `rank` kind ignores the field and skips
   `rank` rows on read (an unknown stored kind is skipped); to remove them
   on rollback, use step 1 below, which covers every kind but `hero_icon`.
 
@@ -492,14 +520,25 @@ stats). Later, roll back with the steps below instead.
 Rollback to the build before this change:
 
 1. Before deploying the old build, remove crops of the new kinds, files
-   first. This deletes members' contributed `stat_digits` and `map_name`
-   crops for good, so it needs FrozenTear's yes first: list `SELECT id, file_name FROM hero_icon WHERE kind != 'hero_icon'`,
+   first. This deletes members' contributed `stat_digits`, `map_name` and
+   `rank` crops for good, so it needs FrozenTear's yes first: list `SELECT id, file_name FROM hero_icon WHERE kind != 'hero_icon'`,
    delete those files from `HERO_ICONS_DIR`, then
    `DELETE hero_icon WHERE kind != 'hero_icon'`. The old build has no kind
    filter and would otherwise show them as hero icons with an empty hero.
    (Files left behind are also removed by the old build's orphan sweep after
    one hour once their rows are gone.)
-2. Deploy the old build. Its migrations redefine only the old fields; the new
+2. Before deploying the old build, give every `member_settings` row its
+   opt-in fields:
+   `UPDATE member_settings SET hero_icon_opt_in = hero_icon_opt_in ?? false, stat_digits_opt_in = stat_digits_opt_in ?? false, map_name_opt_in = map_name_opt_in ?? false, rank_opt_in = rank_opt_in ?? false;`
+   It only fills absent fields with false and changes no member's choice.
+   It is needed because the old build redefines `stat_digits_opt_in` and
+   `map_name_opt_in` (and `hero_icon_opt_in`) with a plain `DEFAULT
+   false`, which SurrealDB applies only when a row is created: on a row
+   that lacks one of them, the old build's stats settings and hero icon
+   opt-in saves would fail the `TYPE bool` check (500). A build from
+   before those fields existed does not redefine them and needs no
+   backfill, but it does no harm there.
+3. Deploy the old build. Its migrations redefine only the old fields; the new
    columns, the index and the consent fields stay defined and unused, and
    hero icon rows keep working: the old build reads rows with its own row
    struct, which picks its fields by name and ignores the others, so a row
@@ -507,10 +546,10 @@ Rollback to the build before this change:
    test `old_build_row_shape_reads_rows_with_kind_and_metadata`, which reads
    such a row with a copy of the old struct). Hero icons the old build
    writes get `kind = 'hero_icon'` from the field default.
-3. Optional cleanup:
+4. Optional cleanup:
    `REMOVE INDEX hero_icon_member_kind_idx ON hero_icon;` and
    `REMOVE FIELD <name> ON hero_icon;` / `ON member_settings` for each new
-   field. Not needed for the old build to run.
+   field. Not needed for the old build to run once step 2 has run.
 
 Hero icon opt-ins are never rewritten, so a rollback keeps every member's
 hero icon choice.

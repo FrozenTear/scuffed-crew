@@ -35,7 +35,8 @@ use scuffed_site_server::state::{AppState, OAuthConfig};
 use scuffed_types::{
     CropKind, HERO_ICON_MAX_FILES_PER_UPLOAD, HERO_ICON_MAX_REQUEST_BYTES, HERO_ICON_RATE_BURST,
     MAP_NAME_MAX_BYTES, MAP_NAME_MAX_PER_MEMBER, MAP_NAME_MAX_WIDTH, RANK_MAX_BYTES,
-    RANK_MAX_HEIGHT, RANK_MAX_PER_MEMBER, RANK_MAX_WIDTH, STATS_UPLOAD_IP_BURST, TrainingCropMeta,
+    RANK_MAX_HEIGHT, RANK_MAX_PER_MEMBER, RANK_MAX_WIDTH, RANK_MIN_SCREEN_HEIGHT,
+    RANK_MIN_SCREEN_WIDTH, STATS_UPLOAD_IP_BURST, TrainingCropMeta,
 };
 
 const OWNER: &str = "cropowner";
@@ -1794,7 +1795,7 @@ async fn rows_that_fail_to_parse_are_still_deleted() {
 }
 
 // ---------------------------------------------------------------------------
-// rank kind (rank screen regions: role, tier, SR, percentile)
+// rank kind (rank screen regions: role, tier, rank bar, result, SR)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -1960,6 +1961,56 @@ async fn rank_consent_reads_false_for_an_existing_member_row() {
     w.cleanup();
 }
 
+/// `meta` for a rank crop: the screen size every rank crop must report.
+fn rank_meta() -> Value {
+    json!({ "screen": "rank", "screen_width": 2560, "screen_height": 1440 })
+}
+
+/// CRC-32 (IEEE) of `bytes`, as PNG chunks use it.
+fn png_crc(bytes: &[u8]) -> u32 {
+    let mut crc = 0xffff_ffffu32;
+    for &byte in bytes {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+        }
+    }
+    !crc
+}
+
+/// `png` padded to exactly `total` bytes with one private ancillary chunk
+/// (`scFp`, valid CRC) before `IEND`. Decoders skip it, so the image is
+/// unchanged.
+fn padded_png(png: Vec<u8>, total: usize) -> Vec<u8> {
+    const CHUNK_OVERHEAD: usize = 12; // length, type, CRC
+    let iend = png.len() - CHUNK_OVERHEAD;
+    assert_eq!(&png[iend + 4..iend + 8], b"IEND");
+    let data_len = total
+        .checked_sub(png.len() + CHUNK_OVERHEAD)
+        .expect("png already larger than the target");
+    let mut chunk = Vec::with_capacity(data_len + CHUNK_OVERHEAD);
+    chunk.extend_from_slice(&u32::try_from(data_len).unwrap().to_be_bytes());
+    let typed_start = chunk.len();
+    chunk.extend_from_slice(b"scFp");
+    chunk.resize(chunk.len() + data_len, 0x5a);
+    let crc = png_crc(&chunk[typed_start..]);
+    chunk.extend_from_slice(&crc.to_be_bytes());
+    let mut out = png[..iend].to_vec();
+    out.extend_from_slice(&chunk);
+    out.extend_from_slice(&png[iend..]);
+    assert_eq!(out.len(), total);
+    out
+}
+
+#[test]
+fn padded_png_decodes_at_its_exact_size() {
+    let padded = padded_png(noise_png(64, 64, 1), 40_000);
+    assert_eq!(padded.len(), 40_000);
+    let image = image::load_from_memory_with_format(&padded, ImageFormat::Png).expect("decodes");
+    assert_eq!((image.width(), image.height()), (64, 64));
+}
+
 #[tokio::test]
 async fn rank_crops_have_their_own_bounds() {
     let w = world().await;
@@ -1969,28 +2020,27 @@ async fn rank_crops_have_their_own_bounds() {
     }
     assert_eq!((RANK_MAX_WIDTH, RANK_MAX_HEIGHT), (1536, 720));
     assert_eq!(RANK_MAX_BYTES, 384 * 1024);
-    // A noise crop over the rank byte limit, inside its edges.
-    let big = noise_png(330, 330, 7);
-    assert!(big.len() > RANK_MAX_BYTES, "{}", big.len());
+    // A valid PNG padded to one byte over the rank byte limit.
+    let over = padded_png(noise_png(300, 300, 7), RANK_MAX_BYTES + 1);
     let bad = StatusCode::BAD_REQUEST;
     let cases: Vec<(Vec<Part>, StatusCode, &str)> = vec![
         (
-            vec![meta(json!({})), crop(1537, 16)],
+            vec![meta(rank_meta()), crop(1537, 16)],
             bad,
             "icon_bad_dimensions",
         ),
         (
-            vec![meta(json!({})), crop(64, 721)],
+            vec![meta(rank_meta()), crop(64, 721)],
             bad,
             "icon_bad_dimensions",
         ),
         (
-            vec![meta(json!({})), crop(7, 16)],
+            vec![meta(rank_meta()), crop(7, 16)],
             bad,
             "icon_bad_dimensions",
         ),
         (
-            vec![meta(json!({})), ("crop", big)],
+            vec![meta(rank_meta()), ("crop", over)],
             StatusCode::PAYLOAD_TOO_LARGE,
             "icon_too_large",
         ),
@@ -2012,7 +2062,6 @@ async fn rank_crops_have_their_own_bounds() {
     )
     .await;
     assert_error(&got, bad, "icon_bad_dimensions");
-
     // Nor does the taller one: map_name stays at 256 tall.
     set_consent(&w.app, OWNER_SESSION, json!({ "map_name": true })).await;
     let got = upload(
@@ -2025,19 +2074,18 @@ async fn rank_crops_have_their_own_bounds() {
     assert_error(&got, bad, "icon_bad_dimensions");
 
     // The real 1440p regions (rank bar 1500x184, tier 420x680), the largest
-    // bound and a noise crop just under the byte limit all pass.
-    let near = noise_png(300, 300, 8);
-    assert!(near.len() <= RANK_MAX_BYTES, "{}", near.len());
-    assert!(near.len() > 216 * 1024, "{}", near.len());
+    // bound and a valid PNG of exactly the byte limit all pass.
+    let exact = padded_png(noise_png(300, 300, 8), RANK_MAX_BYTES);
+    assert_eq!(exact.len(), RANK_MAX_BYTES);
     let ok = vec![
-        meta(json!({})),
+        meta(rank_meta()),
         crop(1500, 184),
-        meta(json!({})),
+        meta(rank_meta()),
         crop(420, 680),
-        meta(json!({})),
+        meta(rank_meta()),
         crop(RANK_MAX_WIDTH, RANK_MAX_HEIGHT),
-        meta(json!({})),
-        ("crop", near),
+        meta(rank_meta()),
+        ("crop", exact),
     ];
     let got = upload(&w.app, OWNER_TOKEN, "rank", &ok).await;
     assert_eq!(got.0, StatusCode::CREATED, "{}", got.1);
@@ -2057,6 +2105,55 @@ async fn rank_crops_have_their_own_bounds() {
         ]
     );
     assert_eq!(files_on_disk(w.dir()).len(), 4);
+    w.cleanup();
+}
+
+#[tokio::test]
+async fn rank_crops_must_report_a_screen_larger_than_any_rank_crop() {
+    let w = world().await;
+    set_consent(&w.app, OWNER_SESSION, json!({ "rank": true })).await;
+    assert_eq!(
+        (RANK_MIN_SCREEN_WIDTH, RANK_MIN_SCREEN_HEIGHT),
+        (1856, 1056)
+    );
+    for (body, why) in [
+        (json!({}), "no screen size"),
+        (
+            json!({ "screen_width": 1280, "screen_height": 720 }),
+            "a whole 720p screen fits",
+        ),
+        (
+            json!({ "screen_width": 1855, "screen_height": 1080 }),
+            "one px too narrow",
+        ),
+        (
+            json!({ "screen_width": 1920, "screen_height": 1055 }),
+            "one px too short",
+        ),
+    ] {
+        let got = upload(&w.app, OWNER_TOKEN, "rank", &[meta(body), crop(1280, 720)]).await;
+        assert_eq!(got.0, StatusCode::BAD_REQUEST, "{why}: {}", got.1);
+        assert_eq!(
+            got.1["error"],
+            json!("invalid_crop_meta"),
+            "{why}: {}",
+            got.1
+        );
+    }
+    assert!(w.rows_of(OWNER).await.is_empty());
+    assert!(files_on_disk(w.dir()).is_empty());
+    let smallest = json!({ "screen_width": 1856, "screen_height": 1056 });
+    let got = upload(
+        &w.app,
+        OWNER_TOKEN,
+        "rank",
+        &[meta(smallest), crop(420, 680)],
+    )
+    .await;
+    assert_eq!(got.0, StatusCode::CREATED, "{}", got.1);
+    let row = &w.rows_of(OWNER).await[0];
+    assert_eq!(row.meta.screen_width, Some(1856));
+    assert_eq!(row.meta.screen_height, Some(1056));
     w.cleanup();
 }
 
@@ -2166,5 +2263,55 @@ async fn rank_cap_is_its_own() {
     assert_error(&got, StatusCode::CONFLICT, "crop_limit_reached");
     let got = upload(&w.app, OWNER_TOKEN, "map_name", &pairs(1, json!({}))).await;
     assert_eq!(got.0, StatusCode::CREATED, "{}", got.1);
+    w.cleanup();
+}
+
+/// Saving stats settings and the hero icon opt-in works for a member whose
+/// settings row is from before the training crop opt-in fields.
+#[tokio::test]
+async fn settings_writes_work_on_rows_from_before_the_opt_in_fields() {
+    let w = world().await;
+    w.db()
+        .client
+        .query(format!(
+            r#"
+            REMOVE FIELD IF EXISTS stat_digits_opt_in ON member_settings;
+            REMOVE FIELD IF EXISTS map_name_opt_in ON member_settings;
+            REMOVE FIELD IF EXISTS rank_opt_in ON member_settings;
+            CREATE member_settings SET member_id = '{OWNER}', player_name = 'Old',
+                stats_visibility = 'public', hero_icon_opt_in = false;
+            CREATE member_settings SET member_id = '{OTHER}', player_name = 'Old',
+                stats_visibility = 'public', hero_icon_opt_in = false;
+            "#
+        ))
+        .await
+        .expect("old rows")
+        .check()
+        .expect("old rows");
+    run_migrations(&w.db().client).await.expect("migrate");
+
+    let got = call(
+        &w.app,
+        Method::PUT,
+        "/api/stats/settings",
+        Some(OWNER_SESSION),
+        Some(json!({ "player_name": "Renamed", "stats_visibility": "members" })),
+    )
+    .await;
+    assert_eq!(got.0, StatusCode::OK, "{}", got.1);
+    let got = call(
+        &w.app,
+        Method::PUT,
+        "/api/hero-icons/opt-in",
+        Some(OTHER_SESSION),
+        Some(json!({ "icon_contribution_opt_in": true })),
+    )
+    .await;
+    assert_eq!(got.0, StatusCode::OK, "{}", got.1);
+    let (_, consent) = get(&w.app, "/api/training-crops/consent", OTHER_SESSION).await;
+    assert_eq!(
+        consent,
+        json!({ "hero_icon": true, "stat_digits": false, "map_name": false, "rank": false })
+    );
     w.cleanup();
 }

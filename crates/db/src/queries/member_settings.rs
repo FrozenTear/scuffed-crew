@@ -631,6 +631,66 @@ mod tests {
         assert!(set.hero_icon && set.stat_digits && !set.map_name);
     }
 
+    /// A row from before every opt-in field (only member_id, player_name,
+    /// stats_visibility). The migration does not rewrite it, so the opt-in
+    /// fields stay absent until a write. Every writer must still succeed on
+    /// it: `TYPE bool` rejects an absent value on update unless the field
+    /// default fills it on every write (`DEFAULT ALWAYS`).
+    #[tokio::test]
+    async fn writers_succeed_on_rows_from_before_the_opt_in_fields() {
+        let db = test_db().await;
+        db.client
+            .query(
+                r#"
+                REMOVE FIELD IF EXISTS hero_icon_opt_in ON member_settings;
+                REMOVE FIELD IF EXISTS stat_digits_opt_in ON member_settings;
+                REMOVE FIELD IF EXISTS map_name_opt_in ON member_settings;
+                REMOVE FIELD IF EXISTS rank_opt_in ON member_settings;
+                CREATE member_settings SET member_id = 'old-a', player_name = 'Old',
+                    stats_visibility = 'members';
+                CREATE member_settings SET member_id = 'old-b', player_name = 'Old',
+                    stats_visibility = 'private';
+                "#,
+            )
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        run_migrations(&db.client).await.unwrap();
+
+        let saved = db
+            .upsert_member_settings("old-a", Some("Renamed"), None)
+            .await
+            .expect("stats settings save on an old row");
+        assert_eq!(saved.player_name.as_deref(), Some("Renamed"));
+        assert_eq!(saved.stats_visibility, StatsVisibility::Members);
+        assert!(!saved.hero_icon_opt_in);
+        assert_eq!(
+            db.get_training_crop_consent("old-a").await.unwrap(),
+            TrainingCropConsent::default()
+        );
+
+        assert!(db
+            .set_hero_icon_opt_in("old-b", true)
+            .await
+            .expect("hero icon opt-in on an old row"));
+        let row = db.get_member_settings("old-b").await.unwrap().expect("row");
+        assert_eq!(row.stats_visibility, StatsVisibility::Private);
+        assert_eq!(row.player_name.as_deref(), Some("Old"));
+        assert_eq!(
+            db.get_training_crop_consent("old-b").await.unwrap(),
+            TrainingCropConsent {
+                hero_icon: true,
+                ..Default::default()
+            }
+        );
+        // Both writers again, now that the rows have been written once.
+        db.upsert_member_settings("old-b", None, Some(StatsVisibility::Public))
+            .await
+            .expect("second stats settings save");
+        assert!(!db.set_hero_icon_opt_in("old-a", false).await.unwrap());
+    }
+
     #[tokio::test]
     async fn rank_consent_reads_false_on_rows_from_before_it() {
         let db = test_db().await;

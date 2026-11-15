@@ -305,8 +305,9 @@ async fn read_meta_part(field: &mut Field<'_>) -> Result<Vec<u8>, Reject> {
 /// Parse and check one `meta` part for `kind`.
 ///
 /// 400 `invalid_crop_meta` for bad JSON, an unknown field or a value out of
-/// bounds. 400 `unknown_hero` for a hero that is not on the list, or a
-/// missing hero on a `hero_icon` crop. Returns the hero key (`soldier-76`,
+/// bounds, and for a `rank` crop without a screen size of at least
+/// [`CropKind::min_screen`]. 400 `unknown_hero` for a hero that is not on
+/// the list, or a missing hero on a `hero_icon` crop. Returns the hero key (`soldier-76`,
 /// see [`hero_key`]) and the metadata to store.
 pub(crate) fn parse_meta(
     kind: CropKind,
@@ -331,6 +332,19 @@ pub(crate) fn parse_meta(
     };
     if kind == CropKind::HeroIcon && hero.is_none() {
         return Err(reject(StatusCode::BAD_REQUEST, HERO_ICON_ERR_UNKNOWN_HERO));
+    }
+    if let Some((min_w, min_h)) = kind.min_screen() {
+        let large_enough = matches!(
+            (stored.screen_width, stored.screen_height),
+            (Some(w), Some(h)) if w >= min_w && h >= min_h
+        );
+        if !large_enough {
+            tracing::debug!(
+                kind = kind.as_str(),
+                "training crop screen size missing or too small"
+            );
+            return Err(invalid());
+        }
     }
     Ok((hero, stored))
 }
@@ -1074,6 +1088,38 @@ mod tests {
         assert_eq!(
             code(parse_meta(CropKind::MapName, br#"{"hero":"nobody"}"#)),
             "400 unknown_hero"
+        );
+    }
+
+    #[test]
+    fn rank_meta_needs_a_screen_size_above_its_largest_crop() {
+        let meta = |body: &str| code(parse_meta(CropKind::Rank, body.as_bytes()));
+        let invalid = "400 invalid_crop_meta";
+        assert_eq!(meta("{}"), invalid, "no screen size");
+        // A whole 720p screen would fit in a rank crop, so it is refused.
+        assert_eq!(
+            meta(r#"{"screen_width":1280,"screen_height":720}"#),
+            invalid
+        );
+        assert_eq!(
+            meta(r#"{"screen_width":1855,"screen_height":1080}"#),
+            invalid
+        );
+        assert_eq!(
+            meta(r#"{"screen_width":1920,"screen_height":1055}"#),
+            invalid
+        );
+        assert_eq!(meta(r#"{"screen_width":1856,"screen_height":1056}"#), "ok");
+        assert_eq!(meta(r#"{"screen_width":1920,"screen_height":1080}"#), "ok");
+        assert_eq!(meta(r#"{"screen_width":2560,"screen_height":1440}"#), "ok");
+        // Other kinds keep the screen size optional and take any valid one.
+        assert_eq!(code(parse_meta(CropKind::MapName, b"{}")), "ok");
+        assert_eq!(
+            code(parse_meta(
+                CropKind::StatDigits,
+                br#"{"screen_width":1280,"screen_height":720}"#
+            )),
+            "ok"
         );
     }
 
