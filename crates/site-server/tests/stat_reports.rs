@@ -932,7 +932,9 @@ fn bundle_with_big_log(log_bytes: usize) -> Vec<u8> {
 
 /// POST /api/stat-reports has its own 10 MiB body limit on top of the 6 MiB
 /// router-wide one. A body between the two is stored. A body over 10 MiB is
-/// refused with 413 and nothing is stored.
+/// refused with 413 and nothing is stored. That 413 can come from either the
+/// per-route body-limit layer or the handler's own size guard in
+/// `create_stat_report` (crates/site-server/src/routes/stat_reports.rs).
 #[tokio::test]
 async fn upload_body_limit_is_ten_mib_not_six() {
     const MIB: usize = 1024 * 1024;
