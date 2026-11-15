@@ -336,7 +336,7 @@ async fn the_card_crop_has_one_side_and_over_256_px_is_skipped_never_resized() {
     // snap, no frame copy and no PNG encode on any Tab.
     let dir = tempfile::tempdir().unwrap();
     set_consent(dir.path(), true, false);
-    let uhd = card_frame(3840, 2160, (2432, 314, 342), GAP_LUMA, 60);
+    let uhd = card_frame(3840, 2160, (2432, 314, 341), GAP_LUMA, 60);
     let over = panel((2420, 320, 2720, 620), "ana", 0.97);
     assert!(!run(dir.path(), "tc-uhd", &uhd, source(Some(&over), Some("ana"))).await);
     assert!(sync::queued_crops(dir.path(), UploadKind::HeroIcon).is_empty());
@@ -401,6 +401,12 @@ enum Scene {
     /// 1440p: the widest a bright element can be in the span searched from
     /// a box 23 px left of the card with the narrowest measured gap.
     SideBlock,
+    /// [`Scene::SideBlock`] above the card: a UI block of luma 60 across
+    /// the card's columns, 50 px tall, ending 13 px above the card at
+    /// 1440p. The top edge is scanned with the same constants as the left,
+    /// so the widest bright element its span can meet must fail the
+    /// sustain run there too.
+    TopBlock,
 }
 
 /// Card luma by px in from its left or top edge at 1440p for
@@ -418,6 +424,7 @@ fn scene_frame(w: u32, h: u32, card: (u32, u32, u32), scene: Scene, u: u32) -> D
     let (band_start, band_end, bar_end) = (px(3.0), px(6.0), left - px(13.0));
     let line = left - px(43.0)..left - px(40.0);
     let block = left - px(63.0)..bar_end;
+    let top_block = top - px(63.0)..top - px(13.0);
     let navy = |x: u32, y: u32| Rgb([37 + ((x + y) % 3) as u8; 3]);
     DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
         if in_square(card, x, y) {
@@ -440,7 +447,12 @@ fn scene_frame(w: u32, h: u32, card: (u32, u32, u32), scene: Scene, u: u32) -> D
             }
         } else if scene == Scene::HeaderBar && x < bar_end && (top..top + side).contains(&y) {
             Rgb([200; 3])
-        } else if scene == Scene::SideBlock && block.contains(&x) && (top..top + side).contains(&y)
+        } else if (scene == Scene::SideBlock
+            && block.contains(&x)
+            && (top..top + side).contains(&y))
+            || (scene == Scene::TopBlock
+                && top_block.contains(&y)
+                && (left..left + side).contains(&x))
         {
             Rgb([60; 3])
         } else {
@@ -461,10 +473,8 @@ fn scene_frame(w: u32, h: u32, card: (u32, u32, u32), scene: Scene, u: u32) -> D
 
 #[test]
 fn the_hero_icon_cut_snaps_to_the_card_from_an_off_box() {
-    // Box corner offsets from the card, in 1440p px: the measured misses
-    // (22 to 23 px left and 2 px up, 4 to 13 px right and 14 to 15 px
-    // down), none, and two worse ones. Scaled by u for other frames.
-    let offsets: [(i64, i64); 5] = [(-23, -2), (13, 15), (0, 0), (20, -20), (-40, 40)];
+    // Box corners at [`OFFSETS`] from the card, scaled by u for other
+    // frames.
     // (name, frame size, game rect left and top, u)
     let frames = [
         ("2560x1440", (2560, 1440), (0, 0), 1440),
@@ -483,6 +493,7 @@ fn the_hero_icon_cut_snaps_to_the_card_from_an_off_box() {
         Scene::DimFill,
         Scene::ThinLine,
         Scene::SideBlock,
+        Scene::TopBlock,
     ];
     for scene in scenes {
         for (name, (w, h), (gx, gy), u) in frames {
@@ -493,8 +504,7 @@ fn the_hero_icon_cut_snaps_to_the_card_from_an_off_box() {
                 (CARD_SIDE * f64::from(u)).round() as u32,
             );
             let frame = scene_frame(w, h, card, scene, u);
-            let mut worst = 0;
-            for (dx, dy) in offsets {
+            for (dx, dy) in OFFSETS {
                 let corner = (
                     (i64::from(card.0) + scale(dx as f64) as i64) as u32,
                     (i64::from(card.1) + scale(dy as f64) as i64) as u32,
@@ -507,9 +517,7 @@ fn the_hero_icon_cut_snaps_to_the_card_from_an_off_box() {
                     err, 0,
                     "{scene:?} {name} offset ({dx}, {dy}): {cut:?} for {card:?}"
                 );
-                worst = worst.max(err);
             }
-            println!("{scene:?} {name}: card {card:?}, max placement error {worst} px");
         }
     }
 }
@@ -552,7 +560,10 @@ fn no_hero_icon_cut_without_a_clear_card_inside_the_frame() {
         assert_eq!(snap_to_card(&frame, corner), None, "{name}");
     }
     // A box 0.04 u (58 px) off the card either way: its edges are out of
-    // reach, so the search never wanders onto anything further out or in.
+    // reach, so the search does not wander onto plain gap further out or
+    // plain card further in. A dark to bright step in the art within reach
+    // can be taken for the edge; the far edge check then keeps none
+    // (the_far_edge_check_keeps_no_shifted_cut).
     let frame = card_frame(2560, 1440, card, GAP_LUMA, 60);
     assert_eq!(snap_to_card(&frame, corner), Some(card));
     for far in [(1563, 151), (1679, 267)] {
@@ -565,10 +576,106 @@ fn no_hero_icon_cut_without_a_clear_card_inside_the_frame() {
         let frame = card_frame(w, 1440, right, GAP_LUMA, 60);
         assert_eq!(snap_to_card(&frame, (2390, 200)), want, "{w} px wide");
     }
+    // Under the card the far edge check needs the gap (real Tabs always
+    // have one there), so a card on the frame's bottom edge keeps none, and
+    // so does one cut past it.
     let bottom = (1621, 1300, 228);
-    for (h, want) in [(1528, Some(bottom)), (1527, None)] {
+    for h in [1528, 1527] {
         let frame = card_frame(2560, h, bottom, GAP_LUMA, 60);
-        assert_eq!(snap_to_card(&frame, (1610, 1290)), want, "{h} px high");
+        assert_eq!(snap_to_card(&frame, (1610, 1290)), None, "{h} px high");
+    }
+    let frame = card_frame(2560, 1540, bottom, GAP_LUMA, 60);
+    assert_eq!(snap_to_card(&frame, (1610, 1290)), Some(bottom));
+}
+
+/// Box corner offsets from the card in 1440p px: the measured misses (22
+/// to 23 px left and 2 px up, 4 to 13 px right and 14 to 15 px down),
+/// none, and two worse ones.
+const OFFSETS: [(i64, i64); 5] = [(-23, -2), (13, 15), (0, 0), (20, -20), (-40, 40)];
+
+#[test]
+fn a_painted_card_a_px_off_the_cut_side_still_cuts_at_its_left_and_top() {
+    // The cut side is CARD_SIDE of u rounded; a real card can be painted a
+    // px shorter (227 px at 1440p on Practice Range Tabs, its first gap row
+    // at top + 227) or longer. Left and top still snap exactly, the cut
+    // keeps the rounded side, and the far edge check takes a drop within 1
+    // px of the cut's edge. 2 px off is past that: none.
+    for (name, (w, h), u) in [
+        ("2560x1440", (2560, 1440), 1440),
+        ("1920x1080", (1920, 1080), 1080),
+    ] {
+        let scale = |v: f64| (v * f64::from(u) / 1440.0).round();
+        let (left, top) = (scale(1621.0) as u32, scale(209.0) as u32);
+        let cut_side = (CARD_SIDE * f64::from(u)).round() as u32;
+        assert_eq!(cut_side, if u == 1440 { 228 } else { 171 });
+        for scene in [Scene::Plain, Scene::DimGap] {
+            for drawn in [cut_side - 2, cut_side - 1, cut_side + 1, cut_side + 2] {
+                let frame = scene_frame(w, h, (left, top, drawn), scene, u);
+                for (dx, dy) in OFFSETS {
+                    let corner = (
+                        (i64::from(left) + scale(dx as f64) as i64) as u32,
+                        (i64::from(top) + scale(dy as f64) as i64) as u32,
+                    );
+                    let want = (drawn.abs_diff(cut_side) <= 1).then_some((left, top, cut_side));
+                    assert_eq!(
+                        snap_to_card(&frame, corner),
+                        want,
+                        "{scene:?} {name} card side {drawn}, offset ({dx}, {dy})"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn the_far_edge_check_keeps_no_shifted_cut() {
+    let card = (1621, 209, 228);
+    let corner = (1598, 207);
+    let in_rows = |y: u32| (209..209 + 228).contains(&y);
+    // The Practice Range: a gap of 16 round a navy card of 37 to 39, and a
+    // lit patch of the game world (luma 45) in the card's rows from 30 px
+    // left of the card up to it. The left edge lands on the patch's
+    // start (1591), 30 px off; the card's own right edge then drops to the
+    // gap 30 px past the cut's.
+    let lit = DynamicImage::ImageRgb8(RgbImage::from_fn(2560, 1440, |x, y| {
+        if in_square(card, x, y) {
+            Rgb([37 + ((x + y) % 3) as u8; 3])
+        } else if (1591..1621).contains(&x) && in_rows(y) {
+            Rgb([45; 3])
+        } else {
+            Rgb([16; 3])
+        }
+    }));
+    // A live game: a gap of 6 and card art of 15 for the card's left 20
+    // px, then 80. The true edge rises only 9, under CARD_MIN_STEP, so the
+    // left edge lands on the step inside the art (1641), 20 px off; the
+    // card's right edge drops to the gap 20 px inside the cut, with gap
+    // from there to past the cut's edge.
+    let dark_art = DynamicImage::ImageRgb8(RgbImage::from_fn(2560, 1440, |x, y| {
+        if in_square(card, x, y) {
+            Rgb([if x < 1641 { 15 } else { 80 }; 3])
+        } else {
+            Rgb([6; 3])
+        }
+    }));
+    for (name, frame) in [("lit world patch", lit), ("dark art band", dark_art)] {
+        assert_eq!(snap_to_card(&frame, corner), None, "{name}");
+    }
+}
+
+#[test]
+fn a_dark_run_ending_on_the_card_is_not_a_gap() {
+    // A box 43 px into the card (the reach at 1440p) still finds its left
+    // edge. At 44 px the first dark run is 5 gap columns and the card's
+    // first column: its mean is under CARD_GAP_MAX_LUMA, but it is not
+    // gap, so no edge is found rather than one a px into the card.
+    let card = (1621, 209, 228);
+    let plain = card_frame(2560, 1440, card, GAP_LUMA, 60);
+    let dim = scene_frame(2560, 1440, card, Scene::DimGap, 1440);
+    for (name, frame) in [("plain", plain), ("Practice Range", dim)] {
+        assert_eq!(snap_to_card(&frame, (1664, 209)), Some(card), "{name}");
+        assert_eq!(snap_to_card(&frame, (1665, 209)), None, "{name}");
     }
 }
 

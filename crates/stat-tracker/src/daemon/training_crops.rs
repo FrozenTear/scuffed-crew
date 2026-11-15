@@ -25,12 +25,16 @@
 //!   so it offers none.
 //!
 //! One set per kind per game (`hero_icon`: per hero), so a game does not
-//! fill the outbox. A miss (no box, no header, chat over the row, a crop
-//! over a cap) skips that crop and nothing else; a consented crop lost to
-//! an error leaves the training warning. The Tab records either way.
+//! fill the outbox. A miss (no box, no card edge, no header, chat over the
+//! row, a crop over a cap) skips that crop and nothing else; a consented
+//! crop lost to an error leaves the training warning. The Tab records
+//! either way.
 //!
-//! The pixel work (the scoreboard copy, the chat check, the cuts and the
-//! PNG encodes) runs on a blocking thread, so a Tab never waits on it.
+//! The card snap runs inline in `handle_capture`, after the Tab's row is
+//! committed: it reads a few thin luma profiles (well under 1 ms) and keeps
+//! the frame copy off a Tab with no card. The rest of the pixel work (the
+//! frame copy, the scoreboard crop, the chat check, the cuts and the PNG
+//! encodes) runs on a blocking thread, so a Tab never waits on it.
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -215,10 +219,10 @@ const CARD_SEARCH: f64 = 0.03;
 /// `u` (6 px at 1440p, at least 2 px), narrow enough to fit the dark gap
 /// between the header bar's right end and the card (13 to 40 px at 1440p).
 const CARD_STEP_WINDOW: f64 = 0.004;
-/// Most mean luma the dark side of an edge may have. The gap round the
-/// card measured about 6 in live games and 16 to 17 in the Practice Range,
-/// where the game world shows behind the panel. A surround with no dark
-/// gap measured 35 to 40.
+/// Most luma any position of the dark side of an edge may have. The gap
+/// round the card measured about 6 in live games and 16 to 17 in the
+/// Practice Range, where the game world shows behind the panel (17 to 21
+/// under the card). A surround with no dark gap measured 35 to 40.
 const CARD_GAP_MAX_LUMA: f64 = 28.0;
 /// Least mean luma of the card side of an edge. The navy card fill dims
 /// with the game world behind it: it measured 37 to 39 over a Practice
@@ -256,8 +260,13 @@ const CARD_SUSTAIN: f64 = 0.045;
 /// columns (both bands stay inside the card for any corner within the
 /// search, the texture of the portrait art averages out), and a square of
 /// [`CARD_SIDE`] cut from there. Each edge is the first dark to card step
-/// from outside the card whose card side holds ([`card_edge`]). `None`
-/// when either edge is not found or the square would leave the frame.
+/// from outside the card whose card side holds ([`card_edge`]).
+///
+/// Before the cut is kept, its far edges are checked on the same kind of
+/// profiles, banded on the cut ([`far_edges_hold`]): a wrong first step
+/// would otherwise keep a square shifted off the card. `None` when either
+/// near edge is not found, the square would leave the frame, or a far edge
+/// does not hold.
 pub(crate) fn snap_to_card(
     frame: &image::DynamicImage,
     (x0, y0): (u32, u32),
@@ -284,7 +293,69 @@ pub(crate) fn snap_to_card(
     let row = |y: u32| cols.clone().map(|x| luma(x, y)).sum::<f64>() / n_cols;
     let left = card_edge(column, x0, (reach, window, sustain), w)?;
     let top = card_edge(row, y0, (reach, window, sustain), h)?;
-    (left + side <= w && top + side <= h).then_some((left, top, side))
+    if left + side > w || top + side > h {
+        return None;
+    }
+    let (rows, cols) = (band(top, h)?, band(left, w)?);
+    let (n_rows, n_cols) = (f64::from(rows.len() as u32), f64::from(cols.len() as u32));
+    let column = |x: u32| rows.clone().map(|y| luma(x, y)).sum::<f64>() / n_rows;
+    let row = |y: u32| cols.clone().map(|x| luma(x, y)).sum::<f64>() / n_cols;
+    let far = (reach, window);
+    far_edges_hold(column, (left + side, w), row, (top + side, h), far).then_some((left, top, side))
+}
+
+/// Whether the cut's far edges sit on the card's: its right edge at `right`
+/// on the column profile `column` of `w` positions, its bottom edge at
+/// `bottom` on the row profile `row` of `h` positions. Each is looked for
+/// as the first card to gap drop from outside the cut within `reach` of it
+/// ([`gap_edge`]), and a drop counts as the card's edge only within 1 px of
+/// the cut's: the cut side is [`CARD_SIDE`] rounded, and the painted card
+/// can be a px shorter or longer.
+///
+/// Measured on 55 Practice Range Tabs at 2560x1440 (card at x 1604, y 209,
+/// side 228): under the card there is always a dark gap (luma 17 to 21,
+/// first gap row at `top + side - 1`, a drop of at least 18), so the bottom
+/// drop is required. Right of the card there is none: the navy panel (luma
+/// 37, the card rim's own fill) runs on for 40 px, so there the drop is
+/// only checked when one is found. On 3 of those Tabs the first drop from
+/// the right is a dark patch of portrait art 24 to 31 px inside the cut,
+/// with the navy panel between it and the cut's edge: a drop inside the
+/// cut is the card's edge only when the gap runs on from it to past the
+/// cut's edge, as it does when a cut lands right of a card that has a gap
+/// beside it.
+fn far_edges_hold(
+    column: impl Fn(u32) -> f64,
+    (right, w): (u32, u32),
+    row: impl Fn(u32) -> f64,
+    (bottom, h): (u32, u32),
+    (reach, window): (i64, i64),
+) -> bool {
+    let near = |edge: u32, cut: u32| edge.abs_diff(cut) <= 1;
+    let bottom_holds =
+        gap_edge(&row, bottom, (reach, window), h).is_some_and(|edge| near(edge, bottom));
+    let right_holds = match gap_edge(&column, right, (reach, window), w) {
+        None => true,
+        Some(edge) if near(edge, right) => true,
+        Some(edge) if edge > right => false,
+        Some(edge) => !(edge..=right.min(w - 1)).all(|x| column(x) <= CARD_GAP_MAX_LUMA),
+    };
+    bottom_holds && right_holds
+}
+
+/// The card's far edge on a luma profile of `len` positions near `cut`:
+/// the first gap position after the first card to gap drop scanned from
+/// `cut + reach` toward `cut - reach`, that is from outside the card
+/// inward. [`card_edge`] on the mirrored profile, with no sustain run (the
+/// card side of a far edge is the cut's own inside, already found). `None`
+/// when no position drops.
+fn gap_edge(
+    profile: impl Fn(u32) -> f64,
+    cut: u32,
+    (reach, window): (i64, i64),
+    len: u32,
+) -> Option<u32> {
+    let mirrored = |i: u32| profile(len - 1 - i);
+    card_edge(mirrored, len - cut, (reach, window, window), len).map(|edge| len - edge)
 }
 
 /// The card's side in px in a `w` x `h` frame: [`CARD_SIDE`] of the 16:9
@@ -300,9 +371,9 @@ fn card_side(w: u32, h: u32) -> u32 {
 /// outside the card, so the first dark to card step is the card's edge,
 /// and brighter portrait art just inside the card is never taken for it.
 ///
-/// A position steps when the `window` positions before it (a dark run)
-/// average at most [`CARD_GAP_MAX_LUMA`], the `window` from it at least
-/// [`CARD_MIN_LUMA`], and the rise between them is at least
+/// A position steps when each of the `window` positions before it (a dark
+/// run) is at most [`CARD_GAP_MAX_LUMA`], the `window` from it average at
+/// least [`CARD_MIN_LUMA`], and the rise between them is at least
 /// [`CARD_MIN_STEP`]. Both sides are window means, so a sharp edge already
 /// steps up to `window - 1` positions before it, as the card side starts
 /// to take in the card. The edge is the first position from the first step
@@ -320,7 +391,10 @@ fn card_side(w: u32, h: u32) -> u32 {
 /// region outside (the header bar's right end) never steps: while any of
 /// its positions is in the dark side that side is too bright, and once a
 /// full dark run lies between it and the card, the card side is gap until
-/// the card. `None` when no position steps.
+/// the card. The dark run is held to that bound at every position, not on
+/// its mean: a run that ends on a column of the card itself (a box just
+/// past reach inside the card) is not a dark run. `None` when no position
+/// steps.
 fn card_edge(
     profile: impl Fn(u32) -> f64,
     at: u32,
@@ -340,11 +414,12 @@ fn card_edge(
     let (w, run) = (window as usize, sustain as usize);
     let (first, bright) = (0..=(hi - lo) as usize).find_map(|edge| {
         let i = edge + w;
-        let dark = mean(&values[i - w..i]);
-        let card = mean(&values[i..i + w]);
+        let run_dark = &values[i - w..i];
+        let (dark, card) = (mean(run_dark), mean(&values[i..i + w]));
         let bright = dark + ((card - dark) / 2.0).min(CARD_MIN_STEP);
-        let steps =
-            dark <= CARD_GAP_MAX_LUMA && card >= CARD_MIN_LUMA && card - dark >= CARD_MIN_STEP;
+        let steps = run_dark.iter().all(|&v| v <= CARD_GAP_MAX_LUMA)
+            && card >= CARD_MIN_LUMA
+            && card - dark >= CARD_MIN_STEP;
         let holds = || {
             values[i..(i + run).min(values.len())]
                 .windows(w)
