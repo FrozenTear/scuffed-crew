@@ -13,6 +13,7 @@ mod hero_icons_ui;
 mod hooks;
 mod keybindings;
 mod layouts;
+mod markdown;
 mod pages;
 mod routes;
 mod sample;

@@ -197,7 +197,7 @@ impl SimClock {
     }
 }
 
-/// A site with all eight packs behind the real rate limit, and every
+/// A site with all ten packs behind the real rate limit, and every
 /// request it saw: when, which path, which status.
 struct LimitedSite {
     base: String,
@@ -310,20 +310,20 @@ async fn run_trackers(clock: &Arc<SimClock>, trackers: Vec<Nap>) -> bool {
 const SIM_LIMIT: Duration = Duration::from_secs(3600);
 
 #[tokio::test]
-async fn against_the_real_limit_one_first_install_is_nine_requests_and_none_is_refused() {
+async fn against_the_real_limit_one_first_install_is_eleven_requests_and_none_is_refused() {
     let clock = SimClock::new(1, SIM_LIMIT);
     let (site, contents) = serve_limited(&clock, Bucket::with_left(Bucket::BURST));
     let dir = tempfile::tempdir().expect("tempdir");
     let (tracker, waits) = tracker(&clock, &site, dir.path(), Duration::ZERO, TEST_JITTER);
     assert!(run_trackers(&clock, vec![tracker]).await);
-    // The list and eight packs are nine requests and the bucket holds
+    // The list and ten packs are eleven requests and the bucket holds
     // the burst of 16: none is refused, the job never waits and the
     // clock never moves.
-    const { assert!(Bucket::BURST > 9, "the burst must hold a first install") };
+    const { assert!(Bucket::BURST > 11, "the burst must hold a first install") };
     assert!(waits.lock().unwrap().is_empty());
     assert_all_installed(dir.path(), &contents);
     assert_eq!(site.paths(), list_then(&pack_names()));
-    assert_eq!(site.statuses(), vec![200; 9]);
+    assert_eq!(site.statuses(), vec![200; 11]);
     assert_eq!(site.refused(), 0);
     assert_eq!(clock.now(), Duration::ZERO);
 }
@@ -348,25 +348,16 @@ async fn against_the_real_limit_a_429_in_the_middle_is_followed_by_the_downloads
     expected.extend(tar_paths(&["bans-v1.tar"]));
     expected.extend(tar_paths(&pack_names()[3..]));
     assert_eq!(site.paths(), expected);
-    assert_eq!(
-        site.statuses(),
-        [200, 200, 200, 200, 429, 200, 200, 200, 200, 200]
-    );
-    assert_eq!(
-        *waits.lock().unwrap(),
-        [
-            secs(11) + TEST_JITTER,
-            secs(10),
-            secs(10),
-            secs(10),
-            secs(10)
-        ]
-    );
-    assert_eq!(
-        site.times()[5..],
-        [ms(11_750), ms(21_750), ms(31_750), ms(41_750), ms(51_750)]
-    );
-    assert_eq!(clock.now(), ms(51_750));
+    let mut statuses = vec![200; 4];
+    statuses.push(429);
+    statuses.extend([200; 7]);
+    assert_eq!(site.statuses(), statuses);
+    let mut expected_waits = vec![secs(11) + TEST_JITTER];
+    expected_waits.extend([secs(10); 6]);
+    assert_eq!(*waits.lock().unwrap(), expected_waits);
+    let expected_times: Vec<Duration> = (0..7).map(|k| ms(11_750 + k * 10_000)).collect();
+    assert_eq!(site.times()[5..], expected_times);
+    assert_eq!(clock.now(), ms(71_750));
 }
 
 #[tokio::test]
@@ -381,13 +372,13 @@ async fn against_the_real_limit_a_bucket_that_starts_empty_refills_one_request_e
         site.paths()
     );
     assert_all_installed(dir.path(), &contents);
-    // The refused list, the list, then the eight packs.
+    // The refused list, the list, then the ten packs.
     let mut expected = vec![LIST_PATH.to_string()];
     expected.extend(list_then(&pack_names()));
     assert_eq!(site.paths(), expected);
     assert_eq!(site.refused(), 1);
     let mut expected_waits = vec![secs(11) + TEST_JITTER];
-    expected_waits.extend([secs(10); 8]);
+    expected_waits.extend([secs(10); 10]);
     assert_eq!(*waits.lock().unwrap(), expected_waits);
     // One request every 10 s, each 1.75 s after the bucket gave it.
     let times = site.times();
@@ -397,7 +388,7 @@ async fn against_the_real_limit_a_bucket_that_starts_empty_refills_one_request_e
             .windows(2)
             .all(|pair| pair[1] - pair[0] == secs(10))
     );
-    assert_eq!(clock.now(), ms(91_750));
+    assert_eq!(clock.now(), ms(111_750));
 }
 
 #[tokio::test]
@@ -421,24 +412,26 @@ async fn against_the_real_limit_two_trackers_behind_one_address_both_finish() {
     );
     assert_all_installed(dir_a.path(), &contents);
     assert_all_installed(dir_b.path(), &contents);
-    // A takes the 8 requests the bucket has left, and its last pack is the
-    // ninth: refused. B's list is refused too, 3 s in. Both then come back
-    // when the bucket refills, B behind A, so A backs off 10.75, 20.75,
-    // 40.75 and 80.75 s when B takes the request it wanted.
-    let expected_a = vec![ms(11_750), ms(10_750), ms(20_750), ms(40_750), ms(80_750)];
+    // A takes the 8 requests the bucket has left, and its next request
+    // (its eighth pack) is refused. B's list is refused too, 3 s in. Both
+    // then come back when the bucket refills, B behind A, so A backs off
+    // 10.75, 20.75, 40.75 and 80.75 s when B takes the request it wanted,
+    // and then fetches its last two packs 10 s apart.
+    let mut expected_a = vec![ms(11_750), ms(10_750), ms(20_750), ms(40_750), ms(80_750)];
+    expected_a.extend([secs(10); 2]);
     assert_eq!(*waits_a.lock().unwrap(), expected_a);
     let mut expected_b = vec![ms(8_750)];
-    expected_b.extend([secs(10); 8]);
+    expected_b.extend([secs(10); 10]);
     assert_eq!(*waits_b.lock().unwrap(), expected_b);
-    // 18 requests are needed (two lists, sixteen packs): 6 are refused.
+    // 22 requests are needed (two lists, twenty packs): 6 are refused.
     let (requests, refused) = (site.statuses().len(), site.refused());
-    assert_eq!((requests - refused, refused), (18, 6));
+    assert_eq!((requests - refused, refused), (22, 6));
     let mut statuses = vec![200; 8];
     statuses.extend([429, 429, 200, 429, 200, 429, 200, 200, 429]);
-    statuses.extend([200, 200, 200, 200, 429, 200, 200]);
+    statuses.extend([200, 200, 200, 200, 429, 200, 200, 200, 200, 200, 200]);
     assert_eq!(site.statuses(), statuses);
-    assert_eq!(site.paths().len(), 24);
-    assert_eq!(clock.now(), ms(164_750));
+    assert_eq!(site.paths().len(), 28);
+    assert_eq!(clock.now(), ms(184_750));
 }
 
 /// Both trackers want the same refilled request every 10 s. The one
@@ -468,21 +461,22 @@ async fn against_the_real_limit_two_trackers_on_an_empty_bucket_both_finish() {
         waits_a.lock().unwrap(),
         waits_b.lock().unwrap()
     );
-    // 18 requests are needed (two lists, sixteen packs). With eight
-    // packs a tracker's first install is a refused list, a list and
-    // eight downloads, so the two keep meeting at the refill: A is
-    // refused once more after its ten requests, then 10.75, 20.75,
-    // 40.75 and 80.75 s. B waits 12.25, 22.25 and 42.25 s and then has
-    // the bucket to itself: 10 refused requests in all, both done after
-    // 254.5 s.
-    assert_eq!(requests - refused, 18);
+    // 22 requests are needed (two lists, twenty packs). With ten packs a
+    // tracker's first install is a refused list, a list and ten
+    // downloads, so the two keep meeting at the refill: A is refused once
+    // more after its ten requests, then 10.75, 20.75, 40.75 and 80.75 s,
+    // and then fetches its last two packs 10 s apart. B waits 12.25,
+    // 22.25 and 42.25 s and then has the bucket to itself: 10 refused
+    // requests in all, both done after 274.5 s.
+    assert_eq!(requests - refused, 22);
     assert_eq!(refused, 10);
-    assert_eq!(took, ms(254_500));
+    assert_eq!(took, ms(274_500));
     let mut expected_a = vec![ms(11_750)];
     expected_a.extend([secs(10); 8]);
     expected_a.extend([ms(9_750), ms(10_750), ms(20_750), ms(40_750), ms(80_750)]);
+    expected_a.extend([secs(10); 2]);
     assert_eq!(*waits_a.lock().unwrap(), expected_a);
     let mut expected_b = vec![ms(13_250), ms(12_250), ms(22_250), ms(42_250)];
-    expected_b.extend([secs(10); 8]);
+    expected_b.extend([secs(10); 10]);
     assert_eq!(*waits_b.lock().unwrap(), expected_b);
 }

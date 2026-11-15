@@ -2,9 +2,10 @@
 //! [`stat_tracker::shadow::queue_title`]): which pre-game frames it reads,
 //! when, and what the game record gets from it.
 //!
-//! Off by default: [`QueueTitleFeed::from_env`] is `None` unless
-//! [`stat_tracker::shadow::queue_title::ENV`] is on and the pack loads, and
-//! with no feed nothing here runs and no game changes.
+//! Off by default: [`QueueTitleFeed::for_config`] is `None` unless config
+//! `rank_reader` (one switch for both rank-v1 readers) is on, or
+//! [`stat_tracker::shadow::queue_title::ENV`] overrides it to on, and the
+//! pack loads. With no feed nothing here runs and no game changes.
 //!
 //! With it on, the feed sees every batch the pre-game saver sends (the
 //! same batches the bans and picks feed sees) and holds the frames of the
@@ -81,7 +82,9 @@ use std::sync::Arc;
 use chrono::{DateTime, Duration, Utc};
 use image::{DynamicImage, RgbImage};
 use stat_tracker::model::QueueTitle;
-use stat_tracker::shadow::queue_title::{Field, MIN_SCORE, POLICY, Reader, Screen};
+use stat_tracker::shadow::queue_title::{
+    Field, MIN_SCORE, POLICY, QueueTitleSetting, Reader, Screen,
+};
 
 use super::bans_picks::{GAME_WINDOW_MINUTES, frames_fit};
 use super::pregame_dump::PregameOp;
@@ -93,7 +96,9 @@ pub(crate) type ReadFn = Arc<dyn Fn(&RgbImage, Screen) -> Field<String> + Send +
 /// The next mode hint waiting for the next game's read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PendingHint {
-    /// The mode banner word, trimmed and not empty.
+    /// The hint the rank wiring handed on ([`super::rank::queue_hint`]: the
+    /// mode banner word without its `COMPETITIVE` and team size words),
+    /// trimmed and not empty.
     pub(crate) text: String,
     /// The session whose rank screen showed it: the hint names the game
     /// after this one, so this one never settles it.
@@ -161,10 +166,16 @@ pub(crate) struct QueueTitleFeed {
 }
 
 impl QueueTitleFeed {
-    /// The live feed: `None`, nothing read, unless the switch is on and
-    /// the pack loads ([`Reader::from_env`]).
-    pub(crate) fn from_env(data_dir: &Path) -> Option<Self> {
-        let reader = Reader::from_env(data_dir)?;
+    /// The live feed: `None`, nothing read, unless config `rank_reader` or
+    /// the env override ([`QueueTitleSetting::for_config`]) is on and the
+    /// pack loads ([`Reader::for_setting`]). Read once at start.
+    pub(crate) fn for_config(rank_reader: bool, data_dir: &Path) -> Option<Self> {
+        let env = QueueTitleSetting::env_override();
+        let setting = QueueTitleSetting::for_config(rank_reader, env);
+        if !setting.is_on() {
+            tracing::info!(target: "scuffed_stat_tracker", config = rank_reader, env = ?env, "queue title: reader off");
+        }
+        let reader = Reader::for_setting(setting, data_dir)?;
         tracing::info!(target: "scuffed_stat_tracker", "queue title: reader on");
         Some(Self::with_read(Arc::new(move |img, screen| {
             reader.read_field(img, screen)
@@ -335,9 +346,11 @@ pub(crate) fn confident(read: &Field<String>) -> Option<&str> {
 /// queue title pack spells the title (`OPEN QUEUE`, `ROLE QUEUE`, with or
 /// without the last `QUEUE`). A word in front of it is part of the key, so
 /// `COMPETITIVE: ROLE QUEUE` (`COMPETITIVE ROLE`) does not agree with a
-/// quick play `ROLE QUEUE` (`ROLE`); the rank reader maps its own labels to
-/// this spelling before it sets a hint. A spelling that does not match is
-/// dropped, never confirmed: the safe way to fail.
+/// `ROLE QUEUE` title (`ROLE`); the rank wiring maps its own labels to
+/// this spelling before it sets a hint ([`super::rank::queue_hint`] drops
+/// the `COMPETITIVE:` of the banner and a `5V5` or `6V6` after it). A
+/// spelling that does not match is dropped, never confirmed: the safe way
+/// to fail.
 /// The key itself is [`stat_tracker::model::queue_key`], shared with the
 /// upload's open queue check.
 pub(crate) fn queue_key(text: &str) -> String {

@@ -10761,6 +10761,7 @@ dependencies = [
  "dioxus-ssr",
  "gloo-timers",
  "js-sys",
+ "pulldown-cmark",
  "scuffed-api-client",
  "scuffed-types",
  "serde",
@@ -10972,7 +10973,7 @@ dependencies = [
 
 [[package]]
 name = "scuffed-stat-tracker"
-version = "0.6.0-alpha.3"
+version = "0.6.0-alpha.3.1"
 dependencies = [
  "ab_glyph",
  "anyhow",
@@ -11009,7 +11010,7 @@ dependencies = [
 
 [[package]]
 name = "scuffed-stat-tracker-core"
-version = "0.6.0-alpha.3"
+version = "0.6.0-alpha.3.1"
 dependencies = [
  "anyhow",
  "chrono",

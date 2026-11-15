@@ -22,6 +22,10 @@ use super::*;
 #[path = "tests_game.rs"]
 mod game_wiring;
 
+/// The env overrides on the real process environment, each in a child.
+#[path = "tests_env.rs"]
+mod env_override;
+
 // ---- 5x7 dot font ----
 
 fn rows_of(c: char) -> [&'static str; 7] {

@@ -9,7 +9,7 @@ use image::{DynamicImage, RgbImage};
 use stat_tracker::model::{BansPicksMissing, BansPicksStatus};
 use stat_tracker::ocr_status::{publish_bans_picks_notice, read_status};
 use stat_tracker::shadow::bans_picks::{
-    BanResults, BanVote, BansPicksSetting, Choice, HeroSelect, Layout, Read, SlotState,
+    BanRead, BanResults, BanVote, BansPicksSetting, Choice, HeroSelect, Layout, Read, SlotState,
     VoteSlotRead,
 };
 use std::sync::Mutex;
@@ -77,9 +77,16 @@ impl Engine for Fake {
     }
     fn bans(&self, _: &RgbImage, rings: &[[u8; 3]]) -> Option<BanResults> {
         self.rings.lock().unwrap().push(rings.first().copied());
+        // A revealed screen: all four bans read, as the real reader gives
+        // four slots (a frame with none set is unrevealed and not stored).
         self.go().then(|| BanResults {
             layout: Layout::Plain,
-            bans: Vec::new(),
+            bans: ["reaper", "sombra", "tracer", "zarya"]
+                .map(|hero| BanRead {
+                    read: read(hero),
+                    team: None,
+                })
+                .to_vec(),
             lobby_ban: Some(read("genji")),
         })
     }
@@ -431,8 +438,8 @@ fn a_new_game_folder_drops_the_old_frames_and_the_window_is_30_minutes() {
     assert!(feed.has_frames(), "the new game's own frame");
 }
 
-#[test]
-fn staged_ban_results_count_only_once_promoted() {
+#[tokio::test]
+async fn staged_ban_results_count_only_once_promoted() {
     let rig = Rig::new();
     let mut feed = rig.feed(Ok(Mode::Fine), true);
     let f = frame(8, 8);
@@ -443,7 +450,13 @@ fn staged_ban_results_count_only_once_promoted() {
         name: BAN_RESULTS_NAME,
     }]);
     assert!(feed.has_frames());
-    let mut feed = rig.feed(Ok(Mode::Fine), true);
+    // A discarded stage was confirmed all the same: it is held as an
+    // earlier stable frame for the ban results fallback, so the game is
+    // read (PR 680), but the promote after the discard must not make it the
+    // saved frame. A reader that reads nothing tells the two apart: a saved
+    // frame it cannot read fails the whole read, a fallback frame is
+    // skipped and the ban results count as missing.
+    let mut feed = rig.feed(Ok(Mode::Nothing), true);
     feed.observe(&[
         PregameOp::Stage(shot(BAN_RESULTS_NAME, &f)),
         PregameOp::Discard {
@@ -455,7 +468,19 @@ fn staged_ban_results_count_only_once_promoted() {
             name: BAN_RESULTS_NAME,
         },
     ]);
-    assert!(!feed.has_frames(), "a discarded frame is gone");
+    assert!(feed.has_frames(), "held as an earlier frame");
+    let outcome = feed.read_now().await;
+    assert_eq!(
+        outcome.status,
+        BansPicksStatus::Partial {
+            missing: vec![
+                BansPicksMissing::BanVote,
+                BansPicksMissing::HeroSelect,
+                BansPicksMissing::BanResults,
+            ]
+        },
+        "not promoted: a promoted frame would fail the read"
+    );
 }
 
 #[test]

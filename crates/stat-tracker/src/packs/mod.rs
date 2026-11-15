@@ -17,15 +17,19 @@
 //! ([`crate::shadow::banner::MapDirs`]) and `words-v1.tar` its result word
 //! pack ([`crate::shadow::result::ResultDirs`]). `names-v1.tar` is the
 //! name reader's letter pack ([`crate::names::pack::dir_in`]). `bans-v1.tar`
-//! is downloaded into a folder no reader opens yet.
+//! is downloaded into a folder no reader opens yet. `rank-v1.tar` and
+//! `queue-title-v1.tar` ([`PackLayout::TemplatesJson`], one `templates.json`
+//! only) land in the folders the rank and queue title readers already load
+//! from ([`crate::shadow::rank::TEMPLATE_DIR`],
+//! [`crate::shadow::queue_title::TEMPLATE_DIR`]), loaded at daemon start
+//! only. Load check and keep: [`install_pack`], [`layout::needs_keep`].
 //! Each pack has its own [`PackLayout`]; any path outside it refuses that
 //! pack only.
 //!
-//! Size and sha256 are checked against the list before anything is
-//! unpacked. Each pack is staged and swapped into place on its own, so one
-//! bad or failed pack never blocks, rolls back, or deletes another. A pack
-//! the server does not list keeps whatever is installed. The token is never
-//! written to a log.
+//! Size and sha256 are checked before anything is unpacked. Each pack is
+//! staged and swapped into place on its own, so one bad or failed pack never
+//! blocks, rolls back, or deletes another. A pack the server does not list
+//! keeps whatever is installed. The token is never written to a log.
 //!
 //! Daemon startup ([`sync_on_startup`]) syncs `heroes-v1.tar` only and hands
 //! its result to [`PackKeeper`], which runs in the background, so capture
@@ -44,32 +48,30 @@
 //! checks the installed files against the manifest sync verified and swaps
 //! the pack in only when they match. The daemon does not wait. It reads
 //! with the Tesseract rows already in hand until a load finishes. The setup
-//! guide ([`sync_reader_packs`]) syncs all of them. Every run
-//! holds an exclusive `flock` on `templates/.pack-sync.lock`; a second run
-//! at the same time is [`PackSync::Busy`] and sends no request.
+//! guide ([`sync_reader_packs`]) syncs all of them. Every run holds an
+//! exclusive `flock` on `templates/.pack-sync.lock`; a second run at the
+//! same time is [`PackSync::Busy`] and sends no request.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use sha2::{Digest, Sha256};
-
 use crate::config::validate_sync_server_url;
 
 pub mod layout;
 
-// The pack layout lives in `packs/layout.rs` (0.6 lane D V4). Re-exported at
-// the old `packs::` paths.
+// Pack layout: `packs/layout.rs` (0.6 lane D V4), re-exported at old paths.
+pub(crate) use layout::is_glyph_name;
 pub use layout::{
     HEROES_PACK_NAME, HEROES_PORTRAIT_1080_PACK_NAME, HEROES_PORTRAIT_PACK_NAME, PACKS, PackLayout,
     PackSpec, installed_manifest, installed_record, pack_spec, record_paths,
 };
 use layout::{
-    MAX_STEM, dir_label, is_sha256, is_word_byte, manifests_path, read_manifests, read_versions,
-    unique_suffix, versions_path,
+    KeepSwap, MANIFESTS_TMP_PREFIX, MAX_STEM, VERSIONS_TMP_PREFIX, dir_label, is_sha256,
+    is_word_byte, manifests_path, read_manifests, read_versions, sha256_hex, unique_suffix,
+    versions_path,
 };
-pub(crate) use layout::{is_glyph_name, swap_dir};
 
 /// `Retry-After` waits stay inside this range. The setup guide uses this
 /// same clamp before it adds a wait to a clock.
@@ -90,6 +92,9 @@ pub const PACK_MISMATCH: &str =
     "The reader pack did not match the site. The installed pack was left in place.";
 pub const PACK_UNSAFE: &str =
     "The reader pack was not safe to unpack. The installed pack was left in place.";
+pub const PACK_BAD_TEMPLATES: &str = "The reader pack did not load, so it was not saved.";
+pub const PACK_NOT_KEPT: &str = "The reader pack was not saved: the old pack folder could not be moved to templates-kept, so it was left in place.";
+pub const PACK_STRANDED: &str = "The reader pack is in the live folder, but the old pack folder could not be moved to templates-kept and could not be put back, so it was left at the staging path. A later sync moves it to templates-kept; it is not removed.";
 pub const PACK_FAILED: &str =
     "Could not download the reader pack. The installed pack was left in place.";
 pub const PACK_AUTH: &str = "Your sync token isn't valid. Sign in again from Settings.";
@@ -339,6 +344,7 @@ fn log_installed(report: &PackReport) {
 /// Only an install is logged here. What went wrong, and that there will be
 /// another try, is the keeper's line to write. Never logs the token.
 pub async fn sync_on_startup(server_url: &str, token: &str, data_dir: &Path) -> StartupSync {
+    layout::log_kept_folders(data_dir);
     sync_on_startup_capped(server_url, token, data_dir, PACK_MAX_BYTES).await
 }
 
@@ -381,8 +387,7 @@ impl StartupSync {
     }
 }
 
-/// Waits, in seconds, while another process holds the pack sync lock. The
-/// last one repeats.
+/// Seconds to wait while another process holds the sync lock; last repeats.
 const BUSY_WAITS_SECS: [u64; 3] = [5, 15, 60];
 /// Waits, in seconds, after packs switched off (503), a network error, a
 /// refused token or a refused download. The last one repeats.
@@ -418,9 +423,18 @@ fn pid_jitter(pid: u32) -> Duration {
 }
 
 /// True for a refusal the same bytes would get again: wrong size or
-/// sha256, a layout the tracker does not accept, or too large.
+/// sha256, a bad layout, too large, a pack its reader does not load, or a
+/// folder `templates-kept/` cannot take (a keep that fails or strands).
 fn is_fixed_refusal(message: &str) -> bool {
-    message == PACK_MISMATCH || message == PACK_UNSAFE || message == PACK_TOO_BIG
+    [
+        PACK_MISMATCH,
+        PACK_UNSAFE,
+        PACK_TOO_BIG,
+        PACK_BAD_TEMPLATES,
+        PACK_NOT_KEPT,
+        PACK_STRANDED,
+    ]
+    .contains(&message)
 }
 
 /// Downloads the tracker refused for a fixed reason in this daemon run, by
@@ -719,8 +733,7 @@ impl Voice {
     }
 }
 
-/// The server URL and token for one try. It has no `Debug`, so the token
-/// cannot reach a log.
+/// URL and token for one try. No `Debug`, so the token cannot reach a log.
 pub struct PackCredentials {
     pub server_url: String,
     pub token: String,
@@ -771,11 +784,10 @@ impl Tried {
 /// [`PACKS`] current, and keep trying while the daemon runs.
 ///
 /// Its first try carries on from [`sync_on_startup`]: with that run's list
-/// it syncs the other packs, so a first install is still eight requests
-/// (the list, then every pack).
-/// If startup did not get that far (busy lock, 429, packs switched off, a
-/// network error, a refused token) nothing is sent now and that outcome
-/// sets the first wait.
+/// it syncs the other packs, so a first install is still one request per
+/// pack plus the list (the list, then every pack). If startup did not get
+/// that far (busy lock, 429, packs switched off, a network error, a refused
+/// token) nothing is sent now and that outcome sets the first wait.
 ///
 /// A later try downloads only the packs that are missing or out of date.
 /// It reuses the list it has: the list is read again only when it is
@@ -787,9 +799,9 @@ impl Tried {
 /// Once the site has answered 429 the job is paced for the rest of its
 /// life: one request per try, [`PACED_GAP_SECS`] apart.
 ///
-/// A pack refused for a fixed reason (size, sha256, layout) is downloaded
-/// once. It is fetched again only when the list shows another entry for
-/// it, or after a restart.
+/// A pack refused for a fixed reason (size, sha256, layout, a pack that does
+/// not load, a keep that cannot happen) is downloaded once. It is fetched
+/// again only when the list shows another entry for it, or after a restart.
 ///
 /// The job stops once every pack is in place or not offered; until then
 /// it waits as `Backoff` says and tries again, one try at a time. Each try
@@ -1124,7 +1136,7 @@ async fn run_sync(
             return SyncRun::early(scope, outcome, plan.listed);
         }
     };
-    sweep_stale_staging(data_dir);
+    layout::sweep_stale_staging(data_dir);
     let client = match reqwest::Client::builder()
         .user_agent(crate::version::USER_AGENT)
         .timeout(std::time::Duration::from_secs(60))
@@ -1316,12 +1328,14 @@ fn is_current(
 /// folder is not in place, so the next sync downloads the pack again.
 fn in_place(data_dir: &Path, spec: &PackSpec) -> bool {
     let dir = spec.dir_in(data_dir);
+    let is_file = |name: &str| {
+        dir.join(name)
+            .symlink_metadata()
+            .is_ok_and(|meta| meta.is_file())
+    };
     dir.is_dir()
-        && (!spec.layout.keeps_manifest()
-            || dir
-                .join("manifest.json")
-                .symlink_metadata()
-                .is_ok_and(|meta| meta.is_file()))
+        && (!spec.layout.keeps_manifest() || is_file("manifest.json"))
+        && (spec.layout != PackLayout::TemplatesJson || is_file(layout::TEMPLATES_JSON))
 }
 
 /// File locked for the length of one sync, so the daemon and the app never
@@ -1393,75 +1407,6 @@ impl SyncLock {
     }
 }
 
-/// A `.<pack>-next-*` or `.<pack>-prev-*` folder this old is left from a
-/// sync that was killed. Live syncs hold the lock, so none of theirs is here.
-const STALE_STAGING: std::time::Duration = std::time::Duration::from_secs(3600);
-
-/// Remove staging and backup folders left by a killed sync. Runs under the
-/// sync lock. Only names this module makes, only real folders (not links),
-/// and only when older than [`STALE_STAGING`]. Also removes versions tmp
-/// files left by a kill.
-fn sweep_stale_staging(data_dir: &Path) {
-    let templates = data_dir.join("templates");
-    let Ok(entries) = std::fs::read_dir(&templates) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        let path = entry.path();
-        if name.starts_with(VERSIONS_TMP_PREFIX) || name.starts_with(MANIFESTS_TMP_PREFIX) {
-            // Only a run holding this lock writes one, so this one is left.
-            if path.symlink_metadata().is_ok_and(|meta| meta.is_file())
-                && let Err(err) = std::fs::remove_file(&path)
-            {
-                tracing::warn!(file = %name, error = %err, "left reader pack versions file was not removed");
-            }
-            continue;
-        }
-        // The pack this name belongs to, and whether it is a `-prev-` backup.
-        let owner = name.strip_prefix('.').and_then(|rest| {
-            PACKS.iter().find_map(|spec| {
-                let tail = rest.strip_prefix(dir_label(&spec.dir_in(data_dir)).as_str())?;
-                if tail.starts_with("-next-") {
-                    Some((spec, false))
-                } else if tail.starts_with("-prev-") {
-                    Some((spec, true))
-                } else {
-                    None
-                }
-            })
-        });
-        let Some((spec, backup)) = owner else {
-            continue;
-        };
-        // A `-prev-` folder is the old live folder renamed, so its mtime is
-        // the old pack's. While the live folder is missing (a kill inside
-        // the fallback swap) it is the only copy of that pack: keep it.
-        if backup && !spec.dir_in(data_dir).exists() {
-            continue;
-        }
-        let Ok(meta) = path.symlink_metadata() else {
-            continue;
-        };
-        let stale = meta
-            .modified()
-            .ok()
-            .and_then(|modified| modified.elapsed().ok())
-            .is_some_and(|age| age >= STALE_STAGING);
-        if meta.is_dir() && stale {
-            match std::fs::remove_dir_all(&path) {
-                Ok(()) => {
-                    tracing::info!(folder = %name, "removed a reader pack folder left by a stopped sync")
-                }
-                Err(err) => {
-                    tracing::warn!(folder = %name, error = %err, "left reader pack folder was not removed")
-                }
-            }
-        }
-    }
-}
-
 /// [`sync_one`] result. `Stop` also ends the loop for the packs after it.
 enum Step {
     /// Swapped into place. Carries the sha256 of the inner manifest.
@@ -1528,9 +1473,11 @@ async fn off_runtime<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'stati
 }
 
 /// The file side of one download: check the bytes against the list, unpack
-/// into a staging folder and swap it in. Blocking; see [`off_runtime`].
-/// `Ok` carries the sha256 of the inner manifest; an `Err` is the
-/// [`PackSync::Failed`] to report.
+/// into a staging folder, load a [`PackLayout::TemplatesJson`] pack with
+/// its reader ([`check_staged`]) and swap it in, keeping the old folder
+/// when [`layout::needs_keep`] ([`layout::swap_keeping`]). Blocking; see
+/// [`off_runtime`]. `Ok` carries the sha256 of the inner manifest; an
+/// `Err` is the [`PackSync::Failed`] to report.
 fn install_pack(
     data_dir: &Path,
     spec: &PackSpec,
@@ -1557,12 +1504,49 @@ fn install_pack(
                 return Err(PackSync::Failed(message.to_string()));
             }
         };
-    if let Err(message) = swap_dir(&staging, &live) {
+    if let Err(message) = check_staged(spec, &staging) {
         let _ = std::fs::remove_dir_all(&staging);
-        tracing::warn!(pack = spec.name, error = %message, "reader pack was not swapped into place");
-        return Err(PackSync::Failed(PACK_FAILED.to_string()));
+        tracing::warn!(pack = spec.name, error = %message, "reader pack did not load; it was not installed");
+        return Err(PackSync::Failed(PACK_BAD_TEMPLATES.to_string()));
+    }
+    let swapped = if layout::needs_keep(data_dir, spec, &live) {
+        layout::swap_keeping(data_dir, spec.name, &staging, &live).map(drop)
+    } else {
+        layout::swap_dir(&staging, &live).map_err(KeepSwap::NotSwapped)
+    };
+    if let Err(failed) = swapped {
+        failed.remove_staging(&staging);
+        let (message, error) = match failed {
+            KeepSwap::Stranded(error) => {
+                tracing::warn!(pack = spec.name, error = %error, "reader pack is in the live folder, but the old folder was left at the staging path; a later sync moves it to templates-kept");
+                return Err(PackSync::Failed(PACK_STRANDED.to_string()));
+            }
+            KeepSwap::NotKept(error) => (PACK_NOT_KEPT, error),
+            KeepSwap::NotSwapped(error) => (PACK_FAILED, error),
+        };
+        tracing::warn!(pack = spec.name, error = %error, "reader pack was not swapped into place");
+        return Err(PackSync::Failed(message.to_string()));
+    }
+    if spec.layout == PackLayout::TemplatesJson {
+        layout::record_templates_hash(data_dir, spec.name, &live);
     }
     Ok(manifest_sha256)
+}
+
+/// A staged [`PackLayout::TemplatesJson`] pack must load with its reader's
+/// `TemplateSet::load_dir` or is refused before the swap; others pass.
+fn check_staged(spec: &PackSpec, staging: &Path) -> Result<(), String> {
+    match spec.name {
+        layout::RANK_PACK_NAME => crate::shadow::rank::templates::TemplateSet::load_dir(staging)
+            .map(drop)
+            .map_err(|err| err.to_string()),
+        layout::QUEUE_TITLE_PACK_NAME => {
+            crate::shadow::queue_title::templates::TemplateSet::load_dir(staging)
+                .map(drop)
+                .map_err(|err| err.to_string())
+        }
+        _ => Ok(()),
+    }
 }
 
 /// The folder a pack's live, staging and backup folders sit in.
@@ -1798,51 +1782,14 @@ struct InnerFile {
     size: u64,
 }
 
-/// Start of every tmp file [`write_versions`] makes. Only a run holding the
-/// sync lock writes one, so any found at the start of a run was left by a kill.
-const VERSIONS_TMP_PREFIX: &str = "pack-versions.json.tmp-";
-
 fn write_versions(data_dir: &Path, versions: &BTreeMap<String, String>) -> Result<(), String> {
     #[cfg(test)]
     tests::note_blocking_work(data_dir);
-    write_map(&versions_path(data_dir), VERSIONS_TMP_PREFIX, versions)
+    layout::write_map(&versions_path(data_dir), VERSIONS_TMP_PREFIX, versions)
 }
-
-/// Start of every tmp file [`write_manifests`] makes; swept like
-/// [`VERSIONS_TMP_PREFIX`].
-const MANIFESTS_TMP_PREFIX: &str = "pack-manifests.json.tmp-";
 
 fn write_manifests(data_dir: &Path, manifests: &BTreeMap<String, String>) -> Result<(), String> {
-    write_map(&manifests_path(data_dir), MANIFESTS_TMP_PREFIX, manifests)
-}
-
-/// Write `map` as JSON to `path` through a tmp file named `<prefix><n>`.
-fn write_map(path: &Path, prefix: &str, map: &BTreeMap<String, String>) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
-    }
-    // A name of its own, so two writers never share one tmp file.
-    let tmp = path.with_file_name(format!("{prefix}{}", unique_suffix()));
-    let bytes = serde_json::to_vec(map).map_err(|err| err.to_string())?;
-    let written = (|| -> std::io::Result<()> {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-        std::fs::rename(&tmp, path)
-    })();
-    if let Err(err) = written {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(err.to_string());
-    }
-    Ok(())
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    layout::write_map(&manifests_path(data_dir), MANIFESTS_TMP_PREFIX, manifests)
 }
 
 fn is_version(value: &str) -> bool {
@@ -1920,6 +1867,7 @@ impl PackLayout {
                     || is_plain_name(raw, ".json", is_word_byte)
             }
             Self::Names => is_names_v1_file(raw),
+            Self::TemplatesJson => raw == "templates.json",
         };
         if ok {
             Ok(raw.to_string())
@@ -1932,7 +1880,9 @@ impl PackLayout {
     fn allows_dir(self, raw: &str) -> bool {
         match self {
             Self::HeroesV1 | Self::Portraits => safe_rel_path(raw).as_deref() == Some("special"),
-            Self::BanIcons | Self::MapGlyphs | Self::Words | Self::Names => false,
+            Self::BanIcons | Self::MapGlyphs | Self::Words | Self::Names | Self::TemplatesJson => {
+                false
+            }
         }
     }
 }
@@ -2974,7 +2924,7 @@ mod tests {
         std::fs::write(live.join("old.txt"), b"old").unwrap();
         std::fs::create_dir(&staging).unwrap();
         std::fs::write(staging.join("new.txt"), b"new").unwrap();
-        swap_dir(&staging, &live).expect("swap");
+        layout::swap_dir(&staging, &live).expect("swap");
         assert_eq!(std::fs::read(live.join("new.txt")).unwrap(), b"new");
         assert!(!live.join("old.txt").exists());
         assert!(!staging.exists());
@@ -2983,7 +2933,7 @@ mod tests {
         let staged = dir.path().join(".heroes-fresh");
         std::fs::create_dir(&staged).unwrap();
         std::fs::write(staged.join("only.txt"), b"only").unwrap();
-        swap_dir(&staged, &fresh).expect("create");
+        layout::swap_dir(&staged, &fresh).expect("create");
         assert_eq!(std::fs::read(fresh.join("only.txt")).unwrap(), b"only");
         assert!(!staged.exists());
     }
@@ -3116,7 +3066,12 @@ mod tests {
     }
 
     /// File names in each pack's own layout, shaped like the real packs.
+    /// rank-v1 and queue-title-v1 carry a `templates.json` their reader
+    /// loads, as install checks that before the swap.
     fn sample_files(name: &str) -> Vec<(String, Vec<u8>)> {
+        if matches!(name, "rank-v1.tar" | "queue-title-v1.tar") {
+            return rank_queue_title::pack_files(name);
+        }
         let names: &[&str] = match name {
             "heroes-v1.tar" => &["ana.png", "special/skull_01.png"],
             "heroes-v2.tar" | "heroes-v2-1080.tar" => {
@@ -3291,6 +3246,8 @@ mod tests {
             ("words-v1.tar", "templates/words-v1"),
             ("names-v1.tar", "templates/names-v1"),
             ("bans-picks-v1.tar", "templates/bans-picks-v1"),
+            ("rank-v1.tar", "templates/rank-v1"),
+            ("queue-title-v1.tar", "templates/queue-title-v1"),
         ];
         assert_eq!(PACKS.len(), expected.len() + 1);
         for (name, dir) in expected {
@@ -3298,9 +3255,8 @@ mod tests {
             assert_eq!(spec.dir_in(data), data.join(dir), "{name}");
             assert!(!spec.required, "{name} is optional");
         }
-        // Reader neutrality: the hero packs, maps-v1, words-v1, names-v1 and
-        // bans-picks-v1 land in a folder a reader opens. bans-v1 does not. The
-        // hand-installed maps and result folders are not pack folders.
+        // Reader neutrality: every pack but bans-v1 lands in a folder a reader
+        // opens. The hand-installed maps and result folders are not pack folders.
         let reader_dirs = [
             crate::shadow::heroes::TEMPLATE_SUBDIR,
             crate::shadow::heroes::TEMPLATE_SUBDIR_V2,
@@ -3311,6 +3267,8 @@ mod tests {
             crate::shadow::banner::TEMPLATE_SUBDIR_V1,
             "templates/names-v1",
             "templates/bans-picks-v1",
+            crate::shadow::rank::TEMPLATE_DIR,
+            crate::shadow::queue_title::TEMPLATE_DIR,
         ];
         let mut seen = BTreeSet::new();
         for spec in PACKS {
@@ -3319,21 +3277,7 @@ mod tests {
             assert_ne!(dir, data.join("templates"));
             assert!(!versions_path(data).starts_with(&dir));
             let used_by_reader = reader_dirs.iter().any(|sub| dir == data.join(sub));
-            assert_eq!(
-                used_by_reader,
-                matches!(
-                    spec.name,
-                    HEROES_PACK_NAME
-                        | "heroes-v2.tar"
-                        | "heroes-v2-1080.tar"
-                        | "maps-v1.tar"
-                        | "words-v1.tar"
-                        | "names-v1.tar"
-                        | "bans-picks-v1.tar"
-                ),
-                "{}",
-                spec.name
-            );
+            assert_eq!(used_by_reader, spec.name != "bans-v1.tar", "{}", spec.name);
             assert_ne!(
                 dir,
                 data.join(crate::shadow::banner::TEMPLATE_SUBDIR),
@@ -3417,6 +3361,7 @@ mod tests {
             PackLayout::MapGlyphs,
             PackLayout::Words,
             PackLayout::Names,
+            PackLayout::TemplatesJson,
         ] {
             assert_eq!(
                 layout.file_path("manifest.json").as_deref(),
@@ -3491,7 +3436,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn all_seven_extra_packs_install_into_a_fresh_data_dir() {
+    async fn all_nine_extra_packs_install_into_a_fresh_data_dir() {
         let (list, files, contents) = all_packs();
         let served = serve(list, files);
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3535,10 +3480,10 @@ mod tests {
             .filter(|name| name.starts_with('.') && name != ".pack-sync.lock")
             .collect();
         assert!(leftovers.is_empty(), "{leftovers:?}");
-        assert_eq!(report.extras_ready(), (7, 7));
+        assert_eq!(report.extras_ready(), (9, 9));
         assert_eq!(
             report.guide_result(),
-            Ok("Reader pack saved. Extra reader packs ready: 7 of 7.".to_string())
+            Ok("Reader pack saved. Extra reader packs ready: 9 of 9.".to_string())
         );
     }
 
@@ -3570,7 +3515,7 @@ mod tests {
         );
         assert_eq!(
             second.guide_result(),
-            Ok("The reader pack is already installed. Extra reader packs ready: 7 of 7.".into())
+            Ok("The reader pack is already installed. Extra reader packs ready: 9 of 9.".into())
         );
     }
 
@@ -3599,7 +3544,7 @@ mod tests {
         let versions = stored_versions(dir.path());
         assert!(!versions.contains_key("bans-v1.tar"));
         assert_eq!(versions.len(), PACKS.len() - 1);
-        assert_eq!(report.extras_ready(), (6, 7));
+        assert_eq!(report.extras_ready(), (8, 9));
     }
 
     #[tokio::test]
@@ -3997,11 +3942,11 @@ mod tests {
             assert_eq!(outcome(&report, spec.name), &expected, "{}", spec.name);
         }
         assert_eq!(served.downloaded(), vec!["heroes-v2.tar".to_string()]);
-        assert_eq!(report.extras_ready(), (6, 7));
+        assert_eq!(report.extras_ready(), (8, 9));
         assert_eq!(
             report.guide_result(),
             Ok(format!(
-                "The reader pack is already installed. Extra reader packs ready: 6 of 7. {limited}."
+                "The reader pack is already installed. Extra reader packs ready: 8 of 9. {limited}."
             ))
         );
     }
@@ -4052,11 +3997,13 @@ mod tests {
             "maps-v1.tar",
             "names-v1.tar",
             "bans-picks-v1.tar",
+            "rank-v1.tar",
+            "queue-title-v1.tar",
         ] {
             assert_eq!(outcome(&report, name), &limited, "{name}");
         }
         assert_eq!(outcome(&report, "words-v1.tar"), &PackSync::Missing);
-        assert_eq!(report.extras_ready(), (0, 6));
+        assert_eq!(report.extras_ready(), (0, 8));
     }
 
     fn age_folder(path: &Path, age: std::time::Duration) {
@@ -4201,7 +4148,7 @@ mod tests {
             .unwrap()
             .elapsed()
             .unwrap();
-        assert!(link_age >= STALE_STAGING, "link aged: {link_age:?}");
+        assert!(link_age >= layout::STALE_STAGING, "link aged: {link_age:?}");
     }
 
     #[tokio::test]
@@ -4660,6 +4607,7 @@ mod tests {
             !live.contains(name)
                 && name != "pack-versions.json"
                 && name != "pack-manifests.json"
+                && name != "pack-file-hashes.json"
                 && name != ".pack-sync.lock"
         });
         left.sort();
@@ -5241,26 +5189,17 @@ mod tests {
         let logs = capture_logs();
         let startup = sync_on_startup_capped(&served.base, TOKEN, dir.path(), PACK_MAX_BYTES).await;
         assert!(startup.goes_on());
-        let (finished, waits) = rig(&served.base, dir.path(), Some(startup), 8, no_nap)
+        let (finished, waits) = rig(&served.base, dir.path(), Some(startup), 10, no_nap)
             .run()
             .await;
         let logs = logs.text();
         assert!(finished);
         // What the server asked for, then one download every 10 s.
-        assert_eq!(
-            waits,
-            [
-                secs(7) + TEST_JITTER,
-                secs(10),
-                secs(10),
-                secs(10),
-                secs(10),
-                secs(10),
-                secs(10)
-            ]
-        );
+        let mut expected_waits = vec![secs(7) + TEST_JITTER];
+        expected_waits.extend([secs(10); 8]);
+        assert_eq!(waits, expected_waits);
         assert_all_installed(dir.path(), &contents);
-        // Startup (2), the refused download, then the seven downloads. The
+        // Startup (2), the refused download, then the nine downloads. The
         // list is not asked for again.
         let mut expected = list_then(&[HEROES_PACK_NAME, "heroes-v2.tar"]);
         expected.extend(tar_paths(&pack_names()[1..]));
@@ -5274,14 +5213,14 @@ mod tests {
         );
         let done = lines_with(&logs, SAID_DONE);
         assert_eq!(done.len(), 1, "{logs}");
-        assert!(done[0].contains("tries=8"), "{logs}");
+        assert!(done[0].contains("tries=10"), "{logs}");
         assert!(
             done[0].contains(&format!("arrived=\"{}\"", pack_names().join(", "))),
             "{logs}"
         );
-        // Eight installs, the 429 line and the closing line. The paced waits
+        // Ten installs, the 429 line and the closing line. The paced waits
         // are not written for a member.
-        assert_eq!(pack_lines(&logs).len(), 10, "{logs}");
+        assert_eq!(pack_lines(&logs).len(), 12, "{logs}");
         assert_no_secrets(&logs);
     }
 
@@ -5305,16 +5244,19 @@ mod tests {
             sent.lock().unwrap().push(paths.lock().unwrap().len());
             no_nap(nap)
         };
-        let (finished, waits) = rig(&served.base, dir.path(), Some(startup), 9, on_nap)
+        let (finished, waits) = rig(&served.base, dir.path(), Some(startup), 11, on_nap)
             .run()
             .await;
         assert!(finished);
         // 300 s is cut to 120 s. Then one request per try: the list, and
         // each pack 10 s after the one before.
         let mut expected_waits = vec![secs(120) + TEST_JITTER];
-        expected_waits.extend([secs(10); 8]);
+        expected_waits.extend([secs(10); 10]);
         assert_eq!(waits, expected_waits);
-        assert_eq!(*sent_by_nap.lock().unwrap(), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(
+            *sent_by_nap.lock().unwrap(),
+            [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        );
         assert_all_installed(dir.path(), &contents);
         let mut expected = vec![LIST_PATH.to_string()];
         expected.extend(list_then(&pack_names()));
@@ -5579,12 +5521,12 @@ mod tests {
         for spec in PACKS {
             assert_eq!(fetched(&format!("/{}", spec.name)), 1, "{}", spec.name);
         }
-        // Startup and the first try are 9 requests. The next try reads the
+        // Startup and the first try are 11 requests. The next try reads the
         // list again, because the download did not match it. After that
         // the list is read only once it is 30 minutes old.
-        assert_eq!(*sent_by_nap.lock().unwrap(), [9, 10, 10, 10, 11]);
+        assert_eq!(*sent_by_nap.lock().unwrap(), [11, 12, 12, 12, 13]);
         assert_eq!(list_requests(&served), 4);
-        assert_eq!(asked.len(), 12);
+        assert_eq!(asked.len(), 14);
         assert!(
             !pack_spec("heroes-v2.tar")
                 .unwrap()
@@ -5653,13 +5595,13 @@ mod tests {
         assert_eq!(waits, [secs(60), secs(300), secs(900), secs(1800)]);
         assert_all_installed(dir.path(), &contents);
         assert_eq!(stored_versions(dir.path())["heroes-v2.tar"], "154088.2");
-        // Startup 2, the first try 7, the list after the mismatch, the
+        // Startup 2, the first try 9, the list after the mismatch, the
         // list at 30 minutes, and the pack again under its new entry.
         let asked = requests(&served);
         let fetched = |name: &str| asked.iter().filter(|path| path.ends_with(name)).count();
         assert_eq!(fetched("/heroes-v2.tar"), 2);
         assert_eq!(list_requests(&served), 3);
-        assert_eq!(asked.len(), 12);
+        assert_eq!(asked.len(), 14);
         assert_eq!(lines_with(&logs, SAID_MISSING).len(), 1, "{logs}");
         let done = lines_with(&logs, SAID_DONE);
         assert_eq!(done.len(), 1, "{logs}");
@@ -6190,6 +6132,8 @@ mod tests {
 
     #[path = "tests_bans_picks.rs"]
     mod bans_picks;
+    #[path = "tests_rank_queue_title.rs"]
+    mod rank_queue_title;
     #[path = "tests_real_limit.rs"]
     mod real_limit;
 
