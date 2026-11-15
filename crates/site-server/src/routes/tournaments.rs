@@ -69,8 +69,11 @@ fn manages_tournaments(member: &Option<Member>) -> bool {
 }
 
 /// Load a tournament by id. 404 "Tournament not found" when no tournament
-/// has this id; a real DB error stays a 500. Officer writes call this before
-/// writing anything; public reads go through `load_visible_tournament`.
+/// has this id; a real DB error stays a 500. Officer writes that take a
+/// tournament id call this (directly or through `require_participant`)
+/// before writing, except `report_match`, which loads the match and checks
+/// that its `tournament_id` matches the path instead. Public reads go
+/// through `load_visible_tournament`, which builds on this.
 async fn require_tournament(state: &AppState, id: &str) -> ApiResult<Tournament> {
     state
         .db

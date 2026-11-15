@@ -371,12 +371,15 @@ async fn main() {
             .await
             .expect("Failed to start RR tournament");
 
-        // Report the first 3 round-robin matches (shared with the tests).
-        scuffed_site_server::seed::report_round_robin_demo_matches(&db, "rr_demo", 3)
-            .await
-            .unwrap_or_else(|(i, e)| panic!("Failed to report RR match {i}: {e}"));
+        // Report up to 3 round-robin matches (shared with the tests).
+        // The error says which step failed: "listing RR matches failed: ..."
+        // or "reporting RR match {i} failed: ...".
+        let rr_reported =
+            scuffed_site_server::seed::report_round_robin_demo_matches(&db, "rr_demo", 3)
+                .await
+                .unwrap_or_else(|e| panic!("Failed to seed RR results: {e}"));
 
-        tracing::info!("Round robin seeded: 4 teams, 3 matches reported");
+        tracing::info!("Round robin seeded: 4 teams, {rr_reported} matches reported");
 
         // ── Swiss tournament seed ──
         db.client

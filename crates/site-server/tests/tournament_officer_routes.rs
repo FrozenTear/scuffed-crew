@@ -555,7 +555,7 @@ async fn dev_seed_round_robin_reports_go_through() {
 
     let reported = scuffed_site_server::seed::report_round_robin_demo_matches(&state.db, &tid, 3)
         .await
-        .unwrap_or_else(|(i, e)| panic!("seed RR match {i} refused: {e}"));
+        .unwrap_or_else(|e| panic!("seed refused: {e}"));
     assert_eq!(reported, 3);
 
     let completed: Vec<_> = state

@@ -215,25 +215,47 @@ type SeedMatchRow = (
     u32,
 );
 
-/// Seed a varied set of personal_match records for the dev member so the
-/// strategy editor's hero-winrate badges and the personal stats dashboard
-/// have something to render in dev mode.
+/// Why `report_round_robin_demo_matches` failed.
+#[derive(Debug)]
+pub struct RoundRobinSeedError {
+    /// Index of the match whose report failed, or `None` when listing the
+    /// tournament's matches failed (before any report).
+    pub match_index: Option<usize>,
+    pub source: Box<scuffed_db::DbError>,
+}
+
+impl std::fmt::Display for RoundRobinSeedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.match_index {
+            Some(i) => write!(f, "reporting RR match {i} failed: {}", self.source),
+            None => write!(f, "listing RR matches failed: {}", self.source),
+        }
+    }
+}
+
+impl std::error::Error for RoundRobinSeedError {}
+
 /// Report the first `count` pending round-robin matches of `tournament_id`
 /// with demo scores and replay codes, alternating the winner (A, B, A, ...).
 ///
 /// The winner's score must exceed the loser's (DB-009), so a B win is
 /// reported 1-2, not 2-1. Used by the standalone site-server dev seed and by
-/// its regression test. On failure returns the index of the match that
-/// failed with the DB error.
+/// its regression test. Returns the number of matches reported.
+///
+/// On failure the error says whether listing the matches or reporting a
+/// given match failed (see [`RoundRobinSeedError`]).
 pub async fn report_round_robin_demo_matches(
     db: &Database,
     tournament_id: &str,
     count: usize,
-) -> Result<usize, (usize, scuffed_db::DbError)> {
+) -> Result<usize, RoundRobinSeedError> {
     let matches = db
         .list_tournament_matches(tournament_id)
         .await
-        .map_err(|e| (0, e))?;
+        .map_err(|e| RoundRobinSeedError {
+            match_index: None,
+            source: Box::new(e),
+        })?;
     let pending: Vec<_> = matches
         .iter()
         .filter(|m| {
@@ -256,11 +278,17 @@ pub async fn report_round_robin_demo_matches(
         ];
         db.report_tournament_match(&m.id, score_a, score_b, winner, None, codes)
             .await
-            .map_err(|e| (i, e))?;
+            .map_err(|e| RoundRobinSeedError {
+                match_index: Some(i),
+                source: Box::new(e),
+            })?;
     }
     Ok(pending.len())
 }
 
+/// Seed a varied set of personal_match records for the dev member so the
+/// strategy editor's hero-winrate badges and the personal stats dashboard
+/// have something to render in dev mode.
 async fn seed_personal_matches(
     db: &Database,
     member_id: &str,
