@@ -22,6 +22,10 @@ use super::*;
 #[path = "tests_game.rs"]
 mod game_wiring;
 
+/// The env overrides on the real process environment, each in a child.
+#[path = "tests_env.rs"]
+mod env_override;
+
 pub(crate) use super::tests_synth::*;
 
 /// The pack learned from [`training`], built once for all tests.

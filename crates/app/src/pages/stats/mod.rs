@@ -173,10 +173,46 @@ pub(super) fn wr_bar_color(tally: Tally) -> &'static str {
 const TRACKER_PLATFORM_COPY: &str =
     "It runs on Linux, on both Wayland and X11. There is no Windows or macOS build.";
 
-/// Stat-tracker build named in the install note on `/stats` when health
-/// does not send `tracker_latest`. One constant, so the banner tracks the
-/// current build instead of an older alpha.
-const TRACKER_RELEASE: &str = "rc.9";
+/// The stat tracker's manifest, read at compile time. Its `[package]`
+/// `version` is the tracker release: `crates/stat-tracker/dist/check-tag-version.sh`
+/// and `crates/stat-tracker/src/tests_release_pins.rs` fail when it differs
+/// from the release tag, so the version bump that cuts a release also
+/// updates the install note here. No separate bump step.
+const TRACKER_CORE_MANIFEST: &str = include_str!("../../../../stat-tracker-core/Cargo.toml");
+
+/// `[package]` `version = "..."` from a Cargo manifest. Same rule as
+/// `package_version` in `check-tag-version.sh`: the first `version` line
+/// inside `[package]`, value between the first pair of double quotes.
+fn manifest_package_version(manifest: &str) -> Option<&str> {
+    let mut in_package = false;
+    for line in manifest.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_package = line == "[package]";
+            continue;
+        }
+        if !in_package {
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("version") else {
+            continue;
+        };
+        let Some(rest) = rest.trim_start().strip_prefix('=') else {
+            continue;
+        };
+        let (_, quoted) = rest.split_once('"')?;
+        let (value, _) = quoted.split_once('"')?;
+        return Some(value).filter(|value| !value.is_empty());
+    }
+    None
+}
+
+/// Stat-tracker release (`MAJOR.MINOR.PATCH-alpha.N` style), from
+/// [`TRACKER_CORE_MANIFEST`]. Named in the install note on `/stats` when
+/// health does not send `tracker_latest`.
+fn tracker_release_version() -> Option<&'static str> {
+    manifest_package_version(TRACKER_CORE_MANIFEST)
+}
 
 /// `true` when `core` is `MAJOR.MINOR.PATCH` with numeric components.
 fn is_release_core(core: &str) -> bool {
@@ -192,11 +228,17 @@ fn is_release_core(core: &str) -> bool {
 }
 
 /// Short install label. A bare `MAJOR.MINOR.PATCH-label` drops the numeric
-/// core so it matches [`TRACKER_RELEASE`]. A value that is already that
-/// short label is kept.
+/// core, so `MAJOR.MINOR.PATCH-alpha.N` reads `alpha.N`. A value that is already that
+/// short label is kept. The server's `tracker_latest` wins when present;
+/// otherwise the label comes from [`tracker_release_version`].
 fn tracker_notice_label(server: Option<&str>) -> String {
-    let Some(raw) = server.map(str::trim).filter(|value| !value.is_empty()) else {
-        return TRACKER_RELEASE.to_string();
+    let non_blank = |value: &&str| !value.is_empty();
+    let Some(raw) = server
+        .map(str::trim)
+        .filter(non_blank)
+        .or_else(|| tracker_release_version().map(str::trim).filter(non_blank))
+    else {
+        return "the latest release".to_string();
     };
     match raw.split_once('-') {
         Some((core, rest)) if is_release_core(core) && !rest.is_empty() => rest.to_string(),
@@ -2095,7 +2137,10 @@ mod header_layout_tests {
 
 #[cfg(test)]
 mod tracker_platform_copy_tests {
-    use super::{TRACKER_PLATFORM_COPY, TRACKER_RELEASE, tracker_release_notice_text};
+    use super::{
+        TRACKER_PLATFORM_COPY, manifest_package_version, tracker_release_notice_text,
+        tracker_release_version,
+    };
 
     /// The install blurb on `/stats`, from the heading through the curl command.
     fn tracker_download_blurb(src: &str) -> &str {
@@ -2143,17 +2188,75 @@ mod tracker_platform_copy_tests {
         );
     }
 
+    /// The short label for a full tracker version, the way the install note
+    /// shows it: `0.6.0-alpha.3` reads `alpha.3`, a plain `1.0.0` stays.
+    fn short_label(version: &str) -> &str {
+        version.split_once('-').map_or(version, |(_, label)| label)
+    }
+
+    #[test]
+    fn tracker_release_comes_from_the_tracker_manifest() {
+        let version = tracker_release_version().expect("stat-tracker-core [package] version");
+        let core = include_str!("../../../../stat-tracker-core/Cargo.toml");
+        assert!(
+            core.lines()
+                .any(|line| line.trim() == format!("version = \"{version}\"")),
+            "{version} is not the version line of crates/stat-tracker-core/Cargo.toml"
+        );
+        // The daemon manifest is the release version the tag check reads first.
+        let daemon = include_str!("../../../../stat-tracker/Cargo.toml");
+        assert_eq!(
+            manifest_package_version(daemon),
+            Some(version),
+            "the install note must name the tracker release version"
+        );
+        let (core_digits, _) = version.split_once('-').unwrap_or((version, ""));
+        assert!(
+            super::is_release_core(core_digits),
+            "tracker version is not MAJOR.MINOR.PATCH[-label]: {version}"
+        );
+    }
+
+    #[test]
+    fn manifest_package_version_reads_only_the_package_table() {
+        let manifest = "# version = \"9.9.9\"\n[workspace]\nversion = \"8.8.8\"\n\
+            [package]\nname = \"x\"\nversion.workspace = true\n\
+            version   =   \"1.2.3-beta.4\" # comment\n[dependencies]\nversion = \"7.7.7\"\n";
+        assert_eq!(manifest_package_version(manifest), Some("1.2.3-beta.4"));
+        assert_eq!(
+            manifest_package_version("[package.metadata]\nversion = \"1.0.0\"\n"),
+            None
+        );
+        assert_eq!(
+            manifest_package_version("[package]\nname = \"x\"\n[lib]\nversion = \"1.0.0\"\n"),
+            None
+        );
+        assert_eq!(
+            manifest_package_version("[package]\nversion = \"\"\n"),
+            None
+        );
+        assert_eq!(manifest_package_version(""), None);
+    }
+
     #[test]
     fn release_notice_names_the_current_tracker_build() {
-        assert_eq!(TRACKER_RELEASE, "rc.9");
+        let version = tracker_release_version().expect("stat-tracker-core [package] version");
+        let label = short_label(version);
+        assert!(!label.is_empty());
         let pinned = tracker_release_notice_text(None);
         assert_eq!(
             pinned,
-            format!("Install {TRACKER_RELEASE} between games, not during one.")
+            format!("Install {label} between games, not during one.")
         );
         assert!(!pinned.contains('\u{2014}'));
         assert!(!pinned.contains('\u{2013}'));
-        assert!(pinned.contains(TRACKER_RELEASE));
+        assert!(pinned.contains(label));
+        if version.contains('-') {
+            assert!(
+                !pinned.contains(version),
+                "the note shows the short label, not {version}"
+            );
+        }
         let src = include_str!("mod.rs");
         // Built here so this test file does not itself contain the old labels.
         for previous in [
@@ -2176,14 +2279,26 @@ mod tracker_platform_copy_tests {
             );
         }
         let prod = src.split("mod tracker_platform_copy_tests").next().unwrap();
+        // No hardcoded build: the stale pin is gone and the current release
+        // is not written into the page source either.
+        let stale = ["rc", "9"].join(".");
+        assert!(
+            !prod.contains(&stale),
+            "the install note must not keep the stale build {stale}"
+        );
+        assert!(
+            !prod.contains(&format!("\"{label}\"")) && !prod.contains(version),
+            "the build name must come from the tracker manifest, not a literal"
+        );
         assert_eq!(
-            prod.matches("rc.9").count(),
+            prod.matches("include_str!(\"../../../../stat-tracker-core/Cargo.toml\")")
+                .count(),
             1,
-            "the build name lives only on TRACKER_RELEASE"
+            "the build name is read from crates/stat-tracker-core/Cargo.toml once"
         );
         assert!(
             !prod.contains("Install alpha."),
-            "the sentence must be built from TRACKER_RELEASE"
+            "the sentence must be built from the tracker version"
         );
         let call = "{tracker_release_notice(&tracker_notice)}";
         let slim = src.find("if slim_tracker {").expect("slim tracker");
@@ -2241,21 +2356,37 @@ mod tracker_platform_copy_tests {
 
     #[test]
     fn release_notice_formats_tracker_latest_like_the_pinned_fallback() {
+        let version = tracker_release_version().expect("stat-tracker-core [package] version");
         let pinned = tracker_release_notice_text(None);
         assert_eq!(
-            tracker_release_notice_text(Some("0.5.0-rc.9")),
+            tracker_release_notice_text(Some(version)),
             pinned,
-            "the current bare version reads the same as the pin"
+            "the current bare version reads the same as the fallback"
+        );
+        assert_eq!(
+            tracker_release_notice_text(Some(&format!("  {version}  "))),
+            pinned
         );
         assert_eq!(
             tracker_release_notice_text(Some("  0.5.0-alpha.11  ")),
             "Install alpha.11 between games, not during one."
         );
+        // The server's tracker_latest wins over the compiled-in version.
+        assert_eq!(
+            tracker_release_notice_text(Some("9.4.1-beta.2")),
+            "Install beta.2 between games, not during one."
+        );
+        assert_eq!(
+            tracker_release_notice_text(Some("beta.2")),
+            "Install beta.2 between games, not during one."
+        );
         assert_eq!(tracker_release_notice_text(Some("")), pinned);
         assert_eq!(tracker_release_notice_text(Some("   ")), pinned);
         assert_eq!(tracker_release_notice_text(Some("\n")), pinned);
-        let shown = tracker_release_notice_text(Some("0.5.0-rc.9"));
-        assert!(!shown.contains("0.5.0-"));
+        let shown = tracker_release_notice_text(Some(version));
+        if let Some((core, _)) = version.split_once('-') {
+            assert!(!shown.contains(&format!("{core}-")));
+        }
         assert!(!shown.contains("stat-tracker-v"));
         assert!(!shown.contains('\u{2014}'));
     }

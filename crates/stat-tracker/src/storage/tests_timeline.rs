@@ -376,6 +376,9 @@ async fn delete_all_removes_the_timeline_backups() {
     }
     let note = format!("{PRE_TIMELINE_BACKUP_PREFIX}20261029_101500.pending");
     std::fs::write(dir.path().join(note), "").unwrap();
+    // The size the cleared store's last vacuum left goes with it.
+    let last_size = dir.path().join(maintain::LAST_VACUUM_SIZE_FILE);
+    std::fs::write(last_size, "33200000").unwrap();
     force_clear_data_dir(dir.path()).unwrap();
     let left: Vec<_> = std::fs::read_dir(dir.path()).unwrap().flatten().collect();
     assert!(left.is_empty(), "{left:?}");

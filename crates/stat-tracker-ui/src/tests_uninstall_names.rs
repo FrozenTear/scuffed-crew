@@ -21,6 +21,19 @@ fn store_backups_are_tracker_data() {
     }
 }
 
+/// The size the last vacuum left (`vacuum.last-size`, the auto-vacuum's
+/// regrowth check) goes with the saved games, in both uninstallers.
+#[test]
+fn both_uninstallers_remove_the_last_vacuum_size() {
+    assert_eq!(
+        stat_tracker::storage::maintain::LAST_VACUUM_SIZE_FILE,
+        "vacuum.last-size"
+    );
+    assert!(is_tracker_data_name("vacuum.last-size"));
+    let sh = include_str!("../../stat-tracker/dist/uninstall.sh");
+    assert!(sh.contains("|vacuum.last-size|"), "dist/uninstall.sh");
+}
+
 /// The shell uninstaller keeps the same list (dist/uninstall.sh).
 #[test]
 fn the_shell_uninstaller_removes_the_timeline_backups_too() {
