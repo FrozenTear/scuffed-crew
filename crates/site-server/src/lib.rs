@@ -36,6 +36,7 @@ use tower_governor::{GovernorLayer, governor::GovernorConfigBuilder};
 use std::path::PathBuf;
 
 use rate_limit::TrustedProxyIpKeyExtractor;
+use scuffed_types::MAX_BUNDLE_BYTES;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
@@ -738,7 +739,9 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         .route(
             "/api/stat-reports",
             post(routes::stat_reports::create_stat_report)
-                .layer::<_, std::convert::Infallible>(DefaultBodyLimit::max(10 * 1024 * 1024))
+                .layer::<_, std::convert::Infallible>(DefaultBodyLimit::max(
+                    MAX_BUNDLE_BYTES as usize,
+                ))
                 // Outer layer, so a throttled request is refused before
                 // the body is read.
                 .layer(
