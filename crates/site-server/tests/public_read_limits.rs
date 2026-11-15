@@ -162,26 +162,17 @@ async fn anonymous_reads_share_the_public_per_ip_budget() {
         "{headers:?}"
     );
 
-    // One bucket for every anonymous read. The bucket refills one token per
-    // 100 ms, and `drain` can take longer than that, so the first request
-    // after it may be that token. A path on the governor still runs out
-    // before a fresh burst. A path outside it would answer the whole burst.
+    // One bucket for every anonymous read: once `/api/teams` has spent it,
+    // each of them is refused. Re-drain first so a token that refilled in
+    // the meantime cannot let one through.
     for path in ANONYMOUS_READS {
         drain(&app, peer).await;
-        let mut limited = false;
-        for _ in 0..PUBLIC_BURST {
-            let (status, _, body) = call(&app, Method::GET, path, peer).await;
-            if status == StatusCode::TOO_MANY_REQUESTS {
-                limited = true;
-                break;
-            }
-            assert_eq!(
-                status,
-                StatusCode::OK,
-                "GET {path} is outside the public governor: {body}"
-            );
-        }
-        assert!(limited, "GET {path} is outside the public governor");
+        let (status, _, body) = call(&app, Method::GET, path, peer).await;
+        assert_eq!(
+            status,
+            StatusCode::TOO_MANY_REQUESTS,
+            "GET {path} is outside the public governor: {body}"
+        );
     }
 
     // Writes on the same paths keep their old behaviour (auth check, no
