@@ -195,21 +195,28 @@ fn hero_icon_crop(
 /// (0.145 u).
 pub(crate) const CARD_SIDE: f64 = 0.158;
 /// How far from the panel read's box corner the card's left and top edges
-/// are searched, in `u`. The read's box sat 22 to 23 px left and 2 px
-/// above the card on one set of 1440p Tabs, and 4 to 13 px right and 14 to
-/// 15 px below it on another: at most 0.016 u.
+/// are searched, in `u` (43 px at 1440p). The read's box sat 22 to 23 px
+/// left and 2 px above the card on one set of 1440p Tabs, and 4 to 13 px
+/// right and 14 to 15 px below it on another: at most 0.016 u, so the
+/// span starts at least 0.014 u (20 px at 1440p) outside the card even
+/// for the worst measured box.
 const CARD_SEARCH: f64 = 0.03;
 /// Width of the dark and the card side compared at each edge candidate, in
 /// `u` (6 px at 1440p, at least 2 px), narrow enough to fit the dark gap
-/// between the header bar's right end and the card.
+/// between the header bar's right end and the card (13 to 40 px at 1440p).
 const CARD_STEP_WINDOW: f64 = 0.004;
 /// Most mean luma the dark side of an edge may have. The gap round the
-/// card measured 6 to 20.
-const CARD_GAP_MAX_LUMA: f64 = 32.0;
-/// Least mean luma rise from the dark side to the card side. The card
-/// measured 50 to 90 and more near its left and top edges, so a real edge
-/// rises 30 or more.
-const CARD_MIN_STEP: f64 = 24.0;
+/// card measured about 6 in live games and 16 to 17 in the Practice Range,
+/// where the game world shows behind the panel. A surround with no dark
+/// gap measured 35 to 40.
+const CARD_GAP_MAX_LUMA: f64 = 28.0;
+/// Least mean luma of the card side of an edge. The navy card fill
+/// measured 37 to 39, the portrait art 50 to 90 and more.
+const CARD_MIN_LUMA: f64 = 30.0;
+/// Least mean luma rise from the dark side to the card side. The dimmest
+/// real edge, a Practice Range gap of 16 to 17 on the card fill of 37 to
+/// 39, rises about 21.
+const CARD_MIN_STEP: f64 = 16.0;
 
 /// The career panel's portrait card in `frame` as `(x, y, side)`, from the
 /// top left corner `(x0, y0)` of the panel read's box: the card's left
@@ -218,9 +225,9 @@ const CARD_MIN_STEP: f64 = 24.0;
 /// its top edge the same way on a row profile over the middle half of its
 /// columns (both bands stay inside the card for any corner within the
 /// search, the texture of the portrait art averages out), and a square of
-/// [`CARD_SIDE`] cut from there. Each edge is the strongest dark to card
-/// rise ([`card_edge`]). `None` when either edge is not found or the
-/// square would leave the frame.
+/// [`CARD_SIDE`] cut from there. Each edge is the first dark to card step
+/// from outside the card ([`card_edge`]). `None` when either edge is not
+/// found or the square would leave the frame.
 pub(crate) fn snap_to_card(
     frame: &image::DynamicImage,
     (x0, y0): (u32, u32),
@@ -250,11 +257,24 @@ pub(crate) fn snap_to_card(
 }
 
 /// The card's edge on a luma profile (`profile(i)`: the mean luma of
-/// column or row `i`) of `len` positions: of the
-/// positions within `reach` of `at`, the one with the strongest rise from
-/// the `window` positions before it to the `window` from it, where the
-/// dark side is at most [`CARD_GAP_MAX_LUMA`] and the rise at least
-/// [`CARD_MIN_STEP`]. `None` when no position qualifies.
+/// column or row `i`) of `len` positions, scanned from `at - reach` toward
+/// `at + reach`, that is from outside the card inward: the gap is always
+/// outside the card, so the first dark to card step is the card's edge,
+/// and brighter portrait art just inside the card is never taken for it.
+///
+/// A position steps when the `window` positions before it (a dark run)
+/// average at most [`CARD_GAP_MAX_LUMA`], the `window` from it at least
+/// [`CARD_MIN_LUMA`], and the rise between them is at least
+/// [`CARD_MIN_STEP`]. Both sides are window means, so a sharp edge already
+/// steps up to `window - 1` positions before it, as the card side starts
+/// to take in the card. The edge is the first position from the first step
+/// that is card bright itself: at least [`CARD_MIN_LUMA`] and
+/// [`CARD_MIN_STEP`] above that step's dark run (one is always within the
+/// step's card side, as its mean passes both). A bright region outside (the
+/// header bar's right end) never steps: while any of its positions is in
+/// the dark side that side is too bright, and once a full dark run lies
+/// between it and the card, the card side is gap until the card. `None`
+/// when no position steps.
 fn card_edge(
     profile: impl Fn(u32) -> f64,
     at: u32,
@@ -272,17 +292,16 @@ fn card_edge(
         .collect();
     let mean = |s: &[f64]| s.iter().sum::<f64>() / s.len() as f64;
     let w = window as usize;
-    let mut best: Option<(i64, f64)> = None;
-    for edge in lo..=hi {
-        let i = (edge - lo) as usize + w;
+    let (first, dark) = (0..=(hi - lo) as usize).find_map(|edge| {
+        let i = edge + w;
         let dark = mean(&values[i - w..i]);
-        let rise = mean(&values[i..i + w]) - dark;
-        if dark <= CARD_GAP_MAX_LUMA && rise >= CARD_MIN_STEP && best.is_none_or(|(_, r)| rise > r)
-        {
-            best = Some((edge, rise));
-        }
-    }
-    best.map(|(edge, _)| edge as u32)
+        let card = mean(&values[i..i + w]);
+        (dark <= CARD_GAP_MAX_LUMA && card >= CARD_MIN_LUMA && card - dark >= CARD_MIN_STEP)
+            .then_some((i, dark))
+    })?;
+    let edge = (first..first + w)
+        .find(|&i| values[i] >= CARD_MIN_LUMA && values[i] - dark >= CARD_MIN_STEP)?;
+    Some((lo - window + edge as i64) as u32)
 }
 
 /// The six stat column windows a `stat_digits` crop is cut on, from the

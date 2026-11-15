@@ -367,6 +367,47 @@ fn placement_error(cut: Option<(u32, u32, u32)>, card: (u32, u32, u32)) -> Optio
     )
 }
 
+/// What [`scene_frame`] draws round and in a card.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Scene {
+    /// A textured card in the dark gap.
+    Plain,
+    /// A dim card rim (luma 40) on the left and top, then a bright art
+    /// band (luma 200) 3 to 5 px inside both edges at 1440p, so the
+    /// strongest dark to bright rise is inside the card.
+    ArtBand,
+    /// The Practice Range: a gap of luma 16 (the game world behind the
+    /// panel) round a navy card fill of 37 to 39.
+    DimGap,
+    /// A bright header bar (luma 200) across the card's rows, ending 13 px
+    /// left of the card at 1440p.
+    HeaderBar,
+}
+
+/// A `w` x `h` frame with `card`, `(left, top, side)`, drawn as `scene`,
+/// px offsets scaled from 1440p to a game rect `u` px high.
+fn scene_frame(w: u32, h: u32, card: (u32, u32, u32), scene: Scene, u: u32) -> DynamicImage {
+    let (left, top, side) = card;
+    let px = |v: f64| (v * f64::from(u) / 1440.0).round() as u32;
+    let (band_start, band_end, bar_end) = (px(3.0), px(6.0), left - px(13.0));
+    let gap = if scene == Scene::DimGap { 16 } else { GAP_LUMA };
+    DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+        if in_square(card, x, y) {
+            let inset = (x - left).min(y - top);
+            match scene {
+                Scene::DimGap => Rgb([37 + ((x + y) % 3) as u8; 3]),
+                Scene::ArtBand if inset < band_start => Rgb([40; 3]),
+                Scene::ArtBand if inset < band_end => Rgb([200; 3]),
+                _ => card_pixel(x, y, 60),
+            }
+        } else if scene == Scene::HeaderBar && x < bar_end && (top..top + side).contains(&y) {
+            Rgb([200; 3])
+        } else {
+            Rgb([gap; 3])
+        }
+    }))
+}
+
 #[test]
 fn the_hero_icon_cut_snaps_to_the_card_from_an_off_box() {
     // Box corner offsets from the card, in 1440p px: the measured misses
@@ -380,27 +421,38 @@ fn the_hero_icon_cut_snaps_to_the_card_from_an_off_box() {
         ("3440x1440 ultrawide", (3440, 1440), (440, 0), 1440),
         ("1920x1200 16:10", (1920, 1200), (0, 60), 1080),
     ];
-    for (name, (w, h), (gx, gy), u) in frames {
-        let scale = |v: f64| (v * f64::from(u) / 1440.0).round();
-        let card = (
-            gx + scale(1621.0) as u32,
-            gy + scale(209.0) as u32,
-            (CARD_SIDE * f64::from(u)).round() as u32,
-        );
-        let frame = card_frame(w, h, card, GAP_LUMA, 60);
-        let mut worst = 0;
-        for (dx, dy) in offsets {
-            let corner = (
-                (i64::from(card.0) + scale(dx as f64) as i64) as u32,
-                (i64::from(card.1) + scale(dy as f64) as i64) as u32,
+    let scenes = [
+        Scene::Plain,
+        Scene::ArtBand,
+        Scene::DimGap,
+        Scene::HeaderBar,
+    ];
+    for scene in scenes {
+        for (name, (w, h), (gx, gy), u) in frames {
+            let scale = |v: f64| (v * f64::from(u) / 1440.0).round();
+            let card = (
+                gx + scale(1621.0) as u32,
+                gy + scale(209.0) as u32,
+                (CARD_SIDE * f64::from(u)).round() as u32,
             );
-            let cut = snap_to_card(&frame, corner);
-            let err = placement_error(cut, card)
-                .unwrap_or_else(|| panic!("{name} offset ({dx}, {dy}): no card"));
-            assert!(err <= 2, "{name} offset ({dx}, {dy}): {cut:?} for {card:?}");
-            worst = worst.max(err);
+            let frame = scene_frame(w, h, card, scene, u);
+            let mut worst = 0;
+            for (dx, dy) in offsets {
+                let corner = (
+                    (i64::from(card.0) + scale(dx as f64) as i64) as u32,
+                    (i64::from(card.1) + scale(dy as f64) as i64) as u32,
+                );
+                let cut = snap_to_card(&frame, corner);
+                let err = placement_error(cut, card)
+                    .unwrap_or_else(|| panic!("{scene:?} {name} offset ({dx}, {dy}): no card"));
+                assert!(
+                    err <= 2,
+                    "{scene:?} {name} offset ({dx}, {dy}): {cut:?} for {card:?}"
+                );
+                worst = worst.max(err);
+            }
+            println!("{scene:?} {name}: card {card:?}, max placement error {worst} px");
         }
-        println!("{name}: card {card:?}, max placement error {worst} px");
     }
 }
 
@@ -415,19 +467,21 @@ fn no_hero_icon_cut_without_a_clear_card_inside_the_frame() {
             card_frame(2560, 1440, (0, 0, 0), GAP_LUMA, 0),
         ),
         ("uniform bright", card_frame(2560, 1440, (0, 0, 0), 120, 0)),
-        // A card that does not stand out: a rise of about 20 from the gap.
+        // A card that does not stand out: a gap of 20 and a card of 30 to
+        // 32, a rise of about 11, under CARD_MIN_STEP.
         ("low contrast", {
             let img = RgbImage::from_fn(2560, 1440, |x, y| {
                 if in_square(card, x, y) {
-                    Rgb([32 + ((x + y) % 4) as u8; 3])
+                    Rgb([30 + ((x + y) % 3) as u8; 3])
                 } else {
-                    Rgb([GAP_LUMA; 3])
+                    Rgb([20; 3])
                 }
             });
             DynamicImage::ImageRgb8(img)
         }),
-        // A bright card on a surround that is not the dark gap.
-        ("grey surround", card_frame(2560, 1440, card, 45, 100)),
+        // A bright card on a surround that is not the dark gap (a real
+        // one measured 35 to 40).
+        ("grey surround", card_frame(2560, 1440, card, 36, 100)),
     ];
     for (name, frame) in cases {
         assert_eq!(snap_to_card(&frame, corner), None, "{name}");
