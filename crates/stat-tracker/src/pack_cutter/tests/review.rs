@@ -510,7 +510,7 @@ fn extra_label_keys_are_ignored() {
                 "screen": "rank",
                 "hero": "Ana",
                 "notes": "ok",
-                "labeler": "soot",
+                "labeler": "labeler-a",
                 "placement_progress": false,
             })
         ),
@@ -526,7 +526,7 @@ fn extra_label_keys_are_ignored() {
                 "index": 1,
                 "file": "a.png",
                 "evidence": "icon",
-                "labeler": "soot",
+                "labeler": "labeler-a",
             })
         ),
     );
@@ -579,7 +579,7 @@ fn extra_label_keys_are_ignored() {
                 "title_box": [1, 2, 3, 4],
                 "visible": true,
                 "note": "ok",
-                "set": "soot",
+                "set": "set-a",
             })
         ),
     );

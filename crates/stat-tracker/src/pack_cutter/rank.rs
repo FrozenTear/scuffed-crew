@@ -40,7 +40,7 @@ pub fn cut(args: &CutArgs, out: &Path) -> Result<String, String> {
     let observed = learner.observed();
     let learned = learner.build();
     let replace: BTreeSet<String> = args.replace.iter().cloned().collect();
-    let unmarked = base.as_ref().is_some_and(lacks_pooled_marks);
+    let unmarked = base.as_ref().is_some_and(has_unmarked_fills);
     let (set, classes) = merge(learned, &observed, base, &replace, args.replace_all)?;
     let near = reject_near(&set, &classes, args.allow_near)?;
     set.check()
@@ -51,7 +51,7 @@ pub fn cut(args: &CutArgs, out: &Path) -> Result<String, String> {
     let mut text = loaded.notes;
     if unmarked {
         text.push_str(
-            "base pack has no pooled marks (cut before they existed): pooled fills are mixed, not replaced\n",
+            "base pack has unmarked pooled fills (cut before pooled marks existed): those fills are mixed, not replaced, and the written pack keeps them, so do not use it as a later --base\n",
         );
     }
     text.push_str(&near);
@@ -610,16 +610,23 @@ fn split_key(name: &str) -> Result<(Family, String), String> {
     Ok((parse_family(family)?, class.to_string()))
 }
 
-/// A base pack with numeric templates and no `pooled` mark on any of them
-/// was cut before the mark existed, so its pooled fills cannot be told
-/// apart from real cuts.
-fn lacks_pooled_marks(base: &TemplateSet) -> bool {
-    let mut numeric = Family::NUMERIC
+/// Whether a base pack still holds pooled fills without the `pooled` mark,
+/// which cannot be told apart from real cuts. A pack with numeric templates
+/// and no mark at all was cut before the mark existed. A pack with some
+/// marks can still carry unmarked fills inherited through a `--base` recut:
+/// the Learner never cuts a class its numeric family does not offer, so an
+/// unmarked template of such a class (`sr/%`, `change/%`) is one of them.
+fn has_unmarked_fills(base: &TemplateSet) -> bool {
+    let numeric: Vec<(Family, &crate::shadow::rank::templates::ClassTemplate)> = Family::NUMERIC
         .iter()
-        .filter_map(|family| base.families.get(family))
-        .flatten()
-        .peekable();
-    numeric.peek().is_some() && !numeric.any(|template| template.pooled)
+        .filter_map(|family| base.families.get(family).map(|t| (*family, t)))
+        .flat_map(|(family, templates)| templates.iter().map(move |t| (family, t)))
+        .collect();
+    let no_marks = !numeric.is_empty() && !numeric.iter().any(|(_, t)| t.pooled);
+    no_marks
+        || numeric
+            .iter()
+            .any(|(family, t)| !t.pooled && !offers(*family, &t.class))
 }
 
 /// Refuse two classes the reader compares, when one of them is new or
@@ -678,9 +685,9 @@ pub(super) fn reject_near(
 const NEAR_RANK_NOTE: &str =
     "the rank check compares raw template dots and does not use the reader's aspect term";
 
-/// The classes the reader offers in a glyph family (the allowed lists in
-/// [`Reader::read`]). `None` for the word families, where the reader
-/// compares every class.
+/// The classes the reader offers in a family (the allowed lists in
+/// [`Reader::read`]). `None` where the reader compares every class: the
+/// word families, and Role, a glyph family with no allowed list.
 fn offered(family: Family) -> Option<&'static [&'static str]> {
     use crate::shadow::rank::{CHEV_LEFT, CHEV_RIGHT, SR_ICON};
     const PCT: &[&str] = &[

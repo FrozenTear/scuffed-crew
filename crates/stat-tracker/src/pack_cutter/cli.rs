@@ -15,7 +15,7 @@ usage:
 --base, --baseline and --candidate are folders that hold templates.json (extract the published tar, or use the tracker's templates/rank-v1 or templates/queue-title-v1 folder).
 --name must be rank-v1.tar or queue-title-v1.tar, matching --kind.
 --replace CLASS (repeatable) or --replace-all makes a re-learned class replace the base template. The default mixes them by sample count.
---allow-near keeps a cut whose new classes correlate above the reader's margin.
+--allow-near keeps a cut where a new or re-learned class correlates above the reader's margin with a class it is compared to, and lists every such near pair.
 --allow-drop CLASS lets eval accept a baseline class the candidate does not have.
 --allow-unverified CLASS lets eval accept a changed class the label set does not exercise.
 Rank class names are family/class (role/Tank). Queue-title class names are the title text.

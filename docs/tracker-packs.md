@@ -132,7 +132,8 @@ default mix is weighted by sample count (`n`), and the summary prints
 `n <base> -> <new>` on every class line. That mix is for new frames. Cutting
 `--base` from the same labelled frames that built the pack mixes each class
 in a second time, so `n` doubles and the vector stays about the same (the
-mix re-normalises in f32, so the last bits can move). Recut those frames
+rank mix re-normalises in f32, so the last bits can move; the queue mix is a
+plain weighted mean with no re-normalise). Recut those frames
 with `--replace-all`, or `--replace` for the classes that should be
 replaced. `--replace CLASS` (repeatable) or `--replace-all` keeps the new
 cut instead. A numeric class the labels did not actually show is not a
@@ -143,9 +144,17 @@ it, and that line prints `new (pooled)`, with or without `--base`.
 
 The published `rank-v1` was cut before the `pooled` mark existed, so a
 `--base` recut against it cannot tell its pooled fills from real cuts: it
-prints `base pack has no pooled marks (cut before they existed): pooled
-fills are mixed, not replaced`. The first marked pack comes from a cut of
-the full label set without `--base`, held to the published pack by `eval`.
+prints `base pack has unmarked pooled fills (cut before pooled marks
+existed): those fills are mixed, not replaced, and the written pack keeps
+them, so do not use it as a later --base`. Such a recut can mark the classes
+it brings into the pool, while every inherited fill stays unmarked, so one
+`pooled` mark does not make a pack safe. The cutter also warns when any
+numeric template of a class its family does not offer (`sr/%`,
+`change/%`) lacks the mark: the Learner never cuts one, so it is an
+inherited fill. Do not use a pack that prints this warning as a later
+`--base` until a full cut without unmarked fills exists. The first such
+pack comes from a cut of the full label set without `--base`, held to the
+published pack by `eval`.
 
 `cut` refuses `--out` equal to `--base`, refuses an `--out` that already
 holds `templates.json` unless `--force`, and writes the file by rename. It
@@ -173,8 +182,9 @@ report prints `labelled: N`, `regressed frames:`, `allowed drops:`,
 `changed class`, and `candidate templates.json sha256:`. Compare that sha
 with the sha `pack` prints for the same file. `result:` is the last line.
 `regressed frames:` uses the label path, so a queue set with absolute paths
-prints home-folder paths. The `ignored keys in <labels path>:` line prints
-the labels path as typed, so it can hold a home-folder path too. Trim those
+prints home-folder paths. The `ignored keys in <labels path>:` and
+`skipped N row(s) with visible: false in <labels path>` lines print the
+labels path as typed, so they can hold a home-folder path too. Trim those
 before pasting a report into a PR or the fleet channel.
 
 `cut` also refuses a title or a rank word (`role_rank`, `next_mode_hint`,
@@ -194,8 +204,12 @@ queue `frame` included), is an error. Queue errors name the file line.
 
 A queue row with `visible: false` marks a title the frame does not show. It
 is skipped: not learned and not scored, and `cut` and `eval` print
-`skipped N row(s) with visible: false in <labels path>`. `visible: true`
-or no `visible` key is a normal row; any other value is an error.
+`skipped N row(s) with visible: false in <labels path>`. If every row is
+hidden, that line still prints, then the `no classes` or `empty label set`
+error. `visible: true` or no `visible` key is a normal row; any other value
+is an error. The ignored `bench_labelled_queue_titles` bench does not read
+`visible`: it still learns and scores hidden rows, so its numbers can
+differ from the cutter's on a set that has them.
 
 Two classes the reader compares, when one of them is new or re-learned, are
 refused when they correlate above the reader's margin. Rank compares raw

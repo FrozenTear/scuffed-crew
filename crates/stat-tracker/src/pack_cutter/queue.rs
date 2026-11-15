@@ -34,8 +34,13 @@ pub fn cut(args: &CutArgs, out: &Path) -> Result<String, String> {
     let replace: BTreeSet<String> = args.replace.iter().cloned().collect();
     let (set, classes) = merge(learned, base, &replace, args.replace_all)?;
     let near = reject_near(&set, &classes, args.allow_near)?;
-    set.check()
-        .map_err(|e| format!("refusing to write an unloadable queue-title pack: {e}"))?;
+    set.check().map_err(|e| {
+        // the notes say why there is nothing to cut (every row hidden)
+        format!(
+            "{}refusing to write an unloadable queue-title pack: {e}",
+            loaded.notes
+        )
+    })?;
     let dest = super::output::prepare_templates(out, args.base.as_deref(), args.force)?;
     let bytes = serde_json::to_vec(&set).map_err(|e| e.to_string())?;
     super::output::write_private(&dest, &bytes)?;
@@ -63,8 +68,8 @@ pub fn eval(args: &EvalArgs) -> Result<EvalDone, String> {
     let loaded = load(&args.labels, args.frames.as_deref())?;
     if loaded.samples.is_empty() {
         return Err(format!(
-            "empty label set ({} rows, {} layout-skipped)",
-            loaded.rows, loaded.skipped
+            "{}empty label set ({} rows, {} layout-skipped)",
+            loaded.notes, loaded.rows, loaded.skipped
         ));
     }
     let (changed, unverified) = changed_classes(

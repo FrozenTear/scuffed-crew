@@ -277,6 +277,63 @@ fn queue_rows_with_visible_false_are_skipped_and_named() {
 }
 
 #[test]
+fn queue_rows_all_hidden_still_print_the_skip_note() {
+    let files = write_queue(&[("s1/a.png", 0, "ALPHA QUEUE")], false);
+    let labels = files.dir.path().join("hidden.jsonl");
+    write(
+        &labels,
+        &format!(
+            "{}\n",
+            serde_json::json!({
+                "path": "s1/a.png",
+                "screen": "heroban",
+                "title_text": "ALPHA QUEUE",
+                "visible": false,
+            })
+        ),
+    );
+    let note = format!(
+        "skipped 1 row(s) with visible: false in {}\n",
+        labels.display()
+    );
+    let cut = run(&[
+        "cut",
+        "--kind",
+        "queue-title",
+        "--labels",
+        labels.to_str().unwrap(),
+        "--frames",
+        files.frames.to_str().unwrap(),
+        "--out",
+        files.dir.path().join("out").to_str().unwrap(),
+    ]);
+    assert_eq!(cut.code, 2, "{}", cut.stdout);
+    assert!(cut.stderr.starts_with(&note), "{}", cut.stderr);
+    assert!(cut.stderr.contains("no classes"), "{}", cut.stderr);
+
+    let pack = files.dir.path().join("pack");
+    assert_eq!(super::cut_queue(&files, &pack).code, 0);
+    let eval = run(&[
+        "eval",
+        "--kind",
+        "queue-title",
+        "--labels",
+        labels.to_str().unwrap(),
+        "--frames",
+        files.frames.to_str().unwrap(),
+        "--baseline",
+        pack.to_str().unwrap(),
+        "--candidate",
+        pack.to_str().unwrap(),
+        "--set-name",
+        "hidden",
+    ]);
+    assert_eq!(eval.code, 2, "{}", eval.stdout);
+    assert!(eval.stderr.starts_with(&note), "{}", eval.stderr);
+    assert!(eval.stderr.contains("empty label set"), "{}", eval.stderr);
+}
+
+#[test]
 fn queue_label_errors_name_the_file_line() {
     let files = write_queue(&[("s1/a.png", 0, "ALPHA QUEUE")], false);
     let cut = |labels: &Path| {
@@ -380,7 +437,7 @@ fn a_recut_against_an_unmarked_base_warns() {
         text.replace(",\"pooled\":true", ""),
     )
     .unwrap();
-    let warning = "base pack has no pooled marks (cut before they existed): pooled fills are mixed, not replaced";
+    let warning = "base pack has unmarked pooled fills (cut before pooled marks existed): those fills are mixed, not replaced, and the written pack keeps them, so do not use it as a later --base";
     let from_unmarked = cut_rank_to(
         &labels,
         &frames,
@@ -392,6 +449,27 @@ fn a_recut_against_an_unmarked_base_warns() {
         from_unmarked.stdout.contains(warning),
         "{}",
         from_unmarked.stdout
+    );
+    // one mark left in place: the other fills are still unmarked, as after a
+    // --base recut that brought one new class into the pool
+    let partly = root.path().join("partly");
+    std::fs::create_dir_all(&partly).unwrap();
+    let mark = ",\"pooled\":true";
+    let first = text.find(mark).unwrap() + mark.len();
+    let kept = format!("{}{}", &text[..first], text[first..].replace(mark, ""));
+    assert_eq!(kept.matches(mark).count(), 1);
+    std::fs::write(partly.join("templates.json"), kept).unwrap();
+    let from_partly = cut_rank_to(
+        &labels,
+        &frames,
+        &root.path().join("out-partly"),
+        &["--base", partly.to_str().unwrap()],
+    );
+    assert_eq!(from_partly.code, 0, "{}", from_partly.stderr);
+    assert!(
+        from_partly.stdout.contains(warning),
+        "{}",
+        from_partly.stdout
     );
     let from_marked = cut_rank_to(
         &labels,
@@ -412,12 +490,22 @@ fn a_rank_recut_with_base_mixes_by_n() {
     let root = scratch();
     let base_frames = root.path().join("base-frames");
     let next_frames = root.path().join("next-frames");
+    // two base frames against one new frame, so a mix that drops or swaps
+    // the weights gives a different vector
     save(&base_frames, "20260101-a/a.png", &paint_gate(2560, 1440));
-    save(&next_frames, "20260102-b/a.png", &paint_gate(1920, 1080));
+    save(&base_frames, "20260101-b/a.png", &paint_gate(2560, 1440));
+    save(&next_frames, "20260102-c/a.png", &paint_gate(1920, 1080));
     let base_labels = root.path().join("base.jsonl");
     let next_labels = root.path().join("next.jsonl");
-    write(&base_labels, &rank_row("20260101-a", "a.png", true));
-    write(&next_labels, &rank_row("20260102-b", "a.png", true));
+    write(
+        &base_labels,
+        &format!(
+            "{}{}",
+            rank_row("20260101-a", "a.png", true),
+            rank_row("20260101-b", "a.png", true)
+        ),
+    );
+    write(&next_labels, &rank_row("20260102-c", "a.png", true));
     let base = root.path().join("base");
     let alone = root.path().join("alone");
     let mixed = root.path().join("mixed");
@@ -433,24 +521,24 @@ fn a_rank_recut_with_base_mixes_by_n() {
     let gate = crate::shadow::rank::GATE_CLASS;
     assert!(
         got.stdout
-            .contains(&format!("class gate/{gate}: learned n 1 -> 2")),
+            .contains(&format!("class gate/{gate}: learned n 2 -> 3")),
         "{}",
         got.stdout
     );
     let a = template(&base, Family::Gate, gate);
     let b = template(&alone, Family::Gate, gate);
+    assert_eq!((a.n, b.n), (2, 1));
     assert_ne!(a.vector, b.vector, "the two cuts should differ");
-    let (na, nb) = (a.n as f32, b.n as f32);
     let want: Vec<f32> = a
         .vector
         .iter()
         .zip(&b.vector)
-        .map(|(x, y)| na * x + nb * y)
+        .map(|(x, y)| 2.0 * x + y)
         .collect();
     let got_t = template(&mixed, Family::Gate, gate);
-    assert_eq!(got_t.n, 2);
+    assert_eq!(got_t.n, 3);
     assert_eq!(got_t.vector, crate::shadow::rank::ink::unit(want));
-    let aspect = ((na * a.aspect.ln() + nb * b.aspect.ln()) / (na + nb)).exp();
+    let aspect = ((2.0 * a.aspect.ln() + b.aspect.ln()) / 3.0).exp();
     assert_eq!(got_t.aspect, aspect);
 }
 
@@ -598,6 +686,52 @@ fn eval_pooled_classes_are_not_unverified() {
     assert!(
         !got.stdout.contains("unverified classes:"),
         "pooled {pooled:?}\n{}",
+        got.stdout
+    );
+}
+
+#[test]
+fn eval_skips_coverage_for_a_class_the_family_does_not_offer() {
+    let root = scratch();
+    let frames = root.path().join("frames");
+    let green = Scene::default();
+    let red = Scene {
+        change: Some(-27),
+        ..Scene::default()
+    };
+    save(&frames, "20260101-a/a.png", &tests_synth::paint(&green));
+    save(&frames, "20260102-b/a.png", &tests_synth::paint(&red));
+    let green_labels = root.path().join("green.jsonl");
+    let red_labels = root.path().join("red.jsonl");
+    write(&green_labels, &lines(&[&synth_row(&green, "20260101-a")]));
+    write(&red_labels, &lines(&[&synth_row(&red, "20260102-b")]));
+    let baseline = root.path().join("baseline");
+    assert_eq!(cut_rank_to(&green_labels, &frames, &baseline, &[]).code, 0);
+    // + is cut only in the green pill, so higher/+ and pct/+ are pooled
+    // fills, and no field of the red frame shows a +
+    assert!(template(&baseline, Family::Higher, "+").pooled);
+    assert!(template(&baseline, Family::Pct, "+").pooled);
+
+    // higher never offers +, so a changed higher/+ needs no frame
+    let higher = root.path().join("higher");
+    tweaked(&baseline, &higher, "higher", "+");
+    let got = eval_rank(&red_labels, &frames, &baseline, &higher, &[]);
+    assert!(
+        got.stdout.contains("changed class higher/+: "),
+        "{}\n{}",
+        got.stderr,
+        got.stdout
+    );
+    assert!(!got.stdout.contains("unverified"), "{}", got.stdout);
+
+    // pct offers +, so a changed pct/+ still needs a frame that shows one
+    let pct = root.path().join("pct");
+    tweaked(&baseline, &pct, "pct", "+");
+    let got = eval_rank(&red_labels, &frames, &baseline, &pct, &[]);
+    assert_eq!(got.code, 1, "{}\n{}", got.stderr, got.stdout);
+    assert!(
+        got.stdout.contains("unverified classes: pct/+\n"),
+        "{}",
         got.stdout
     );
 }

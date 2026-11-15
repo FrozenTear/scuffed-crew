@@ -136,6 +136,39 @@ fn rank_near_check_skips_classes_the_reader_does_not_offer() {
 }
 
 #[test]
+fn rank_near_check_skips_a_pair_of_kept_classes() {
+    let reject = super::super::rank::reject_near;
+    let v = [0.6, 0.8];
+    let set = RankSet {
+        recognizer: crate::shadow::rank::RECOGNIZER_ID.into(),
+        families: BTreeMap::from([(
+            Family::Pct,
+            vec![rank_template("7", &v), rank_template("%", &v)],
+        )]),
+    };
+    let notes = |fate: ClassFate| -> Vec<ClassNote> {
+        vec![
+            ("pct/7".into(), fate, 1, 1),
+            ("pct/%".into(), ClassFate::Kept, 1, 1),
+        ]
+    };
+    // neither class is new or re-learned, so the pair is not checked
+    assert_eq!(
+        reject(&set, &notes(ClassFate::Kept), false),
+        Ok(String::new())
+    );
+    assert_eq!(
+        reject(&set, &notes(ClassFate::KeptPooled), false),
+        Ok(String::new())
+    );
+    let err = reject(&set, &notes(ClassFate::Learned), false).unwrap_err();
+    assert!(
+        err.contains("class pct/7 correlates 1.000 with pct/%"),
+        "{err}"
+    );
+}
+
+#[test]
 fn queue_near_check_uses_ncc_not_cosine() {
     use crate::shadow::queue_title::{TH, TW, templates::ClassTemplate};
     let pattern = |i: usize| {
