@@ -8,6 +8,13 @@
 //! `--accent-soft`) is derived from the brand hex by [`AccentRoles::derive`],
 //! a port of the design system's `derive-accent.js`, including its contrast
 //! lock and the mint lock for the live brand.
+//!
+//! Port source: the design-system package (`site-redesign/design-system/`),
+//! which is not vendored in this repo. Files and sha256 the port matches:
+//! - `tokens/derive-accent.js`
+//!   `adf946e17cdebd1f0c753527a8964af7e056a206ffabf85932d1b7d4049c21a5`
+//! - `tokens.md`
+//!   `c224092174343293c88ab6fd94821989b009445886aab86cc744a280e4b877b8`
 
 /// Dark ink for a fill that white text does not clear 4.5:1 on.
 /// Same value as `--neutral-900` and Look A dark `--bg`.
@@ -556,7 +563,12 @@ mod tests {
 
     /// A low-contrast brand is adjusted, never shipped as-is: yellow on a
     /// light surface is darkened until 4.5:1, and every derived pair holds
-    /// for any brand, including the product purple and the strategy orange.
+    /// for the brands listed here, including the product purple and the
+    /// strategy orange. Not for every brand: in dark, `--on-accent` falls
+    /// back to dark ink without a check, so for a dark solid with relative
+    /// luminance between about 0.1833 and 0.2148 neither white nor the ink
+    /// reaches 4.5:1 (`#d35400`: ink 4.28:1, white 4.17:1).
+    /// `derive-accent.js` has the same gap; the fix belongs there first.
     #[test]
     fn low_contrast_accent_is_adjusted_to_aa() {
         let yellow = AccentRoles::derive("#ffff00", Scheme::Light);

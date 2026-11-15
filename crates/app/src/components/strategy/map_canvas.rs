@@ -25,9 +25,10 @@ use scuffed_types::strategy::{
 use super::hero_chip::{HeroChip, hero_chip, portrait_ready};
 use crate::canvas::tile_manager::{SharedTileManager, create_tile_manager};
 use crate::theme::tokens::{
-    CANVAS_BADGE_BG, CANVAS_BG, CANVAS_GRID_LOADING, CANVAS_MARKER_BORDER, CANVAS_SELECTION_TOKEN,
-    CANVAS_TEXT_LOADING, CANVAS_TILE_PLACEHOLDER, CANVAS_WHITE, HP_GLOW, HP_LARGE_FILL,
-    HP_LARGE_STROKE, HP_SMALL_FILL, HP_SMALL_STROKE, STRATEGY_ACCENT,
+    CANVAS_BADGE_BG, CANVAS_BG, CANVAS_GRID_LOADING, CANVAS_MARKER_BORDER,
+    CANVAS_SELECTION_FALLBACK, CANVAS_SELECTION_TOKEN, CANVAS_TEXT_LOADING,
+    CANVAS_TILE_PLACEHOLDER, CANVAS_WHITE, HP_GLOW, HP_LARGE_FILL, HP_LARGE_STROKE, HP_SMALL_FILL,
+    HP_SMALL_STROKE, STRATEGY_ACCENT,
 };
 
 // =============================================================================
@@ -744,15 +745,15 @@ pub fn MapCanvas(
                 .collect();
 
             // `--canvas-selection` follows the brand's solid accent for this
-            // theme, so it is read from the canvas's computed style.
+            // theme, so it is read from the canvas's computed style. If it
+            // resolves empty, the outline still draws in the fallback colour.
             let selection = web_sys::window()
                 .and_then(|w| w.get_computed_style(&canvas).ok().flatten())
                 .and_then(|style| style.get_property_value(CANVAS_SELECTION_TOKEN).ok())
                 .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty());
-            if let (Some(element), Some(selection)) =
-                (visible.iter().find(|e| e.id == sel), selection)
-            {
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| CANVAS_SELECTION_FALLBACK.to_string());
+            if let Some(element) = visible.iter().find(|e| e.id == sel) {
                 ctx.set_stroke_style_str(&selection);
                 ctx.set_line_width(2.0);
                 let dash = Array::of2(&4.0.into(), &4.0.into());

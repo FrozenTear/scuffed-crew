@@ -1,5 +1,8 @@
 /* Scuffed Crew site tokens: primitives
-   Raw ramps and scales only. Pages must never reference these names.
+   Raw ramps and scales only. Pages must never reference the colour
+   primitives (--neutral-*, --mint-*, --blue-* and the other ramps); they use
+   semantic roles. The spacing scale (--space-*) is the exception for now:
+   pages use it directly until spacing gets semantic tokens.
    A future theme remaps semantic roles onto this file (or an extended ramp). */
 
 :root {

@@ -99,6 +99,10 @@ pub const STRATEGY_ACCENT: &str = brand::STRATEGY_BRAND;
 /// Selection follows the brand and theme (`--sel-ring`, the solid accent), so
 /// the canvas reads it from computed style instead of a literal.
 pub const CANVAS_SELECTION_TOKEN: &str = "--canvas-selection";
+/// Selection ring when computed `--canvas-selection` is empty: the product
+/// default dark solid accent (the planner field is dark in both themes).
+/// `desktop_canvas.js` carries the same literal; a test holds the two together.
+pub const CANVAS_SELECTION_FALLBACK: &str = BRAND_ACCENT_DARK;
 pub const CANVAS_BADGE_BG: &str = "rgba(0,0,0,0.7)";
 pub const CANVAS_WHITE: &str = "#ffffff";
 pub const HP_SMALL_FILL: &str = "#ffeb3b";
@@ -183,9 +187,9 @@ pub(crate) fn resolved_tokens(css: &str, theme: &str) -> std::collections::HashM
 #[cfg(test)]
 mod tests {
     use super::{
-        BrandConfig, CANVAS_BG, CANVAS_TILE_PLACEHOLDER, HP_LARGE_FILL, HP_LARGE_STROKE,
-        HP_SMALL_FILL, HP_SMALL_STROKE, MINT_REFINED, STRATEGY_ACCENT, TEMPLATES, resolved_tokens,
-        template_by_id, theme_css, theme_css_for,
+        BrandConfig, CANVAS_BG, CANVAS_SELECTION_FALLBACK, CANVAS_TILE_PLACEHOLDER, HP_LARGE_FILL,
+        HP_LARGE_STROKE, HP_SMALL_FILL, HP_SMALL_STROKE, MINT_REFINED, STRATEGY_ACCENT, TEMPLATES,
+        resolved_tokens, template_by_id, theme_css, theme_css_for,
     };
     use crate::theme::brand::{DARK_SURFACES, LIGHT_SURFACES, contrast_ratio};
 
@@ -379,6 +383,23 @@ mod tests {
         assert_eq!(
             get(&tokens, "--canvas-selection"),
             get(&tokens, "--accent-solid")
+        );
+    }
+
+    /// The canvas fallback is the product default's selection colour, and
+    /// the desktop canvas script uses the same literal.
+    #[test]
+    fn canvas_selection_fallback_matches_the_product_default() {
+        let css = theme_css(&BrandConfig::product_default());
+        let tokens = resolved_tokens(&css, "dark");
+        assert_eq!(
+            get(&tokens, "--canvas-selection"),
+            CANVAS_SELECTION_FALLBACK
+        );
+        let js = include_str!("../../assets/desktop_canvas.js");
+        assert!(
+            js.contains(&format!("|| \"{CANVAS_SELECTION_FALLBACK}\"")),
+            "desktop_canvas.js selection fallback"
         );
     }
 

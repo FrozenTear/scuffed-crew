@@ -1534,9 +1534,18 @@ fn render_patch_card(
     }
 }
 
+/// Pill fill. Maps sits on the opaque `--info-soft` surface, which holds
+/// `--info` ink at AA; the other tags keep the 12% wash of their ink.
+fn section_tag_bg(category: &str) -> String {
+    match section_tag_color(category) {
+        "var(--info)" => "var(--info-soft)".to_string(),
+        color => format!("color-mix(in srgb, {color} 12%, transparent)"),
+    }
+}
+
 fn render_tag_pill(category: &str) -> Element {
     let color = section_tag_color(category);
-    let bg = format!("color-mix(in srgb, {color} 12%, transparent)");
+    let bg = section_tag_bg(category);
     rsx! {
         span {
             class: "patch-tag-pill",
@@ -2171,8 +2180,11 @@ mod tests {
 
     #[test]
     fn tag_pill_ink_uses_text_roles_not_chart_series() {
-        // Pill ink is 12px text on a 12% wash. Chart series colours are not
-        // held to AA as text (light --chart-5 is 3.5:1 there); --info is.
+        // Pill ink is 12px / 600 text, so it needs 4.5:1. Chart series
+        // colours are not text roles: light --chart-5 on a 12% wash over
+        // --surface is 3.51:1. --info on that wash reaches only 4.37:1 light
+        // (4.62:1 dark), so the Maps pill sits on --info-soft instead:
+        // 4.64:1 light, 4.72:1 dark (WCAG 2).
         for cat in [
             "Hero Balance",
             "Bug Fixes",
@@ -2184,5 +2196,6 @@ mod tests {
             assert!(!ink.contains("--chart"), "{cat}: {ink}");
         }
         assert_eq!(section_tag_color("Maps"), "var(--info)");
+        assert_eq!(section_tag_bg("Maps"), "var(--info-soft)");
     }
 }
