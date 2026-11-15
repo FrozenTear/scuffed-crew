@@ -98,9 +98,9 @@ fn mark_offered(key: String) {
 
 /// Cut this Tab's `hero_icon` and `stat_digits` crops for the game
 /// `session_id` and keep them on a blocking thread. Only the consent, gate
-/// and box checks and the card snap (two thin luma profiles) run here; the
-/// rest of the pixel work runs on that thread. `None` when there is nothing
-/// to cut. The handle is for tests.
+/// and box checks and, for a hero icon still wanted, the card snap (two
+/// thin luma profiles) run here; the rest of the pixel work runs on that
+/// thread. `None` when there is nothing to cut. The handle is for tests.
 pub(crate) fn archive_tab_training_crops(
     data_dir: &Path,
     session_id: &str,
@@ -109,9 +109,8 @@ pub(crate) fn archive_tab_training_crops(
 ) -> Option<tokio::task::JoinHandle<()>> {
     use stat_tracker::sync::UploadKind::{HeroIcon, StatDigits};
     let hero = sync::training_kind_on(data_dir, HeroIcon)
-        .then(|| hero_icon_crop(frame, source.panel, source.pack_hero))
-        .flatten()
-        .filter(|crop| !offered(&offer_key(session_id, HeroIcon, &crop.hero)));
+        .then(|| hero_icon_crop(frame, session_id, source.panel, source.pack_hero))
+        .flatten();
     let digit_row = (sync::training_kind_on(data_dir, StatDigits)
         && !offered(&offer_key(session_id, StatDigits, "")))
     .then(|| stat_digit_row(source.row, source.own_row))
@@ -156,17 +155,28 @@ pub(crate) fn stat_digit_row(row: Option<usize>, own_row: Option<OwnRow>) -> Opt
 
 /// The career panel's portrait card in `frame`: only when the panel read
 /// passed the panel gate and names `pack_hero`, the Tab's hero authority,
-/// and [`snap_to_card`] finds the card next to the read's box. `None` for
-/// no read (ocr-v1, no hero pack), an abstain, a box outside the frame, or
-/// no card found.
+/// the game `session_id` has not offered that hero's crop yet, the card's
+/// side is within the `hero_icon` edge cap, and [`snap_to_card`] finds the
+/// card next to the read's box. `None` for no read (ocr-v1, no hero pack),
+/// an abstain, a hero already offered, a card over the cap (4K: never
+/// resized, so never kept), a box outside the frame, or no card found. The
+/// checks before the snap keep its pixel work off a Tab whose crop could
+/// not be kept anyway.
 fn hero_icon_crop(
     frame: &image::DynamicImage,
+    session_id: &str,
     panel: Option<&PanelRead>,
     pack_hero: Option<&str>,
 ) -> Option<HeroCrop> {
     let panel = panel?;
     let hero = panel.accepted()?;
-    if pack_hero != Some(hero) {
+    if pack_hero != Some(hero) || offered(&offer_key(session_id, sync::UploadKind::HeroIcon, hero))
+    {
+        return None;
+    }
+    let (max_w, max_h) = sync::UploadKind::HeroIcon.crop_kind().max_edges();
+    if card_side(frame.width(), frame.height()) > max_w.min(max_h) {
+        tracing::debug!(target: "scuffed_stat_tracker", "career panel card over the hero icon edge cap: no hero icon crop");
         return None;
     }
     let (x0, y0, x1, y1) = panel.box_px;
@@ -210,9 +220,11 @@ const CARD_STEP_WINDOW: f64 = 0.004;
 /// where the game world shows behind the panel. A surround with no dark
 /// gap measured 35 to 40.
 const CARD_GAP_MAX_LUMA: f64 = 28.0;
-/// Least mean luma of the card side of an edge. The navy card fill
-/// measured 37 to 39, the portrait art 50 to 90 and more.
-const CARD_MIN_LUMA: f64 = 30.0;
+/// Least mean luma of the card side of an edge. The navy card fill dims
+/// with the game world behind it: it measured 37 to 39 over a Practice
+/// Range world of 16 to 17 and 25 to 29 over a black one (luma 0), the
+/// portrait art 50 to 90 and more.
+const CARD_MIN_LUMA: f64 = 24.0;
 /// Least mean luma rise from the dark side to the card side. The dimmest
 /// real edge, a Practice Range gap of 16 to 17 on the card fill of 37 to
 /// 39, rises about 21.
@@ -236,7 +248,7 @@ pub(crate) fn snap_to_card(
     let (w, h) = frame.dimensions();
     let (_, _, _, gh) = stat_tracker::frame::geometry::game_rect_16_9(w, h);
     let u = f64::from(gh);
-    let side = (CARD_SIDE * u).round() as u32;
+    let side = card_side(w, h);
     let reach = (CARD_SEARCH * u).round() as i64;
     let window = ((CARD_STEP_WINDOW * u).round() as i64).max(2);
     let luma = |x: u32, y: u32| {
@@ -256,6 +268,13 @@ pub(crate) fn snap_to_card(
     (left + side <= w && top + side <= h).then_some((left, top, side))
 }
 
+/// The card's side in px in a `w` x `h` frame: [`CARD_SIDE`] of the 16:9
+/// game rect's height.
+fn card_side(w: u32, h: u32) -> u32 {
+    let (_, _, _, gh) = stat_tracker::frame::geometry::game_rect_16_9(w, h);
+    (CARD_SIDE * f64::from(gh)).round() as u32
+}
+
 /// The card's edge on a luma profile (`profile(i)`: the mean luma of
 /// column or row `i`) of `len` positions, scanned from `at - reach` toward
 /// `at + reach`, that is from outside the card inward: the gap is always
@@ -268,13 +287,18 @@ pub(crate) fn snap_to_card(
 /// [`CARD_MIN_STEP`]. Both sides are window means, so a sharp edge already
 /// steps up to `window - 1` positions before it, as the card side starts
 /// to take in the card. The edge is the first position from the first step
-/// that is card bright itself: at least [`CARD_MIN_LUMA`] and
-/// [`CARD_MIN_STEP`] above that step's dark run (one is always within the
-/// step's card side, as its mean passes both). A bright region outside (the
-/// header bar's right end) never steps: while any of its positions is in
-/// the dark side that side is too bright, and once a full dark run lies
-/// between it and the card, the card side is gap until the card. `None`
-/// when no position steps.
+/// at least halfway from that step's dark run to its card side, or
+/// [`CARD_MIN_STEP`] above the dark run where that is less (one always is:
+/// the halfway point is under the card side's mean). Relative to the step,
+/// not a fixed luma: a half bright anti-aliased first column of the card
+/// (luma 25 between a gap of 0 to 6 and a fill of 37, or 27 on a game
+/// world gap of 16) is the card's, and the [`CARD_MIN_STEP`] bound keeps a
+/// dim card rim the edge when bright portrait art right behind it lifts
+/// the card side's mean. A bright region outside (the header bar's right
+/// end) never steps: while any of its positions is in the dark side that
+/// side is too bright, and once a full dark run lies between it and the
+/// card, the card side is gap until the card. `None` when no position
+/// steps.
 fn card_edge(
     profile: impl Fn(u32) -> f64,
     at: u32,
@@ -292,15 +316,15 @@ fn card_edge(
         .collect();
     let mean = |s: &[f64]| s.iter().sum::<f64>() / s.len() as f64;
     let w = window as usize;
-    let (first, dark) = (0..=(hi - lo) as usize).find_map(|edge| {
+    let (first, dark, card) = (0..=(hi - lo) as usize).find_map(|edge| {
         let i = edge + w;
         let dark = mean(&values[i - w..i]);
         let card = mean(&values[i..i + w]);
         (dark <= CARD_GAP_MAX_LUMA && card >= CARD_MIN_LUMA && card - dark >= CARD_MIN_STEP)
-            .then_some((i, dark))
+            .then_some((i, dark, card))
     })?;
-    let edge = (first..first + w)
-        .find(|&i| values[i] >= CARD_MIN_LUMA && values[i] - dark >= CARD_MIN_STEP)?;
+    let bright = dark + ((card - dark) / 2.0).min(CARD_MIN_STEP);
+    let edge = (first..first + w).find(|&i| values[i] >= bright)?;
     Some((lo - window + edge as i64) as u32)
 }
 

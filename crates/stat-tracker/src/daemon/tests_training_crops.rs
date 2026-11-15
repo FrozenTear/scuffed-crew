@@ -47,11 +47,12 @@ fn coord_of(p: &Rgb<u8>) -> (u32, u32) {
 const REAL_LABELS: [f64; 6] = [0.3206, 0.3549, 0.3912, 0.4441, 0.5093, 0.5661];
 
 /// Mean luma of the dark gap drawn round a synthetic career panel card:
-/// the real gap measured 6 to 20.
+/// the real gap measured 0 to 17.
 const GAP_LUMA: u8 = 12;
 
-/// A textured career panel card pixel, mean luma about 60 to 110 (the
-/// real card measured 50 to 90 and more near its left and top edges).
+/// A textured career panel card pixel, luma about `base - 5` to
+/// `base + 45` (the real card measured 50 to 90 and more near its left
+/// and top edges in live games).
 fn card_pixel(x: u32, y: u32, base: u8) -> Rgb<u8> {
     let v = base.saturating_add(((x * 37 + y * 101 + (x * y) % 13) % 50) as u8);
     Rgb([v, v.saturating_sub(12), v.saturating_add(20)])
@@ -331,12 +332,13 @@ async fn the_card_crop_has_one_side_and_over_256_px_is_skipped_never_resized() {
     }
     assert_eq!(sync::training_warning(dir.path()), None);
 
-    // 4K: the card's side (341 px) is over the cap.
+    // 4K: the card's side (341 px) is over the cap, so nothing is cut: no
+    // snap, no frame copy and no PNG encode on any Tab.
     let dir = tempfile::tempdir().unwrap();
     set_consent(dir.path(), true, false);
     let uhd = card_frame(3840, 2160, (2432, 314, 342), GAP_LUMA, 60);
     let over = panel((2420, 320, 2720, 620), "ana", 0.97);
-    assert!(run(dir.path(), "tc-uhd", &uhd, source(Some(&over), Some("ana"))).await);
+    assert!(!run(dir.path(), "tc-uhd", &uhd, source(Some(&over), Some("ana"))).await);
     assert!(sync::queued_crops(dir.path(), UploadKind::HeroIcon).is_empty());
     assert!(
         !sync::has_queued_crops(dir.path()),
@@ -382,7 +384,23 @@ enum Scene {
     /// A bright header bar (luma 200) across the card's rows, ending 13 px
     /// left of the card at 1440p.
     HeaderBar,
+    /// A half bright anti-aliased first column and row (luma 25) between a
+    /// gap of 0 to 6 and a navy fill of 37 to 39, as on real Practice
+    /// Range Tabs.
+    AntiAliased,
+    /// [`Scene::DimGap`] with a half bright first column and row (luma 27).
+    AntiAliasedOnDimGap,
+    /// A dim fill on a black gap (luma 0): [`DIM_FILL`] in from the left
+    /// and top edges, then textured card.
+    DimFill,
 }
+
+/// Card luma by px in from its left or top edge at 1440p for
+/// [`Scene::DimFill`], as measured on a real Practice Range Tab over a
+/// black game world: 25 to 29 for 10 px, then rising into the art.
+const DIM_FILL: [u8; 20] = [
+    25, 29, 26, 28, 28, 28, 29, 29, 29, 29, 31, 34, 35, 35, 37, 39, 40, 41, 50, 57,
+];
 
 /// A `w` x `h` frame with `card`, `(left, top, side)`, drawn as `scene`,
 /// px offsets scaled from 1440p to a game rect `u` px high.
@@ -390,12 +408,21 @@ fn scene_frame(w: u32, h: u32, card: (u32, u32, u32), scene: Scene, u: u32) -> D
     let (left, top, side) = card;
     let px = |v: f64| (v * f64::from(u) / 1440.0).round() as u32;
     let (band_start, band_end, bar_end) = (px(3.0), px(6.0), left - px(13.0));
-    let gap = if scene == Scene::DimGap { 16 } else { GAP_LUMA };
+    let navy = |x: u32, y: u32| Rgb([37 + ((x + y) % 3) as u8; 3]);
     DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
         if in_square(card, x, y) {
             let inset = (x - left).min(y - top);
             match scene {
-                Scene::DimGap => Rgb([37 + ((x + y) % 3) as u8; 3]),
+                Scene::DimGap => navy(x, y),
+                Scene::AntiAliased if inset == 0 => Rgb([25; 3]),
+                Scene::AntiAliasedOnDimGap if inset == 0 => Rgb([27; 3]),
+                Scene::AntiAliased | Scene::AntiAliasedOnDimGap => navy(x, y),
+                Scene::DimFill => {
+                    let at = (f64::from(inset) * 1440.0 / f64::from(u)) as usize;
+                    DIM_FILL
+                        .get(at)
+                        .map_or_else(|| card_pixel(x, y, 60), |&v| Rgb([v; 3]))
+                }
                 Scene::ArtBand if inset < band_start => Rgb([40; 3]),
                 Scene::ArtBand if inset < band_end => Rgb([200; 3]),
                 _ => card_pixel(x, y, 60),
@@ -403,7 +430,12 @@ fn scene_frame(w: u32, h: u32, card: (u32, u32, u32), scene: Scene, u: u32) -> D
         } else if scene == Scene::HeaderBar && x < bar_end && (top..top + side).contains(&y) {
             Rgb([200; 3])
         } else {
-            Rgb([gap; 3])
+            match scene {
+                Scene::DimGap | Scene::AntiAliasedOnDimGap => Rgb([16; 3]),
+                Scene::AntiAliased => Rgb([((x + y) % 7) as u8; 3]),
+                Scene::DimFill => Rgb([0; 3]),
+                _ => Rgb([GAP_LUMA; 3]),
+            }
         }
     }))
 }
@@ -412,12 +444,13 @@ fn scene_frame(w: u32, h: u32, card: (u32, u32, u32), scene: Scene, u: u32) -> D
 fn the_hero_icon_cut_snaps_to_the_card_from_an_off_box() {
     // Box corner offsets from the card, in 1440p px: the measured misses
     // (22 to 23 px left and 2 px up, 4 to 13 px right and 14 to 15 px
-    // down), none, and a worse one. Scaled by u for other frames.
+    // down), none, and two worse ones. Scaled by u for other frames.
     let offsets: [(i64, i64); 5] = [(-23, -2), (13, 15), (0, 0), (20, -20), (-40, 40)];
     // (name, frame size, game rect left and top, u)
     let frames = [
         ("2560x1440", (2560, 1440), (0, 0), 1440),
         ("1920x1080", (1920, 1080), (0, 0), 1080),
+        ("1280x720", (1280, 720), (0, 0), 720),
         ("3440x1440 ultrawide", (3440, 1440), (440, 0), 1440),
         ("1920x1200 16:10", (1920, 1200), (0, 60), 1080),
     ];
@@ -426,6 +459,9 @@ fn the_hero_icon_cut_snaps_to_the_card_from_an_off_box() {
         Scene::ArtBand,
         Scene::DimGap,
         Scene::HeaderBar,
+        Scene::AntiAliased,
+        Scene::AntiAliasedOnDimGap,
+        Scene::DimFill,
     ];
     for scene in scenes {
         for (name, (w, h), (gx, gy), u) in frames {
@@ -445,8 +481,9 @@ fn the_hero_icon_cut_snaps_to_the_card_from_an_off_box() {
                 let cut = snap_to_card(&frame, corner);
                 let err = placement_error(cut, card)
                     .unwrap_or_else(|| panic!("{scene:?} {name} offset ({dx}, {dy}): no card"));
-                assert!(
-                    err <= 2,
+                // Exact: a px off is the miss this guards against.
+                assert_eq!(
+                    err, 0,
                     "{scene:?} {name} offset ({dx}, {dy}): {cut:?} for {card:?}"
                 );
                 worst = worst.max(err);
@@ -454,6 +491,18 @@ fn the_hero_icon_cut_snaps_to_the_card_from_an_off_box() {
             println!("{scene:?} {name}: card {card:?}, max placement error {worst} px");
         }
     }
+}
+
+/// A 2560x1440 frame of the gap luma `gap` with `card` filled at `fill`
+/// to `fill + 2`.
+fn flat_card_frame(card: (u32, u32, u32), gap: u8, fill: u8) -> DynamicImage {
+    DynamicImage::ImageRgb8(RgbImage::from_fn(2560, 1440, |x, y| {
+        if in_square(card, x, y) {
+            Rgb([fill + ((x + y) % 3) as u8; 3])
+        } else {
+            Rgb([gap; 3])
+        }
+    }))
 }
 
 #[test]
@@ -469,16 +518,11 @@ fn no_hero_icon_cut_without_a_clear_card_inside_the_frame() {
         ("uniform bright", card_frame(2560, 1440, (0, 0, 0), 120, 0)),
         // A card that does not stand out: a gap of 20 and a card of 30 to
         // 32, a rise of about 11, under CARD_MIN_STEP.
-        ("low contrast", {
-            let img = RgbImage::from_fn(2560, 1440, |x, y| {
-                if in_square(card, x, y) {
-                    Rgb([30 + ((x + y) % 3) as u8; 3])
-                } else {
-                    Rgb([20; 3])
-                }
-            });
-            DynamicImage::ImageRgb8(img)
-        }),
+        ("low contrast", flat_card_frame(card, 20, 30)),
+        // A black gap and a side of 21 to 23: a rise of 22, but too dim
+        // for a card, under CARD_MIN_LUMA (the dimmest real card side, over
+        // a black game world, measured 25 to 29).
+        ("dim step", flat_card_frame(card, 0, 21)),
         // A bright card on a surround that is not the dark gap (a real
         // one measured 35 to 40).
         ("grey surround", card_frame(2560, 1440, card, 36, 100)),
@@ -486,17 +530,25 @@ fn no_hero_icon_cut_without_a_clear_card_inside_the_frame() {
     for (name, frame) in cases {
         assert_eq!(snap_to_card(&frame, corner), None, "{name}");
     }
-    // Card near the frame's right or bottom edge: its left and top edges
-    // are found, but a 228 px square from there would leave the frame.
-    let right = (2400, 209, 160);
-    let frame = card_frame(2560, 1440, right, GAP_LUMA, 60);
-    assert_eq!(snap_to_card(&frame, (2390, 200)), None, "right edge");
-    let bottom = (1621, 1300, 140);
-    let frame = card_frame(2560, 1440, bottom, GAP_LUMA, 60);
-    assert_eq!(snap_to_card(&frame, (1610, 1290)), None, "bottom edge");
-    // The same cards with room for the square are found.
-    let frame = card_frame(2560, 1440, (2300, 209, 228), GAP_LUMA, 60);
-    assert_eq!(snap_to_card(&frame, (2290, 200)), Some((2300, 209, 228)));
+    // A box 0.04 u (58 px) off the card either way: its edges are out of
+    // reach, so the search never wanders onto anything further out or in.
+    let frame = card_frame(2560, 1440, card, GAP_LUMA, 60);
+    assert_eq!(snap_to_card(&frame, corner), Some(card));
+    for far in [(1563, 151), (1679, 267)] {
+        assert_eq!(snap_to_card(&frame, far), None, "box at {far:?}");
+    }
+    // The square may end on the frame's right or bottom edge, not one px
+    // past it (the card's edges are found either way).
+    let right = (2400, 209, 228);
+    for (w, want) in [(2628, Some(right)), (2627, None)] {
+        let frame = card_frame(w, 1440, right, GAP_LUMA, 60);
+        assert_eq!(snap_to_card(&frame, (2390, 200)), want, "{w} px wide");
+    }
+    let bottom = (1621, 1300, 228);
+    for (h, want) in [(1528, Some(bottom)), (1527, None)] {
+        let frame = card_frame(2560, h, bottom, GAP_LUMA, 60);
+        assert_eq!(snap_to_card(&frame, (1610, 1290)), want, "{h} px high");
+    }
 }
 
 #[tokio::test]
