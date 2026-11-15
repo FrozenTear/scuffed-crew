@@ -6,10 +6,14 @@
 //! that kind's consent on (`sync::keep_tab_crops`). With consent off nothing
 //! is cut and nothing is kept.
 //!
-//! * `hero_icon`: the career panel's portrait box the heroes-v2 read found
-//!   (`PanelRead::box_px`), cut from the full frame, raw pixels, no pack
-//!   preprocess. Only when the panel read passed its gate and names the
-//!   Tab's hero authority. ocr-v1 reads no panel box, so it offers none.
+//! * `hero_icon`: the career panel's portrait card near the box the
+//!   heroes-v2 read found (`PanelRead::box_px`), cut from the full frame,
+//!   raw pixels, no pack preprocess. The read's box can sit off the card
+//!   (the matcher slides the template inside it), so the cut is snapped to
+//!   the card's own left and top edges ([`snap_to_card`]); a Tab where they
+//!   are not found keeps none. Only when the panel read passed its gate and
+//!   names the Tab's hero authority. ocr-v1 reads no panel box, so it
+//!   offers none.
 //! * `stat_digits`: the own row's six stat cells, each on its own window
 //!   under the header labels ([`training_stat_columns`]), never the name
 //!   column and never another row. Only under the new reader, when its own
@@ -57,7 +61,8 @@ pub(crate) struct TabCropSource<'a> {
 
 /// A `hero_icon` crop's box in the frame and the panel read behind it.
 struct HeroCrop {
-    /// `(x, y, width, height)` in frame pixels, inside the frame.
+    /// `(x, y, width, height)` in frame pixels, inside the frame: the
+    /// card [`snap_to_card`] found, not the panel read's box.
     rect: (u32, u32, u32, u32),
     hero: String,
     score: f32,
@@ -93,8 +98,9 @@ fn mark_offered(key: String) {
 
 /// Cut this Tab's `hero_icon` and `stat_digits` crops for the game
 /// `session_id` and keep them on a blocking thread. Only the consent, gate
-/// and box checks run here; the pixel work runs on that thread. `None`
-/// when there is nothing to cut. The handle is for tests.
+/// and box checks and the card snap (two thin luma profiles) run here; the
+/// rest of the pixel work runs on that thread. `None` when there is nothing
+/// to cut. The handle is for tests.
 pub(crate) fn archive_tab_training_crops(
     data_dir: &Path,
     session_id: &str,
@@ -148,10 +154,11 @@ pub(crate) fn stat_digit_row(row: Option<usize>, own_row: Option<OwnRow>) -> Opt
         .then_some(row)
 }
 
-/// The career panel's portrait box in `frame`: only when the panel read
-/// passed the panel gate and names `pack_hero`, the Tab's hero authority.
-/// `None` for no read (ocr-v1, no hero pack), an abstain, or a box outside
-/// the frame.
+/// The career panel's portrait card in `frame`: only when the panel read
+/// passed the panel gate and names `pack_hero`, the Tab's hero authority,
+/// and [`snap_to_card`] finds the card next to the read's box. `None` for
+/// no read (ocr-v1, no hero pack), an abstain, a box outside the frame, or
+/// no card found.
 fn hero_icon_crop(
     frame: &image::DynamicImage,
     panel: Option<&PanelRead>,
@@ -169,13 +176,113 @@ fn hero_icon_crop(
         tracing::debug!(target: "scuffed_stat_tracker", box_px = ?panel.box_px, "career panel box outside the frame: no hero icon crop");
         return None;
     }
+    let Some((x, y, side)) = snap_to_card(frame, (x0, y0)) else {
+        tracing::debug!(target: "scuffed_stat_tracker", box_px = ?panel.box_px, "career panel card edges not found or card past the frame: no hero icon crop");
+        return None;
+    };
     Some(HeroCrop {
-        rect: (x0, y0, x1 - x0, y1 - y0),
+        rect: (x, y, side, side),
         hero: hero.to_string(),
         score: panel.read.score,
         lead: panel.read.lead,
         pack: panel.pack.as_str(),
     })
+}
+
+/// Side of the career panel's portrait card, in 16:9 game-rect heights
+/// (`u`, the unit [`HeroSet::read_panel`](stat_tracker::shadow::heroes::HeroSet::read_panel)
+/// searches in). Measured on 2560x1440 Tabs: about 228 px, top at y 209
+/// (0.145 u).
+pub(crate) const CARD_SIDE: f64 = 0.158;
+/// How far from the panel read's box corner the card's left and top edges
+/// are searched, in `u`. The read's box sat 22 to 23 px left and 2 px
+/// above the card on one set of 1440p Tabs, and 4 to 13 px right and 14 to
+/// 15 px below it on another: at most 0.016 u.
+const CARD_SEARCH: f64 = 0.03;
+/// Width of the dark and the card side compared at each edge candidate, in
+/// `u` (6 px at 1440p, at least 2 px), narrow enough to fit the dark gap
+/// between the header bar's right end and the card.
+const CARD_STEP_WINDOW: f64 = 0.004;
+/// Most mean luma the dark side of an edge may have. The gap round the
+/// card measured 6 to 20.
+const CARD_GAP_MAX_LUMA: f64 = 32.0;
+/// Least mean luma rise from the dark side to the card side. The card
+/// measured 50 to 90 and more near its left and top edges, so a real edge
+/// rises 30 or more.
+const CARD_MIN_STEP: f64 = 24.0;
+
+/// The career panel's portrait card in `frame` as `(x, y, side)`, from the
+/// top left corner `(x0, y0)` of the panel read's box: the card's left
+/// edge searched within [`CARD_SEARCH`] of `x0` on a column luma profile
+/// over the middle half of the rows of a card sized square at `(x0, y0)`,
+/// its top edge the same way on a row profile over the middle half of its
+/// columns (both bands stay inside the card for any corner within the
+/// search, the texture of the portrait art averages out), and a square of
+/// [`CARD_SIDE`] cut from there. Each edge is the strongest dark to card
+/// rise ([`card_edge`]). `None` when either edge is not found or the
+/// square would leave the frame.
+pub(crate) fn snap_to_card(
+    frame: &image::DynamicImage,
+    (x0, y0): (u32, u32),
+) -> Option<(u32, u32, u32)> {
+    use image::GenericImageView;
+    let (w, h) = frame.dimensions();
+    let (_, _, _, gh) = stat_tracker::frame::geometry::game_rect_16_9(w, h);
+    let u = f64::from(gh);
+    let side = (CARD_SIDE * u).round() as u32;
+    let reach = (CARD_SEARCH * u).round() as i64;
+    let window = ((CARD_STEP_WINDOW * u).round() as i64).max(2);
+    let luma = |x: u32, y: u32| {
+        let [r, g, b, _] = frame.get_pixel(x, y).0;
+        0.299 * f64::from(r) + 0.587 * f64::from(g) + 0.114 * f64::from(b)
+    };
+    let band = |start: u32, len: u32| {
+        let band = (start + side / 4).min(len)..(start + side * 3 / 4).min(len);
+        (!band.is_empty()).then_some(band)
+    };
+    let (rows, cols) = (band(y0, h)?, band(x0, w)?);
+    let (n_rows, n_cols) = (f64::from(rows.len() as u32), f64::from(cols.len() as u32));
+    let column = |x: u32| rows.clone().map(|y| luma(x, y)).sum::<f64>() / n_rows;
+    let row = |y: u32| cols.clone().map(|x| luma(x, y)).sum::<f64>() / n_cols;
+    let left = card_edge(column, x0, reach, window, w)?;
+    let top = card_edge(row, y0, reach, window, h)?;
+    (left + side <= w && top + side <= h).then_some((left, top, side))
+}
+
+/// The card's edge on a luma profile (`profile(i)`: the mean luma of
+/// column or row `i`) of `len` positions: of the
+/// positions within `reach` of `at`, the one with the strongest rise from
+/// the `window` positions before it to the `window` from it, where the
+/// dark side is at most [`CARD_GAP_MAX_LUMA`] and the rise at least
+/// [`CARD_MIN_STEP`]. `None` when no position qualifies.
+fn card_edge(
+    profile: impl Fn(u32) -> f64,
+    at: u32,
+    reach: i64,
+    window: i64,
+    len: u32,
+) -> Option<u32> {
+    let lo = (i64::from(at) - reach).max(window);
+    let hi = (i64::from(at) + reach).min(i64::from(len) - window);
+    if lo > hi {
+        return None;
+    }
+    let values: Vec<f64> = (lo - window..hi + window)
+        .map(|i| profile(i as u32))
+        .collect();
+    let mean = |s: &[f64]| s.iter().sum::<f64>() / s.len() as f64;
+    let w = window as usize;
+    let mut best: Option<(i64, f64)> = None;
+    for edge in lo..=hi {
+        let i = (edge - lo) as usize + w;
+        let dark = mean(&values[i - w..i]);
+        let rise = mean(&values[i..i + w]) - dark;
+        if dark <= CARD_GAP_MAX_LUMA && rise >= CARD_MIN_STEP && best.is_none_or(|(_, r)| rise > r)
+        {
+            best = Some((edge, rise));
+        }
+    }
+    best.map(|(edge, _)| edge as u32)
 }
 
 /// The six stat column windows a `stat_digits` crop is cut on, from the

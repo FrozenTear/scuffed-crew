@@ -46,6 +46,23 @@ fn coord_of(p: &Rgb<u8>) -> (u32, u32) {
 /// right of the in-match name column.
 const REAL_LABELS: [f64; 6] = [0.3206, 0.3549, 0.3912, 0.4441, 0.5093, 0.5661];
 
+/// Mean luma of the dark gap drawn round a synthetic career panel card:
+/// the real gap measured 6 to 20.
+const GAP_LUMA: u8 = 12;
+
+/// A textured career panel card pixel, mean luma about 60 to 110 (the
+/// real card measured 50 to 90 and more near its left and top edges).
+fn card_pixel(x: u32, y: u32, base: u8) -> Rgb<u8> {
+    let v = base.saturating_add(((x * 37 + y * 101 + (x * y) % 13) % 50) as u8);
+    Rgb([v, v.saturating_sub(12), v.saturating_add(20)])
+}
+
+/// The career panel card [`tab_frame`] draws, `(left, top, side)`, right
+/// of the 1920x1080 board crop and clear of its header strip, in a dark
+/// gap from x 1585 to 1830 and y 185 to 420. The side is
+/// [`CARD_SIDE`] of 1080 px.
+const TAB_CARD: (u32, u32, u32) = (1610, 210, 171);
+
 /// A 1920x1080 Tab with the six stat labels at [`REAL_LABELS`].
 fn tab_frame() -> DynamicImage {
     tab_frame_with(&REAL_LABELS)
@@ -68,7 +85,8 @@ fn label_start(label: f64, index: usize) -> u32 {
 /// A 1920x1080 Tab: every pixel right of the chat strip names its own
 /// position, and the scoreboard's header strip is a bright bar with a dark
 /// mark centred on each of `labels` (fractions of the board width), the
-/// fourth wider than the rest ([`label_width`]).
+/// fourth wider than the rest ([`label_width`]). Right of the board, the
+/// career panel card [`TAB_CARD`] in a dark gap.
 fn tab_frame_with(labels: &[f64]) -> DynamicImage {
     let (w, h) = (1920, 1080);
     let (bx, by, bw, bh) = ocr::preprocess::crop_scoreboard_rect(w, h);
@@ -94,11 +112,31 @@ fn tab_frame_with(labels: &[f64]) -> DynamicImage {
             } else {
                 Rgb([232, 232, 232])
             }
+        } else if in_square(TAB_CARD, x, y) {
+            card_pixel(x, y, 60)
+        } else if (1585..1830).contains(&x) && (185..420).contains(&y) {
+            Rgb([GAP_LUMA; 3])
         } else {
             coord_pixel(x, y)
         }
     });
     DynamicImage::ImageRgb8(img)
+}
+
+fn in_square((left, top, side): (u32, u32, u32), x: u32, y: u32) -> bool {
+    (left..left + side).contains(&x) && (top..top + side).contains(&y)
+}
+
+/// A `w` x `h` frame of the dark gap luma `gap` with a textured card of
+/// `base` luma and up at `card`, `(left, top, side)`.
+fn card_frame(w: u32, h: u32, card: (u32, u32, u32), gap: u8, base: u8) -> DynamicImage {
+    DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+        if in_square(card, x, y) {
+            card_pixel(x, y, base)
+        } else {
+            Rgb([gap; 3])
+        }
+    }))
 }
 
 fn panel(box_px: (usize, usize, usize, usize), hero: &str, score: f32) -> PanelRead {
@@ -173,9 +211,11 @@ async fn a_stored_tab_keeps_the_raw_career_panel_portrait_with_its_hero() {
 
     let queued = sync::queued_crops(dir.path(), UploadKind::HeroIcon);
     assert_eq!(queued.len(), 1);
-    // The raw panel box: same size, same pixels, nothing resized or
-    // preprocessed. Not the hero name title under it.
-    let want = frame.crop_imm(1600, 200, 200, 200).to_rgb8();
+    // The raw portrait card the box was snapped to (10 px right of and
+    // below the box's corner, its own side, not the box's): same pixels,
+    // nothing resized or preprocessed. Not the hero name title under it.
+    let (left, top, side) = TAB_CARD;
+    let want = frame.crop_imm(left, top, side, side).to_rgb8();
     assert_eq!(decode(&queued[0].png), want);
     let meta = &queued[0].meta;
     assert_eq!(meta.hero.as_deref(), Some("ana"));
@@ -268,50 +308,34 @@ async fn no_hero_icon_without_an_accepted_panel_hero_or_a_box_in_the_frame() {
 }
 
 #[tokio::test]
-async fn a_panel_box_over_256_px_is_skipped_never_resized() {
-    // The panel search tries sides of 0.145, 0.16 and 0.175 of the height,
-    // then a fine pass 0.0075 either side of the best: 0.1375 to 0.1825.
-    // 1440p: the largest coarse side (0.175, 252 px) fits.
+async fn the_card_crop_has_one_side_and_over_256_px_is_skipped_never_resized() {
+    // The cut is the card's own side, CARD_SIDE of the game rect height,
+    // whatever the side of the box the panel read chose (0.1375 to 0.1825
+    // of the height). 1440p: 228 px, under the 256 px cap.
     let dir = tempfile::tempdir().unwrap();
     set_consent(dir.path(), true, false);
-    let qhd = DynamicImage::ImageRgb8(RgbImage::from_pixel(2560, 1440, Rgb([90, 60, 30])));
-    let side = (0.175_f64 * 1440.0).round() as usize;
-    let fits = panel((2000, 160, 2000 + side, 160 + side), "ana", 0.97);
-    assert!(run(dir.path(), "tc-qhd", &qhd, source(Some(&fits), Some("ana"))).await);
+    let qhd = card_frame(2560, 1440, (1621, 209, 228), GAP_LUMA, 60);
+    for (n, side) in [252, 263].into_iter().enumerate() {
+        let read = panel((1598, 207, 1598 + side, 207 + side), "ana", 0.97);
+        let session = format!("tc-qhd-{n}");
+        assert!(run(dir.path(), &session, &qhd, source(Some(&read), Some("ana"))).await);
+    }
     let queued = sync::queued_crops(dir.path(), UploadKind::HeroIcon);
-    assert_eq!(queued.len(), 1);
-    assert_eq!(
-        sync::png_size(&queued[0].png),
-        Some((side as u32, side as u32))
-    );
-    // 1440p after the fine pass: the largest side (0.1825, 263 px) is over
-    // the cap and is skipped, not resized.
-    let side = (0.1825_f64 * 1440.0).round() as usize;
-    assert_eq!(side, 263);
-    let over = panel((2000, 160, 2000 + side, 160 + side), "ana", 0.97);
-    assert!(
-        run(
-            dir.path(),
-            "tc-qhd-fine",
-            &qhd,
-            source(Some(&over), Some("ana"))
-        )
-        .await
-    );
-    assert_eq!(
-        sync::queued_crops(dir.path(), UploadKind::HeroIcon).len(),
-        1,
-        "only the 252 px crop"
-    );
+    assert_eq!(queued.len(), 2);
+    for crop in &queued {
+        assert_eq!(sync::png_size(&crop.png), Some((228, 228)));
+        assert_eq!(
+            decode(&crop.png),
+            qhd.crop_imm(1621, 209, 228, 228).to_rgb8()
+        );
+    }
     assert_eq!(sync::training_warning(dir.path()), None);
 
-    // 4K: the smallest searched side (0.1375 of the height) is over the cap.
+    // 4K: the card's side (341 px) is over the cap.
     let dir = tempfile::tempdir().unwrap();
     set_consent(dir.path(), true, false);
-    let uhd = DynamicImage::ImageRgb8(RgbImage::from_pixel(3840, 2160, Rgb([90, 60, 30])));
-    let side = (0.1375_f64 * 2160.0).round() as usize;
-    assert!(side > 256);
-    let over = panel((2700, 240, 2700 + side, 240 + side), "ana", 0.97);
+    let uhd = card_frame(3840, 2160, (2432, 314, 342), GAP_LUMA, 60);
+    let over = panel((2420, 320, 2720, 620), "ana", 0.97);
     assert!(run(dir.path(), "tc-uhd", &uhd, source(Some(&over), Some("ana"))).await);
     assert!(sync::queued_crops(dir.path(), UploadKind::HeroIcon).is_empty());
     assert!(
@@ -323,6 +347,102 @@ async fn a_panel_box_over_256_px_is_skipped_never_resized() {
         None,
         "a cap skip is not an error"
     );
+}
+
+/// The worst of the cut's left, top, right and bottom distances from the
+/// drawn `card`, in px, or `None` for no cut.
+fn placement_error(cut: Option<(u32, u32, u32)>, card: (u32, u32, u32)) -> Option<u32> {
+    let (x, y, side) = cut?;
+    let (left, top, card_side) = card;
+    Some(
+        [
+            x.abs_diff(left),
+            y.abs_diff(top),
+            (x + side).abs_diff(left + card_side),
+            (y + side).abs_diff(top + card_side),
+        ]
+        .into_iter()
+        .max()
+        .unwrap(),
+    )
+}
+
+#[test]
+fn the_hero_icon_cut_snaps_to_the_card_from_an_off_box() {
+    // Box corner offsets from the card, in 1440p px: the measured misses
+    // (22 to 23 px left and 2 px up, 4 to 13 px right and 14 to 15 px
+    // down), none, and a worse one. Scaled by u for other frames.
+    let offsets: [(i64, i64); 5] = [(-23, -2), (13, 15), (0, 0), (20, -20), (-40, 40)];
+    // (name, frame size, game rect left and top, u)
+    let frames = [
+        ("2560x1440", (2560, 1440), (0, 0), 1440),
+        ("1920x1080", (1920, 1080), (0, 0), 1080),
+        ("3440x1440 ultrawide", (3440, 1440), (440, 0), 1440),
+        ("1920x1200 16:10", (1920, 1200), (0, 60), 1080),
+    ];
+    for (name, (w, h), (gx, gy), u) in frames {
+        let scale = |v: f64| (v * f64::from(u) / 1440.0).round();
+        let card = (
+            gx + scale(1621.0) as u32,
+            gy + scale(209.0) as u32,
+            (CARD_SIDE * f64::from(u)).round() as u32,
+        );
+        let frame = card_frame(w, h, card, GAP_LUMA, 60);
+        let mut worst = 0;
+        for (dx, dy) in offsets {
+            let corner = (
+                (i64::from(card.0) + scale(dx as f64) as i64) as u32,
+                (i64::from(card.1) + scale(dy as f64) as i64) as u32,
+            );
+            let cut = snap_to_card(&frame, corner);
+            let err = placement_error(cut, card)
+                .unwrap_or_else(|| panic!("{name} offset ({dx}, {dy}): no card"));
+            assert!(err <= 2, "{name} offset ({dx}, {dy}): {cut:?} for {card:?}");
+            worst = worst.max(err);
+        }
+        println!("{name}: card {card:?}, max placement error {worst} px");
+    }
+}
+
+#[test]
+fn no_hero_icon_cut_without_a_clear_card_inside_the_frame() {
+    let card = (1621, 209, 228);
+    let corner = (1598, 207);
+    let cases = [
+        // No card at all: all gap, or all bright.
+        (
+            "uniform dark",
+            card_frame(2560, 1440, (0, 0, 0), GAP_LUMA, 0),
+        ),
+        ("uniform bright", card_frame(2560, 1440, (0, 0, 0), 120, 0)),
+        // A card that does not stand out: a rise of about 20 from the gap.
+        ("low contrast", {
+            let img = RgbImage::from_fn(2560, 1440, |x, y| {
+                if in_square(card, x, y) {
+                    Rgb([32 + ((x + y) % 4) as u8; 3])
+                } else {
+                    Rgb([GAP_LUMA; 3])
+                }
+            });
+            DynamicImage::ImageRgb8(img)
+        }),
+        // A bright card on a surround that is not the dark gap.
+        ("grey surround", card_frame(2560, 1440, card, 45, 100)),
+    ];
+    for (name, frame) in cases {
+        assert_eq!(snap_to_card(&frame, corner), None, "{name}");
+    }
+    // Card near the frame's right or bottom edge: its left and top edges
+    // are found, but a 228 px square from there would leave the frame.
+    let right = (2400, 209, 160);
+    let frame = card_frame(2560, 1440, right, GAP_LUMA, 60);
+    assert_eq!(snap_to_card(&frame, (2390, 200)), None, "right edge");
+    let bottom = (1621, 1300, 140);
+    let frame = card_frame(2560, 1440, bottom, GAP_LUMA, 60);
+    assert_eq!(snap_to_card(&frame, (1610, 1290)), None, "bottom edge");
+    // The same cards with room for the square are found.
+    let frame = card_frame(2560, 1440, (2300, 209, 228), GAP_LUMA, 60);
+    assert_eq!(snap_to_card(&frame, (2290, 200)), Some((2300, 209, 228)));
 }
 
 #[tokio::test]
@@ -648,15 +768,15 @@ async fn a_rejected_tab_gives_no_hero_icon_or_stat_digit_crop() {
 }
 
 #[tokio::test]
-async fn an_over_cap_panel_box_still_records_the_tab_and_its_digits() {
+async fn a_hero_icon_miss_still_records_the_tab_and_its_digits() {
     let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let ctx = o8_ctx(dir.path(), true).await;
     set_consent(dir.path(), true, true);
-    // 300 px: over the 256 px cap.
+    // A box 110 px left of and above the card: no card edge within reach.
     let (recorded, rows) = record_tab(
         &ctx,
-        "tc-overcap",
+        "tc-nocard",
         panel_tab((1500, 100, 1800, 400)),
         sure_board(),
     )
@@ -705,7 +825,7 @@ async fn a_held_hero_is_never_written_into_stat_digit_meta() {
 /// Tab on a strong highlight that no seed has confirmed yet (and on a name
 /// fallback), unmarked, but that row is not known to be the member's, so
 /// it gives no stat digit crop. The same Tab with a sure verdict keeps six
-/// ([`an_over_cap_panel_box_still_records_the_tab_and_its_digits`]).
+/// ([`a_hero_icon_miss_still_records_the_tab_and_its_digits`]).
 #[tokio::test]
 async fn an_accepted_tab_with_an_unconfirmed_own_row_keeps_no_stat_digit_crops() {
     let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
