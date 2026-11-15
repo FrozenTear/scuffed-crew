@@ -229,6 +229,24 @@ const CARD_MIN_LUMA: f64 = 24.0;
 /// real edge, a Practice Range gap of 16 to 17 on the card fill of 37 to
 /// 39, rises about 21.
 const CARD_MIN_STEP: f64 = 16.0;
+/// How far a step's card side must hold, in `u` (65 px at 1440p, at least
+/// one `window`): every [`CARD_STEP_WINDOW`] window from the step to this
+/// far in must stay at or above the step's edge threshold, so a thin
+/// bright line is not taken for the card. On a 5v5 Tab the table's right
+/// border is a 3 to 4 px line (peak 52) about 40 px left of the card, after
+/// a dark run of 9 and before a gap of 5 to 7: its window rises about 17
+/// to a mean of about 26, which passes [`CARD_MIN_LUMA`] and
+/// [`CARD_MIN_STEP`], but the gap after it drops back to 7. The real card
+/// holds: its dimmest fill, 25 to 29 for 10 px over a black world then 31
+/// to 57, stays above its threshold of about 14, and the Practice Range
+/// fill of 37 to 39 above its threshold of about 25. Long enough to cover
+/// the search: with the box up to 23 px left of the card the scan starts
+/// about 66 px left of it, and the gap before the card is at least 13 px
+/// (the header bar's end), so any UI step in the span is followed by a
+/// full gap window within 0.045 u. A threshold relative to the step, not
+/// [`CARD_GAP_MAX_LUMA`]: the dim fill's own windows (about 27) are under
+/// that.
+const CARD_SUSTAIN: f64 = 0.045;
 
 /// The career panel's portrait card in `frame` as `(x, y, side)`, from the
 /// top left corner `(x0, y0)` of the panel read's box: the card's left
@@ -238,8 +256,8 @@ const CARD_MIN_STEP: f64 = 16.0;
 /// columns (both bands stay inside the card for any corner within the
 /// search, the texture of the portrait art averages out), and a square of
 /// [`CARD_SIDE`] cut from there. Each edge is the first dark to card step
-/// from outside the card ([`card_edge`]). `None` when either edge is not
-/// found or the square would leave the frame.
+/// from outside the card whose card side holds ([`card_edge`]). `None`
+/// when either edge is not found or the square would leave the frame.
 pub(crate) fn snap_to_card(
     frame: &image::DynamicImage,
     (x0, y0): (u32, u32),
@@ -251,6 +269,7 @@ pub(crate) fn snap_to_card(
     let side = card_side(w, h);
     let reach = (CARD_SEARCH * u).round() as i64;
     let window = ((CARD_STEP_WINDOW * u).round() as i64).max(2);
+    let sustain = (CARD_SUSTAIN * u).round() as i64;
     let luma = |x: u32, y: u32| {
         let [r, g, b, _] = frame.get_pixel(x, y).0;
         0.299 * f64::from(r) + 0.587 * f64::from(g) + 0.114 * f64::from(b)
@@ -263,8 +282,8 @@ pub(crate) fn snap_to_card(
     let (n_rows, n_cols) = (f64::from(rows.len() as u32), f64::from(cols.len() as u32));
     let column = |x: u32| rows.clone().map(|y| luma(x, y)).sum::<f64>() / n_rows;
     let row = |y: u32| cols.clone().map(|x| luma(x, y)).sum::<f64>() / n_cols;
-    let left = card_edge(column, x0, reach, window, w)?;
-    let top = card_edge(row, y0, reach, window, h)?;
+    let left = card_edge(column, x0, (reach, window, sustain), w)?;
+    let top = card_edge(row, y0, (reach, window, sustain), h)?;
     (left + side <= w && top + side <= h).then_some((left, top, side))
 }
 
@@ -294,16 +313,18 @@ fn card_side(w: u32, h: u32) -> u32 {
 /// (luma 25 between a gap of 0 to 6 and a fill of 37, or 27 on a game
 /// world gap of 16) is the card's, and the [`CARD_MIN_STEP`] bound keeps a
 /// dim card rim the edge when bright portrait art right behind it lifts
-/// the card side's mean. A bright region outside (the header bar's right
-/// end) never steps: while any of its positions is in the dark side that
-/// side is too bright, and once a full dark run lies between it and the
-/// card, the card side is gap until the card. `None` when no position
-/// steps.
+/// the card side's mean. A step only counts when every `window` from it
+/// within `sustain` positions (cut short at the end of the profile) also
+/// averages at least that threshold ([`CARD_SUSTAIN`]): a thin bright line
+/// or a narrow UI element with gap after it falls back under it. A bright
+/// region outside (the header bar's right end) never steps: while any of
+/// its positions is in the dark side that side is too bright, and once a
+/// full dark run lies between it and the card, the card side is gap until
+/// the card. `None` when no position steps.
 fn card_edge(
     profile: impl Fn(u32) -> f64,
     at: u32,
-    reach: i64,
-    window: i64,
+    (reach, window, sustain): (i64, i64, i64),
     len: u32,
 ) -> Option<u32> {
     let lo = (i64::from(at) - reach).max(window);
@@ -311,19 +332,26 @@ fn card_edge(
     if lo > hi {
         return None;
     }
-    let values: Vec<f64> = (lo - window..hi + window)
+    let sustain = sustain.max(window);
+    let values: Vec<f64> = (lo - window..(hi + sustain).min(i64::from(len)))
         .map(|i| profile(i as u32))
         .collect();
     let mean = |s: &[f64]| s.iter().sum::<f64>() / s.len() as f64;
-    let w = window as usize;
-    let (first, dark, card) = (0..=(hi - lo) as usize).find_map(|edge| {
+    let (w, run) = (window as usize, sustain as usize);
+    let (first, bright) = (0..=(hi - lo) as usize).find_map(|edge| {
         let i = edge + w;
         let dark = mean(&values[i - w..i]);
         let card = mean(&values[i..i + w]);
-        (dark <= CARD_GAP_MAX_LUMA && card >= CARD_MIN_LUMA && card - dark >= CARD_MIN_STEP)
-            .then_some((i, dark, card))
+        let bright = dark + ((card - dark) / 2.0).min(CARD_MIN_STEP);
+        let steps =
+            dark <= CARD_GAP_MAX_LUMA && card >= CARD_MIN_LUMA && card - dark >= CARD_MIN_STEP;
+        let holds = || {
+            values[i..(i + run).min(values.len())]
+                .windows(w)
+                .all(|s| mean(s) >= bright)
+        };
+        (steps && holds()).then_some((i, bright))
     })?;
-    let bright = dark + ((card - dark) / 2.0).min(CARD_MIN_STEP);
     let edge = (first..first + w).find(|&i| values[i] >= bright)?;
     Some((lo - window + edge as i64) as u32)
 }

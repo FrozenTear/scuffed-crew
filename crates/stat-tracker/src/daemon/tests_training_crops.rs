@@ -393,6 +393,14 @@ enum Scene {
     /// A dim fill on a black gap (luma 0): [`DIM_FILL`] in from the left
     /// and top edges, then textured card.
     DimFill,
+    /// A 5v5 Tab's table border: a gap of 9, a 3 px line of luma 52 ending
+    /// 40 px left of the card at 1440p, then a gap of 7 to a card of 67
+    /// and up, as measured on a real Tab whose cut snapped to the line.
+    ThinLine,
+    /// A UI block of luma 60, 50 px wide, ending 13 px left of the card at
+    /// 1440p: the widest a bright element can be in the span searched from
+    /// a box 23 px left of the card with the narrowest measured gap.
+    SideBlock,
 }
 
 /// Card luma by px in from its left or top edge at 1440p for
@@ -408,6 +416,8 @@ fn scene_frame(w: u32, h: u32, card: (u32, u32, u32), scene: Scene, u: u32) -> D
     let (left, top, side) = card;
     let px = |v: f64| (v * f64::from(u) / 1440.0).round() as u32;
     let (band_start, band_end, bar_end) = (px(3.0), px(6.0), left - px(13.0));
+    let line = left - px(43.0)..left - px(40.0);
+    let block = left - px(63.0)..bar_end;
     let navy = |x: u32, y: u32| Rgb([37 + ((x + y) % 3) as u8; 3]);
     DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
         if in_square(card, x, y) {
@@ -425,12 +435,21 @@ fn scene_frame(w: u32, h: u32, card: (u32, u32, u32), scene: Scene, u: u32) -> D
                 }
                 Scene::ArtBand if inset < band_start => Rgb([40; 3]),
                 Scene::ArtBand if inset < band_end => Rgb([200; 3]),
+                Scene::ThinLine => card_pixel(x, y, 67),
                 _ => card_pixel(x, y, 60),
             }
         } else if scene == Scene::HeaderBar && x < bar_end && (top..top + side).contains(&y) {
             Rgb([200; 3])
+        } else if scene == Scene::SideBlock && block.contains(&x) && (top..top + side).contains(&y)
+        {
+            Rgb([60; 3])
         } else {
             match scene {
+                Scene::ThinLine if line.contains(&x) && (top..top + side).contains(&y) => {
+                    Rgb([52; 3])
+                }
+                Scene::ThinLine if x < line.start => Rgb([9; 3]),
+                Scene::ThinLine => Rgb([7; 3]),
                 Scene::DimGap | Scene::AntiAliasedOnDimGap => Rgb([16; 3]),
                 Scene::AntiAliased => Rgb([((x + y) % 7) as u8; 3]),
                 Scene::DimFill => Rgb([0; 3]),
@@ -462,6 +481,8 @@ fn the_hero_icon_cut_snaps_to_the_card_from_an_off_box() {
         Scene::AntiAliased,
         Scene::AntiAliasedOnDimGap,
         Scene::DimFill,
+        Scene::ThinLine,
+        Scene::SideBlock,
     ];
     for scene in scenes {
         for (name, (w, h), (gx, gy), u) in frames {
