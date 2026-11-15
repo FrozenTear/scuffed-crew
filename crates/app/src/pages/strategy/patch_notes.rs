@@ -455,7 +455,7 @@ fn section_tag_color(category: &str) -> &'static str {
     } else if cat.contains("bug") || cat.contains("fix") {
         "var(--text-subtle)"
     } else if cat.contains("map") {
-        "var(--chart-5)"
+        "var(--info)"
     } else if cat.contains("competitive") || cat.contains("ranked") {
         "var(--accent-text)"
     } else {
@@ -2167,5 +2167,22 @@ mod tests {
         let raw = r#"{"data": [{"version": "9.0", "title": "Season 9 \u2014 Balance"}]}"#;
         let list: ListResponse = serde_json::from_str(raw).expect("parse");
         assert!(patch_matches_search(&list.data[0], "season 9, balance"));
+    }
+
+    #[test]
+    fn tag_pill_ink_uses_text_roles_not_chart_series() {
+        // Pill ink is 12px text on a 12% wash. Chart series colours are not
+        // held to AA as text (light --chart-5 is 3.5:1 there); --info is.
+        for cat in [
+            "Hero Balance",
+            "Bug Fixes",
+            "Maps",
+            "Competitive",
+            "General",
+        ] {
+            let ink = section_tag_color(cat);
+            assert!(!ink.contains("--chart"), "{cat}: {ink}");
+        }
+        assert_eq!(section_tag_color("Maps"), "var(--info)");
     }
 }
