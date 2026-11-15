@@ -703,9 +703,9 @@ mod tests {
             && inner.y + inner.height <= outer.y + outer.height + 0.5
     }
 
-    /// The moved switch is the last CAPTURE row, after the focus gate,
-    /// and Troubleshooting no longer has it. With the env override the
-    /// lock line sits inside that row.
+    /// The moved switch sits under READERS in Capture and reading, below
+    /// the focus gate (the last CAPTURE row), and Troubleshooting no longer
+    /// has it. With the env override the lock line sits inside that row.
     #[test]
     fn the_bans_picks_row_is_drawn_in_capture_and_reading() {
         use crate::bans_picks_setting::ROW_ID;
@@ -764,6 +764,155 @@ mod tests {
             ts.ids.iter().all(|(id, _)| *id != row_id),
             "Troubleshooting must not draw the Read bans and picks row"
         );
+    }
+
+    /// Every reader switch sits together under READERS in Capture and
+    /// reading, below every CAPTURE row: Reader first, then names, bans and
+    /// picks, rank and the extra number reader, then the classic OCR rows
+    /// (Reading model, OCR workers) and Report pictures. Website account
+    /// and Troubleshooting no longer draw the rank and extra number reader
+    /// rows.
+    #[test]
+    fn the_reader_rows_sit_together_under_readers() {
+        use crate::settings::SHADOW_READER_LABEL;
+        use crate::settings_cards::BANS_PICKS_LABEL;
+        use crate::settings_keys::RANK_LABEL;
+
+        let width = 976.0;
+        let (_dir, mut page) = app();
+        page.fixture = None;
+        page.outside_env = Some(crate::settings_env::OutsideEnv::default());
+        // A running tracker: the Reading model row is drawn, so its place
+        // below the reader switches is checked, not skipped.
+        page.ocr_switch.daemon_off = false;
+        assert!(crate::settings::ocr_card_blocks(page.ocr_switch.daemon_off).reading_model);
+        assert!(crate::settings_model::row_shown("share_report_pictures"));
+        page.page_state
+            .show_section(AdvancedSection::CaptureReading);
+        let found = operate_page(&page, width);
+        let y_of = |label: &str| {
+            found
+                .texts
+                .iter()
+                .find(|(text, _)| text == label)
+                .map(|(_, b)| b.y)
+                .unwrap_or_else(|| panic!("{label} is drawn"))
+        };
+        let heading = y_of("READERS");
+        let gate = found
+            .ids
+            .iter()
+            .find(|(id, _)| *id == Id::new(crate::focus_status::ROW_ID))
+            .map(|(_, b)| b.y)
+            .expect("the focus gate, the last CAPTURE row");
+        assert!(gate < heading, "CAPTURE ends before READERS");
+        // Reader comes first, right under the heading: no row sits between.
+        let reader = y_of("Reader");
+        assert!(heading < reader, "Reader at {reader} follows READERS");
+        let between: Vec<_> = found
+            .texts
+            .iter()
+            .filter(|(text, b)| b.y > heading && b.y < reader && !text.is_empty())
+            .collect();
+        assert!(between.is_empty(), "no row before Reader: {between:?}");
+        let mut last = reader;
+        for label in [
+            "Name reader",
+            BANS_PICKS_LABEL,
+            RANK_LABEL,
+            SHADOW_READER_LABEL,
+        ] {
+            let y = y_of(label);
+            assert!(last < y, "{label} at {y} follows {last}");
+            last = y;
+        }
+        // The classic OCR rows and Report pictures come after every reader
+        // switch, in this order.
+        for label in ["Reading model", "OCR workers", "Report pictures"] {
+            let y = y_of(label);
+            assert!(last < y, "{label} at {y} follows {last}");
+            last = y;
+        }
+        // The bans and picks row keeps its id, so its deep link and
+        // outline still find it.
+        let row_id = Id::new(crate::bans_picks_setting::ROW_ID);
+        assert!(found.ids.iter().any(|(id, _)| *id == row_id));
+
+        let (_dir_closed, mut closed) = app();
+        closed.fixture = None;
+        closed.outside_env = Some(crate::settings_env::OutsideEnv::default());
+        let everyday = operate_page(&closed, width);
+        assert!(
+            everyday.texts.iter().all(|(text, _)| text != RANK_LABEL),
+            "Website account no longer draws the rank row"
+        );
+        closed
+            .page_state
+            .show_section(AdvancedSection::Troubleshooting);
+        let ts = operate_page(&closed, width);
+        assert!(
+            ts.texts.iter().all(|(text, _)| text != SHADOW_READER_LABEL),
+            "Troubleshooting no longer draws the extra number reader"
+        );
+    }
+
+    /// Each rank variable that is set draws its "Set outside the app" lock
+    /// line inside the Read my rank row, with the service note once; with
+    /// neither set the row draws none.
+    #[test]
+    fn the_rank_row_draws_a_lock_line_per_variable_set() {
+        use crate::capture_reading::SERVICE_MAY_DIFFER;
+        use crate::settings::SHADOW_READER_LABEL;
+        use crate::settings_env::{OutsideEnv, QUEUE_TITLE_ENV, RANK_ENV};
+        use crate::settings_keys::RANK_LABEL;
+
+        let rank_lock = format!("Set outside the app: {RANK_ENV}");
+        let queue_lock = format!("Set outside the app: {QUEUE_TITLE_ENV}");
+        let drawn = |vars: Vec<(&'static str, String)>| {
+            let (_dir, mut page) = app();
+            page.fixture = None;
+            page.outside_env = Some(OutsideEnv {
+                vars,
+                ..OutsideEnv::default()
+            });
+            page.page_state
+                .show_section(AdvancedSection::CaptureReading);
+            let found = operate_page(&page, 976.0);
+            let y_of = |label: &str| {
+                found
+                    .texts
+                    .iter()
+                    .find(|(text, _)| text == label)
+                    .map(|(_, b)| b.y)
+                    .unwrap_or_else(|| panic!("{label} is drawn"))
+            };
+            let (top, next) = (y_of(RANK_LABEL), y_of(SHADOW_READER_LABEL));
+            // the rank row's lines: under its title, above the next row
+            found
+                .texts
+                .into_iter()
+                .filter(|(_, b)| b.y > top && b.y < next)
+                .map(|(text, _)| text)
+                .collect::<Vec<_>>()
+        };
+        let both = drawn(vec![
+            (RANK_ENV, "on".to_string()),
+            (QUEUE_TITLE_ENV, "off".to_string()),
+        ]);
+        let at = |text: &str| both.iter().position(|t| t == text);
+        let (rank, queue) = (at(&rank_lock), at(&queue_lock));
+        assert!(rank.is_some() && queue.is_some(), "{both:?}");
+        assert!(rank < queue, "the rank lock line comes first: {both:?}");
+        let note = both.iter().filter(|t| *t == SERVICE_MAY_DIFFER).count();
+        assert_eq!(note, 1, "{both:?}");
+        let queue_only = drawn(vec![(QUEUE_TITLE_ENV, "on".to_string())]);
+        assert!(queue_only.contains(&queue_lock), "{queue_only:?}");
+        assert!(!queue_only.contains(&rank_lock), "{queue_only:?}");
+        // blank is unset: no lock line, no service note
+        let none = drawn(vec![(RANK_ENV, " ".to_string())]);
+        for text in [&rank_lock, &queue_lock, &SERVICE_MAY_DIFFER.to_string()] {
+            assert!(!none.contains(text), "{text} in {none:?}");
+        }
     }
 
     /// Signed in, the Website account card draws the training crop section:

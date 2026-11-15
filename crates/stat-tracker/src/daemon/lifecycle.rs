@@ -738,9 +738,10 @@ pub(crate) async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
         &ctx.data_dir,
         site_linked,
     );
-    // The queue title reader: off unless its env switch is on and the pack
-    // loads; off leaves the saver as it is.
-    let queue_title = daemon::queue_title::QueueTitleFeed::from_env(&ctx.data_dir);
+    // The queue title reader: off unless config `rank_reader` (or its env
+    // override) is on and the pack loads; off leaves the saver as it is.
+    let queue_title =
+        daemon::queue_title::QueueTitleFeed::for_config(config.rank_reader, &ctx.data_dir);
     let mut pregame_dump = daemon::pregame_dump::PregameDump::with_readers(
         ctx.save_pregame_screens,
         bans_picks,
@@ -749,8 +750,10 @@ pub(crate) async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
         ctx.auto_detect.poll_interval(ctx.use_new_reader),
     );
     // The rank update reader: `None` (nothing read, saved or sent) unless
-    // its env switch is on and the pack loads (`daemon::rank`).
-    let mut rank_feed = daemon::rank::RankFeed::from_env(&ctx.data_dir);
+    // config `rank_reader` (or its env override) is on and the pack loads
+    // (`daemon::rank`). A missing pack leaves it `None`: games record as
+    // before, and the app shows the pack warning.
+    let mut rank_feed = daemon::rank::RankFeed::for_config(config.rank_reader, &ctx.data_dir);
     let result = run_loop(
         Arc::clone(&ctx),
         early_sigterm,

@@ -17,9 +17,10 @@ pub(crate) async fn run_loop(
     // no frame is kept. The caller flushes it after the loop.
     pregame_dump: &mut Option<daemon::pregame_dump::PregameDump>,
     // The rank update reader: `None` (nothing read, saved or sent) unless
-    // its env switch is on and the pack loads (`daemon::rank`). The caller
-    // settles a rank screen still held after the loop, as it flushes the
-    // pre-game saver.
+    // config `rank_reader` (or its env override) is on and the pack loads
+    // (`daemon::rank::RankFeed::for_config`, built by the caller). The
+    // caller settles a rank screen still held after the loop, as it
+    // flushes the pre-game saver.
     rank_feed: &mut Option<daemon::rank::RankFeed>,
 ) -> anyhow::Result<()> {
     // Ergonomic locals over the shared context; spawned tasks clone the Arc.
@@ -166,7 +167,7 @@ pub(crate) async fn run_loop(
     {
         // Open needs a confident queue title, and the banner hint is handed
         // on through the queue title wiring: both need its own switch.
-        tracing::info!(target: "scuffed_stat_tracker", "rank update: the queue title reader is off (STAT_TRACKER_QUEUE_TITLE_RECOGNIZER), so no Open role is sent and no next mode hint is handed on");
+        tracing::info!(target: "scuffed_stat_tracker", "rank update: the queue title reader is off or has no pack (rank_reader, STAT_TRACKER_QUEUE_TITLE_RECOGNIZER), so no Open role is sent and no next mode hint is handed on");
     }
 
     let mut poll_timer = tokio::time::interval(poll_interval);
@@ -574,6 +575,7 @@ pub(crate) async fn run_loop(
                         let postgame_want =
                             daemon::pregame_dump::PregameDump::post_want_of(pregame_dump.as_mut(), now);
                         let rank_read = rank_feed.as_ref().map(daemon::rank::RankFeed::reader);
+                        let rank_holds = rank_feed.as_ref().is_some_and(daemon::rank::RankFeed::holds_screen);
                         // Dropping this join detaches the blocking OCR. That
                         // task does not write a match row. The row is written
                         // below, and only when shutdown has not begun and no
@@ -610,6 +612,7 @@ pub(crate) async fn run_loop(
                             // same lit-crop gate and stability wait as the
                             // OCR it replaces (alpha.7 O11).
                             let words = detect::match_end::ResultWords::for_reader(use_new_reader);
+                            stability.forget_first_seen();
                             let signal = detect::match_end::detect_outcome_signal_polled(
                                 &img,
                                 &rgb,
@@ -617,6 +620,14 @@ pub(crate) async fn run_loop(
                                 detect::match_end::FinalScoreSource::for_reader(use_new_reader),
                                 &titles,
                                 &words,
+                            );
+                            // The gate held the rank word back on a first
+                            // sighting (the history was reset, as by a focus
+                            // pause or a failed analysis) while a rank screen
+                            // is held: rank-v1 reads it.
+                            let rank_held_back = daemon::rank::rank_held_back(
+                                rank_holds,
+                                stability.first_seen(detect::RANK_SCREEN_CONTEXT),
                             );
                             // Cheap wake path: while Tab cell OCR is in
                             // flight, skip the phase and accolade-map reads
@@ -704,6 +715,7 @@ pub(crate) async fn run_loop(
                             let rank_seen = daemon::rank::read_rank_screen(
                                 rank_read.as_ref(),
                                 signal.map(|(_, source)| source),
+                                rank_held_back,
                                 &rgb,
                             );
                             if rank_seen.is_some() {
@@ -717,7 +729,7 @@ pub(crate) async fn run_loop(
                                 postgame_want,
                                 signal.is_some() || end_reel,
                             );
-                            (signal, phase, accolade_map, end_reel, end_title_seen, stability, result_read, rank_pngs, rank_seen, pregame, postgame)
+                            (signal, phase, accolade_map, end_reel, end_title_seen, stability, result_read, rank_pngs, rank_seen, rank_held_back, pregame, postgame)
                         }),
                             stat_tracker::replace::shutdown_notified(),
                             stat_tracker::tab_retry::next_press(&mut kbd, &mut tabs),
@@ -739,7 +751,7 @@ pub(crate) async fn run_loop(
                         // nothing about the rank screen: the rank wiring
                         // skips it, so it is neither a read nor a miss.
                         let analysis_ok = matches!(&analyzed, Ok(Ok(_)));
-                        let (signal, phase, accolade_map, end_reel, end_title_seen, stability, result_read, rank_pngs, rank_seen, pregame, postgame) = match analyzed {
+                        let (signal, phase, accolade_map, end_reel, end_title_seen, stability, result_read, rank_pngs, rank_seen, rank_held_back, pregame, postgame) = match analyzed {
                             Err(()) => {
                                 shutdown_from_signal(
                                     &mut st,
@@ -755,7 +767,7 @@ pub(crate) async fn run_loop(
                                 return Ok(());
                             }
                             Ok(joined) => joined.unwrap_or_else(|_| {
-                                (None, detect::GamePhase::Unknown, None, false, false, detect::stability::FrameStability::default(), None, None, None, None, None)
+                                (None, detect::GamePhase::Unknown, None, false, false, detect::stability::FrameStability::default(), None, None, None, false, None, None)
                             }),
                         };
                         if stat_tracker::replace::shutdown_requested() {
@@ -798,6 +810,7 @@ pub(crate) async fn run_loop(
                             && daemon::rank::tick(
                                 feed,
                                 rank_seen,
+                                rank_held_back,
                                 daemon::rank::rank_game(st.active_game.as_ref()),
                                 store,
                                 pregame_dump.as_mut(),

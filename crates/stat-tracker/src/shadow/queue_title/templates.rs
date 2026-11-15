@@ -48,7 +48,10 @@ pub struct TemplateSet {
 
 #[derive(Debug)]
 pub enum TemplateError {
+    /// No pack file.
     Missing(PathBuf),
+    /// The file could not be read, is not a pack, or is not this build's
+    /// shape ([`TemplateSet::check`]).
     Bad(PathBuf, String),
 }
 
@@ -76,7 +79,13 @@ impl TemplateSet {
     /// Load a pack and check its shape matches this build.
     pub fn load_dir(dir: &Path) -> Result<Self, TemplateError> {
         let p = dir.join(PACK_FILE);
-        let s = std::fs::read_to_string(&p).map_err(|_| TemplateError::Missing(p.clone()))?;
+        let s = match std::fs::read_to_string(&p) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(TemplateError::Missing(p));
+            }
+            Err(e) => return Err(TemplateError::Bad(p, e.to_string())),
+        };
         let set: Self =
             serde_json::from_str(&s).map_err(|e| TemplateError::Bad(p.clone(), e.to_string()))?;
         set.check().map_err(|e| TemplateError::Bad(p, e))?;

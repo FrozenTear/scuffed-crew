@@ -2,10 +2,12 @@
 //! [`stat_tracker::shadow::rank`]): which post-game frames it reads, how the
 //! reads of one rank screen are combined, and what the game record gets.
 //!
-//! Off by default: [`RankFeed::from_env`] is `None` unless
-//! [`stat_tracker::shadow::rank::ENV`] is on and the pack loads. With no
-//! feed nothing here runs: no rank screen is read, saved or uploaded, and
-//! no game changes.
+//! Off by default: [`RankFeed::for_config`] is `None` unless config
+//! `rank_reader` is on (or [`stat_tracker::shadow::rank::ENV`] overrides it
+//! to on) and the pack loads. With no feed nothing here runs: no rank
+//! screen is read, saved or uploaded, and no game changes. The app shows
+//! [`stat_tracker::shadow::rank::pack_warning`] for a pack that is missing
+//! or does not load.
 //!
 //! With it on, every poll frame the end detector reads as the rank screen
 //! (its result word, `OutcomeSource::RankScreen`) is read once, inside the
@@ -13,7 +15,15 @@
 //! 2560x1440 frames only, never the placement screen. The reads are held
 //! for the open game while the screen lasts ([`RankFeed::observe`]). One
 //! analyzed tick that misses the screen does not end it: it is held as a
-//! break between reads. The screen is gone after [`RANK_SETTLE_MISSES`]
+//! break between reads. A tick whose rank-screen word crop the stability
+//! gate held back on a first sighting (the history was dropped: by a focus
+//! pause, so the first tick after an alt-tab, or by a tick whose analysis
+//! failed) is not a miss by itself: a crop that only moved still is. While
+//! a screen is held, rank-v1 reads that frame, and only a frame it does not
+//! read counts as a miss ([`read_rank_screen`]). Such a frame never starts
+//! a screen, not even when the tick ends a held screen because the open
+//! game changed ([`RankFeed::observe_tick`]). Focus-paused ticks read nothing
+//! and reach none of this. The screen is gone after [`RANK_SETTLE_MISSES`]
 //! analyzed ticks in a row miss it, when another game's screen starts or
 //! the open game changes or closes, when the game process stops
 //! ([`close`]), or when the tracker shuts down ([`finish_on_shutdown`]).
@@ -118,10 +128,16 @@ pub(crate) struct RankFeed {
 }
 
 impl RankFeed {
-    /// The live feed: `None`, nothing read, unless [`RankSetting::from_env`]
-    /// is on and the pack loads.
-    pub(crate) fn from_env(data_dir: &Path) -> Option<Self> {
-        Self::for_setting(RankSetting::from_env(), data_dir)
+    /// The live feed: `None`, nothing read, unless config `rank_reader` or
+    /// the env override ([`RankSetting::for_config`]) is on and the pack
+    /// loads. Read once at start: a change applies after a restart.
+    pub(crate) fn for_config(rank_reader: bool, data_dir: &Path) -> Option<Self> {
+        let env = RankSetting::env_override();
+        let setting = RankSetting::for_config(rank_reader, env);
+        if !setting.is_on() {
+            tracing::info!(target: "scuffed_stat_tracker", config = rank_reader, env = ?env, "rank update: reader off");
+        }
+        Self::for_setting(setting, data_dir)
     }
 
     pub(crate) fn for_setting(setting: RankSetting, data_dir: &Path) -> Option<Self> {
@@ -143,7 +159,7 @@ impl RankFeed {
                 })))
             }
             Err(e) => {
-                tracing::warn!(target: "scuffed_stat_tracker", "rank update reader on but not loaded: {e}");
+                tracing::warn!(target: "scuffed_stat_tracker", "rank update reader on but not loaded, games record without a rank: {e}");
                 None
             }
         }
@@ -160,6 +176,13 @@ impl RankFeed {
     /// The read function, for the poll's analysis thread.
     pub(crate) fn reader(&self) -> RankReadFn {
         Arc::clone(&self.read)
+    }
+
+    /// A rank screen's reads are held, not settled yet: a tick whose word
+    /// crop the stability gate held back is read by rank-v1 itself
+    /// ([`read_rank_screen`]).
+    pub(crate) fn holds_screen(&self) -> bool {
+        self.held.is_some()
     }
 
     /// One analyzed poll tick. `seen` is the tick's rank screen read
@@ -209,6 +232,27 @@ impl RankFeed {
         done
     }
 
+    /// [`Self::observe`] for one tick of the poll loop, with the tick's
+    /// held-back flag ([`rank_held_back`]). A held-back frame is read only
+    /// because a screen was held before the tick, and the end detector never
+    /// classified it. So when that screen is for another game than `game`
+    /// (or `game` is `None`), the tick finishes it, and the frame starts no
+    /// screen for the new game: it counts as no read.
+    pub(crate) fn observe_tick(
+        &mut self,
+        seen: Option<Option<RankUpdate>>,
+        held_back: bool,
+        game: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Option<Settled> {
+        let other_game = self
+            .held
+            .as_ref()
+            .is_some_and(|h| game != Some(h.session.as_str()));
+        let seen = if held_back && other_game { None } else { seen };
+        self.observe(seen, game, now)
+    }
+
     /// Settle the held reads now, whatever the misses: the game process
     /// stopped.
     pub(crate) fn close(&mut self) -> Option<Settled> {
@@ -252,18 +296,43 @@ impl Drop for RankFeed {
     }
 }
 
+/// The held-back gate, the `held_back` flag of [`read_rank_screen`]: true
+/// only when a rank screen is held (`holds_screen`, taken before this
+/// tick's outcome detector runs) and the stability gate held this tick's
+/// rank-screen word crop back on a first sighting (`first_seen`, asked
+/// after it). Either alone is false: with no screen held before the tick a
+/// held-back frame is not read, and a held screen with a crop the gate
+/// looked at reads only what the end detector classified. A held-back frame
+/// read while the held screen is another game's starts nothing: the tick
+/// finishes that screen ([`RankFeed::observe_tick`]).
+pub(crate) fn rank_held_back(holds_screen: bool, first_seen: bool) -> bool {
+    holds_screen && first_seen
+}
+
 /// The rank screen read of one poll frame: `None` when the reader is off
 /// (`read` is `None`) or the end detector did not read the frame as the
 /// rank screen; else the frame's read, where a reader that panics or reads
 /// nothing is `Some(None)`. A caught panic is logged once per run.
+///
+/// `held_back` is true when the stability gate held this tick's rank-screen
+/// word crop back on a first sighting (no history) while a screen is held
+/// ([`RankFeed::holds_screen`], the gate is [`rank_held_back`]). The
+/// detector then never looked at the word, so the frame is no miss by
+/// itself: rank-v1, whose own gate needs the RANK PROGRESS label, reads it.
+/// A read is `Some(read)`; a frame it does not read is `None`, a miss. Any
+/// tick after the stability history was dropped can be such a tick: the
+/// first one after a focus pause, or the one after a tick whose analysis
+/// failed (its join error leaves a fresh history).
 pub(crate) fn read_rank_screen(
     read: Option<&RankReadFn>,
     source: Option<OutcomeSource>,
+    held_back: bool,
     img: &RgbImage,
 ) -> Option<Option<RankUpdate>> {
-    let read = read.filter(|_| source == Some(OutcomeSource::RankScreen))?;
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read(img))) {
-        Ok(r) => Some(r),
+    let classified = source == Some(OutcomeSource::RankScreen);
+    let read = read.filter(|_| classified || held_back)?;
+    let read = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read(img))) {
+        Ok(r) => r,
         Err(payload) => {
             if !PANIC_LOGGED.swap(true, Ordering::Relaxed) {
                 let why = payload
@@ -273,8 +342,16 @@ pub(crate) fn read_rank_screen(
                     .unwrap_or_default();
                 tracing::warn!(target: "scuffed_stat_tracker", panic = %why, "rank update: the reader panicked on a frame, read as no read (logged once per run)");
             }
-            Some(None)
+            None
         }
+    };
+    if !classified {
+        tracing::info!(target: "scuffed_stat_tracker", read = read.is_some(), "rank update: read a frame whose rank word was held back on a first sighting (the stability history was reset, as by a focus pause or a failed analysis)");
+    }
+    if classified {
+        Some(read)
+    } else {
+        read.map(Some)
     }
 }
 
@@ -355,30 +432,33 @@ pub(crate) fn rank_game(game: Option<&crate::ActiveGame>) -> Option<&str> {
 }
 
 /// One analyzed poll tick of the wiring: hold the rank screen read or
-/// settle the held ones ([`RankFeed::observe`]), store a settled update on
-/// its game and hand its mode banner word to the queue title wiring, and
-/// try an update the store refused again. `true` when an update was stored
-/// on its game (the live snapshot is then out of date).
+/// settle the held ones ([`RankFeed::observe_tick`], with the tick's
+/// `held_back` flag), store a settled update on its game and hand its mode
+/// banner word to the queue title wiring, and try an update the store
+/// refused again. `true` when an update was stored on its game (the live
+/// snapshot is then out of date).
 pub(crate) async fn tick(
     feed: &mut RankFeed,
     seen: Option<Option<RankUpdate>>,
+    held_back: bool,
     game: Option<&str>,
     store: &impl RankStore,
     dump: Option<&mut PregameDump>,
 ) -> bool {
-    tick_at(feed, seen, game, store, dump, Utc::now()).await
+    tick_at(feed, seen, held_back, game, store, dump, Utc::now()).await
 }
 
 /// [`tick`] with the time of this tick's read.
 pub(crate) async fn tick_at(
     feed: &mut RankFeed,
     seen: Option<Option<RankUpdate>>,
+    held_back: bool,
     game: Option<&str>,
     store: &impl RankStore,
     dump: Option<&mut PregameDump>,
     now: DateTime<Utc>,
 ) -> bool {
-    let settled = feed.observe(seen, game, now);
+    let settled = feed.observe_tick(seen, held_back, game, now);
     apply(feed, settled, store, dump).await
 }
 
@@ -502,3 +582,7 @@ async fn store_rank(feed: &mut RankFeed, store: &impl RankStore, s: Settled, tri
 #[cfg(test)]
 #[path = "tests_rank.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests_rank_wiring.rs"]
+mod tests_wiring;
