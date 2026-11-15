@@ -179,7 +179,12 @@ fn open_is_sent_only_when_the_queue_title_says_open_queue() {
             "{title:?}: the rest is sent"
         );
     }
-    for title in ["OPEN QUEUE", "Open Queue", "COMPETITIVE: OPEN QUEUE"] {
+    for title in [
+        "OPEN QUEUE",
+        "Open Queue",
+        "COMPETITIVE: OPEN QUEUE",
+        "COMPETITIVE: 6V6 OPEN QUEUE",
+    ] {
         let rank = sent(Some(open.clone()), Some(queue(title)));
         assert_eq!(rank["role"], f(json!("Open"), 0.5), "{title}");
     }

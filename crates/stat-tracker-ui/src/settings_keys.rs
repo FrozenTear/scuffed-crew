@@ -1,12 +1,13 @@
 //! The 0.6 Settings rows that write the config keys added for 0.6: In-game
 //! names as a list (`player_name` first, then `player_names`), Upload
-//! games after each match (`live_upload`), the two Sharing switches
-//! (`rank_reader`, `share_stat_pictures`), Report pictures
+//! games after each match (`live_upload`), Read my rank after Comp games
+//! (`rank_reader`, under READERS in Capture and reading), the Sharing
+//! switch (`share_stat_pictures`), Report pictures
 //! (`share_report_pictures`) and Only capture while Overwatch is in front
 //! (`capture_only_on_screen`, with a live note while the tracker cannot
 //! tell which window is in front). Each applies at once. The tracker reads
-//! names and the focus gate when it starts, so those rows are tagged After
-//! restart.
+//! names, the focus gate and `rank_reader` when it starts, so those rows
+//! are tagged After restart.
 //!
 //! The upload row is not shown ([`crate::settings_model::HIDDEN_KEYS`]);
 //! its key still loads and saves as before. The rows whose key nothing
@@ -202,27 +203,63 @@ pub(crate) fn upload_row<'a>(
     ))
 }
 
-/// The two Sharing switches under Website account, both starting off,
-/// less the hidden ones. Empty while both are hidden.
+/// The lines under Read my rank after Comp games: its help, a lock line
+/// for each reader an env variable decides (the rank one also locks the
+/// switch, which shows the rank reader in effect), and the warning for a
+/// reader that is on with no usable pack (games still record).
+fn rank_lines<'a>(
+    app: &TrackerApp,
+    switch: crate::settings_env::RankSwitch,
+    help: &'static str,
+) -> Vec<Element<'a, Message>> {
+    use crate::settings_env::{QUEUE_TITLE_ENV, RANK_ENV};
+    let mut lines = vec![hint(help)];
+    for (set, env) in [
+        (switch.rank_env, RANK_ENV),
+        (switch.queue_env, QUEUE_TITLE_ENV),
+    ] {
+        if set {
+            lines.push(crate::capture_reading::lock_line(env));
+        }
+    }
+    if switch.rank_env || switch.queue_env {
+        lines.push(hint(crate::capture_reading::SERVICE_MAY_DIFFER));
+    }
+    if let Some(warning) = app.rank_pack_warning() {
+        lines.push(crate::widgets::warn_line(&warning));
+    }
+    lines
+}
+
+/// The rank switch's label.
+pub(crate) const RANK_LABEL: &str = "Read my rank after Comp games";
+
+/// Help under [`RANK_LABEL`].
+pub(crate) const RANK_HELP: &str = "Reads the rank screen after each Comp game and the queue title before it, saves your rank, its change and its label with the game, and sends them with your game uploads. Only what it read is sent, never a picture. Needs the rank-v1 and queue-title-v1 packs, loaded when the tracker starts. Starts off.";
+
+/// Read my rank after Comp games, under READERS in Capture and reading
+/// with the other reader switches. `None` while hidden.
+pub(crate) fn rank_row(app: &TrackerApp, demo: bool) -> Option<Element<'_, Message>> {
+    if !row_shown("rank_reader") {
+        return None;
+    }
+    let rank = app.rank_switch();
+    Some(setting_row(
+        title_line(RANK_LABEL, false, read_tags("rank_reader")),
+        rank_lines(app, rank, RANK_HELP),
+        edit_switch(rank.rank_on, demo || rank.rank_env, ConfigEdit::RankReader),
+    ))
+}
+
+/// The Sharing switch under Website account, starting off. Empty while it
+/// is hidden.
 pub(crate) fn sharing_rows<'a>(
     app: &'a TrackerApp,
     demo: bool,
-    rank_help: &'static str,
     pictures_help: &'static str,
 ) -> Vec<Element<'a, Message>> {
     let c = &app.saved_config;
     let mut rows = Vec::new();
-    if row_shown("rank_reader") {
-        rows.push(setting_row(
-            title_line(
-                "Read my rank after Comp games",
-                false,
-                read_tags("rank_reader"),
-            ),
-            vec![hint(rank_help), hint(NOT_READ_NOTE)],
-            edit_switch(c.rank_reader, demo, ConfigEdit::RankReader),
-        ));
-    }
     if row_shown("share_stat_pictures") {
         rows.push(setting_row(
             title_line(
@@ -441,10 +478,13 @@ mod tests {
         let (_dir, app) = crate::fixtures::test_app();
         assert!(upload_row(&app, false, "help", true).is_none());
         assert_eq!(not_connected_note(false), Some(UPLOAD_NO_SITE));
-        assert_eq!(sharing_rows(&app, false, "a", "b").len(), 2);
+        assert_eq!(sharing_rows(&app, false, "b").len(), 1);
+        assert!(rank_row(&app, false).is_some());
+        assert!(!RANK_HELP.contains('\u{2014}') && RANK_HELP.contains("Starts off"));
         assert!(report_pictures_row(&app, false, "c").is_some());
         assert!(focus_gate_row(&app, false, "d").is_some());
-        assert_eq!(read_tags("rank_reader"), &[] as &[Tag]);
+        assert_eq!(read_tags("rank_reader"), &[Tag::AfterRestart]);
+        assert_eq!(read_tags("share_stat_pictures"), &[] as &[Tag]);
         assert_eq!(read_tags("player_names"), &[Tag::AfterRestart]);
         assert!(NOT_READ_NOTE.starts_with("Not read by this build yet"));
     }

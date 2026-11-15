@@ -4,8 +4,9 @@
 //! Templates are cut from the game's own text, so a pack is never committed.
 //! The reader loads it from `<data_dir>/templates/rank-v1/templates.json`
 //! ([`TEMPLATE_DIR`], [`PACK_FILE`]); a pack is built locally from labelled
-//! frames with [`Learner`] (the ignored bench in `tests.rs` writes one).
-//! Without a pack there is no reader.
+//! frames with [`Learner`] (the ignored bench in `tests.rs` writes one), or
+//! arrives in the same folder through the tracker's pack download
+//! (`rank-v1.tar`, [`crate::packs`]). Without a pack there is no reader.
 //!
 //! A template is the mean of the normalised cuts ([`super::ink::vector`]) of
 //! one class (a digit, `%`, a tag word, a tier name) in one family (where the

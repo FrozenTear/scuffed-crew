@@ -115,7 +115,7 @@ async fn a_list_without_the_pack_installs_the_rest_and_leaves_no_reader_folder()
         Reader::load(dir.path()),
         Err(TemplateError::Missing(_))
     ));
-    assert_eq!(report.extras_ready(), (6, 6));
+    assert_eq!(report.extras_ready(), (8, 8));
     assert!(!stored_versions(dir.path()).contains_key(BANS_PICKS_PACK_NAME));
 }
 

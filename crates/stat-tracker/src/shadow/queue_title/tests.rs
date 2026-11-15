@@ -359,6 +359,18 @@ fn pack_with_wrong_size_is_refused() {
     ));
 }
 
+/// A pack file that is there but cannot be read did not load; only a file
+/// that is not there is missing.
+#[test]
+fn an_unreadable_pack_file_is_bad_not_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(PACK_FILE)).unwrap();
+    assert!(matches!(
+        TemplateSet::load_dir(dir.path()),
+        Err(TemplateError::Bad(..))
+    ));
+}
+
 #[test]
 fn pick_follows_the_policy() {
     let v = |s: &str| Field {
@@ -659,7 +671,7 @@ fn bench_labelled_queue_titles() {
     all.save_dir(&out.join("pack")).unwrap();
     let _ = writeln!(
         md,
-        "\nPack from all {} frames (1440p) written to `pack/{PACK_FILE}`; install under `<data_dir>/{TEMPLATE_DIR}/`.",
+        "\nPack from all {} frames (1440p) written to `pack/{PACK_FILE}`; install under `<data_dir>/{TEMPLATE_DIR}/`. The pack can also arrive there through the tracker's pack download, which moves a folder whose `{PACK_FILE}` is not the one it installed (or that holds other files) to `<data_dir>/templates-kept/` first.",
         items.len()
     );
     std::fs::create_dir_all(&out).unwrap();

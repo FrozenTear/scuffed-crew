@@ -16,6 +16,12 @@ pub use crate::input::{MultiKeyboardStream, TabKey};
 
 pub use crate::model::MatchOutcome;
 
+/// The rank screen's result-word crop: its log context and its
+/// [`stability::FrameStability`] key, so the poll can ask whether this
+/// tick's gate held the crop back on a first sighting
+/// ([`stability::FrameStability::first_seen`]).
+pub const RANK_SCREEN_CONTEXT: &str = "rank screen";
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum GamePhase {
     MapVote {
