@@ -68,7 +68,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         position: absolute;
         right: max(2%, calc((100% - var(--home-max)) / 2 + 4%));
         bottom: -0.08em;
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: clamp(7rem, 28vw, 16rem);
         line-height: 0.78;
         letter-spacing: 0.02em;
@@ -173,7 +173,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         50% { opacity: 0.35; }
     }
     .home-title {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: clamp(2.85rem, 9.5vw, 5.5rem);
         line-height: 0.92;
         letter-spacing: 0.01em;
@@ -193,7 +193,7 @@ pub const HOME_SHARED_CSS: &str = r#"
     .home-sub {
         margin: 1.35rem 0 0;
         max-width: 32rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 1.05rem;
         line-height: 1.6;
         font-weight: 400;
@@ -223,7 +223,7 @@ pub const HOME_SHARED_CSS: &str = r#"
     .home-metric:last-child { border-right: none; }
     .home-metric strong {
         display: block;
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 1.85rem;
         letter-spacing: 0.04em;
         color: var(--text);
@@ -265,7 +265,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         color: var(--warn);
     }
     .home-heading {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-weight: 700;
         font-size: clamp(1.2rem, 2.4vw, 1.5rem);
         color: var(--text);
@@ -279,7 +279,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         content: none;
     }
     .home-body {
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.95rem;
         line-height: 1.65;
         max-width: 40rem;
@@ -318,7 +318,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         transform: translateX(2px);
     }
     .rules li .rn {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 1.35rem;
         letter-spacing: 0.04em;
         color: var(--accent-text);
@@ -379,7 +379,7 @@ pub const HOME_SHARED_CSS: &str = r#"
     .live-list li:last-child { border-bottom: none; }
     .live-list a {
         color: var(--text);
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-weight: 700;
         font-size: 1rem;
     }
@@ -427,7 +427,7 @@ pub const HOME_SHARED_CSS: &str = r#"
     }
     .next-match-vs {
         margin: 0;
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-weight: 700;
         font-size: 1.15rem;
         color: var(--text);
@@ -445,7 +445,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         margin: 0.45rem 0 0.2rem;
         font-family: var(--font-mono);
         font-size: 0.78rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         letter-spacing: 0.04em;
     }
     .results-ticker {
@@ -492,7 +492,7 @@ pub const HOME_SHARED_CSS: &str = r#"
     .ticker-chip .ticker-score {
         font-family: var(--font-mono);
         font-weight: 700;
-        color: var(--text-muted);
+        color: var(--text-3);
     }
     .ticker-chip .ticker-date {
         font-family: var(--font-mono);
@@ -552,7 +552,7 @@ pub const HOME_SHARED_CSS: &str = r#"
     }
     .team-row:hover::before { width: 3px; }
     .team-row .tm-name {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-weight: 700;
         color: var(--text);
         font-size: 1.05rem;
@@ -586,7 +586,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         white-space: nowrap;
     }
     .team-row .tm-div {
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.8rem;
         text-align: right;
         white-space: nowrap;
@@ -597,7 +597,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         font-family: var(--font-mono);
         font-size: 0.8rem;
         letter-spacing: 0.04em;
-        color: var(--text-muted);
+        color: var(--text-3);
         text-align: right;
         font-variant-numeric: tabular-nums;
         white-space: nowrap;
@@ -656,14 +656,14 @@ pub const HOME_SHARED_CSS: &str = r#"
         letter-spacing: 0.1em;
     }
     .news-row h3 {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-weight: 700;
         font-size: 1.2rem;
         color: var(--text);
         margin: 0.25rem 0 0.4rem;
     }
     .news-row p {
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.9rem;
         line-height: 1.55;
         margin: 0;
@@ -717,7 +717,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         display: flex;
         gap: 0.55rem;
         padding: 0.45rem 0;
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.86rem;
         border-bottom: 1px solid var(--border);
     }
@@ -744,7 +744,7 @@ pub const HOME_SHARED_CSS: &str = r#"
     .never-box p {
         margin: 0;
         font-size: 0.8rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         line-height: 1.5;
     }
     .seek-tags {
@@ -810,7 +810,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         color: var(--text);
     }
     .btn-outline:hover {
-        border-color: var(--text-muted);
+        border-color: var(--text-3);
         color: var(--text);
         transform: translateY(-1px);
     }
@@ -1012,14 +1012,14 @@ pub const HOME_SHELL_CSS: &str = r#"
     background: color-mix(in srgb, var(--accent) 5%, var(--surface));
 }
 .home-wrap .team-card .tc-name {
-    font-family: var(--font-display);
+    font-family: var(--font-head);
     font-weight: 600;
     font-size: 1.05rem;
 }
 .home-wrap .team-card .tc-meta {
     margin-top: 0.35rem;
     font-size: 0.8rem;
-    color: var(--text-muted);
+    color: var(--text-3);
 }
 .home-wrap .team-card.forming {
     border-style: dashed;
@@ -1039,7 +1039,7 @@ pub const HOME_SHELL_CSS: &str = r#"
     border: 1px solid var(--border);
     background: var(--surface-sunken);
     border-radius: var(--radius-pill, 999px);
-    color: var(--text-muted);
+    color: var(--text-3);
     transition: border-color 0.15s, color 0.15s;
 }
 .home-wrap .team-chip:hover {

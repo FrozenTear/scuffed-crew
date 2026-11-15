@@ -66,7 +66,7 @@ fn pct(part: u32, total: u32) -> f64 {
 fn render_hp(hero: &Hero) -> Element {
     let total = hero.total_hp();
     let segments: Vec<(&str, &str, u32, f64)> = [
-        ("Health", "var(--text-muted)", hero.health),
+        ("Health", "var(--text-3)", hero.health),
         ("Armor", "var(--warn)", hero.armor),
         ("Shields", "var(--chart-5)", hero.shields),
     ]

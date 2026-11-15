@@ -57,7 +57,7 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 1.5rem;
     }
     .strategy-browse-title {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 2rem;
         color: var(--text);
         text-transform: uppercase;
@@ -120,7 +120,7 @@ const PAGE_CSS: &str = r#"
         border-radius: 999px;
         border: 1px solid var(--border);
         background: var(--surface);
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.78rem;
         font-weight: 600;
         cursor: pointer;
@@ -160,7 +160,7 @@ const PAGE_CSS: &str = r#"
         transform: translateY(-2px);
     }
     .strategy-card-name {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-weight: 700;
         font-size: 1.1rem;
         color: var(--text);
@@ -190,7 +190,7 @@ const PAGE_CSS: &str = r#"
         width: fit-content;
     }
     .strategy-card-owner {
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.8rem;
     }
     .strategy-card-footer {

@@ -55,7 +55,7 @@ const PAGE_CSS: &str = r#"
         margin: 0 auto;
     }
     .events-page h1 {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 2.5rem;
         color: var(--text);
         letter-spacing: 3px;
@@ -77,7 +77,7 @@ const PAGE_CSS: &str = r#"
         gap: 0.75rem;
     }
     .events-day-header {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-weight: 700;
         font-size: 1.1rem;
         color: var(--accent-text);
@@ -105,7 +105,7 @@ const PAGE_CSS: &str = r#"
         border-color: var(--accent-soft);
     }
     .event-card-title {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-weight: 700;
         font-size: 1.1rem;
         color: var(--text);
@@ -146,7 +146,7 @@ const PAGE_CSS: &str = r#"
         border-radius: 6px;
         border: 1px solid var(--border);
         background: transparent;
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.75rem;
         font-weight: 600;
         cursor: pointer;

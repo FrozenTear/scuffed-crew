@@ -76,7 +76,7 @@ pub const CSS: &str = r#"
     }
 
     .list-cap-notice {
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.85rem;
         padding: 0.75rem 0;
         display: flex;

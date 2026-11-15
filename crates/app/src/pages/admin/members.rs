@@ -747,7 +747,7 @@ pub fn AdminMembers() -> Element {
             } else {
                 rsx! {
                     h2 {
-                        style: "font-family:var(--font-display);font-size:0.95rem;color:var(--text);margin:1.5rem 0 0.75rem;",
+                        style: "font-family:var(--font-head);font-size:0.95rem;color:var(--text);margin:1.5rem 0 0.75rem;",
                         "Recently deactivated (this session)"
                     }
                     p { class: "empty-state", style: "text-align:left;padding:0 0 0.75rem;margin:0;",
@@ -950,7 +950,7 @@ pub fn AdminMembers() -> Element {
                                     div {
                                         style: "text-align:center;margin-top:1rem;",
                                         span {
-                                            style: "font-family:var(--font-display);font-size:2.5rem;color:var(--accent-text);",
+                                            style: "font-family:var(--font-head);font-size:2.5rem;color:var(--accent-text);",
                                             "{rate}"
                                         }
                                         div {
@@ -1035,7 +1035,7 @@ pub fn AdminMembers() -> Element {
                         div {
                             style: "border-top:1px solid var(--border);padding-top:1rem;margin-top:1rem;",
                             h3 {
-                                style: "font-family:var(--font-display);font-size:0.9rem;font-weight:700;color:var(--text);text-transform:uppercase;margin-bottom:0.75rem;",
+                                style: "font-family:var(--font-head);font-size:0.9rem;font-weight:700;color:var(--text);text-transform:uppercase;margin-bottom:0.75rem;",
                                 "Add Account"
                             }
                             div { style: "display:flex;gap:0.5rem;flex-wrap:wrap;align-items:flex-end;",

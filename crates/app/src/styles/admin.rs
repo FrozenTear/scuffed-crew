@@ -11,11 +11,11 @@ pub const CSS: &str = r#"
     }
     .data-table { width: 100%; min-width: 36rem; border-collapse: collapse; font-size: 0.85rem; }
     .data-table th {
-        text-align: left; padding: 0.6rem 0.75rem; font-family: var(--font-display);
+        text-align: left; padding: 0.6rem 0.75rem; font-family: var(--font-head);
         font-weight: 700; font-size: 0.75rem; text-transform: uppercase;
         letter-spacing: 0.05em; color: var(--text-subtle); border-bottom: 1px solid var(--border);
     }
-    .data-table td { padding: 0.6rem 0.75rem; border-bottom: 1px solid var(--border); color: var(--text-muted); }
+    .data-table td { padding: 0.6rem 0.75rem; border-bottom: 1px solid var(--border); color: var(--text-3); }
     .data-table tr:hover td { background: var(--surface); }
     .data-table tr.is-inactive td {
         color: var(--text-subtle);
@@ -29,7 +29,7 @@ pub const CSS: &str = r#"
     .row-actions { display: flex; gap: 0.35rem; flex-wrap: wrap; }
     .row-btn {
         padding: 0.2rem 0.55rem; border-radius: 4px; border: 1px solid var(--border);
-        background: var(--surface); color: var(--text-muted); font-size: 0.7rem;
+        background: var(--surface); color: var(--text-3); font-size: 0.7rem;
         cursor: pointer; transition: all 0.15s; white-space: nowrap;
     }
     @media (max-width: 768px) {
@@ -102,7 +102,7 @@ pub const CSS: &str = r#"
     }
     .application-detail dt {
         margin: 0;
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-weight: 600;
         font-size: 0.75rem;
         letter-spacing: 0.04em;
@@ -133,7 +133,7 @@ pub const CSS: &str = r#"
     }
     .form-modal-header {
         padding: 1.25rem 1.5rem 0.75rem; border-bottom: 1px solid var(--border);
-        font-family: var(--font-display); font-weight: 700; font-size: 1.2rem;
+        font-family: var(--font-head); font-weight: 700; font-size: 1.2rem;
         color: var(--text); text-transform: uppercase; letter-spacing: 0.03em;
     }
     .form-modal-body { padding: 1.25rem 1.5rem; display: flex; flex-direction: column; gap: 1rem; }
@@ -142,7 +142,7 @@ pub const CSS: &str = r#"
     }
     .btn-cancel {
         padding: 0.5rem 1rem; border-radius: 6px; background: var(--surface);
-        border: 1px solid var(--border); color: var(--text-muted); font-size: 0.85rem;
+        border: 1px solid var(--border); color: var(--text-3); font-size: 0.85rem;
         cursor: pointer; transition: all 0.15s;
     }
     .btn-cancel:hover { color: var(--text); }
@@ -159,7 +159,7 @@ pub const CSS: &str = r#"
     /* Form Fields */
     .form-field { display: flex; flex-direction: column; gap: 0.3rem; }
     .form-label {
-        font-family: var(--font-display); font-weight: 600; font-size: 0.8rem;
+        font-family: var(--font-head); font-weight: 600; font-size: 0.8rem;
         color: var(--text); text-transform: uppercase; letter-spacing: 0.04em;
     }
     .form-input, .form-select, .form-textarea {
@@ -187,7 +187,7 @@ pub const CSS: &str = r#"
     }
 
     /* Confirm Dialog */
-    .confirm-body { padding: 1.25rem 1.5rem; color: var(--text-muted); font-size: 0.9rem; line-height: 1.6; }
+    .confirm-body { padding: 1.25rem 1.5rem; color: var(--text-3); font-size: 0.9rem; line-height: 1.6; }
 
     /* Summary Cards (dashboard) */
     .summary-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 1rem; margin-bottom: 2rem; }
@@ -205,7 +205,7 @@ pub const CSS: &str = r#"
         transform: translateY(-1px);
     }
     .summary-card .value {
-        font-family: var(--font-display); font-size: 2.2rem; color: var(--accent-text);
+        font-family: var(--font-head); font-size: 2.2rem; color: var(--accent-text);
         letter-spacing: 2px; line-height: 1;
     }
     .summary-card .label {
@@ -225,7 +225,7 @@ pub const CSS: &str = r#"
     .dash-chip {
         display: inline-block; padding: 0.35rem 0.75rem; border-radius: var(--radius-pill);
         font-size: 0.75rem; text-decoration: none; border: 1px solid var(--border);
-        background: var(--surface); color: var(--text-muted);
+        background: var(--surface); color: var(--text-3);
     }
     .dash-chip.soft {
         border-color: color-mix(in srgb, var(--text-subtle) 35%, transparent);
@@ -245,7 +245,7 @@ pub const CSS: &str = r#"
     .pagination { display: flex; align-items: center; gap: 0.75rem; margin-top: 1.5rem; }
     .pagination button {
         padding: 0.35rem 0.75rem; border-radius: 4px; border: 1px solid var(--border);
-        background: var(--surface); color: var(--text-muted); font-size: 0.8rem; cursor: pointer;
+        background: var(--surface); color: var(--text-3); font-size: 0.8rem; cursor: pointer;
     }
     .pagination button:hover:not(:disabled) { color: var(--text); border-color: var(--accent-soft); }
     .pagination button:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -254,7 +254,7 @@ pub const CSS: &str = r#"
     /* Form sections */
     .form-section { margin-bottom: 2rem; }
     .form-section h2 {
-        font-family: var(--font-display); font-size: 1.1rem; font-weight: 700;
+        font-family: var(--font-head); font-size: 1.1rem; font-weight: 700;
         color: var(--text); text-transform: uppercase; letter-spacing: 0.04em;
         margin: 0 0 0.4rem; padding-bottom: 0;
         border-bottom: none;
@@ -273,7 +273,7 @@ pub const CSS: &str = r#"
     .btn-ghost {
         display: inline-flex; align-items: center; gap: 0.4rem;
         padding: 0.5rem 1rem; border-radius: 6px;
-        background: transparent; color: var(--text-muted);
+        background: transparent; color: var(--text-3);
         border: 1px solid var(--border); font-size: 0.85rem; font-weight: 600;
         cursor: pointer; text-decoration: none; transition: all 0.15s;
         text-transform: uppercase; letter-spacing: 0.03em;
@@ -302,7 +302,7 @@ pub const CSS: &str = r#"
         background: color-mix(in srgb, var(--accent) 8%, var(--surface-sunken));
     }
     .pack-card-name {
-        font-family: var(--font-display); font-weight: 700; font-size: 0.9rem;
+        font-family: var(--font-head); font-weight: 700; font-size: 0.9rem;
         letter-spacing: 0.02em;
     }
     .pack-card-desc {
@@ -337,7 +337,7 @@ pub const CSS: &str = r#"
         background: color-mix(in srgb, var(--accent) 10%, var(--surface-sunken));
     }
     .option-tile-title {
-        font-family: var(--font-display); font-weight: 700; font-size: 0.82rem;
+        font-family: var(--font-head); font-weight: 700; font-size: 0.82rem;
         margin-bottom: 0.25rem;
     }
     .option-tile-blurb { font-size: 0.72rem; color: var(--text-subtle); line-height: 1.35; }
@@ -350,7 +350,7 @@ pub const CSS: &str = r#"
         display: inline-flex; align-items: center; gap: 0.4rem;
         padding: 0.4rem 0.7rem; border-radius: 999px;
         border: 1px solid var(--border); background: var(--surface-sunken);
-        font-size: 0.78rem; color: var(--text-muted); cursor: pointer;
+        font-size: 0.78rem; color: var(--text-3); cursor: pointer;
         user-select: none; transition: all 0.15s;
     }
     .section-chip input { accent-color: var(--accent-solid); margin: 0; }
@@ -373,7 +373,7 @@ pub const CSS: &str = r#"
     }
     .copy-panel-head:hover { background: color-mix(in srgb, var(--surface-sunken) 80%, transparent); }
     .copy-panel-title {
-        font-family: var(--font-display); font-weight: 700; font-size: 0.85rem;
+        font-family: var(--font-head); font-weight: 700; font-size: 0.85rem;
         text-transform: uppercase; letter-spacing: 0.06em;
     }
     .copy-panel-chevron {
@@ -414,7 +414,7 @@ pub const CSS: &str = r#"
         border-bottom: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
     }
     .settings-subhead {
-        font-family: var(--font-display); font-size: 0.72rem; font-weight: 700;
+        font-family: var(--font-head); font-size: 0.72rem; font-weight: 700;
         text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-subtle);
         margin: 0 0 0.55rem;
     }

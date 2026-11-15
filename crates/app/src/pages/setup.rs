@@ -42,13 +42,13 @@ const CSS: &str = r#"
     margin: 0.25rem 0 0;
 }
 .setup-card h1 {
-    font-family: var(--font-display);
+    font-family: var(--font-head);
     font-size: 1.5rem;
     color: var(--text);
     margin: 0 0 0.5rem;
 }
 .setup-card p.lead {
-    color: var(--text-muted);
+    color: var(--text-3);
     font-size: 0.9rem;
     margin: 0 0 1.5rem;
 }
@@ -84,7 +84,7 @@ const CSS: &str = r#"
 .setup-pack-meta {
     font-family: var(--font-mono);
     font-size: 0.72rem;
-    color: var(--text-muted);
+    color: var(--text-3);
     margin: 0.35rem 0 0;
     letter-spacing: 0.02em;
 }

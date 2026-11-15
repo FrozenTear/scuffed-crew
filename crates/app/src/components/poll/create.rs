@@ -24,7 +24,7 @@ const CREATE_CSS: &str = r#"
     margin-bottom: 1.5rem;
 }
 .poll-create-title {
-    font-family: var(--font-display);
+    font-family: var(--font-head);
     font-weight: 700;
     font-size: 1rem;
     color: var(--text);
@@ -54,7 +54,7 @@ const CREATE_CSS: &str = r#"
 }
 .poll-create-field label {
     display: block;
-    color: var(--text-muted);
+    color: var(--text-3);
     font-size: 0.75rem;
     margin-bottom: 0.25rem;
     text-transform: uppercase;
@@ -98,15 +98,15 @@ const CREATE_CSS: &str = r#"
     transition: border-color 0.15s, color 0.15s;
 }
 .poll-create-add-btn:hover {
-    border-color: var(--text-muted);
-    color: var(--text-muted);
+    border-color: var(--text-3);
+    color: var(--text-3);
 }
 .poll-create-check {
     display: flex;
     align-items: center;
     gap: 0.5rem;
     margin: 0.5rem 0;
-    color: var(--text-muted);
+    color: var(--text-3);
     font-size: 0.85rem;
 }
 .poll-create-actions {

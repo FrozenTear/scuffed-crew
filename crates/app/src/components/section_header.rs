@@ -6,8 +6,8 @@ const SECTION_HEADER_CSS: &str = r#"
 .sec-label-purple { color: var(--accent-text); }
 .sec-label-red { color: var(--accent-text); }
 .sec-label-blue { color: var(--accent-text); }
-.sec-title { font-family: var(--font-display); font-size: var(--text-3xl); color: var(--text); letter-spacing: 3px; margin: 0 0 var(--space-2); }
-.sec-desc { color: var(--text-muted); max-width: 600px; line-height: 1.7; }
+.sec-title { font-family: var(--font-head); font-size: var(--text-3xl); color: var(--text); letter-spacing: 3px; margin: 0 0 var(--space-2); }
+.sec-desc { color: var(--text-3); max-width: 600px; line-height: 1.7; }
 "#;
 
 #[component]

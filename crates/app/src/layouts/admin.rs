@@ -40,7 +40,7 @@ const ADMIN_CSS: &str = r#"
         gap: 0.5rem;
     }
     .admin-sidebar .brand-text h2 {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 1.2rem;
         color: var(--accent-text);
         text-transform: uppercase;
@@ -61,7 +61,7 @@ const ADMIN_CSS: &str = r#"
     .admin-sidebar nav a {
         display: block;
         padding: 0.6rem 1.25rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         text-decoration: none;
         font-size: 0.9rem;
         transition: background 0.15s, color 0.15s;
@@ -111,7 +111,7 @@ const ADMIN_CSS: &str = r#"
         margin-left: auto;
         background: transparent;
         border: 1px solid var(--border);
-        color: var(--text-muted);
+        color: var(--text-3);
         border-radius: 6px;
         width: 2.25rem;
         height: 2.25rem;
@@ -134,7 +134,7 @@ const ADMIN_CSS: &str = r#"
         overflow-y: auto;
     }
     .admin-main h1 {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 1.8rem;
         color: var(--text);
         margin-bottom: 1.5rem;
@@ -168,7 +168,7 @@ const ADMIN_CSS: &str = r#"
         }
         .admin-mobile-bar .menu-btn:hover { border-color: var(--accent-soft); }
         .admin-mobile-bar .title {
-            font-family: var(--font-display);
+            font-family: var(--font-head);
             font-size: 0.95rem;
             font-weight: 700;
             color: var(--accent-text);
@@ -254,7 +254,7 @@ pub fn AdminLayout() -> Element {
     if !auth().is_officer_or_above() {
         return rsx! {
             div {
-                style: "display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;color:var(--text-muted);gap:0.5rem;",
+                style: "display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;color:var(--text-3);gap:0.5rem;",
                 h2 { style: "color:var(--text);margin-bottom:0.5rem;", "Access Denied" }
                 p { "You need officer permissions to access the admin panel." }
                 Link {
@@ -270,7 +270,7 @@ pub fn AdminLayout() -> Element {
                 if cfg!(debug_assertions) {
                     a {
                         href: "/api/dev/login",
-                        style: "color:var(--text-muted);",
+                        style: "color:var(--text-3);",
                         "Dev login (in-memory only)"
                     }
                 }

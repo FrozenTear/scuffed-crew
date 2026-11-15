@@ -251,7 +251,7 @@ mod tests {
             ("--border", "#353541", "#e3e3e9"),
             ("--border-strong", "#72727f", "#888896"),
             ("--text", "#f4f4f8", "#16161c"),
-            ("--text-muted", "#c1c1cd", "#545462"),
+            ("--text-3", "#c1c1cd", "#545462"),
             ("--text-subtle", "#9696a3", "#696975"),
             ("--text-disabled", "#777784", "#888896"),
             ("--accent-text", "#46d8a4", "#087a50"),
@@ -299,7 +299,7 @@ mod tests {
                 for bg in SURFACES.iter().map(|n| get(&tokens, n)) {
                     for (name, min) in [
                         ("--text", 4.5),
-                        ("--text-muted", 4.5),
+                        ("--text-3", 4.5),
                         ("--text-subtle", 4.5),
                         ("--accent-text", 4.5),
                         ("--link", 4.5),
@@ -328,7 +328,7 @@ mod tests {
                     ("--loss", "--loss-soft"),
                     ("--warn", "--warn-soft"),
                     ("--info", "--info-soft"),
-                    ("--text-muted", "--neutral-soft"),
+                    ("--text-3", "--neutral-soft"),
                 ] {
                     let (f, b) = (get(&tokens, fg), get(&tokens, bg));
                     let ratio = contrast_ratio(f, b);

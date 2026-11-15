@@ -55,7 +55,7 @@ const CARD_CSS: &str = r#"
     flex-shrink: 0;
 }
 .post-author {
-    font-family: var(--font-display);
+    font-family: var(--font-head);
     font-weight: 700;
     font-size: 0.95rem;
     color: var(--text);
@@ -65,7 +65,7 @@ const CARD_CSS: &str = r#"
     color: var(--text-subtle);
 }
 .post-content {
-    color: var(--text-muted);
+    color: var(--text-3);
     font-size: 0.9rem;
     line-height: 1.7;
     margin-bottom: 0.75rem;

@@ -51,7 +51,7 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 1.5rem;
     }
     .blog-post-title {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 2.2rem;
         color: var(--text);
         letter-spacing: 2px;
@@ -68,7 +68,7 @@ const PAGE_CSS: &str = r#"
         border-bottom: 1px solid var(--border);
     }
     .blog-post-content {
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.9rem;
         line-height: 1.85;
         overflow-wrap: break-word;

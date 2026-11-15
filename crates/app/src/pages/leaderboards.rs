@@ -39,7 +39,7 @@ const PAGE_CSS: &str = r#"
         margin: 0 auto;
     }
     .lb-page h1 {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 1.8rem;
         margin: 0 0 0.5rem;
         color: var(--text);
@@ -58,7 +58,7 @@ const PAGE_CSS: &str = r#"
     .lb-tab {
         background: var(--surface-sunken);
         border: 1px solid var(--border);
-        color: var(--text-muted);
+        color: var(--text-3);
         padding: 0.4rem 0.85rem;
         border-radius: 6px;
         cursor: pointer;
@@ -119,7 +119,7 @@ const PAGE_CSS: &str = r#"
         margin-top: 1.5rem;
     }
     .lb-unranked h2 {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 1.1rem;
         margin: 0 0 0.25rem;
         color: var(--text);

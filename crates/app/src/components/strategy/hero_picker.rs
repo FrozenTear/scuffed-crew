@@ -9,7 +9,7 @@ const HERO_PICKER_CSS: &str = r##"
         overflow-y: auto;
     }
     .hero-picker .panel-title {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 0.75rem;
         color: var(--text-subtle);
         text-transform: uppercase;
@@ -31,7 +31,7 @@ const HERO_PICKER_CSS: &str = r##"
         background: none;
         border: none;
         border-left: 3px solid transparent;
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.8rem;
         cursor: pointer;
         transition: background 0.12s;
@@ -73,7 +73,7 @@ const HERO_PICKER_CSS: &str = r##"
         background: none;
         border: 1px solid transparent;
         border-radius: 6px;
-        color: var(--text-muted);
+        color: var(--text-3);
         cursor: pointer;
         transition: background 0.12s, border-color 0.12s;
     }
@@ -139,7 +139,7 @@ const HERO_PICKER_CSS: &str = r##"
         padding: 0.2rem 0.3rem;
         border-radius: 4px;
         font-size: 0.7rem;
-        color: var(--text-muted);
+        color: var(--text-3);
     }
     .ability-item:hover {
         background: var(--surface-sunken);

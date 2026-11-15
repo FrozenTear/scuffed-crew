@@ -48,7 +48,7 @@ const TOOLBAR_CSS: &str = r#"
         border: 1px solid transparent;
         border-radius: 5px;
         background: none;
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.85rem;
         cursor: pointer;
         transition: background 0.12s, color 0.12s, border-color 0.12s;
@@ -115,7 +115,7 @@ const TOOLBAR_CSS: &str = r#"
         background: var(--surface-sunken);
         border: 1px solid var(--border);
         border-radius: 4px;
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.75rem;
         padding: 0.2rem 0.35rem;
     }
@@ -130,7 +130,7 @@ const TOOLBAR_CSS: &str = r#"
         border: 1px solid transparent;
         border-radius: 5px;
         background: none;
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.9rem;
         cursor: pointer;
         transition: background 0.12s, color 0.12s;
@@ -193,7 +193,7 @@ const TOOLBAR_CSS: &str = r#"
         background: var(--surface-sunken);
         border: 1px solid var(--border);
         border-radius: 4px;
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.75rem;
         padding: 0.2rem 0.35rem;
     }

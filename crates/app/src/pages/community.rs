@@ -44,14 +44,14 @@ const PAGE_CSS: &str = r#"
         margin: 0 auto;
     }
     .community-page-title {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 2.5rem;
         color: var(--text);
         letter-spacing: 3px;
         margin: 0 0 0.5rem;
     }
     .community-subtitle {
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.95rem;
         margin: 0 0 2rem;
     }
@@ -77,7 +77,7 @@ const PAGE_CSS: &str = r#"
         justify-content: center;
     }
     .community-banner-placeholder span {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 3rem;
         color: color-mix(in srgb, var(--text) 30%, transparent);
         letter-spacing: 8px;
@@ -86,14 +86,14 @@ const PAGE_CSS: &str = r#"
         padding: 1.5rem 2rem 2rem;
     }
     .community-name {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 1.5rem;
         font-weight: 700;
         color: var(--text);
         margin: 0 0 0.5rem;
     }
     .community-desc {
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.9rem;
         line-height: 1.6;
         margin: 0 0 1.5rem;
@@ -107,7 +107,7 @@ const PAGE_CSS: &str = r#"
         text-align: center;
     }
     .community-stat-value {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 2rem;
         color: var(--accent-text);
     }
@@ -121,7 +121,7 @@ const PAGE_CSS: &str = r#"
         margin-top: 2rem;
     }
     .community-section-title {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 1.1rem;
         font-weight: 700;
         color: var(--text);
@@ -134,7 +134,7 @@ const PAGE_CSS: &str = r#"
         border: 1px solid var(--border);
         border-radius: 8px;
         padding: 1rem 1.25rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.85rem;
         line-height: 1.6;
         white-space: pre-wrap;
@@ -187,7 +187,7 @@ const PAGE_CSS: &str = r#"
         padding: 0.5rem 1rem;
         font-family: var(--font-mono);
         font-size: 0.8rem;
-        color: var(--text-muted);
+        color: var(--text-3);
     }
     .community-relay-dot {
         width: 8px;

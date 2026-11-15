@@ -11,7 +11,7 @@ const TIMELINE_CSS: &str = r#"
         overflow-y: auto;
     }
     .timeline-panel .panel-title {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 0.75rem;
         color: var(--text-subtle);
         text-transform: uppercase;
@@ -81,7 +81,7 @@ const TIMELINE_CSS: &str = r#"
     }
     .phase-name {
         font-size: 0.8rem;
-        color: var(--text-muted);
+        color: var(--text-3);
     }
     .timeline-phase.active .phase-name {
         color: var(--accent-text);
@@ -165,7 +165,7 @@ const TIMELINE_CSS: &str = r#"
         border: 1px solid var(--border);
         border-radius: 4px;
         background: none;
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.75rem;
         cursor: pointer;
         transition: background 0.12s, color 0.12s;

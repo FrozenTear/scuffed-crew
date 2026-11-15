@@ -44,7 +44,7 @@ const ENCRYPTED_CHAT_CSS: &str = r#"
     gap: 12px;
     padding: 2rem;
     text-align: center;
-    color: var(--text-muted);
+    color: var(--text-3);
     font-size: 13px;
     flex: 1;
 }

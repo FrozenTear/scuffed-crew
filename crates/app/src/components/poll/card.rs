@@ -17,13 +17,13 @@ const CARD_CSS: &str = r#"
     border-color: var(--accent-soft);
 }
 .poll-card-title {
-    font-family: var(--font-display);
+    font-family: var(--font-head);
     font-size: 1.15rem;
     color: var(--text);
     margin: 0 0 0.25rem;
 }
 .poll-card-desc {
-    color: var(--text-muted);
+    color: var(--text-3);
     font-size: 0.85rem;
     margin: 0 0 1rem;
 }
@@ -85,7 +85,7 @@ const CARD_CSS: &str = r#"
     font-size: 0.75rem;
 }
 .poll-total-votes {
-    color: var(--text-muted);
+    color: var(--text-3);
 }
 .poll-badge-multiple {
     background: var(--accent-soft);

@@ -117,7 +117,7 @@ const PAGE_CSS: &str = r#"
         object-fit: cover;
     }
     .team-page-logo .team-initials {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 2.4rem;
         color: var(--accent-text);
         letter-spacing: 3px;
@@ -129,7 +129,7 @@ const PAGE_CSS: &str = r#"
         min-width: 0;
     }
     .team-page-name {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 2.2rem;
         color: var(--text);
         letter-spacing: 2px;
@@ -159,7 +159,7 @@ const PAGE_CSS: &str = r#"
     .team-page-record {
         font-family: var(--font-mono);
         font-size: 0.85rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         font-variant-numeric: tabular-nums;
         white-space: nowrap;
         margin: 0;
@@ -171,7 +171,7 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 2rem;
     }
     .team-section h2 {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 1.2rem;
         font-weight: 700;
         color: var(--text);
@@ -213,13 +213,13 @@ const PAGE_CSS: &str = r#"
         object-fit: cover;
     }
     .team-roster-avatar .member-initials {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 0.9rem;
         color: var(--accent-text);
         letter-spacing: 1px;
     }
     .team-roster-name {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-weight: 700;
         color: var(--text);
         flex: 1;
@@ -262,7 +262,7 @@ const PAGE_CSS: &str = r#"
     }
     .team-match-score.win { color: var(--win); }
     .team-match-score.loss { color: var(--loss); }
-    .team-match-score.draw { color: var(--text-muted); }
+    .team-match-score.draw { color: var(--text-3); }
     .team-match-opponent {
         color: var(--text);
         min-width: 0;

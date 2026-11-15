@@ -51,7 +51,7 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 2rem;
     }
     .wiki-detail-title {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 2.2rem;
         color: var(--text);
         letter-spacing: 2px;
@@ -95,7 +95,7 @@ const PAGE_CSS: &str = r#"
     }
     .wiki-btn-secondary {
         background: var(--surface);
-        color: var(--text-muted);
+        color: var(--text-3);
         border: 1px solid var(--border);
     }
     .wiki-btn-secondary:hover {
@@ -108,7 +108,7 @@ const PAGE_CSS: &str = r#"
         border: 1px solid var(--border);
         border-radius: 10px;
         padding: 1.5rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.85rem;
         line-height: 1.7;
         overflow-wrap: break-word;
@@ -152,7 +152,7 @@ const PAGE_CSS: &str = r#"
         margin-top: 2rem;
     }
     .wiki-revisions-title {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 1.1rem;
         font-weight: 700;
         color: var(--text);
@@ -176,7 +176,7 @@ const PAGE_CSS: &str = r#"
         gap: 0.5rem;
     }
     .wiki-revision-note {
-        color: var(--text-muted);
+        color: var(--text-3);
     }
     .wiki-revision-date {
         color: var(--text-subtle);

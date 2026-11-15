@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 pub const FEEDBACK_CSS: &str = r#"
-.ui-empty { text-align: center; color: var(--text-muted); padding: var(--space-8) var(--space-4); }
-.ui-empty h3 { font-family: var(--font-display); color: var(--text); font-size: var(--text-lg); margin-bottom: var(--space-2); }
+.ui-empty { text-align: center; color: var(--text-3); padding: var(--space-8) var(--space-4); }
+.ui-empty h3 { font-family: var(--font-head); color: var(--text); font-size: var(--text-lg); margin-bottom: var(--space-2); }
 .ui-empty p { font-size: var(--text-sm); }
 .ui-spinner { width: 18px; height: 18px; border: 2px solid var(--border);
   border-top-color: var(--accent-solid); border-radius: 50%; animation: ui-spin .7s linear infinite; }

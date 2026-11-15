@@ -64,7 +64,7 @@ const PAGE_CSS: &str = r#"
         margin: 0 auto;
     }
     .tournaments-page h1 {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 2.5rem;
         color: var(--text);
         letter-spacing: 3px;
@@ -91,7 +91,7 @@ const PAGE_CSS: &str = r#"
         transform: translateY(-2px);
     }
     .tournament-card-name {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-weight: 700;
         font-size: 1.15rem;
         color: var(--text);
@@ -104,7 +104,7 @@ const PAGE_CSS: &str = r#"
         color: var(--text-subtle);
     }
     .tournament-card-desc {
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.8rem;
         line-height: 1.5;
         margin: 0;
@@ -128,8 +128,8 @@ const PAGE_CSS: &str = r#"
         color: var(--win);
     }
     .tournament-card-status.completed {
-        background: color-mix(in srgb, var(--text-muted) 15%, transparent);
-        color: var(--text-muted);
+        background: color-mix(in srgb, var(--text-3) 15%, transparent);
+        color: var(--text-3);
     }
     .tournament-card-status.archived {
         background: color-mix(in srgb, var(--text-subtle) 15%, transparent);

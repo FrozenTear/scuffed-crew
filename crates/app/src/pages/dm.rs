@@ -22,7 +22,7 @@ const PAGE_CSS: &str = r#"
     box-sizing: border-box;
 }
 .dm-page-title {
-    font-family: var(--font-display);
+    font-family: var(--font-head);
     font-size: 2.25rem;
     color: var(--text);
     letter-spacing: 3px;
@@ -59,7 +59,7 @@ const PAGE_CSS: &str = r#"
     border-radius: 10px;
     padding: 2.5rem 2rem;
     text-align: center;
-    color: var(--text-muted);
+    color: var(--text-3);
 }
 @media (max-width: 720px) {
     .dm-page-grid {

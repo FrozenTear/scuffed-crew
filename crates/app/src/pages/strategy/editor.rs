@@ -246,7 +246,7 @@ const EDITOR_CSS: &str = r#"
         border-radius: 4px;
         cursor: pointer;
         font-size: 0.8rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         transition: background 0.1s;
     }
     .element-list-item:hover {
@@ -296,7 +296,7 @@ const EDITOR_CSS: &str = r#"
     .status-map-link {
         background: none;
         border: none;
-        color: var(--text-muted);
+        color: var(--text-3);
         cursor: pointer;
         font-size: 0.75rem;
         padding: 0;
@@ -310,7 +310,7 @@ const EDITOR_CSS: &str = r#"
         font-weight: 600;
     }
     .status-item.collaborators {
-        color: var(--text-muted);
+        color: var(--text-3);
     }
 
     /* Map picker modal */
@@ -346,7 +346,7 @@ const EDITOR_CSS: &str = r#"
     .map-picker-header h3 {
         margin: 0;
         color: var(--text);
-        font-family: var(--font-display);
+        font-family: var(--font-head);
     }
     .map-picker-close {
         background: none;
@@ -379,7 +379,7 @@ const EDITOR_CSS: &str = r#"
     }
     .map-picker-mode-title {
         margin: 0 0 0.5rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.7rem;
         font-weight: 600;
         letter-spacing: 0.06em;
@@ -1181,7 +1181,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                                             }
                                             span { class: "el-type", "{type_name}" }
                                             if !label.is_empty() {
-                                                span { style: "color: var(--text-muted);", "{label}" }
+                                                span { style: "color: var(--text-3);", "{label}" }
                                             }
                                         }
                                     }

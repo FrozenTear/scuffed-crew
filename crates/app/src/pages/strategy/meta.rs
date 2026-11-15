@@ -166,7 +166,7 @@ const PAGE_CSS: &str = r#"
         margin: 0 auto;
     }
     .meta-page-title {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 2.2rem;
         color: var(--text);
         letter-spacing: 2px;
@@ -189,7 +189,7 @@ const PAGE_CSS: &str = r#"
         gap: 0.35rem;
     }
     .meta-role-card-title {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-weight: 700;
         font-size: 1rem;
         text-transform: uppercase;
@@ -197,7 +197,7 @@ const PAGE_CSS: &str = r#"
     }
     .meta-role-card-stat {
         font-size: 0.8rem;
-        color: var(--text-muted);
+        color: var(--text-3);
     }
     .meta-role-card-stat strong {
         color: var(--text);
@@ -216,7 +216,7 @@ const PAGE_CSS: &str = r#"
         font-weight: 600;
         border: 1px solid var(--border);
         background: var(--surface);
-        color: var(--text-muted);
+        color: var(--text-3);
         cursor: pointer;
         transition: all 0.15s;
         text-transform: uppercase;
@@ -245,7 +245,7 @@ const PAGE_CSS: &str = r#"
     .meta-table th {
         padding: 0.65rem 0.75rem;
         text-align: left;
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-weight: 700;
         font-size: 0.75rem;
         text-transform: uppercase;
@@ -258,7 +258,7 @@ const PAGE_CSS: &str = r#"
         transition: color 0.15s;
     }
     .meta-table th:hover {
-        color: var(--text-muted);
+        color: var(--text-3);
     }
     .meta-table th.sorted {
         color: var(--accent-text);

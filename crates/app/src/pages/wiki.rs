@@ -49,7 +49,7 @@ const PAGE_CSS: &str = r#"
         gap: 1rem;
     }
     .wiki-page-title {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 2.5rem;
         color: var(--text);
         letter-spacing: 3px;
@@ -97,7 +97,7 @@ const PAGE_CSS: &str = r#"
         transform: translateY(-1px);
     }
     .wiki-card-title {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-weight: 700;
         font-size: 1.1rem;
         color: var(--text);

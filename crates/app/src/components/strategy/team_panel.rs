@@ -9,7 +9,7 @@ const TEAM_PANEL_CSS: &str = r#"
         overflow-y: auto;
     }
     .team-panel .panel-title {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 0.75rem;
         color: var(--text-subtle);
         text-transform: uppercase;
@@ -32,7 +32,7 @@ const TEAM_PANEL_CSS: &str = r#"
         border: 1px solid var(--border);
         border-radius: 4px;
         background: none;
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.8rem;
         font-weight: 600;
         cursor: pointer;
@@ -136,7 +136,7 @@ const TEAM_PANEL_CSS: &str = r#"
         border: 1px solid var(--border);
         border-radius: 4px;
         background: none;
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.75rem;
         cursor: pointer;
         transition: background 0.12s, color 0.12s;

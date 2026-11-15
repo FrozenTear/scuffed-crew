@@ -12,14 +12,14 @@ const PAGE_CSS: &str = r#"
         margin: 0 auto;
     }
     .feed-page-title {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 2.5rem;
         color: var(--text);
         letter-spacing: 3px;
         margin: 0 0 0.25rem;
     }
     .feed-subtitle {
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.9rem;
         margin: 0 0 2rem;
     }
@@ -76,8 +76,8 @@ const PAGE_CSS: &str = r#"
         transition: border-color 0.15s, color 0.15s;
     }
     .feed-filter-clear:hover {
-        border-color: var(--text-muted);
-        color: var(--text-muted);
+        border-color: var(--text-3);
+        color: var(--text-3);
     }
     @media (max-width: 768px) {
         .feed-page { padding: 2rem 1rem; }

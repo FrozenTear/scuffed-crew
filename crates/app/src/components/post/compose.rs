@@ -21,7 +21,7 @@ const COMPOSE_CSS: &str = r#"
     margin-bottom: 1.5rem;
 }
 .post-compose-label {
-    font-family: var(--font-display);
+    font-family: var(--font-head);
     font-weight: 700;
     font-size: 1rem;
     color: var(--text);

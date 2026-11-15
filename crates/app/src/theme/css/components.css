@@ -13,7 +13,7 @@
   --button-height: var(--hit-target-min);
   --button-pad-x: var(--space-4);
   --button-radius: var(--radius-control);
-  --button-font: var(--font-display);
+  --button-font: var(--font-head);
   --button-font-size: var(--text-sm);
   --button-font-weight: var(--font-label-weight);
   --button-primary-bg: var(--accent-solid);
@@ -31,11 +31,11 @@
   --chip-height: var(--hit-target-min);
   --chip-pad-x: var(--space-3);
   --chip-radius: var(--radius-pill);
-  --chip-font: var(--font-display);
+  --chip-font: var(--font-head);
   --chip-font-size: var(--text-xs);
   --chip-font-weight: var(--font-weight-500);
   --chip-bg: var(--surface-sunken);
-  --chip-fg: var(--text-muted);
+  --chip-fg: var(--text-3);
   --chip-border: var(--border);
   --chip-selected-bg: var(--accent-soft);
   --chip-selected-fg: var(--accent-text);
@@ -58,7 +58,7 @@
   --table-row-border: var(--border);
   --table-row-hover: var(--surface-raised);
   --table-row-fg: var(--text);
-  --table-row-muted: var(--text-muted);
+  --table-row-muted: var(--text-3);
   --table-header-fg: var(--text-subtle);
   --table-header-weight: var(--font-label-weight);
   --table-font: var(--font-body);
@@ -69,11 +69,11 @@
   /* Nav */
   --nav-bg: var(--header-bg);
   --nav-fg: var(--text);
-  --nav-muted: var(--text-muted);
+  --nav-muted: var(--text-3);
   --nav-active: var(--accent-text);
   --nav-border: var(--border);
   --nav-height-used: var(--nav-height);
-  --nav-font: var(--font-display);
+  --nav-font: var(--font-head);
   --nav-font-size: var(--text-sm);
   --nav-active-underline-width: var(--nav-underline-width);
   --nav-active-underline-color: var(--nav-underline-color);
@@ -87,12 +87,12 @@
   --badge-height: 24px;
   --badge-pad-x: var(--space-2);
   --badge-radius: var(--radius-pill);
-  --badge-font: var(--font-display);
+  --badge-font: var(--font-head);
   --badge-font-size: var(--font-size-11);
   --badge-font-weight: var(--font-label-weight);
   --badge-font-transform: uppercase;
   --badge-bg: var(--surface-sunken);
-  --badge-fg: var(--text-muted);
+  --badge-fg: var(--text-3);
   --badge-border: transparent;
   --badge-win-bg: var(--win-soft);
   --badge-win-fg: var(--win);
@@ -103,7 +103,7 @@
   --badge-info-bg: var(--info-soft);
   --badge-info-fg: var(--info);
   --badge-neutral-bg: var(--neutral-soft);
-  --badge-neutral-fg: var(--text-muted);
+  --badge-neutral-fg: var(--text-3);
 
   /* Initials tile (hero mark) */
   --tile-size: 32px;
@@ -111,15 +111,15 @@
   --tile-bg: var(--surface-sunken);
   --tile-fg: var(--text);
   --tile-radius: var(--radius-tile);
-  --tile-font: var(--font-display);
-  --tile-font-weight: var(--font-display-weight);
+  --tile-font: var(--font-head);
+  --tile-font-weight: var(--font-head-weight);
 
   /* Skip link: derived ink on the solid accent */
   --skip-link-bg: var(--skip-bg);
   --skip-link-fg: var(--skip-fg);
 
   /* Community / mint banner: soft fill with --text and --accent-text, or
-     solid fill with --on-accent. Never --text-muted. */
+     solid fill with --on-accent. Never --text-3. */
   --banner-soft-bg: var(--banner-bg);
   --banner-soft-fg: var(--banner-fg);
   --banner-soft-accent: var(--banner-accent);

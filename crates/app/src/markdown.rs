@@ -62,7 +62,7 @@ pub const MARKDOWN_CSS: &str = r#"
     .md-body h1,
     .md-body h2,
     .md-body h3 {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
     }
     .md-body h1 { font-size: var(--text-3xl); font-weight: 700; }
     .md-body h2 { font-size: var(--text-2xl); font-weight: 700; }
@@ -72,7 +72,7 @@ pub const MARKDOWN_CSS: &str = r#"
     .md-body h6 {
         font-size: var(--text-sm);
         font-weight: 600;
-        color: var(--text-muted);
+        color: var(--text-3);
         text-transform: uppercase;
         letter-spacing: 0.04em;
     }

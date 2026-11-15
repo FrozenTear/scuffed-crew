@@ -30,7 +30,7 @@ const PAGE_CSS: &str = r#"
         margin: 0 auto;
     }
     .identity-page-title {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 2.5rem;
         color: var(--text);
         letter-spacing: 3px;
@@ -53,14 +53,14 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 1.25rem;
     }
     .identity-section h2 {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 1.15rem;
         font-weight: 700;
         color: var(--text);
         margin: 0 0 0.75rem;
     }
     .identity-section p {
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.85rem;
         line-height: 1.5;
         margin: 0 0 1rem;
@@ -114,7 +114,7 @@ const PAGE_CSS: &str = r#"
         color: var(--accent-text);
     }
     .identity-nip05 {
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.85rem;
     }
     .identity-nip05-unset {
@@ -156,7 +156,7 @@ const PAGE_CSS: &str = r#"
     }
     .identity-btn-outline {
         background: transparent;
-        color: var(--text-muted);
+        color: var(--text-3);
         border: 1px solid var(--border);
     }
     .identity-btn-outline:hover:not(:disabled) {
@@ -186,14 +186,14 @@ const PAGE_CSS: &str = r#"
         margin: 0 0 1rem;
     }
     .identity-intro {
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: var(--text-md);
         line-height: 1.5;
         margin: 0 0 1rem;
     }
     .identity-advanced summary {
         cursor: pointer;
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 1.15rem;
         font-weight: 700;
         color: var(--text);
@@ -211,7 +211,7 @@ const PAGE_CSS: &str = r#"
         margin-top: 1rem;
     }
     .identity-sub h3 {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: var(--text-md);
         color: var(--text);
         margin: 0 0 0.5rem;

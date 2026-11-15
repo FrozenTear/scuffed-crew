@@ -263,7 +263,7 @@ const NAV_CSS: &str = r#"
         border-radius: 4px;
         display: grid;
         place-items: center;
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 0.85rem;
         font-weight: 700;
         color: var(--on-accent);
@@ -275,7 +275,7 @@ const NAV_CSS: &str = r#"
         box-shadow: none;
     }
     .nav-mark-text {
-        font-family: var(--font-mono, var(--font-display));
+        font-family: var(--font-mono, var(--font-head));
         font-size: 0.75rem;
         letter-spacing: 0.12em;
         text-transform: uppercase;
@@ -299,8 +299,8 @@ const NAV_CSS: &str = r#"
     .nav-actions a,
     .nav-actions button.nav-linkish {
         padding: 0.3rem 0.55rem;
-        color: var(--text-muted);
-        font-family: var(--font-mono, var(--font-display));
+        color: var(--text-3);
+        font-family: var(--font-mono, var(--font-head));
         font-size: 0.75rem;
         letter-spacing: 0.08em;
         text-transform: uppercase;
@@ -373,8 +373,8 @@ const NAV_CSS: &str = r#"
         width: 100%;
         text-align: left;
         padding: 0.45rem 0.65rem;
-        color: var(--text-muted);
-        font-family: var(--font-mono, var(--font-display));
+        color: var(--text-3);
+        font-family: var(--font-mono, var(--font-head));
         font-size: 0.75rem;
         letter-spacing: 0.06em;
         text-transform: uppercase;
@@ -422,7 +422,7 @@ const NAV_CSS: &str = r#"
     .nav-hamburger span {
         width: 18px;
         height: 2px;
-        background: var(--text-muted);
+        background: var(--text-3);
         transition: transform 0.2s, opacity 0.2s;
     }
     .nav-hamburger.open span:nth-child(1) { transform: rotate(45deg) translate(3px, 3px); }
@@ -469,7 +469,7 @@ const NAV_CSS: &str = r#"
     .nav-overlay button {
         color: var(--text);
         font-size: 0.95rem;
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         text-align: left;
         text-decoration: none;
         background: none;
@@ -478,7 +478,7 @@ const NAV_CSS: &str = r#"
         padding: 0.55rem 0.25rem;
     }
     .nav-overlay-label {
-        font-family: var(--font-mono, var(--font-display));
+        font-family: var(--font-mono, var(--font-head));
         font-size: 0.75rem;
         letter-spacing: 0.14em;
         text-transform: uppercase;
@@ -505,7 +505,7 @@ const NAV_CSS: &str = r#"
         border-top: 1px solid var(--border);
     }
     .nav-overlay-theme span {
-        font-family: var(--font-mono, var(--font-display));
+        font-family: var(--font-mono, var(--font-head));
         font-size: 0.75rem;
         letter-spacing: 0.12em;
         text-transform: uppercase;

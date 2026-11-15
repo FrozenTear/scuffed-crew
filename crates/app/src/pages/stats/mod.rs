@@ -282,7 +282,7 @@ const STATS_CSS: &str = r#"
         --history-border: 1px;
     }
     .my-stats.stats-page h1 {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 1.8rem;
         color: var(--text);
         text-transform: uppercase;
@@ -315,7 +315,7 @@ const STATS_CSS: &str = r#"
         border-radius: 6px;
         border: 1px solid var(--border);
         background: var(--bg);
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.8rem;
         cursor: pointer;
         transition: all 0.15s;
@@ -336,8 +336,8 @@ const STATS_CSS: &str = r#"
         padding: 0.6rem 1.2rem;
         border: none;
         background: none;
-        color: var(--text-muted);
-        font-family: var(--font-display);
+        color: var(--text-3);
+        font-family: var(--font-head);
         font-size: 0.9rem;
         font-weight: 600;
         text-transform: uppercase;
@@ -373,7 +373,7 @@ const STATS_CSS: &str = r#"
        serious/danger, draw = neutral text (never gold). */
     .outcome-win { color: var(--win); font-weight: 600; }
     .outcome-loss { color: var(--loss); font-weight: 600; }
-    .outcome-draw { color: var(--text-muted); font-weight: 600; }
+    .outcome-draw { color: var(--text-3); font-weight: 600; }
     /* W5b history layout: outcome | identity | E D A | dmg heal | date.
        Header + cards share the outer grid; numeric cols live in .match-stats
        with fixed tracks so values column-scan. Tighter than free scoreline. */
@@ -456,7 +456,7 @@ const STATS_CSS: &str = r#"
     .match-card-overlay:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
     .match-cards { display: flex; flex-direction: column; gap: 0.3rem; }
     .match-card .match-outcome {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 0.85rem;
         font-weight: 700;
         text-transform: uppercase;
@@ -604,7 +604,7 @@ const STATS_CSS: &str = r#"
         text-align: left;
         text-decoration: none;
         white-space: normal;
-        color: var(--text-muted);
+        color: var(--text-3);
     }
     .match-card .match-outcome:has(.stat-unsure-note-open),
     .match-card .match-hero:has(.stat-unsure-note-open) {
@@ -640,7 +640,7 @@ const STATS_CSS: &str = r#"
         white-space: nowrap;
     }
     .match-card .match-map {
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.75rem;
         display: flex;
         flex-wrap: wrap;
@@ -656,7 +656,7 @@ const STATS_CSS: &str = r#"
         white-space: nowrap;
     }
     .match-stat {
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.8rem;
         font-variant-numeric: tabular-nums;
     }
@@ -676,7 +676,7 @@ const STATS_CSS: &str = r#"
         border-radius: 6px;
         border: 1px solid var(--border);
         background: var(--bg);
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.8rem;
         cursor: pointer;
         transition: all 0.15s;
@@ -705,7 +705,7 @@ const STATS_CSS: &str = r#"
         justify-content: center;
     }
     .my-stats .stat-tile-value {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 1.9rem;
         color: var(--text);
         letter-spacing: 2px;
@@ -724,7 +724,7 @@ const STATS_CSS: &str = r#"
     }
     .my-stats .stat-tile-record {
         font-size: 0.9rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         margin-top: 0.4rem;
         white-space: nowrap;
     }
@@ -733,7 +733,7 @@ const STATS_CSS: &str = r#"
     .stats-load-error {
         text-align: center;
         padding: 2rem 1rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.9rem;
     }
     .stats-load-error p { margin: 0 0 0.75rem; }
@@ -742,7 +742,7 @@ const STATS_CSS: &str = r#"
         border-radius: 6px;
         border: 1px solid var(--border);
         background: var(--bg);
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.8rem;
         cursor: pointer;
         transition: all 0.15s;
@@ -766,7 +766,7 @@ const STATS_CSS: &str = r#"
         padding: 1.25rem;
     }
     .overview-section h3 {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 0.85rem;
         color: var(--text-subtle);
         text-transform: uppercase;
@@ -795,7 +795,7 @@ const STATS_CSS: &str = r#"
         margin-top: 0.15rem;
     }
     .role-card-wr {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 1.1rem;
         font-weight: 700;
         color: var(--text);
@@ -808,7 +808,7 @@ const STATS_CSS: &str = r#"
         margin-bottom: 1.5rem;
     }
     .section-title {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 0.8rem;
         color: var(--text-subtle);
         text-transform: uppercase;
@@ -827,7 +827,7 @@ const STATS_CSS: &str = r#"
         border-bottom: 1px solid var(--border);
     }
     .map-mode-name {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 0.85rem;
         font-weight: 600;
         text-transform: uppercase;
@@ -860,14 +860,14 @@ const STATS_CSS: &str = r#"
         font-size: 0.85rem;
     }
     .tracker-slim-label {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 0.8rem;
         color: var(--text-subtle);
         text-transform: uppercase;
         letter-spacing: 0.06em;
     }
     .tracker-slim-sep { color: var(--text-subtle); }
-    .tracker-slim-note { color: var(--text-muted); }
+    .tracker-slim-note { color: var(--text-3); }
     .tracker-slim-actions {
         margin-left: auto;
         display: flex;
@@ -878,7 +878,7 @@ const STATS_CSS: &str = r#"
         border-radius: 6px;
         border: 1px solid var(--border);
         background: var(--bg);
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.8rem;
         cursor: pointer;
         transition: all 0.15s;
@@ -909,7 +909,7 @@ const STATS_CSS: &str = r#"
         margin-bottom: 1.5rem;
     }
     .daemon-settings summary {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 0.85rem;
         color: var(--text-subtle);
         text-transform: uppercase;
@@ -931,7 +931,7 @@ const STATS_CSS: &str = r#"
     }
     .daemon-settings-label {
         font-size: 0.8rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         white-space: nowrap;
     }
     .daemon-settings-input {
@@ -970,7 +970,7 @@ const STATS_CSS: &str = r#"
         margin-bottom: 0.75rem;
     }
     .tracker-download-head h3 {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 0.85rem;
         color: var(--text-subtle);
         text-transform: uppercase;
@@ -991,7 +991,7 @@ const STATS_CSS: &str = r#"
     }
     .tracker-download p {
         font-size: 0.85rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         margin: 0 0 0.75rem;
         line-height: 1.5;
     }
@@ -1018,7 +1018,7 @@ const STATS_CSS: &str = r#"
         border-radius: 6px;
         border: 1px solid var(--border);
         background: var(--bg);
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.8rem;
         text-decoration: none;
         transition: all 0.15s;
@@ -1054,7 +1054,7 @@ const STATS_CSS: &str = r#"
         border-radius: 999px;
         border: 1px solid var(--border);
         background: var(--bg);
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.75rem;
         cursor: pointer;
     }
@@ -1076,7 +1076,7 @@ const STATS_CSS: &str = r#"
         border-radius: 6px;
         border: 1px solid var(--border);
         background: var(--bg);
-        color: var(--text-muted);
+        color: var(--text-3);
         cursor: pointer;
     }
     .density-toggle:hover { color: var(--text); border-color: var(--accent-soft); }
@@ -1140,7 +1140,7 @@ const STATS_CSS: &str = r#"
     .map-callout.worst { border-left: 3px solid var(--loss); }
     .map-callout-label { font-size: 0.75rem; text-transform: uppercase; color: var(--text-subtle); }
     .map-callout-name { font-weight: 600; color: var(--text); }
-    .map-callout-meta { color: var(--text-muted); font-variant-numeric: tabular-nums; }
+    .map-callout-meta { color: var(--text-3); font-variant-numeric: tabular-nums; }
 
     /* W4 polish: tables, mobile, hold layout */
     .my-stats.stats-page .data-table th:not(:first-child),

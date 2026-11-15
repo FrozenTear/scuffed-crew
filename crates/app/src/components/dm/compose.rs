@@ -34,7 +34,7 @@ const COMPOSE_CSS: &str = r#"
     border-bottom: 1px solid var(--border);
 }
 .dm-compose-title {
-    font-family: var(--font-display);
+    font-family: var(--font-head);
     font-weight: 700;
     font-size: 1.1rem;
     color: var(--text);
@@ -63,10 +63,10 @@ const COMPOSE_CSS: &str = r#"
 .dm-compose-banner a { color: var(--loss); font-weight: 600; text-decoration: underline; }
 .dm-compose-field { display: flex; flex-direction: column; gap: 0.35rem; position: relative; }
 .dm-compose-label {
-    font-family: var(--font-display);
+    font-family: var(--font-head);
     font-weight: 600;
     font-size: 0.8rem;
-    color: var(--text-muted);
+    color: var(--text-3);
     text-transform: uppercase;
     letter-spacing: 0.05em;
 }
@@ -136,7 +136,7 @@ const COMPOSE_CSS: &str = r#"
     font-weight: 600;
     cursor: pointer;
 }
-.dm-compose-cancel { background: transparent; color: var(--text-muted); border: 1px solid var(--border); }
+.dm-compose-cancel { background: transparent; color: var(--text-3); border: 1px solid var(--border); }
 .dm-compose-cancel:hover { color: var(--text); border-color: var(--accent-soft); }
 .dm-compose-submit { background: var(--accent-solid); color: var(--on-accent); }
 .dm-compose-submit:hover:not(:disabled) { filter: brightness(1.15); }

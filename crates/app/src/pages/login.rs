@@ -31,13 +31,13 @@ const CSS: &str = r#"
     padding: 2rem;
 }
 .login-card h1 {
-    font-family: var(--font-display);
+    font-family: var(--font-head);
     font-size: 1.5rem;
     color: var(--text);
     margin: 0 0 0.5rem;
 }
 .login-card p.lead {
-    color: var(--text-muted);
+    color: var(--text-3);
     font-size: 0.9rem;
     margin: 0 0 1.5rem;
 }
@@ -50,7 +50,7 @@ const CSS: &str = r#"
 .login-field label {
     font-size: 0.85rem;
     font-weight: 600;
-    color: var(--text-muted);
+    color: var(--text-3);
 }
 .login-field input {
     background: var(--bg);
@@ -94,7 +94,7 @@ const CSS: &str = r#"
     gap: 0.5rem;
     margin-bottom: 1rem;
     font-size: 0.85rem;
-    color: var(--text-muted);
+    color: var(--text-3);
 }
 .login-switch {
     margin-top: 1rem;
@@ -123,7 +123,7 @@ const CSS: &str = r#"
     padding: 0.55rem;
     border: 1px solid var(--border);
     border-radius: 6px;
-    color: var(--text-muted);
+    color: var(--text-3);
     font-size: 0.9rem;
 }
 .login-oauth a:hover {

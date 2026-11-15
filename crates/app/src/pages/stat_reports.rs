@@ -100,10 +100,10 @@ const REPORTS_CSS: &str = r#"
     margin: 0 auto; padding: 2rem 1.25rem 3rem;
 }
 .reports-page h1 {
-    font-family: var(--font-display); font-size: 1.8rem; color: var(--text);
+    font-family: var(--font-head); font-size: 1.8rem; color: var(--text);
     letter-spacing: 0.04em; margin: 0 0 0.75rem;
 }
-.reports-intro { color: var(--text-muted); font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem; }
+.reports-intro { color: var(--text-3); font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem; }
 .reports-status { color: var(--text-subtle); padding: 1.5rem 0; }
 .reports-error { color: var(--loss); }
 /* The download status region stays mounted; take no space while it is empty. */
@@ -123,7 +123,7 @@ const REPORTS_CSS: &str = r#"
     font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em;
     color: var(--text-subtle); font-weight: 600;
 }
-.reports-sub { display: block; color: var(--text-muted); font-size: 0.8rem; margin-top: 0.2rem; }
+.reports-sub { display: block; color: var(--text-3); font-size: 0.8rem; margin-top: 0.2rem; }
 .report-when { white-space: nowrap; font-variant-numeric: tabular-nums; }
 /* The control label is position:absolute. Without a positioned parent its
    containing block is the viewport, so a label sitting in the wide table
@@ -181,8 +181,8 @@ td.report-member, td.report-note {
     background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
     padding: 1.5rem; max-width: 28rem; width: 100%;
 }
-.report-dialog h2 { font-family: var(--font-display); color: var(--text); font-size: 1.2rem; margin: 0 0 0.75rem; }
-.report-dialog p { color: var(--text-muted); line-height: 1.5; margin: 0 0 1rem; }
+.report-dialog h2 { font-family: var(--font-head); color: var(--text); font-size: 1.2rem; margin: 0 0 0.75rem; }
+.report-dialog p { color: var(--text-3); line-height: 1.5; margin: 0 0 1rem; }
 .report-dialog-actions { display: flex; justify-content: flex-end; gap: 0.6rem; flex-wrap: wrap; }
 .report-card-label { display: none; }
 /* Wide pages: fit the table to the page so Delete and Withdraw stay on screen. */

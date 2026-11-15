@@ -25,7 +25,7 @@ const CONVERSATION_LIST_CSS: &str = r#"
     z-index: 1;
 }
 .dm-conv-list-title {
-    font-family: var(--font-display);
+    font-family: var(--font-head);
     font-weight: 700;
     font-size: 1rem;
     text-transform: uppercase;
@@ -56,7 +56,7 @@ const CONVERSATION_LIST_CSS: &str = r#"
 }
 .dm-conv-list-refresh {
     background: transparent;
-    color: var(--text-muted);
+    color: var(--text-3);
     border: 1px solid var(--border);
     border-radius: 6px;
     font-size: 0.75rem;
@@ -101,7 +101,7 @@ const CONVERSATION_LIST_CSS: &str = r#"
     gap: 0.5rem;
 }
 .dm-conv-name {
-    font-family: var(--font-display);
+    font-family: var(--font-head);
     font-weight: 700;
     font-size: 0.95rem;
     color: var(--text);
@@ -123,7 +123,7 @@ const CONVERSATION_LIST_CSS: &str = r#"
 }
 .dm-conv-preview {
     font-size: 0.8rem;
-    color: var(--text-muted);
+    color: var(--text-3);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;

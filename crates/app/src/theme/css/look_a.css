@@ -6,8 +6,8 @@
    data-theme on <html> and ships one look. */
 
 :root {
-  --font-display-weight: var(--font-weight-700);
-  --font-display-tracking: var(--tracking-snug);
+  --font-head-weight: var(--font-weight-700);
+  --font-head-tracking: var(--tracking-snug);
   --radius-card: var(--radius-3);
   --radius-control: var(--radius-2);
   --radius-tile: var(--radius-2);
@@ -28,7 +28,7 @@
   --border: var(--neutral-700);
   --border-strong: var(--neutral-450);
   --text: var(--neutral-30);
-  --text-muted: var(--neutral-300);
+  --text-3: var(--neutral-300);
   --text-subtle: var(--neutral-400);
   --text-inverse: var(--neutral-900);
 
@@ -71,7 +71,7 @@
   --border: var(--neutral-200);
   --border-strong: var(--neutral-420);
   --text: var(--neutral-875);
-  --text-muted: var(--neutral-600);
+  --text-3: var(--neutral-600);
   --text-subtle: var(--neutral-500);
   --text-inverse: var(--neutral-0);
 

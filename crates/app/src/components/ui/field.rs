@@ -9,7 +9,7 @@ pub const FIELD_CSS: &str = r#"
 .ui-field--invalid { border-color: var(--loss); }
 textarea.ui-field { resize: vertical; min-height: 80px; }
 .ui-field-wrap { display: flex; flex-direction: column; gap: 0.35rem; width: 100%; }
-.ui-field-label { font-family: var(--font-body); font-size: var(--text-sm); font-weight: 600; color: var(--text-muted); }
+.ui-field-label { font-family: var(--font-body); font-size: var(--text-sm); font-weight: 600; color: var(--text-3); }
 "#;
 
 fn field_class(invalid: bool) -> &'static str {

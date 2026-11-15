@@ -18,13 +18,13 @@ const GATE_CSS: &str = r#"
         margin: 0 auto;
     }
     .member-gate h2 {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 1.35rem;
         color: var(--text);
         margin: 0 0 0.6rem;
     }
     .member-gate p {
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.9rem;
         line-height: 1.5;
         margin: 0 0 1.25rem;

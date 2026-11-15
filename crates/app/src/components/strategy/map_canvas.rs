@@ -83,13 +83,13 @@ pub const MAP_CANVAS_CSS: &str = r#"
         overflow-y: auto;
     }
     .map-selector-content h2 {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 1.5rem;
         color: var(--text);
         margin-bottom: 0.5rem;
     }
     .map-selector-content p {
-        color: var(--text-muted);
+        color: var(--text-3);
         margin-bottom: 1.5rem;
     }
     .map-selector-modes {
@@ -131,7 +131,7 @@ pub const MAP_CANVAS_CSS: &str = r#"
         text-align: left;
         background: transparent;
         border: none;
-        color: var(--text-muted);
+        color: var(--text-3);
         cursor: pointer;
         transition: background 0.15s, color 0.15s;
     }

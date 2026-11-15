@@ -23,7 +23,7 @@ const PAGE_CSS: &str = r#"
         margin: 0 auto;
     }
     .news-page-title {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 2.5rem;
         color: var(--text);
         letter-spacing: 3px;
@@ -52,14 +52,14 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 0.5rem;
     }
     .news-title {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 1.2rem;
         font-weight: 700;
         color: var(--text);
         margin: 0 0 0.5rem;
     }
     .news-body {
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.85rem;
         line-height: 1.7;
         margin: 0;

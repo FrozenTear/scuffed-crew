@@ -500,7 +500,7 @@ const PAGE_CSS: &str = r#"
         flex-wrap: wrap;
     }
     .patch-page-title {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 1.85rem;
         color: var(--text);
         letter-spacing: 0.12em;
@@ -595,7 +595,7 @@ const PAGE_CSS: &str = r#"
         font-weight: 600;
         border: 1px solid var(--border);
         background: var(--surface);
-        color: var(--text-muted);
+        color: var(--text-3);
         cursor: pointer;
         transition: all 0.15s;
         text-transform: uppercase;
@@ -689,7 +689,7 @@ const PAGE_CSS: &str = r#"
         flex-shrink: 0;
     }
     .patch-card-title {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-weight: 700;
         font-size: 0.9rem;
         color: var(--text);
@@ -713,7 +713,7 @@ const PAGE_CSS: &str = r#"
     }
     .patch-hero-count {
         font-size: 0.75rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         background: var(--surface-sunken);
         padding: 0.08rem 0.4rem;
         border-radius: var(--radius-pill);
@@ -765,7 +765,7 @@ const PAGE_CSS: &str = r#"
     }
     .patch-body-lead {
         font-size: 0.85rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         line-height: 1.55;
         margin: 0.85rem 0 0.15rem;
     }
@@ -783,7 +783,7 @@ const PAGE_CSS: &str = r#"
         margin-top: 0.65rem;
     }
     .patch-section-title {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-weight: 700;
         font-size: 0.8rem;
         color: var(--text);
@@ -844,7 +844,7 @@ const PAGE_CSS: &str = r#"
         border: 1px solid transparent;
         border-radius: var(--radius-control);
         background: transparent;
-        color: var(--text-muted);
+        color: var(--text-3);
         font: inherit;
         font-size: 0.75rem;
         text-align: left;
@@ -899,7 +899,7 @@ const PAGE_CSS: &str = r#"
         background: color-mix(in srgb, var(--surface) 55%, var(--surface-sunken));
     }
     .patch-hero-name {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-weight: 700;
         font-size: 0.88rem;
         color: var(--text);
@@ -938,7 +938,7 @@ const PAGE_CSS: &str = r#"
     }
     .patch-dev-comment {
         font-size: 0.78rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         font-style: italic;
         padding: 0.45rem 0.7rem;
         margin: 0.55rem 0 0.5rem;
@@ -1012,7 +1012,7 @@ const PAGE_CSS: &str = r#"
     .patch-external-text {
         display: inline-flex;
         font-size: 0.75rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         margin-top: 0.75rem;
         word-break: break-all;
     }

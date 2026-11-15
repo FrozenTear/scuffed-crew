@@ -12,7 +12,7 @@ const PROPERTIES_CSS: &str = r#"
         overflow-y: auto;
     }
     .props-title {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 0.75rem;
         color: var(--text-subtle);
         text-transform: uppercase;
@@ -54,7 +54,7 @@ const PROPERTIES_CSS: &str = r#"
     }
     .prop-value {
         font-size: 0.8rem;
-        color: var(--text-muted);
+        color: var(--text-3);
     }
     .prop-input {
         width: 100%;
@@ -106,7 +106,7 @@ const PROPERTIES_CSS: &str = r#"
         background: var(--surface-sunken);
         border: 1px solid var(--border);
         border-radius: 4px;
-        color: var(--text-muted);
+        color: var(--text-3);
         cursor: pointer;
         transition: background 0.12s, color 0.12s;
     }

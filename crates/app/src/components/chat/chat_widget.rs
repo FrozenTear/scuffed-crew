@@ -104,7 +104,7 @@ const CHAT_WIDGET_CSS: &str = r#"
     justify-content: center;
     border: none;
     background: transparent;
-    color: var(--text-muted);
+    color: var(--text-3);
     cursor: pointer;
     border-radius: 4px;
     font-size: 16px;
@@ -147,7 +147,7 @@ const CHAT_WIDGET_CSS: &str = r#"
     border: 1px solid var(--border);
     border-radius: 12px;
     background: transparent;
-    color: var(--text-muted);
+    color: var(--text-3);
     font-size: 11px;
     font-weight: 500;
     cursor: pointer;

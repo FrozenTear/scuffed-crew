@@ -16,15 +16,15 @@
   /* -----------------------------------------------------------------------
      Type roles
      ----------------------------------------------------------------------- */
-  --font-display: var(--brand-font-display);
+  --font-head: var(--brand-font-display);
   --font-body: var(--font-family-ibm-plex-sans);
   --font-mono: var(--font-family-jetbrains);
-  --font-display-weight: var(--font-weight-700);
-  --font-display-tracking: var(--tracking-snug);
+  --font-head-weight: var(--font-weight-700);
+  --font-head-tracking: var(--tracking-snug);
   --font-body-weight: var(--font-weight-400);
   --font-label-weight: var(--font-weight-600);
   --font-label-tracking: var(--tracking-open);
-  --font-display-transform: none;
+  --font-head-transform: none;
 
   --text-xs: var(--font-size-12);
   --text-sm: var(--font-size-13);
@@ -79,7 +79,7 @@
   --border: var(--neutral-700);
   --border-strong: var(--neutral-450);
   --text: var(--neutral-25);
-  --text-muted: var(--neutral-300);
+  --text-3: var(--neutral-300);
   --text-subtle: var(--neutral-400);
   --text-inverse: var(--neutral-900);
 
@@ -205,7 +205,7 @@
 [data-theme],
 [data-density],
 [data-accent] {
-  --font-display: var(--brand-font-display);
+  --font-head: var(--brand-font-display);
   --accent: var(--brand-accent);
   --link: var(--accent-text);
   --link-hover: var(--accent-text);

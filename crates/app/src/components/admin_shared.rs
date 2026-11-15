@@ -66,7 +66,7 @@ pub fn list_cap_notice<T: 'static>(resource: &ApiResource<T>, what: &str) -> Ele
 pub fn AccessDenied(message: String) -> Element {
     rsx! {
         div {
-            style: "display:flex;flex-direction:column;align-items:center;justify-content:center;padding:4rem 1rem;color:var(--text-muted);gap:0.5rem;text-align:center;",
+            style: "display:flex;flex-direction:column;align-items:center;justify-content:center;padding:4rem 1rem;color:var(--text-3);gap:0.5rem;text-align:center;",
             h2 { style: "color:var(--text);margin-bottom:0.5rem;", "Access Denied" }
             p { "{message}" }
             Link {

@@ -48,7 +48,7 @@ const REACTION_CSS: &str = r#"
     font-size: 12px;
     cursor: pointer;
     transition: border-color 0.15s, background 0.15s;
-    color: var(--text-muted);
+    color: var(--text-3);
     line-height: 1.6;
 }
 
@@ -87,7 +87,7 @@ const REACTION_CSS: &str = r#"
 
 .reaction-add:hover {
     border-color: var(--accent-soft);
-    color: var(--text-muted);
+    color: var(--text-3);
 }
 
 .reaction-picker {

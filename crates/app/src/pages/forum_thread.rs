@@ -87,7 +87,7 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 0.5rem;
     }
     .thread-title {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 2rem;
         color: var(--text);
         letter-spacing: 2px;
@@ -109,8 +109,8 @@ const PAGE_CSS: &str = r#"
         color: var(--loss);
     }
     .thread-badge-cat {
-        background: color-mix(in srgb, var(--text-muted) 15%, transparent);
-        color: var(--text-muted);
+        background: color-mix(in srgb, var(--text-3) 15%, transparent);
+        color: var(--text-3);
     }
     .thread-meta {
         font-size: 0.75rem;
@@ -124,14 +124,14 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 2rem;
     }
     .thread-op-content {
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.9rem;
         line-height: 1.7;
         white-space: pre-wrap;
         margin: 0;
     }
     .thread-replies-heading {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-weight: 700;
         font-size: 1.1rem;
         color: var(--text);
@@ -155,7 +155,7 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 0.5rem;
     }
     .thread-reply-content {
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.85rem;
         line-height: 1.6;
         white-space: pre-wrap;
@@ -169,7 +169,7 @@ const PAGE_CSS: &str = r#"
     }
     .thread-compose-title {
         display: block;
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-weight: 700;
         font-size: 1rem;
         color: var(--text);

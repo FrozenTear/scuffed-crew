@@ -20,7 +20,7 @@ pub const BRACKET_STYLES: &str = r#"
 }
 .bracket-round-title {
     text-align: center;
-    font-family: var(--font-display);
+    font-family: var(--font-head);
     font-weight: 700;
     font-size: 0.75rem;
     text-transform: uppercase;
@@ -159,7 +159,7 @@ pub const BRACKET_STYLES: &str = r#"
     gap: 2rem;
 }
 .double-elim-section-label {
-    font-family: var(--font-display);
+    font-family: var(--font-head);
     font-weight: 700;
     font-size: 0.8rem;
     text-transform: uppercase;
@@ -228,7 +228,7 @@ pub const BRACKET_STYLES: &str = r#"
 }
 .bracket-mobile-round { margin-bottom: 1.5rem; }
 .bracket-mobile-round-title {
-    font-family: var(--font-display);
+    font-family: var(--font-head);
     font-weight: 700;
     font-size: 0.8rem;
     text-transform: uppercase;
@@ -252,7 +252,7 @@ pub const BRACKET_STYLES: &str = r#"
     margin: 0 auto;
 }
 .tournaments-page h1, .tournament-detail-page h1 {
-    font-family: var(--font-display);
+    font-family: var(--font-head);
     font-size: 3rem;
     color: var(--text);
     letter-spacing: 3px;
@@ -292,7 +292,7 @@ pub const BRACKET_STYLES: &str = r#"
     transform: translateY(-2px);
 }
 .tournament-card-name {
-    font-family: var(--font-display);
+    font-family: var(--font-head);
     font-weight: 700;
     font-size: 1.2rem;
     color: var(--text);
@@ -307,7 +307,7 @@ pub const BRACKET_STYLES: &str = r#"
     color: var(--text-subtle);
 }
 .tournament-card-desc {
-    color: var(--text-muted);
+    color: var(--text-3);
     font-size: 0.82rem;
     margin-top: 0.4rem;
     line-height: 1.5;
@@ -334,8 +334,8 @@ pub const BRACKET_STYLES: &str = r#"
 }
 /* completed → text-2 (neutral, past) */
 .tournament-card-status.completed {
-    background: color-mix(in srgb, var(--text-muted) 15%, transparent);
-    color: var(--text-muted);
+    background: color-mix(in srgb, var(--text-3) 15%, transparent);
+    color: var(--text-3);
 }
 /* draft → warn (pending/not yet open) */
 .tournament-card-status.draft {
@@ -349,13 +349,13 @@ pub const BRACKET_STYLES: &str = r#"
     justify-content: center;
     gap: 1.5rem;
     flex-wrap: wrap;
-    color: var(--text-muted);
+    color: var(--text-3);
     font-size: 0.85rem;
     margin-bottom: 1rem;
 }
 .tournament-meta span { font-family: var(--font-mono); font-size: 0.8rem; }
 .tournament-description {
-    color: var(--text-muted);
+    color: var(--text-3);
     max-width: 700px;
     line-height: 1.7;
     margin: 0 auto 1rem;
@@ -373,7 +373,7 @@ pub const BRACKET_STYLES: &str = r#"
     gap: 1rem;
 }
 .tournament-section-title {
-    font-family: var(--font-display);
+    font-family: var(--font-head);
     font-weight: 700;
     font-size: 1rem;
     text-transform: uppercase;

@@ -310,11 +310,11 @@ pub(super) const RANK_CSS: &str = r#"
     }
     .rank-chart-heading {
         margin: 0 0 0.6rem;
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 1rem;
         color: var(--text);
     }
-    .rank-chart-status { margin: 0.5rem 0; font-size: 0.8rem; color: var(--text-muted); }
+    .rank-chart-status { margin: 0.5rem 0; font-size: 0.8rem; color: var(--text-3); }
     /* The svg scales to its width, text too. Capped so the axis labels stay
        about 11 to 13px from a 360px phone up to desktop. */
     .rank-chart-plot { max-width: 360px; }
@@ -332,7 +332,7 @@ pub(super) const RANK_CSS: &str = r#"
     }
     .rank-chart-note { margin: 0.4rem 0 0; font-size: 0.75rem; color: var(--text-subtle); }
     .rank-chart-table-wrap { margin-top: 0.5rem; font-size: 0.8rem; }
-    .rank-chart-table-wrap summary { cursor: pointer; color: var(--text-muted); }
+    .rank-chart-table-wrap summary { cursor: pointer; color: var(--text-3); }
     .rank-chart-table { width: 100%; border-collapse: collapse; margin-top: 0.4rem; }
     .rank-chart-table th,
     .rank-chart-table td {

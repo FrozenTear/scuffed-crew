@@ -14,7 +14,7 @@ const NOT_FOUND_CSS: &str = r#"
         color: var(--text);
     }
     .nf-code {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: clamp(4rem, 18vw, 6.5rem);
         line-height: 1;
         letter-spacing: 0.04em;
@@ -22,13 +22,13 @@ const NOT_FOUND_CSS: &str = r#"
         margin: 0;
     }
     .nf-title {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 1.25rem;
         margin: 1rem 0 0.35rem;
         color: var(--text);
     }
     .nf-msg {
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.95rem;
         max-width: 28rem;
         margin: 0 0 1.5rem;

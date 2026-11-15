@@ -25,7 +25,7 @@ const CHARTS_CSS: &str = r#"
         pointer-events: none;
     }
     .donut-center-value {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 1.2rem;
         font-weight: 700;
         color: var(--text);
@@ -54,7 +54,7 @@ const CHARTS_CSS: &str = r#"
         border-radius: 2px;
         flex-shrink: 0;
     }
-    .legend-name { color: var(--text-muted); }
+    .legend-name { color: var(--text-3); }
     .legend-val {
         margin-left: auto;
         color: var(--text-subtle);
@@ -68,7 +68,7 @@ const CHARTS_CSS: &str = r#"
     .hbar-label {
         min-width: 110px;
         font-size: 0.8rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         text-align: right;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -102,7 +102,7 @@ const CHARTS_CSS: &str = r#"
         min-width: 50px;
         font-size: 0.8rem;
         font-weight: 600;
-        color: var(--text-muted);
+        color: var(--text-3);
         font-variant-numeric: tabular-nums;
     }
     .hbar-row.muted .hbar-val { color: var(--text-subtle); font-weight: 400; }

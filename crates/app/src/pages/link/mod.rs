@@ -448,7 +448,7 @@ const CSS: &str = r#"
     padding: 2rem;
 }
 .link-card h1 {
-    font-family: var(--font-display);
+    font-family: var(--font-head);
     font-size: 1.5rem;
     color: var(--text);
     margin: 0 0 0.5rem;
@@ -456,7 +456,7 @@ const CSS: &str = r#"
 .link-card p.lead,
 .link-card h2.link-step,
 .link-card p.note {
-    color: var(--text-muted);
+    color: var(--text-3);
     font-size: 0.9rem;
     font-weight: 400;
     font-family: inherit;
@@ -528,7 +528,7 @@ const CSS: &str = r#"
     font-weight: 600;
 }
 .link-wait {
-    color: var(--text-muted);
+    color: var(--text-3);
     text-align: center;
 }
 "#;

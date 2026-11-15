@@ -114,7 +114,7 @@ const PAGE_CSS: &str = r#"
         object-fit: cover;
     }
     .profile-avatar-large .member-initials {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 2.4rem;
         color: var(--accent-text);
         letter-spacing: 3px;
@@ -125,7 +125,7 @@ const PAGE_CSS: &str = r#"
         gap: 0.4rem;
     }
     .profile-name {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 2.2rem;
         color: var(--text);
         letter-spacing: 2px;
@@ -141,7 +141,7 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 2rem;
     }
     .profile-section h2 {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 1.2rem;
         font-weight: 700;
         color: var(--text);
@@ -150,7 +150,7 @@ const PAGE_CSS: &str = r#"
         letter-spacing: 0.04em;
     }
     .profile-bio {
-        color: var(--text-muted);
+        color: var(--text-3);
         font-size: 0.9rem;
         line-height: 1.7;
         margin: 0;
@@ -170,7 +170,7 @@ const PAGE_CSS: &str = r#"
         color: var(--accent-text);
     }
     .profile-team-name {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-weight: 700;
         color: var(--text);
     }
@@ -180,7 +180,7 @@ const PAGE_CSS: &str = r#"
         text-transform: uppercase;
     }
     .profile-account-name {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-weight: 700;
         color: var(--text);
     }
@@ -244,7 +244,7 @@ const PAGE_CSS: &str = r#"
         gap: 0.75rem;
     }
     .profile-hero-name {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-weight: 700;
         color: var(--text);
         text-transform: capitalize;

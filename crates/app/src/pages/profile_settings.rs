@@ -89,7 +89,7 @@ const PAGE_CSS: &str = r#"
         margin: 0 auto;
     }
     .profile-edit-page h1 {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 1.8rem;
         color: var(--text);
         letter-spacing: 2px;
@@ -108,7 +108,7 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 2.5rem;
     }
     .profile-edit-section h2 {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 1.1rem;
         color: var(--text);
         text-transform: uppercase;
@@ -168,7 +168,7 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 1rem;
     }
     .profile-edit-account-name {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-weight: 700;
         color: var(--text);
         margin-bottom: 0.75rem;

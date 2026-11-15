@@ -95,7 +95,7 @@ const MEMBER_STATS_CSS: &str = r#"
         padding: 2rem 1.5rem;
     }
     .member-stats.stats-page h1 {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 1.8rem;
         color: var(--text);
         text-transform: uppercase;
@@ -113,8 +113,8 @@ const MEMBER_STATS_CSS: &str = r#"
         padding: 0.6rem 1.2rem;
         border: none;
         background: none;
-        color: var(--text-muted);
-        font-family: var(--font-display);
+        color: var(--text-3);
+        font-family: var(--font-head);
         font-size: 0.9rem;
         font-weight: 600;
         text-transform: uppercase;
@@ -147,7 +147,7 @@ const MEMBER_STATS_CSS: &str = r#"
         justify-content: center;
     }
     .member-stats .stat-tile-value {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 1.9rem;
         color: var(--text);
         letter-spacing: 2px;
@@ -166,7 +166,7 @@ const MEMBER_STATS_CSS: &str = r#"
     }
     .member-stats .stat-tile-record {
         font-size: 0.9rem;
-        color: var(--text-muted);
+        color: var(--text-3);
         margin-top: 0.4rem;
         white-space: nowrap;
     }

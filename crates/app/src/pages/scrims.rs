@@ -61,19 +61,19 @@ const PAGE_CSS: &str = r#"
     margin: 0 auto;
 }
 .scrims-page-title {
-    font-family: var(--font-display);
+    font-family: var(--font-head);
     font-size: 2.5rem;
     color: var(--text);
     letter-spacing: 3px;
     margin: 0 0 0.25rem;
 }
 .scrims-subtitle {
-    color: var(--text-muted);
+    color: var(--text-3);
     font-size: 0.9rem;
     margin: 0 0 2rem;
 }
 .scrims-section-title {
-    font-family: var(--font-display);
+    font-family: var(--font-head);
     font-weight: 700;
     font-size: 1.2rem;
     color: var(--text);
@@ -115,7 +115,7 @@ const PAGE_CSS: &str = r#"
     flex-wrap: wrap;
 }
 .scrim-team {
-    font-family: var(--font-display);
+    font-family: var(--font-head);
     font-weight: 700;
     font-size: 1.05rem;
     color: var(--text);
@@ -138,8 +138,8 @@ const PAGE_CSS: &str = r#"
     color: var(--accent-text);
 }
 .scrim-status.completed {
-    background: color-mix(in srgb, var(--text-muted) 15%, transparent);
-    color: var(--text-muted);
+    background: color-mix(in srgb, var(--text-3) 15%, transparent);
+    color: var(--text-3);
 }
 .scrim-status.cancelled {
     background: color-mix(in srgb, var(--loss) 15%, transparent);
@@ -149,7 +149,7 @@ const PAGE_CSS: &str = r#"
     display: flex;
     gap: 1.25rem;
     font-size: 0.8rem;
-    color: var(--text-muted);
+    color: var(--text-3);
     flex-wrap: wrap;
 }
 .scrim-details span { display: flex; align-items: center; gap: 0.25rem; }
@@ -176,7 +176,7 @@ const PAGE_CSS: &str = r#"
     letter-spacing: 0.03em;
     border: 1px solid var(--border);
     background: var(--surface-sunken);
-    color: var(--text-muted);
+    color: var(--text-3);
     cursor: pointer;
     transition: all 0.15s;
 }
@@ -215,7 +215,7 @@ const PAGE_CSS: &str = r#"
     margin-bottom: 1.5rem;
 }
 .scrim-create-title {
-    font-family: var(--font-display);
+    font-family: var(--font-head);
     font-weight: 700;
     font-size: 1.1rem;
     color: var(--text);

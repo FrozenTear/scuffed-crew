@@ -57,7 +57,7 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 0.4rem;
     }
     .match-vs {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: clamp(1.5rem, 3vw, 2rem);
         font-weight: 700;
         color: var(--text);
@@ -73,7 +73,7 @@ const PAGE_CSS: &str = r#"
         margin-top: 0.6rem;
     }
     .match-score {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 2.4rem;
         font-weight: 700;
         letter-spacing: 0.04em;
@@ -88,7 +88,7 @@ const PAGE_CSS: &str = r#"
         margin-top: 1.5rem;
     }
     .match-section h2 {
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 1rem;
         text-transform: uppercase;
         letter-spacing: 0.06em;

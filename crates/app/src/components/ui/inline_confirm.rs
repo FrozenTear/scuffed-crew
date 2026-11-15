@@ -12,7 +12,7 @@ pub const INLINE_CONFIRM_CSS: &str = r#"
   padding: var(--space-3); background: transparent; color: var(--text);
   display: flex; flex-direction: column; gap: var(--space-2); }
 .inline-confirm__title { font-size: var(--text-sm); font-weight: 600; margin: 0; }
-.inline-confirm__body { font-size: var(--text-sm); color: var(--text-muted); margin: 0; line-height: 1.5; }
+.inline-confirm__body { font-size: var(--text-sm); color: var(--text-3); margin: 0; line-height: 1.5; }
 .inline-confirm__actions { display: flex; justify-content: flex-end; gap: var(--space-2); }
 .inline-confirm__cancel, .inline-confirm__go { font-family: var(--font-body); font-size: var(--text-sm);
   font-weight: 600; border-radius: var(--radius-control); padding: var(--space-2) var(--space-4);

@@ -240,7 +240,7 @@ pub(super) const BANS_PICKS_CSS: &str = r#"
     }
     .game-bans-picks .game-bp-heading {
         margin: 0 0 0.75rem;
-        font-family: var(--font-display);
+        font-family: var(--font-head);
         font-size: 1rem;
         color: var(--text);
     }
@@ -359,7 +359,7 @@ pub(super) const BANS_PICKS_CARD_CSS: &str = r#"
         padding: 0;
         list-style: none;
         font-size: 0.75rem;
-        color: var(--text-muted);
+        color: var(--text-3);
     }
     .match-card .match-bp-group {
         display: flex;

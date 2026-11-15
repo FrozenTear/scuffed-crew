@@ -41,7 +41,7 @@ const MESSAGE_THREAD_CSS: &str = r#"
     flex-shrink: 0;
 }
 .dm-thread-name {
-    font-family: var(--font-display);
+    font-family: var(--font-head);
     font-weight: 700;
     font-size: 1.05rem;
     color: var(--text);
@@ -62,7 +62,7 @@ const MESSAGE_THREAD_CSS: &str = r#"
 .dm-thread-load-older {
     align-self: center;
     background: transparent;
-    color: var(--text-muted);
+    color: var(--text-3);
     border: 1px solid var(--border);
     border-radius: 6px;
     padding: 0.35rem 0.75rem;

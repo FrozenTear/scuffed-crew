@@ -88,13 +88,13 @@ fn thread_count_label(count: u64) -> String {
 const PAGE_CSS: &str = r#"
     .forum-page { padding: 2rem; max-width: 960px; margin: 0 auto; }
     .forum-page-title {
-        font-family: var(--font-display); font-size: 2rem; color: var(--text);
+        font-family: var(--font-head); font-size: 2rem; color: var(--text);
         letter-spacing: 2px; margin: 0 0 0.35rem;
     }
-    .forum-lead { color: var(--text-muted); font-size: 0.9rem; margin: 0 0 1.5rem; }
+    .forum-lead { color: var(--text-3); font-size: 0.9rem; margin: 0 0 1.5rem; }
     .forum-section { margin-bottom: 1.75rem; }
     .forum-section-title {
-        font-family: var(--font-display); font-size: 0.85rem; letter-spacing: 0.12em;
+        font-family: var(--font-head); font-size: 0.85rem; letter-spacing: 0.12em;
         text-transform: uppercase; color: var(--accent-text); margin: 0 0 0.35rem;
     }
     .forum-section-desc { color: var(--text-subtle); font-size: 0.8rem; margin: 0 0 0.65rem; }
@@ -111,14 +111,14 @@ const PAGE_CSS: &str = r#"
     .forum-board-row:hover { background: var(--surface-sunken); }
     .forum-board-row.sub { padding-left: 2rem; }
     .forum-board-name {
-        font-family: var(--font-display); font-weight: 600; color: var(--text); font-size: 1rem;
+        font-family: var(--font-head); font-weight: 600; color: var(--text); font-size: 1rem;
     }
     .forum-board-desc { color: var(--text-subtle); font-size: 0.8rem; margin-top: 0.15rem; }
     .forum-board-meta { color: var(--text-subtle); font-size: 0.75rem; text-align: right; }
     .forum-locked { color: var(--text-subtle); font-size: 0.7rem; margin-left: 0.4rem; }
     .forum-toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; gap: 1rem; flex-wrap: wrap; }
     .forum-crumb { font-size: 0.8rem; color: var(--text-subtle); }
-    .forum-crumb a { color: var(--text-muted); text-decoration: none; }
+    .forum-crumb a { color: var(--text-3); text-decoration: none; }
     .forum-crumb a:hover { color: var(--accent-text); }
     .forum-new-btn {
         padding: 0.5rem 1rem; background: var(--accent-solid); color: var(--on-accent);
@@ -155,7 +155,7 @@ const PAGE_CSS: &str = r#"
     .forum-compose textarea { min-height: 120px; resize: vertical; }
     .forum-compose-actions { display: flex; gap: 0.5rem; justify-content: flex-end; }
     .forum-btn-ghost {
-        background: transparent; border: 1px solid var(--border); color: var(--text-muted);
+        background: transparent; border: 1px solid var(--border); color: var(--text-3);
         padding: 0.45rem 0.85rem; border-radius: 6px; cursor: pointer;
     }
 "#;

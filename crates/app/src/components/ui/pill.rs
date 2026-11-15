@@ -10,7 +10,7 @@ pub enum PillTone {
 pub const PILL_CSS: &str = r#"
 .ui-pill { font-family: var(--font-body); font-weight: 500; font-size: var(--text-xs);
   padding: 3px var(--space-2); border-radius: var(--radius-control); display: inline-block; }
-.ui-pill--neutral { background: var(--surface-sunken); color: var(--text-muted); }
+.ui-pill--neutral { background: var(--surface-sunken); color: var(--text-3); }
 .ui-pill--accent { background: var(--accent-soft); color: var(--accent-text); }
 .ui-pill--ok { background: color-mix(in srgb, var(--win) 15%, transparent); color: var(--win); }
 .ui-pill--warn { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
