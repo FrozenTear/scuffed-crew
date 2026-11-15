@@ -71,8 +71,8 @@ use crate::extractors::{AdminUser, CropUploader, OfficerUser, OrgMember};
 use crate::hero_icons::{ensure_hero_icons_dir, is_icon_id};
 use crate::routes::audit_log::audit;
 use crate::routes::hero_icons::{
-    ADMIN_REQUIRED, CleanIcon, Reject, UploadReject, clean_png_within, configured, db_error,
-    discard_icon_file, internal, member_active, multipart_reject, read_png_part, reject,
+    ADMIN_REQUIRED, CleanIcon, Reject, UploadReject, clean_png_within, clean_reject, configured,
+    db_error, discard_icon_file, internal, member_active, multipart_reject, read_png_part, reject,
     remove_icon_file, write_private,
 };
 use crate::state::AppState;
@@ -434,9 +434,10 @@ pub async fn upload_training_crops(
                 let Some((hero, meta)) = pending.take() else {
                     return Err(unexpected().into());
                 };
-                let data = read_png_part(&mut field, kind.max_crop_bytes()).await?;
+                let max_bytes = kind.max_crop_bytes();
+                let data = read_png_part(&mut field, max_bytes).await?;
                 let cleaned = tokio::task::spawn_blocking(move || {
-                    clean_png_within(&data, max_width, max_height)
+                    clean_png_within(&data, max_width, max_height, max_bytes)
                 })
                 .await
                 .map_err(|error| {
@@ -445,7 +446,7 @@ pub async fn upload_training_crops(
                 })?;
                 match cleaned {
                     Ok(image) => accepted.push(PendingCrop { hero, meta, image }),
-                    Err(code) => return Err(reject(StatusCode::BAD_REQUEST, code).into()),
+                    Err(code) => return Err(clean_reject(code).into()),
                 }
             }
             _ => return Err(unexpected().into()),
@@ -1249,7 +1250,7 @@ mod tests {
         canvas
             .write_to(&mut out, image::ImageFormat::Png)
             .expect("png");
-        clean_png_within(&out.into_inner(), 1024, 256).expect("clean")
+        clean_png_within(&out.into_inner(), 1024, 256, usize::MAX).expect("clean")
     }
 
     fn new_row(member: &str, kind: CropKind) -> NewTrainingCrop {

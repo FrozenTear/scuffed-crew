@@ -78,12 +78,18 @@ just below that, and it is larger than the largest `rank` crop on both
 edges, so a `rank` crop is never the whole screen it reports. The screen
 size is what the tracker reports; the server cannot see the screen.
 
-Worst-case disk use per consenting member, at every cap with every crop at
-its byte limit: `hero_icon` 500 x 64 KiB (about 31 MiB), `stat_digits`
-1000 x 64 KiB (about 62 MiB), `map_name` 200 x 256 KiB (50 MiB), `rank`
-1000 x 384 KiB (375 MiB). `rank` is the largest by far. Real crops are
+Every stored file is also within its kind's byte limit: the server
+re-encodes each crop at 8 bits per sample with the best PNG compression,
+and refuses one whose re-encode is over the limit (see below). So the
+worst-case disk use per consenting member, at every cap with every stored
+file at its byte limit, is: `hero_icon` 500 x 64 KiB (about 31 MiB),
+`stat_digits` 1000 x 64 KiB (about 62 MiB), `map_name` 200 x 256 KiB
+(50 MiB), `rank` 1000 x 384 KiB (375 MiB); about 519 MiB for a member who
+consents to every kind. `rank` is the largest by far. Real crops are
 smaller (the measured `rank` maximums average about 95 KiB across the five
-regions), and stored files are the server's re-encode, not the upload.
+regions). Before this bound, a re-encode kept 16-bit samples and used fast
+compression, so a small upload could be stored many times larger (QA saw
+an 89,866-byte 16-bit `rank` upload stored as 8,848,823 bytes).
 
 ## Auth
 
@@ -217,7 +223,8 @@ Check order:
 9. The parts, in order. Each `meta`: 400 `invalid_crop_meta` or
    `unknown_hero`. Each `crop`: 415 `not_png`, 413 `icon_too_large` (over
    the kind's byte limit), 400 `icon_bad_dimensions` (outside the kind's
-   edges, see Crop size per kind), 400 `invalid_png`. A 21st pair is 413
+   edges, see Crop size per kind), 400 `invalid_png`, 413 `icon_too_large`
+   (its re-encode is over the kind's byte limit). A 21st pair is 413
    `too_many_crops_in_request`. A body over 2 MiB is 413 `icon_too_large`.
 10. 400 `no_crops` when there was no pair.
 11. 409 `crop_limit_reached` when this request would pass the cap.
@@ -228,7 +235,13 @@ consent are checked again: if another upload pushed the caller over the cap
 rows and files are removed again.
 
 The PNG is decoded and re-encoded before it is stored, as for hero icons, so
-text chunks and other metadata in the file are dropped.
+text chunks and other metadata in the file are dropped. The re-encode is
+8 bits per sample (gray, gray with alpha, RGB or RGBA, as the upload has
+them; a 16-bit upload loses its low byte, a palette upload becomes RGB or
+RGBA) with the best PNG compression. If the re-encode is over the kind's
+byte limit the crop is 413 `icon_too_large`, the same answer as an
+oversized part, and nothing of the request is stored. `size_bytes` is the
+stored size, so it is never over the limit.
 
 The tracker version is taken from a `User-Agent` of the form
 `scuffed-stat-tracker/<semver>` (same parsing as the stats sync legacy-id
@@ -480,7 +493,7 @@ Every error body is `{"error": "<code>"}`, except the shared 429 body
 | 403 | `Officer access required` | Member session on `/members` |
 | 404 | `crop_not_found` | Unknown id, malformed id, or a crop the caller may not see |
 | 409 | `crop_limit_reached` | The upload would pass the kind's cap |
-| 413 | `icon_too_large` | A `crop` part over the kind's limit (64 KiB; `map_name` 256 KiB; `rank` 384 KiB), or the body over 2 MiB |
+| 413 | `icon_too_large` | A `crop` part over the kind's limit (64 KiB; `map_name` 256 KiB; `rank` 384 KiB), its re-encode over that limit, or the body over 2 MiB |
 | 413 | `too_many_crops_in_request` | More than 20 pairs |
 | 415 | `not_png` | A `crop` part without the PNG signature |
 | 429 | `rate_limited` | Per-member, per-kind upload limiter, or the per-IP limit of the sync token routes |
@@ -549,7 +562,9 @@ exact statement on rows missing every one of these fields.
 ### Rollback A: undo only the `rank` kind (back to the build before PR 682)
 
 The build before PR 682 already has `stat_digits` and `map_name`, so their
-crops and consent stay as they are.
+crops and consent stay as they are. `rank` consent does not survive: step 4
+clears it, so if this kind is deployed again later, every member starts
+with `rank` off and must opt in again. No consent comes back on by itself.
 
 1. Rank crops can stay. The old build skips rows of a kind it does not
    know on every list and count, and a member's own delete-all
@@ -571,8 +586,25 @@ crops and consent stay as they are.
    only when a row is written) and the plain defaults above. `rank_opt_in`
    stays defined with `DEFAULT ALWAYS false` and unused, so it never blocks
    a write.
-4. Optional cleanup, once no `rank` rows are left:
-   `REMOVE FIELD rank_opt_in ON member_settings;`.
+4. Required, right after the old build is up: clear `rank` consent and
+   its field, both statements in one query:
+
+   ```sql
+   REMOVE FIELD rank_opt_in ON member_settings; UPDATE member_settings UNSET rank_opt_in;
+   ```
+
+   The `UNSET` is what matters. `member_settings` is `SCHEMAFULL`, and the
+   backfill in step 2 wrote `rank_opt_in` on every row: once the field
+   definition is gone, any write of a row that still carries the value
+   fails with "Found field 'rank_opt_in', but no such field exists" (every
+   stats settings, hero icon opt-in and consent save would be 500). The
+   `UPDATE ... UNSET` removes the value from every row, so saves work
+   again and no stored `rank` consent is left to come back on a later
+   deploy. Run it after step 3, not before: the build from this PR writes
+   `rank_opt_in` on every save. A save that lands between the two
+   statements can 500 once; that is why they go in one query. The db test
+   `rollback_a_clears_rank_consent_and_saves_still_work` runs these exact
+   statements.
 
 ### Rollback B: undo the whole training crops feature (back to the build before #653)
 
@@ -597,10 +629,21 @@ crops and consent stay as they are.
    test `old_build_row_shape_reads_rows_with_kind_and_metadata`, which reads
    such a row with a copy of the old struct). Hero icons the old build
    writes get `kind = 'hero_icon'` from the field default.
-4. Optional cleanup:
-   `REMOVE INDEX hero_icon_member_kind_idx ON hero_icon;` and
-   `REMOVE FIELD <name> ON hero_icon;` / `ON member_settings` for each new
-   field. Not needed for the old build to run once steps 1 and 2 have run.
+4. Optional cleanup, after the old build is up. Every `REMOVE FIELD` must
+   be followed by an `UPDATE ... UNSET` of the same field in the same
+   query: both tables are `SCHEMAFULL`, the backfill in step 2 wrote the
+   `member_settings` opt-ins on every row, and a row that still carries a
+   value of a removed field fails every write with "Found field ..., but
+   no such field exists". This also drops every stored `stat_digits`,
+   `map_name` and `rank` consent, so nothing comes back on by itself if the
+   feature is deployed again. Skip the step entirely if in doubt: the old
+   build runs with the fields still defined.
+
+   ```sql
+   REMOVE FIELD stat_digits_opt_in ON member_settings; REMOVE FIELD map_name_opt_in ON member_settings; REMOVE FIELD rank_opt_in ON member_settings; UPDATE member_settings UNSET stat_digits_opt_in, map_name_opt_in, rank_opt_in;
+   REMOVE INDEX hero_icon_member_kind_idx ON hero_icon;
+   REMOVE FIELD kind ON hero_icon; REMOVE FIELD screen ON hero_icon; REMOVE FIELD slot_type ON hero_icon; REMOVE FIELD slot_index ON hero_icon; REMOVE FIELD game_token ON hero_icon; REMOVE FIELD score ON hero_icon; REMOVE FIELD runner_up ON hero_icon; REMOVE FIELD margin ON hero_icon; REMOVE FIELD icon_set_version ON hero_icon; REMOVE FIELD spot_version ON hero_icon; REMOVE FIELD vote_card_filled ON hero_icon; REMOVE FIELD locked_in ON hero_icon; REMOVE FIELD screen_width ON hero_icon; REMOVE FIELD screen_height ON hero_icon; REMOVE FIELD ui_scale ON hero_icon; REMOVE FIELD tracker_version ON hero_icon; REMOVE FIELD found_x ON hero_icon; REMOVE FIELD found_y ON hero_icon; REMOVE FIELD found_w ON hero_icon; REMOVE FIELD found_h ON hero_icon; REMOVE FIELD found_confidence ON hero_icon; UPDATE hero_icon UNSET kind, screen, slot_type, slot_index, game_token, score, runner_up, margin, icon_set_version, spot_version, vote_card_filled, locked_in, screen_width, screen_height, ui_scale, tracker_version, found_x, found_y, found_w, found_h, found_confidence;
+   ```
 
 Hero icon opt-ins are never rewritten, so a rollback keeps every member's
 hero icon choice.

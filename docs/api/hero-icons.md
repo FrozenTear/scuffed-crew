@@ -114,10 +114,14 @@ in the request passes.
 3. The PNG header gives a width and height in `8..=256`. Otherwise 400
    `icon_bad_dimensions`.
 4. The image decodes. Otherwise 400 `invalid_png`.
+5. The re-encode (below) is at most `HERO_ICON_MAX_BYTES`. Otherwise 413
+   `icon_too_large`.
 
 The server then re-encodes the decoded pixels as a new PNG and stores that, so
-text chunks and other metadata from the upload are dropped. `size_bytes` is the
-size of the stored file. File names on disk are `<id>.png`, where `id` is 32
+text chunks and other metadata from the upload are dropped. The re-encode is
+8 bits per sample (gray, gray with alpha, RGB or RGBA, as the upload has
+them) with the best PNG compression, so a stored file is never larger than
+`HERO_ICON_MAX_BYTES`. `size_bytes` is the size of the stored file. File names on disk are `<id>.png`, where `id` is 32
 lowercase hex characters made by the server. Nothing in a path comes from the
 request.
 
@@ -151,7 +155,7 @@ Every error body is `{"error": "<code>"}`. The codes are constants in
 | 400 | `icon_bad_dimensions` | Width or height outside 8 to 256 |
 | 400 | `invalid_png` | PNG signature present but the image does not decode |
 | 409 | `icon_limit_reached` | The upload would go over `HERO_ICON_MAX_PER_MEMBER` |
-| 413 | `icon_too_large` | A part over 64 KiB, or the body over 2 MiB |
+| 413 | `icon_too_large` | A part over 64 KiB, its re-encode over 64 KiB, or the body over 2 MiB |
 | 413 | `too_many_icons_in_request` | More than 20 `icon` parts |
 | 415 | `not_png` | A part without the PNG signature |
 | 429 | `rate_limited` | Per-member upload limiter, see below |

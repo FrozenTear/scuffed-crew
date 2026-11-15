@@ -46,7 +46,8 @@ use axum::extract::{Multipart, Path as UrlPath, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
-use image::ImageFormat;
+use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+use image::{ColorType, DynamicImage, ImageFormat};
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{AuditAction, AuditTargetType, DbError, HeroIcon, NewHeroIcon, OrgRole};
 use scuffed_types::api::{
@@ -371,18 +372,33 @@ pub(crate) struct CleanIcon {
 /// Check the header size, decode, and re-encode one PNG. Runs on a blocking thread.
 ///
 /// The stored file is the re-encoded image, so text chunks and other metadata
-/// in the upload are dropped. `Err` is the 400 error code.
+/// in the upload are dropped. `Err` is the error code; answer it with
+/// [`clean_reject`].
 pub(crate) fn clean_png(data: &[u8]) -> Result<CleanIcon, &'static str> {
-    clean_png_within(data, HERO_ICON_MAX_EDGE, HERO_ICON_MAX_EDGE)
+    clean_png_within(
+        data,
+        HERO_ICON_MAX_EDGE,
+        HERO_ICON_MAX_EDGE,
+        HERO_ICON_MAX_BYTES,
+    )
 }
 
-/// [`clean_png`] with its own largest width and height. Each edge is still
-/// at least `HERO_ICON_MIN_EDGE`. Training crops use it for the wider
-/// `map_name` bound.
+/// [`clean_png`] with its own largest width, height and stored size. Each
+/// edge is still at least `HERO_ICON_MIN_EDGE`. Training crops use it for
+/// the bounds of each kind.
+///
+/// The stored file is never larger than `max_bytes`, the same limit as the
+/// upload part: the image is re-encoded at 8 bits per sample (gray, gray
+/// with alpha, RGB or RGBA, as the upload has them) with the best PNG
+/// compression, and a re-encode over `max_bytes` is refused with
+/// `icon_too_large` (413, like an oversized upload). Without this a small
+/// 16-bit or palette upload could be stored many times larger than its
+/// kind's limit.
 pub(crate) fn clean_png_within(
     data: &[u8],
     max_width: u32,
     max_height: u32,
+    max_bytes: usize,
 ) -> Result<CleanIcon, &'static str> {
     let reader = image::ImageReader::with_format(Cursor::new(data), ImageFormat::Png);
     let Ok((width, height)) = reader.into_dimensions() else {
@@ -395,15 +411,45 @@ pub(crate) fn clean_png_within(
     let Ok(decoded) = image::load_from_memory_with_format(data, ImageFormat::Png) else {
         return Err(HERO_ICON_ERR_INVALID_PNG);
     };
-    let mut out = Cursor::new(Vec::new());
-    if decoded.write_to(&mut out, ImageFormat::Png).is_err() {
+    let (width, height) = (decoded.width(), decoded.height());
+    let eight_bit = to_eight_bit(decoded);
+    let mut bytes = Vec::new();
+    let encoder =
+        PngEncoder::new_with_quality(&mut bytes, CompressionType::Best, FilterType::Adaptive);
+    if eight_bit.write_with_encoder(encoder).is_err() {
         return Err(HERO_ICON_ERR_INVALID_PNG);
     }
+    if bytes.len() > max_bytes {
+        return Err(HERO_ICON_ERR_TOO_LARGE);
+    }
     Ok(CleanIcon {
-        bytes: out.into_inner(),
-        width: decoded.width(),
-        height: decoded.height(),
+        bytes,
+        width,
+        height,
     })
+}
+
+/// `image` at 8 bits per sample, keeping gray and alpha where it has them.
+fn to_eight_bit(image: DynamicImage) -> DynamicImage {
+    match image.color() {
+        ColorType::L8 | ColorType::La8 | ColorType::Rgb8 | ColorType::Rgba8 => image,
+        ColorType::L16 => DynamicImage::ImageLuma8(image.to_luma8()),
+        ColorType::La16 => DynamicImage::ImageLumaA8(image.to_luma_alpha8()),
+        color if color.has_alpha() => DynamicImage::ImageRgba8(image.to_rgba8()),
+        _ => DynamicImage::ImageRgb8(image.to_rgb8()),
+    }
+}
+
+/// The answer for a [`clean_png_within`] error code: 413 for
+/// `icon_too_large` (a re-encode over the kind's byte limit), 400 for the
+/// others.
+pub(crate) fn clean_reject(code: &'static str) -> Reject {
+    let status = if code == HERO_ICON_ERR_TOO_LARGE {
+        StatusCode::PAYLOAD_TOO_LARGE
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+    reject(status, code)
 }
 
 pub(crate) fn multipart_reject(error: MultipartError) -> Reject {
@@ -595,7 +641,7 @@ pub async fn upload_hero_icons(
             })?;
         match cleaned {
             Ok(icon) => accepted.push(icon),
-            Err(code) => return Err(reject(StatusCode::BAD_REQUEST, code).into()),
+            Err(code) => return Err(clean_reject(code).into()),
         }
     }
     if accepted.is_empty() {
@@ -1015,6 +1061,91 @@ mod tests {
         let mut out = Cursor::new(Vec::new());
         canvas.write_to(&mut out, ImageFormat::Png).unwrap();
         out.into_inner()
+    }
+
+    /// Encode `image` as a PNG with the image crate's defaults (fast
+    /// compression, the image's own bit depth), as a client might.
+    fn encode(image: DynamicImage) -> Vec<u8> {
+        let mut out = Cursor::new(Vec::new());
+        image.write_to(&mut out, ImageFormat::Png).unwrap();
+        out.into_inner()
+    }
+
+    /// A 1536x720 16-bit image in 64 px blocks: small as an upload, large
+    /// once decoded (8 bytes per pixel with alpha).
+    fn blocks_16bit(alpha: bool) -> DynamicImage {
+        let value =
+            |x: u32, y: u32, k: u32| (((x / 64) * 7 + (y / 64) * 13 + k * 29) % 256) as u16 * 257;
+        if alpha {
+            DynamicImage::ImageRgba16(image::ImageBuffer::from_fn(1536, 720, |x, y| {
+                image::Rgba([value(x, y, 0), value(x, y, 1), value(x, y, 2), 65535])
+            }))
+        } else {
+            DynamicImage::ImageRgb16(image::ImageBuffer::from_fn(1536, 720, |x, y| {
+                image::Rgb([value(x, y, 0), value(x, y, 1), value(x, y, 2)])
+            }))
+        }
+    }
+
+    #[test]
+    fn sixteen_bit_uploads_are_stored_as_eight_bit_within_the_limit() {
+        const LIMIT: usize = 384 * 1024;
+        for (alpha, stored_color) in [(true, ColorType::Rgba8), (false, ColorType::Rgb8)] {
+            let upload = encode(blocks_16bit(alpha));
+            assert!(upload.len() <= LIMIT, "upload {}", upload.len());
+            let clean = clean_png_within(&upload, 1536, 720, LIMIT).expect("accepted");
+            assert!(clean.bytes.len() <= LIMIT, "stored {}", clean.bytes.len());
+            assert_eq!((clean.width, clean.height), (1536, 720));
+            let stored =
+                image::load_from_memory_with_format(&clean.bytes, ImageFormat::Png).unwrap();
+            assert_eq!(stored.color(), stored_color);
+            // Same picture at 8 bits: every 16-bit sample was v * 257.
+            let original = blocks_16bit(alpha).to_rgba8();
+            assert_eq!(stored.to_rgba8(), original);
+        }
+        // Gray stays gray, at 8 bits.
+        let gray = DynamicImage::ImageLuma16(image::ImageBuffer::from_pixel(
+            64,
+            64,
+            image::Luma([40_000u16]),
+        ));
+        let clean = clean_png_within(&encode(gray), 256, 256, LIMIT).unwrap();
+        let stored = image::load_from_memory_with_format(&clean.bytes, ImageFormat::Png).unwrap();
+        assert_eq!(stored.color(), ColorType::L8);
+    }
+
+    #[test]
+    fn a_re_encode_over_the_byte_limit_is_icon_too_large() {
+        // Noise does not compress, so its re-encode is about 4 bytes per
+        // pixel whatever the upload looked like.
+        let mut state = 0x9e37_79b9u32;
+        let noise = image::RgbaImage::from_fn(128, 128, |_, _| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            image::Rgba(state.to_le_bytes())
+        });
+        let upload = encode(DynamicImage::ImageRgba8(noise));
+        let fits = clean_png_within(&upload, 256, 256, usize::MAX).expect("no limit");
+        let stored = fits.bytes.len();
+        assert!(
+            clean_png_within(&upload, 256, 256, stored).is_ok(),
+            "exactly at the limit"
+        );
+        assert_eq!(
+            clean_png_within(&upload, 256, 256, stored - 1).err(),
+            Some(HERO_ICON_ERR_TOO_LARGE)
+        );
+        assert_eq!(
+            clean_reject(HERO_ICON_ERR_TOO_LARGE).0,
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert_eq!(
+            clean_reject(HERO_ICON_ERR_BAD_DIMENSIONS).0,
+            StatusCode::BAD_REQUEST
+        );
+        // The hero icon route's own limit applies to its re-encode too.
+        assert_eq!(clean_png(&upload).err(), Some(HERO_ICON_ERR_TOO_LARGE));
     }
 
     /// Store two icons for `member_id` the way the upload route does.

@@ -2003,6 +2003,121 @@ fn padded_png(png: Vec<u8>, total: usize) -> Vec<u8> {
     out
 }
 
+/// PNG chunk: length, type, data, CRC.
+fn png_chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+    let mut chunk = u32::try_from(data.len()).unwrap().to_be_bytes().to_vec();
+    chunk.extend_from_slice(kind);
+    chunk.extend_from_slice(data);
+    let crc = png_crc(&chunk[4..]);
+    chunk.extend_from_slice(&crc.to_be_bytes());
+    chunk
+}
+
+/// A palette PNG (8-bit indices, 256 random colours, random indices), its
+/// image data in stored (uncompressed) deflate blocks. About one byte per
+/// pixel as an upload; a decoder expands it to RGB, three bytes per pixel
+/// of noise, so a re-encode is about three times larger.
+fn palette_noise_png(width: u32, height: u32, seed: u32) -> Vec<u8> {
+    let mut state = seed.wrapping_mul(2_654_435_761).wrapping_add(1);
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        state
+    };
+    let mut raw = Vec::new();
+    for _ in 0..height {
+        // Filter byte 0 (none), then one random palette index per pixel.
+        let row = std::iter::once(0u8).chain((0..width).map(|_| next() as u8));
+        raw.extend(row);
+    }
+    let mut zlib = vec![0x78, 0x01];
+    let blocks: Vec<&[u8]> = raw.chunks(65_535).collect();
+    for (i, block) in blocks.iter().enumerate() {
+        zlib.push(u8::from(i + 1 == blocks.len()));
+        let len = u16::try_from(block.len()).unwrap();
+        zlib.extend_from_slice(&len.to_le_bytes());
+        zlib.extend_from_slice(&(!len).to_le_bytes());
+        zlib.extend_from_slice(block);
+    }
+    let (mut a, mut b) = (1u32, 0u32);
+    for &byte in &raw {
+        a = (a + u32::from(byte)) % 65_521;
+        b = (b + a) % 65_521;
+    }
+    zlib.extend_from_slice(&((b << 16) | a).to_be_bytes());
+    let palette: Vec<u8> = (0..256 * 3).map(|_| next() as u8).collect();
+    let mut ihdr = width.to_be_bytes().to_vec();
+    ihdr.extend_from_slice(&height.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 3, 0, 0, 0]); // depth 8, palette
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    png.extend(png_chunk(b"IHDR", &ihdr));
+    png.extend(png_chunk(b"PLTE", &palette));
+    png.extend(png_chunk(b"IDAT", &zlib));
+    png.extend(png_chunk(b"IEND", &[]));
+    png
+}
+
+#[test]
+fn palette_noise_png_decodes() {
+    let png = palette_noise_png(40, 30, 1);
+    let image = image::load_from_memory_with_format(&png, ImageFormat::Png).expect("decodes");
+    assert_eq!((image.width(), image.height()), (40, 30));
+}
+
+#[tokio::test]
+async fn stored_rank_crops_stay_within_the_byte_limit() {
+    let w = world().await;
+    set_consent(&w.app, OWNER_SESSION, json!({ "rank": true })).await;
+
+    // A 16-bit RGBA 1536x720 upload (as QA sent: small upload, 8 bytes per
+    // pixel decoded) is stored as 8-bit RGBA within the rank byte limit.
+    let sixteen = image::ImageBuffer::from_fn(1536, 720, |x, y| {
+        let v = |k: u32| (((x / 64) * 7 + (y / 64) * 13 + k * 29) % 256) as u16 * 257;
+        image::Rgba([v(0), v(1), v(2), 65535u16])
+    });
+    let mut upload = Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba16(sixteen)
+        .write_to(&mut upload, ImageFormat::Png)
+        .unwrap();
+    let upload = upload.into_inner();
+    assert!(upload.len() <= RANK_MAX_BYTES, "{}", upload.len());
+    let got = upload_parts(&w, "rank", vec![meta(rank_meta()), ("crop", upload)]).await;
+    assert_eq!(got.0, StatusCode::CREATED, "{}", got.1);
+    let stored_size = got.1["crops"][0]["size_bytes"].as_u64().unwrap();
+    assert!(stored_size <= RANK_MAX_BYTES as u64, "{stored_size}");
+    let files = files_on_disk(w.dir());
+    assert_eq!(files.len(), 1);
+    let stored = std::fs::read(w.dir().join(&files[0])).unwrap();
+    assert_eq!(stored.len() as u64, stored_size);
+    let decoded = image::load_from_memory_with_format(&stored, ImageFormat::Png).unwrap();
+    assert_eq!(decoded.color(), image::ColorType::Rgba8);
+    assert_eq!((decoded.width(), decoded.height()), (1536, 720));
+
+    // A palette upload under the limit whose re-encode is over it: 413,
+    // like an oversized upload, and nothing more is stored.
+    let palette = palette_noise_png(600, 600, 3);
+    assert!(palette.len() <= RANK_MAX_BYTES, "{}", palette.len());
+    let got = upload_parts(&w, "rank", vec![meta(rank_meta()), ("crop", palette)]).await;
+    assert_error(&got, StatusCode::PAYLOAD_TOO_LARGE, "icon_too_large");
+    assert_eq!(files_on_disk(w.dir()).len(), 1);
+    assert_eq!(w.rows_of(OWNER).await.len(), 1);
+
+    // The same holds for another kind at its own limit (stat_digits, 64 KiB).
+    set_consent(&w.app, OWNER_SESSION, json!({ "stat_digits": true })).await;
+    let palette = palette_noise_png(200, 200, 4);
+    assert!(palette.len() <= 64 * 1024, "{}", palette.len());
+    let got = upload_parts(&w, "stat_digits", vec![meta(json!({})), ("crop", palette)]).await;
+    assert_error(&got, StatusCode::PAYLOAD_TOO_LARGE, "icon_too_large");
+    assert_eq!(files_on_disk(w.dir()).len(), 1);
+    w.cleanup();
+}
+
+/// Upload `parts` of `kind` with the owner's sync token.
+async fn upload_parts(w: &World, kind: &str, parts: Vec<Part>) -> Got {
+    upload(&w.app, OWNER_TOKEN, kind, &parts).await
+}
+
 #[test]
 fn padded_png_decodes_at_its_exact_size() {
     let padded = padded_png(noise_png(64, 64, 1), 40_000);

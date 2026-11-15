@@ -785,6 +785,101 @@ mod tests {
         );
     }
 
+    /// Rollback A step 4 in `docs/api/training-crops.md`, read from the
+    /// doc. `REMOVE FIELD` alone leaves the stored values, and on a
+    /// `SCHEMAFULL` table every later write of such a row fails; with the
+    /// `UNSET` in the same query, saves work and no rank consent is left.
+    #[tokio::test]
+    async fn rollback_a_clears_rank_consent_and_saves_still_work() {
+        const DOC: &str = include_str!("../../../../docs/api/training-crops.md");
+        const CLEAR: &str = "REMOVE FIELD rank_opt_in ON member_settings; UPDATE member_settings UNSET rank_opt_in;";
+        assert!(DOC.contains(CLEAR), "the doc runs this exact query");
+
+        async fn with_rank_on() -> Database {
+            let db = test_db().await;
+            for member in ["r1", "r2"] {
+                db.set_training_crop_consent(
+                    member,
+                    TrainingCropConsentUpdate {
+                        rank: Some(true),
+                        map_name: Some(true),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            }
+            db
+        }
+
+        // REMOVE FIELD alone: the stats settings save fails.
+        let db = with_rank_on().await;
+        db.client
+            .query("REMOVE FIELD rank_opt_in ON member_settings;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let error = db
+            .upsert_member_settings("r1", Some("Name"), None)
+            .await
+            .expect_err("a row still carrying rank_opt_in cannot be written");
+        assert!(error.to_string().contains("rank_opt_in"), "{error}");
+
+        // The doc's query: saves work, rank consent is gone, other consent
+        // is kept.
+        let db = with_rank_on().await;
+        db.client.query(CLEAR).await.unwrap().check().unwrap();
+        db.upsert_member_settings("r1", Some("Name"), Some(StatsVisibility::Members))
+            .await
+            .expect("stats settings save after the rollback");
+        assert!(db.set_hero_icon_opt_in("r2", true).await.unwrap());
+        let mut result = db
+            .client
+            .query("SELECT VALUE rank_opt_in FROM member_settings")
+            .await
+            .unwrap();
+        let rank: Vec<Option<bool>> = result.take(0).unwrap();
+        assert_eq!(rank, vec![None, None], "no rank consent left in any row");
+        let consent = db.get_training_crop_consent("r2").await.unwrap();
+        assert!(consent.map_name && consent.hero_icon && !consent.rank);
+    }
+
+    /// `hero_icon_opt_in` has `DEFAULT ALWAYS false` too. Every writer in
+    /// this crate assigns it, so this uses a write that does not, on a row
+    /// without it: with a plain `DEFAULT` the update would fail `TYPE bool`.
+    #[tokio::test]
+    async fn a_write_that_omits_hero_icon_opt_in_fills_it() {
+        let db = test_db().await;
+        db.client
+            .query(
+                r#"
+                REMOVE FIELD IF EXISTS hero_icon_opt_in ON member_settings;
+                CREATE member_settings SET member_id = 'no-hero', player_name = 'Old',
+                    stats_visibility = 'public', stat_digits_opt_in = false,
+                    map_name_opt_in = false, rank_opt_in = false;
+                "#,
+            )
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        run_migrations(&db.client).await.unwrap();
+        db.client
+            .query("UPDATE member_settings SET player_name = 'New' WHERE member_id = 'no-hero'")
+            .await
+            .unwrap()
+            .check()
+            .expect("a write without hero_icon_opt_in succeeds");
+        let mut result = db
+            .client
+            .query("SELECT VALUE hero_icon_opt_in FROM member_settings WHERE member_id = 'no-hero'")
+            .await
+            .unwrap();
+        let stored: Vec<Option<bool>> = result.take(0).unwrap();
+        assert_eq!(stored, vec![Some(false)]);
+    }
+
     #[tokio::test]
     async fn rank_consent_reads_false_on_rows_from_before_it() {
         let db = test_db().await;
