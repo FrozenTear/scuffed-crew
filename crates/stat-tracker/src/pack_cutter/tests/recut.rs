@@ -334,6 +334,16 @@ fn queue_rows_with_visible_false_still_check_their_values() {
         "missing path",
     );
     check(
+        "hidden-empty.jsonl",
+        serde_json::json!({
+            "path": "s1/a.png",
+            "screen": "heroban",
+            "title_text": "",
+            "visible": false,
+        }),
+        "title_text is empty",
+    );
+    check(
         "hidden-spaced.jsonl",
         serde_json::json!({
             "path": "s1/a.png",

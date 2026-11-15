@@ -418,7 +418,10 @@ fn load(labels: &Path, frames: Option<&Path>) -> Result<Loaded<Sample>, String> 
         let Some(title) = text_field(labels, line, obj, "title_text")? else {
             return Err(format!("{}:{line}: missing title_text", labels.display()));
         };
-        if title.is_empty() || title != title.trim() || title.contains("  ") {
+        if title.is_empty() {
+            return Err(format!("{}:{line}: title_text is empty", labels.display()));
+        }
+        if title != title.trim() || title.contains("  ") {
             return Err(format!(
                 "{}:{line}: title_text {title:?} has leading, trailing or doubled spaces",
                 labels.display()
@@ -439,13 +442,13 @@ fn load(labels: &Path, frames: Option<&Path>) -> Result<Loaded<Sample>, String> 
         })?;
         // `visible: false` marks a title the frame does not show. Learning
         // from it would poison the pack, so the row is skipped, not refused.
-        // Its fields are checked above first, so a malformed row cannot hide
-        // behind it.
+        // Its fields are type-checked above first. The path is only
+        // type-checked: it is not resolved.
         if !visible {
             hidden += 1;
             continue;
         }
-        rows.push((path, screen, title));
+        rows.push((line, path, screen, title));
     }
     if hidden > 0 {
         notes.push_str(&format!(
@@ -455,15 +458,21 @@ fn load(labels: &Path, frames: Option<&Path>) -> Result<Loaded<Sample>, String> 
     }
     let mut samples = Vec::new();
     let mut skipped = 0usize;
-    for (label_path, screen, title) in &rows {
-        let path = resolve_frame(frames, label_path)?;
-        let (width, height) = image::image_dimensions(&path)
-            .map_err(|e| format!("reading {}: {e}", path.display()))?;
+    for (line, label_path, screen, title) in &rows {
+        let here = |e: String| format!("{}:{line}: {e}", labels.display());
+        let path = resolve_frame(frames, label_path).map_err(here)?;
+        let (width, height) = image::image_dimensions(&path).map_err(|e| {
+            format!(
+                "{}:{line}: reading {}: {e}",
+                labels.display(),
+                path.display()
+            )
+        })?;
         if title_crop(width, height, *screen).is_none() {
             skipped += 1;
             continue;
         }
-        let session = session_of(&path)?;
+        let session = session_of(&path).map_err(|e| format!("{}:{line}: {e}", labels.display()))?;
         samples.push(Sample {
             label_path: label_path.clone(),
             session,
