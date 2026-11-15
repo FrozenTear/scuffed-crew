@@ -10,8 +10,10 @@
 //!   heroes-v2 read found (`PanelRead::box_px`), cut from the full frame,
 //!   raw pixels, no pack preprocess. The read's box can sit off the card
 //!   (the matcher slides the template inside it), so the cut is snapped to
-//!   the card's own left and top edges ([`snap_to_card`]); a Tab where they
-//!   are not found keeps none. Only when the panel read passed its gate and
+//!   the card's own left and top edges ([`snap_to_card`]) and kept only
+//!   when its far edges hold: the gap under the card, and right of it where
+//!   the Tab has a gap there. A Tab where an edge is not found or a far edge
+//!   does not hold keeps none. Only when the panel read passed its gate and
 //!   names the Tab's hero authority. ocr-v1 reads no panel box, so it
 //!   offers none.
 //! * `stat_digits`: the own row's six stat cells, each on its own window
@@ -31,10 +33,11 @@
 //! either way.
 //!
 //! The card snap runs inline in `handle_capture`, after the Tab's row is
-//! committed: it reads a few thin luma profiles (well under 1 ms) and keeps
-//! the frame copy off a Tab with no card. The rest of the pixel work (the
-//! frame copy, the scoreboard crop, the chat check, the cuts and the PNG
-//! encodes) runs on a blocking thread, so a Tab never waits on it.
+//! committed: it reads a few thin luma profiles, well under 1 ms. The frame
+//! is then cloned inline too, when a hero icon or a stat_digits crop is
+//! still wanted. The rest of the pixel work after the clone (the scoreboard
+//! crop, the chat check, the cuts and the PNG encodes) runs on a blocking
+//! thread, so a Tab never waits on it.
 
 use std::collections::VecDeque;
 use std::path::Path;
@@ -102,9 +105,11 @@ fn mark_offered(key: String) {
 
 /// Cut this Tab's `hero_icon` and `stat_digits` crops for the game
 /// `session_id` and keep them on a blocking thread. Only the consent, gate
-/// and box checks and, for a hero icon still wanted, the card snap (two
-/// thin luma profiles) run here; the rest of the pixel work runs on that
-/// thread. `None` when there is nothing to cut. The handle is for tests.
+/// and box checks, for a hero icon still wanted the card snap (four thin
+/// luma profiles, plus a re-read of the right one inside the cut when a
+/// drop lands there), and the frame clone run here; the rest of the pixel
+/// work runs on that thread. `None` when there is nothing to cut. The
+/// handle is for tests.
 pub(crate) fn archive_tab_training_crops(
     data_dir: &Path,
     session_id: &str,
@@ -190,9 +195,16 @@ fn hero_icon_crop(
         tracing::debug!(target: "scuffed_stat_tracker", box_px = ?panel.box_px, "career panel box outside the frame: no hero icon crop");
         return None;
     }
-    let Some((x, y, side)) = snap_to_card(frame, (x0, y0)) else {
-        tracing::debug!(target: "scuffed_stat_tracker", box_px = ?panel.box_px, "career panel card edges not found or card past the frame: no hero icon crop");
-        return None;
+    let (x, y, side) = match snap_to_card(frame, (x0, y0)) {
+        Ok(cut) => cut,
+        Err(SnapMiss::NearEdge) => {
+            tracing::debug!(target: "scuffed_stat_tracker", box_px = ?panel.box_px, "career panel card edges not found or card past the frame: no hero icon crop");
+            return None;
+        }
+        Err(SnapMiss::FarEdge { cut, right, bottom }) => {
+            tracing::debug!(target: "scuffed_stat_tracker", box_px = ?panel.box_px, cut = ?cut, right_drop = ?right, bottom_drop = ?bottom, "career panel cut's far edges are not the card's (a drop of None: none found): no hero icon crop");
+            return None;
+        }
     };
     Some(HeroCrop {
         rect: (x, y, side, side),
@@ -252,6 +264,21 @@ const CARD_MIN_STEP: f64 = 16.0;
 /// that.
 const CARD_SUSTAIN: f64 = 0.045;
 
+/// Why [`snap_to_card`] keeps no cut.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum SnapMiss {
+    /// A near (left or top) edge not found, or the square past the frame.
+    NearEdge,
+    /// The cut `(x, y, side)` was found, but its far edges do not hold
+    /// ([`far_edges_hold`]): the right and bottom drops found, `None` where
+    /// none was.
+    FarEdge {
+        cut: (u32, u32, u32),
+        right: Option<u32>,
+        bottom: Option<u32>,
+    },
+}
+
 /// The career panel's portrait card in `frame` as `(x, y, side)`, from the
 /// top left corner `(x0, y0)` of the panel read's box: the card's left
 /// edge searched within [`CARD_SEARCH`] of `x0` on a column luma profile
@@ -263,14 +290,18 @@ const CARD_SUSTAIN: f64 = 0.045;
 /// from outside the card whose card side holds ([`card_edge`]).
 ///
 /// Before the cut is kept, its far edges are checked on the same kind of
-/// profiles, banded on the cut ([`far_edges_hold`]): a wrong first step
-/// would otherwise keep a square shifted off the card. `None` when either
-/// near edge is not found, the square would leave the frame, or a far edge
-/// does not hold.
+/// profiles, banded on the cut ([`far_edges_hold`]), against a wrong first
+/// step that keeps a square shifted off the card. The bottom drop is
+/// required, so a vertical shift keeps none. A horizontal shift keeps none
+/// only where the Tab has a gap right of the card: on Practice Range Tabs
+/// the navy panel there gives no right drop, and a cut shifted left or
+/// right whose top and bottom hold is kept. [`SnapMiss::NearEdge`] when
+/// either near edge is not found or the square would leave the frame,
+/// [`SnapMiss::FarEdge`] when a far edge does not hold.
 pub(crate) fn snap_to_card(
     frame: &image::DynamicImage,
     (x0, y0): (u32, u32),
-) -> Option<(u32, u32, u32)> {
+) -> Result<(u32, u32, u32), SnapMiss> {
     use image::GenericImageView;
     let (w, h) = frame.dimensions();
     let (_, _, _, gh) = stat_tracker::frame::geometry::game_rect_16_9(w, h);
@@ -287,21 +318,26 @@ pub(crate) fn snap_to_card(
         let band = (start + side / 4).min(len)..(start + side * 3 / 4).min(len);
         (!band.is_empty()).then_some(band)
     };
-    let (rows, cols) = (band(y0, h)?, band(x0, w)?);
-    let (n_rows, n_cols) = (f64::from(rows.len() as u32), f64::from(cols.len() as u32));
-    let column = |x: u32| rows.clone().map(|y| luma(x, y)).sum::<f64>() / n_rows;
-    let row = |y: u32| cols.clone().map(|x| luma(x, y)).sum::<f64>() / n_cols;
-    let left = card_edge(column, x0, (reach, window, sustain), w)?;
-    let top = card_edge(row, y0, (reach, window, sustain), h)?;
-    if left + side > w || top + side > h {
-        return None;
-    }
-    let (rows, cols) = (band(top, h)?, band(left, w)?);
+    let near = || {
+        let (rows, cols) = (band(y0, h)?, band(x0, w)?);
+        let (n_rows, n_cols) = (f64::from(rows.len() as u32), f64::from(cols.len() as u32));
+        let column = |x: u32| rows.clone().map(|y| luma(x, y)).sum::<f64>() / n_rows;
+        let row = |y: u32| cols.clone().map(|x| luma(x, y)).sum::<f64>() / n_cols;
+        let left = card_edge(column, x0, (reach, window, sustain), w)?;
+        let top = card_edge(row, y0, (reach, window, sustain), h)?;
+        (left + side <= w && top + side <= h).then_some((left, top))
+    };
+    let (left, top) = near().ok_or(SnapMiss::NearEdge)?;
+    let (rows, cols) = (band(top, h), band(left, w));
+    let (rows, cols) = rows.zip(cols).ok_or(SnapMiss::NearEdge)?;
     let (n_rows, n_cols) = (f64::from(rows.len() as u32), f64::from(cols.len() as u32));
     let column = |x: u32| rows.clone().map(|y| luma(x, y)).sum::<f64>() / n_rows;
     let row = |y: u32| cols.clone().map(|x| luma(x, y)).sum::<f64>() / n_cols;
     let far = (reach, window);
-    far_edges_hold(column, (left + side, w), row, (top + side, h), far).then_some((left, top, side))
+    let cut = (left, top, side);
+    far_edges_hold(column, (left + side, w), row, (top + side, h), far)
+        .map(|()| cut)
+        .map_err(|(right, bottom)| SnapMiss::FarEdge { cut, right, bottom })
 }
 
 /// Whether the cut's far edges sit on the card's: its right edge at `right`
@@ -313,33 +349,48 @@ pub(crate) fn snap_to_card(
 /// can be a px shorter or longer.
 ///
 /// Measured on 55 Practice Range Tabs at 2560x1440 (card at x 1604, y 209,
-/// side 228): under the card there is always a dark gap (luma 17 to 21,
-/// first gap row at `top + side - 1`, a drop of at least 18), so the bottom
-/// drop is required. Right of the card there is none: the navy panel (luma
-/// 37, the card rim's own fill) runs on for 40 px, so there the drop is
-/// only checked when one is found. On 3 of those Tabs the first drop from
-/// the right is a dark patch of portrait art 24 to 31 px inside the cut,
-/// with the navy panel between it and the cut's edge: a drop inside the
-/// cut is the card's edge only when the gap runs on from it to past the
-/// cut's edge, as it does when a cut lands right of a card that has a gap
-/// beside it.
+/// side 228): under the card there is always a dark gap (luma 17 to 21
+/// across the card's full width, first gap row at `top + side - 1`, a drop
+/// of at least 18), so the bottom drop is required. Right of the card there
+/// is no gap: the navy panel (luma 37, the card rim's own fill) runs on for
+/// 40 px, then the mid band either falls to about 22 to 24 (38 of the 55;
+/// a rise from there to 37 of only about 13, under [`CARD_MIN_STEP`]) or
+/// stays about 29 (17 of the 55). The right scan reaches 43 px past the
+/// cut, but neither is a qualifying drop, so the 55 Tabs still cut; there
+/// the right drop is only checked when one is found. That also means a cut
+/// shifted left or right of such a card finds no right drop and is kept
+/// when its top and bottom hold: this check catches a horizontal shift only
+/// where the Tab has a gap right of the card. On 3 of those Tabs the first
+/// drop from the right is a dark patch of portrait art 24 to 31 px inside
+/// the cut, with the navy panel between it and the cut's edge: a drop
+/// inside the cut is the card's edge only when the gap runs on from it to
+/// past the cut's edge, as it does when a cut lands right of a card that
+/// has a gap beside it.
+///
+/// `Err((right, bottom))` with the drops found (`None` where none was) when
+/// a far edge does not hold.
 fn far_edges_hold(
     column: impl Fn(u32) -> f64,
     (right, w): (u32, u32),
     row: impl Fn(u32) -> f64,
     (bottom, h): (u32, u32),
     (reach, window): (i64, i64),
-) -> bool {
+) -> Result<(), (Option<u32>, Option<u32>)> {
     let near = |edge: u32, cut: u32| edge.abs_diff(cut) <= 1;
-    let bottom_holds =
-        gap_edge(&row, bottom, (reach, window), h).is_some_and(|edge| near(edge, bottom));
-    let right_holds = match gap_edge(&column, right, (reach, window), w) {
+    let bottom_drop = gap_edge(&row, bottom, (reach, window), h);
+    let bottom_holds = bottom_drop.is_some_and(|edge| near(edge, bottom));
+    let right_drop = gap_edge(&column, right, (reach, window), w);
+    let right_holds = match right_drop {
         None => true,
         Some(edge) if near(edge, right) => true,
         Some(edge) if edge > right => false,
         Some(edge) => !(edge..=right.min(w - 1)).all(|x| column(x) <= CARD_GAP_MAX_LUMA),
     };
-    bottom_holds && right_holds
+    if bottom_holds && right_holds {
+        Ok(())
+    } else {
+        Err((right_drop, bottom_drop))
+    }
 }
 
 /// The card's far edge on a luma profile of `len` positions near `cut`:
