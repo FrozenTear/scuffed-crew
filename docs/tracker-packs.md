@@ -131,24 +131,38 @@ tars. Extract the published tar, or point at the tracker's
 default mix is weighted by sample count (`n`), and the summary prints
 `n <base> -> <new>` on every class line. That mix is for new frames. Cutting
 `--base` from the same labelled frames that built the pack mixes each class
-in a second time, so `n` doubles and the vector stays the same
-(`templates.json` differs only in `n`). Recut those frames with
-`--replace-all`, or `--replace` for the classes that should be replaced.
-`--replace CLASS` (repeatable) or `--replace-all` keeps the new cut instead. A numeric class the labels did
-not actually show is not a recut: it stays the base template and prints
-`kept from base (pooled)`. A pooled base template is replaced by an observed
-cut of that class, not averaged into the pool. Pooling fills a class only
-when neither side has it, and that line prints `new (pooled)`. `cut` refuses
-`--out` equal to `--base`, refuses an `--out` that already holds
-`templates.json` unless `--force`, and writes the file by rename. It also
-refuses an existing `--out` or `<out>/packs` that group or other can read,
-and it does not chmod that directory. `pack` checks `--name` against the
+in a second time, so `n` doubles and the vector stays about the same (the
+mix re-normalises in f32, so the last bits can move). Recut those frames
+with `--replace-all`, or `--replace` for the classes that should be
+replaced. `--replace CLASS` (repeatable) or `--replace-all` keeps the new
+cut instead. A numeric class the labels did not actually show is not a
+recut: it stays the base template and prints `kept from base (pooled)`. A
+base template marked `pooled` is replaced by an observed cut of that class,
+not averaged into the pool. Pooling fills a class only when neither side has
+it, and that line prints `new (pooled)`, with or without `--base`.
+
+The published `rank-v1` was cut before the `pooled` mark existed, so a
+`--base` recut against it cannot tell its pooled fills from real cuts: it
+prints `base pack has no pooled marks (cut before they existed): pooled
+fills are mixed, not replaced`. The first marked pack comes from a cut of
+the full label set without `--base`, held to the published pack by `eval`.
+
+`cut` refuses `--out` equal to `--base`, refuses an `--out` that already
+holds `templates.json` unless `--force`, and writes the file by rename. It
+also refuses an existing `--out` that group or other can read, and it does
+not chmod that directory. `pack` refuses an `<out>/packs` that group or
+other can read. `pack` checks `--name` against the
 kind (`rank-v1.tar` or `queue-title-v1.tar`), loads the folder with that
 kind's reader, and prints the sha256 of `templates.json`. `eval` diffs the
 two packs first. Every changed class needs a labelled frame that shows that
 class, unless `--allow-unverified CLASS` names it. Rank coverage is per
 class (an `sr/7` needs a labelled SR that contains a 7; a `role/Tank` needs
-a Tank label), the same way a queue class needs a frame of that title. Then
+a Tank label; a `division/3` needs a division 3 label; an `emblem/3` needs a
+division 2 or 4 label, whose emblems show the 3), the same way a queue class
+needs a frame of that title. A class the reader never offers in its family
+(`pct/sr_icon`, `sr/%`) cannot change a read and needs no frame. A pooled
+numeric template is verified by a frame that shows that class in any
+numeric field. Then
 it scores the candidate pack against the baseline pack on every row,
 including a title the baseline pack does not have. It fails on a new wrong,
 on a frame that was correct and is now unread or wrong, on a dropped
@@ -159,21 +173,42 @@ report prints `labelled: N`, `regressed frames:`, `allowed drops:`,
 `changed class`, and `candidate templates.json sha256:`. Compare that sha
 with the sha `pack` prints for the same file. `result:` is the last line.
 `regressed frames:` uses the label path, so a queue set with absolute paths
-prints home-folder paths. Trim those before pasting a report into a PR or
-the fleet channel.
+prints home-folder paths. The `ignored keys in <labels path>:` line prints
+the labels path as typed, so it can hold a home-folder path too. Trim those
+before pasting a report into a PR or the fleet channel.
 
 `cut` also refuses a title or a rank word (`role_rank`, `next_mode_hint`,
 each `change_tags` entry) with a leading, trailing, or doubled space, and a
-role file that lists the same game twice. A label row may carry extra keys.
-They are ignored, and one line per file lists their names. A duplicate key
-in one row, or a value of the wrong type, is still an error. Two
-classes the reader compares, when one of them is new or re-learned, are
-refused when they correlate above the reader's margin. `--allow-near` is
-the override for that check.
+role file that lists the same game twice. A label row may carry the extra
+keys the label tools write, and nothing else:
+
+- rank: `index`, `screen`, `hero`, `notes`, `labeler`, `placement_progress`
+- role file: `index`, `file`, `evidence`, `labeler`
+- queue title: `width`, `height`, `title_box`, `note`, `set`
+
+They are not read, and one `ignored keys in <labels path>:` line per file
+lists their names. Any other key is refused as `unknown key`, so a typo such
+as `hero_sr_chnage` stops the cut instead of blinding the gate to that
+field. A duplicate key in one row, or a value of the wrong type (a non-string
+queue `frame` included), is an error. Queue errors name the file line.
+
+A queue row with `visible: false` marks a title the frame does not show. It
+is skipped: not learned and not scored, and `cut` and `eval` print
+`skipped N row(s) with visible: false in <labels path>`. `visible: true`
+or no `visible` key is a normal row; any other value is an error.
+
+Two classes the reader compares, when one of them is new or re-learned, are
+refused when they correlate above the reader's margin. Rank compares raw
+template dots and does not use the reader's aspect term, so it can refuse a
+pair the reader would separate by width. Queue compares the reader's
+whole-title NCC. Two kept base classes do not block a recut. `--allow-near`
+writes the pack anyway, and the summary still lists every near pair as
+`allowed near pair:`.
 
 Exit status: 0 when eval passes or help is shown, 1 when the eval gate
 fails, 2 on any other error. `-h` and `--help` are help only as the command
-or in flag-name position. A repeated flag is an error.
+or in flag-name position. A repeated flag is an error, except the repeatable
+`--replace`, `--allow-drop` and `--allow-unverified`.
 
 Inputs and output stay on the build machine. `cut` and `pack` refuse an
 `--out` inside a git work tree. Any `..` in `--out` is refused, whether or

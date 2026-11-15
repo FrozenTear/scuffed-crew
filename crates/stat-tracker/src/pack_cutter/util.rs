@@ -14,9 +14,10 @@ pub struct Loaded<T> {
     /// Rows the layout refused (rank scale, or queue-title plane).
     pub skipped: usize,
     pub samples: Vec<T>,
-    /// One line per label file whose rows carried keys this tool does not
-    /// read. Empty when every key was known.
-    pub ignored: String,
+    /// Lines printed above the cut summary or the eval report: one per label
+    /// file whose rows carried allowed extra keys, and one for queue rows
+    /// skipped because they say `visible: false`. Empty when neither.
+    pub notes: String,
 }
 
 /// What happened to one template class while cutting.
@@ -24,11 +25,14 @@ pub struct Loaded<T> {
 pub enum ClassFate {
     /// Labels produced it and it was merged with the base by sample count.
     Learned,
-    /// `--replace` kept the newly cut template and dropped the base one.
+    /// The newly cut template was kept and the base one dropped: by
+    /// `--replace` or `--replace-all`, or because an observed rank cut
+    /// replaces a base template marked `pooled`.
     Replaced,
     /// The labels did not produce it, so the base copy was kept.
     Kept,
-    /// Numeric pooling invented it, but the base already had a real cut.
+    /// Numeric pooling filled it in this cut, not an observed cut, so the
+    /// base copy was kept. The base copy may itself be a pooled fill.
     KeptPooled,
     /// The labels produced it and the base pack did not have it.
     New,
@@ -42,12 +46,19 @@ pub type ClassNote = (String, ClassFate, usize, usize);
 /// A class whose template changed: name, baseline `n`, candidate `n`.
 pub type CountChange = (String, usize, usize);
 
-/// Read JSONL objects. A repeated key in one row is an error. Keys outside
-/// `known` are dropped and named in the returned note, one line for the file.
+/// One JSONL object and its 1-based line in the file.
+pub type LabelRow = (usize, Map<String, Value>);
+
+/// Read JSONL objects, each with its 1-based line in the file. Blank lines
+/// are skipped. A repeated key in one row is an error. Keys in `known` are
+/// kept. Keys in `extra` are the ones the label tools also write: they are
+/// dropped and named in the returned note, one line for the file. Any other
+/// key is an error, so a typo of a known key is refused, not dropped.
 pub fn read_jsonl(
     path: &Path,
     known: &[&str],
-) -> Result<(Vec<Map<String, Value>>, String), String> {
+    extra: &[&str],
+) -> Result<(Vec<LabelRow>, String), String> {
     let text =
         std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
     let mut rows = Vec::new();
@@ -58,6 +69,12 @@ pub fn read_jsonl(
         }
         let StrictObject(mut obj) =
             serde_json::from_str(line).map_err(|e| format!("{}:{}: {e}", path.display(), n + 1))?;
+        if let Some(key) = obj
+            .keys()
+            .find(|key| !known.contains(&key.as_str()) && !extra.contains(&key.as_str()))
+        {
+            return Err(format!("{}:{}: unknown key {key:?}", path.display(), n + 1));
+        }
         obj.retain(|key, _| {
             if known.contains(&key.as_str()) {
                 true
@@ -66,7 +83,7 @@ pub fn read_jsonl(
                 false
             }
         });
-        rows.push(obj);
+        rows.push((n + 1, obj));
     }
     let note = if ignored.is_empty() {
         String::new()
@@ -121,6 +138,31 @@ pub fn under_root(root: &Path, rel: &Path) -> Result<std::path::PathBuf, String>
         return Err(format!("{} is outside the frames directory", rel.display()));
     }
     Ok(root.join(rel))
+}
+
+/// The near-pair check's result. No pairs: nothing to print. Pairs and
+/// `allow`: one `allowed near pair:` line each, printed above the summary.
+/// Pairs without `allow`: the refusal, naming every pair and the flag.
+/// `note` is one more line for the refusal, or empty.
+pub fn near_outcome(pairs: Vec<String>, allow: bool, note: &str) -> Result<String, String> {
+    if pairs.is_empty() {
+        return Ok(String::new());
+    }
+    if allow {
+        return Ok(pairs
+            .iter()
+            .map(|pair| format!("allowed near pair: {pair}\n"))
+            .collect());
+    }
+    let mut msg = pairs.join("\n");
+    msg.push_str(
+        "\nrefusing classes the reader may not separate; --allow-near writes them anyway and lists each pair in the summary",
+    );
+    if !note.is_empty() {
+        msg.push('\n');
+        msg.push_str(note);
+    }
+    Err(msg)
 }
 
 pub fn summary(

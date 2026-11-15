@@ -408,7 +408,7 @@ fn cut_refuses_loose_out_same_dir_as_base_and_an_existing_templates_file() {
 }
 
 #[test]
-fn cut_refuses_spaced_titles_unknown_keys_and_duplicate_roles() {
+fn cut_refuses_spaced_titles_bad_types_duplicate_keys_and_duplicate_roles() {
     let files = write_queue(&[("s1/a.png", 0, "ALPHA QUEUE")], false);
     let spaced = files.dir.path().join("spaced.jsonl");
     write(&spaced, &queue_row("s1/a.png", "ALPHA QUEUE "));
@@ -598,7 +598,7 @@ fn extra_label_keys_are_ignored() {
     assert_eq!(got.code, 0, "{}", got.stderr);
     assert!(
         got.stdout.contains(&format!(
-            "ignored keys in {}: height, note, set, title_box, visible, width",
+            "ignored keys in {}: height, note, set, title_box, width",
             qlabels.display()
         )),
         "{}",

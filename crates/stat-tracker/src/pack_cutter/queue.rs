@@ -33,13 +33,14 @@ pub fn cut(args: &CutArgs, out: &Path) -> Result<String, String> {
     let learned = learner.build();
     let replace: BTreeSet<String> = args.replace.iter().cloned().collect();
     let (set, classes) = merge(learned, base, &replace, args.replace_all)?;
-    reject_near(&set, &classes, args.allow_near)?;
+    let near = reject_near(&set, &classes, args.allow_near)?;
     set.check()
         .map_err(|e| format!("refusing to write an unloadable queue-title pack: {e}"))?;
     let dest = super::output::prepare_templates(out, args.base.as_deref(), args.force)?;
     let bytes = serde_json::to_vec(&set).map_err(|e| e.to_string())?;
     super::output::write_private(&dest, &bytes)?;
-    let mut text = loaded.ignored;
+    let mut text = loaded.notes;
+    text.push_str(&near);
     text.push_str(&util::summary(
         "queue-title",
         out,
@@ -143,7 +144,7 @@ pub fn eval(args: &EvalArgs) -> Result<EvalDone, String> {
         class_folds: &[],
         candidate_sha: &sha,
     });
-    done.report.insert_str(0, &loaded.ignored);
+    done.report.insert_str(0, &loaded.notes);
     Ok(done)
 }
 
@@ -313,10 +314,14 @@ fn mix_queue(
     }
 }
 
-fn reject_near(set: &TemplateSet, notes: &[ClassNote], allow: bool) -> Result<(), String> {
-    if allow {
-        return Ok(());
-    }
+/// Refuse two classes, when one of them is new or re-learned, whose
+/// [`template_ncc`] is above the reader's margin. With `allow`, the pairs
+/// are still found and returned as summary lines instead.
+pub(super) fn reject_near(
+    set: &TemplateSet,
+    notes: &[ClassNote],
+    allow: bool,
+) -> Result<String, String> {
     let hot: BTreeSet<&str> = notes
         .iter()
         .filter(|(_, fate, _, _)| {
@@ -328,6 +333,7 @@ fn reject_near(set: &TemplateSet, notes: &[ClassNote], allow: bool) -> Result<()
         .map(|(name, _, _, _)| name.as_str())
         .collect();
     let limit = 1.0 - crate::shadow::queue_title::MIN_MARGIN;
+    let mut pairs = Vec::new();
     for i in 0..set.classes.len() {
         for j in (i + 1)..set.classes.len() {
             if !hot.contains(set.classes[i].class.as_str())
@@ -337,14 +343,14 @@ fn reject_near(set: &TemplateSet, notes: &[ClassNote], allow: bool) -> Result<()
             }
             let dot = template_ncc(&set.classes[i].vector, &set.classes[j].vector);
             if dot > limit {
-                return Err(format!(
+                pairs.push(format!(
                     "class {} correlates {dot:.3} with {}, above {limit:.3}",
                     set.classes[i].class, set.classes[j].class
                 ));
             }
         }
     }
-    Ok(())
+    util::near_outcome(pairs, allow, "")
 }
 
 struct Sample {
@@ -362,64 +368,81 @@ fn titles_of(samples: &[Sample]) -> Vec<String> {
     titles
 }
 
+/// Keys the queue label tools also write. They are named once per file and
+/// not read. Any key outside these and the read keys is refused.
+const QUEUE_EXTRA_KEYS: &[&str] = &["width", "height", "title_box", "note", "set"];
+
+/// A string field of one queue row. `line` is the row's line in the file.
+fn text_field(
+    labels: &Path,
+    line: usize,
+    obj: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<Option<String>, String> {
+    match obj.get(key) {
+        Some(Value::String(text)) => Ok(Some(text.clone())),
+        Some(_) => Err(format!(
+            "{}:{line}: {key} must be a string",
+            labels.display()
+        )),
+        None => Ok(None),
+    }
+}
+
 fn load(labels: &Path, frames: Option<&Path>) -> Result<Loaded<Sample>, String> {
-    let (rows_in, ignored) = util::read_jsonl(labels, &["path", "screen", "frame", "title_text"])?;
+    let (rows_in, mut notes) = util::read_jsonl(
+        labels,
+        &["path", "screen", "frame", "title_text", "visible"],
+        QUEUE_EXTRA_KEYS,
+    )?;
     let mut rows = Vec::new();
-    for (n, obj) in rows_in.iter().enumerate() {
-        let title = match obj.get("title_text") {
-            Some(Value::String(text)) => text.clone(),
+    let mut hidden = 0usize;
+    for (line, obj) in &rows_in {
+        let line = *line;
+        // `visible: false` marks a title the frame does not show. Learning
+        // from it would poison the pack, so the row is skipped, not refused.
+        match obj.get("visible") {
+            None | Some(Value::Bool(true)) => {}
+            Some(Value::Bool(false)) => {
+                hidden += 1;
+                continue;
+            }
             Some(_) => {
                 return Err(format!(
-                    "{}:{}: title_text must be a string",
-                    labels.display(),
-                    n + 1
+                    "{}:{line}: visible must be true or false",
+                    labels.display()
                 ));
             }
-            None => {
-                return Err(format!(
-                    "{}:{}: missing title_text",
-                    labels.display(),
-                    n + 1
-                ));
-            }
+        }
+        let Some(title) = text_field(labels, line, obj, "title_text")? else {
+            return Err(format!("{}:{line}: missing title_text", labels.display()));
         };
         if title.is_empty() || title != title.trim() || title.contains("  ") {
             return Err(format!(
-                "{}:{}: title_text {title:?} has leading, trailing or doubled spaces",
-                labels.display(),
-                n + 1
+                "{}:{line}: title_text {title:?} has leading, trailing or doubled spaces",
+                labels.display()
             ));
         }
-        let path = match obj.get("path") {
-            Some(Value::String(text)) => text.clone(),
-            Some(_) => {
-                return Err(format!(
-                    "{}:{}: path must be a string",
-                    labels.display(),
-                    n + 1
-                ));
-            }
-            None => {
-                return Err(format!("{}:{}: missing path", labels.display(), n + 1));
-            }
+        let Some(path) = text_field(labels, line, obj, "path")? else {
+            return Err(format!("{}:{line}: missing path", labels.display()));
         };
-        let screen = match obj.get("screen") {
-            Some(Value::String(text)) => text.clone(),
-            Some(_) => {
-                return Err(format!(
-                    "{}:{}: screen must be a string",
-                    labels.display(),
-                    n + 1
-                ));
-            }
-            None => {
-                return Err(format!("{}:{}: missing screen", labels.display(), n + 1));
-            }
+        let Some(screen) = text_field(labels, line, obj, "screen")? else {
+            return Err(format!("{}:{line}: missing screen", labels.display()));
         };
-        let frame = obj.get("frame").and_then(Value::as_str).unwrap_or("");
-        let screen = Screen::parse(&screen)
-            .ok_or_else(|| format!("queue title frame {frame} has unknown screen {screen:?}"))?;
+        let frame = text_field(labels, line, obj, "frame")?.unwrap_or_default();
+        let screen = Screen::parse(&screen).ok_or_else(|| {
+            format!(
+                "{}:{line}: queue title frame {frame:?} has unknown screen {screen:?}",
+                labels.display()
+            )
+        })?;
         rows.push((path, screen, title));
+    }
+    if hidden > 0 {
+        notes.push_str(&format!(
+            "skipped {hidden} row(s) with visible: false in {}\n",
+            labels.display()
+        ));
     }
     let mut samples = Vec::new();
     let mut skipped = 0usize;
@@ -441,11 +464,11 @@ fn load(labels: &Path, frames: Option<&Path>) -> Result<Loaded<Sample>, String> 
         });
     }
     Ok(Loaded {
-        rows: rows.len(),
+        rows: rows_in.len(),
         unreadable: 0,
         skipped,
         samples,
-        ignored,
+        notes,
     })
 }
 

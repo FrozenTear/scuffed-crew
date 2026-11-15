@@ -279,6 +279,13 @@ impl Learner {
     /// Classes a frame actually contributed, before numeric pooling.
     /// [`build`](Self::build) also copies a digit seen in one numeric family
     /// into the others. Those copies are not observed.
+    pub fn observed(&self) -> std::collections::BTreeSet<(Family, String)> {
+        self.examples
+            .iter()
+            .flat_map(|(family, classes)| classes.keys().map(move |class| (*family, class.clone())))
+            .collect()
+    }
+
     /// Add every example from `other`. Used to combine one learner per day.
     pub fn merge(&mut self, other: &Self) {
         for (family, classes) in &other.examples {
@@ -289,13 +296,6 @@ impl Learner {
                     .extend(list.iter().cloned());
             }
         }
-    }
-
-    pub fn observed(&self) -> std::collections::BTreeSet<(Family, String)> {
-        self.examples
-            .iter()
-            .flat_map(|(family, classes)| classes.keys().map(move |class| (*family, class.clone())))
-            .collect()
     }
 
     pub(super) fn add(&mut self, f: Family, class: &str, ink: &Plane) {

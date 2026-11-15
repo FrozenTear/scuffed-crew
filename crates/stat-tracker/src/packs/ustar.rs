@@ -1,5 +1,5 @@
-//! Plain ustar reader for reader packs. `read_ustar` is the check the
-//! cutter tests run a packed tar through.
+//! The tracker's ustar reader for downloaded packs (`unpack_pack`); the
+//! cutter tests reuse it.
 
 use super::{PACK_MISMATCH, PACK_UNSAFE, PackLayout};
 
@@ -25,6 +25,7 @@ pub(crate) fn safe_rel_path(raw: &str) -> Option<String> {
     }
     Some(parts.join("/"))
 }
+
 pub(crate) fn read_ustar(
     bytes: &[u8],
     layout: PackLayout,

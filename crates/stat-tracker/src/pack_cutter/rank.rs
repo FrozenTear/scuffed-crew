@@ -40,14 +40,21 @@ pub fn cut(args: &CutArgs, out: &Path) -> Result<String, String> {
     let observed = learner.observed();
     let learned = learner.build();
     let replace: BTreeSet<String> = args.replace.iter().cloned().collect();
+    let unmarked = base.as_ref().is_some_and(lacks_pooled_marks);
     let (set, classes) = merge(learned, &observed, base, &replace, args.replace_all)?;
-    reject_near(&set, &classes, args.allow_near)?;
+    let near = reject_near(&set, &classes, args.allow_near)?;
     set.check()
         .map_err(|e| format!("refusing to write an unloadable rank pack: {e}"))?;
     let dest = super::output::prepare_templates(out, args.base.as_deref(), args.force)?;
     let bytes = serde_json::to_vec(&set).map_err(|e| e.to_string())?;
     super::output::write_private(&dest, &bytes)?;
-    let mut text = loaded.ignored;
+    let mut text = loaded.notes;
+    if unmarked {
+        text.push_str(
+            "base pack has no pooled marks (cut before they existed): pooled fills are mixed, not replaced\n",
+        );
+    }
+    text.push_str(&near);
     text.push_str(&util::summary(
         "rank",
         out,
@@ -138,7 +145,7 @@ pub fn eval(args: &EvalArgs) -> Result<EvalDone, String> {
         class_folds: &folds,
         candidate_sha: &sha,
     });
-    done.report.insert_str(0, &loaded.ignored);
+    done.report.insert_str(0, &loaded.notes);
     Ok(done)
 }
 
@@ -306,7 +313,12 @@ fn changed_classes(
             continue;
         }
         changed.push((name.clone(), before, template.n));
-        if !exercised(key.0, &key.1, samples) && !allow_set.contains(name.as_str()) {
+        // a class the reader never offers in this family cannot change a read
+        if !offers(key.0, &key.1) {
+            continue;
+        }
+        if !exercised(key.0, &key.1, template.pooled, samples) && !allow_set.contains(name.as_str())
+        {
             unverified.push(name);
         }
     }
@@ -327,13 +339,24 @@ fn changed_classes(
     Ok((changed, unverified))
 }
 
-fn exercised(family: Family, class: &str, samples: &[Sample]) -> bool {
+/// Whether a labelled frame shows `class` in `family`. A pooled numeric
+/// template is the same class cut in any numeric family, so a frame that
+/// shows the class in any numeric family verifies it.
+fn exercised(family: Family, class: &str, pooled: bool, samples: &[Sample]) -> bool {
     if family == Family::Gate {
         return !samples.is_empty();
     }
-    samples
-        .iter()
-        .any(|sample| sample.readable && class_shown(family, class, &sample.labels))
+    let families: &[Family] = if pooled && Family::NUMERIC.contains(&family) {
+        &Family::NUMERIC
+    } else {
+        std::slice::from_ref(&family)
+    };
+    samples.iter().any(|sample| {
+        sample.readable
+            && families
+                .iter()
+                .any(|f| class_shown(*f, class, &sample.labels))
+    })
 }
 
 fn class_shown(family: Family, class: &str, labels: &Labels) -> bool {
@@ -390,12 +413,17 @@ fn class_shown(family: Family, class: &str, labels: &Labels) -> bool {
         Family::Banner => labels.next_mode_hint.as_deref() == Some(class),
         Family::Tier => labels.role_rank.as_deref() == Some(class),
         Family::Role => labels.role.is_some_and(|role| role.as_str() == class),
-        Family::Division | Family::Emblem => labels.division.is_some_and(|d| {
+        // the Learner cuts the labelled division into Division, and only its
+        // two neighbours into Emblem
+        Family::Division => labels
+            .division
+            .is_some_and(|d| (1..=5).contains(&d) && class == d.to_string()),
+        Family::Emblem => labels.division.is_some_and(|d| {
             if !(1..=5).contains(&d) {
                 return false;
             }
             let (left, right) = crate::shadow::rank::neighbours(d);
-            class == d.to_string() || class == left.to_string() || class == right.to_string()
+            class == left.to_string() || class == right.to_string()
         }),
     }
 }
@@ -423,7 +451,7 @@ fn class_key(family: Family, class: &str) -> String {
     format!("{}/{}", family_name(family), class)
 }
 
-fn family_name(family: Family) -> &'static str {
+pub(super) fn family_name(family: Family) -> &'static str {
     match family {
         Family::Gate => "gate",
         Family::Pct => "pct",
@@ -475,12 +503,12 @@ fn merge(
         let mut notes = Vec::new();
         for (family, templates) in &learned.families {
             for template in templates {
-                notes.push((
-                    class_key(*family, &template.class),
-                    ClassFate::New,
-                    0,
-                    template.n,
-                ));
+                let fate = if template.pooled {
+                    ClassFate::NewPooled
+                } else {
+                    ClassFate::New
+                };
+                notes.push((class_key(*family, &template.class), fate, 0, template.n));
             }
         }
         notes.sort_by(|a, b| a.0.cmp(&b.0));
@@ -582,10 +610,26 @@ fn split_key(name: &str) -> Result<(Family, String), String> {
     Ok((parse_family(family)?, class.to_string()))
 }
 
-fn reject_near(set: &TemplateSet, notes: &[ClassNote], allow: bool) -> Result<(), String> {
-    if allow {
-        return Ok(());
-    }
+/// A base pack with numeric templates and no `pooled` mark on any of them
+/// was cut before the mark existed, so its pooled fills cannot be told
+/// apart from real cuts.
+fn lacks_pooled_marks(base: &TemplateSet) -> bool {
+    let mut numeric = Family::NUMERIC
+        .iter()
+        .filter_map(|family| base.families.get(family))
+        .flatten()
+        .peekable();
+    numeric.peek().is_some() && !numeric.any(|template| template.pooled)
+}
+
+/// Refuse two classes the reader compares, when one of them is new or
+/// re-learned, that correlate above the reader's margin. With `allow`, the
+/// pairs are still found and returned as summary lines instead.
+pub(super) fn reject_near(
+    set: &TemplateSet,
+    notes: &[ClassNote],
+    allow: bool,
+) -> Result<String, String> {
     let hot: BTreeSet<&str> = notes
         .iter()
         .filter(|(_, fate, _, _)| {
@@ -596,6 +640,7 @@ fn reject_near(set: &TemplateSet, notes: &[ClassNote], allow: bool) -> Result<()
         })
         .map(|(name, _, _, _)| name.as_str())
         .collect();
+    let mut pairs = Vec::new();
     for (family, templates) in &set.families {
         let limit = if family.is_glyph() {
             1.0 - crate::shadow::rank::MIN_MARGIN
@@ -619,60 +664,54 @@ fn reject_near(set: &TemplateSet, notes: &[ClassNote], allow: bool) -> Result<()
                     .map(|(a, b)| a * b)
                     .sum();
                 if dot > limit {
-                    return Err(format!(
-                        "class {} correlates {dot:.3} with {}, above {limit:.3}",
-                        class_key(*family, &templates[i].class),
-                        class_key(*family, &templates[j].class)
+                    pairs.push(format!(
+                        "class {left} correlates {dot:.3} with {right}, above {limit:.3}"
                     ));
                 }
             }
         }
     }
-    Ok(())
+    util::near_outcome(pairs, allow, NEAR_RANK_NOTE)
 }
 
+/// Rank's line in the near-pair refusal.
+const NEAR_RANK_NOTE: &str =
+    "the rank check compares raw template dots and does not use the reader's aspect term";
+
+/// The classes the reader offers in a glyph family (the allowed lists in
+/// [`Reader::read`]). `None` for the word families, where the reader
+/// compares every class.
+fn offered(family: Family) -> Option<&'static [&'static str]> {
+    use crate::shadow::rank::{CHEV_LEFT, CHEV_RIGHT, SR_ICON};
+    const PCT: &[&str] = &[
+        "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "%", "-", "+",
+    ];
+    const HIGHER: &[&str] = &["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "%"];
+    const PILL: &[&str] = &[
+        "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "%", "+", CHEV_LEFT, CHEV_RIGHT,
+    ];
+    const SR: &[&str] = &["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", SR_ICON];
+    const CHANGE: &[&str] = &["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
+    const DIVISION: &[&str] = &["1", "2", "3", "4", "5"];
+    match family {
+        Family::Pct => Some(PCT),
+        Family::Higher => Some(HIGHER),
+        Family::Pill => Some(PILL),
+        Family::Sr => Some(SR),
+        Family::Change => Some(CHANGE),
+        Family::Division | Family::Emblem => Some(DIVISION),
+        Family::Gate | Family::Tag | Family::Banner | Family::Tier | Family::Role => None,
+    }
+}
+
+/// Whether the reader ever offers `class` in `family`.
+fn offers(family: Family, class: &str) -> bool {
+    offered(family).is_none_or(|list| list.contains(&class))
+}
+
+/// Whether the reader ranks `a` against `b` in `family`.
 fn competes(family: Family, a: &str, b: &str) -> bool {
-    let digits = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
-    let division = ["1", "2", "3", "4", "5"];
-    let allowed: &[&str] = match family {
-        Family::Pct => &[
-            "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "%", "-", "+",
-        ],
-        Family::Higher => &["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "%"],
-        Family::Pill => &[
-            "0",
-            "1",
-            "2",
-            "3",
-            "4",
-            "5",
-            "6",
-            "7",
-            "8",
-            "9",
-            "%",
-            "+",
-            crate::shadow::rank::CHEV_LEFT,
-            crate::shadow::rank::CHEV_RIGHT,
-        ],
-        Family::Sr => &[
-            "0",
-            "1",
-            "2",
-            "3",
-            "4",
-            "5",
-            "6",
-            "7",
-            "8",
-            "9",
-            crate::shadow::rank::SR_ICON,
-        ],
-        Family::Change => &digits,
-        Family::Division | Family::Emblem => &division,
-        Family::Gate | Family::Tag | Family::Banner | Family::Tier | Family::Role => return true,
-    };
-    allowed.contains(&a) && allowed.contains(&b)
+    offers(family, a) && offers(family, b)
 }
 
 fn class_folds_from(days: &BTreeMap<String, Learner>) -> Vec<(String, usize)> {
@@ -708,6 +747,20 @@ const RANK_KEYS: &[&str] = &[
     "next_mode_hint",
 ];
 
+/// Keys the rank label tools also write. They are named once per file and
+/// not read. Any key outside these and [`RANK_KEYS`] is refused.
+const RANK_EXTRA_KEYS: &[&str] = &[
+    "index",
+    "screen",
+    "hero",
+    "notes",
+    "labeler",
+    "placement_progress",
+];
+
+/// Keys the role label tool also writes, besides `game` and `role`.
+const ROLE_EXTRA_KEYS: &[&str] = &["index", "file", "evidence", "labeler"];
+
 #[derive(Deserialize)]
 struct Row {
     game: String,
@@ -729,20 +782,24 @@ fn load(
     role_labels: Option<&Path>,
 ) -> Result<Loaded<Sample>, String> {
     let frames = frames.ok_or("missing --frames")?;
-    let (values, mut ignored) = read_objects(labels, RANK_KEYS)?;
+    let (values, mut notes) = util::read_jsonl(labels, RANK_KEYS, RANK_EXTRA_KEYS)?;
     let mut rows: Vec<Row> = values
-        .iter()
-        .map(|value| serde_json::from_value(fill_label_nulls(value)))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| format!("{}: {e}", labels.display()))?;
+        .into_iter()
+        .map(|(line, obj)| {
+            serde_json::from_value(fill_label_nulls(Value::Object(obj)))
+                .map_err(|e| format!("{}:{line}: {e}", labels.display()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     if let Some(path) = role_labels {
-        let (role_values, role_ignored) = read_objects(path, &["game", "role"])?;
-        ignored.push_str(&role_ignored);
+        let (role_values, role_notes) = util::read_jsonl(path, &["game", "role"], ROLE_EXTRA_KEYS)?;
+        notes.push_str(&role_notes);
         let roles: Vec<RoleRow> = role_values
-            .iter()
-            .map(|value| serde_json::from_value(value.clone()))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| format!("{}: {e}", path.display()))?;
+            .into_iter()
+            .map(|(line, obj)| {
+                serde_json::from_value(Value::Object(obj))
+                    .map_err(|e| format!("{}:{line}: {e}", path.display()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let mut seen = BTreeSet::new();
         for role in &roles {
             if !seen.insert(role.game.as_str()) {
@@ -787,15 +844,14 @@ fn load(
         unreadable,
         skipped,
         samples,
-        ignored,
+        notes,
     })
 }
 
 /// `Labels` options have no `serde(default)`, so a row that omits a field
 /// is filled with null before it is decoded. Null and a missing field are
 /// the same: the field was not labelled.
-fn fill_label_nulls(value: &Value) -> Value {
-    let mut value = value.clone();
+fn fill_label_nulls(mut value: Value) -> Value {
     if let Some(obj) = value.as_object_mut() {
         for key in RANK_KEYS {
             if *key != "game" && *key != "file" && *key != "readable" {
@@ -804,11 +860,6 @@ fn fill_label_nulls(value: &Value) -> Value {
         }
     }
     value
-}
-
-fn read_objects(path: &Path, keys: &[&str]) -> Result<(Vec<Value>, String), String> {
-    let (rows, ignored) = util::read_jsonl(path, keys)?;
-    Ok((rows.into_iter().map(Value::Object).collect(), ignored))
 }
 
 fn check_words(labels: &Labels) -> Result<(), String> {

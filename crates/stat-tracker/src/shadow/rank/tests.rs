@@ -216,6 +216,24 @@ fn learning_covers_every_field_family() {
 }
 
 #[test]
+fn merging_two_learners_is_one_learner_fed_both_frames() {
+    let scenes = training();
+    let (a, b) = (paint(&scenes[0]), paint(&scenes[1]));
+    let mut one = Learner::new();
+    assert!(one.add_frame(&a, &labels(&scenes[0])) > 0);
+    assert!(one.add_frame(&b, &labels(&scenes[1])) > 0);
+    let mut left = Learner::new();
+    left.add_frame(&a, &labels(&scenes[0]));
+    let mut right = Learner::new();
+    right.add_frame(&b, &labels(&scenes[1]));
+    left.merge(&right);
+    // the examples, in order, are the learner's whole state
+    assert_eq!(format!("{left:?}"), format!("{one:?}"));
+    assert_eq!(left.observed(), one.observed());
+    assert_eq!(left.build(), one.build());
+}
+
+#[test]
 fn a_template_pack_round_trips_through_its_file() {
     let set = trained();
     let dir = tempfile::tempdir().unwrap();

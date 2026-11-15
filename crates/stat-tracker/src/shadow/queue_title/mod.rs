@@ -341,7 +341,7 @@ fn window(g: &Gray, dx: usize, dy: usize) -> Vec<f32> {
 }
 
 /// Mean-centred NCC of two learned title templates (no shift). This is the
-/// score [`ncc_cols`] gives the reader at a zero shift.
+/// score the reader's whole-title NCC gives at a zero shift.
 pub fn template_ncc(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != TW * TH || b.len() != TW * TH {
         return 0.0;

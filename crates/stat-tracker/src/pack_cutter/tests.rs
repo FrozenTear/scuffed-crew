@@ -1127,4 +1127,6 @@ fn cut_rank_keeps_a_banner_the_new_labels_do_not_cut() {
     assert_eq!(allowed.code, 0, "{}\n{}", allowed.stderr, allowed.stdout);
 }
 
+mod near;
+mod recut;
 mod review;

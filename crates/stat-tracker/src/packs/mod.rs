@@ -1850,7 +1850,7 @@ impl PackLayout {
     /// does not allow it. `manifest.json` is accepted at the top level for
     /// every layout; [`unpack_pack`] reads it and writes it only for a
     /// layout that [`Self::keeps_manifest`].
-    pub(crate) fn file_path(self, raw: &str) -> Result<String, &'static str> {
+    fn file_path(self, raw: &str) -> Result<String, &'static str> {
         if self == Self::HeroesV1 {
             return heroes_v1_file_path(raw);
         }
@@ -1880,7 +1880,7 @@ impl PackLayout {
     }
 
     /// The one directory entry a layout may carry: `special/` for hero packs.
-    pub(crate) fn allows_dir(self, raw: &str) -> bool {
+    fn allows_dir(self, raw: &str) -> bool {
         match self {
             Self::HeroesV1 | Self::Portraits => {
                 ustar::safe_rel_path(raw).as_deref() == Some("special")
