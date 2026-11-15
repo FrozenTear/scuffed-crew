@@ -720,18 +720,18 @@ fn range_frame_past(
     patch: RangePatch,
     past: u8,
 ) -> DynamicImage {
-    range_frame_around(w, h, card, u, patch, past, 30.0)
+    range_frame_around(w, h, card, u, patch, (past, 16), 30.0)
 }
 
-/// [`range_frame_past`] with a left-hand world patch `left_width` px wide
-/// at 1440p (LitLeft, LitLeftTall, LitLeftPartial).
+/// [`range_frame_past`] with the game world at luma `world` and a left-hand
+/// world patch `left_width` px wide at 1440p (LitLeft, LitLeftTall, LitLeftPartial).
 fn range_frame_around(
     w: u32,
     h: u32,
     card: (u32, u32, u32),
     u: u32,
     patch: RangePatch,
-    past: u8,
+    (past, world): (u8, u8),
     left_width: f64,
 ) -> DynamicImage {
     let (left, top, side) = card;
@@ -773,7 +773,7 @@ fn range_frame_around(
         } else if in_rows && x >= right {
             Rgb([past; 3])
         } else {
-            Rgb([16; 3])
+            Rgb([world; 3])
         }
     }))
 }
@@ -918,7 +918,7 @@ fn a_narrow_tall_world_patch_keeps_a_horizontal_shift() {
     let (w, h, u) = (2560, 1440, 1440);
     let card = range_card(u);
     let (left, top, side) = card;
-    let frame = range_frame_around(w, h, card, u, RangePatch::LitLeftTall, 24, 25.0);
+    let frame = range_frame_around(w, h, card, u, RangePatch::LitLeftTall, (24, 16), 25.0);
     let corner = (left - 23, top - 2);
     assert_eq!(
         snap(&frame, corner),
@@ -927,53 +927,16 @@ fn a_narrow_tall_world_patch_keeps_a_horizontal_shift() {
     );
 }
 
-/// [`range_frame`] with every row above `top + clip` (`clip` px at 1440p)
-/// black: a letterbox bar over the card's top rows.
-fn letterbox_frame(w: u32, h: u32, card: (u32, u32, u32), u: u32, clip: f64) -> DynamicImage {
-    let mut img = range_frame(w, h, card, u, RangePatch::Bare).to_rgb8();
-    let bar = card.1 + (clip * f64::from(u) / 1440.0).round() as u32;
-    for (_, y, p) in img.enumerate_pixels_mut() {
-        if y < bar {
-            *p = Rgb([0; 3]);
-        }
-    }
-    DynamicImage::ImageRgb8(img)
-}
-
-#[test]
-fn a_letterboxed_card_top_still_cuts_the_whole_card() {
-    // On 29 accepted live 1440p Tabs a black bar covered every row down to
-    // y 215: the card's top 7 px were lost, its found top was 216, and its
-    // bottom gap stayed at 436. The cut is the card's own square (1604,
-    // 209, 228 at 1440p) with those rows black, from the bottom gap and
-    // CARD_SIDE: not FarEdge, and not the visible 220 px square at 216,
-    // which would clip the card's right.
-    assert_eq!(range_card(1440), (1604, 209, 228));
-    for (name, (w, h), u) in RANGE_FRAMES {
-        let card = range_card(u);
-        let scale = |v: f64| (v * f64::from(u) / 1440.0).round() as u32;
-        let corner = (card.0 - scale(23.0), card.1 - scale(2.0));
-        let frame = letterbox_frame(w, h, card, u, 7.0);
-        assert_eq!(snap_to_card(&frame, corner), Ok(card), "{name}");
-        // Past CARD_CLIP_MAX (16 px at 1440p, 12 at 1080p) the bar is not
-        // taken for a clipped top.
-        let frame = letterbox_frame(w, h, card, u, 17.0);
-        let got = snap_to_card(&frame, corner);
-        assert!(
-            matches!(got, Err(SnapMiss::FarEdge { .. })),
-            "{name}: {got:?}"
-        );
-    }
-}
-
 /// Not kept: a true card under a soft navy rim over its outer column
 /// bands, as on 5 of the 15 live 5v5 Tabs that reached the outer top
 /// check (a gap of 21 to 31 rising 8 to 15 into the card at its top).
 /// Outer caps loose enough to keep them (a gap of 32 and a step of 8,
 /// checked at the cut's top) also keep the 30 px left shifts in
 /// an_outer_top_off_the_cut_keeps_no_30_px_left_shift_beside_the_navy_panel,
-/// so the outer bands keep the near-edge caps. Pinned so a future guard
-/// can be pointed here.
+/// so the outer bands keep the near-edge caps. Also a world band over the
+/// outer left only, brighter about 9 px above the top (31, then 29 for the
+/// last 5 rows), as on one of those 5. Pinned so a future guard can be
+/// pointed here.
 #[test]
 fn a_soft_outer_rim_still_drops_a_true_card() {
     let (w, h, u) = (2560, 1440, 1440);
@@ -981,10 +944,12 @@ fn a_soft_outer_rim_still_drops_a_true_card() {
     let (left, top, side) = card;
     let bare = range_frame(w, h, card, u, RangePatch::Bare);
     let outer = |x: u32| x < left + side / 4 || x >= left + side * 3 / 4;
-    for rim in [23, 30] {
+    for (rim, band) in [(23, false), (30, false), (16, true)] {
         let frame = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
             let over = (top - 43..top).contains(&y) && (left..left + side).contains(&x);
-            if over && outer(x) {
+            if over && band && x < left + side / 4 && y >= top - 9 {
+                Rgb([if y < top - 5 { 31 } else { 29 }; 3])
+            } else if over && outer(x) {
                 Rgb([rim; 3])
             } else {
                 *bare.as_rgb8().unwrap().get_pixel(x, y)
@@ -993,7 +958,7 @@ fn a_soft_outer_rim_still_drops_a_true_card() {
         let got = snap_to_card(&frame, (left - 23, top - 2));
         assert!(
             matches!(got, Err(SnapMiss::OuterTop { cut, .. }) if cut == card),
-            "rim {rim}: {got:?}"
+            "rim {rim} band {band}: {got:?}"
         );
     }
 }
@@ -1467,3 +1432,6 @@ async fn a_crop_that_cannot_be_written_warns_and_the_tab_still_records() {
     assert!(warning.contains("hero icons"), "{warning}");
     assert!(sync::queued_crops(dir.path(), UploadKind::HeroIcon).is_empty());
 }
+
+#[path = "tests_training_crops_letterbox.rs"]
+mod letterbox;

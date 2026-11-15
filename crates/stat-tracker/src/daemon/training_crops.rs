@@ -111,9 +111,8 @@ fn mark_offered(key: String) {
 /// and box checks, for a hero icon still wanted the card snap (six thin
 /// luma profiles, plus a re-read of the right one inside the cut when a
 /// drop lands there, and the far edge ones again on a letterboxed top),
-/// and the frame clone run here; the rest of the pixel
-/// work runs on that thread. `None` when there is nothing to cut. The
-/// handle is for tests.
+/// and the frame clone run here; the rest of the pixel work runs on that
+/// thread. `None` when there is nothing to cut. The handle is for tests.
 pub(crate) fn archive_tab_training_crops(
     data_dir: &Path,
     session_id: &str,
@@ -285,12 +284,16 @@ const CARD_MIN_STEP: f64 = 16.0;
 const CARD_SUSTAIN: f64 = 0.045;
 /// Most a letterboxed card's found top may sit below the top its bottom
 /// gap implies, in `u` (16 px at 1440p, 12 at 1080p). On 29 accepted live
-/// 1440p Tabs a black bar covered every row down to y 215: the card's top
-/// 7 px and the scoreboard header were lost, the found top was 216, and
-/// the bottom gap stayed at 436, the same as on unclipped Tabs (top 209).
+/// 1440p Tabs a black bar covered every row down to y 215: the top 7 px of
+/// the card and of the scoreboard header were lost, the found top was 216,
+/// and the bottom gap stayed at 436, the same as on unclipped Tabs (top
+/// 209).
 const CARD_CLIP_MAX: f64 = 0.011;
 /// Most mean luma of a letterbox-black row: the bar measured 0. Strict, so
-/// a lit patch of the game world (16 and up) never counts as black.
+/// a lit patch of the game world (16 and up) never counts as black. The
+/// check cannot tell a letterbox bar from a black game world (luma 0 on
+/// some Practice Range Tabs), so the outer-band exception in
+/// [`snap_to_card`] also needs a cut the correction moved.
 const CARD_BLACK_MAX_LUMA: f64 = 4.0;
 
 /// Why [`snap_to_card`] keeps no cut.
@@ -308,7 +311,8 @@ pub(crate) enum SnapMiss {
     },
     /// The cut `(x, y, side)`'s far edges hold, but its top edge, searched
     /// again over its outer left and right column bands, is not within 1 px
-    /// of the cut's top (nor below it past only letterbox-black rows): the
+    /// of the cut's top (nor, on a cut the letterbox correction moved up,
+    /// within 1 px of the found top past only letterbox-black rows): the
     /// top found on each band, `None` where none was.
     OuterTop {
         cut: (u32, u32, u32),
@@ -358,17 +362,21 @@ pub(crate) enum SnapMiss {
 /// its far edges checked again. That is a card whose top rows a black bar
 /// clipped: the cut keeps the card's side and framing, and its top rows
 /// are black. The side is not measured from the visible height (220 px on
-/// the clipped Tabs, which would cut 7 px off the card's right). An outer
-/// band whose first step lies below the cut's top, with only black rows
-/// between, then holds too. The residual: on a letterboxed Tab beside the
-/// navy panel a left shift may still be kept when its middle band and
-/// bottom hold and both outer bands see the same black bar, and a card
-/// painted 2 px short on a black surround is cut from 1 px above its top
-/// rather than dropped. The outer top
-/// caps stay at [`CARD_GAP_MAX_LUMA`] and [`CARD_MIN_STEP`]: on live 5v5
-/// Tabs a soft navy rim over an outer band (a gap of 21 to 31, a rise of 8
-/// to 15) drops some true cards, but caps loose enough to keep them also
-/// keep a cut shifted 30 px left onto a tall or partial lit world patch.
+/// the clipped Tabs, which would cut 7 px off the card's right). On a cut
+/// so moved, and only there, an outer band whose first step lies within 1
+/// px of the found top, with only black rows from the cut's top to it,
+/// holds too. On an unmoved cut that exception would also pass a black
+/// game world above a wide lit patch, which the black check cannot tell
+/// from a bar. Residuals: on a letterboxed Tab beside the navy panel the
+/// outer-top guard catches no left shift (both outer bands see the bar
+/// and step at the found top) and the right drop catches none either, so
+/// a 30 px lit patch left of the card is kept shifted; and a card painted
+/// 2 px short beside the navy panel, with black above the card, is cut
+/// from 1 px above its top rather than dropped. The outer top caps stay
+/// at [`CARD_GAP_MAX_LUMA`] and [`CARD_MIN_STEP`]: on live 5v5 Tabs a soft
+/// navy rim over an outer band (a gap of 21 to 31, a rise of 8 to 15)
+/// drops some true cards, but caps loose enough to keep them also keep a
+/// cut shifted 30 px left onto a tall or partial lit world patch.
 /// [`SnapMiss::NearEdge`] when either near edge is not found or the square
 /// would leave the frame, [`SnapMiss::FarEdge`] when a far edge does not
 /// hold, [`SnapMiss::OuterTop`] when an outer top does not.
@@ -456,7 +464,7 @@ pub(crate) fn snap_to_card(
         let found = card_edge(row, top, (reach, window, sustain), h);
         let holds = match found {
             Some(t) if t.abs_diff(top) <= 1 => true,
-            Some(t) if t > top => black(top..t, &row),
+            Some(t) if top < found_top && t.abs_diff(found_top) <= 1 => black(top..t, &row),
             _ => false,
         };
         (found, holds)
