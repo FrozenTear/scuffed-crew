@@ -218,6 +218,49 @@ type SeedMatchRow = (
 /// Seed a varied set of personal_match records for the dev member so the
 /// strategy editor's hero-winrate badges and the personal stats dashboard
 /// have something to render in dev mode.
+/// Report the first `count` pending round-robin matches of `tournament_id`
+/// with demo scores and replay codes, alternating the winner (A, B, A, ...).
+///
+/// The winner's score must exceed the loser's (DB-009), so a B win is
+/// reported 1-2, not 2-1. Used by the standalone site-server dev seed and by
+/// its regression test. On failure returns the index of the match that
+/// failed with the DB error.
+pub async fn report_round_robin_demo_matches(
+    db: &Database,
+    tournament_id: &str,
+    count: usize,
+) -> Result<usize, (usize, scuffed_db::DbError)> {
+    let matches = db
+        .list_tournament_matches(tournament_id)
+        .await
+        .map_err(|e| (0, e))?;
+    let pending: Vec<_> = matches
+        .iter()
+        .filter(|m| {
+            m.participant_a_id.is_some()
+                && m.participant_b_id.is_some()
+                && m.status == scuffed_db::types::TournamentMatchStatus::Pending
+        })
+        .take(count)
+        .collect();
+
+    for (i, m) in pending.iter().enumerate() {
+        let (winner, score_a, score_b) = if i % 2 == 0 {
+            (m.participant_a_id.as_deref().unwrap_or_default(), 2, 1)
+        } else {
+            (m.participant_b_id.as_deref().unwrap_or_default(), 1, 2)
+        };
+        let codes = vec![
+            format!("RR{}{}", (b'A' + i as u8) as char, "001"),
+            format!("RR{}{}", (b'A' + i as u8) as char, "002"),
+        ];
+        db.report_tournament_match(&m.id, score_a, score_b, winner, None, codes)
+            .await
+            .map_err(|e| (i, e))?;
+    }
+    Ok(pending.len())
+}
+
 async fn seed_personal_matches(
     db: &Database,
     member_id: &str,

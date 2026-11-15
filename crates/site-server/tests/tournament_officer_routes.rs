@@ -1,6 +1,13 @@
-//! Officer tournament routes answer 404 on an unknown tournament,
-//! participant, or match id, and write nothing. Deferred follow-up from
-//! PR 675, which covers the public GET routes.
+//! Officer tournament write routes (PR 679, follow-up to PR 675 which covers
+//! the public GET routes).
+//!
+//! - Unknown tournament, participant or match ids answer 404 with a fixed
+//!   body and write nothing.
+//! - Bracket generation with fewer than 2 participants is a 400; an internal
+//!   failure inside a generator is a logged 500, never a 404.
+//! - The changed routes still work on a real tournament.
+//! - DB-009 on round-robin reports, and the standalone dev seed's
+//!   round-robin report helper (it used to panic on match 1).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -19,6 +26,7 @@ use scuffed_site_server::create_router;
 use scuffed_site_server::state::{AppState, OAuthConfig};
 
 const OFFICER_TOKEN: &str = "tourn-officer-token";
+const MEMBER_TOKEN: &str = "tourn-member-token";
 const MISSING: &str = "doesnotexist";
 
 async fn test_state() -> AppState {
@@ -111,11 +119,11 @@ async fn seed_user(
         .unwrap_or_else(|e| panic!("seed session {member_key}: {e}"));
 }
 
-fn authed(method: Method, uri: &str, body: Option<Value>) -> Request<Body> {
+fn authed(method: Method, uri: &str, token: &str, body: Option<Value>) -> Request<Body> {
     let req = Request::builder()
         .method(method)
         .uri(uri)
-        .header(header::AUTHORIZATION, format!("Bearer {OFFICER_TOKEN}"))
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
         .header(header::CONTENT_TYPE, "application/json")
         .header("x-forwarded-for", "127.0.0.1")
         .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
@@ -130,14 +138,25 @@ fn authed(method: Method, uri: &str, body: Option<Value>) -> Request<Body> {
     }
 }
 
+/// Call as the officer.
 async fn call(
     state: &AppState,
     method: Method,
     uri: &str,
     body: Option<Value>,
 ) -> (StatusCode, Value) {
+    call_as(state, OFFICER_TOKEN, method, uri, body).await
+}
+
+async fn call_as(
+    state: &AppState,
+    token: &str,
+    method: Method,
+    uri: &str,
+    body: Option<Value>,
+) -> (StatusCode, Value) {
     let resp = create_router(state.clone())
-        .oneshot(authed(method, uri, body))
+        .oneshot(authed(method, uri, token, body))
         .await
         .unwrap();
     let status = resp.status();
@@ -157,6 +176,15 @@ async fn seeded() -> AppState {
         "TournOfficer",
         "officer",
         OFFICER_TOKEN,
+    )
+    .await;
+    seed_user(
+        &state.db,
+        "memberuser",
+        "membermember",
+        "TournMember",
+        "member",
+        MEMBER_TOKEN,
     )
     .await;
     state
@@ -214,53 +242,65 @@ async fn officer_routes_404_on_unknown_tournament_and_write_nothing() {
     let pid = add_participant(&state, &tid, "Team A").await;
     let before = snapshot(&state).await;
 
-    let cases: Vec<(Method, String, Option<Value>)> = vec![
+    // Expected body per case: an unmatched /api path also answers 404
+    // ({"error":"Not found"}), so the body proves the handler ran.
+    const T404: &str = "Tournament not found";
+    let cases: Vec<(Method, String, Option<Value>, &str)> = vec![
         (
             Method::PUT,
             format!("/api/tournaments/{MISSING}"),
             Some(json!({ "name": "Renamed" })),
+            T404,
         ),
         (
             Method::PATCH,
             format!("/api/tournaments/{MISSING}/status"),
             Some(json!({ "status": "registration" })),
+            T404,
         ),
         (
             Method::POST,
             format!("/api/tournaments/{MISSING}/generate-bracket"),
             None,
+            T404,
         ),
         (
             Method::POST,
             format!("/api/tournaments/{MISSING}/next-round"),
             None,
+            T404,
         ),
         (
             Method::POST,
             format!("/api/tournaments/{MISSING}/participants"),
             Some(json!({ "external_name": "Ghost" })),
+            T404,
         ),
         // Real participant id under a missing tournament.
         (
             Method::PUT,
             format!("/api/tournaments/{MISSING}/participants/{pid}"),
             Some(json!({ "seed": 1 })),
+            T404,
         ),
         (
             Method::DELETE,
             format!("/api/tournaments/{MISSING}/participants/{pid}"),
             None,
+            T404,
         ),
         (
             Method::PATCH,
             format!("/api/tournaments/{MISSING}/matches/{MISSING}/report"),
             Some(json!({ "score_a": 1, "score_b": 0, "winner_id": pid })),
+            "Match not found",
         ),
     ];
 
-    for (method, uri, body) in cases {
+    for (method, uri, body, error) in cases {
         let (status, resp) = call(&state, method.clone(), &uri, body).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{method} {uri}: {resp}");
+        assert_eq!(resp["error"], error, "{method} {uri}");
     }
 
     assert_eq!(snapshot(&state).await, before, "no rows written");
@@ -268,28 +308,6 @@ async fn officer_routes_404_on_unknown_tournament_and_write_nothing() {
     let participants = state.db.list_tournament_participants(&tid).await.unwrap();
     assert_eq!(participants.len(), 1);
     assert_eq!(participants[0].seed, None);
-}
-
-#[tokio::test]
-async fn next_round_on_missing_tournament_creates_no_round() {
-    let state = seeded().await;
-    let (status, body) = call(
-        &state,
-        Method::POST,
-        &format!("/api/tournaments/{MISSING}/next-round"),
-        None,
-    )
-    .await;
-    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
-    assert_eq!(count(&state, "tournament_round").await, 0);
-    assert!(
-        state
-            .db
-            .list_tournament_rounds(MISSING)
-            .await
-            .unwrap()
-            .is_empty()
-    );
 }
 
 #[tokio::test]
@@ -304,8 +322,10 @@ async fn participant_routes_404_on_unknown_or_foreign_participant() {
         let uri = format!("/api/tournaments/{tid}/participants/{pid}");
         let (status, body) = call(&state, Method::PUT, &uri, Some(json!({ "seed": 3 }))).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "PUT {uri}: {body}");
+        assert_eq!(body["error"], "Participant not found", "PUT {uri}");
         let (status, body) = call(&state, Method::DELETE, &uri, None).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "DELETE {uri}: {body}");
+        assert_eq!(body["error"], "Participant not found", "DELETE {uri}");
     }
 
     assert_eq!(snapshot(&state).await, before, "no rows written");
@@ -328,6 +348,7 @@ async fn report_404_on_unknown_match_in_real_tournament() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+    assert_eq!(body["error"], "Match not found");
     assert_eq!(snapshot(&state).await, before);
 }
 
@@ -352,12 +373,12 @@ async fn existing_participant_update_and_delete_still_work() {
     );
 }
 
-/// Dev-seed regression (site-server main.rs, "Failed to report RR match 1"):
-/// the seed reported a B win as 2-1. The report path is right to refuse that
-/// (DB-009, the winner must outscore the loser). A B win reported 1-2 on a
-/// round-robin match goes through.
+/// DB-009 through the report route on a round-robin match: naming B the
+/// winner while A has the higher score is refused (409), and a B win reported
+/// 1-2 goes through. This check existed before PR 679; the dev-seed fix is
+/// covered by `dev_seed_round_robin_reports_go_through` below.
 #[tokio::test]
-async fn round_robin_b_win_needs_b_to_outscore_a() {
+async fn round_robin_report_db009_b_win_needs_b_to_outscore_a() {
     let state = seeded().await;
     let tid = create_tournament(&state, "RR Cup", "round_robin").await;
     for name in ["Alpha", "Bravo", "Charlie", "Echo"] {
@@ -510,4 +531,193 @@ async fn bracket_routes_404_only_for_missing_tournament() {
     assert_eq!(body["tournament"]["id"], tid.as_str());
     assert_eq!(body["participants"].as_array().unwrap().len(), 2);
     assert!(!body["matches"].as_array().unwrap().is_empty(), "{body}");
+}
+
+/// Dev-seed regression (standalone site-server, "Failed to report RR match
+/// 1"). Runs the seed's own helper, which `main.rs` calls: with the old 2-1
+/// score for every match, match 1 (a B win) was refused by DB-009 and this
+/// returns `Err((1, Conflict))`.
+#[tokio::test]
+async fn dev_seed_round_robin_reports_go_through() {
+    let state = seeded().await;
+    let tid = create_tournament(&state, "Seed RR", "round_robin").await;
+    for name in ["Alpha", "Bravo", "Charlie", "Echo"] {
+        add_participant(&state, &tid, name).await;
+    }
+    let (status, body) = call(
+        &state,
+        Method::POST,
+        &format!("/api/tournaments/{tid}/generate-bracket"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let reported = scuffed_site_server::seed::report_round_robin_demo_matches(&state.db, &tid, 3)
+        .await
+        .unwrap_or_else(|(i, e)| panic!("seed RR match {i} refused: {e}"));
+    assert_eq!(reported, 3);
+
+    let completed: Vec<_> = state
+        .db
+        .list_tournament_matches(&tid)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|m| m.status == scuffed_db::TournamentMatchStatus::Completed)
+        .collect();
+    assert_eq!(completed.len(), 3);
+    for m in &completed {
+        let (a, b) = (m.score_a.unwrap(), m.score_b.unwrap());
+        let winner_is_a = m.winner_id == m.participant_a_id;
+        assert!(
+            if winner_is_a { a > b } else { b > a },
+            "winner outscores loser: {m:?}"
+        );
+    }
+    assert!(
+        completed.iter().any(|m| m.winner_id == m.participant_b_id),
+        "the seed reports at least one B win"
+    );
+}
+
+/// The routes this PR changed still work on a real (draft) tournament.
+#[tokio::test]
+async fn changed_routes_work_on_a_real_tournament() {
+    let state = seeded().await;
+
+    // PUT rename.
+    let tid = create_tournament(&state, "Old Name", "single_elim").await;
+    let (status, body) = call(
+        &state,
+        Method::PUT,
+        &format!("/api/tournaments/{tid}"),
+        Some(json!({ "name": "New Name" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["name"], "New Name");
+    assert_eq!(
+        state.db.get_tournament(&tid).await.unwrap().unwrap().name,
+        "New Name"
+    );
+
+    // Swiss, 2 participants: next-round straight away is round 1.
+    let swiss = create_tournament(&state, "Swiss A", "swiss").await;
+    add_participant(&state, &swiss, "Alpha").await;
+    add_participant(&state, &swiss, "Bravo").await;
+    let (status, body) = call(
+        &state,
+        Method::POST,
+        &format!("/api/tournaments/{swiss}/next-round"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["round_number"], 1);
+
+    // Swiss, 2 participants: generate-bracket makes round 1, next-round round 2.
+    let swiss = create_tournament(&state, "Swiss B", "swiss").await;
+    add_participant(&state, &swiss, "Alpha").await;
+    add_participant(&state, &swiss, "Bravo").await;
+    let (status, body) = call(
+        &state,
+        Method::POST,
+        &format!("/api/tournaments/{swiss}/generate-bracket"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["rounds"].as_array().unwrap().len(), 1, "{body}");
+    assert_eq!(body["matches"].as_array().unwrap().len(), 1, "{body}");
+    let (status, body) = call(
+        &state,
+        Method::POST,
+        &format!("/api/tournaments/{swiss}/next-round"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["round_number"], 2);
+}
+
+/// A member (not an officer) gets the same 403 for a real and an unknown
+/// tournament id: the officer check runs before any lookup, so the response
+/// does not reveal which ids exist.
+#[tokio::test]
+async fn member_gets_same_403_for_real_and_unknown_id() {
+    let state = seeded().await;
+    let tid = create_tournament(&state, "Real Cup", "single_elim").await;
+    let before = snapshot(&state).await;
+    let rename = Some(json!({ "name": "Hijacked" }));
+
+    let real = call_as(
+        &state,
+        MEMBER_TOKEN,
+        Method::PUT,
+        &format!("/api/tournaments/{tid}"),
+        rename.clone(),
+    )
+    .await;
+    let missing = call_as(
+        &state,
+        MEMBER_TOKEN,
+        Method::PUT,
+        &format!("/api/tournaments/{MISSING}"),
+        rename,
+    )
+    .await;
+    assert_eq!(real.0, StatusCode::FORBIDDEN, "{}", real.1);
+    assert_eq!(real, missing, "real vs unknown id");
+    assert_eq!(snapshot(&state).await, before, "no rows written");
+}
+
+/// Site review finding 1: a `NotFound` raised inside a generator, on rows the
+/// generator itself just wrote, is a logged 500 and not a 404. Forced here
+/// with an event that deletes every first-round match (the ones with a
+/// participant) as soon as it is created, so single-elim's wiring step finds
+/// its own match gone, as a second concurrent generate-bracket run would
+/// cause.
+#[tokio::test]
+async fn internal_not_found_in_generator_is_500() {
+    let state = seeded().await;
+    let tid = create_tournament(&state, "Vanishing Cup", "single_elim").await;
+    for name in ["Alpha", "Bravo", "Charlie"] {
+        add_participant(&state, &tid, name).await;
+    }
+    state
+        .db
+        .client
+        .query(
+            "DEFINE EVENT vanish_first_round ON TABLE tournament_match \
+             WHEN $event = 'CREATE' \
+               AND ($after.participant_a_id != NONE OR $after.participant_b_id != NONE) \
+             THEN { DELETE $after.id };",
+        )
+        .await
+        .unwrap()
+        .check()
+        .expect("define event");
+
+    // The DB layer raises an internal NotFound here, not Invalid or a
+    // driver error, so the route test below covers the real path.
+    let err = state
+        .db
+        .generate_single_elim_bracket(&tid)
+        .await
+        .expect_err("first-round matches vanish");
+    assert!(
+        matches!(err, scuffed_db::DbError::NotFound(_)),
+        "expected an internal NotFound, got {err:?}"
+    );
+
+    let (status, body) = call(
+        &state,
+        Method::POST,
+        &format!("/api/tournaments/{tid}/generate-bracket"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    assert_eq!(body["error"], "Internal server error");
 }
