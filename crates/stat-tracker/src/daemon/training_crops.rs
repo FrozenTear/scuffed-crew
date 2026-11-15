@@ -370,9 +370,14 @@ pub(crate) enum SnapMiss {
 /// from a bar. Residuals: on a letterboxed Tab beside the navy panel the
 /// outer-top guard catches no left shift (both outer bands see the bar
 /// and step at the found top) and the right drop catches none either, so
-/// a 30 px lit patch left of the card is kept shifted; and a card painted
-/// 2 px short beside the navy panel, with black above the card, is cut
-/// from 1 px above its top rather than dropped. The outer top caps stay
+/// a lit patch left of the card that reaches the bar (tall, or on the
+/// card's rows) is kept shifted at any width the left search reaches, and
+/// a partial one under about 45 px; a wider partial one is still
+/// OuterTop. And with black above the card, a bottom drop k px early (up
+/// to [`CARD_CLIP_MAX`]) moves the cut up k px: a card painted 2 px short
+/// beside the navy panel is cut from 1 px above its top rather than
+/// dropped (the measured bottoms, a drop of at least 18 on the 55 Practice
+/// Range Tabs, make this unlikely). The outer top caps stay
 /// at [`CARD_GAP_MAX_LUMA`] and [`CARD_MIN_STEP`]: on live 5v5 Tabs a soft
 /// navy rim over an outer band (a gap of 21 to 31, a rise of 8 to 15)
 /// drops some true cards, but caps loose enough to keep them also keep a

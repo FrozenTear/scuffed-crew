@@ -63,7 +63,11 @@ fn a_letterboxed_card_top_still_cuts_the_whole_card() {
         }
         // A residual: beside the navy panel both outer bands see the bar and
         // step at the found top, so the outer-top guard catches no left
-        // shift on a letterboxed Tab, and the right drop catches none.
+        // shift on a letterboxed Tab, and the right drop catches none. A
+        // lit patch left of the card that reaches the bar (tall, or on the
+        // card's rows) is kept shifted at any width the left search
+        // reaches, and a partial one under about 45 px; a wider partial
+        // one is still OuterTop.
         let shifted = Ok((left - scale(30.0), top, side));
         assert_eq!(
             boxed(RangePatch::LitLeftPartial, 7.0, 0),
@@ -79,7 +83,10 @@ fn a_letterboxed_card_top_still_cuts_the_whole_card() {
 /// its rows, sees black down to the patch's top over its outer-left band,
 /// but the cut was not moved, so it is still OuterTop. A residual: a card
 /// painted 2 px short beside the navy panel, with black above it, is cut
-/// from 1 px above its top rather than dropped.
+/// from 1 px above its top rather than dropped. That is the 1 px case of a
+/// wider one: with black above the card, a bottom drop k px early (up to
+/// CARD_CLIP_MAX) moves the cut up k px. The measured bottoms (a drop of
+/// at least 18 on the 55 Practice Range Tabs) make this unlikely.
 #[test]
 fn a_black_game_world_is_not_a_letterbox_bar() {
     for (name, (w, h), u) in RANGE_FRAMES {
@@ -101,5 +108,46 @@ fn a_black_game_world_is_not_a_letterbox_bar() {
         }
         let got = snap_to_card(&DynamicImage::ImageRgb8(short), corner);
         assert_eq!(got, Ok((left, top - 1, side)), "{name} 2 px short");
+    }
+}
+
+/// The two halves of the outer exception on a moved cut. Its outer band
+/// must step within 1 px of the found top: a 7 px bar over a black world
+/// (luma 0) and a 60 px lit patch left of the card, over part of its
+/// rows, moves the shifted cut up, but its outer left steps at the patch's
+/// top, so it is still OuterTop. And the rows above that step must be
+/// letterbox-black: a bar over the card whose outer-left columns are not
+/// black (luma 5 and up) is OuterTop at the card's own cut.
+#[test]
+fn a_moved_cut_needs_its_outer_step_at_the_found_top_past_black_rows() {
+    for (name, (w, h), u) in RANGE_FRAMES {
+        let card = range_card(u);
+        let (left, top, side) = card;
+        let scale = |v: f64| (v * f64::from(u) / 1440.0).round() as u32;
+        let corner = (left - scale(23.0), top - scale(2.0));
+        let world = range_frame_around(w, h, card, u, RangePatch::LitLeftPartial, (24, 0), 60.0);
+        let got = snap_to_card(&letterbox_frame(world, card, u, 7.0, 0), corner);
+        let want = Err(SnapMiss::OuterTop {
+            cut: (left - scale(60.0), top, side),
+            tops: [Some(top + scale(20.0)), Some(top + scale(7.0))],
+        });
+        assert_eq!(got, want, "{name} 60 px partial over a black world");
+        let end = top + scale(7.0);
+        let bare = range_frame(w, h, card, u, RangePatch::Bare);
+        let boxed = letterbox_frame(bare, card, u, 7.0, 0);
+        for outer in [5, 10, 16] {
+            let mut img = boxed.to_rgb8();
+            for y in 0..end {
+                for x in left..left + side / 4 {
+                    img.put_pixel(x, y, Rgb([outer; 3]));
+                }
+            }
+            let got = snap_to_card(&DynamicImage::ImageRgb8(img), corner);
+            let want = Err(SnapMiss::OuterTop {
+                cut: card,
+                tops: [Some(end), Some(end)],
+            });
+            assert_eq!(got, want, "{name} outer left at {outer}");
+        }
     }
 }

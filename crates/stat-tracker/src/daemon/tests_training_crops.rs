@@ -724,7 +724,8 @@ fn range_frame_past(
 }
 
 /// [`range_frame_past`] with the game world at luma `world` and a left-hand
-/// world patch `left_width` px wide at 1440p (LitLeft, LitLeftTall, LitLeftPartial).
+/// world patch `left_width` px wide at 1440p (LitLeft, LitLeftTall,
+/// LitLeftPartial).
 fn range_frame_around(
     w: u32,
     h: u32,
@@ -935,8 +936,9 @@ fn a_narrow_tall_world_patch_keeps_a_horizontal_shift() {
 /// an_outer_top_off_the_cut_keeps_no_30_px_left_shift_beside_the_navy_panel,
 /// so the outer bands keep the near-edge caps. Also a world band over the
 /// outer left only, brighter about 9 px above the top (31, then 29 for the
-/// last 5 rows), as on one of those 5. Pinned so a future guard can be
-/// pointed here.
+/// last 5 rows) over darker rows above it (about 6), as on one of those 5:
+/// its outer left steps at the band, 9 px above the top (200 at 1440p,
+/// as measured). Pinned so a future guard can be pointed here.
 #[test]
 fn a_soft_outer_rim_still_drops_a_true_card() {
     let (w, h, u) = (2560, 1440, 1440);
@@ -947,8 +949,12 @@ fn a_soft_outer_rim_still_drops_a_true_card() {
     for (rim, band) in [(23, false), (30, false), (16, true)] {
         let frame = DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
             let over = (top - 43..top).contains(&y) && (left..left + side).contains(&x);
-            if over && band && x < left + side / 4 && y >= top - 9 {
-                Rgb([if y < top - 5 { 31 } else { 29 }; 3])
+            if over && band && x < left + side / 4 {
+                Rgb([match y {
+                    y if y < top - 9 => 6,
+                    y if y < top - 5 => 31,
+                    _ => 29,
+                }; 3])
             } else if over && outer(x) {
                 Rgb([rim; 3])
             } else {
@@ -960,6 +966,10 @@ fn a_soft_outer_rim_still_drops_a_true_card() {
             matches!(got, Err(SnapMiss::OuterTop { cut, .. }) if cut == card),
             "rim {rim} band {band}: {got:?}"
         );
+        if band {
+            let tops = [Some(top - 9), Some(top)];
+            assert_eq!(got, Err(SnapMiss::OuterTop { cut: card, tops }));
+        }
     }
 }
 
