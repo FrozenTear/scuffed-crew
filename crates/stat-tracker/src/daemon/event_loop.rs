@@ -16,8 +16,12 @@ pub(crate) async fn run_loop(
     // `debug_save_pregame_screens`: `None` while off, so no check runs and
     // no frame is kept. The caller flushes it after the loop.
     pregame_dump: &mut Option<daemon::pregame_dump::PregameDump>,
-    // Config `rank_reader`, read once here (`daemon::rank::RankFeed::for_config`).
-    rank_reader: bool,
+    // The rank update reader: `None` (nothing read, saved or sent) unless
+    // config `rank_reader` (or its env override) is on and the pack loads
+    // (`daemon::rank::RankFeed::for_config`, built by the caller). The
+    // caller settles a rank screen still held after the loop, as it
+    // flushes the pre-game saver.
+    rank_feed: &mut Option<daemon::rank::RankFeed>,
 ) -> anyhow::Result<()> {
     // Ergonomic locals over the shared context; spawned tasks clone the Arc.
     let backend = &ctx.backend;
@@ -156,11 +160,6 @@ pub(crate) async fn run_loop(
     // Taken as a Tab press preempts a poll, before the poll's grab is
     // dropped, so the stream does not pause and resume in between.
     let mut preempt_stream_hold: Option<capture::KeyHold> = None;
-    // The rank update reader: `None` (nothing read, saved or sent) unless
-    // config `rank_reader` (or its env override) is on and the pack loads
-    // (`daemon::rank`). A missing pack leaves it `None`: games record as
-    // before, and the app shows the pack warning.
-    let mut rank_feed = daemon::rank::RankFeed::for_config(rank_reader, data_dir);
     if rank_feed.is_some()
         && !pregame_dump
             .as_ref()

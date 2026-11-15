@@ -448,6 +448,93 @@ async fn the_game_process_stopping_stores_the_held_screen() {
     assert!(!close(&mut feed, &store, None).await, "nothing held");
 }
 
+#[tokio::test]
+async fn a_shutdown_on_the_rank_screen_stores_the_held_screen() {
+    let (_dir, store) = store_with("g1").await;
+    let mut feed = RankFeed::with_read(Arc::new(|_| None));
+    // the tracker stops while the rank screen still shows: no miss, no
+    // game close, nothing settled yet
+    tick(&mut feed, Some(Some(full(40))), Some("g1"), &store, None).await;
+    tick(&mut feed, Some(Some(full(40))), Some("g1"), &store, None).await;
+    let before = store.get_session_snapshots("g1").await.unwrap();
+    assert_eq!(before[0].rank_update, None);
+    // No upload runs in this test, so a new row is unsynced whether or not
+    // the rank write queues it. Mark the game uploaded first: then
+    // `!synced` below shows the stored rank queued it again for the next
+    // upload. The upload itself is not run here.
+    store
+        .mark_synced(&crate::storage::SyncClaim::capture(&before))
+        .await
+        .unwrap();
+    assert!(
+        store.get_session_snapshots("g1").await.unwrap()[0].synced,
+        "uploaded before the shutdown"
+    );
+    assert!(finish_on_shutdown(&mut feed, &store, None).await);
+    let rows = store.get_session_snapshots("g1").await.unwrap();
+    assert_eq!(rows[0].rank_update, Some(full(40)));
+    assert!(!rows[0].synced, "the stored rank queues the next upload");
+    assert!(
+        feed.held.is_none(),
+        "nothing left for the drop to throw away"
+    );
+    assert!(!finish_on_shutdown(&mut feed, &store, None).await);
+}
+
+#[tokio::test]
+async fn a_shutdown_gives_an_update_the_store_refused_one_last_try() {
+    let (_dir, store) = store_with("g1").await;
+    let failing = Failing {
+        store: &store,
+        fail: Mutex::new(true),
+    };
+    let mut feed = RankFeed::with_read(Arc::new(|_| None));
+    for seen in [Some(Some(full(40))), Some(Some(full(40))), None, None] {
+        tick(&mut feed, seen, Some("g1"), &failing, None).await;
+    }
+    assert!(feed.unsaved.is_some());
+    *failing.fail.lock().unwrap() = false;
+    assert!(finish_on_shutdown(&mut feed, &failing, None).await);
+    assert!(feed.unsaved.is_none());
+    let rows = store.get_session_snapshots("g1").await.unwrap();
+    assert_eq!(rows[0].rank_update, Some(full(40)));
+}
+
+#[test]
+fn the_caller_builds_the_feed_and_settles_it_after_the_loop() {
+    let lifecycle: String = include_str!("lifecycle.rs").split_whitespace().collect();
+    let at = |needle: &str| {
+        assert_eq!(lifecycle.matches(needle).count(), 1, "{needle} once");
+        lifecycle.find(needle).expect("counted above")
+    };
+    let made =
+        at("letmutrank_feed=daemon::rank::RankFeed::for_config(config.rank_reader,&ctx.data_dir);");
+    let looped = at("letresult=run_loop(");
+    let handed = at("&mutpregame_dump,&mutrank_feed,)");
+    let settle = at("finish_or_abort_sync(");
+    let flush = at("daemon::rank::finish_on_shutdown(feed,&ctx.store,pregame_dump.as_mut())");
+    let pregame = at("dump.finish(within).await");
+    let close = lifecycle
+        .rfind("close_store_before_exit(ctx).await")
+        .expect("store close");
+    // built before the loop and handed to it; after the loop, settled and
+    // stored before the pre-game flush takes the saver, and before the
+    // store closes
+    assert!(made < looped && looped < handed && handed < settle);
+    assert!(settle < flush && flush < pregame && pregame < close);
+    // bounded by the shutdown deadline
+    assert!(lifecycle[flush..pregame].contains("tokio::time::timeout(within,flush)"));
+    // a stored rank marks the snapshot dirty and then forces the write: the
+    // loop's own forced shutdown write has run already, and the marking
+    // alone writes only with a GUI running and the debounce passed
+    let wrote = at("flush_snapshot_if_dirty(&ctx.store,&ctx.data_dir).await;");
+    let marked = lifecycle[flush..]
+        .find("refresh_snapshot(&ctx.store,&ctx.data_dir).await;")
+        .map(|i| flush + i)
+        .expect("the snapshot is marked after the rank is stored");
+    assert!(flush < marked && marked < wrote && wrote < pregame);
+}
+
 // ---- the live feed and the event loop ----
 
 #[test]
@@ -519,8 +606,11 @@ fn the_poll_loop_wires_the_feed_in_order() {
             .find(needle)
             .unwrap_or_else(|| panic!("run_loop must contain {needle:?}"))
     };
-    // built once from config `rank_reader` (env override inside); off is `None`
-    let feed = at("daemon::rank::RankFeed::for_config(rank_reader, data_dir)");
+    // built once from config `rank_reader` (env override inside) by the
+    // caller (off is `None`), and handed in; the loop never builds its own
+    assert!(!run_loop.contains("RankFeed::from_env("));
+    assert!(!run_loop.contains("RankFeed::for_config("));
+    let feed = at("if rank_feed.is_some()");
     // the game process stopping settles a held screen at once (the poll
     // arm, not the keyboard arm's earlier `if !running`)
     let poll = at("poll_timer.tick()");
@@ -545,6 +635,17 @@ fn the_poll_loop_wires_the_feed_in_order() {
     assert!(
         close_at < refresh_at,
         "refresh_snapshot follows close in the process-stop branch"
+    );
+    // and before the branch's own `continue;`: a refresh after it would sit
+    // outside the branch and run on every poll tick, not when close stored
+    // a rank
+    let continue_at = close_at
+        + branch[close_at..]
+            .find("continue;")
+            .expect("the process-stop branch ends in continue");
+    assert!(
+        refresh_at < continue_at,
+        "refresh_snapshot sits before the process-stop branch's continue"
     );
     // read in the analysis thread, after the poll analysis perf sample
     let perf = at("stat_tracker::perf::Stage::PollAnalyze");
@@ -630,7 +731,7 @@ fn the_poll_loop_wires_the_feed_in_order() {
 }
 
 /// Config `rank_reader` reaches both readers at start: the queue title feed
-/// and the `run_loop` argument the rank feed is built from. A literal in
+/// and the rank feed `run` builds and hands to `run_loop`. A literal in
 /// either place would pass every behavior test, so the seam is pinned here.
 #[test]
 fn the_daemon_hands_config_rank_reader_to_both_readers() {
@@ -646,26 +747,30 @@ fn the_daemon_hands_config_rank_reader_to_both_readers() {
     );
     let readers =
         at("PregameDump::with_readers( ctx.save_pregame_screens, bans_picks, queue_title,");
+    let rank = at(
+        "let mut rank_feed = daemon::rank::RankFeed::for_config(config.rank_reader, \
+         &ctx.data_dir);",
+    );
     let call = at(
         "let result = run_loop( Arc::clone(&ctx), early_sigterm, &mut sync_task, &mut \
-         restart_to, &mut pregame_dump, config.rank_reader, ) .await;",
+         restart_to, &mut pregame_dump, &mut rank_feed, ) .await;",
     );
-    assert!(queue < readers && readers < call);
+    assert!(queue < readers && readers < rank && rank < call);
     assert_eq!(run.matches("QueueTitleFeed::for_config(").count(), 1);
+    assert_eq!(run.matches("RankFeed::for_config(").count(), 1);
+    assert!(!run.contains("RankFeed::from_env("));
     assert_eq!(run.matches("run_loop(").count(), 1);
-    // `run_loop` takes it as its last parameter and builds the rank feed
-    // from that parameter, not from anything else
+    // `run_loop` takes that feed as its last parameter and builds none of
+    // its own, so no other value can stand in for the config switch
     let run_loop = norm(crate::main_tests::source_text::fn_source("run_loop"));
     assert!(
-        run_loop.contains(
-            "pregame_dump: &mut Option<daemon::pregame_dump::PregameDump>, // Config \
-             `rank_reader`, read once here (`daemon::rank::RankFeed::for_config`). rank_reader: \
-             bool, ) -> anyhow::Result<()> {"
-        ),
-        "rank_reader is run_loop's last parameter"
+        run_loop
+            .contains("rank_feed: &mut Option<daemon::rank::RankFeed>, ) -> anyhow::Result<()> {"),
+        "rank_feed is run_loop's last parameter"
     );
-    assert_eq!(run_loop.matches("RankFeed::for_config(").count(), 1);
-    assert!(run_loop.contains("RankFeed::for_config(rank_reader, data_dir)"));
+    assert!(!run_loop.contains("rank_reader: bool"));
+    assert!(!run_loop.contains("RankFeed::for_config("));
+    assert!(!run_loop.contains("RankFeed::from_env("));
 }
 
 // ---- review regressions: the newest pair only, and a missed tick ----
