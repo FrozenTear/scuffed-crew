@@ -25,6 +25,10 @@
 //!   package's `LICENSE.txt`, byte for byte.
 //!
 //! Shipped files, byte size and sha256 (`assets/fonts/`):
+//! - `urbanist.woff2` 29912 B
+//!   `e59b4b15d8f69eead16ab029dbb8f089257ea12950a0e94c5c8a3e4c78dd083b`
+//! - `jetbrains-mono.woff2` 44500 B
+//!   `24353ce2af3dd5a3ade31cedc79ef5c85314032194970c1745626677476ab8b4`
 //! - `ibm-plex-sans-var-roman-latin1.woff2` 68988 B
 //!   `a18d94ea83c93f0a465d0976d8bc8ecbb031225dbaf76fd201d4e724a972034f`
 //! - `ibm-plex-sans-var-roman-latin2.woff2` 44752 B
@@ -42,7 +46,9 @@
 //!
 //! The crate has no sha256 dependency, so `pinned_files_are_unchanged`
 //! holds each file to its byte length and a 64-bit FNV-1a checksum instead
-//! of the sha256. Re-derive both from the file if one is ever replaced.
+//! of the sha256. If a file is ever replaced, update all three values for it
+//! together from the new file: the byte size and sha256 in the list above,
+//! and the size and FNV-1a in `pinned_files_are_unchanged`.
 //!
 //! Each text family has a metric-matched local fallback (`Urbanist
 //! Fallback`, `IBM Plex Sans Fallback`, named in `--font-family-*`) so the
@@ -256,6 +262,48 @@ mod tests {
         assert!(!css.contains("font-stretch"));
     }
 
+    /// Each Plex file is served under IBM's own `unicode-range` for that
+    /// split. The ranges are literal copies of `IBM Plex Sans Var-Roman.css`
+    /// in `@ibm/plex-sans-variable` 0.2.0, not the constants above, so a
+    /// swapped constant or a swapped face fails here.
+    #[test]
+    fn plex_faces_carry_ibm_ranges_for_their_file() {
+        let css = fonts_css_with(&URLS);
+        let ibm = [
+            (
+                "/p1.woff2",
+                "U+0000, U+000D, U+0020-007E, U+00A0-00FF, U+0131, U+0152-0153, U+02C6, U+02DA, U+02DC, U+2013-2014, U+2018-201A, U+201C-201E, U+2020-2022, U+2026, U+2030, U+2039-203A, U+2044, U+20AC, U+2122, U+2212, U+FB01-FB02",
+            ),
+            (
+                "/p2.woff2",
+                "U+0100-0101, U+0104-0130, U+0132-0151, U+0154-017F, U+018F, U+0192, U+01A0-01A1, U+01AF-01B0, U+01FA-01FF, U+0218-021B, U+0237, U+0259, U+1E80-1E85, U+1E9E, U+20A1, U+20A4, U+20A6, U+20A8-20AA, U+20AD-20AE, U+20B1-20B2, U+20B4-20B5, U+20B8-20BA, U+20BD, U+20BF",
+            ),
+            ("/p3.woff2", "U+0102-0103, U+01CD-01DC, U+1EA0-1EF9, U+20AB"),
+            (
+                "/p4.woff2",
+                "U+0E3F, U+2000-200D, U+2015, U+2028-2029, U+202F, U+2032-2033, U+2070, U+2074-2079, U+2080-2089, U+2113, U+2116, U+2126, U+212E, U+2150-2151, U+2153-215E, U+2190-2199, U+21A9-21AA, U+21B0-21B3, U+21B6-21B7, U+21BA-21BB, U+21C4, U+21C6, U+2202, U+2206, U+220F, U+2211, U+2215, U+221A, U+221E, U+222B, U+2248, U+2260, U+2264-2265, U+25CA, U+2713, U+274C, U+2B0E-2B11, U+ECE0, U+EFCC, U+FEFF, U+FFFD",
+            ),
+        ];
+        for (url, range) in ibm {
+            let src = format!("src: url(\"{url}\") format(\"woff2\");");
+            let blocks: Vec<&str> = css
+                .split("@font-face {")
+                .filter(|block| block.contains(&src))
+                .collect();
+            assert_eq!(blocks.len(), 1, "{url} is in one @font-face");
+            let block = blocks[0];
+            assert!(
+                block.contains("font-family: \"IBM Plex Sans\";"),
+                "{url} family"
+            );
+            assert!(
+                block.contains(&format!("unicode-range: {range};\n")),
+                "{url} has IBM's unicode-range for its split"
+            );
+            assert_eq!(block.matches("unicode-range:").count(), 1, "{url}");
+        }
+    }
+
     /// Source wiring and contents only: each OFL text is declared as an
     /// `asset!()` in this file, the font CSS comment names the licence URLs
     /// it is given, and each file reads as OFL 1.1. Whether `dx` copies the
@@ -289,11 +337,25 @@ mod tests {
         })
     }
 
-    /// The four IBM Plex woff2 files and the three OFL texts, byte length and
-    /// FNV-1a over the actual files (sha256 for each is in the module doc).
+    /// Every shipped font and licence file (the Urbanist and JetBrains Mono
+    /// subsets, the four IBM Plex woff2 files and the three OFL texts), byte
+    /// length and FNV-1a over the actual files (sha256 for each is in the
+    /// module doc).
     #[test]
     fn pinned_files_are_unchanged() {
-        let pins: [(&str, &[u8], usize, u64); 7] = [
+        let pins: [(&str, &[u8], usize, u64); 9] = [
+            (
+                "urbanist.woff2",
+                include_bytes!("../../assets/fonts/urbanist.woff2"),
+                29_912,
+                0x7622_b50d_6214_cd3f,
+            ),
+            (
+                "jetbrains-mono.woff2",
+                include_bytes!("../../assets/fonts/jetbrains-mono.woff2"),
+                44_500,
+                0xa99d_cc8b_62d0_a2f5,
+            ),
             (
                 "ibm-plex-sans-var-roman-latin1.woff2",
                 include_bytes!("../../assets/fonts/ibm-plex-sans-var-roman-latin1.woff2"),
