@@ -11,9 +11,9 @@
 //!   raw pixels, no pack preprocess. The read's box can sit off the card
 //!   (the matcher slides the template inside it), so the cut is snapped to
 //!   the card's own left and top edges ([`snap_to_card`]) and kept only
-//!   when its far edges hold: the gap under the card, and right of it where
-//!   the Tab has a gap there. A Tab where an edge is not found or a far edge
-//!   does not hold keeps none. Only when the panel read passed its gate and
+//!   when its far edges hold and its outer tops agree with the cut's top.
+//!   A Tab where an edge is not found, a far edge does not hold, or an
+//!   outer top is off the cut keeps none. Only when the panel read passed its gate and
 //!   names the Tab's hero authority. ocr-v1 reads no panel box, so it
 //!   offers none.
 //! * `stat_digits`: the own row's six stat cells, each on its own window
@@ -105,7 +105,7 @@ fn mark_offered(key: String) {
 
 /// Cut this Tab's `hero_icon` and `stat_digits` crops for the game
 /// `session_id` and keep them on a blocking thread. Only the consent, gate
-/// and box checks, for a hero icon still wanted the card snap (four thin
+/// and box checks, for a hero icon still wanted the card snap (six thin
 /// luma profiles, plus a re-read of the right one inside the cut when a
 /// drop lands there), and the frame clone run here; the rest of the pixel
 /// work runs on that thread. `None` when there is nothing to cut. The
@@ -224,8 +224,9 @@ fn hero_icon_crop(
 /// searches in). Measured on 2560x1440 Tabs: about 228 px, top at y 209
 /// (0.145 u).
 pub(crate) const CARD_SIDE: f64 = 0.158;
-/// How far from the panel read's box corner the card's left and top edges
-/// are searched, in `u` (43 px at 1440p). The read's box sat 22 to 23 px
+/// How far the left and top edges are searched from the panel read's box
+/// corner, and how far the bottom drop and the outer tops are searched
+/// from the cut, in `u` (43 px at 1440p). The read's box sat 22 to 23 px
 /// left and 2 px above the card on one set of 1440p Tabs, and 4 to 13 px
 /// right and 14 to 15 px below it on another: at most 0.016 u, so the
 /// span starts at least 0.014 u (20 px at 1440p) outside the card even
@@ -233,11 +234,14 @@ pub(crate) const CARD_SIDE: f64 = 0.158;
 const CARD_SEARCH: f64 = 0.03;
 /// How far past the cut's right edge the far edge check looks for the
 /// card's right drop, in `u` (36 px at 1440p): shorter than
-/// [`CARD_SEARCH`], which the left, top and bottom searches keep. On
-/// Practice Range Tabs the navy panel runs on for 40 px right of the card
-/// and then ends; a reach of 0.028 u (40 px) or more takes that end for a
-/// drop past the cut and rejects the exact cut. Stopping short of it keeps
-/// the panel's end out of the scan.
+/// [`CARD_SEARCH`], which the left, top, bottom and outer-top searches
+/// keep. On Practice Range Tabs the navy panel runs on for 40 px right of
+/// the card and then ends. Where that end rises 16 or more (a mid-band of
+/// 22, the low end of the measured 22 to 24), a reach of 0.0275 u already
+/// rounds to 40 px and takes the end for a drop past the cut, so the
+/// exact cut is rejected. 0.025 u stops the scan short of it. On a layout
+/// with a dark gap right of the card, a left shift is then caught only up
+/// to 36 px, not 43.
 const CARD_RIGHT_SEARCH: f64 = 0.025;
 /// Width of the dark and the card side compared at each edge candidate, in
 /// `u` (6 px at 1440p, at least 2 px), narrow enough to fit the dark gap
@@ -311,18 +315,26 @@ pub(crate) enum SnapMiss {
 /// Before the cut is kept, its far edges are checked on the same kind of
 /// profiles, banded on the cut ([`far_edges_hold`]), against a wrong first
 /// step that keeps a square shifted off the card. The bottom drop is
-/// required, so a vertical shift keeps none. The right drop catches a
-/// horizontal shift only where the Tab has a gap right of the card: on
-/// Practice Range Tabs the navy panel there gives no right drop. So the
-/// top edge is then searched again, the same way as the near top edge, on
-/// row profiles over the cut's outer column bands (`side/16 .. side/4` and
-/// `3*side/4 .. 15*side/16` from its left), and each must land within 1 px
-/// of the cut's top: the card's top runs across its full width, while a
-/// cut shifted onto a lit patch of the game world beside the card has
-/// world above its outer band, whose top rarely lines up with the card's.
-/// The residual: a world patch that spans exactly the card's rows (its top
-/// within 1 px of the card's) still keeps the shifted cut. No bottom
-/// version of this guard: dark portrait art low in the card would fail it.
+/// required, so a vertical shift keeps none. The right drop catches a left
+/// shift only where the Tab has a gap right of the card, and a right shift
+/// of 4 px or more when the panel's end sits inside the right reach and
+/// rises 16 or more (a mid-band of 22). On Practice Range Tabs the navy
+/// panel often gives no right drop, so the top edge is then searched
+/// again, the same way as the near top edge, on row profiles over the
+/// cut's outer column bands (`side/16 .. side/4` and `3*side/4 ..
+/// 15*side/16` from its left), and each must land within 1 px of the
+/// cut's top: the card's top runs across its full width, while a cut
+/// shifted onto a lit patch of the game world beside the card has world
+/// above its outer band, whose top rarely lines up with the card's.
+/// Residuals that still keep a shifted cut: a world patch under about 26
+/// px wide at 1440p (19 at 1080p), whatever rows it spans, because the
+/// outer-left band starts `side/16` (14 px) into the cut; a wider patch
+/// that spans exactly the card's rows (its top within 1 px of the card's);
+/// and a right shift beside the navy panel, whose top is the card's, unless
+/// the panel's end qualifies and the right drop catches it. No bottom
+/// version of this guard: dark portrait art low in the card would fail it
+/// with little margin. The top version can also drop a correct card once
+/// dark art covers about a quarter of an outer band near the top.
 /// [`SnapMiss::NearEdge`] when either near edge is not found or the square
 /// would leave the frame, [`SnapMiss::FarEdge`] when a far edge does not
 /// hold, [`SnapMiss::OuterTop`] when an outer top does not.
@@ -390,34 +402,36 @@ pub(crate) fn snap_to_card(
 /// on the column profile `column` of `w` positions, its bottom edge at
 /// `bottom` on the row profile `row` of `h` positions. Each is looked for
 /// as the first card to gap drop from outside the cut within `right_reach`
-/// (right) or `reach` (bottom) of it ([`gap_edge`]), and a drop counts as the card's edge only within 1 px of
-/// the cut's: the cut side is [`CARD_SIDE`] rounded, and the painted card
-/// can be a px shorter or longer.
+/// (right) or `reach` (bottom) of it ([`gap_edge`]), and a drop counts as
+/// the card's edge only within 1 px of the cut's: the cut side is
+/// [`CARD_SIDE`] rounded, and the painted card can be a px shorter or
+/// longer.
 ///
 /// Measured on 55 Practice Range Tabs at 2560x1440 (card at x 1604, y 209,
 /// side 228): under the card there is always a dark gap (luma 17 to 21
 /// across the card's full width, first gap row at `top + side - 1`, a drop
 /// of at least 18), so the bottom drop is required. Right of the card there
 /// is no gap: the navy panel (luma 37, the card rim's own fill) runs on for
-/// 40 px, then the mid band either falls to about 22 to 24 (38 of the 55;
-/// a rise from there to 37 of only about 13, under [`CARD_MIN_STEP`]) or
-/// stays about 29 (17 of the 55). With the navy at 37 to 39 the fall to 22
-/// to 24 is a rise of 13 to 17 back into the panel, and 17 is above
-/// [`CARD_MIN_STEP`], so that end can qualify as a drop, 40 px past the
-/// cut. The right scan reaches only [`CARD_RIGHT_SEARCH`] (`right_reach`,
-/// 36 px at 1440p) past the cut, short of the panel's end, and that is what
-/// keeps the exact cut there; the bottom scan keeps `reach`. Within the
-/// right reach the panel gives no drop, so the right drop is only checked
-/// when one is found. That also means a cut shifted left or right of such
-/// a card finds no right drop and passes this check when its top and
-/// bottom hold: it catches a horizontal shift only where the Tab has a gap
-/// right of the card ([`snap_to_card`] then checks the outer tops). On 3
-/// of those Tabs the first
-/// drop from the right is a dark patch of portrait art 24 to 31 px inside
-/// the cut, with the navy panel between it and the cut's edge: a drop
-/// inside the cut is the card's edge only when the gap runs on from it to
-/// past the cut's edge, as it does when a cut lands right of a card that
-/// has a gap beside it.
+/// 40 px, then the mid band either falls to about 22 to 24 (38 of the 55)
+/// or stays about 29 (17 of the 55). With the navy at 37 to 39, a fall to
+/// 22 to 24 is a rise of 13 to 17 back into the panel. Window means of 38
+/// vs 22 rise 16, at [`CARD_MIN_STEP`], so that end can qualify as a drop
+/// 40 px past the cut (a band of 24 rises 14 and does not). The right scan
+/// reaches only [`CARD_RIGHT_SEARCH`] (`right_reach`, 36 px at 1440p) past
+/// the cut, short of the panel's end, and that is what keeps the exact cut
+/// there; the bottom scan keeps `reach`. Within the right reach the panel
+/// gives no drop, so the right drop is only checked when one is found. A
+/// left shift of such a card then finds no right drop and passes this
+/// check when its top and bottom hold. A right shift of 4 px or more can
+/// bring the panel's end inside the 36 px scan, and on a band of 22 that
+/// end is a drop past the cut. The right drop otherwise catches a
+/// horizontal shift only where the Tab has a gap right of the card
+/// ([`snap_to_card`] then checks the outer tops). On 3 of those Tabs the
+/// first drop from the right is a dark patch of portrait art 24 to 31 px
+/// inside the cut, with the navy panel between it and the cut's edge: a
+/// drop inside the cut is the card's edge only when the gap runs on from
+/// it to past the cut's edge, as it does when a cut lands right of a card
+/// that has a gap beside it.
 ///
 /// `Err((right, bottom))` with the drops found (`None` where none was) when
 /// a far edge does not hold.

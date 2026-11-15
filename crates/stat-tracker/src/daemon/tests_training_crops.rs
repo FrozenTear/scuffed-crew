@@ -567,11 +567,11 @@ fn no_hero_icon_cut_without_a_clear_card_inside_the_frame() {
     // A box 0.04 u (58 px) off the card either way: its edges are out of
     // reach, so the search does not wander onto plain gap further out or
     // plain card further in. A dark to bright step in the art within reach
-    // can be taken for the edge; beside a dark gap the far edge check then
-    // keeps none (the_far_edge_check_keeps_no_shifted_cut_beside_a_dark_gap),
-    // beside the Practice Range navy panel the outer top check keeps none
-    // unless the shift's patch spans exactly the card's rows
-    // (a_world_patch_on_exactly_the_card_rows_keeps_a_horizontal_shift).
+    // can be taken for the edge. Beside a dark gap the far edge check then
+    // keeps none (the_far_edge_check_keeps_no_shifted_cut_beside_a_dark_gap).
+    // An art step is a right shift: beside the Practice Range navy panel
+    // the outer tops still pass it, and the cut is kept unless the panel's
+    // end qualifies as a drop (a mid-band of 22 at 1440p).
     let frame = card_frame(2560, 1440, card, GAP_LUMA, 60);
     assert_eq!(snap(&frame, corner), Some(card));
     for far in [(1563, 151), (1679, 267)] {
@@ -641,8 +641,9 @@ fn a_painted_card_a_px_off_the_cut_side_still_cuts_at_its_left_and_top() {
 fn the_far_edge_check_keeps_no_shifted_cut_beside_a_dark_gap() {
     // Both scenes draw a dark gap right of the card, as round a card with
     // a gap on every side. Real Practice Range Tabs have the navy panel
-    // there instead, where the right drop catches no horizontal shift
-    // (an_outer_top_off_the_cut_keeps_no_horizontal_shift_beside_the_navy_panel).
+    // there instead, where the right drop catches no left shift. A 30 px
+    // left patch that is tall or partial then returns OuterTop
+    // (an_outer_top_off_the_cut_keeps_no_30_px_left_shift_beside_the_navy_panel).
     let card = (1621, 209, 228);
     let corner = (1598, 207);
     let in_rows = |y: u32| (209..209 + 228).contains(&y);
@@ -719,6 +720,20 @@ fn range_frame_past(
     patch: RangePatch,
     past: u8,
 ) -> DynamicImage {
+    range_frame_around(w, h, card, u, patch, past, 30.0)
+}
+
+/// [`range_frame_past`] with a left-hand world patch `left_width` px wide
+/// at 1440p (LitLeft, LitLeftTall, LitLeftPartial).
+fn range_frame_around(
+    w: u32,
+    h: u32,
+    card: (u32, u32, u32),
+    u: u32,
+    patch: RangePatch,
+    past: u8,
+    left_width: f64,
+) -> DynamicImage {
     let (left, top, side) = card;
     let px = |v: f64| (v * f64::from(u) / 1440.0).round() as u32;
     let (right, bottom) = (left + side, top + side - 1);
@@ -732,14 +747,14 @@ fn range_frame_past(
                 in_rows && (right - px(31.0)..right - px(24.0)).contains(&x)
             }
             RangePatch::LitAbove => in_cols && (top - px(30.0)..top).contains(&y),
-            RangePatch::LitLeft => in_rows && (left - px(30.0)..left).contains(&x),
+            RangePatch::LitLeft => in_rows && (left - px(left_width)..left).contains(&x),
             RangePatch::LitLeftTall => {
                 (top - px(40.0)..bottom + px(60.0)).contains(&y)
-                    && (left - px(30.0)..left).contains(&x)
+                    && (left - px(left_width)..left).contains(&x)
             }
             RangePatch::LitLeftPartial => {
                 (top + px(20.0)..top + px(170.0)).contains(&y)
-                    && (left - px(30.0)..left).contains(&x)
+                    && (left - px(left_width)..left).contains(&x)
             }
         };
         let patch_luma = if patch == RangePatch::DarkArtInside {
@@ -823,9 +838,12 @@ fn the_practice_range_surround_cuts_at_the_card_and_drops_a_vertical_shift() {
 #[test]
 fn the_navy_panel_end_past_the_right_reach_keeps_the_exact_cut() {
     // The band past the navy panel at 22, the low end of the measured 22
-    // to 24: on the navy of 37 to 39 the panel's end, 40 px right of the
-    // card, rises up to 17 and can qualify as a drop. CARD_RIGHT_SEARCH
-    // stops the right scan short of it, so the exact cut is kept.
+    // to 24: window means of navy 38 vs 22 rise 16, at CARD_MIN_STEP, so
+    // the panel's end, 40 px right of the card, can qualify as a drop.
+    // CARD_RIGHT_SEARCH stops the right scan short of it, so the exact cut
+    // is kept. The inversion with the old 0.03 u reach is at 1440p (FarEdge
+    // with right 1872). At 1080p the same band rises just under 16, so the
+    // old reach already kept the cut.
     for (name, (w, h), u) in RANGE_FRAMES {
         let card = range_card(u);
         let (left, top, _) = card;
@@ -846,12 +864,14 @@ fn the_navy_panel_end_past_the_right_reach_keeps_the_exact_cut() {
 }
 
 #[test]
-fn an_outer_top_off_the_cut_keeps_no_horizontal_shift_beside_the_navy_panel() {
-    // A lit patch left of the card, taller than it or over only part of
-    // its rows: the left edge lands on the patch's start, the navy panel
-    // gives no right drop and the bottom holds, but over the cut's outer
-    // left columns the patch and the world above it give no top step at
-    // the card's top.
+fn an_outer_top_off_the_cut_keeps_no_30_px_left_shift_beside_the_navy_panel() {
+    // A 30 px (23 px at 1080p) lit patch left of the card, taller than it
+    // or over only part of its rows: the left edge lands on the patch's
+    // start, the navy panel gives no right drop and the bottom holds, but
+    // over the cut's outer left columns the patch and the world above it
+    // give no top step at the card's top. Narrower than about 26 px at
+    // 1440p (19 at 1080p) is still kept
+    // (a_narrow_tall_world_patch_keeps_a_horizontal_shift).
     for (name, (w, h), u) in RANGE_FRAMES {
         let card = range_card(u);
         let (left, top, side) = card;
@@ -869,11 +889,12 @@ fn an_outer_top_off_the_cut_keeps_no_horizontal_shift_beside_the_navy_panel() {
     }
 }
 
-/// The documented residual of the outer top check: a lit patch of the game
+/// One residual of the outer top check: a 30 px lit patch of the game
 /// world that spans exactly the card's rows (its top within 1 px of the
 /// card's) gives the cut's outer left columns a top step at the card's
-/// top, so a cut shifted left onto it still passes and is kept. Pinned so
-/// a future guard can be pointed here.
+/// top, so a cut shifted left onto it still passes and is kept, even
+/// though 30 px is past the narrow-patch bound. Pinned so a future guard
+/// can be pointed here.
 #[test]
 fn a_world_patch_on_exactly_the_card_rows_keeps_a_horizontal_shift() {
     for (name, (w, h), u) in RANGE_FRAMES {
@@ -886,6 +907,24 @@ fn a_world_patch_on_exactly_the_card_rows_keeps_a_horizontal_shift() {
         let shifted = (left - scale(30.0), top, side);
         assert_eq!(snap(&frame, corner), Some(shifted), "{name}");
     }
+}
+
+/// Another residual: a tall lit patch 25 px wide at 1440p, under the
+/// about 26 px bound, still keeps the cut shifted left by that width. The
+/// outer-left band starts side/16 (14 px) into the cut, so it still sees
+/// the card's top.
+#[test]
+fn a_narrow_tall_world_patch_keeps_a_horizontal_shift() {
+    let (w, h, u) = (2560, 1440, 1440);
+    let card = range_card(u);
+    let (left, top, side) = card;
+    let frame = range_frame_around(w, h, card, u, RangePatch::LitLeftTall, 24, 25.0);
+    let corner = (left - 23, top - 2);
+    assert_eq!(
+        snap(&frame, corner),
+        Some((left - 25, top, side)),
+        "25 px tall patch at 1440p"
+    );
 }
 
 #[test]
