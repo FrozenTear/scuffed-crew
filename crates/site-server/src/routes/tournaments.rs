@@ -68,25 +68,79 @@ fn manages_tournaments(member: &Option<Member>) -> bool {
         .is_some_and(|m| m.org_role.is_at_least(OrgRole::Officer))
 }
 
+/// Load a tournament by id. 404 "Tournament not found" when no tournament
+/// has this id; a real DB error stays a 500. Officer writes that take a
+/// tournament id call this (directly or through `require_participant`)
+/// before writing, except `report_match`, which loads the match and checks
+/// that its `tournament_id` matches the path instead. Public reads go
+/// through `load_visible_tournament`, which builds on this.
+async fn require_tournament(state: &AppState, id: &str) -> ApiResult<Tournament> {
+    state
+        .db
+        .get_tournament(id)
+        .await
+        .map_err(internal_err)?
+        .ok_or_else(|| not_found("Tournament not found"))
+}
+
 /// Load a tournament the caller is allowed to see.
 ///
 /// 404 when no tournament has this id, or when it is a draft and the caller
-/// does not manage tournaments. A real DB error stays a 500.
+/// does not manage tournaments (same body, so a hidden draft and a missing id
+/// look the same). A real DB error stays a 500.
 async fn load_visible_tournament(
     state: &AppState,
     id: &str,
     member: &Option<Member>,
 ) -> ApiResult<Tournament> {
-    let tournament = state
-        .db
-        .get_tournament(id)
-        .await
-        .map_err(internal_err)?
-        .ok_or_else(|| not_found("Tournament not found"))?;
+    let tournament = require_tournament(state, id).await?;
     if tournament.status == TournamentStatus::Draft && !manages_tournaments(member) {
         return Err(not_found("Tournament not found"));
     }
     Ok(tournament)
+}
+
+/// Load a participant that belongs to tournament `id`. 404 when the
+/// tournament is missing, the participant is missing, or the participant
+/// belongs to a different tournament.
+async fn require_participant(
+    state: &AppState,
+    id: &str,
+    pid: &str,
+) -> ApiResult<TournamentParticipant> {
+    require_tournament(state, id).await?;
+    state
+        .db
+        .list_tournament_participants(id)
+        .await
+        .map_err(internal_err)?
+        .into_iter()
+        .find(|p| p.id == pid)
+        .ok_or_else(|| not_found("Participant not found"))
+}
+
+/// Bracket and round generators: `Invalid` (for example fewer than 2
+/// participants) is a 400. Everything else, including a `NotFound` raised on
+/// rows the generator itself just wrote, is a logged 500. A missing
+/// tournament never reaches here: callers check it first with
+/// `require_tournament`.
+fn invalid_or_internal(e: scuffed_db::DbError) -> (StatusCode, Json<ErrorResponse>) {
+    match e {
+        scuffed_db::DbError::Invalid(msg) => bad_request(&msg),
+        other => internal_err(other),
+    }
+}
+
+/// An update after the existence check: a `NotFound` means the row was
+/// deleted in between, so answer the same fixed 404 body as the check.
+/// Never echo the DB message. Everything else is a logged 500.
+fn gone_or_internal(
+    body: &'static str,
+) -> impl FnOnce(scuffed_db::DbError) -> (StatusCode, Json<ErrorResponse>) {
+    move |e| match e {
+        scuffed_db::DbError::NotFound(_) => not_found(body),
+        other => internal_err(other),
+    }
 }
 
 #[derive(Deserialize)]
@@ -238,6 +292,7 @@ pub async fn update_tournament(
     Path(id): Path<String>,
     Json(body): Json<UpdateTournamentRequest>,
 ) -> ApiResult<Json<Tournament>> {
+    require_tournament(&state, &id).await?;
     let tournament = state
         .db
         .update_tournament(
@@ -257,7 +312,7 @@ pub async fn update_tournament(
             body.ends_at,
         )
         .await
-        .map_err(internal_err)?;
+        .map_err(gone_or_internal("Tournament not found"))?;
 
     audit(
         &state.db,
@@ -286,12 +341,7 @@ pub async fn transition_status(
     Path(id): Path<String>,
     Json(body): Json<StatusTransitionRequest>,
 ) -> ApiResult<Json<Tournament>> {
-    let tournament = state
-        .db
-        .get_tournament(&id)
-        .await
-        .map_err(internal_err)?
-        .ok_or_else(|| not_found("Tournament not found"))?;
+    let tournament = require_tournament(&state, &id).await?;
 
     let new_status = match body.status.as_str() {
         "registration" => TournamentStatus::Registration,
@@ -374,11 +424,9 @@ pub async fn get_bracket(
         .db
         .get_tournament_bracket(&id)
         .await
+        .map_err(internal_err)?
         .map(Json)
-        .map_err(|e| match e {
-            scuffed_db::DbError::NotFound(_) => not_found("Tournament not found"),
-            e => internal_err(e),
-        })
+        .ok_or_else(|| not_found("Tournament not found"))
 }
 
 /// POST /api/tournaments/:id/generate-bracket
@@ -387,12 +435,7 @@ pub async fn generate_bracket(
     officer: OfficerUser,
     Path(id): Path<String>,
 ) -> ApiResult<Json<TournamentBracket>> {
-    let tournament = state
-        .db
-        .get_tournament(&id)
-        .await
-        .map_err(internal_err)?
-        .ok_or_else(|| not_found("Tournament not found"))?;
+    let tournament = require_tournament(&state, &id).await?;
 
     match tournament.format {
         TournamentFormat::SingleElim => {
@@ -400,21 +443,21 @@ pub async fn generate_bracket(
                 .db
                 .generate_single_elim_bracket(&id)
                 .await
-                .map_err(internal_err)?;
+                .map_err(invalid_or_internal)?;
         }
         TournamentFormat::DoubleElim => {
             state
                 .db
                 .generate_double_elim_bracket(&id)
                 .await
-                .map_err(internal_err)?;
+                .map_err(invalid_or_internal)?;
         }
         TournamentFormat::RoundRobin => {
             state
                 .db
                 .generate_round_robin_pairings(&id)
                 .await
-                .map_err(internal_err)?;
+                .map_err(invalid_or_internal)?;
         }
         TournamentFormat::Swiss => {
             // Swiss generates one round at a time; for initial bracket, generate round 1
@@ -422,7 +465,7 @@ pub async fn generate_bracket(
                 .db
                 .generate_swiss_round(&id)
                 .await
-                .map_err(internal_err)?;
+                .map_err(invalid_or_internal)?;
         }
     }
 
@@ -440,11 +483,9 @@ pub async fn generate_bracket(
         .db
         .get_tournament_bracket(&id)
         .await
+        .map_err(internal_err)?
         .map(Json)
-        .map_err(|e| match e {
-            scuffed_db::DbError::NotFound(_) => not_found("Tournament not found"),
-            e => internal_err(e),
-        })
+        .ok_or_else(|| not_found("Tournament not found"))
 }
 
 // ─── Participants ───
@@ -483,12 +524,7 @@ pub async fn add_participant(
     }
 
     // Check max_teams
-    let tournament = state
-        .db
-        .get_tournament(&id)
-        .await
-        .map_err(internal_err)?
-        .ok_or_else(|| not_found("Tournament not found"))?;
+    let tournament = require_tournament(&state, &id).await?;
 
     if let Some(max) = tournament.max_teams {
         let count = state
@@ -554,6 +590,7 @@ pub async fn update_participant(
         _ => ParticipantStatus::Registered,
     });
 
+    require_participant(&state, &id, &pid).await?;
     let result = state
         .db
         .update_tournament_participant(
@@ -563,7 +600,7 @@ pub async fn update_participant(
             body.group_label.as_ref().map(|g| g.as_deref()),
         )
         .await
-        .map_err(internal_err)?;
+        .map_err(gone_or_internal("Participant not found"))?;
 
     audit(
         &state.db,
@@ -584,6 +621,7 @@ pub async fn remove_participant(
     officer: OfficerUser,
     Path((id, pid)): Path<(String, String)>,
 ) -> ApiResult<StatusCode> {
+    require_participant(&state, &id, &pid).await?;
     state
         .db
         .remove_tournament_participant(&pid)
@@ -805,11 +843,12 @@ pub async fn generate_next_round(
     officer: OfficerUser,
     Path(id): Path<String>,
 ) -> ApiResult<(StatusCode, Json<TournamentRound>)> {
+    require_tournament(&state, &id).await?;
     let round = state
         .db
         .generate_swiss_round(&id)
         .await
-        .map_err(internal_err)?;
+        .map_err(invalid_or_internal)?;
 
     audit(
         &state.db,

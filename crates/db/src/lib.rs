@@ -34,6 +34,12 @@ pub enum DbError {
     NotFound(String),
     #[error("Conflict: {0}")]
     Conflict(String),
+    /// The request cannot be carried out as asked (for example a bracket
+    /// with fewer than 2 participants). Only the tournament routes
+    /// (`site-server` `routes/tournaments.rs`) map this to HTTP 400 today;
+    /// other routes' catch-all arms make it a 500.
+    #[error("Invalid: {0}")]
+    Invalid(String),
     #[error("Configuration error: {0}")]
     Config(String),
     #[error("Operation timed out")]

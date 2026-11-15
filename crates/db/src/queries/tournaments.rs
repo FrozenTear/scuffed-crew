@@ -830,21 +830,25 @@ impl Database {
 
     // ── Aggregates ──
 
-    pub async fn get_tournament_bracket(&self, id: &str) -> DbResult<TournamentBracket> {
-        let tournament = self
-            .get_tournament(id)
-            .await?
-            .ok_or_else(|| crate::DbError::NotFound(format!("Tournament {id} not found")))?;
+    /// Tournament plus its participants, rounds and matches.
+    ///
+    /// `Ok(None)` means no tournament has this id, and nothing else does:
+    /// callers map only that to "Tournament not found". Every error is a
+    /// real failure.
+    pub async fn get_tournament_bracket(&self, id: &str) -> DbResult<Option<TournamentBracket>> {
+        let Some(tournament) = self.get_tournament(id).await? else {
+            return Ok(None);
+        };
         let participants = self.list_tournament_participants(id).await?;
         let rounds = self.list_tournament_rounds(id).await?;
         let matches = self.list_tournament_matches(id).await?;
 
-        Ok(TournamentBracket {
+        Ok(Some(TournamentBracket {
             tournament,
             participants,
             rounds,
             matches,
-        })
+        }))
     }
 
     pub async fn get_swiss_standings(&self, tournament_id: &str) -> DbResult<Vec<SwissStanding>> {
@@ -977,7 +981,7 @@ impl Database {
         let participants = self.list_tournament_participants(tournament_id).await?;
         let n = participants.len();
         if n < 2 {
-            return Err(crate::DbError::NotFound(
+            return Err(crate::DbError::Invalid(
                 "Need at least 2 participants".into(),
             ));
         }
@@ -1112,7 +1116,7 @@ impl Database {
         let participants = self.list_tournament_participants(tournament_id).await?;
         let n = participants.len();
         if n < 2 {
-            return Err(crate::DbError::NotFound(
+            return Err(crate::DbError::Invalid(
                 "Need at least 2 participants".into(),
             ));
         }
@@ -1342,7 +1346,7 @@ impl Database {
         let participants = self.list_tournament_participants(tournament_id).await?;
         let n = participants.len();
         if n < 2 {
-            return Err(crate::DbError::NotFound(
+            return Err(crate::DbError::Invalid(
                 "Need at least 2 participants".into(),
             ));
         }
@@ -1412,6 +1416,11 @@ impl Database {
     }
 
     pub async fn generate_swiss_round(&self, tournament_id: &str) -> DbResult<TournamentRound> {
+        if self.count_tournament_participants(tournament_id).await? < 2 {
+            return Err(crate::DbError::Invalid(
+                "Need at least 2 participants".into(),
+            ));
+        }
         let rounds = self.list_tournament_rounds(tournament_id).await?;
         let round_number = rounds.len() as u32 + 1;
 
