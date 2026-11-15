@@ -1534,11 +1534,13 @@ fn render_patch_card(
     }
 }
 
-/// Pill fill. Maps sits on the opaque `--info-soft` surface, which holds
-/// `--info` ink at AA; the other tags keep the 12% wash of their ink.
+/// Pill fill. Maps sits on the opaque `--info-soft` surface and Competitive
+/// on `--accent-soft`, each of which holds its ink at AA; the other tags keep
+/// the 12% wash of their ink.
 fn section_tag_bg(category: &str) -> String {
     match section_tag_color(category) {
         "var(--info)" => "var(--info-soft)".to_string(),
+        "var(--accent-text)" => "var(--accent-soft)".to_string(),
         color => format!("color-mix(in srgb, {color} 12%, transparent)"),
     }
 }
@@ -2184,7 +2186,10 @@ mod tests {
         // colours are not text roles: light --chart-5 on a 12% wash over
         // --surface is 3.51:1. --info on that wash reaches only 4.37:1 light
         // (4.62:1 dark), so the Maps pill sits on --info-soft instead:
-        // 4.64:1 light, 4.72:1 dark (WCAG 2).
+        // 4.64:1 light, 4.72:1 dark (WCAG 2). --accent-text on a 12% wash
+        // is 4.48:1 light in the planner, so the
+        // Competitive pill sits on --accent-soft, which derive() holds
+        // --accent-text to: 4.87:1 light, 5.07:1 dark in the planner.
         for cat in [
             "Hero Balance",
             "Bug Fixes",
@@ -2197,5 +2202,7 @@ mod tests {
         }
         assert_eq!(section_tag_color("Maps"), "var(--info)");
         assert_eq!(section_tag_bg("Maps"), "var(--info-soft)");
+        assert_eq!(section_tag_color("Competitive"), "var(--accent-text)");
+        assert_eq!(section_tag_bg("Competitive"), "var(--accent-soft)");
     }
 }

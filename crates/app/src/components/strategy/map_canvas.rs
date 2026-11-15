@@ -746,7 +746,8 @@ pub fn MapCanvas(
 
             // `--canvas-selection` follows the brand's solid accent for this
             // theme, so it is read from the canvas's computed style. If it
-            // resolves empty, the outline still draws in the fallback colour.
+            // resolves empty, the outline still draws in the strategy scope's
+            // dark ring colour (CANVAS_SELECTION_FALLBACK).
             let selection = web_sys::window()
                 .and_then(|w| w.get_computed_style(&canvas).ok().flatten())
                 .and_then(|style| style.get_property_value(CANVAS_SELECTION_TOKEN).ok())

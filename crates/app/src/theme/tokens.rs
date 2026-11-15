@@ -99,10 +99,12 @@ pub const STRATEGY_ACCENT: &str = brand::STRATEGY_BRAND;
 /// Selection follows the brand and theme (`--sel-ring`, the solid accent), so
 /// the canvas reads it from computed style instead of a literal.
 pub const CANVAS_SELECTION_TOKEN: &str = "--canvas-selection";
-/// Selection ring when computed `--canvas-selection` is empty: the product
-/// default dark solid accent (the planner field is dark in both themes).
-/// `desktop_canvas.js` carries the same literal; a test holds the two together.
-pub const CANVAS_SELECTION_FALLBACK: &str = BRAND_ACCENT_DARK;
+/// Selection ring when computed `--canvas-selection` is empty. Both canvases
+/// draw only inside `[data-accent="strategy"]`, so this is the strategy
+/// scope's dark ring (`--accent-solid` derived from the strategy orange; the
+/// planner field is dark in both themes). `desktop_canvas.js` carries the
+/// same literal; a test holds the two together.
+pub const CANVAS_SELECTION_FALLBACK: &str = STRATEGY_ACCENT;
 pub const CANVAS_BADGE_BG: &str = "rgba(0,0,0,0.7)";
 pub const CANVAS_WHITE: &str = "#ffffff";
 pub const HP_SMALL_FILL: &str = "#ffeb3b";
@@ -191,7 +193,9 @@ mod tests {
         HP_LARGE_STROKE, HP_SMALL_FILL, HP_SMALL_STROKE, MINT_REFINED, STRATEGY_ACCENT, TEMPLATES,
         resolved_tokens, template_by_id, theme_css, theme_css_for,
     };
-    use crate::theme::brand::{DARK_SURFACES, LIGHT_SURFACES, contrast_ratio};
+    use crate::theme::brand::{
+        AccentRoles, DARK_SURFACES, LIGHT_SURFACES, STRATEGY_BRAND, Scheme, contrast_ratio,
+    };
 
     const SURFACES: [&str; 4] = ["--bg", "--surface", "--surface-raised", "--surface-sunken"];
 
@@ -386,16 +390,13 @@ mod tests {
         );
     }
 
-    /// The canvas fallback is the product default's selection colour, and
-    /// the desktop canvas script uses the same literal.
+    /// The canvas fallback is the strategy scope's dark selection ring
+    /// (`--sel-ring` is `--accent-solid`, derived from the strategy orange),
+    /// and the desktop canvas script uses the same literal.
     #[test]
-    fn canvas_selection_fallback_matches_the_product_default() {
-        let css = theme_css(&BrandConfig::product_default());
-        let tokens = resolved_tokens(&css, "dark");
-        assert_eq!(
-            get(&tokens, "--canvas-selection"),
-            CANVAS_SELECTION_FALLBACK
-        );
+    fn canvas_selection_fallback_matches_the_strategy_ring() {
+        let strategy_dark = AccentRoles::derive(STRATEGY_BRAND, Scheme::Dark);
+        assert_eq!(strategy_dark.solid, CANVAS_SELECTION_FALLBACK);
         let js = include_str!("../../assets/desktop_canvas.js");
         assert!(
             js.contains(&format!("|| \"{CANVAS_SELECTION_FALLBACK}\"")),

@@ -566,9 +566,9 @@
             const sel = vis.find(e => e.id === selectedElement);
             if (sel) {
                 // Follows the brand's solid accent (--canvas-selection token).
-                // Empty value: fall back to the product default solid accent
+                // Empty value: fall back to the strategy scope's dark ring
                 // (CANVAS_SELECTION_FALLBACK in theme/tokens.rs).
-                ctx.strokeStyle = getComputedStyle(c).getPropertyValue("--canvas-selection").trim() || "#8f73ff";
+                ctx.strokeStyle = getComputedStyle(c).getPropertyValue("--canvas-selection").trim() || "#ff7a1a";
                 ctx.lineWidth = 2;
                 ctx.setLineDash([4, 4]);
                 ctx.beginPath();
