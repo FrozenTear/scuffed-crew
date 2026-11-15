@@ -262,10 +262,13 @@ mod tests {
         assert!(!css.contains("font-stretch"));
     }
 
-    /// Each Plex file is served under IBM's own `unicode-range` for that
-    /// split. The ranges are literal copies of `IBM Plex Sans Var-Roman.css`
-    /// in `@ibm/plex-sans-variable` 0.2.0, not the constants above, so a
-    /// swapped constant or a swapped face fails here.
+    /// `fonts_css_with` puts each Plex URL slot (the dummy `/p1` to `/p4`
+    /// URLs here, Latin1, Latin2, Latin3 and Pi in that order) in its own
+    /// `@font-face` with IBM's `unicode-range` for that split. The ranges
+    /// are literal copies of `IBM Plex Sans Var-Roman.css` in
+    /// `@ibm/plex-sans-variable` 0.2.0, not the constants above, so a swapped
+    /// range constant or a swapped face fails here. Which real file fills
+    /// each slot is set in `fonts_css`, which this test does not call.
     #[test]
     fn plex_faces_carry_ibm_ranges_for_their_file() {
         let css = fonts_css_with(&URLS);
