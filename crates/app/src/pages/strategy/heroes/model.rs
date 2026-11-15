@@ -49,9 +49,9 @@ impl RoleGroup {
     pub(super) fn color(self) -> &'static str {
         match self {
             RoleGroup::Tank => "var(--chart-5)",
-            RoleGroup::Damage => "var(--danger)",
-            RoleGroup::Support => "var(--ok)",
-            RoleGroup::Other => "var(--text-3)",
+            RoleGroup::Damage => "var(--loss)",
+            RoleGroup::Support => "var(--win)",
+            RoleGroup::Other => "var(--text-subtle)",
         }
     }
 
@@ -59,9 +59,9 @@ impl RoleGroup {
     pub(super) fn tint(self) -> &'static str {
         match self {
             RoleGroup::Tank => "color-mix(in srgb, var(--chart-5) 12%, transparent)",
-            RoleGroup::Damage => "color-mix(in srgb, var(--danger) 12%, transparent)",
-            RoleGroup::Support => "color-mix(in srgb, var(--ok) 12%, transparent)",
-            RoleGroup::Other => "color-mix(in srgb, var(--text-3) 12%, transparent)",
+            RoleGroup::Damage => "color-mix(in srgb, var(--loss) 12%, transparent)",
+            RoleGroup::Support => "color-mix(in srgb, var(--win) 12%, transparent)",
+            RoleGroup::Other => "color-mix(in srgb, var(--text-subtle) 12%, transparent)",
         }
     }
 }

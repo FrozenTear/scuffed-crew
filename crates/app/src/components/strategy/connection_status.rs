@@ -27,8 +27,8 @@ const CONNECTION_STATUS_CSS: &str = r#"
 }
 
 .connection-status--connected {
-    background-color: color-mix(in srgb, var(--ok) 15%, transparent);
-    color: var(--ok);
+    background-color: color-mix(in srgb, var(--win) 15%, transparent);
+    color: var(--win);
 }
 
 .connection-status--connecting {
@@ -38,13 +38,13 @@ const CONNECTION_STATUS_CSS: &str = r#"
 
 .connection-status--reconnecting {
     background-color: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
 }
 
 .connection-status--disconnected,
 .connection-status--error {
-    background-color: color-mix(in srgb, var(--danger) 15%, transparent);
-    color: var(--danger);
+    background-color: color-mix(in srgb, var(--loss) 15%, transparent);
+    color: var(--loss);
 }
 
 .connection-status__dot {
@@ -56,7 +56,7 @@ const CONNECTION_STATUS_CSS: &str = r#"
 }
 
 .connection-status--connected .connection-status__dot {
-    background-color: var(--ok);
+    background-color: var(--win);
 }
 
 .connection-status--connecting .connection-status__dot {
@@ -65,13 +65,13 @@ const CONNECTION_STATUS_CSS: &str = r#"
 }
 
 .connection-status--reconnecting .connection-status__dot {
-    background-color: var(--accent);
+    background-color: var(--accent-solid);
     animation: connection-pulse 1s ease-in-out infinite;
 }
 
 .connection-status--disconnected .connection-status__dot,
 .connection-status--error .connection-status__dot {
-    background-color: var(--danger);
+    background-color: var(--loss);
 }
 
 .connection-status__retry {
@@ -88,7 +88,7 @@ const CONNECTION_STATUS_CSS: &str = r#"
 }
 
 .connection-status__retry:hover {
-    background-color: color-mix(in srgb, var(--danger) 20%, transparent);
+    background-color: color-mix(in srgb, var(--loss) 20%, transparent);
 }
 
 @keyframes connection-pulse {

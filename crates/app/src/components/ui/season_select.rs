@@ -40,7 +40,7 @@ const STATS_SEASON_KEY: &str = "stats-season-v2";
 
 pub const SEASON_SELECT_CSS: &str = r#"
 .season-select { display: flex; flex-direction: column; gap: var(--space-1); }
-.season-select-status { margin: 0; color: var(--text-3); font-size: var(--text-xs); }
+.season-select-status { margin: 0; color: var(--text-subtle); font-size: var(--text-xs); }
 "#;
 
 /// One season the picker can resolve a saved value against.

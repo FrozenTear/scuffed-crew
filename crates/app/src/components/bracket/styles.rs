@@ -20,12 +20,12 @@ pub const BRACKET_STYLES: &str = r#"
 }
 .bracket-round-title {
     text-align: center;
-    font-family: var(--font-head);
+    font-family: var(--font-display);
     font-weight: 700;
     font-size: 0.75rem;
     text-transform: uppercase;
     letter-spacing: 0.06em;
-    color: var(--text-3);
+    color: var(--text-subtle);
     margin-bottom: 0.5rem;
 }
 
@@ -42,8 +42,8 @@ pub const BRACKET_STYLES: &str = r#"
     border-color: var(--accent-soft);
 }
 .match-card.live {
-    border-color: var(--ok);
-    box-shadow: 0 0 12px color-mix(in srgb, var(--ok) 30%, transparent);
+    border-color: var(--win);
+    box-shadow: 0 0 12px color-mix(in srgb, var(--win) 30%, transparent);
 }
 .match-card.completed {
     opacity: 0.85;
@@ -73,7 +73,7 @@ pub const BRACKET_STYLES: &str = r#"
 .team-slot-seed {
     font-family: var(--font-mono);
     font-size: 0.65rem;
-    color: var(--text-3);
+    color: var(--text-subtle);
     min-width: 1.5rem;
 }
 .team-slot-name {
@@ -87,7 +87,7 @@ pub const BRACKET_STYLES: &str = r#"
 }
 .team-slot-name.tbd {
     font-style: italic;
-    color: var(--text-3);
+    color: var(--text-subtle);
     font-weight: 400;
 }
 .team-slot-score {
@@ -98,7 +98,7 @@ pub const BRACKET_STYLES: &str = r#"
     text-align: center;
 }
 .team-slot.winner .team-slot-score {
-    color: var(--accent);
+    color: var(--accent-text);
 }
 
 .match-card-status {
@@ -108,10 +108,10 @@ pub const BRACKET_STYLES: &str = r#"
     text-transform: uppercase;
     letter-spacing: 0.06em;
     padding: 0.15rem 0;
-    color: var(--text-3);
+    color: var(--text-subtle);
 }
 .match-card-status.live {
-    color: var(--ok);
+    color: var(--win);
 }
 .match-card-status.live::before {
     content: '';
@@ -119,7 +119,7 @@ pub const BRACKET_STYLES: &str = r#"
     width: 6px;
     height: 6px;
     border-radius: 50%;
-    background: var(--ok);
+    background: var(--win);
     margin-right: 0.3rem;
     vertical-align: middle;
     animation: pulse-dot 1.5s ease-in-out infinite;
@@ -139,8 +139,8 @@ pub const BRACKET_STYLES: &str = r#"
 .replay-code {
     font-family: var(--font-mono);
     font-size: 0.6rem;
-    color: var(--text-3);
-    background: var(--surface-2);
+    color: var(--text-subtle);
+    background: var(--surface-sunken);
     padding: 0.1rem 0.35rem;
     border-radius: 3px;
     letter-spacing: 0.04em;
@@ -159,12 +159,12 @@ pub const BRACKET_STYLES: &str = r#"
     gap: 2rem;
 }
 .double-elim-section-label {
-    font-family: var(--font-head);
+    font-family: var(--font-display);
     font-weight: 700;
     font-size: 0.8rem;
     text-transform: uppercase;
     letter-spacing: 0.08em;
-    color: var(--accent);
+    color: var(--accent-text);
     padding-bottom: 0.5rem;
     border-bottom: 1px solid var(--border);
     margin-bottom: 0.5rem;
@@ -180,8 +180,8 @@ pub const BRACKET_STYLES: &str = r#"
     min-width: 3rem;
 }
 .rr-table th {
-    background: var(--surface-2);
-    color: var(--text-3);
+    background: var(--surface-sunken);
+    color: var(--text-subtle);
     font-family: var(--font-mono);
     font-size: 0.7rem;
     text-transform: uppercase;
@@ -193,18 +193,18 @@ pub const BRACKET_STYLES: &str = r#"
     white-space: nowrap;
 }
 .rr-table .rr-self { background: var(--bg); }
-.rr-table .rr-win { color: var(--ok); font-weight: 700; }
-.rr-table .rr-loss { color: var(--danger); font-weight: 700; }
-.rr-table .rr-pending { color: var(--text-3); }
-.rr-score-with-codes { border-bottom: 1px dotted var(--text-3); cursor: help; }
+.rr-table .rr-win { color: var(--win); font-weight: 700; }
+.rr-table .rr-loss { color: var(--loss); font-weight: 700; }
+.rr-table .rr-pending { color: var(--text-subtle); }
+.rr-score-with-codes { border-bottom: 1px dotted var(--text-subtle); cursor: help; }
 
 /* --- Swiss Standings --- */
 .swiss-standings { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
 .swiss-standings th {
     text-align: left;
     padding: 0.5rem 0.75rem;
-    background: var(--surface-2);
-    color: var(--text-3);
+    background: var(--surface-sunken);
+    color: var(--text-subtle);
     font-size: 0.7rem;
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -215,7 +215,7 @@ pub const BRACKET_STYLES: &str = r#"
     border-bottom: 1px solid color-mix(in srgb, var(--text) 6%, transparent);
     color: var(--text);
 }
-.swiss-standings .rank-col { font-family: var(--font-mono); color: var(--text-3); width: 2.5rem; }
+.swiss-standings .rank-col { font-family: var(--font-mono); color: var(--text-subtle); width: 2.5rem; }
 .swiss-standings .record-col { font-family: var(--font-mono); font-weight: 700; }
 
 /* --- Mobile Fallback --- */
@@ -228,12 +228,12 @@ pub const BRACKET_STYLES: &str = r#"
 }
 .bracket-mobile-round { margin-bottom: 1.5rem; }
 .bracket-mobile-round-title {
-    font-family: var(--font-head);
+    font-family: var(--font-display);
     font-weight: 700;
     font-size: 0.8rem;
     text-transform: uppercase;
     letter-spacing: 0.06em;
-    color: var(--text-3);
+    color: var(--text-subtle);
     margin-bottom: 0.5rem;
     padding-bottom: 0.25rem;
     border-bottom: 1px solid var(--border);
@@ -252,7 +252,7 @@ pub const BRACKET_STYLES: &str = r#"
     margin: 0 auto;
 }
 .tournaments-page h1, .tournament-detail-page h1 {
-    font-family: var(--font-head);
+    font-family: var(--font-display);
     font-size: 3rem;
     color: var(--text);
     letter-spacing: 3px;
@@ -264,7 +264,7 @@ pub const BRACKET_STYLES: &str = r#"
     display: block;
     width: 60px;
     height: 3px;
-    background: var(--accent);
+    background: var(--accent-solid);
     margin-top: 0.75rem;
     margin-bottom: 2.5rem;
     border-radius: 2px;
@@ -292,7 +292,7 @@ pub const BRACKET_STYLES: &str = r#"
     transform: translateY(-2px);
 }
 .tournament-card-name {
-    font-family: var(--font-head);
+    font-family: var(--font-display);
     font-weight: 700;
     font-size: 1.2rem;
     color: var(--text);
@@ -304,10 +304,10 @@ pub const BRACKET_STYLES: &str = r#"
     gap: 0.75rem;
     flex-wrap: wrap;
     font-size: 0.78rem;
-    color: var(--text-3);
+    color: var(--text-subtle);
 }
 .tournament-card-desc {
-    color: var(--text-2);
+    color: var(--text-muted);
     font-size: 0.82rem;
     margin-top: 0.4rem;
     line-height: 1.5;
@@ -325,17 +325,17 @@ pub const BRACKET_STYLES: &str = r#"
 /* registration/upcoming → accent (upcoming opportunity) */
 .tournament-card-status.registration {
     background: color-mix(in srgb, var(--accent) 20%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
 }
 /* in_progress → ok (active/live) */
 .tournament-card-status.in_progress {
-    background: color-mix(in srgb, var(--ok) 20%, transparent);
-    color: var(--ok);
+    background: color-mix(in srgb, var(--win) 20%, transparent);
+    color: var(--win);
 }
 /* completed → text-2 (neutral, past) */
 .tournament-card-status.completed {
-    background: color-mix(in srgb, var(--text-2) 15%, transparent);
-    color: var(--text-2);
+    background: color-mix(in srgb, var(--text-muted) 15%, transparent);
+    color: var(--text-muted);
 }
 /* draft → warn (pending/not yet open) */
 .tournament-card-status.draft {
@@ -349,13 +349,13 @@ pub const BRACKET_STYLES: &str = r#"
     justify-content: center;
     gap: 1.5rem;
     flex-wrap: wrap;
-    color: var(--text-2);
+    color: var(--text-muted);
     font-size: 0.85rem;
     margin-bottom: 1rem;
 }
 .tournament-meta span { font-family: var(--font-mono); font-size: 0.8rem; }
 .tournament-description {
-    color: var(--text-2);
+    color: var(--text-muted);
     max-width: 700px;
     line-height: 1.7;
     margin: 0 auto 1rem;
@@ -363,7 +363,7 @@ pub const BRACKET_STYLES: &str = r#"
 }
 .tournament-external-link {
     display: inline-block;
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 0.85rem;
     margin-bottom: 1.5rem;
 }
@@ -373,12 +373,12 @@ pub const BRACKET_STYLES: &str = r#"
     gap: 1rem;
 }
 .tournament-section-title {
-    font-family: var(--font-head);
+    font-family: var(--font-display);
     font-weight: 700;
     font-size: 1rem;
     text-transform: uppercase;
     letter-spacing: 0.06em;
-    color: var(--text-3);
+    color: var(--text-subtle);
     margin: 2rem 0 1rem;
     padding-bottom: 0.5rem;
     border-bottom: 1px solid var(--border);

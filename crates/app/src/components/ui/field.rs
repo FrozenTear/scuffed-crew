@@ -2,14 +2,14 @@ use dioxus::prelude::*;
 
 pub const FIELD_CSS: &str = r#"
 .ui-field { width: 100%; font-family: var(--font-body); font-size: var(--text-sm); font-weight: 500;
-  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-md);
+  background: var(--surface-sunken); border: 1px solid var(--border); border-radius: var(--radius-control);
   padding: var(--space-2) var(--space-3); color: var(--text); }
-.ui-field::placeholder { color: var(--text-3); }
-.ui-field:focus { border-color: var(--accent); }
-.ui-field--invalid { border-color: var(--danger); }
+.ui-field::placeholder { color: var(--text-subtle); }
+.ui-field:focus { border-color: var(--accent-solid); }
+.ui-field--invalid { border-color: var(--loss); }
 textarea.ui-field { resize: vertical; min-height: 80px; }
 .ui-field-wrap { display: flex; flex-direction: column; gap: 0.35rem; width: 100%; }
-.ui-field-label { font-family: var(--font-body); font-size: var(--text-sm); font-weight: 600; color: var(--text-2); }
+.ui-field-label { font-family: var(--font-body); font-size: var(--text-sm); font-weight: 600; color: var(--text-muted); }
 "#;
 
 fn field_class(invalid: bool) -> &'static str {

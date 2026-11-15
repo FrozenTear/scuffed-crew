@@ -12,14 +12,14 @@ const PAGE_CSS: &str = r#"
     margin: 0 auto;
 }
 .polls-page-title {
-    font-family: var(--font-head);
+    font-family: var(--font-display);
     font-size: 2.5rem;
     color: var(--text);
     letter-spacing: 3px;
     margin: 0 0 0.25rem;
 }
 .polls-subtitle {
-    color: var(--text-2);
+    color: var(--text-muted);
     font-size: 0.9rem;
     margin: 0 0 2rem;
 }
@@ -29,7 +29,7 @@ const PAGE_CSS: &str = r#"
     gap: 1rem;
 }
 .polls-loading, .polls-empty {
-    color: var(--text-3);
+    color: var(--text-subtle);
     text-align: center;
     padding: 3rem 0;
 }

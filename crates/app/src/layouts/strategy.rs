@@ -15,9 +15,9 @@ const STRATEGY_CSS: &str = r#"
         border-bottom: 1px solid var(--border);
     }
     .strategy-nav .brand {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: 0.95rem;
-        color: var(--accent);
+        color: var(--accent-text);
         text-transform: uppercase;
         letter-spacing: 0.06em;
     }
@@ -28,23 +28,23 @@ const STRATEGY_CSS: &str = r#"
     }
     .strategy-nav .links a {
         padding: 0.35rem 0.7rem;
-        color: var(--text-2);
+        color: var(--text-muted);
         font-size: 0.85rem;
         border-radius: 5px;
         transition: color 0.15s, background 0.15s;
     }
     .strategy-nav .links a:hover {
         color: var(--text);
-        background: var(--surface-2);
+        background: var(--surface-sunken);
     }
     .strategy-nav .back-link {
         margin-left: auto;
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-size: 0.8rem;
         transition: color 0.15s;
     }
     .strategy-nav .back-link:hover {
-        color: var(--text-2);
+        color: var(--text-muted);
     }
     /* Phones: brand and Back to Clan share the top row, the section links
        wrap onto their own rows below, so the page never gets wider than
@@ -84,12 +84,12 @@ const STRATEGY_CSS: &str = r#"
         color: var(--text);
     }
     .strategy-off h1 {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: 1.25rem;
         margin: 0 0 0.5rem;
     }
     .strategy-off p {
-        color: var(--text-2);
+        color: var(--text-muted);
         font-size: 0.95rem;
         max-width: 28rem;
         margin: 0 0 1.25rem;
@@ -105,18 +105,18 @@ const STRATEGY_CSS: &str = r#"
         display: inline-flex;
         align-items: center;
         padding: 0.55rem 1.1rem;
-        background: var(--accent);
-        color: var(--accent-fg);
+        background: var(--accent-solid);
+        color: var(--on-accent);
         font-family: var(--font-mono);
         font-size: 0.72rem;
         letter-spacing: 0.1em;
         text-transform: uppercase;
         text-decoration: none;
-        border-radius: var(--radius-md, 8px);
+        border-radius: var(--radius-control, 8px);
     }
     .strategy-off a.ghost {
         background: transparent;
-        color: var(--text-2);
+        color: var(--text-muted);
         border: 1px solid var(--border);
     }
 "#;

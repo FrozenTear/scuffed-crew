@@ -28,7 +28,7 @@ const TOKENS_CSS: &str = r#"
         padding: 2rem 1.5rem;
     }
     .tokens-page h1 {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: 1.8rem;
         color: var(--text);
         text-transform: uppercase;
@@ -42,10 +42,10 @@ const TOKENS_CSS: &str = r#"
         margin-bottom: 1.5rem;
     }
     .tracker-setup.has-token {
-        border-color: var(--accent);
+        border-color: var(--accent-solid);
     }
     .tracker-setup h2 {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: 1rem;
         color: var(--text);
         text-transform: uppercase;
@@ -53,12 +53,12 @@ const TOKENS_CSS: &str = r#"
         margin: 0 0 0.5rem;
     }
     .tracker-setup p {
-        color: var(--text-2);
+        color: var(--text-muted);
         font-size: 0.85rem;
         margin: 0 0 0.5rem;
     }
     .tracker-setup a {
-        color: var(--accent);
+        color: var(--accent-text);
         font-size: 0.85rem;
     }
     .tracker-setup code {
@@ -69,7 +69,7 @@ const TOKENS_CSS: &str = r#"
         padding: 0.6rem 0.75rem;
         font-family: var(--font-mono);
         font-size: 0.8rem;
-        color: var(--accent);
+        color: var(--accent-text);
         word-break: break-all;
         margin: 0.5rem 0;
         user-select: all;

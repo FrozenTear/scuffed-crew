@@ -220,9 +220,9 @@ const NAV_CSS: &str = r#"
         z-index: 1000;
         transform: translateY(-200%);
         padding: var(--space-2) var(--space-4);
-        background: var(--accent);
-        color: var(--accent-fg);
-        border-radius: var(--radius-md);
+        background: var(--accent-solid);
+        color: var(--on-accent);
+        border-radius: var(--radius-control);
         font-size: var(--text-sm);
         font-weight: 600;
         text-decoration: none;
@@ -259,23 +259,23 @@ const NAV_CSS: &str = r#"
     .nav-icon {
         width: 26px;
         height: 26px;
-        background: var(--accent);
+        background: var(--accent-solid);
         border-radius: 4px;
         display: grid;
         place-items: center;
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: 0.85rem;
         font-weight: 700;
-        color: var(--accent-fg);
+        color: var(--on-accent);
         box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 35%, transparent);
     }
     .nav-icon.is-pending {
         color: transparent;
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         box-shadow: none;
     }
     .nav-mark-text {
-        font-family: var(--font-mono, var(--font-head));
+        font-family: var(--font-mono, var(--font-display));
         font-size: 0.75rem;
         letter-spacing: 0.12em;
         text-transform: uppercase;
@@ -299,8 +299,8 @@ const NAV_CSS: &str = r#"
     .nav-actions a,
     .nav-actions button.nav-linkish {
         padding: 0.3rem 0.55rem;
-        color: var(--text-2);
-        font-family: var(--font-mono, var(--font-head));
+        color: var(--text-muted);
+        font-family: var(--font-mono, var(--font-display));
         font-size: 0.75rem;
         letter-spacing: 0.08em;
         text-transform: uppercase;
@@ -317,7 +317,7 @@ const NAV_CSS: &str = r#"
     .nav-actions a:hover,
     .nav-actions button.nav-linkish:hover {
         color: var(--text);
-        background: var(--surface-2);
+        background: var(--surface-sunken);
     }
     .nav-actions {
         display: flex;
@@ -330,8 +330,8 @@ const NAV_CSS: &str = r#"
         padding: 0;
     }
     .nav-cta {
-        background: var(--accent) !important;
-        color: var(--accent-fg) !important;
+        background: var(--accent-solid) !important;
+        color: var(--on-accent) !important;
         padding: 0.35rem 0.75rem !important;
         font-weight: 500;
         box-shadow: 0 0 16px color-mix(in srgb, var(--accent) 30%, transparent);
@@ -340,7 +340,7 @@ const NAV_CSS: &str = r#"
         filter: brightness(1.1);
     }
     .nav-ghost {
-        color: var(--text-3) !important;
+        color: var(--text-subtle) !important;
     }
     .nav-drop {
         position: relative;
@@ -373,8 +373,8 @@ const NAV_CSS: &str = r#"
         width: 100%;
         text-align: left;
         padding: 0.45rem 0.65rem;
-        color: var(--text-2);
-        font-family: var(--font-mono, var(--font-head));
+        color: var(--text-muted);
+        font-family: var(--font-mono, var(--font-display));
         font-size: 0.75rem;
         letter-spacing: 0.06em;
         text-transform: uppercase;
@@ -387,7 +387,7 @@ const NAV_CSS: &str = r#"
     .nav-drop-menu a:hover,
     .nav-drop-menu button:hover {
         color: var(--text);
-        background: var(--surface-2);
+        background: var(--surface-sunken);
     }
     .nav-drop-sep {
         height: 1px;
@@ -422,7 +422,7 @@ const NAV_CSS: &str = r#"
     .nav-hamburger span {
         width: 18px;
         height: 2px;
-        background: var(--text-2);
+        background: var(--text-muted);
         transition: transform 0.2s, opacity 0.2s;
     }
     .nav-hamburger.open span:nth-child(1) { transform: rotate(45deg) translate(3px, 3px); }
@@ -469,7 +469,7 @@ const NAV_CSS: &str = r#"
     .nav-overlay button {
         color: var(--text);
         font-size: 0.95rem;
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         text-align: left;
         text-decoration: none;
         background: none;
@@ -478,19 +478,19 @@ const NAV_CSS: &str = r#"
         padding: 0.55rem 0.25rem;
     }
     .nav-overlay-label {
-        font-family: var(--font-mono, var(--font-head));
+        font-family: var(--font-mono, var(--font-display));
         font-size: 0.75rem;
         letter-spacing: 0.14em;
         text-transform: uppercase;
-        color: var(--text-3);
+        color: var(--text-subtle);
         margin: 0.85rem 0 0.25rem;
     }
     .nav-overlay a.nav-cta {
         display: inline-flex;
         align-self: flex-start;
         margin: 0.35rem 0 0.5rem;
-        background: var(--accent);
-        color: var(--accent-fg);
+        background: var(--accent-solid);
+        color: var(--on-accent);
         padding: 0.55rem 1rem;
         border-radius: 6px;
         font-size: 0.85rem;
@@ -505,11 +505,11 @@ const NAV_CSS: &str = r#"
         border-top: 1px solid var(--border);
     }
     .nav-overlay-theme span {
-        font-family: var(--font-mono, var(--font-head));
+        font-family: var(--font-mono, var(--font-display));
         font-size: 0.75rem;
         letter-spacing: 0.12em;
         text-transform: uppercase;
-        color: var(--text-3);
+        color: var(--text-subtle);
     }
     .site-main {
         min-width: 0;
@@ -521,7 +521,7 @@ const NAV_CSS: &str = r#"
         border-top: 1px solid var(--border);
         padding: 2rem;
         text-align: center;
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-size: 0.8rem;
     }
     .theme-toggle {
@@ -530,7 +530,7 @@ const NAV_CSS: &str = r#"
         color: var(--text);
         width: 30px;
         height: 30px;
-        border-radius: var(--radius-md, 6px);
+        border-radius: var(--radius-control, 6px);
         cursor: pointer;
         font-size: 0.9rem;
         display: inline-flex;
@@ -538,7 +538,7 @@ const NAV_CSS: &str = r#"
         justify-content: center;
         flex-shrink: 0;
     }
-    .theme-toggle:hover { background: var(--surface-2); }
+    .theme-toggle:hover { background: var(--surface-sunken); }
     @media (max-width: 820px) {
         .nav-center, .nav-actions { display: none; }
         .nav-mobile-tools { display: flex; }

@@ -70,7 +70,7 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 1.5rem;
     }
     .my-strategies-title {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: 2rem;
         color: var(--text);
         text-transform: uppercase;
@@ -82,8 +82,8 @@ const PAGE_CSS: &str = r#"
         gap: 0.4rem;
         padding: 0.55rem 1.3rem;
         border-radius: 6px;
-        background: var(--accent);
-        color: white;
+        background: var(--accent-solid);
+        color: var(--on-accent);
         border: none;
         font-size: 0.85rem;
         font-weight: 600;
@@ -118,7 +118,7 @@ const PAGE_CSS: &str = r#"
         border-color: var(--accent-soft);
     }
     .my-strategy-card-name {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-weight: 700;
         font-size: 1.1rem;
         color: var(--text);
@@ -128,7 +128,7 @@ const PAGE_CSS: &str = r#"
         gap: 0.75rem;
         flex-wrap: wrap;
         font-size: 0.75rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
     }
     .my-strategy-card-mode {
         display: inline-block;
@@ -139,7 +139,7 @@ const PAGE_CSS: &str = r#"
         text-transform: uppercase;
         letter-spacing: 0.04em;
         background: var(--accent-soft);
-        color: var(--accent);
+        color: var(--accent-text);
         width: fit-content;
     }
 
@@ -154,16 +154,16 @@ const PAGE_CSS: &str = r#"
         letter-spacing: 0.04em;
     }
     .visibility-badge.public {
-        background: color-mix(in srgb, var(--ok) 20%, transparent);
-        color: var(--ok);
+        background: color-mix(in srgb, var(--win) 20%, transparent);
+        color: var(--win);
     }
     .visibility-badge.unlisted {
         background: color-mix(in srgb, var(--warn) 20%, transparent);
         color: var(--warn);
     }
     .visibility-badge.private {
-        background: color-mix(in srgb, var(--text-3) 20%, transparent);
-        color: var(--text-3);
+        background: color-mix(in srgb, var(--text-subtle) 20%, transparent);
+        color: var(--text-subtle);
     }
 
     .my-strategy-card-footer {
@@ -174,7 +174,7 @@ const PAGE_CSS: &str = r#"
         padding-top: 0.5rem;
         border-top: 1px solid var(--border);
         font-size: 0.7rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
     }
 
     /* Card actions */
@@ -188,7 +188,7 @@ const PAGE_CSS: &str = r#"
         border-radius: 5px;
         border: 1px solid var(--border);
         background: var(--surface);
-        color: var(--text-2);
+        color: var(--text-muted);
         font-size: 0.75rem;
         font-weight: 600;
         cursor: pointer;
@@ -202,19 +202,19 @@ const PAGE_CSS: &str = r#"
         color: var(--text);
     }
     .card-btn.danger:hover {
-        border-color: var(--danger);
-        color: var(--danger);
+        border-color: var(--loss);
+        color: var(--loss);
     }
 
     /* States */
     .my-strategies-loading, .my-strategies-empty {
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-align: center;
         padding: 4rem 1rem;
         font-size: 0.95rem;
     }
     .my-strategies-error {
-        color: var(--danger);
+        color: var(--loss);
         text-align: center;
         padding: 4rem 1rem;
         font-size: 0.95rem;
@@ -224,13 +224,13 @@ const PAGE_CSS: &str = r#"
         padding: 5rem 2rem;
     }
     .my-strategies-login h2 {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: 1.4rem;
         color: var(--text);
         margin-bottom: 0.75rem;
     }
     .my-strategies-login p {
-        color: var(--text-2);
+        color: var(--text-muted);
         margin-bottom: 1.5rem;
         font-size: 0.9rem;
     }
@@ -238,8 +238,8 @@ const PAGE_CSS: &str = r#"
         display: inline-block;
         padding: 0.5rem 1.5rem;
         border-radius: 6px;
-        background: var(--accent);
-        color: white;
+        background: var(--accent-solid);
+        color: var(--on-accent);
         font-weight: 600;
         font-size: 0.85rem;
         text-decoration: none;

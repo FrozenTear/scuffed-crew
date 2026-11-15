@@ -1,0 +1,153 @@
+/* Scuffed Crew site tokens: components
+   Defined only from semantic tokens. Pages may use these or semantic names.
+   Never reference primitives here. */
+
+:root,
+[data-direction],
+[data-theme],
+[data-density],
+[data-accent] {
+  /* Re-specified on every themed node so var() resolves against that
+     node's semantic values, instead of inheriting :root's computed hex. */
+  /* Buttons */
+  --button-height: var(--hit-target-min);
+  --button-pad-x: var(--space-4);
+  --button-radius: var(--radius-control);
+  --button-font: var(--font-display);
+  --button-font-size: var(--text-sm);
+  --button-font-weight: var(--font-label-weight);
+  --button-primary-bg: var(--accent-solid);
+  --button-primary-fg: var(--on-accent);
+  --button-primary-border: var(--accent-solid);
+  --button-primary-hover-bg: var(--accent-solid);
+  --button-secondary-bg: var(--surface);
+  --button-secondary-fg: var(--text);
+  --button-secondary-border: var(--border-strong);
+  --button-danger-bg: transparent;
+  --button-danger-fg: var(--loss);
+  --button-danger-border: var(--loss);
+
+  /* Chips / filter pills */
+  --chip-height: var(--hit-target-min);
+  --chip-pad-x: var(--space-3);
+  --chip-radius: var(--radius-pill);
+  --chip-font: var(--font-display);
+  --chip-font-size: var(--text-xs);
+  --chip-font-weight: var(--font-weight-500);
+  --chip-bg: var(--surface-sunken);
+  --chip-fg: var(--text-muted);
+  --chip-border: var(--border);
+  --chip-selected-bg: var(--accent-soft);
+  --chip-selected-fg: var(--accent-text);
+  --chip-selected-border: var(--accent-text);
+  --chip-selected-border-width: 1px;
+  --chip-selected-weight: var(--font-weight-600);
+
+  /* Cards */
+  --card-bg: var(--surface);
+  --card-fg: var(--text);
+  --card-border: var(--frame-stroke);
+  --card-radius: var(--radius-card);
+  --card-shadow: var(--shadow-card);
+  --card-padding: var(--space-card-pad);
+
+  /* Tables */
+  --table-row-height: var(--density-row);
+  --table-row-bg: var(--surface);
+  --table-row-alt: var(--surface-sunken);
+  --table-row-border: var(--border);
+  --table-row-hover: var(--surface-raised);
+  --table-row-fg: var(--text);
+  --table-row-muted: var(--text-muted);
+  --table-header-fg: var(--text-subtle);
+  --table-header-weight: var(--font-label-weight);
+  --table-font: var(--font-body);
+  --table-font-size: var(--text-sm);
+  --table-radius: var(--radius-card);
+  --table-pad-x: var(--space-3);
+
+  /* Nav */
+  --nav-bg: var(--header-bg);
+  --nav-fg: var(--text);
+  --nav-muted: var(--text-muted);
+  --nav-active: var(--accent-text);
+  --nav-border: var(--border);
+  --nav-height-used: var(--nav-height);
+  --nav-font: var(--font-display);
+  --nav-font-size: var(--text-sm);
+  --nav-active-underline-width: var(--nav-underline-width);
+  --nav-active-underline-color: var(--nav-underline-color);
+  --nav-font-weight: var(--font-label-weight);
+  --nav-radius: var(--radius-control);
+  --nav-mark-bg: var(--accent-solid);
+  --nav-mark-fg: var(--on-accent);
+  --nav-mark-radius: var(--radius-tile);
+
+  /* Badges and verdict chips (shape plus word, never colour alone) */
+  --badge-height: 24px;
+  --badge-pad-x: var(--space-2);
+  --badge-radius: var(--radius-pill);
+  --badge-font: var(--font-display);
+  --badge-font-size: var(--font-size-11);
+  --badge-font-weight: var(--font-label-weight);
+  --badge-font-transform: uppercase;
+  --badge-bg: var(--surface-sunken);
+  --badge-fg: var(--text-muted);
+  --badge-border: transparent;
+  --badge-win-bg: var(--win-soft);
+  --badge-win-fg: var(--win);
+  --badge-loss-bg: var(--loss-soft);
+  --badge-loss-fg: var(--loss);
+  --badge-warn-bg: var(--warn-soft);
+  --badge-warn-fg: var(--warn);
+  --badge-info-bg: var(--info-soft);
+  --badge-info-fg: var(--info);
+  --badge-neutral-bg: var(--neutral-soft);
+  --badge-neutral-fg: var(--text-muted);
+
+  /* Initials tile (hero mark) */
+  --tile-size: 32px;
+  --tile-size-lg: 48px;
+  --tile-bg: var(--surface-sunken);
+  --tile-fg: var(--text);
+  --tile-radius: var(--radius-tile);
+  --tile-font: var(--font-display);
+  --tile-font-weight: var(--font-display-weight);
+
+  /* Skip link: derived ink on the solid accent */
+  --skip-link-bg: var(--skip-bg);
+  --skip-link-fg: var(--skip-fg);
+
+  /* Community / mint banner: soft fill with --text and --accent-text, or
+     solid fill with --on-accent. Never --text-muted. */
+  --banner-soft-bg: var(--banner-bg);
+  --banner-soft-fg: var(--banner-fg);
+  --banner-soft-accent: var(--banner-accent);
+  --banner-solid-fill: var(--banner-solid-bg);
+  --banner-solid-ink: var(--banner-solid-fg);
+
+  /* Strategy canvas. Selection follows --sel-ring, not a literal lime. */
+  --canvas-bg: var(--canvas-space-bg);
+  --canvas-tile-placeholder: var(--canvas-tile);
+  --canvas-selection: var(--sel-ring);
+  --canvas-hp-small-fill: var(--hp-small-fill);
+  --canvas-hp-small-stroke: var(--hp-small-stroke);
+  --canvas-hp-large-fill: var(--hp-large-fill);
+  --canvas-hp-large-stroke: var(--hp-large-stroke);
+}
+
+/* Competitive: cards and stat tiles sit on the raised step so their
+   edges read against the flat canvas. Hairline comes from --frame-stroke. */
+[data-direction="b"] {
+  --card-bg: var(--surface-raised);
+  --table-row-bg: var(--surface-raised);
+  --table-row-alt: var(--surface-raised);
+}
+
+/* Calm Panels: a thicker selected chip border in the solid accent, so
+   the selected state is not colour alone on a soft wash. Weight stays 600. */
+[data-direction="c"] {
+  --chip-selected-border: var(--accent-solid);
+  --chip-selected-border-width: 2px;
+}
+

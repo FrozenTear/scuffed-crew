@@ -22,7 +22,7 @@ const PAGE_CSS: &str = r#"
     box-sizing: border-box;
 }
 .dm-page-title {
-    font-family: var(--font-head);
+    font-family: var(--font-display);
     font-size: 2.25rem;
     color: var(--text);
     letter-spacing: 3px;
@@ -42,13 +42,13 @@ const PAGE_CSS: &str = r#"
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 10px;
-    color: var(--text-3);
+    color: var(--text-subtle);
     font-size: 0.95rem;
     text-align: center;
     padding: 2rem;
 }
 .dm-loading {
-    color: var(--text-3);
+    color: var(--text-subtle);
     text-align: center;
     padding: 3rem 0;
     font-size: 0.9rem;
@@ -59,7 +59,7 @@ const PAGE_CSS: &str = r#"
     border-radius: 10px;
     padding: 2.5rem 2rem;
     text-align: center;
-    color: var(--text-2);
+    color: var(--text-muted);
 }
 @media (max-width: 720px) {
     .dm-page-grid {

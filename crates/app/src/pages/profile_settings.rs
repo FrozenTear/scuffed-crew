@@ -89,7 +89,7 @@ const PAGE_CSS: &str = r#"
         margin: 0 auto;
     }
     .profile-edit-page h1 {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: 1.8rem;
         color: var(--text);
         letter-spacing: 2px;
@@ -99,7 +99,7 @@ const PAGE_CSS: &str = r#"
         margin: 0 0 1.5rem;
     }
     .profile-edit-reports a {
-        color: var(--accent);
+        color: var(--accent-text);
         font-size: 0.85rem;
         font-weight: 600;
         text-decoration: none;
@@ -108,7 +108,7 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 2.5rem;
     }
     .profile-edit-section h2 {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: 1.1rem;
         color: var(--text);
         text-transform: uppercase;
@@ -124,14 +124,14 @@ const PAGE_CSS: &str = r#"
         font-weight: 600;
         text-transform: uppercase;
         letter-spacing: 0.05em;
-        color: var(--text-3);
+        color: var(--text-subtle);
         margin-bottom: 0.35rem;
     }
     .profile-edit-field input,
     .profile-edit-field textarea,
     .profile-edit-field select {
         width: 100%;
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         border: 1px solid var(--border);
         border-radius: 6px;
         color: var(--text);
@@ -144,12 +144,12 @@ const PAGE_CSS: &str = r#"
     }
     .profile-edit-hint {
         font-size: 0.72rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         margin-top: 0.3rem;
     }
     .profile-edit-btn {
-        background: var(--accent);
-        color: var(--accent-fg);
+        background: var(--accent-solid);
+        color: var(--on-accent);
         border: none;
         border-radius: 6px;
         font-weight: 700;
@@ -168,7 +168,7 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 1rem;
     }
     .profile-edit-account-name {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-weight: 700;
         color: var(--text);
         margin-bottom: 0.75rem;
@@ -180,7 +180,7 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 0.75rem;
     }
     .profile-edit-status {
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-align: center;
         padding: 3rem 0;
     }
@@ -190,7 +190,7 @@ const PAGE_CSS: &str = r#"
         border-top: 1px solid var(--border);
     }
     .profile-edit-back a {
-        color: var(--accent);
+        color: var(--accent-text);
         text-decoration: none;
         font-size: 0.85rem;
         font-weight: 600;

@@ -57,7 +57,7 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 1.5rem;
     }
     .strategy-browse-title {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: 2rem;
         color: var(--text);
         text-transform: uppercase;
@@ -69,8 +69,8 @@ const PAGE_CSS: &str = r#"
         gap: 0.4rem;
         padding: 0.55rem 1.3rem;
         border-radius: 6px;
-        background: var(--accent);
-        color: white;
+        background: var(--accent-solid);
+        color: var(--on-accent);
         border: none;
         font-size: 0.85rem;
         font-weight: 600;
@@ -102,10 +102,10 @@ const PAGE_CSS: &str = r#"
         transition: border-color 0.2s;
     }
     .strategy-search-input::placeholder {
-        color: var(--text-3);
+        color: var(--text-subtle);
     }
     .strategy-search-input:focus {
-        border-color: var(--accent);
+        border-color: var(--accent-solid);
     }
 
     /* Filter chips */
@@ -120,7 +120,7 @@ const PAGE_CSS: &str = r#"
         border-radius: 999px;
         border: 1px solid var(--border);
         background: var(--surface);
-        color: var(--text-2);
+        color: var(--text-muted);
         font-size: 0.78rem;
         font-weight: 600;
         cursor: pointer;
@@ -133,9 +133,9 @@ const PAGE_CSS: &str = r#"
         color: var(--text);
     }
     .strategy-browse .filter-chip.active {
-        background: var(--accent);
-        border-color: var(--accent);
-        color: white;
+        background: var(--accent-solid);
+        border-color: var(--accent-solid);
+        color: var(--on-accent);
     }
 
     /* Card grid */
@@ -160,7 +160,7 @@ const PAGE_CSS: &str = r#"
         transform: translateY(-2px);
     }
     .strategy-card-name {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-weight: 700;
         font-size: 1.1rem;
         color: var(--text);
@@ -170,7 +170,7 @@ const PAGE_CSS: &str = r#"
         gap: 0.75rem;
         flex-wrap: wrap;
         font-size: 0.75rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
     }
     .strategy-card-meta span {
         display: inline-flex;
@@ -186,11 +186,11 @@ const PAGE_CSS: &str = r#"
         text-transform: uppercase;
         letter-spacing: 0.04em;
         background: var(--accent-soft);
-        color: var(--accent);
+        color: var(--accent-text);
         width: fit-content;
     }
     .strategy-card-owner {
-        color: var(--text-2);
+        color: var(--text-muted);
         font-size: 0.8rem;
     }
     .strategy-card-footer {
@@ -201,12 +201,12 @@ const PAGE_CSS: &str = r#"
         padding-top: 0.5rem;
         border-top: 1px solid var(--border);
         font-size: 0.75rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
     }
 
     /* States */
     .strategy-loading, .strategy-empty {
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-align: center;
         padding: 4rem 1rem;
         font-size: 0.95rem;

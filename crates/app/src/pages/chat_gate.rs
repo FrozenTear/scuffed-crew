@@ -28,7 +28,7 @@ const CSS: &str = r#"
     box-sizing: border-box;
 }
 .chat-unavailable h1 {
-    font-family: var(--font-head);
+    font-family: var(--font-display);
     font-size: 1.25rem;
     font-weight: 500;
     color: var(--text);

@@ -74,21 +74,21 @@ fn slugify(s: &str) -> String {
 
 const CSS: &str = r#"
     .af-page { padding: 1.5rem; max-width: 900px; }
-    .af-title { font-family: var(--font-head); font-size: 1.5rem; margin: 0 0 1rem; color: var(--text); }
+    .af-title { font-family: var(--font-display); font-size: 1.5rem; margin: 0 0 1rem; color: var(--text); }
     .af-section { border: 1px solid var(--border); border-radius: 8px; padding: 1rem; margin-bottom: 1rem; background: var(--surface); }
-    .af-cat { font-weight: 700; color: var(--accent); margin-bottom: 0.5rem; }
+    .af-cat { font-weight: 700; color: var(--accent-text); margin-bottom: 0.5rem; }
     .af-board { padding: 0.35rem 0 0.35rem 0.5rem; color: var(--text); font-size: 0.9rem; }
-    .af-sub { padding-left: 1.5rem; color: var(--text-2); font-size: 0.85rem; }
+    .af-sub { padding-left: 1.5rem; color: var(--text-muted); font-size: 0.85rem; }
     .af-form { display: grid; gap: 0.5rem; margin-top: 0.75rem; }
     .af-form input, .af-form select {
         background: var(--bg); border: 1px solid var(--border); color: var(--text);
         padding: 0.45rem 0.6rem; border-radius: 6px;
     }
     .af-form button {
-        justify-self: start; background: var(--accent); color: var(--accent-fg);
+        justify-self: start; background: var(--accent-solid); color: var(--on-accent);
         border: none; border-radius: 6px; padding: 0.45rem 0.9rem; font-weight: 600; cursor: pointer;
     }
-    .af-hint { color: var(--text-3); font-size: 0.8rem; margin-bottom: 1rem; }
+    .af-hint { color: var(--text-subtle); font-size: 0.8rem; margin-bottom: 1rem; }
 "#;
 
 #[component]

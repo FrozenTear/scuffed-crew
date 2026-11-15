@@ -1,0 +1,107 @@
+/* Direction A: Mint Refined
+   The current Scuffed Crew look, tightened onto the semantic layer.
+   Default density: default. Radius 12 / 8 / 999. Surfaces match tokens.rs.
+   App copy of themes/a-mint-refined.css: the [data-direction="a"] scopes are
+   keyed on :root and [data-theme] here, because the app switches theme with
+   data-theme on <html> and ships one look. */
+
+:root {
+  --font-display-weight: var(--font-weight-700);
+  --font-display-tracking: var(--tracking-snug);
+  --radius-card: var(--radius-3);
+  --radius-control: var(--radius-2);
+  --radius-tile: var(--radius-2);
+  --radius-pill: var(--radius-full);
+  --text-xs: var(--font-size-12);
+  --text-sm: var(--font-size-13);
+  --text-md: var(--font-size-14);
+  --text-xl: var(--font-size-18);
+  --text-2xl: var(--font-size-24);
+  --text-3xl: var(--font-size-30);
+}
+
+[data-theme="dark"] {
+  --bg: var(--neutral-900);
+  --surface: var(--neutral-850);
+  --surface-raised: var(--neutral-800);
+  --surface-sunken: var(--neutral-800);
+  --border: var(--neutral-700);
+  --border-strong: var(--neutral-450);
+  --text: var(--neutral-30);
+  --text-muted: var(--neutral-300);
+  --text-subtle: var(--neutral-400);
+  --text-inverse: var(--neutral-900);
+
+  --accent: var(--brand-accent);
+  --accent-text: var(--mint-400);
+  --accent-solid: var(--mint-400);
+  --on-accent: var(--neutral-900);
+  --accent-soft: #263e3c;
+  --accent-secondary: var(--brand-accent);
+  --accent-secondary-text: var(--accent-text);
+
+  --win: var(--mint-400);
+  --loss: var(--red-300);
+  --warn: var(--amber-300);
+  --info: var(--blue-400);
+  --on-win: var(--neutral-900);
+
+  --focus-ring: var(--accent-text);
+  --link: var(--accent-text);
+  --link-hover: var(--accent-text);
+  --shadow-card: var(--shadow-0);
+  --shadow-raised: var(--shadow-1-dark);
+  --shadow-overlay: var(--shadow-3-dark);
+
+  --chart-1: var(--chart-purple-dark);
+  --chart-2: var(--chart-mint-dark);
+  --chart-3: var(--chart-amber-dark);
+  --chart-4: var(--chart-red-dark);
+  --chart-5: var(--chart-blue-dark);
+  --chart-6: var(--chart-violet-dark);
+  --chart-wr-up: var(--chart-wr-up-dark);
+  --chart-wr-down: var(--chart-wr-down-dark);
+}
+
+[data-theme="light"] {
+  --bg: var(--neutral-50);
+  --surface: var(--neutral-0);
+  --surface-raised: var(--neutral-0);
+  --surface-sunken: var(--neutral-100);
+  --border: var(--neutral-200);
+  --border-strong: var(--neutral-420);
+  --text: var(--neutral-875);
+  --text-muted: var(--neutral-600);
+  --text-subtle: var(--neutral-500);
+  --text-inverse: var(--neutral-0);
+
+  --accent: var(--brand-accent);
+  --accent-text: var(--mint-700);
+  --accent-solid: var(--mint-700);
+  --on-accent: var(--neutral-0);
+  --accent-soft: #ecfbf6;
+  --accent-secondary: var(--brand-accent);
+  --accent-secondary-text: var(--accent-text);
+
+  --win: var(--mint-700);
+  --loss: var(--red-550);
+  --warn: var(--amber-600);
+  --info: var(--blue-600);
+  --on-win: var(--neutral-0);
+
+  --focus-ring: var(--accent-text);
+  --link: var(--accent-text);
+  --link-hover: var(--accent-text);
+  --shadow-card: var(--shadow-1-light);
+  --shadow-raised: var(--shadow-2-light);
+  --shadow-overlay: var(--shadow-3-light);
+
+  --chart-1: var(--chart-purple-light);
+  --chart-2: var(--chart-mint-light);
+  --chart-3: var(--chart-amber-light);
+  --chart-4: var(--chart-red-light);
+  --chart-5: var(--chart-blue-light);
+  --chart-6: var(--chart-violet-light);
+  --chart-wr-up: var(--chart-wr-up-light);
+  --chart-wr-down: var(--chart-wr-down-light);
+}

@@ -19,7 +19,7 @@ pub fn admin_pending<T: 'static>(resource: &ApiResource<T>, label: &str) -> Elem
     if let Some(err) = resource.error.read().as_ref().cloned() {
         let mut refresh = resource.refresh;
         rsx! {
-            p { class: "admin-loading", style: "color: var(--danger);",
+            p { class: "admin-loading", style: "color: var(--loss);",
                 "Failed to load {label}: {err}"
             }
             button {
@@ -66,12 +66,12 @@ pub fn list_cap_notice<T: 'static>(resource: &ApiResource<T>, what: &str) -> Ele
 pub fn AccessDenied(message: String) -> Element {
     rsx! {
         div {
-            style: "display:flex;flex-direction:column;align-items:center;justify-content:center;padding:4rem 1rem;color:var(--text-2);gap:0.5rem;text-align:center;",
+            style: "display:flex;flex-direction:column;align-items:center;justify-content:center;padding:4rem 1rem;color:var(--text-muted);gap:0.5rem;text-align:center;",
             h2 { style: "color:var(--text);margin-bottom:0.5rem;", "Access Denied" }
             p { "{message}" }
             Link {
                 to: Route::AdminDashboard {},
-                style: "color:var(--accent);margin-top:0.5rem;",
+                style: "color:var(--accent-text);margin-top:0.5rem;",
                 "Back to dashboard"
             }
         }

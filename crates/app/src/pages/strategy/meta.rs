@@ -62,28 +62,28 @@ impl SortDir {
 fn role_color(role: &str) -> &'static str {
     match role {
         "Tank" | "tank" => "var(--chart-5)",
-        "Damage" | "damage" => "var(--danger)",
-        "Support" | "support" => "var(--ok)",
-        _ => "var(--text-3)",
+        "Damage" | "damage" => "var(--loss)",
+        "Support" | "support" => "var(--win)",
+        _ => "var(--text-subtle)",
     }
 }
 
 fn role_bg(role: &str) -> &'static str {
     match role {
         "Tank" | "tank" => "color-mix(in srgb, var(--chart-5) 12%, transparent)",
-        "Damage" | "damage" => "color-mix(in srgb, var(--danger) 12%, transparent)",
-        "Support" | "support" => "color-mix(in srgb, var(--ok) 12%, transparent)",
-        _ => "color-mix(in srgb, var(--text-3) 12%, transparent)",
+        "Damage" | "damage" => "color-mix(in srgb, var(--loss) 12%, transparent)",
+        "Support" | "support" => "color-mix(in srgb, var(--win) 12%, transparent)",
+        _ => "color-mix(in srgb, var(--text-subtle) 12%, transparent)",
     }
 }
 
 fn winrate_bar_color(wr: f64) -> &'static str {
     if wr >= 52.0 {
-        "var(--ok)"
+        "var(--win)"
     } else if wr <= 48.0 {
-        "var(--danger)"
+        "var(--loss)"
     } else {
-        "var(--text-3)"
+        "var(--text-subtle)"
     }
 }
 
@@ -166,7 +166,7 @@ const PAGE_CSS: &str = r#"
         margin: 0 auto;
     }
     .meta-page-title {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: 2.2rem;
         color: var(--text);
         letter-spacing: 2px;
@@ -189,7 +189,7 @@ const PAGE_CSS: &str = r#"
         gap: 0.35rem;
     }
     .meta-role-card-title {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-weight: 700;
         font-size: 1rem;
         text-transform: uppercase;
@@ -197,7 +197,7 @@ const PAGE_CSS: &str = r#"
     }
     .meta-role-card-stat {
         font-size: 0.8rem;
-        color: var(--text-2);
+        color: var(--text-muted);
     }
     .meta-role-card-stat strong {
         color: var(--text);
@@ -216,7 +216,7 @@ const PAGE_CSS: &str = r#"
         font-weight: 600;
         border: 1px solid var(--border);
         background: var(--surface);
-        color: var(--text-2);
+        color: var(--text-muted);
         cursor: pointer;
         transition: all 0.15s;
         text-transform: uppercase;
@@ -227,9 +227,9 @@ const PAGE_CSS: &str = r#"
         color: var(--text);
     }
     .meta-chip.active {
-        border-color: var(--accent);
+        border-color: var(--accent-solid);
         background: var(--accent-soft);
-        color: var(--accent);
+        color: var(--accent-text);
     }
     .meta-table-wrap {
         overflow-x: auto;
@@ -245,12 +245,12 @@ const PAGE_CSS: &str = r#"
     .meta-table th {
         padding: 0.65rem 0.75rem;
         text-align: left;
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-weight: 700;
         font-size: 0.75rem;
         text-transform: uppercase;
         letter-spacing: 0.06em;
-        color: var(--text-3);
+        color: var(--text-subtle);
         border-bottom: 1px solid var(--border);
         cursor: pointer;
         user-select: none;
@@ -258,10 +258,10 @@ const PAGE_CSS: &str = r#"
         transition: color 0.15s;
     }
     .meta-table th:hover {
-        color: var(--text-2);
+        color: var(--text-muted);
     }
     .meta-table th.sorted {
-        color: var(--accent);
+        color: var(--accent-text);
     }
     .meta-table th .sort-ind {
         margin-left: 0.3rem;
@@ -276,7 +276,7 @@ const PAGE_CSS: &str = r#"
         border-bottom: none;
     }
     .meta-table tr:hover td {
-        background: var(--surface-2);
+        background: var(--surface-sunken);
     }
     .meta-hero-cell {
         display: flex;
@@ -332,11 +332,11 @@ const PAGE_CSS: &str = r#"
     .meta-footer {
         margin-top: 1rem;
         font-size: 0.75rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-align: right;
     }
     .meta-loading, .meta-empty {
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-align: center;
         padding: 3rem 0;
     }
@@ -569,7 +569,7 @@ fn render_hero_row(hero: &HeroMeta) -> Element {
                     div { class: "meta-bar-track",
                         div {
                             class: "meta-bar-fill",
-                            style: "width: {pr_width}; background: var(--accent);",
+                            style: "width: {pr_width}; background: var(--accent-solid);",
                         }
                     }
                 }

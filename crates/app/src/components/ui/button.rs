@@ -28,13 +28,13 @@ fn class_for(variant: BtnVariant, size: BtnSize) -> String {
 
 pub const BUTTON_CSS: &str = r#"
 .ui-btn { font-family: var(--font-body); font-weight: 600; border: none; cursor: pointer;
-  border-radius: var(--radius-md); display: inline-flex; align-items: center; gap: var(--space-2);
+  border-radius: var(--radius-control); display: inline-flex; align-items: center; gap: var(--space-2);
   transition: filter .12s, background .12s; }
 .ui-btn--sm { font-size: var(--text-sm); padding: var(--space-2) var(--space-3); }
-.ui-btn--md { font-size: var(--text-base); padding: var(--space-2) var(--space-4); }
-.ui-btn--primary { background: var(--accent); color: var(--accent-fg); }
+.ui-btn--md { font-size: var(--text-md); padding: var(--space-2) var(--space-4); }
+.ui-btn--primary { background: var(--accent-solid); color: var(--on-accent); }
 .ui-btn--ghost { background: transparent; border: 1px solid var(--border); color: var(--text); }
-.ui-btn--danger { background: var(--danger); color: var(--accent-fg); }
+.ui-btn--danger { background: var(--loss); color: var(--on-loss); }
 .ui-btn:hover:not(:disabled) { filter: brightness(1.08); }
 .ui-btn:disabled { opacity: .5; cursor: not-allowed; }
 "#;

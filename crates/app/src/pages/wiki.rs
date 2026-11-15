@@ -49,7 +49,7 @@ const PAGE_CSS: &str = r#"
         gap: 1rem;
     }
     .wiki-page-title {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: 2.5rem;
         color: var(--text);
         letter-spacing: 3px;
@@ -71,7 +71,7 @@ const PAGE_CSS: &str = r#"
         font-size: 0.85rem;
     }
     .wiki-search input::placeholder {
-        color: var(--text-3);
+        color: var(--text-subtle);
     }
     .wiki-search input:focus {
         border-color: var(--accent-soft);
@@ -97,7 +97,7 @@ const PAGE_CSS: &str = r#"
         transform: translateY(-1px);
     }
     .wiki-card-title {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-weight: 700;
         font-size: 1.1rem;
         color: var(--text);
@@ -106,15 +106,15 @@ const PAGE_CSS: &str = r#"
         display: flex;
         gap: 0.75rem;
         font-size: 0.7rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
     }
     .wiki-card-topic {
         font-size: 0.75rem;
-        color: var(--accent);
+        color: var(--accent-text);
         font-family: var(--font-mono);
     }
     .wiki-loading, .wiki-empty {
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-align: center;
         padding: 3rem 0;
     }

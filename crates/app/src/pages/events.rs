@@ -55,14 +55,14 @@ const PAGE_CSS: &str = r#"
         margin: 0 auto;
     }
     .events-page h1 {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: 2.5rem;
         color: var(--text);
         letter-spacing: 3px;
         margin: 0 0 0.5rem;
     }
     .events-subtitle {
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-size: 0.85rem;
         margin: 0 0 2rem;
     }
@@ -77,10 +77,10 @@ const PAGE_CSS: &str = r#"
         gap: 0.75rem;
     }
     .events-day-header {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-weight: 700;
         font-size: 1.1rem;
-        color: var(--accent);
+        color: var(--accent-text);
         text-transform: uppercase;
         letter-spacing: 0.06em;
         padding-bottom: 0.35rem;
@@ -105,7 +105,7 @@ const PAGE_CSS: &str = r#"
         border-color: var(--accent-soft);
     }
     .event-card-title {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-weight: 700;
         font-size: 1.1rem;
         color: var(--text);
@@ -116,7 +116,7 @@ const PAGE_CSS: &str = r#"
         flex-wrap: wrap;
         gap: 0.75rem;
         font-size: 0.78rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
     }
     .event-card-meta span {
         display: flex;
@@ -132,7 +132,7 @@ const PAGE_CSS: &str = r#"
         text-transform: uppercase;
         letter-spacing: 0.04em;
         background: var(--accent-soft);
-        color: var(--accent);
+        color: var(--accent-text);
     }
     .event-rsvp-row {
         display: flex;
@@ -146,7 +146,7 @@ const PAGE_CSS: &str = r#"
         border-radius: 6px;
         border: 1px solid var(--border);
         background: transparent;
-        color: var(--text-2);
+        color: var(--text-muted);
         font-size: 0.75rem;
         font-weight: 600;
         cursor: pointer;
@@ -158,9 +158,9 @@ const PAGE_CSS: &str = r#"
         border-color: var(--accent-soft);
     }
     .event-rsvp-btn.active-yes {
-        background: color-mix(in srgb, var(--ok) 20%, transparent);
-        color: var(--ok);
-        border-color: color-mix(in srgb, var(--ok) 33%, transparent);
+        background: color-mix(in srgb, var(--win) 20%, transparent);
+        color: var(--win);
+        border-color: color-mix(in srgb, var(--win) 33%, transparent);
     }
     .event-rsvp-btn.active-maybe {
         background: color-mix(in srgb, var(--warn) 20%, transparent);
@@ -168,15 +168,15 @@ const PAGE_CSS: &str = r#"
         border-color: color-mix(in srgb, var(--warn) 33%, transparent);
     }
     .event-rsvp-btn.active-no {
-        background: color-mix(in srgb, var(--danger) 20%, transparent);
-        color: var(--danger);
-        border-color: color-mix(in srgb, var(--danger) 33%, transparent);
+        background: color-mix(in srgb, var(--loss) 20%, transparent);
+        color: var(--loss);
+        border-color: color-mix(in srgb, var(--loss) 33%, transparent);
     }
     .event-rsvp-counts {
         display: flex;
         gap: 0.75rem;
         font-size: 0.7rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         margin-top: 0.15rem;
     }
     .event-rsvp-counts span {
@@ -190,16 +190,16 @@ const PAGE_CSS: &str = r#"
         border-radius: 50%;
         display: inline-block;
     }
-    .rsvp-dot.yes { background: var(--ok); }
+    .rsvp-dot.yes { background: var(--win); }
     .rsvp-dot.maybe { background: var(--warn); }
-    .rsvp-dot.no { background: var(--danger); }
+    .rsvp-dot.no { background: var(--loss); }
     .events-loading, .events-empty {
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-align: center;
         padding: 3rem 0;
     }
     .events-no-day {
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-size: 0.8rem;
         font-style: italic;
         padding: 0.25rem 0;

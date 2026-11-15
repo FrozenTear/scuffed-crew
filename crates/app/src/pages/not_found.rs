@@ -14,7 +14,7 @@ const NOT_FOUND_CSS: &str = r#"
         color: var(--text);
     }
     .nf-code {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: clamp(4rem, 18vw, 6.5rem);
         line-height: 1;
         letter-spacing: 0.04em;
@@ -22,13 +22,13 @@ const NOT_FOUND_CSS: &str = r#"
         margin: 0;
     }
     .nf-title {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: 1.25rem;
         margin: 1rem 0 0.35rem;
         color: var(--text);
     }
     .nf-msg {
-        color: var(--text-2);
+        color: var(--text-muted);
         font-size: 0.95rem;
         max-width: 28rem;
         margin: 0 0 1.5rem;
@@ -37,7 +37,7 @@ const NOT_FOUND_CSS: &str = r#"
     .nf-path {
         font-family: var(--font-mono);
         font-size: 0.72rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         letter-spacing: 0.04em;
         margin-bottom: 1.5rem;
         word-break: break-all;
@@ -46,14 +46,14 @@ const NOT_FOUND_CSS: &str = r#"
         display: inline-flex;
         align-items: center;
         padding: 0.55rem 1.1rem;
-        background: var(--accent);
-        color: var(--accent-fg);
+        background: var(--accent-solid);
+        color: var(--on-accent);
         font-family: var(--font-mono);
         font-size: 0.72rem;
         letter-spacing: 0.1em;
         text-transform: uppercase;
         text-decoration: none;
-        border-radius: var(--radius-md, 8px);
+        border-radius: var(--radius-control, 8px);
     }
     .nf-link:hover { filter: brightness(1.08); }
     .nf-links {

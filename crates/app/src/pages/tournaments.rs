@@ -64,7 +64,7 @@ const PAGE_CSS: &str = r#"
         margin: 0 auto;
     }
     .tournaments-page h1 {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: 2.5rem;
         color: var(--text);
         letter-spacing: 3px;
@@ -91,7 +91,7 @@ const PAGE_CSS: &str = r#"
         transform: translateY(-2px);
     }
     .tournament-card-name {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-weight: 700;
         font-size: 1.15rem;
         color: var(--text);
@@ -101,10 +101,10 @@ const PAGE_CSS: &str = r#"
         gap: 0.75rem;
         flex-wrap: wrap;
         font-size: 0.75rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
     }
     .tournament-card-desc {
-        color: var(--text-2);
+        color: var(--text-muted);
         font-size: 0.8rem;
         line-height: 1.5;
         margin: 0;
@@ -121,26 +121,26 @@ const PAGE_CSS: &str = r#"
     }
     .tournament-card-status.registration {
         background: color-mix(in srgb, var(--accent) 20%, transparent);
-        color: var(--accent);
+        color: var(--accent-text);
     }
     .tournament-card-status.in_progress {
-        background: color-mix(in srgb, var(--ok) 20%, transparent);
-        color: var(--ok);
+        background: color-mix(in srgb, var(--win) 20%, transparent);
+        color: var(--win);
     }
     .tournament-card-status.completed {
-        background: color-mix(in srgb, var(--text-2) 15%, transparent);
-        color: var(--text-2);
+        background: color-mix(in srgb, var(--text-muted) 15%, transparent);
+        color: var(--text-muted);
     }
     .tournament-card-status.archived {
-        background: color-mix(in srgb, var(--text-3) 15%, transparent);
-        color: var(--text-3);
+        background: color-mix(in srgb, var(--text-subtle) 15%, transparent);
+        color: var(--text-subtle);
     }
     .tournament-card-status.draft {
         background: color-mix(in srgb, var(--warn) 20%, transparent);
         color: var(--warn);
     }
     .tournaments-loading, .tournaments-empty {
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-align: center;
         padding: 3rem 0;
     }
@@ -179,7 +179,7 @@ pub fn Tournaments() -> Element {
                             rsx! {
                                 div { class: "tournaments-empty",
                                     p { "No tournaments yet." }
-                                    p { style: "margin-top:0.5rem; font-size:0.85rem; color: var(--text-3);",
+                                    p { style: "margin-top:0.5rem; font-size:0.85rem; color: var(--text-subtle);",
                                         "{detail}"
                                     }
                                 }

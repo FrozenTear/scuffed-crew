@@ -68,7 +68,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         position: absolute;
         right: max(2%, calc((100% - var(--home-max)) / 2 + 4%));
         bottom: -0.08em;
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: clamp(7rem, 28vw, 16rem);
         line-height: 0.78;
         letter-spacing: 0.02em;
@@ -112,7 +112,7 @@ pub const HOME_SHARED_CSS: &str = r#"
     }
     .home-skel {
         border-radius: 6px;
-        background: color-mix(in srgb, var(--text) 12%, var(--surface-2));
+        background: color-mix(in srgb, var(--text) 12%, var(--surface-sunken));
     }
     .home-skel-badge {
         width: 9.5rem;
@@ -152,7 +152,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         font-size: 0.68rem;
         letter-spacing: 0.16em;
         text-transform: uppercase;
-        color: var(--accent);
+        color: var(--accent-text);
         margin-bottom: 1.1rem;
         padding: 0.35rem 0.7rem 0.35rem 0.5rem;
         border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
@@ -164,8 +164,8 @@ pub const HOME_SHARED_CSS: &str = r#"
         content: '';
         width: 6px;
         height: 6px;
-        background: var(--accent);
-        box-shadow: 0 0 8px var(--accent);
+        background: var(--accent-solid);
+        box-shadow: 0 0 8px var(--accent-solid);
         animation: pulse-dot 1.6s ease-in-out infinite;
     }
     @keyframes pulse-dot {
@@ -173,7 +173,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         50% { opacity: 0.35; }
     }
     .home-title {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: clamp(2.85rem, 9.5vw, 5.5rem);
         line-height: 0.92;
         letter-spacing: 0.01em;
@@ -185,7 +185,7 @@ pub const HOME_SHARED_CSS: &str = r#"
     .home-title em {
         font-style: normal;
         display: block;
-        color: var(--accent);
+        color: var(--accent-text);
         text-shadow:
             0 0 48px color-mix(in srgb, var(--accent) 40%, transparent),
             -2px 0 0 color-mix(in srgb, var(--accent) 22%, transparent);
@@ -193,11 +193,11 @@ pub const HOME_SHARED_CSS: &str = r#"
     .home-sub {
         margin: 1.35rem 0 0;
         max-width: 32rem;
-        color: var(--text-2);
+        color: var(--text-muted);
         font-size: 1.05rem;
         line-height: 1.6;
         font-weight: 400;
-        border-left: 3px solid var(--accent);
+        border-left: 3px solid var(--accent-text);
         padding-left: 0.95rem;
     }
     .home-actions {
@@ -223,7 +223,7 @@ pub const HOME_SHARED_CSS: &str = r#"
     .home-metric:last-child { border-right: none; }
     .home-metric strong {
         display: block;
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: 1.85rem;
         letter-spacing: 0.04em;
         color: var(--text);
@@ -237,7 +237,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         font-size: 0.58rem;
         letter-spacing: 0.14em;
         text-transform: uppercase;
-        color: var(--text-3);
+        color: var(--text-subtle);
     }
     @media (max-width: 520px) {
         .home-metrics { display: flex; width: 100%; }
@@ -258,14 +258,14 @@ pub const HOME_SHARED_CSS: &str = r#"
         font-size: 0.62rem;
         letter-spacing: 0.14em;
         text-transform: uppercase;
-        color: var(--text-3);
+        color: var(--text-subtle);
         margin-bottom: 0.4rem;
     }
     .home-kicker.compete {
         color: var(--warn);
     }
     .home-heading {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-weight: 700;
         font-size: clamp(1.2rem, 2.4vw, 1.5rem);
         color: var(--text);
@@ -279,7 +279,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         content: none;
     }
     .home-body {
-        color: var(--text-2);
+        color: var(--text-muted);
         font-size: 0.95rem;
         line-height: 1.65;
         max-width: 40rem;
@@ -304,9 +304,9 @@ pub const HOME_SHARED_CSS: &str = r#"
         gap: 0.75rem;
         align-items: start;
         padding: 0.9rem 1rem 0.9rem 0.85rem;
-        background: color-mix(in srgb, var(--surface-2) 88%, var(--bg));
+        background: color-mix(in srgb, var(--surface-sunken) 88%, var(--bg));
         border: 1px solid var(--border);
-        border-left: 3px solid var(--accent);
+        border-left: 3px solid var(--accent-text);
         color: var(--text);
         font-size: 0.9rem;
         line-height: 1.45;
@@ -314,14 +314,14 @@ pub const HOME_SHARED_CSS: &str = r#"
     }
     .rules li:hover {
         border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
-        background: color-mix(in srgb, var(--accent) 6%, var(--surface-2));
+        background: color-mix(in srgb, var(--accent) 6%, var(--surface-sunken));
         transform: translateX(2px);
     }
     .rules li .rn {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: 1.35rem;
         letter-spacing: 0.04em;
-        color: var(--accent);
+        color: var(--accent-text);
         line-height: 1;
         min-width: 1.4rem;
         opacity: 0.95;
@@ -342,7 +342,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         .live-grid { grid-template-columns: 1fr; }
     }
     .live-panel {
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         border: 1px solid var(--border);
         padding: 1.1rem 1.15rem 1.25rem;
         position: relative;
@@ -379,15 +379,15 @@ pub const HOME_SHARED_CSS: &str = r#"
     .live-list li:last-child { border-bottom: none; }
     .live-list a {
         color: var(--text);
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-weight: 700;
         font-size: 1rem;
     }
-    .live-list a:hover { color: var(--accent); }
+    .live-list a:hover { color: var(--accent-text); }
     .live-meta {
         font-family: var(--font-mono);
         font-size: 0.68rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         white-space: nowrap;
     }
     .tag {
@@ -401,9 +401,9 @@ pub const HOME_SHARED_CSS: &str = r#"
         background: color-mix(in srgb, var(--warn) 10%, transparent);
     }
     .tag.live {
-        color: var(--danger);
-        border-color: color-mix(in srgb, var(--danger) 50%, transparent);
-        background: color-mix(in srgb, var(--danger) 12%, transparent);
+        color: var(--loss);
+        border-color: color-mix(in srgb, var(--loss) 50%, transparent);
+        background: color-mix(in srgb, var(--loss) 12%, transparent);
     }
     .tag.open {
         color: var(--warn);
@@ -427,25 +427,25 @@ pub const HOME_SHARED_CSS: &str = r#"
     }
     .next-match-vs {
         margin: 0;
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-weight: 700;
         font-size: 1.15rem;
         color: var(--text);
         line-height: 1.3;
     }
     .next-match-sep {
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-weight: 500;
         font-size: 0.9rem;
     }
     .next-match-opp {
-        color: var(--accent);
+        color: var(--accent-text);
     }
     .next-match-when {
         margin: 0.45rem 0 0.2rem;
         font-family: var(--font-mono);
         font-size: 0.78rem;
-        color: var(--text-2);
+        color: var(--text-muted);
         letter-spacing: 0.04em;
     }
     .results-ticker {
@@ -454,7 +454,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         gap: 0.75rem;
         margin: 0 0 1rem;
         padding: 0.55rem 0.75rem;
-        background: color-mix(in srgb, var(--surface-2) 90%, var(--bg));
+        background: color-mix(in srgb, var(--surface-sunken) 90%, var(--bg));
         border: 1px solid var(--border);
         overflow: hidden;
     }
@@ -463,7 +463,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         font-size: 0.62rem;
         letter-spacing: 0.14em;
         text-transform: uppercase;
-        color: var(--text-3);
+        color: var(--text-subtle);
         flex-shrink: 0;
     }
     .results-ticker-track {
@@ -492,15 +492,15 @@ pub const HOME_SHARED_CSS: &str = r#"
     .ticker-chip .ticker-score {
         font-family: var(--font-mono);
         font-weight: 700;
-        color: var(--text-2);
+        color: var(--text-muted);
     }
     .ticker-chip .ticker-date {
         font-family: var(--font-mono);
         font-size: 0.65rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
     }
-    .ticker-chip.win .ticker-score { color: var(--ok); }
-    .ticker-chip.loss .ticker-score { color: var(--danger); }
+    .ticker-chip.win .ticker-score { color: var(--win); }
+    .ticker-chip.loss .ticker-score { color: var(--loss); }
     .ticker-chip.draw .ticker-score { color: var(--warn); }
 
     /* Team rows: shared fixed tracks so every column lines up across rows */
@@ -526,7 +526,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         font-size: 0.58rem;
         letter-spacing: 0.12em;
         text-transform: uppercase;
-        color: var(--text-3);
+        color: var(--text-subtle);
     }
     .team-head span:nth-child(3),
     .team-head span:nth-child(4),
@@ -544,7 +544,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         position: absolute;
         left: 0; top: 0; bottom: 0;
         width: 0;
-        background: var(--accent);
+        background: var(--accent-solid);
         transition: width 0.15s;
     }
     .team-row:hover {
@@ -552,7 +552,7 @@ pub const HOME_SHARED_CSS: &str = r#"
     }
     .team-row:hover::before { width: 3px; }
     .team-row .tm-name {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-weight: 700;
         color: var(--text);
         font-size: 1.05rem;
@@ -564,7 +564,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         text-decoration: none;
     }
     .team-row .tm-name-link:hover {
-        color: var(--accent);
+        color: var(--accent-text);
         text-decoration: underline;
     }
     .team-row .tm-game {
@@ -572,7 +572,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         font-size: 0.65rem;
         letter-spacing: 0.08em;
         text-transform: uppercase;
-        color: var(--text-3);
+        color: var(--text-subtle);
         min-width: 0;
     }
     .team-row .tm-roster {
@@ -580,13 +580,13 @@ pub const HOME_SHARED_CSS: &str = r#"
         font-size: 0.65rem;
         letter-spacing: 0.06em;
         text-transform: uppercase;
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-align: right;
         font-variant-numeric: tabular-nums;
         white-space: nowrap;
     }
     .team-row .tm-div {
-        color: var(--text-2);
+        color: var(--text-muted);
         font-size: 0.8rem;
         text-align: right;
         white-space: nowrap;
@@ -597,7 +597,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         font-family: var(--font-mono);
         font-size: 0.8rem;
         letter-spacing: 0.04em;
-        color: var(--text-2);
+        color: var(--text-muted);
         text-align: right;
         font-variant-numeric: tabular-nums;
         white-space: nowrap;
@@ -623,7 +623,7 @@ pub const HOME_SHARED_CSS: &str = r#"
     }
     .team-lore {
         grid-column: 1 / -1;
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-size: 0.8rem;
         font-style: italic;
         margin-top: 0.15rem;
@@ -652,18 +652,18 @@ pub const HOME_SHARED_CSS: &str = r#"
     .news-row time {
         font-family: var(--font-mono);
         font-size: 0.65rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         letter-spacing: 0.1em;
     }
     .news-row h3 {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-weight: 700;
         font-size: 1.2rem;
         color: var(--text);
         margin: 0.25rem 0 0.4rem;
     }
     .news-row p {
-        color: var(--text-2);
+        color: var(--text-muted);
         font-size: 0.9rem;
         line-height: 1.55;
         margin: 0;
@@ -674,7 +674,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         font-size: 0.58rem;
         letter-spacing: 0.1em;
         text-transform: uppercase;
-        color: var(--accent);
+        color: var(--accent-text);
         margin-left: 0.5rem;
         border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
         padding: 0.05rem 0.3rem;
@@ -687,7 +687,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         grid-template-columns: 1.15fr 1fr;
         gap: 0;
         border: 1px solid var(--border);
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         overflow: hidden;
         box-shadow: 0 12px 40px color-mix(in srgb, var(--bg) 35%, transparent);
     }
@@ -698,7 +698,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         padding: 1.6rem 1.45rem;
         background:
             linear-gradient(135deg, color-mix(in srgb, var(--accent) 16%, transparent) 0%, transparent 55%),
-            var(--surface-2);
+            var(--surface-sunken);
         border-right: 1px solid var(--border);
     }
     @media (max-width: 720px) {
@@ -717,13 +717,13 @@ pub const HOME_SHARED_CSS: &str = r#"
         display: flex;
         gap: 0.55rem;
         padding: 0.45rem 0;
-        color: var(--text-2);
+        color: var(--text-muted);
         font-size: 0.86rem;
         border-bottom: 1px solid var(--border);
     }
     .expect-list li::before {
         content: "▸";
-        color: var(--accent);
+        color: var(--accent-text);
         font-weight: 700;
         flex-shrink: 0;
     }
@@ -738,13 +738,13 @@ pub const HOME_SHARED_CSS: &str = r#"
         font-size: 0.62rem;
         letter-spacing: 0.12em;
         text-transform: uppercase;
-        color: var(--accent);
+        color: var(--accent-text);
         margin: 0 0 0.4rem;
     }
     .never-box p {
         margin: 0;
         font-size: 0.8rem;
-        color: var(--text-2);
+        color: var(--text-muted);
         line-height: 1.5;
     }
     .seek-tags {
@@ -771,12 +771,12 @@ pub const HOME_SHARED_CSS: &str = r#"
         font-size: 0.7rem;
         letter-spacing: 0.12em;
         text-transform: uppercase;
-        color: var(--accent);
+        color: var(--accent-text);
         border-bottom: 1px solid transparent;
     }
     .home-link:hover {
         color: var(--text);
-        border-bottom-color: var(--accent);
+        border-bottom-color: var(--accent-solid);
     }
 
     .btn {
@@ -795,8 +795,8 @@ pub const HOME_SHARED_CSS: &str = r#"
         clip-path: polygon(0 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%);
     }
     .btn-primary {
-        background: var(--accent);
-        color: var(--accent-fg);
+        background: var(--accent-solid);
+        color: var(--on-accent);
         box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 40%, transparent);
     }
     .btn-primary:hover {
@@ -810,13 +810,13 @@ pub const HOME_SHARED_CSS: &str = r#"
         color: var(--text);
     }
     .btn-outline:hover {
-        border-color: var(--text-2);
+        border-color: var(--text-muted);
         color: var(--text);
         transform: translateY(-1px);
     }
 
     .muted {
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-size: 0.88rem;
     }
     .home-foot {
@@ -827,7 +827,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         font-size: 0.65rem;
         letter-spacing: 0.1em;
         text-transform: uppercase;
-        color: var(--text-3);
+        color: var(--text-subtle);
     }
 
     /* --- Alignment: Center = hero only; body always left --- */
@@ -841,7 +841,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         margin-left: auto;
         margin-right: auto;
         border-left: none;
-        border-top: 3px solid var(--accent);
+        border-top: 3px solid var(--accent-solid);
         padding-left: 0;
         padding-top: 0.85rem;
         max-width: 32rem;
@@ -875,7 +875,7 @@ pub const HOME_SHARED_CSS: &str = r#"
 pub const HOME_SKIN_CLEAN_CSS: &str = r#"
 .home-wrap[data-home-skin="clean"] .home-badge {
     clip-path: none;
-    border-radius: var(--radius-sm, 7px);
+    border-radius: var(--radius-control, 7px);
     letter-spacing: 0.1em;
 }
 .home-wrap[data-home-skin="clean"] .home-title {
@@ -887,19 +887,19 @@ pub const HOME_SKIN_CLEAN_CSS: &str = r#"
     opacity: 0.45;
 }
 .home-wrap[data-home-skin="clean"] .home-metrics {
-    border-radius: var(--radius-md, 9px);
+    border-radius: var(--radius-control, 9px);
     overflow: hidden;
 }
 .home-wrap[data-home-skin="clean"] .rules li {
-    border-radius: 0 var(--radius-sm, 7px) var(--radius-sm, 7px) 0;
+    border-radius: 0 var(--radius-control, 7px) var(--radius-control, 7px) 0;
 }
 .home-wrap[data-home-skin="clean"] .recruit-banner {
-    border-radius: var(--radius-md, 9px);
+    border-radius: var(--radius-control, 9px);
     overflow: hidden;
 }
 .home-wrap[data-home-skin="clean"] .btn {
     clip-path: none;
-    border-radius: var(--radius-sm, 7px);
+    border-radius: var(--radius-control, 7px);
 }
 .home-wrap[data-home-skin="clean"] .seek-tag {
     border-radius: var(--radius-pill, 999px);
@@ -1004,7 +1004,7 @@ pub const HOME_SHELL_CSS: &str = r#"
     border: 1px solid var(--border);
     background: color-mix(in srgb, var(--surface) 92%, var(--bg));
     padding: 1rem 1.1rem;
-    border-radius: var(--radius-md, 9px);
+    border-radius: var(--radius-control, 9px);
     transition: border-color 0.15s, background 0.15s;
 }
 .home-wrap .team-card:hover {
@@ -1012,14 +1012,14 @@ pub const HOME_SHELL_CSS: &str = r#"
     background: color-mix(in srgb, var(--accent) 5%, var(--surface));
 }
 .home-wrap .team-card .tc-name {
-    font-family: var(--font-head);
+    font-family: var(--font-display);
     font-weight: 600;
     font-size: 1.05rem;
 }
 .home-wrap .team-card .tc-meta {
     margin-top: 0.35rem;
     font-size: 0.8rem;
-    color: var(--text-2);
+    color: var(--text-muted);
 }
 .home-wrap .team-card.forming {
     border-style: dashed;
@@ -1037,9 +1037,9 @@ pub const HOME_SHELL_CSS: &str = r#"
     letter-spacing: 0.04em;
     padding: 0.4rem 0.75rem;
     border: 1px solid var(--border);
-    background: var(--surface-2);
+    background: var(--surface-sunken);
     border-radius: var(--radius-pill, 999px);
-    color: var(--text-2);
+    color: var(--text-muted);
     transition: border-color 0.15s, color 0.15s;
 }
 .home-wrap .team-chip:hover {
@@ -1048,7 +1048,7 @@ pub const HOME_SHELL_CSS: &str = r#"
 }
 .home-wrap .team-chip.forming {
     border-style: dashed;
-    color: var(--text-3);
+    color: var(--text-subtle);
 }
 "#;
 

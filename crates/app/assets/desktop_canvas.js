@@ -565,7 +565,8 @@
             );
             const sel = vis.find(e => e.id === selectedElement);
             if (sel) {
-                ctx.strokeStyle = "#00ff00";
+                // Follows the brand's solid accent (--canvas-selection token).
+                ctx.strokeStyle = getComputedStyle(c).getPropertyValue("--canvas-selection").trim();
                 ctx.lineWidth = 2;
                 ctx.setLineDash([4, 4]);
                 ctx.beginPath();

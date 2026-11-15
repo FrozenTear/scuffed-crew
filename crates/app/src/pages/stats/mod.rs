@@ -161,7 +161,7 @@ pub(super) fn wr_bar_color(tally: Tally) -> &'static str {
     let wins2 = u64::from(tally.wins) * 2;
     let total = u64::from(tally.games);
     if !tally.has_win_rate() || wins2 == total {
-        "var(--text-3)"
+        "var(--text-subtle)"
     } else if wins2 > total {
         "var(--chart-wr-up)"
     } else {
@@ -282,7 +282,7 @@ const STATS_CSS: &str = r#"
         --history-border: 1px;
     }
     .my-stats.stats-page h1 {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: 1.8rem;
         color: var(--text);
         text-transform: uppercase;
@@ -299,10 +299,10 @@ const STATS_CSS: &str = r#"
     }
     .my-stats .stats-visibility-note {
         font-size: 0.8rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         margin: -0.75rem 0 1rem;
     }
-    .my-stats .stats-visibility-note a { color: var(--accent); }
+    .my-stats .stats-visibility-note a { color: var(--accent-text); }
     .stats-header-actions {
         display: flex;
         flex-wrap: wrap;
@@ -315,7 +315,7 @@ const STATS_CSS: &str = r#"
         border-radius: 6px;
         border: 1px solid var(--border);
         background: var(--bg);
-        color: var(--text-2);
+        color: var(--text-muted);
         font-size: 0.8rem;
         cursor: pointer;
         transition: all 0.15s;
@@ -336,8 +336,8 @@ const STATS_CSS: &str = r#"
         padding: 0.6rem 1.2rem;
         border: none;
         background: none;
-        color: var(--text-2);
-        font-family: var(--font-head);
+        color: var(--text-muted);
+        font-family: var(--font-display);
         font-size: 0.9rem;
         font-weight: 600;
         text-transform: uppercase;
@@ -351,8 +351,8 @@ const STATS_CSS: &str = r#"
         color: var(--text);
     }
     .my-stats .stats-tab.active {
-        color: var(--accent);
-        border-bottom-color: var(--accent);
+        color: var(--accent-text);
+        border-bottom-color: var(--accent-solid);
     }
     /* Win-rate text values: plain text tokens, muted below the min-games gate.
        No traffic light; polarity lives in the bar vs the 50% hairline. */
@@ -363,17 +363,17 @@ const STATS_CSS: &str = r#"
         color: var(--text);
         font-variant-numeric: tabular-nums;
     }
-    .my-stats .stats-wr.muted { color: var(--text-3); font-weight: 400; }
+    .my-stats .stats-wr.muted { color: var(--text-subtle); font-weight: 400; }
     .stats-gate-note {
         font-size: 0.75rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         margin: 0 0 0.75rem;
     }
     /* Outcome chips: status tokens as status only. Win = good, defeat =
        serious/danger, draw = neutral text (never gold). */
-    .outcome-win { color: var(--ok); font-weight: 600; }
-    .outcome-loss { color: var(--danger); font-weight: 600; }
-    .outcome-draw { color: var(--text-2); font-weight: 600; }
+    .outcome-win { color: var(--win); font-weight: 600; }
+    .outcome-loss { color: var(--loss); font-weight: 600; }
+    .outcome-draw { color: var(--text-muted); font-weight: 600; }
     /* W5b history layout: outcome | identity | E D A | dmg heal | date.
        Header + cards share the outer grid; numeric cols live in .match-stats
        with fixed tracks so values column-scan. Tighter than free scoreline. */
@@ -413,7 +413,7 @@ const STATS_CSS: &str = r#"
         font-weight: 600;
         letter-spacing: 0.04em;
         text-transform: uppercase;
-        color: var(--text-3);
+        color: var(--text-subtle);
     }
     /* Header and value cells in a column share padding, box model, and alignment. */
     .match-h-outcome,
@@ -441,7 +441,7 @@ const STATS_CSS: &str = r#"
         font-size: 0.85rem;
         transition: background 0.15s;
     }
-    .match-card:hover { background: var(--surface-2); }
+    .match-card:hover { background: var(--surface-sunken); }
     /* History rows open the game page through a stretched link: an empty anchor
        that covers the whole row. Marked values sit above it, so a button is
        never inside the link. */
@@ -453,10 +453,10 @@ const STATS_CSS: &str = r#"
         color: inherit;
         text-decoration: none;
     }
-    .match-card-overlay:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    .match-card-overlay:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
     .match-cards { display: flex; flex-direction: column; gap: 0.3rem; }
     .match-card .match-outcome {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: 0.85rem;
         font-weight: 700;
         text-transform: uppercase;
@@ -557,7 +557,7 @@ const STATS_CSS: &str = r#"
         outline: none;
     }
     .stat-unsure-mark:focus-visible::after {
-        outline: 2px solid var(--accent);
+        outline: 2px solid var(--focus-ring);
         outline-offset: 0;
     }
     /* The note is a live region that is always in the page. Closed, it is
@@ -604,7 +604,7 @@ const STATS_CSS: &str = r#"
         text-align: left;
         text-decoration: none;
         white-space: normal;
-        color: var(--text-2);
+        color: var(--text-muted);
     }
     .match-card .match-outcome:has(.stat-unsure-note-open),
     .match-card .match-hero:has(.stat-unsure-note-open) {
@@ -640,7 +640,7 @@ const STATS_CSS: &str = r#"
         white-space: nowrap;
     }
     .match-card .match-map {
-        color: var(--text-2);
+        color: var(--text-muted);
         font-size: 0.75rem;
         display: flex;
         flex-wrap: wrap;
@@ -656,12 +656,12 @@ const STATS_CSS: &str = r#"
         white-space: nowrap;
     }
     .match-stat {
-        color: var(--text-2);
+        color: var(--text-muted);
         font-size: 0.8rem;
         font-variant-numeric: tabular-nums;
     }
     .match-card .match-date {
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-size: 0.75rem;
         white-space: nowrap;
     }
@@ -676,7 +676,7 @@ const STATS_CSS: &str = r#"
         border-radius: 6px;
         border: 1px solid var(--border);
         background: var(--bg);
-        color: var(--text-2);
+        color: var(--text-muted);
         font-size: 0.8rem;
         cursor: pointer;
         transition: all 0.15s;
@@ -705,7 +705,7 @@ const STATS_CSS: &str = r#"
         justify-content: center;
     }
     .my-stats .stat-tile-value {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: 1.9rem;
         color: var(--text);
         letter-spacing: 2px;
@@ -713,18 +713,18 @@ const STATS_CSS: &str = r#"
     }
     .my-stats .stat-tile-hero .stat-tile-value {
         font-size: 2.8rem;
-        color: var(--accent);
+        color: var(--accent-text);
     }
     .my-stats .stat-tile-label {
         font-size: 0.75rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-transform: uppercase;
         letter-spacing: 0.05em;
         margin-top: 0.35rem;
     }
     .my-stats .stat-tile-record {
         font-size: 0.9rem;
-        color: var(--text-2);
+        color: var(--text-muted);
         margin-top: 0.4rem;
         white-space: nowrap;
     }
@@ -733,7 +733,7 @@ const STATS_CSS: &str = r#"
     .stats-load-error {
         text-align: center;
         padding: 2rem 1rem;
-        color: var(--text-2);
+        color: var(--text-muted);
         font-size: 0.9rem;
     }
     .stats-load-error p { margin: 0 0 0.75rem; }
@@ -742,7 +742,7 @@ const STATS_CSS: &str = r#"
         border-radius: 6px;
         border: 1px solid var(--border);
         background: var(--bg);
-        color: var(--text-2);
+        color: var(--text-muted);
         font-size: 0.8rem;
         cursor: pointer;
         transition: all 0.15s;
@@ -766,9 +766,9 @@ const STATS_CSS: &str = r#"
         padding: 1.25rem;
     }
     .overview-section h3 {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: 0.85rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-transform: uppercase;
         letter-spacing: 0.06em;
         margin: 0 0 1rem;
@@ -791,26 +791,26 @@ const STATS_CSS: &str = r#"
     }
     .role-card-sub {
         font-size: 0.75rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         margin-top: 0.15rem;
     }
     .role-card-wr {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: 1.1rem;
         font-weight: 700;
         color: var(--text);
         font-variant-numeric: tabular-nums;
     }
-    .role-card-wr.muted { color: var(--text-3); font-weight: 400; }
+    .role-card-wr.muted { color: var(--text-subtle); font-weight: 400; }
 
     /* Heroes: chart + table */
     .heroes-chart-section {
         margin-bottom: 1.5rem;
     }
     .section-title {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: 0.8rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-transform: uppercase;
         letter-spacing: 0.06em;
         margin-bottom: 0.75rem;
@@ -827,7 +827,7 @@ const STATS_CSS: &str = r#"
         border-bottom: 1px solid var(--border);
     }
     .map-mode-name {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: 0.85rem;
         font-weight: 600;
         text-transform: uppercase;
@@ -835,7 +835,7 @@ const STATS_CSS: &str = r#"
     }
     .map-mode-agg {
         font-size: 0.75rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         margin-left: auto;
     }
 
@@ -860,14 +860,14 @@ const STATS_CSS: &str = r#"
         font-size: 0.85rem;
     }
     .tracker-slim-label {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: 0.8rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-transform: uppercase;
         letter-spacing: 0.06em;
     }
-    .tracker-slim-sep { color: var(--text-3); }
-    .tracker-slim-note { color: var(--text-2); }
+    .tracker-slim-sep { color: var(--text-subtle); }
+    .tracker-slim-note { color: var(--text-muted); }
     .tracker-slim-actions {
         margin-left: auto;
         display: flex;
@@ -878,7 +878,7 @@ const STATS_CSS: &str = r#"
         border-radius: 6px;
         border: 1px solid var(--border);
         background: var(--bg);
-        color: var(--text-2);
+        color: var(--text-muted);
         font-size: 0.8rem;
         cursor: pointer;
         transition: all 0.15s;
@@ -909,9 +909,9 @@ const STATS_CSS: &str = r#"
         margin-bottom: 1.5rem;
     }
     .daemon-settings summary {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: 0.85rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-transform: uppercase;
         letter-spacing: 0.06em;
         cursor: pointer;
@@ -931,7 +931,7 @@ const STATS_CSS: &str = r#"
     }
     .daemon-settings-label {
         font-size: 0.8rem;
-        color: var(--text-2);
+        color: var(--text-muted);
         white-space: nowrap;
     }
     .daemon-settings-input {
@@ -950,7 +950,7 @@ const STATS_CSS: &str = r#"
     }
     .daemon-settings-hint {
         font-size: 0.75rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         margin-top: 0.5rem;
     }
 
@@ -970,9 +970,9 @@ const STATS_CSS: &str = r#"
         margin-bottom: 0.75rem;
     }
     .tracker-download-head h3 {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: 0.85rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-transform: uppercase;
         letter-spacing: 0.06em;
         margin: 0;
@@ -981,7 +981,7 @@ const STATS_CSS: &str = r#"
         display: inline-block;
         padding: 0.15rem 0.55rem;
         border-radius: 4px;
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         border: 1px solid var(--warn);
         color: var(--warn);
         font-size: 0.75rem;
@@ -991,7 +991,7 @@ const STATS_CSS: &str = r#"
     }
     .tracker-download p {
         font-size: 0.85rem;
-        color: var(--text-2);
+        color: var(--text-muted);
         margin: 0 0 0.75rem;
         line-height: 1.5;
     }
@@ -1003,7 +1003,7 @@ const STATS_CSS: &str = r#"
         padding: 0.6rem 0.75rem;
         font-family: var(--font-mono);
         font-size: 0.8rem;
-        color: var(--accent);
+        color: var(--accent-text);
         word-break: break-all;
         margin: 0 0 0.75rem;
         user-select: all;
@@ -1018,7 +1018,7 @@ const STATS_CSS: &str = r#"
         border-radius: 6px;
         border: 1px solid var(--border);
         background: var(--bg);
-        color: var(--text-2);
+        color: var(--text-muted);
         font-size: 0.8rem;
         text-decoration: none;
         transition: all 0.15s;
@@ -1046,7 +1046,7 @@ const STATS_CSS: &str = r#"
         font-size: 0.75rem;
         text-transform: uppercase;
         letter-spacing: 0.05em;
-        color: var(--text-3);
+        color: var(--text-subtle);
         margin-right: 0.25rem;
     }
     .my-stats.stats-page .filter-chip {
@@ -1054,18 +1054,18 @@ const STATS_CSS: &str = r#"
         border-radius: 999px;
         border: 1px solid var(--border);
         background: var(--bg);
-        color: var(--text-2);
+        color: var(--text-muted);
         font-size: 0.75rem;
         cursor: pointer;
     }
     .my-stats.stats-page .filter-chip.active {
-        border-color: var(--accent);
+        border-color: var(--accent-solid);
         color: var(--text);
         background: color-mix(in srgb, var(--accent) 12%, var(--bg));
     }
     .filter-hint {
         font-size: 0.75rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         margin: 0;
         width: 100%;
     }
@@ -1076,7 +1076,7 @@ const STATS_CSS: &str = r#"
         border-radius: 6px;
         border: 1px solid var(--border);
         background: var(--bg);
-        color: var(--text-2);
+        color: var(--text-muted);
         cursor: pointer;
     }
     .density-toggle:hover { color: var(--text); border-color: var(--accent-soft); }
@@ -1104,8 +1104,8 @@ const STATS_CSS: &str = r#"
         border-bottom: 1px solid var(--border);
     }
     .mini-hero-name { color: var(--text); font-weight: 500; }
-    .mini-hero-meta { color: var(--text-3); }
-    .mini-hero-wr { color: var(--accent); font-weight: 600; font-variant-numeric: tabular-nums; }
+    .mini-hero-meta { color: var(--text-subtle); }
+    .mini-hero-wr { color: var(--accent-text); font-weight: 600; font-variant-numeric: tabular-nums; }
     .mode-chips { display: flex; flex-wrap: wrap; gap: 0.5rem; }
     .mode-chip {
         display: flex;
@@ -1117,9 +1117,9 @@ const STATS_CSS: &str = r#"
         background: var(--bg);
         min-width: 4.5rem;
     }
-    .mode-chip-name { font-size: 0.75rem; color: var(--text-3); text-transform: uppercase; }
+    .mode-chip-name { font-size: 0.75rem; color: var(--text-subtle); text-transform: uppercase; }
     .mode-chip-wr { font-size: 1.1rem; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
-    .mode-chip-n { font-size: 0.75rem; color: var(--text-3); }
+    .mode-chip-n { font-size: 0.75rem; color: var(--text-subtle); }
     .form-strip { display: flex; flex-wrap: wrap; gap: 0.35rem; }
     .form-chip {
         width: 1.6rem; height: 1.6rem;
@@ -1127,20 +1127,20 @@ const STATS_CSS: &str = r#"
         border-radius: 4px;
         font-size: 0.75rem; font-weight: 700;
     }
-    .form-chip.win { background: color-mix(in srgb, var(--ok) 25%, transparent); color: var(--ok); }
-    .form-chip.loss { background: color-mix(in srgb, var(--danger) 25%, transparent); color: var(--danger); }
-    .form-chip.draw { background: color-mix(in srgb, var(--text-3) 20%, transparent); color: var(--text-3); }
+    .form-chip.win { background: color-mix(in srgb, var(--win) 25%, transparent); color: var(--win); }
+    .form-chip.loss { background: color-mix(in srgb, var(--loss) 25%, transparent); color: var(--loss); }
+    .form-chip.draw { background: color-mix(in srgb, var(--text-subtle) 20%, transparent); color: var(--text-subtle); }
     .map-callouts { display: flex; flex-wrap: wrap; gap: 0.75rem; margin-bottom: 1.25rem; }
     .map-callout {
         display: flex; flex-wrap: wrap; gap: 0.5rem 0.75rem; align-items: baseline;
         padding: 0.6rem 0.9rem; border-radius: 8px; border: 1px solid var(--border);
         background: var(--surface); font-size: 0.85rem;
     }
-    .map-callout.best { border-left: 3px solid var(--ok); }
-    .map-callout.worst { border-left: 3px solid var(--danger); }
-    .map-callout-label { font-size: 0.75rem; text-transform: uppercase; color: var(--text-3); }
+    .map-callout.best { border-left: 3px solid var(--win); }
+    .map-callout.worst { border-left: 3px solid var(--loss); }
+    .map-callout-label { font-size: 0.75rem; text-transform: uppercase; color: var(--text-subtle); }
     .map-callout-name { font-weight: 600; color: var(--text); }
-    .map-callout-meta { color: var(--text-2); font-variant-numeric: tabular-nums; }
+    .map-callout-meta { color: var(--text-muted); font-variant-numeric: tabular-nums; }
 
     /* W4 polish: tables, mobile, hold layout */
     .my-stats.stats-page .data-table th:not(:first-child),
@@ -1949,7 +1949,7 @@ mod header_layout_tests {
         let ring = block_after(STATS_CSS, ".stat-unsure-mark:focus-visible::after {");
         let ring_head = ring.split('}').next().unwrap();
         assert!(
-            ring_head.contains("outline: 2px solid var(--accent)"),
+            ring_head.contains("outline: 2px solid var(--focus-ring)"),
             "{ring_head}"
         );
         let last = open_rules.last().unwrap().1;

@@ -23,7 +23,7 @@ const PAGE_CSS: &str = r#"
         margin: 0 auto;
     }
     .news-page-title {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: 2.5rem;
         color: var(--text);
         letter-spacing: 3px;
@@ -48,24 +48,24 @@ const PAGE_CSS: &str = r#"
         align-items: center;
         gap: 0.5rem;
         font-size: 0.7rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         margin-bottom: 0.5rem;
     }
     .news-title {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: 1.2rem;
         font-weight: 700;
         color: var(--text);
         margin: 0 0 0.5rem;
     }
     .news-body {
-        color: var(--text-2);
+        color: var(--text-muted);
         font-size: 0.85rem;
         line-height: 1.7;
         margin: 0;
     }
     .news-loading {
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-align: center;
         padding: 3rem 0;
     }

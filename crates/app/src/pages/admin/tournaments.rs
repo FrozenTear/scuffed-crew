@@ -583,7 +583,7 @@ pub fn AdminTournaments() -> Element {
                         div { style: "margin-bottom:2rem;",
                             div { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem;",
                                 h2 {
-                                    style: "font-family:var(--font-head),sans-serif;font-size:1.1rem;font-weight:700;color:var(--text);text-transform:uppercase;letter-spacing:0.04em;margin:0;",
+                                    style: "font-family:var(--font-display),sans-serif;font-size:1.1rem;font-weight:700;color:var(--text);text-transform:uppercase;letter-spacing:0.04em;margin:0;",
                                     "Participants"
                                 }
                                 button {
@@ -626,7 +626,7 @@ pub fn AdminTournaments() -> Element {
                         // Rounds & matches section
                         div {
                             h2 {
-                                style: "font-family:var(--font-head),sans-serif;font-size:1.1rem;font-weight:700;color:var(--text);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:0.75rem;",
+                                style: "font-family:var(--font-display),sans-serif;font-size:1.1rem;font-weight:700;color:var(--text);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:0.75rem;",
                                 "Bracket"
                             }
                             {
@@ -646,7 +646,7 @@ pub fn AdminTournaments() -> Element {
                                                     rsx! {
                                                         div { style: "margin-bottom:1.5rem;",
                                                             h3 {
-                                                                style: "font-family:var(--font-head),sans-serif;font-size:0.9rem;font-weight:600;color:var(--text-2);text-transform:uppercase;margin-bottom:0.5rem;",
+                                                                style: "font-family:var(--font-display),sans-serif;font-size:0.9rem;font-weight:600;color:var(--text-muted);text-transform:uppercase;margin-bottom:0.5rem;",
                                                                 "Round {round.round_number} - {round.stage}"
                                                             }
                                                             DataTable { headers: vec!["#", "Player A", "Score", "Player B", "Status", "Actions"],
@@ -670,14 +670,14 @@ pub fn AdminTournaments() -> Element {
                                                                                 td { "{bm.bracket_position}" }
                                                                                 td {
                                                                                     span {
-                                                                                        style: if bm.winner_id == bm.participant_a_id && bm.winner_id.is_some() { "color:var(--accent);font-weight:700;" } else { "" },
+                                                                                        style: if bm.winner_id == bm.participant_a_id && bm.winner_id.is_some() { "color:var(--accent-text);font-weight:700;" } else { "" },
                                                                                         "{a_name}"
                                                                                     }
                                                                                 }
                                                                                 td { "{score_display}" }
                                                                                 td {
                                                                                     span {
-                                                                                        style: if bm.winner_id == bm.participant_b_id && bm.winner_id.is_some() { "color:var(--accent);font-weight:700;" } else { "" },
+                                                                                        style: if bm.winner_id == bm.participant_b_id && bm.winner_id.is_some() { "color:var(--accent-text);font-weight:700;" } else { "" },
                                                                                         "{b_name}"
                                                                                     }
                                                                                 }

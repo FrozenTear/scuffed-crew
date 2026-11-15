@@ -29,8 +29,8 @@ const CSS: &str = r#"
         .hero-icons-admin__status ~ .data-table-scroll .data-table th,
         .hero-icons-admin__status ~ .data-table-scroll .data-table td { padding-left: 0.5rem; padding-right: 0.5rem; }
     }
-    .hero-icons-admin__off { display: inline-block; padding: 0 var(--space-2); border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: var(--text-sm); color: var(--text-2); white-space: nowrap; }
-    .hero-icons-admin__status { min-height: 1.5em; margin: 0 0 var(--space-3); font-size: var(--text-sm); color: var(--text-2); }
+    .hero-icons-admin__off { display: inline-block; padding: 0 var(--space-2); border: 1px solid var(--border); border-radius: var(--radius-control); font-size: var(--text-sm); color: var(--text-muted); white-space: nowrap; }
+    .hero-icons-admin__status { min-height: 1.5em; margin: 0 0 var(--space-3); font-size: var(--text-sm); color: var(--text-muted); }
 "#;
 
 #[component]

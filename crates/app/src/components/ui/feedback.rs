@@ -1,18 +1,18 @@
 use dioxus::prelude::*;
 pub const FEEDBACK_CSS: &str = r#"
-.ui-empty { text-align: center; color: var(--text-2); padding: var(--space-8) var(--space-4); }
-.ui-empty h3 { font-family: var(--font-head); color: var(--text); font-size: var(--text-lg); margin-bottom: var(--space-2); }
+.ui-empty { text-align: center; color: var(--text-muted); padding: var(--space-8) var(--space-4); }
+.ui-empty h3 { font-family: var(--font-display); color: var(--text); font-size: var(--text-lg); margin-bottom: var(--space-2); }
 .ui-empty p { font-size: var(--text-sm); }
 .ui-spinner { width: 18px; height: 18px; border: 2px solid var(--border);
-  border-top-color: var(--accent); border-radius: 50%; animation: ui-spin .7s linear infinite; }
+  border-top-color: var(--accent-solid); border-radius: 50%; animation: ui-spin .7s linear infinite; }
 @keyframes ui-spin { to { transform: rotate(360deg); } }
 .ui-empty__next { margin-top: var(--space-4); }
 .ui-skel-list { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-4) 0; }
-.ui-skel-row { height: 3.25rem; border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--text) 12%, var(--surface-2)); }
+.ui-skel-row { height: 3.25rem; border-radius: var(--radius-control);
+  background: color-mix(in srgb, var(--text) 12%, var(--surface-sunken)); }
 .ui-skel-status { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
   overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
-.ui-status { color: var(--text-3); font-size: var(--text-sm); text-align: center; margin: var(--space-2) 0; }
+.ui-status { color: var(--text-subtle); font-size: var(--text-sm); text-align: center; margin: var(--space-2) 0; }
 "#;
 #[component]
 pub fn EmptyState(

@@ -40,15 +40,15 @@ const ADMIN_CSS: &str = r#"
         gap: 0.5rem;
     }
     .admin-sidebar .brand-text h2 {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: 1.2rem;
-        color: var(--accent);
+        color: var(--accent-text);
         text-transform: uppercase;
         margin: 0;
     }
     .admin-sidebar .brand-text span {
         font-size: 0.7rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-transform: uppercase;
         letter-spacing: 0.05em;
     }
@@ -61,13 +61,13 @@ const ADMIN_CSS: &str = r#"
     .admin-sidebar nav a {
         display: block;
         padding: 0.6rem 1.25rem;
-        color: var(--text-2);
+        color: var(--text-muted);
         text-decoration: none;
         font-size: 0.9rem;
         transition: background 0.15s, color 0.15s;
     }
     .admin-sidebar nav a:hover {
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         color: var(--text);
     }
     .admin-nav-group {
@@ -83,12 +83,12 @@ const ADMIN_CSS: &str = r#"
         font-weight: 700;
         letter-spacing: 0.08em;
         text-transform: uppercase;
-        color: var(--text-3);
+        color: var(--text-subtle);
     }
     .admin-sidebar nav a.admin-view-site {
         margin-top: auto;
         border-top: 1px solid var(--border);
-        color: var(--accent);
+        color: var(--accent-text);
         font-weight: 600;
     }
     .admin-sidebar .user-info {
@@ -103,7 +103,7 @@ const ADMIN_CSS: &str = r#"
     }
     .admin-sidebar .user-info .role {
         font-size: 0.7rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-transform: uppercase;
     }
     .admin-sidebar-close {
@@ -111,7 +111,7 @@ const ADMIN_CSS: &str = r#"
         margin-left: auto;
         background: transparent;
         border: 1px solid var(--border);
-        color: var(--text-2);
+        color: var(--text-muted);
         border-radius: 6px;
         width: 2.25rem;
         height: 2.25rem;
@@ -134,7 +134,7 @@ const ADMIN_CSS: &str = r#"
         overflow-y: auto;
     }
     .admin-main h1 {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: 1.8rem;
         color: var(--text);
         margin-bottom: 1.5rem;
@@ -156,7 +156,7 @@ const ADMIN_CSS: &str = r#"
             border-bottom: 1px solid var(--border);
         }
         .admin-mobile-bar .menu-btn {
-            background: var(--surface-2);
+            background: var(--surface-sunken);
             border: 1px solid var(--border);
             color: var(--text);
             border-radius: 6px;
@@ -168,10 +168,10 @@ const ADMIN_CSS: &str = r#"
         }
         .admin-mobile-bar .menu-btn:hover { border-color: var(--accent-soft); }
         .admin-mobile-bar .title {
-            font-family: var(--font-head);
+            font-family: var(--font-display);
             font-size: 0.95rem;
             font-weight: 700;
-            color: var(--accent);
+            color: var(--accent-text);
             text-transform: uppercase;
             letter-spacing: 0.04em;
         }
@@ -244,7 +244,7 @@ pub fn AdminLayout() -> Element {
     if auth().loading {
         return rsx! {
             div {
-                style: "display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;color:var(--text-3);",
+                style: "display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;color:var(--text-subtle);",
                 p { "Checking session…" }
             }
         };
@@ -254,12 +254,12 @@ pub fn AdminLayout() -> Element {
     if !auth().is_officer_or_above() {
         return rsx! {
             div {
-                style: "display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;color:var(--text-2);gap:0.5rem;",
+                style: "display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;color:var(--text-muted);gap:0.5rem;",
                 h2 { style: "color:var(--text);margin-bottom:0.5rem;", "Access Denied" }
                 p { "You need officer permissions to access the admin panel." }
                 Link {
                     to: Route::Login {},
-                    style: "color:var(--accent);margin-top:0.5rem;",
+                    style: "color:var(--accent-text);margin-top:0.5rem;",
                     onclick: move |_| {
                         if !auth().is_logged_in() {
                             crate::pages::remember_login_return(&return_path);
@@ -270,11 +270,11 @@ pub fn AdminLayout() -> Element {
                 if cfg!(debug_assertions) {
                     a {
                         href: "/api/dev/login",
-                        style: "color:var(--text-2);",
+                        style: "color:var(--text-muted);",
                         "Dev login (in-memory only)"
                     }
                 }
-                Link { to: Route::Home {}, style: "color:var(--accent);margin-top:1rem;", "Return home" }
+                Link { to: Route::Home {}, style: "color:var(--accent-text);margin-top:1rem;", "Return home" }
             }
         };
     }

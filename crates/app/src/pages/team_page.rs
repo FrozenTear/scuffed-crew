@@ -89,7 +89,7 @@ const PAGE_CSS: &str = r#"
     }
     .team-page-loading,
     .team-page-missing {
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-align: center;
         padding: 3rem 0;
     }
@@ -102,9 +102,9 @@ const PAGE_CSS: &str = r#"
     .team-page-logo {
         width: 120px;
         height: 120px;
-        border-radius: var(--radius-md, 9px);
+        border-radius: var(--radius-control, 9px);
         overflow: hidden;
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         border: 1px solid var(--border);
         display: flex;
         align-items: center;
@@ -117,9 +117,9 @@ const PAGE_CSS: &str = r#"
         object-fit: cover;
     }
     .team-page-logo .team-initials {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: 2.4rem;
-        color: var(--accent);
+        color: var(--accent-text);
         letter-spacing: 3px;
     }
     .team-page-info {
@@ -129,7 +129,7 @@ const PAGE_CSS: &str = r#"
         min-width: 0;
     }
     .team-page-name {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: 2.2rem;
         color: var(--text);
         letter-spacing: 2px;
@@ -147,11 +147,11 @@ const PAGE_CSS: &str = r#"
         font-size: 0.7rem;
         letter-spacing: 0.08em;
         text-transform: uppercase;
-        color: var(--text-3);
+        color: var(--text-subtle);
         margin: 0;
     }
     .team-page-lore {
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-size: 0.85rem;
         font-style: italic;
         margin: 0;
@@ -159,7 +159,7 @@ const PAGE_CSS: &str = r#"
     .team-page-record {
         font-family: var(--font-mono);
         font-size: 0.85rem;
-        color: var(--text-2);
+        color: var(--text-muted);
         font-variant-numeric: tabular-nums;
         white-space: nowrap;
         margin: 0;
@@ -171,7 +171,7 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 2rem;
     }
     .team-section h2 {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: 1.2rem;
         font-weight: 700;
         color: var(--text);
@@ -201,7 +201,7 @@ const PAGE_CSS: &str = r#"
         height: 40px;
         border-radius: 50%;
         overflow: hidden;
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         display: flex;
         align-items: center;
         justify-content: center;
@@ -213,13 +213,13 @@ const PAGE_CSS: &str = r#"
         object-fit: cover;
     }
     .team-roster-avatar .member-initials {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: 0.9rem;
-        color: var(--accent);
+        color: var(--accent-text);
         letter-spacing: 1px;
     }
     .team-roster-name {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-weight: 700;
         color: var(--text);
         flex: 1;
@@ -251,7 +251,7 @@ const PAGE_CSS: &str = r#"
     .team-match-date {
         font-family: var(--font-mono);
         font-size: 0.7rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         white-space: nowrap;
     }
     .team-match-score {
@@ -260,9 +260,9 @@ const PAGE_CSS: &str = r#"
         font-variant-numeric: tabular-nums;
         white-space: nowrap;
     }
-    .team-match-score.win { color: var(--ok); }
-    .team-match-score.loss { color: var(--danger); }
-    .team-match-score.draw { color: var(--text-2); }
+    .team-match-score.win { color: var(--win); }
+    .team-match-score.loss { color: var(--loss); }
+    .team-match-score.draw { color: var(--text-muted); }
     .team-match-opponent {
         color: var(--text);
         min-width: 0;
@@ -275,7 +275,7 @@ const PAGE_CSS: &str = r#"
         font-size: 0.65rem;
         letter-spacing: 0.06em;
         text-transform: uppercase;
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-align: right;
         white-space: nowrap;
     }
@@ -298,7 +298,7 @@ const PAGE_CSS: &str = r#"
     .team-schedule-meta {
         font-family: var(--font-mono);
         font-size: 0.7rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         white-space: nowrap;
     }
     .team-page-back {
@@ -307,7 +307,7 @@ const PAGE_CSS: &str = r#"
         border-top: 1px solid var(--border);
     }
     .team-page-back a {
-        color: var(--accent);
+        color: var(--accent-text);
         text-decoration: none;
         font-size: 0.85rem;
         font-weight: 600;

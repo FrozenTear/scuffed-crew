@@ -187,14 +187,9 @@ fn App() -> Element {
     }
 
     rsx! {
-        // The shell only preloads this CSS, so first paint does not wait on
-        // fonts.googleapis.com. Apply it after boot. An inline onload would
-        // be blocked by script-src. `display=swap` is in `FONT_STYLESHEET`.
-        // Web title and meta updates live in `HeadLayout`.
-        document::Link {
-            rel: "stylesheet",
-            href: crate::head::FONT_STYLESHEET,
-        }
+        // Self-hosted faces with `font-display: swap`; the shell preloads the
+        // display face. Web title and meta updates live in `HeadLayout`.
+        style { {theme::fonts::fonts_css()} }
         document::Stylesheet {
             href: asset!("/assets/tailwind.css")
         }
@@ -234,14 +229,16 @@ mod tests {
         assert!(!visible.contains("rel=\"canonical\""));
         assert!(!visible.contains("og:url"));
         assert!(!visible.contains("og:image"));
-        let href = crate::head::FONT_STYLESHEET.replace('&', "&amp;");
-        assert_eq!(visible.matches(href.as_str()).count(), 1, "preload only");
-        assert!(
-            !visible.contains("rel=\"stylesheet\""),
-            "the font stylesheet is applied after boot"
+        // Fonts are self-hosted: no third-party font host, one font preload.
+        assert!(!visible.contains("fonts.googleapis.com"));
+        assert!(!visible.contains("fonts.gstatic.com"));
+        assert!(!visible.contains("rel=\"preconnect\""));
+        assert!(!visible.contains("rel=\"stylesheet\""));
+        assert_eq!(
+            visible.matches("as=\"font\"").count(),
+            1,
+            "one font preload"
         );
-        assert_eq!(visible.matches("rel=\"preconnect\"").count(), 2);
-        assert!(visible.contains("fonts.gstatic.com"));
         assert_eq!(visible.matches("rel=\"apple-touch-icon\"").count(), 1);
         assert_eq!(visible.matches("/assets/favicon.svg").count(), 1);
         assert_eq!(visible.matches("/assets/favicon-32.png").count(), 1);
@@ -255,12 +252,8 @@ mod tests {
         let main_src = include_str!("main.rs");
         let before_tests = main_src.split("mod tests").next().unwrap_or(main_src);
         assert!(
-            before_tests.contains("document::Link"),
-            "the font stylesheet is applied after boot"
-        );
-        assert!(
-            before_tests.contains("FONT_STYLESHEET"),
-            "the applied href is the shared font URL"
+            before_tests.contains("fonts::fonts_css()"),
+            "the self-hosted @font-face rules are applied by the app root"
         );
         // dx injects a loader at every `</body>`, including one inside a comment.
         assert_eq!(

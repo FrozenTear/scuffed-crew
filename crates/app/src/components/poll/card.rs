@@ -17,13 +17,13 @@ const CARD_CSS: &str = r#"
     border-color: var(--accent-soft);
 }
 .poll-card-title {
-    font-family: var(--font-head);
+    font-family: var(--font-display);
     font-size: 1.15rem;
     color: var(--text);
     margin: 0 0 0.25rem;
 }
 .poll-card-desc {
-    color: var(--text-2);
+    color: var(--text-muted);
     font-size: 0.85rem;
     margin: 0 0 1rem;
 }
@@ -34,7 +34,7 @@ const CARD_CSS: &str = r#"
 }
 .poll-option {
     position: relative;
-    background: var(--surface-2);
+    background: var(--surface-sunken);
     border: 1px solid var(--border);
     border-radius: 6px;
     padding: 0.6rem 0.75rem;
@@ -46,7 +46,7 @@ const CARD_CSS: &str = r#"
     border-color: var(--accent-soft);
 }
 .poll-option.voted {
-    border-color: var(--accent);
+    border-color: var(--accent-solid);
 }
 .poll-option-bar {
     position: absolute;
@@ -72,7 +72,7 @@ const CARD_CSS: &str = r#"
     font-size: 0.9rem;
 }
 .poll-option-stats {
-    color: var(--text-3);
+    color: var(--text-subtle);
     font-size: 0.8rem;
     white-space: nowrap;
 }
@@ -81,15 +81,15 @@ const CARD_CSS: &str = r#"
     justify-content: space-between;
     align-items: center;
     margin-top: 0.75rem;
-    color: var(--text-3);
+    color: var(--text-subtle);
     font-size: 0.75rem;
 }
 .poll-total-votes {
-    color: var(--text-2);
+    color: var(--text-muted);
 }
 .poll-badge-multiple {
     background: var(--accent-soft);
-    color: var(--accent);
+    color: var(--accent-text);
     padding: 0.15rem 0.5rem;
     border-radius: 999px;
     font-size: 0.65rem;
@@ -100,7 +100,7 @@ const CARD_CSS: &str = r#"
 .poll-delete-btn {
     background: none;
     border: 1px solid var(--border);
-    color: var(--text-3);
+    color: var(--text-subtle);
     border-radius: 4px;
     padding: 0.2rem 0.5rem;
     font-size: 0.7rem;
@@ -108,8 +108,8 @@ const CARD_CSS: &str = r#"
     transition: border-color 0.15s, color 0.15s;
 }
 .poll-delete-btn:hover {
-    border-color: var(--danger);
-    color: var(--danger);
+    border-color: var(--loss);
+    color: var(--loss);
 }
 "#;
 

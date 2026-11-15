@@ -62,17 +62,17 @@ pub const MARKDOWN_CSS: &str = r#"
     .md-body h1,
     .md-body h2,
     .md-body h3 {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
     }
     .md-body h1 { font-size: var(--text-3xl); font-weight: 700; }
     .md-body h2 { font-size: var(--text-2xl); font-weight: 700; }
     .md-body h3 { font-size: var(--text-xl); font-weight: 600; }
     .md-body h4 { font-size: var(--text-lg); font-weight: 600; }
-    .md-body h5 { font-size: var(--text-base); font-weight: 600; }
+    .md-body h5 { font-size: var(--text-md); font-weight: 600; }
     .md-body h6 {
         font-size: var(--text-sm);
         font-weight: 600;
-        color: var(--text-2);
+        color: var(--text-muted);
         text-transform: uppercase;
         letter-spacing: 0.04em;
     }

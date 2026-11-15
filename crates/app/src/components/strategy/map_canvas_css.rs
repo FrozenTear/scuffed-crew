@@ -47,13 +47,13 @@ pub const MAP_CANVAS_CSS: &str = r#"
         overflow-y: auto;
     }
     .map-selector-content h2 {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: 1.5rem;
         color: var(--text);
         margin-bottom: 0.5rem;
     }
     .map-selector-content p {
-        color: var(--text-2);
+        color: var(--text-muted);
         margin-bottom: 1.5rem;
     }
     .map-selector-modes {
@@ -68,7 +68,7 @@ pub const MAP_CANVAS_CSS: &str = r#"
     }
     .map-selector-mode-title {
         padding: 0.6rem 1rem;
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         color: var(--text);
         font-weight: 600;
         cursor: pointer;
@@ -78,7 +78,7 @@ pub const MAP_CANVAS_CSS: &str = r#"
     }
     .map-count {
         font-size: 0.8rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         background: var(--surface);
         padding: 0.1rem 0.5rem;
         border-radius: 10px;
@@ -95,13 +95,13 @@ pub const MAP_CANVAS_CSS: &str = r#"
         text-align: left;
         background: transparent;
         border: none;
-        color: var(--text-2);
+        color: var(--text-muted);
         cursor: pointer;
         transition: background 0.15s, color 0.15s;
     }
     .map-selector-btn:hover,
     .map-selector-btn-submap:hover {
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         color: var(--text);
     }
     .map-selector-btn-submap {
@@ -114,7 +114,7 @@ pub const MAP_CANVAS_CSS: &str = r#"
     .map-selector-expand-hint {
         margin-left: 0.5rem;
         font-size: 0.8rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
     }
     .map-selector-submaps {
         padding-left: 0.5rem;

@@ -420,21 +420,21 @@ fn scroll_to_hero_card(dom_id: &str) {
 
 fn change_type_color(ct: &str) -> &'static str {
     match ct {
-        "buff" => "var(--ok)",
-        "nerf" => "var(--danger)",
+        "buff" => "var(--win)",
+        "nerf" => "var(--loss)",
         "adjustment" => "var(--warn)",
-        "bugfix" => "var(--text-3)",
-        _ => "var(--text-3)",
+        "bugfix" => "var(--text-subtle)",
+        _ => "var(--text-subtle)",
     }
 }
 
 fn change_type_bg(ct: &str) -> &'static str {
     match ct {
-        "buff" => "color-mix(in srgb, var(--ok) 12%, transparent)",
-        "nerf" => "color-mix(in srgb, var(--danger) 12%, transparent)",
+        "buff" => "color-mix(in srgb, var(--win) 12%, transparent)",
+        "nerf" => "color-mix(in srgb, var(--loss) 12%, transparent)",
         "adjustment" => "color-mix(in srgb, var(--warn) 12%, transparent)",
-        "bugfix" => "color-mix(in srgb, var(--text-3) 12%, transparent)",
-        _ => "color-mix(in srgb, var(--text-3) 12%, transparent)",
+        "bugfix" => "color-mix(in srgb, var(--text-subtle) 12%, transparent)",
+        _ => "color-mix(in srgb, var(--text-subtle) 12%, transparent)",
     }
 }
 
@@ -451,15 +451,15 @@ fn change_type_label(ct: &str) -> &'static str {
 fn section_tag_color(category: &str) -> &'static str {
     let cat = category.to_lowercase();
     if cat.contains("hero") || cat.contains("balance") {
-        "var(--ok)"
+        "var(--win)"
     } else if cat.contains("bug") || cat.contains("fix") {
-        "var(--text-3)"
+        "var(--text-subtle)"
     } else if cat.contains("map") {
         "var(--chart-5)"
     } else if cat.contains("competitive") || cat.contains("ranked") {
-        "var(--accent)"
+        "var(--accent-text)"
     } else {
-        "var(--text-3)"
+        "var(--text-subtle)"
     }
 }
 
@@ -500,7 +500,7 @@ const PAGE_CSS: &str = r#"
         flex-wrap: wrap;
     }
     .patch-page-title {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: 1.85rem;
         color: var(--text);
         letter-spacing: 0.12em;
@@ -513,7 +513,7 @@ const PAGE_CSS: &str = r#"
         font-size: 0.75rem;
         letter-spacing: 0.08em;
         text-transform: uppercase;
-        color: var(--text-3);
+        color: var(--text-subtle);
     }
     .patch-toolbar {
         position: sticky;
@@ -548,13 +548,13 @@ const PAGE_CSS: &str = r#"
         font-weight: 600;
         letter-spacing: 0.08em;
         text-transform: uppercase;
-        color: var(--text-3);
+        color: var(--text-subtle);
     }
     .patch-search {
         flex: 1;
         min-width: 0;
         padding: 0.45rem 0.75rem;
-        border-radius: var(--radius-sm);
+        border-radius: var(--radius-control);
         border: 1px solid var(--border);
         background: var(--surface);
         color: var(--text);
@@ -563,16 +563,16 @@ const PAGE_CSS: &str = r#"
         transition: border-color 0.15s;
     }
     .patch-search::placeholder {
-        color: var(--text-3);
+        color: var(--text-subtle);
     }
     .patch-search:focus {
-        border-color: var(--accent);
+        border-color: var(--accent-solid);
     }
     .patch-text-btn {
         flex-shrink: 0;
         border: none;
         background: none;
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-family: var(--font-body);
         font-size: 0.75rem;
         cursor: pointer;
@@ -595,7 +595,7 @@ const PAGE_CSS: &str = r#"
         font-weight: 600;
         border: 1px solid var(--border);
         background: var(--surface);
-        color: var(--text-2);
+        color: var(--text-muted);
         cursor: pointer;
         transition: all 0.15s;
         text-transform: uppercase;
@@ -606,9 +606,9 @@ const PAGE_CSS: &str = r#"
         color: var(--text);
     }
     .patch-chip.active {
-        border-color: var(--accent);
+        border-color: var(--accent-solid);
         background: var(--accent-soft);
-        color: var(--accent);
+        color: var(--accent-text);
     }
     .patch-year-block + .patch-year-block {
         margin-top: 1.15rem;
@@ -619,7 +619,7 @@ const PAGE_CSS: &str = r#"
         font-weight: 600;
         letter-spacing: 0.14em;
         text-transform: uppercase;
-        color: var(--text-3);
+        color: var(--text-subtle);
         margin: 0 0 0.45rem;
     }
     .patch-featured-wrap {
@@ -634,7 +634,7 @@ const PAGE_CSS: &str = r#"
         background: var(--surface);
         background-image: none;
         border: 1px solid var(--border);
-        border-radius: var(--radius-sm);
+        border-radius: var(--radius-control);
         /* visible so the 12+ hero TOC can stick; hidden clips position:sticky */
         overflow: visible;
         transition: border-color 0.2s;
@@ -667,7 +667,7 @@ const PAGE_CSS: &str = r#"
         user-select: none;
     }
     .patch-card-header:hover {
-        background: var(--surface-2);
+        background: var(--surface-sunken);
     }
     .patch-card-featured .patch-card-header {
         grid-template-columns: auto minmax(0, 1fr) auto;
@@ -685,11 +685,11 @@ const PAGE_CSS: &str = r#"
         padding: 0.12rem 0.45rem;
         border-radius: 4px;
         background: var(--accent-soft);
-        color: var(--accent);
+        color: var(--accent-text);
         flex-shrink: 0;
     }
     .patch-card-title {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-weight: 700;
         font-size: 0.9rem;
         color: var(--text);
@@ -708,13 +708,13 @@ const PAGE_CSS: &str = r#"
     .patch-card-date {
         font-family: var(--font-mono);
         font-size: 0.75rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         white-space: nowrap;
     }
     .patch-hero-count {
         font-size: 0.75rem;
-        color: var(--text-2);
-        background: var(--surface-2);
+        color: var(--text-muted);
+        background: var(--surface-sunken);
         padding: 0.08rem 0.4rem;
         border-radius: var(--radius-pill);
         white-space: nowrap;
@@ -744,12 +744,12 @@ const PAGE_CSS: &str = r#"
     .patch-tag-more {
         font-family: var(--font-mono);
         font-size: 0.75rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         white-space: nowrap;
     }
     .patch-expand-icon {
         font-size: 0.75rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         line-height: 1;
         transition: transform 0.2s;
     }
@@ -765,7 +765,7 @@ const PAGE_CSS: &str = r#"
     }
     .patch-body-lead {
         font-size: 0.85rem;
-        color: var(--text-2);
+        color: var(--text-muted);
         line-height: 1.55;
         margin: 0.85rem 0 0.15rem;
     }
@@ -783,7 +783,7 @@ const PAGE_CSS: &str = r#"
         margin-top: 0.65rem;
     }
     .patch-section-title {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-weight: 700;
         font-size: 0.8rem;
         color: var(--text);
@@ -832,7 +832,7 @@ const PAGE_CSS: &str = r#"
         font-weight: 600;
         letter-spacing: 0.12em;
         text-transform: uppercase;
-        color: var(--text-3);
+        color: var(--text-subtle);
         margin: 0 0 0.15rem;
     }
     .patch-hero-toc-item {
@@ -842,9 +842,9 @@ const PAGE_CSS: &str = r#"
         gap: 0.35rem;
         width: 100%;
         border: 1px solid transparent;
-        border-radius: var(--radius-sm);
+        border-radius: var(--radius-control);
         background: transparent;
-        color: var(--text-2);
+        color: var(--text-muted);
         font: inherit;
         font-size: 0.75rem;
         text-align: left;
@@ -852,13 +852,13 @@ const PAGE_CSS: &str = r#"
         cursor: pointer;
     }
     .patch-hero-toc-item:hover {
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         color: var(--text);
     }
     .patch-hero-toc-item.active {
         border-color: var(--accent-soft);
         background: var(--accent-soft);
-        color: var(--accent);
+        color: var(--accent-text);
     }
     /* Collapsed rows: multi-col on desktop so 24 closed heroes are not a
        tall wall. Open detail spans the full track (DEV + change grid). */
@@ -868,9 +868,9 @@ const PAGE_CSS: &str = r#"
         gap: 0.4rem 0.65rem;
     }
     .patch-hero-card {
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         border: 1px solid var(--border);
-        border-radius: var(--radius-sm);
+        border-radius: var(--radius-control);
         overflow: hidden;
         scroll-margin-top: calc(48px + 5.75rem);
     }
@@ -896,10 +896,10 @@ const PAGE_CSS: &str = r#"
         cursor: pointer;
     }
     .patch-hero-card-header:hover {
-        background: color-mix(in srgb, var(--surface) 55%, var(--surface-2));
+        background: color-mix(in srgb, var(--surface) 55%, var(--surface-sunken));
     }
     .patch-hero-name {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-weight: 700;
         font-size: 0.88rem;
         color: var(--text);
@@ -920,7 +920,7 @@ const PAGE_CSS: &str = r#"
         font-size: 0.75rem;
         letter-spacing: 0.04em;
         text-transform: uppercase;
-        color: var(--text-3);
+        color: var(--text-subtle);
         white-space: nowrap;
     }
     .patch-change-badge {
@@ -938,7 +938,7 @@ const PAGE_CSS: &str = r#"
     }
     .patch-dev-comment {
         font-size: 0.78rem;
-        color: var(--text-2);
+        color: var(--text-muted);
         font-style: italic;
         padding: 0.45rem 0.7rem;
         margin: 0.55rem 0 0.5rem;
@@ -993,14 +993,14 @@ const PAGE_CSS: &str = r#"
         content: "\2022";
         position: absolute;
         left: 0;
-        color: var(--text-3);
+        color: var(--text-subtle);
     }
     .patch-external-link {
         display: inline-flex;
         align-items: center;
         gap: 0.3rem;
         font-size: 0.75rem;
-        color: var(--accent);
+        color: var(--accent-text);
         text-decoration: none;
         margin-top: 0.75rem;
         transition: opacity 0.15s;
@@ -1012,12 +1012,12 @@ const PAGE_CSS: &str = r#"
     .patch-external-text {
         display: inline-flex;
         font-size: 0.75rem;
-        color: var(--text-2);
+        color: var(--text-muted);
         margin-top: 0.75rem;
         word-break: break-all;
     }
     .patch-loading, .patch-empty {
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-align: center;
         padding: 4rem 1rem;
         font-size: 0.95rem;
@@ -1027,7 +1027,7 @@ const PAGE_CSS: &str = r#"
         font-size: 0.85rem;
     }
     .patch-error {
-        color: var(--danger);
+        color: var(--loss);
     }
     .patch-retry {
         margin-top: 1rem;

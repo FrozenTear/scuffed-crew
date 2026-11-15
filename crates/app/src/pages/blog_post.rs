@@ -34,7 +34,7 @@ const PAGE_CSS: &str = r#"
         display: inline-flex;
         align-items: center;
         gap: 0.4rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-size: 0.8rem;
         margin-bottom: 1.5rem;
         text-decoration: none;
@@ -51,7 +51,7 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 1.5rem;
     }
     .blog-post-title {
-        font-family: var(--font-head);
+        font-family: var(--font-display);
         font-size: 2.2rem;
         color: var(--text);
         letter-spacing: 2px;
@@ -62,13 +62,13 @@ const PAGE_CSS: &str = r#"
         align-items: center;
         gap: 0.75rem;
         font-size: 0.75rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         margin-bottom: 2rem;
         padding-bottom: 1.5rem;
         border-bottom: 1px solid var(--border);
     }
     .blog-post-content {
-        color: var(--text-2);
+        color: var(--text-muted);
         font-size: 0.9rem;
         line-height: 1.85;
         overflow-wrap: break-word;
@@ -82,7 +82,7 @@ const PAGE_CSS: &str = r#"
         margin: 0 0 1rem;
     }
     .blog-post-content a {
-        color: var(--accent);
+        color: var(--accent-text);
     }
     .blog-post-content img {
         max-width: 100%;
@@ -91,7 +91,7 @@ const PAGE_CSS: &str = r#"
     .blog-post-content blockquote {
         border-left: 3px solid var(--border);
         padding-left: 1rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
     }
     .blog-post-content pre {
         background: var(--surface);
@@ -109,7 +109,7 @@ const PAGE_CSS: &str = r#"
         padding: 0.35rem 0.6rem;
     }
     .blog-post-loading, .blog-post-error {
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-align: center;
         padding: 3rem 0;
     }

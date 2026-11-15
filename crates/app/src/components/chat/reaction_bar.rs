@@ -48,17 +48,17 @@ const REACTION_CSS: &str = r#"
     font-size: 12px;
     cursor: pointer;
     transition: border-color 0.15s, background 0.15s;
-    color: var(--text-2);
+    color: var(--text-muted);
     line-height: 1.6;
 }
 
 .reaction-pill:hover {
     border-color: var(--accent-soft);
-    background: var(--surface-2);
+    background: var(--surface-sunken);
 }
 
 .reaction-pill--mine {
-    border-color: var(--accent);
+    border-color: var(--accent-solid);
     background: color-mix(in srgb, var(--accent) 9%, transparent);
 }
 
@@ -80,14 +80,14 @@ const REACTION_CSS: &str = r#"
     background: none;
     cursor: pointer;
     font-size: 12px;
-    color: var(--text-3);
+    color: var(--text-subtle);
     transition: border-color 0.15s, color 0.15s;
     position: relative;
 }
 
 .reaction-add:hover {
     border-color: var(--accent-soft);
-    color: var(--text-2);
+    color: var(--text-muted);
 }
 
 .reaction-picker {
