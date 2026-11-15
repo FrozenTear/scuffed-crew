@@ -70,7 +70,7 @@ Which names each tracker asks for:
 | 0.5.0-alpha.7 to 0.5.0-alpha.12 | six: `heroes-v1.tar` first, then `heroes-v2.tar`, `heroes-v2-1080.tar`, `bans-v1.tar`, `maps-v1.tar`, `words-v1.tar` |
 | 0.5.0-rc.1 to 0.5.0-rc.9, 0.5.0, and 0.6.0-alpha.1 to 0.6.0-alpha.1.4 | seven: the six, then `names-v1.tar` (optional) |
 | 0.6.0-alpha.2 to 0.6.0-alpha.3, and main | eight: the seven, then `bans-picks-v1.tar` (optional) |
-| the first release after 0.6.0-alpha.3, and later | ten: the eight, then `rank-v1.tar` (optional) and `queue-title-v1.tar` (optional) |
+| 0.6.0-alpha.3.1 and later | ten: the eight, then `rank-v1.tar` (optional) and `queue-title-v1.tar` (optional) |
 
 No tracker pins a pack `version`: each one takes the `version` the list
 gives. `heroes-v1.tar` is the only pack every release needs (it is the one
