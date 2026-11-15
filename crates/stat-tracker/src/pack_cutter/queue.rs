@@ -140,6 +140,7 @@ pub fn eval(args: &EvalArgs) -> Result<EvalDone, String> {
         set_name: &args.set_name,
         frames: loaded.rows,
         scored: loaded.samples.len(),
+        hidden: loaded.hidden,
         skipped: loaded.skipped,
         rows: &rows,
         dropped: &dropped,
@@ -404,21 +405,16 @@ fn load(labels: &Path, frames: Option<&Path>) -> Result<Loaded<Sample>, String> 
     let mut hidden = 0usize;
     for (line, obj) in &rows_in {
         let line = *line;
-        // `visible: false` marks a title the frame does not show. Learning
-        // from it would poison the pack, so the row is skipped, not refused.
-        match obj.get("visible") {
-            None | Some(Value::Bool(true)) => {}
-            Some(Value::Bool(false)) => {
-                hidden += 1;
-                continue;
-            }
+        let visible = match obj.get("visible") {
+            None | Some(Value::Bool(true)) => true,
+            Some(Value::Bool(false)) => false,
             Some(_) => {
                 return Err(format!(
                     "{}:{line}: visible must be true or false",
                     labels.display()
                 ));
             }
-        }
+        };
         let Some(title) = text_field(labels, line, obj, "title_text")? else {
             return Err(format!("{}:{line}: missing title_text", labels.display()));
         };
@@ -441,6 +437,14 @@ fn load(labels: &Path, frames: Option<&Path>) -> Result<Loaded<Sample>, String> 
                 labels.display()
             )
         })?;
+        // `visible: false` marks a title the frame does not show. Learning
+        // from it would poison the pack, so the row is skipped, not refused.
+        // Its fields are checked above first, so a malformed row cannot hide
+        // behind it.
+        if !visible {
+            hidden += 1;
+            continue;
+        }
         rows.push((path, screen, title));
     }
     if hidden > 0 {
@@ -472,6 +476,7 @@ fn load(labels: &Path, frames: Option<&Path>) -> Result<Loaded<Sample>, String> 
         rows: rows_in.len(),
         unreadable: 0,
         skipped,
+        hidden,
         samples,
         notes,
     })

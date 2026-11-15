@@ -131,9 +131,8 @@ tars. Extract the published tar, or point at the tracker's
 default mix is weighted by sample count (`n`), and the summary prints
 `n <base> -> <new>` on every class line. That mix is for new frames. Cutting
 `--base` from the same labelled frames that built the pack mixes each class
-in a second time, so `n` doubles and the vector stays about the same (the
-rank mix re-normalises in f32, so the last bits can move; the queue mix is a
-plain weighted mean with no re-normalise). Recut those frames
+in a second time, so `n` doubles and the vector stays about the same (both
+mixes round in f32, so the last bits can move). Recut those frames
 with `--replace-all`, or `--replace` for the classes that should be
 replaced. `--replace CLASS` (repeatable) or `--replace-all` keeps the new
 cut instead. A numeric class the labels did not actually show is not a
@@ -145,14 +144,16 @@ it, and that line prints `new (pooled)`, with or without `--base`.
 The published `rank-v1` was cut before the `pooled` mark existed, so a
 `--base` recut against it cannot tell its pooled fills from real cuts: it
 prints `base pack has unmarked pooled fills (cut before pooled marks
-existed): those fills are mixed, not replaced, and the written pack keeps
-them, so do not use it as a later --base`. Such a recut can mark the classes
+existed, or recut from such a pack): an observed fill is mixed unless
+replaced, the written pack keeps the rest unmarked, so do not use it as a
+later --base`. Such a recut can mark the classes
 it brings into the pool, while every inherited fill stays unmarked, so one
 `pooled` mark does not make a pack safe. The cutter also warns when any
 numeric template of a class its family does not offer (`sr/%`,
 `change/%`) lacks the mark: the Learner never cuts one, so it is an
-inherited fill. Do not use a pack that prints this warning as a later
-`--base` until a full cut without unmarked fills exists. The first such
+inherited fill. Do not use the base that triggers this warning, or the pack
+such a cut writes, as a later `--base` until a full cut without unmarked
+fills exists. The first such
 pack comes from a cut of the full label set without `--base`, held to the
 published pack by `eval`.
 
@@ -207,7 +208,12 @@ is skipped: not learned and not scored, and `cut` and `eval` print
 `skipped N row(s) with visible: false in <labels path>`. If every row is
 hidden, that line still prints, then the `no classes` or `empty label set`
 error. `visible: true` or no `visible` key is a normal row; any other value
-is an error. The ignored `bench_labelled_queue_titles` bench does not read
+is an error. A hidden row still needs `path`, `screen` (one of the known screens)
+and `title_text` as strings, `frame` must be a string if present, and
+`title_text` is checked for spaces, before it is skipped. Its frame file is
+not opened. The `eval` header prints
+`frames: N scored: N hidden: N layout-skipped: N`, so hidden rows are not
+counted as layout-skipped. The ignored `bench_labelled_queue_titles` bench does not read
 `visible`: it still learns and scores hidden rows, so its numbers can
 differ from the cutter's on a set that has them.
 

@@ -316,6 +316,7 @@ fn offsetting_frame_changes_fail_and_name_the_frames() {
         set_name: "offset",
         frames: 2,
         scored: 2,
+        hidden: 0,
         skipped: 0,
         rows: &[row],
         dropped: &[],

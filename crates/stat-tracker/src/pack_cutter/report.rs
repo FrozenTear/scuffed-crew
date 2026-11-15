@@ -77,6 +77,9 @@ pub struct Inputs<'a> {
     pub set_name: &'a str,
     pub frames: usize,
     pub scored: usize,
+    /// Rows that say `visible: false` (queue only; 0 for rank).
+    pub hidden: usize,
+    /// Rows the layout refused.
     pub skipped: usize,
     pub rows: &'a [ScoreRow],
     pub dropped: &'a [String],
@@ -105,8 +108,8 @@ fn render(inp: &Inputs<'_>, pass: bool) -> String {
     let _ = writeln!(out, "set: {}", inp.set_name);
     let _ = writeln!(
         out,
-        "frames: {} scored: {} skipped: {}",
-        inp.frames, inp.scored, inp.skipped
+        "frames: {} scored: {} hidden: {} layout-skipped: {}",
+        inp.frames, inp.scored, inp.hidden, inp.skipped
     );
     if !inp.candidate_sha.is_empty() {
         let _ = writeln!(

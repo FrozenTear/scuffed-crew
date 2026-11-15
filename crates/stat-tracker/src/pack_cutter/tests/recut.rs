@@ -251,6 +251,13 @@ fn queue_rows_with_visible_false_are_skipped_and_named() {
     assert_eq!(eval.code, 0, "{}\n{}", eval.stderr, eval.stdout);
     assert!(eval.stdout.contains(&note), "{}", eval.stdout);
     assert!(!eval.stdout.contains("BRAVO"), "{}", eval.stdout);
+    // The hidden row is counted as hidden, not as layout-skipped.
+    assert!(
+        eval.stdout
+            .contains("frames: 2 scored: 1 hidden: 1 layout-skipped: 0"),
+        "{}",
+        eval.stdout
+    );
 
     let bad = files.dir.path().join("bad-visible.jsonl");
     write(
@@ -273,6 +280,89 @@ fn queue_rows_with_visible_false_are_skipped_and_named() {
         got.stderr.contains("visible must be true or false"),
         "{}",
         got.stderr
+    );
+}
+
+#[test]
+fn queue_rows_with_visible_false_still_check_their_values() {
+    let files = write_queue(&[("s1/a.png", 0, "ALPHA QUEUE")], false);
+    // A good visible row first, so exit 2 comes from the hidden row's
+    // value check, not from a file that has no classes.
+    let good = serde_json::json!({
+        "path": "s1/a.png",
+        "screen": "heroban",
+        "title_text": "ALPHA QUEUE",
+        "visible": true,
+    });
+    let cut = |labels: &Path| {
+        run(&[
+            "cut",
+            "--kind",
+            "queue-title",
+            "--labels",
+            labels.to_str().unwrap(),
+            "--frames",
+            files.frames.to_str().unwrap(),
+            "--out",
+            files.dir.path().join("hidden-out").to_str().unwrap(),
+        ])
+    };
+    let check = |name: &str, bad: Value, want: &str| {
+        let labels = files.dir.path().join(name);
+        write(&labels, &format!("{good}\n{bad}\n"));
+        let got = cut(&labels);
+        assert_eq!(got.code, 2, "{}", got.stderr);
+        let line = format!("{}:2: {want}", labels.display());
+        assert!(
+            got.stderr.contains(&line),
+            "want {line:?} in {}",
+            got.stderr
+        );
+    };
+    check(
+        "hidden-typed.jsonl",
+        serde_json::json!({"title_text": 5, "visible": false}),
+        "title_text must be a string",
+    );
+    check(
+        "hidden-no-path.jsonl",
+        serde_json::json!({
+            "screen": "heroban",
+            "title_text": "BRAVO QUEUE",
+            "visible": false,
+        }),
+        "missing path",
+    );
+    check(
+        "hidden-spaced.jsonl",
+        serde_json::json!({
+            "path": "s1/a.png",
+            "screen": "heroban",
+            "title_text": " BRAVO QUEUE",
+            "visible": false,
+        }),
+        "title_text \" BRAVO QUEUE\" has leading, trailing or doubled spaces",
+    );
+    check(
+        "hidden-bad-frame.jsonl",
+        serde_json::json!({
+            "path": "s1/a.png",
+            "screen": "heroban",
+            "title_text": "BRAVO QUEUE",
+            "frame": 3,
+            "visible": false,
+        }),
+        "frame must be a string",
+    );
+    check(
+        "hidden-bad-screen.jsonl",
+        serde_json::json!({
+            "path": "s1/a.png",
+            "screen": "nonsense",
+            "title_text": "BRAVO QUEUE",
+            "visible": false,
+        }),
+        "queue title frame \"\" has unknown screen \"nonsense\"",
     );
 }
 
@@ -437,7 +527,7 @@ fn a_recut_against_an_unmarked_base_warns() {
         text.replace(",\"pooled\":true", ""),
     )
     .unwrap();
-    let warning = "base pack has unmarked pooled fills (cut before pooled marks existed): those fills are mixed, not replaced, and the written pack keeps them, so do not use it as a later --base";
+    let warning = "base pack has unmarked pooled fills (cut before pooled marks existed, or recut from such a pack): an observed fill is mixed unless replaced, the written pack keeps the rest unmarked, so do not use it as a later --base";
     let from_unmarked = cut_rank_to(
         &labels,
         &frames,
@@ -540,6 +630,34 @@ fn a_rank_recut_with_base_mixes_by_n() {
     assert_eq!(got_t.vector, crate::shadow::rank::ink::unit(want));
     let aspect = ((2.0 * a.aspect.ln() + b.aspect.ln()) / 3.0).exp();
     assert_eq!(got_t.aspect, aspect);
+}
+
+#[test]
+fn mix_rank_takes_the_n_weighted_log_mean_aspect() {
+    let base = ClassTemplate {
+        class: "rank_progress".into(),
+        aspect: 0.5,
+        n: 2,
+        vector: vec![1.0, 0.0],
+        pooled: false,
+    };
+    let learned = ClassTemplate {
+        class: "rank_progress".into(),
+        aspect: 2.0,
+        n: 1,
+        vector: vec![0.0, 1.0],
+        pooled: false,
+    };
+    let mixed = super::super::rank::mix_rank(&base, &learned);
+    let want = ((2.0 * 0.5f32.ln() + 2.0f32.ln()) / 3.0).exp();
+    assert!(
+        (mixed.aspect - want).abs() < 1e-6,
+        "aspect {} want {want}",
+        mixed.aspect
+    );
+    // `let aspect = base.aspect;` would give 0.5 here.
+    assert!((mixed.aspect - base.aspect).abs() > 0.1, "{}", mixed.aspect);
+    assert_eq!(mixed.n, 3);
 }
 
 #[test]

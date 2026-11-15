@@ -51,7 +51,7 @@ pub fn cut(args: &CutArgs, out: &Path) -> Result<String, String> {
     let mut text = loaded.notes;
     if unmarked {
         text.push_str(
-            "base pack has unmarked pooled fills (cut before pooled marks existed): those fills are mixed, not replaced, and the written pack keeps them, so do not use it as a later --base\n",
+            "base pack has unmarked pooled fills (cut before pooled marks existed, or recut from such a pack): an observed fill is mixed unless replaced, the written pack keeps the rest unmarked, so do not use it as a later --base\n",
         );
     }
     text.push_str(&near);
@@ -136,6 +136,7 @@ pub fn eval(args: &EvalArgs) -> Result<EvalDone, String> {
         set_name: &args.set_name,
         frames: loaded.rows,
         scored: loaded.samples.len(),
+        hidden: loaded.hidden,
         skipped: loaded.skipped,
         rows: &rows,
         dropped: &dropped,
@@ -580,7 +581,7 @@ fn merge(
     ))
 }
 
-fn mix_rank(
+pub(super) fn mix_rank(
     base: &crate::shadow::rank::templates::ClassTemplate,
     learned: &crate::shadow::rank::templates::ClassTemplate,
 ) -> crate::shadow::rank::templates::ClassTemplate {
@@ -850,6 +851,7 @@ fn load(
         rows: rows.len(),
         unreadable,
         skipped,
+        hidden: 0,
         samples,
         notes,
     })

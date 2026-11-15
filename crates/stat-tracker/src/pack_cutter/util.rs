@@ -13,6 +13,9 @@ pub struct Loaded<T> {
     pub unreadable: usize,
     /// Rows the layout refused (rank scale, or queue-title plane).
     pub skipped: usize,
+    /// Queue rows that say `visible: false`: counted in `rows`, checked, but
+    /// neither learned nor scored. Always 0 for rank.
+    pub hidden: usize,
     pub samples: Vec<T>,
     /// Lines printed above the cut summary or the eval report: one per label
     /// file whose rows carried allowed extra keys, and one for queue rows
