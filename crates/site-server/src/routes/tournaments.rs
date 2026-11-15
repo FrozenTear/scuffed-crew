@@ -412,8 +412,9 @@ pub async fn get_bracket(
         .db
         .get_tournament_bracket(&id)
         .await
+        .map_err(internal_err)?
         .map(Json)
-        .map_err(internal_err)
+        .ok_or_else(|| not_found("Tournament not found"))
 }
 
 /// POST /api/tournaments/:id/generate-bracket
@@ -471,8 +472,9 @@ pub async fn generate_bracket(
         .db
         .get_tournament_bracket(&id)
         .await
+        .map_err(internal_err)?
         .map(Json)
-        .map_err(internal_err)
+        .ok_or_else(|| not_found("Tournament not found"))
 }
 
 // ─── Participants ───

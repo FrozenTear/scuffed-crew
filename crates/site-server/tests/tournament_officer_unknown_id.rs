@@ -449,3 +449,65 @@ async fn generate_bracket_with_under_two_participants_is_400() {
     }
     assert_eq!(count(&state, "tournament_round").await, 0);
 }
+
+/// QA nit 2 from PR 675: the bracket read and generate routes answer 404
+/// "Tournament not found" only for a missing tournament. The DB layer now
+/// says "no such tournament" as `Ok(None)`, so no other NotFound can be
+/// turned into that 404.
+#[tokio::test]
+async fn bracket_routes_404_only_for_missing_tournament() {
+    let state = seeded().await;
+
+    // DB layer: a missing tournament is Ok(None), not an error.
+    assert!(
+        state
+            .db
+            .get_tournament_bracket(MISSING)
+            .await
+            .expect("missing tournament is not an error")
+            .is_none()
+    );
+
+    for (method, uri) in [
+        (Method::GET, format!("/api/tournaments/{MISSING}/bracket")),
+        (
+            Method::POST,
+            format!("/api/tournaments/{MISSING}/generate-bracket"),
+        ),
+    ] {
+        let (status, body) = call(&state, method.clone(), &uri, None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {uri}: {body}");
+        assert_eq!(body["error"], "Tournament not found", "{method} {uri}");
+    }
+
+    // A real tournament: the read is 200 with the tournament and empty lists,
+    // and generate returns the new bracket.
+    let tid = create_tournament(&state, "Bracket Cup", "single_elim").await;
+    let (status, body) = call(
+        &state,
+        Method::GET,
+        &format!("/api/tournaments/{tid}/bracket"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["tournament"]["id"], tid.as_str());
+    for key in ["participants", "rounds", "matches"] {
+        assert_eq!(body[key], json!([]), "{key}: {body}");
+    }
+
+    for name in ["Alpha", "Bravo"] {
+        add_participant(&state, &tid, name).await;
+    }
+    let (status, body) = call(
+        &state,
+        Method::POST,
+        &format!("/api/tournaments/{tid}/generate-bracket"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["tournament"]["id"], tid.as_str());
+    assert_eq!(body["participants"].as_array().unwrap().len(), 2);
+    assert!(!body["matches"].as_array().unwrap().is_empty(), "{body}");
+}
