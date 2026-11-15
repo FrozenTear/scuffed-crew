@@ -15,8 +15,9 @@
 //! analyzed tick that misses the screen does not end it: it is held as a
 //! break between reads. The screen is gone after [`RANK_SETTLE_MISSES`]
 //! analyzed ticks in a row miss it, when another game's screen starts or
-//! the open game changes or closes, or when the game process stops
-//! ([`close`]). Then [`settle`] keeps each field only when the newest read
+//! the open game changes or closes, when the game process stops
+//! ([`close`]), or when the tracker shuts down ([`finish_on_shutdown`]).
+//! Then [`settle`] keeps each field only when the newest read
 //! that has it agrees with the read right before it, so a value caught
 //! while it still counts up, or one the screen has since replaced, is not
 //! kept. The result is stored on that game once
@@ -237,8 +238,10 @@ impl RankFeed {
 }
 
 impl Drop for RankFeed {
-    /// Shutdown (the loop returns): held reads and an unsaved update are
-    /// dropped, and the log says so.
+    /// The feed goes away: held reads and an unsaved update still here are
+    /// dropped, and the log says so. A clean shutdown settles and stores
+    /// the held reads first ([`finish_on_shutdown`]), so this is a feed
+    /// dropped without it, or an update the store refused even then.
     fn drop(&mut self) {
         if let Some(h) = &self.held {
             tracing::info!(target: "scuffed_stat_tracker", session = %h.session, entries = h.reads.len(), "rank update: shutting down with a rank screen held, dropped");
@@ -388,6 +391,24 @@ pub(crate) async fn close(
 ) -> bool {
     let settled = feed.close();
     apply(feed, settled, store, dump).await
+}
+
+/// Shutdown, after the loop: a rank screen still held (the tracker stopped
+/// while it showed) settles and is stored on its game, as when the game
+/// process stops ([`close`]), and an update the store refused gets this
+/// last try. It uploads with the next sync. `true` when an update was
+/// stored.
+pub(crate) async fn finish_on_shutdown(
+    feed: &mut RankFeed,
+    store: &impl RankStore,
+    dump: Option<&mut PregameDump>,
+) -> bool {
+    if let Some(h) = &feed.held {
+        tracing::info!(target: "scuffed_stat_tracker", session = %h.session, entries = h.reads.len(), "rank update: shutting down with a rank screen held, settled now");
+    }
+    // No tick comes after this one: what the store refused stays unsaved,
+    // and the drop logs it.
+    close(feed, store, dump).await
 }
 
 async fn apply(
