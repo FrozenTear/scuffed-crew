@@ -768,9 +768,10 @@ mod tests {
 
     /// Every reader switch sits together under READERS in Capture and
     /// reading, below every CAPTURE row: Reader first, then names, bans and
-    /// picks, rank and the extra number reader, and the classic OCR rows
-    /// after them. Website account and Troubleshooting no longer draw the
-    /// rank and extra number reader rows.
+    /// picks, rank and the extra number reader, then the classic OCR rows
+    /// (Reading model, OCR workers) and Report pictures. Website account
+    /// and Troubleshooting no longer draw the rank and extra number reader
+    /// rows.
     #[test]
     fn the_reader_rows_sit_together_under_readers() {
         use crate::settings::SHADOW_READER_LABEL;
@@ -781,6 +782,11 @@ mod tests {
         let (_dir, mut page) = app();
         page.fixture = None;
         page.outside_env = Some(crate::settings_env::OutsideEnv::default());
+        // A running tracker: the Reading model row is drawn, so its place
+        // below the reader switches is checked, not skipped.
+        page.ocr_switch.daemon_off = false;
+        assert!(crate::settings::ocr_card_blocks(page.ocr_switch.daemon_off).reading_model);
+        assert!(crate::settings_model::row_shown("share_report_pictures"));
         page.page_state
             .show_section(AdvancedSection::CaptureReading);
         let found = operate_page(&page, width);
@@ -820,19 +826,13 @@ mod tests {
             assert!(last < y, "{label} at {y} follows {last}");
             last = y;
         }
-        // The classic OCR rows come after every reader switch: Reading model
-        // (drawn only while its card shows) and then OCR workers.
-        let model = found
-            .texts
-            .iter()
-            .find(|(text, _)| text == "Reading model")
-            .map(|(_, b)| b.y);
-        if let Some(model) = model {
-            assert!(last < model, "Reading model at {model} follows {last}");
-            last = model;
+        // The classic OCR rows and Report pictures come after every reader
+        // switch, in this order.
+        for label in ["Reading model", "OCR workers", "Report pictures"] {
+            let y = y_of(label);
+            assert!(last < y, "{label} at {y} follows {last}");
+            last = y;
         }
-        let workers = y_of("OCR workers");
-        assert!(last < workers, "OCR workers at {workers} follows {last}");
         // The bans and picks row keeps its id, so its deep link and
         // outline still find it.
         let row_id = Id::new(crate::bans_picks_setting::ROW_ID);

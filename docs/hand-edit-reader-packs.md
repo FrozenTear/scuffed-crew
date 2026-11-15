@@ -137,8 +137,9 @@ else. It must be JSON the queue title reader can load: `width` 120,
 Both readers start off. With them off, `templates.json` is never loaded,
 so an edit there changes nothing.
 
-Turn both on with the **Read my rank after Comp games** switch under
-**Readers** on the Settings page. The older layout does not have it.
+Turn both on with the **Read my rank after Comp games** switch (Settings,
+Advanced, Capture and reading, Readers). The switch takes effect after a
+tracker restart. The older layout does not have it.
 
 An environment variable in the tracker's service environment overrides
 the switch for each reader:

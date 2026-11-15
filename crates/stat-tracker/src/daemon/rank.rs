@@ -582,3 +582,7 @@ async fn store_rank(feed: &mut RankFeed, store: &impl RankStore, s: Settled, tri
 #[cfg(test)]
 #[path = "tests_rank.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests_rank_wiring.rs"]
+mod tests_wiring;
