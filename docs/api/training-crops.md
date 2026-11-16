@@ -223,10 +223,12 @@ Check order:
 7. 409 `crop_limit_reached` when the caller is already at the kind's cap.
 8. 400 `invalid_multipart` when the body is not readable multipart.
 9. The parts, in order. Each `meta`: 400 `invalid_crop_meta` or
-   `unknown_hero`. Each `crop`: 415 `not_png`, 413 `icon_too_large` (over
-   the kind's byte limit), 400 `icon_bad_dimensions` (outside the kind's
-   edges, see Crop size per kind), 400 `invalid_png`, 413 `icon_too_large`
-   (its re-encode is over the kind's byte limit). A 21st pair is 413
+   `unknown_hero`. Each `crop`, in this order: 415 `not_png`, 413
+   `icon_too_large` (over the kind's byte limit), 400 `invalid_png` (the
+   chunk list is refused, see below), 400 `icon_bad_dimensions` (the
+   `IHDR` size is outside the kind's edges, see Crop size per kind), 400
+   `invalid_png` (the pixels do not decode), 413 `icon_too_large` (its
+   re-encode is over the kind's byte limit). A 21st pair is 413
    `too_many_crops_in_request`. A body over 2 MiB is 413 `icon_too_large`.
 10. 400 `no_crops` when there was no pair.
 11. 409 `crop_limit_reached` when this request would pass the cap.
@@ -238,22 +240,40 @@ rows and files are removed again.
 
 The PNG is decoded and re-encoded before it is stored, as for hero icons, so
 text chunks and other metadata in the file are dropped. Before decoding,
-the width and height are read from the `IHDR` bytes and checked (an
-absurd header is 400 `icon_bad_dimensions`, nothing decoded), and only
-`IHDR`, `PLTE`, `tRNS`, `IDAT` and `IEND` are passed to the decoder: colour
-profiles (`iCCP`), text and every other ancillary chunk are dropped
+the chunk list is walked (nothing is inflated) and the width and height
+are read from the `IHDR` bytes and checked (an absurd header is 400
+`icon_bad_dimensions`, nothing decoded). Only `IHDR`, `PLTE`, `tRNS`,
+`IDAT` and `IEND` are passed to the decoder: colour profiles (`iCCP`),
+text and every other ancillary chunk (lowercase first letter) are dropped
 without being inflated, so they never cause an error and cost no memory.
+The walk refuses with 400 `invalid_png`: a missing or wrong-length leading
+`IHDR`, a chunk running past the end, a `PLTE` whose length is not a
+multiple of 3 (png 0.18.1 panics on one, which was a 500), and any
+critical chunk (uppercase first letter) other than the four above, since
+the PNG spec says a decoder must not ignore an unknown critical chunk.
 The decoder is also capped at 32 MiB (`PNG_DECODE_MAX_ALLOC`) as a
-backstop. Measured peak heap for one whole crop (check, decode, 8-bit
-conversion, re-encode; db-free unit test
-`one_png_read_stays_within_its_measured_peak`, which also asserts it stays
-under 20 MiB):
+backstop.
 
-| Upload | Peak heap now | Same file, read as in 920c695f |
+Measured peak heap for one whole crop: chunk walk, decode, 8-bit
+conversion and re-encode in one `clean_png_within` call, counted by a
+test-only allocator in the unit test
+`one_png_read_stays_within_its_measured_peak` (debug build), which also
+asserts each of these four stays under 20 MiB. The right column is the
+same test's stand-in for how the previous version of this change read a
+PNG (one decoder over the whole upload, colour profile included and
+copied, then the decode); it is a re-creation, not the old code.
+
+| Upload | Peak heap now | Stand-in for the previous read |
 |--------|---------------|-------------------------------|
 | 58 KB, 1536x720, `iCCP` inflating to 40 MiB | 3.6 MiB | 33.2 MiB |
 | 49 KB, 1536x720, `iCCP` inflating to 31 MiB | 3.6 MiB | 67.5 MiB |
-| 47 KB, 1536x720 16-bit RGBA (the largest accepted crop) | 12.7 MiB | 8.7 MiB (decode only) |
+| 47 KB, 1536x720 16-bit RGBA, the largest `rank` crop (the most pixel memory any kind accepts) | 12.7 MiB | 8.7 MiB (decode only) |
+| 4 KB, 256x256 16-bit RGBA, the largest `hero_icon` (also the `stat_digits` bound) | 0.8 MiB | 0.8 MiB |
+
+Measured another way, by process RSS on real builds, the Site review
+found the same order: the 40 MiB-profile bomb at +3.4 MiB now against
++33.8 MiB before, the 31 MiB profile at +3.4 MiB against +63.7 MiB (heap
+peak 64.2 MiB) before.
 
 The heap is per crop and per request in flight; uploads are not
 serialized, so concurrent uploads add up. The re-encode is
@@ -510,7 +530,7 @@ Every error body is `{"error": "<code>"}`, except the shared 429 body
 | 400 | `no_crops` | No `meta`/`crop` pair |
 | 400 | `invalid_multipart` | Body is not readable multipart |
 | 400 | `icon_bad_dimensions` | PNG width or height outside the kind's bound (8 to 256; `map_name` 8 to 1536 wide, 8 to 256 tall; `rank` 8 to 1536 wide, 8 to 720 tall) |
-| 400 | `invalid_png` | PNG signature present but the chunk list is broken (no leading 13-byte `IHDR`, or a chunk past the end) or the pixels do not decode within the 32 MiB decoder cap. Colour profiles (`iCCP`) and other ancillary chunks are dropped before decoding and never cause it |
+| 400 | `invalid_png` | PNG signature present but the chunk list is refused (no leading 13-byte `IHDR`, a chunk past the end, a `PLTE` whose length is not a multiple of 3, or a critical chunk other than `IHDR`, `PLTE`, `IDAT`, `IEND`), or the pixels do not decode within the 32 MiB decoder cap. Colour profiles (`iCCP`) and other ancillary chunks are dropped before decoding and never cause it |
 | 400 | `invalid_consent` | Consent body not JSON, unknown kind (`full_screen` included), or not a bool |
 | 401 | session error (as for every member route) | `PUT /consent` without a session; a sync token is not a session there |
 | 403 | `Admin access required` | Officer session on another member's image or delete; non-admin on the admin list or `/resolutions` |

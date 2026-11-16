@@ -112,7 +112,9 @@ in the request passes.
 1. The part starts with the 8-byte PNG signature. Otherwise 415 `not_png`.
 2. The part is at most `HERO_ICON_MAX_BYTES`. Otherwise 413 `icon_too_large`.
 3. The chunk list is walked (nothing is inflated): the first chunk must be
-   a 13-byte `IHDR` and no chunk may run past the end of the part.
+   a 13-byte `IHDR`, no chunk may run past the end of the part, a `PLTE`
+   must be whole RGB triples, and no critical chunk (uppercase first
+   letter) other than `IHDR`, `PLTE`, `IDAT` and `IEND` may appear.
    Otherwise 400 `invalid_png`. The width and height in that `IHDR` must be
    in `8..=256`. Otherwise 400 `icon_bad_dimensions`, before any decode.
 4. Only `IHDR`, `PLTE`, `tRNS`, `IDAT` and `IEND` are passed to the
@@ -120,10 +122,10 @@ in the request passes.
    animation) is dropped unread, so it never causes an error and costs no
    memory however large it would inflate. The image then decodes, with the
    decoder's memory capped at 32 MiB (`PNG_DECODE_MAX_ALLOC`) as a
-   backstop. Otherwise 400 `invalid_png`. Measured: one whole check,
-   decode and re-encode of the largest accepted file peaks at about
-   12.7 MiB of heap (see the `training-crops.md` numbers); a 58 KB upload
-   whose colour profile would inflate to 40 MiB peaks at 3.6 MiB.
+   backstop. Otherwise 400 `invalid_png`. Measured peak heap for one whole
+   check, decode and re-encode: 0.8 MiB for the largest hero icon
+   (256x256 16-bit RGBA); see `training-crops.md` for the training crop
+   kinds, whose largest (a 1536x720 16-bit RGBA rank crop) peaks higher.
 5. The re-encode (below) is at most `HERO_ICON_MAX_BYTES`. Otherwise 413
    `icon_too_large`.
 
@@ -165,7 +167,7 @@ Every error body is `{"error": "<code>"}`. The codes are constants in
 | 400 | `unexpected_field` | A multipart part not named `icon` |
 | 400 | `invalid_multipart` | Body is not `multipart/form-data` or is not readable multipart |
 | 400 | `icon_bad_dimensions` | Width or height outside 8 to 256 |
-| 400 | `invalid_png` | PNG signature present but the chunk list is broken (no leading 13-byte `IHDR`, or a chunk past the end) or the pixels do not decode within the 32 MiB decoder cap. Colour profiles (`iCCP`) and other ancillary chunks are dropped before decoding and never cause it |
+| 400 | `invalid_png` | PNG signature present but the chunk list is refused (no leading 13-byte `IHDR`, a chunk past the end, a `PLTE` whose length is not a multiple of 3, or a critical chunk other than `IHDR`, `PLTE`, `IDAT`, `IEND`), or the pixels do not decode within the 32 MiB decoder cap. Colour profiles (`iCCP`) and other ancillary chunks are dropped before decoding and never cause it |
 | 409 | `icon_limit_reached` | The upload would go over `HERO_ICON_MAX_PER_MEMBER` |
 | 413 | `icon_too_large` | A part over 64 KiB, its re-encode over 64 KiB, or the body over 2 MiB |
 | 413 | `too_many_icons_in_request` | More than 20 `icon` parts |

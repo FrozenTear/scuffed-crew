@@ -2165,6 +2165,26 @@ async fn an_iccp_bomb_rank_crop_is_stored_without_its_profile() {
     w.cleanup();
 }
 
+#[tokio::test]
+async fn a_palette_crop_with_a_broken_plte_is_400_not_500() {
+    let w = world().await;
+    set_consent(&w.app, OWNER_SESSION, json!({ "rank": true })).await;
+    // A palette PNG whose PLTE is 4 bytes (not whole RGB triples). png
+    // 0.18.1 panics on it while decoding; the server must refuse it first.
+    let good = palette_noise_png(16, 16, 9);
+    let plte_len = u32::from_be_bytes([good[33], good[34], good[35], good[36]]) as usize;
+    let mut bad = good[..33].to_vec();
+    bad.extend(png_chunk(b"PLTE", &[0, 0, 0, 255]));
+    bad.extend_from_slice(&good[33 + 12 + plte_len..]);
+    let got = upload_parts(&w, "rank", vec![meta(rank_meta()), ("crop", bad)]).await;
+    assert_error(&got, StatusCode::BAD_REQUEST, "invalid_png");
+    assert!(files_on_disk(w.dir()).is_empty());
+    // The same file with its whole palette is stored.
+    let got = upload_parts(&w, "rank", vec![meta(rank_meta()), ("crop", good)]).await;
+    assert_eq!(got.0, StatusCode::CREATED, "{}", got.1);
+    w.cleanup();
+}
+
 /// Upload `parts` of `kind` with the owner's sync token.
 async fn upload_parts(w: &World, kind: &str, parts: Vec<Part>) -> Got {
     upload(&w.app, OWNER_TOKEN, kind, &parts).await

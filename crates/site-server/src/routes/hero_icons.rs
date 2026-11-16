@@ -451,9 +451,12 @@ const PNG_PIXEL_CHUNKS: [&[u8; 4]; 5] = [b"IHDR", b"PLTE", b"tRNS", b"IDAT", b"I
 
 /// Width, height and a copy of `data` (a PNG) that keeps only
 /// [`PNG_PIXEL_CHUNKS`], each copied byte for byte (CRC included). Walks the
-/// chunk headers; nothing is inflated. `None` when the signature is
-/// missing, the first chunk is not a 13-byte `IHDR`, or a chunk runs past
-/// the end of `data`. Bytes after `IEND` are ignored.
+/// chunk headers; nothing is inflated. Ancillary chunks (lowercase first
+/// letter: colour profiles, text, EXIF, animation) are dropped. `None` when
+/// the signature is missing, the first chunk is not a 13-byte `IHDR`, a
+/// chunk runs past the end of `data`, a `PLTE` length is not a multiple of
+/// 3, or there is a critical chunk (uppercase first letter) that is not in
+/// [`PNG_PIXEL_CHUNKS`]. Bytes after `IEND` are ignored.
 fn png_pixel_chunks(data: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     if !data.starts_with(&PNG_SIGNATURE) {
         return None;
@@ -476,8 +479,17 @@ fn png_pixel_chunks(data: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
                 |i: usize| u32::from_be_bytes([chunk[i], chunk[i + 1], chunk[i + 2], chunk[i + 3]]);
             size = Some((field(8), field(12)));
         }
+        // A PLTE that is not whole RGB triples makes png 0.18.1 panic
+        // (decoder/transform/palette.rs), which would be a 500.
+        if kind == b"PLTE" && !len.is_multiple_of(3) {
+            return None;
+        }
         if PNG_PIXEL_CHUNKS.iter().any(|keep| kind == &keep[..]) {
             out.extend_from_slice(chunk);
+        } else if kind[0] & 0x20 == 0 {
+            // An unknown critical chunk (uppercase first letter). A decoder
+            // must not ignore one (PNG spec), so the file is refused.
+            return None;
         }
         at = end;
         if kind == b"IEND" {
@@ -1341,6 +1353,161 @@ mod tests {
         kinds
     }
 
+    /// One PNG chunk: length, type, data, CRC.
+    fn png_chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut chunk = u32::try_from(data.len()).unwrap().to_be_bytes().to_vec();
+        chunk.extend_from_slice(kind);
+        chunk.extend_from_slice(data);
+        let mut crc = flate2::Crc::new();
+        crc.update(&chunk[4..]);
+        chunk.extend_from_slice(&crc.sum().to_be_bytes());
+        chunk
+    }
+
+    /// An 8-bit palette PNG, `width` x `height`, pixel x using index
+    /// `x % 2`. `extra` chunks go between `tRNS` and `IDAT`; the image data
+    /// is split over two `IDAT` chunks.
+    fn palette_png(
+        width: u32,
+        height: u32,
+        plte: &[u8],
+        trns: Option<&[u8]>,
+        extra: &[Vec<u8>],
+    ) -> Vec<u8> {
+        use std::io::Write;
+        let mut raw = Vec::new();
+        for _ in 0..height {
+            raw.push(0);
+            raw.extend((0..width).map(|x| (x % 2) as u8));
+        }
+        let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        z.write_all(&raw).unwrap();
+        let idat = z.finish().unwrap();
+        let mut ihdr = width.to_be_bytes().to_vec();
+        ihdr.extend_from_slice(&height.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 3, 0, 0, 0]);
+        let mut png = PNG_SIGNATURE.to_vec();
+        png.extend(png_chunk(b"IHDR", &ihdr));
+        png.extend(png_chunk(b"PLTE", plte));
+        if let Some(trns) = trns {
+            png.extend(png_chunk(b"tRNS", trns));
+        }
+        for chunk in extra {
+            png.extend_from_slice(chunk);
+        }
+        let half = idat.len() / 2;
+        png.extend(png_chunk(b"IDAT", &idat[..half]));
+        png.extend(png_chunk(b"IDAT", &idat[half..]));
+        png.extend(png_chunk(b"IEND", &[]));
+        png
+    }
+
+    const RED_AND_BLACK: [u8; 6] = [0, 0, 0, 255, 0, 0];
+
+    #[test]
+    fn a_plte_that_is_not_whole_triples_is_invalid_png_not_a_panic() {
+        let bad = palette_png(8, 8, &[0, 0, 0, 255], None, &[]);
+        // Without the walker's check png 0.18.1 panics on this file.
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = png_reader(&bad).decode();
+        }))
+        .is_err();
+        assert!(panicked, "png 0.18.1 panics on a PLTE of 4 bytes");
+        assert!(png_pixel_chunks(&bad).is_none());
+        assert_eq!(
+            clean_png_within(&bad, 1536, 720, 384 * 1024).err(),
+            Some(HERO_ICON_ERR_INVALID_PNG)
+        );
+        assert_eq!(clean_png(&bad).err(), Some(HERO_ICON_ERR_INVALID_PNG));
+        // Whole triples are fine.
+        let good = palette_png(8, 8, &RED_AND_BLACK, None, &[]);
+        assert!(clean_png(&good).is_ok());
+    }
+
+    #[test]
+    fn trns_is_kept_so_palette_transparency_survives() {
+        // Index 0 fully transparent, index 1 opaque red.
+        let png = palette_png(8, 8, &RED_AND_BLACK, Some(&[0, 255]), &[]);
+        let clean = clean_png_within(&png, 256, 256, 64 * 1024).expect("stored");
+        let stored = image::load_from_memory_with_format(&clean.bytes, ImageFormat::Png).unwrap();
+        assert_eq!(
+            stored.color(),
+            ColorType::Rgba8,
+            "tRNS kept: stored with alpha"
+        );
+        let rgba = stored.to_rgba8();
+        assert_eq!(rgba.get_pixel(0, 0).0, [0, 0, 0, 0]);
+        assert_eq!(rgba.get_pixel(1, 0).0, [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn the_keep_list_is_exactly_ihdr_plte_trns_idat_iend() {
+        let extra = [
+            png_chunk(b"tEXt", b"Comment\0hello"),
+            png_chunk(b"zTXt", b"Comment\0\0x"),
+            png_chunk(b"gAMA", &45_455u32.to_be_bytes()),
+            png_chunk(b"juNK", b"private ancillary"),
+        ];
+        let mut png = palette_png(8, 8, &RED_AND_BLACK, Some(&[0, 255]), &extra);
+        png.extend_from_slice(b"bytes after IEND are ignored");
+        let (_, _, kept) = png_pixel_chunks(&png).expect("valid");
+        assert_eq!(
+            chunk_kinds(&kept),
+            vec![*b"IHDR", *b"PLTE", *b"tRNS", *b"IDAT", *b"IDAT", *b"IEND"]
+        );
+        // Kept chunks are byte for byte, so the pixels are the same.
+        let kept_image = image::load_from_memory_with_format(&kept, ImageFormat::Png).unwrap();
+        let clean = palette_png(8, 8, &RED_AND_BLACK, Some(&[0, 255]), &[]);
+        let plain_image = image::load_from_memory_with_format(&clean, ImageFormat::Png).unwrap();
+        assert_eq!(kept_image.to_rgba8(), plain_image.to_rgba8());
+        // IHDR longer than 13 bytes is refused.
+        let mut long_ihdr = PNG_SIGNATURE.to_vec();
+        long_ihdr.extend(png_chunk(b"IHDR", &[0; 14]));
+        long_ihdr.extend_from_slice(&png[8 + 25..]);
+        assert!(png_pixel_chunks(&long_ihdr).is_none());
+    }
+
+    #[test]
+    fn an_unknown_critical_chunk_is_refused() {
+        // Uppercase first letter: critical. A decoder must not skip it.
+        let png = palette_png(8, 8, &RED_AND_BLACK, None, &[png_chunk(b"JUNK", b"x")]);
+        assert!(png_pixel_chunks(&png).is_none());
+        assert_eq!(clean_png(&png).err(), Some(HERO_ICON_ERR_INVALID_PNG));
+        // The same chunk as ancillary (lowercase first letter) is dropped.
+        let png = palette_png(8, 8, &RED_AND_BLACK, None, &[png_chunk(b"jUNK", b"x")]);
+        assert!(clean_png(&png).is_ok());
+    }
+
+    #[test]
+    fn the_decode_backstop_refuses_a_pixel_buffer_over_32_mib() {
+        // 4000x4000 16-bit RGBA is 122 MiB of pixels. The edge check does
+        // not stop it here (bounds of 4000 on purpose), so only the decoder
+        // limit does, before any pixel is read.
+        let mut ihdr = 4000u32.to_be_bytes().to_vec();
+        ihdr.extend_from_slice(&4000u32.to_be_bytes());
+        ihdr.extend_from_slice(&[16, 6, 0, 0, 0]);
+        let mut png = PNG_SIGNATURE.to_vec();
+        png.extend(png_chunk(b"IHDR", &ihdr));
+        png.extend(png_chunk(
+            b"IDAT",
+            &[0x78, 0x01, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01],
+        ));
+        png.extend(png_chunk(b"IEND", &[]));
+        let (_, _, kept) = png_pixel_chunks(&png).unwrap();
+        assert!(
+            matches!(
+                png_reader(&kept).decode(),
+                Err(image::ImageError::Limits(_))
+            ),
+            "refused by the 32 MiB limit"
+        );
+        assert_eq!(
+            clean_png_within(&png, 4000, 4000, usize::MAX).err(),
+            Some(HERO_ICON_ERR_INVALID_PNG)
+        );
+        assert_eq!(PNG_DECODE_MAX_ALLOC, 32 * 1024 * 1024);
+    }
+
     #[test]
     fn only_pixel_chunks_reach_the_decoder() {
         let png = iccp_png(64, 32, 4096);
@@ -1464,9 +1631,10 @@ mod tests {
 
     const MIB: f64 = 1024.0 * 1024.0;
 
-    /// The 920c695f read: one decoder over the whole upload (profile
-    /// included), its `icc_profile()` copy, then the decode.
-    fn read_like_920c695f(data: &[u8]) {
+    /// A stand-in for how the previous version of this PR read a PNG: one
+    /// decoder over the whole upload (profile included), its
+    /// `icc_profile()` copy, then the decode. Only used to compare peaks.
+    fn read_whole_upload_like_before(data: &[u8]) {
         use image::ImageDecoder;
         let mut decoder = png_reader(data).into_decoder().unwrap();
         let _profile = decoder.icc_profile();
@@ -1475,28 +1643,44 @@ mod tests {
 
     #[test]
     fn one_png_read_stays_within_its_measured_peak() {
-        // QA's two cases and the largest crop that is accepted.
+        // QA's two profile cases at the rank bound, the largest rank crop
+        // (1536x720 16-bit RGBA, the most pixel memory any kind accepts),
+        // and the largest hero icon (256x256 16-bit RGBA).
         let bomb_40 = iccp_png(1536, 720, 40 * 1024 * 1024);
         let near_cap_31 = iccp_png(1536, 720, 31 * 1024 * 1024);
-        let largest = encode(blocks_16bit(true));
+        let largest_rank = encode(blocks_16bit(true));
+        let largest_icon = encode(DynamicImage::ImageRgba16(image::ImageBuffer::from_fn(
+            256,
+            256,
+            |x, y| image::Rgba([(x * 257) as u16, (y * 257) as u16, 9000, 65535]),
+        )));
         let mut report = Vec::new();
-        for (name, upload) in [
-            ("40 MiB profile", &bomb_40),
-            ("31 MiB profile", &near_cap_31),
-            ("1536x720 RGBA16", &largest),
+        for (name, upload, (w, h, bytes)) in [
+            ("40 MiB profile", &bomb_40, (1536, 720, 384 * 1024)),
+            ("31 MiB profile", &near_cap_31, (1536, 720, 384 * 1024)),
+            (
+                "rank 1536x720 RGBA16",
+                &largest_rank,
+                (1536, 720, 384 * 1024),
+            ),
+            (
+                "hero icon 256x256 RGBA16",
+                &largest_icon,
+                (256, 256, usize::MAX),
+            ),
         ] {
-            let (result, now) =
-                heap::peak_during(|| clean_png_within(upload, 1536, 720, 384 * 1024));
+            let (result, now) = heap::peak_during(|| clean_png_within(upload, w, h, bytes));
             assert!(result.is_ok(), "{name} is stored");
-            let ((), before) = heap::peak_during(|| read_like_920c695f(upload));
+            let ((), before) = heap::peak_during(|| read_whole_upload_like_before(upload));
             report.push(format!(
-                "{name} ({} B upload): peak heap {:.1} MiB now, {:.1} MiB with the 920c695f read",
+                "{name} ({} B upload): peak heap {:.1} MiB now, {:.1} MiB with the earlier whole-upload read",
                 upload.len(),
                 now as f64 / MIB,
                 before as f64 / MIB
             ));
             // The bound the docs state: one whole clean_png_within call,
-            // decode and re-encode, stays under 20 MiB for any accepted crop.
+            // decode and re-encode, stays under 20 MiB for each of these
+            // four, the largest rank crop included.
             assert!(now < 20 * 1024 * 1024, "{name}: {now} bytes");
         }
         println!("{}", report.join("\n"));
