@@ -45,7 +45,7 @@ const GAME_CSS: &str = r#"
         display: inline-block;
         margin-bottom: 1rem;
         font-size: 0.85rem;
-        color: var(--text-2);
+        color: var(--text-3);
         text-decoration: none;
     }
     .game-back:hover { color: var(--text); }
@@ -78,7 +78,7 @@ const GAME_CSS: &str = r#"
         gap: 0.35rem 0.6rem;
         margin: 0;
         font-size: 0.9rem;
-        color: var(--text-2);
+        color: var(--text-3);
     }
     .game-badges {
         display: flex;
@@ -104,7 +104,7 @@ const GAME_CSS: &str = r#"
         font-weight: 600;
         letter-spacing: 0.04em;
         text-transform: uppercase;
-        color: var(--text-3);
+        color: var(--text-subtle);
     }
     .game-stat dd {
         margin: 0.2rem 0 0;
@@ -116,7 +116,7 @@ const GAME_CSS: &str = r#"
     .game-unsure-note {
         margin: 0.9rem 0 0;
         font-size: 0.85rem;
-        color: var(--text-2);
+        color: var(--text-3);
     }
     @media (max-width: 520px) {
         .game-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }

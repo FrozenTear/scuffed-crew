@@ -1,0 +1,226 @@
+/* Scuffed Crew site tokens: semantic
+   Pages and components may use these names. They must not use primitives.
+   Colour roles are filled by a theme file. This file owns the contract,
+   typography, layout, density remap, and the customisable override surface. */
+
+:root {
+  /* -----------------------------------------------------------------------
+     Override surface
+     Change these three, then re-derive accent roles (see tokens.md and
+     derive-accent.js). A future custom look can also ship a new theme file.
+     ----------------------------------------------------------------------- */
+  --brand-accent: #46d8a4;
+  --brand-font-display: var(--font-family-urbanist);
+  --density: default;
+
+  /* -----------------------------------------------------------------------
+     Type roles
+     ----------------------------------------------------------------------- */
+  --font-head: var(--brand-font-display);
+  --font-body: var(--font-family-ibm-plex-sans);
+  --font-mono: var(--font-family-jetbrains);
+  --font-head-weight: var(--font-weight-700);
+  --font-head-tracking: var(--tracking-snug);
+  --font-body-weight: var(--font-weight-400);
+  --font-label-weight: var(--font-weight-600);
+  --font-label-tracking: var(--tracking-open);
+  --font-head-transform: none;
+
+  --text-xs: var(--font-size-12);
+  --text-sm: var(--font-size-13);
+  --text-md: var(--font-size-14);
+  --text-lg: var(--font-size-16);
+  --text-xl: var(--font-size-18);
+  --text-2xl: var(--font-size-24);
+  --text-3xl: var(--font-size-30);
+  --leading-display: var(--leading-tight);
+  --leading-body: var(--leading-normal);
+  --leading-ui: var(--leading-snug);
+
+  /* -----------------------------------------------------------------------
+     Layout and density roles
+     ----------------------------------------------------------------------- */
+  --hit-target-min: var(--size-hit-44);
+  --row-height-compact: var(--size-row-44);
+  --row-height-default: var(--size-row-52);
+  --row-height-comfortable: var(--size-row-64);
+  --container-sm: var(--container-sm-width);
+  --container-md: var(--container-md-width);
+  --container-lg: var(--container-lg-width);
+  --container-xl: var(--container-xl-width);
+  --content-max-narrow: var(--content-narrow-width);
+  --content-max-default: var(--content-default-width);
+  --content-max-wide: var(--content-wide-width);
+  --content-max-full: none;
+  --control-size-sm: var(--size-control-32);
+  --frame-stroke: var(--border);
+  --nav-underline-width: 2px;
+  --nav-underline-color: var(--accent-text);
+  --radius-card: var(--radius-3);
+  --radius-control: var(--radius-2);
+  --radius-tile: var(--radius-2);
+  --radius-pill: var(--radius-full);
+
+  /* Fallback density (default). [data-density] remaps below. */
+  --density-row: var(--row-height-default);
+  --space-page: var(--space-6);
+  --space-section: var(--space-8);
+  --space-card-pad: var(--space-4);
+  --space-stack: var(--space-4);
+  --nav-height: var(--size-nav-56);
+
+  /* -----------------------------------------------------------------------
+     Colour roles (fallback = Mint Refined dark). Theme files override.
+     ----------------------------------------------------------------------- */
+  --bg: var(--neutral-900);
+  --surface: var(--neutral-850);
+  --surface-raised: var(--neutral-800);
+  --surface-sunken: var(--neutral-800);
+  --border: var(--neutral-700);
+  --border-strong: var(--neutral-450);
+  --text: var(--neutral-25);
+  --text-3: var(--neutral-300);
+  --text-subtle: var(--neutral-400);
+  --text-inverse: var(--neutral-900);
+
+  --accent: var(--brand-accent);
+  --accent-text: var(--mint-400);
+  --accent-solid: var(--mint-400);
+  --on-accent: var(--neutral-900);
+  /* Soft fills are opaque, pre-composited on --surface (A default
+     #1f1f27). Recipe is unchanged: 12% --win, 10% --loss/--warn/--info/
+     --text-subtle, 17% --brand-accent. Chrome serializes a transparent
+     color-mix as oklch(... / alpha); parsers that skip the "none" hue
+     then force alpha 1 and treat the wash as near-black. An opaque hex
+     keeps computed style as rgb() and contrast stable on any parent.
+     Themes B and C override these when --surface or the ink differs.
+     derive-accent.js rewrites --accent-soft the same way on a swap. */
+  --accent-soft: #263e3c;
+  --accent-secondary: var(--brand-accent);
+  --accent-secondary-text: var(--accent-text);
+
+  --win: var(--mint-400);
+  --loss: var(--red-300);
+  --warn: var(--amber-300);
+  --info: var(--blue-400);
+  --win-soft: #243536;
+  --loss-soft: #34262e;
+  --warn-soft: #352f27;
+  --info-soft: #1d2c39;
+  --neutral-soft: #2b2b33;
+  --on-win: var(--neutral-900);
+  --on-loss: var(--neutral-900);
+
+  --focus-ring: var(--accent-text);
+  --focus-ring-width: 2px;
+  --focus-ring-offset: 2px;
+  --link: var(--accent-text);
+  --link-hover: var(--accent-text);
+  --overlay: rgba(0, 0, 0, 0.6);
+  --header-bg: color-mix(in oklch, var(--bg) 92%, transparent);
+  --text-disabled: var(--neutral-445);
+  --selection-bg: var(--accent-soft);
+  --shadow-card: var(--shadow-0);
+  --shadow-raised: var(--shadow-1-dark);
+  --shadow-overlay: var(--shadow-3-dark);
+
+  --chart-1: var(--chart-purple-dark);
+  --chart-2: var(--chart-mint-dark);
+  --chart-3: var(--chart-amber-dark);
+  --chart-4: var(--chart-red-dark);
+  --chart-5: var(--chart-blue-dark);
+  --chart-6: var(--chart-violet-dark);
+  --chart-wr-up: var(--chart-wr-up-dark);
+  --chart-wr-down: var(--chart-wr-down-dark);
+
+  --boot-bg: var(--bg);
+  --boot-text: var(--text);
+  --status-pending: var(--text-subtle);
+  --sel-ring: var(--accent-solid);
+  --skip-bg: var(--accent-solid);
+  --skip-fg: var(--on-accent);
+  --banner-bg: var(--accent-soft);
+  --banner-fg: var(--text);
+  --banner-accent: var(--accent-text);
+  --banner-solid-bg: var(--accent-solid);
+  --banner-solid-fg: var(--on-accent);
+}
+
+
+/* Density remap. Pages should set data-density to match --density.
+   Direction defaults: A default, B compact, C comfortable.
+   An override of --density / data-density wins over the direction default. */
+[data-density="compact"] {
+  --density-row: var(--row-height-compact);
+  --space-page: var(--space-4);
+  --space-section: var(--space-5);
+  --space-card-pad: var(--space-3);
+  --space-stack: var(--space-3);
+  --nav-height: var(--size-nav-52);
+}
+
+[data-density="default"] {
+  --density-row: var(--row-height-default);
+  --space-page: var(--space-6);
+  --space-section: var(--space-8);
+  --space-card-pad: var(--space-4);
+  --space-stack: var(--space-4);
+  --nav-height: var(--size-nav-56);
+}
+
+[data-density="comfortable"] {
+  --density-row: var(--row-height-comfortable);
+  --space-page: var(--space-10);
+  --space-section: var(--space-12);
+  --space-card-pad: var(--space-7);
+  --space-stack: var(--space-6);
+  --nav-height: var(--size-nav-64);
+}
+
+/* Light-theme soft fills: same recipe at 8% status/neutral and 10%
+   accent, pre-composited on A --surface #ffffff. */
+[data-theme="light"] {
+  --win-soft: #ebf4f1;
+  --loss-soft: #fbeded;
+  --warn-soft: #f7f2eb;
+  --info-soft: #ebf4f9;
+  --neutral-soft: #f3f3f4;
+  --accent-soft: #ecfbf6;
+  --header-bg: color-mix(in oklch, var(--bg) 94%, transparent);
+  --overlay: rgba(23, 23, 29, 0.45);
+  --on-win: var(--neutral-0);
+  --on-loss: var(--neutral-0);
+  --text-disabled: var(--neutral-420);
+}
+
+
+/* Strategy planner: only the brand hex is set here. Ink, text, solid and
+   soft wash come from the same derivation as any other --brand-accent. */
+[data-accent="strategy"] {
+  --brand-accent: var(--orange-strategy);
+}
+
+/* Re-bind aliases on themed nodes so they follow the node's own roles. */
+[data-direction],
+[data-theme],
+[data-density],
+[data-accent] {
+  --font-head: var(--brand-font-display);
+  --accent: var(--brand-accent);
+  --link: var(--accent-text);
+  --link-hover: var(--accent-text);
+  --focus-ring: var(--accent-text);
+  --sel-ring: var(--accent-solid);
+  --selection-bg: var(--accent-soft);
+  --boot-bg: var(--bg);
+  --boot-text: var(--text);
+  --status-pending: var(--text-subtle);
+  --skip-bg: var(--accent-solid);
+  --skip-fg: var(--on-accent);
+  --banner-bg: var(--accent-soft);
+  --banner-fg: var(--text);
+  --banner-accent: var(--accent-text);
+  --banner-solid-bg: var(--accent-solid);
+  --banner-solid-fg: var(--on-accent);
+  --nav-underline-color: var(--accent-text);
+}

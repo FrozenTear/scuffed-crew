@@ -40,8 +40,8 @@ const CONVERSATION_LIST_CSS: &str = r#"
     flex-shrink: 0;
 }
 .dm-conv-list-new {
-    background: var(--accent);
-    color: var(--accent-fg);
+    background: var(--accent-solid);
+    color: var(--on-accent);
     border: none;
     border-radius: 6px;
     font-size: 0.75rem;
@@ -51,12 +51,12 @@ const CONVERSATION_LIST_CSS: &str = r#"
 }
 .dm-conv-list-new:hover { filter: brightness(1.15); }
 .dm-conv-list-new:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--focus-ring);
     outline-offset: 2px;
 }
 .dm-conv-list-refresh {
     background: transparent;
-    color: var(--text-2);
+    color: var(--text-3);
     border: 1px solid var(--border);
     border-radius: 6px;
     font-size: 0.75rem;
@@ -82,7 +82,7 @@ const CONVERSATION_LIST_CSS: &str = r#"
     height: 36px;
     border-radius: 50%;
     background: var(--accent-soft);
-    color: var(--accent);
+    color: var(--accent-text);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -111,7 +111,7 @@ const CONVERSATION_LIST_CSS: &str = r#"
 }
 .dm-conv-time {
     font-size: 0.7rem;
-    color: var(--text-3);
+    color: var(--text-subtle);
     white-space: nowrap;
 }
 .dm-conv-row-bottom {
@@ -123,15 +123,15 @@ const CONVERSATION_LIST_CSS: &str = r#"
 }
 .dm-conv-preview {
     font-size: 0.8rem;
-    color: var(--text-2);
+    color: var(--text-3);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
     flex: 1;
 }
 .dm-conv-unread {
-    background: var(--accent);
-    color: var(--accent-fg);
+    background: var(--accent-solid);
+    color: var(--on-accent);
     font-size: 0.7rem;
     font-weight: 700;
     border-radius: var(--radius-pill);
@@ -141,13 +141,13 @@ const CONVERSATION_LIST_CSS: &str = r#"
 .dm-conv-empty {
     padding: 2.5rem 1rem;
     text-align: center;
-    color: var(--text-3);
+    color: var(--text-subtle);
     font-size: 0.85rem;
 }
 .dm-conv-empty-cta {
     margin-top: 0.75rem;
-    background: var(--accent);
-    color: var(--accent-fg);
+    background: var(--accent-solid);
+    color: var(--on-accent);
     border: none;
     border-radius: 6px;
     padding: 0.5rem 1rem;

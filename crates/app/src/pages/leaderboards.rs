@@ -45,7 +45,7 @@ const PAGE_CSS: &str = r#"
         color: var(--text);
     }
     .lb-sub {
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-size: 0.9rem;
         margin-bottom: 1.5rem;
     }
@@ -56,9 +56,9 @@ const PAGE_CSS: &str = r#"
         flex-wrap: wrap;
     }
     .lb-tab {
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         border: 1px solid var(--border);
-        color: var(--text-2);
+        color: var(--text-3);
         padding: 0.4rem 0.85rem;
         border-radius: 6px;
         cursor: pointer;
@@ -66,12 +66,12 @@ const PAGE_CSS: &str = r#"
         font-weight: 600;
     }
     .lb-tab.active {
-        background: var(--accent);
-        border-color: var(--accent);
-        color: var(--accent-fg);
+        background: var(--accent-solid);
+        border-color: var(--accent-solid);
+        color: var(--on-accent);
     }
     .lb-status {
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-align: center;
         padding: 2rem 0;
     }
@@ -86,7 +86,7 @@ const PAGE_CSS: &str = r#"
         font-size: 0.75rem;
         letter-spacing: 0.08em;
         text-transform: uppercase;
-        color: var(--text-3);
+        color: var(--text-subtle);
         padding: 0.5rem 0.6rem;
         border-bottom: 1px solid var(--border);
     }
@@ -96,22 +96,22 @@ const PAGE_CSS: &str = r#"
         color: var(--text);
     }
     .lb-table a {
-        color: var(--accent);
+        color: var(--accent-text);
         font-weight: 600;
         text-decoration: none;
     }
     .lb-table a:hover { text-decoration: underline; }
     .lb-rank {
         font-family: var(--font-mono);
-        color: var(--text-3);
+        color: var(--text-subtle);
         width: 2.5rem;
     }
     .lb-wr-muted {
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-size: 0.8rem;
     }
     .lb-rule-note {
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-size: 0.8rem;
         margin: 0.75rem 0 0;
     }
@@ -125,7 +125,7 @@ const PAGE_CSS: &str = r#"
         color: var(--text);
     }
     .lb-unranked-sub {
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-size: 0.8rem;
         margin: 0 0 0.75rem;
     }
@@ -139,7 +139,7 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 1.25rem;
     }
     .lb-updated {
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-size: 0.8rem;
         margin: -0.75rem 0 1.25rem;
     }

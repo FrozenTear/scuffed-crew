@@ -23,11 +23,6 @@ pub const SHELL_TITLE: &str = "Community";
 /// Shell description before site settings supply one. Matches `index.html`.
 pub const SHELL_DESCRIPTION: &str = "A community site for teams, events, and scheduled play.";
 
-/// Faces the stylesheets actually set. Space Grotesk 500 is not used on
-/// `--font-head` (body/UI 500 is Inter). `display=swap` keeps text visible
-/// while the files download. The files stay on Google Fonts.
-pub const FONT_STYLESHEET: &str = "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@400;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap";
-
 const OG_IMAGE_PATH: &str = "/assets/apple-touch-icon.png";
 const TITLE_SEP: &str = " | ";
 
@@ -950,16 +945,6 @@ mod tests {
         assert!(slots.og_url.len() <= 1);
         assert!(slots.og_image.len() <= 1);
         assert!(slots.canonical.len() <= 1);
-    }
-
-    #[test]
-    fn font_request_uses_display_swap_and_drops_unused_space_grotesk_500() {
-        assert!(FONT_STYLESHEET.contains("display=swap"));
-        assert!(FONT_STYLESHEET.contains("Inter:wght@400;500;600;700"));
-        assert!(FONT_STYLESHEET.contains("Space+Grotesk:wght@400;600;700"));
-        assert!(!FONT_STYLESHEET.contains("Space+Grotesk:wght@500"));
-        assert!(FONT_STYLESHEET.contains("JetBrains+Mono:wght@400;500;600;700"));
-        assert!(!FONT_STYLESHEET.contains("fonts.gstatic.com/s/"));
     }
 
     #[test]

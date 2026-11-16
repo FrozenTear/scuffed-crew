@@ -1,4 +1,5 @@
 pub mod brand;
+pub mod fonts;
 pub mod provider;
 pub mod tokens;
 
@@ -8,4 +9,4 @@ pub use tokens::theme_css;
 #[allow(unused_imports)]
 pub use tokens::theme_css_current;
 #[allow(unused_imports)]
-pub use tokens::{APP, CLASSIC, Palette, TEMPLATES, Template, template_by_id, theme_css_for};
+pub use tokens::{MINT_REFINED, TEMPLATES, Template, template_by_id, theme_css_for};

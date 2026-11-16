@@ -67,7 +67,7 @@ const CHAT_WIDGET_CSS: &str = r#"
     align-items: center;
     justify-content: space-between;
     padding: 10px 14px;
-    background: var(--surface-2);
+    background: var(--surface-sunken);
     border-bottom: 1px solid var(--border);
     cursor: pointer;
     user-select: none;
@@ -104,7 +104,7 @@ const CHAT_WIDGET_CSS: &str = r#"
     justify-content: center;
     border: none;
     background: transparent;
-    color: var(--text-2);
+    color: var(--text-3);
     cursor: pointer;
     border-radius: 4px;
     font-size: 16px;
@@ -113,7 +113,7 @@ const CHAT_WIDGET_CSS: &str = r#"
 
 .chat-widget__toggle:hover {
     color: var(--text);
-    background: var(--surface-2);
+    background: var(--surface-sunken);
 }
 
 .chat-widget__body {
@@ -147,7 +147,7 @@ const CHAT_WIDGET_CSS: &str = r#"
     border: 1px solid var(--border);
     border-radius: 12px;
     background: transparent;
-    color: var(--text-2);
+    color: var(--text-3);
     font-size: 11px;
     font-weight: 500;
     cursor: pointer;
@@ -156,23 +156,23 @@ const CHAT_WIDGET_CSS: &str = r#"
 }
 
 .chat-widget__channel:hover {
-    border-color: var(--accent);
+    border-color: var(--accent-solid);
     color: var(--text);
 }
 
 .chat-widget__channel--active {
     background: var(--accent-soft);
-    border-color: var(--accent);
-    color: var(--accent);
+    border-color: var(--accent-solid);
+    color: var(--accent-text);
 }
 
 .chat-widget__error {
     margin: 8px 12px 0;
     padding: 8px 10px;
     border-radius: 8px;
-    background: color-mix(in srgb, var(--danger) 8%, transparent);
-    border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
-    color: var(--danger);
+    background: color-mix(in srgb, var(--loss) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--loss) 40%, transparent);
+    color: var(--loss);
     font-size: 12px;
     line-height: 1.4;
 }
@@ -182,7 +182,7 @@ const CHAT_WIDGET_CSS: &str = r#"
     display: flex;
     align-items: center;
     justify-content: center;
-    color: var(--text-3);
+    color: var(--text-subtle);
     font-size: 13px;
     padding: 2rem;
     text-align: center;

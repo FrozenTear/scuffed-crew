@@ -25,9 +25,10 @@ use scuffed_types::strategy::{
 use super::hero_chip::{HeroChip, hero_chip, portrait_ready};
 use crate::canvas::tile_manager::{SharedTileManager, create_tile_manager};
 use crate::theme::tokens::{
-    CANVAS_BADGE_BG, CANVAS_BG, CANVAS_GRID_LOADING, CANVAS_MARKER_BORDER, CANVAS_SELECTION_COLOR,
-    CANVAS_TEXT_LOADING, CANVAS_TILE_PLACEHOLDER, CANVAS_WHITE, HP_GLOW, HP_LARGE_FILL,
-    HP_LARGE_STROKE, HP_SMALL_FILL, HP_SMALL_STROKE, STRATEGY_ACCENT,
+    CANVAS_BADGE_BG, CANVAS_BG, CANVAS_GRID_LOADING, CANVAS_MARKER_BORDER,
+    CANVAS_SELECTION_FALLBACK, CANVAS_SELECTION_TOKEN, CANVAS_TEXT_LOADING,
+    CANVAS_TILE_PLACEHOLDER, CANVAS_WHITE, HP_GLOW, HP_LARGE_FILL, HP_LARGE_STROKE, HP_SMALL_FILL,
+    HP_SMALL_STROKE, STRATEGY_ACCENT,
 };
 
 // =============================================================================
@@ -89,7 +90,7 @@ pub const MAP_CANVAS_CSS: &str = r#"
         margin-bottom: 0.5rem;
     }
     .map-selector-content p {
-        color: var(--text-2);
+        color: var(--text-3);
         margin-bottom: 1.5rem;
     }
     .map-selector-modes {
@@ -104,7 +105,7 @@ pub const MAP_CANVAS_CSS: &str = r#"
     }
     .map-selector-mode-title {
         padding: 0.6rem 1rem;
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         color: var(--text);
         font-weight: 600;
         cursor: pointer;
@@ -114,7 +115,7 @@ pub const MAP_CANVAS_CSS: &str = r#"
     }
     .map-count {
         font-size: 0.8rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         background: var(--surface);
         padding: 0.1rem 0.5rem;
         border-radius: 10px;
@@ -131,13 +132,13 @@ pub const MAP_CANVAS_CSS: &str = r#"
         text-align: left;
         background: transparent;
         border: none;
-        color: var(--text-2);
+        color: var(--text-3);
         cursor: pointer;
         transition: background 0.15s, color 0.15s;
     }
     .map-selector-btn:hover,
     .map-selector-btn-submap:hover {
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         color: var(--text);
     }
     .map-selector-btn-submap {
@@ -150,7 +151,7 @@ pub const MAP_CANVAS_CSS: &str = r#"
     .map-selector-expand-hint {
         margin-left: 0.5rem;
         font-size: 0.8rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
     }
     .map-selector-submaps {
         padding-left: 0.5rem;
@@ -743,8 +744,18 @@ pub fn MapCanvas(
                 .filter(|e| e.phase_id.is_none() || e.phase_id == sel_phase)
                 .collect();
 
+            // `--canvas-selection` follows the brand's solid accent for this
+            // theme, so it is read from the canvas's computed style. If it
+            // resolves empty, the outline still draws in the strategy scope's
+            // dark ring colour (CANVAS_SELECTION_FALLBACK).
+            let selection = web_sys::window()
+                .and_then(|w| w.get_computed_style(&canvas).ok().flatten())
+                .and_then(|style| style.get_property_value(CANVAS_SELECTION_TOKEN).ok())
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| CANVAS_SELECTION_FALLBACK.to_string());
             if let Some(element) = visible.iter().find(|e| e.id == sel) {
-                ctx.set_stroke_style_str(CANVAS_SELECTION_COLOR);
+                ctx.set_stroke_style_str(&selection);
                 ctx.set_line_width(2.0);
                 let dash = Array::of2(&4.0.into(), &4.0.into());
                 let _ = ctx.set_line_dash(&dash);
@@ -1084,7 +1095,7 @@ pub fn MapCanvas(
                         div { class: "map-selector-modes",
                             // Map selection handled by parent component's map picker
                             p {
-                                style: "color: var(--text-3); text-align: center; padding: 2rem;",
+                                style: "color: var(--text-subtle); text-align: center; padding: 2rem;",
                                 "Use the status bar or toolbar to select a map."
                             }
                         }

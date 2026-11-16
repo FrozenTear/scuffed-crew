@@ -42,7 +42,7 @@ const CAPS: &[(&str, usize)] = &[
     ("stat-tracker/src/main_tests/mod.rs", 2166),
     ("stat-tracker/src/ocr/mod.rs", 2755),
     ("stat-tracker/src/ocr/preprocess.rs", 2336),
-    ("stat-tracker/src/packs/mod.rs", 6308),
+    ("stat-tracker/src/packs/mod.rs", 6186),
     ("stat-tracker/src/reader_apply.rs", 1581),
     ("stat-tracker/src/report/blank/reader.rs", 1623),
     ("stat-tracker/src/report/scrub.rs", 2292),
@@ -52,7 +52,7 @@ const CAPS: &[(&str, usize)] = &[
     ("stat-tracker/src/shadow/heroes.rs", 2538),
     ("stat-tracker/src/shadow/reader.rs", 2576),
     ("stat-tracker/src/shadow/result.rs", 4141),
-    ("stat-tracker/src/tests_layering.rs", 2071),
+    ("stat-tracker/src/tests_layering.rs", 1916),
 ];
 
 /// Every `.rs` file the guard covers, by path under `crates/` with `/`

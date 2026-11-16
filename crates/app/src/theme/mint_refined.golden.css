@@ -1,0 +1,780 @@
+/* Scuffed Crew site tokens: primitives
+   Raw ramps and scales only. Pages must never reference the colour
+   primitives (--neutral-*, --mint-*, --blue-* and the other ramps); they use
+   semantic roles. The spacing scale (--space-*) is the exception for now:
+   pages use it directly until spacing gets semantic tokens.
+   A future theme remaps semantic roles onto this file (or an extended ramp). */
+
+:root {
+  /* -------------------------------------------------------------------------
+     Neutral (cool violet-gray, locked to the live site stops where they fit)
+     ------------------------------------------------------------------------- */
+  --neutral-0: #ffffff;
+  --neutral-15: #fbfcfd;
+  --neutral-25: #fbfbfe;
+  --neutral-30: #f4f4f8;
+  --neutral-50: #f7f7f9;
+  --neutral-80: #eef0f4;
+  --neutral-100: #f0f0f4;
+  --neutral-150: #e8e8ee;
+  --neutral-200: #e3e3e9;
+  --neutral-250: #d0d0d6;
+  --neutral-300: #c1c1cd;
+  --neutral-350: #a0a0ae;
+  --neutral-400: #9696a3;
+  --neutral-420: #888896;
+  --neutral-445: #777784;
+  --neutral-450: #72727f;
+  --neutral-480: #6b6b78;
+  --neutral-500: #696975;
+  --neutral-550: #5c5c6a;
+  --neutral-600: #545462;
+  --neutral-650: #3f3f4a;
+  --neutral-700: #353541;
+  --neutral-720: #3a3a48;
+  --neutral-800: #282831;
+  --neutral-825: #1c1c24;
+  --neutral-835: #2c2c36;
+  --neutral-840: #22222b;
+  --neutral-850: #1f1f27;
+  --neutral-860: #1a1a22;
+  --neutral-870: #18181f;
+  --neutral-875: #16161c;
+  --neutral-880: #14141a;
+  --neutral-900: #17171d;
+  --neutral-910: #101014;
+  --neutral-925: #121218;
+  --neutral-950: #0f0f14;
+  --neutral-975: #0a0a10;
+  --neutral-1000: #050508;
+
+  /* -------------------------------------------------------------------------
+     Mint (live brand). Locked stops:
+     400 #46d8a4 dark accent / dark win
+     600 #0ea66e live light accent (decorative only)
+     700 #087a50 light solid (all directions) and A/B light accent-text and win
+     750 #007046 C light accent-text and win, for 4.5:1 on soft fills
+     ------------------------------------------------------------------------- */
+  --mint-50: #defeed;
+  --mint-100: #c5f6dd;
+  --mint-200: #a8e9c7;
+  --mint-300: #7ee0b8;
+  --mint-400: #46d8a4;
+  --mint-500: #1fbe86;
+  --mint-600: #0ea66e;
+  --mint-700: #087a50;
+  --mint-750: #007046;
+  --mint-800: #006136;
+  --mint-900: #00451c;
+  --mint-950: #002904;
+
+  /* -------------------------------------------------------------------------
+     Red (loss / NERF). Locked stops:
+     300 #f06a6a dark loss (site --danger)
+     500 #d63031 light loss (site --danger). Text only on white or --neutral-50.
+     ------------------------------------------------------------------------- */
+  --red-50: #ffdad5;
+  --red-100: #ffc4be;
+  --red-200: #ff9a94;
+  --red-300: #f06a6a;
+  --red-400: #e24c4e;
+  --red-500: #d63031;
+  --red-550: #c81d24;
+  --red-600: #b61f24;
+  --red-700: #8c1014;
+  --red-800: #670909;
+  --red-900: #4c0000;
+  --red-950: #2a0000;
+
+  /* -------------------------------------------------------------------------
+     Amber (warn). Locked / fixed stops:
+     300 #fbbf24 dark warn (site --warn)
+     500 #c2830a previous light warn, kept for charts; fails AA as 12px text
+     600 #9b5f00 light warn text and icons (AA on light surfaces)
+     ------------------------------------------------------------------------- */
+  --amber-50: #ffe9b2;
+  --amber-100: #ffd980;
+  --amber-200: #ffcb55;
+  --amber-300: #fbbf24;
+  --amber-400: #dfa11a;
+  --amber-500: #c2830a;
+  --amber-600: #9b5f00;
+  --amber-700: #7a4800;
+  --amber-800: #5a3200;
+  --amber-900: #3d2000;
+  --amber-950: #241200;
+
+  /* -------------------------------------------------------------------------
+     Blue (info). Locked / fixed stops:
+     400 #089fd7 dark info (site chart-5)
+     500 #0284c7 previous light info, kept for charts; misses AA as 12px text
+     600 #0072b3 light info text and icons (AA on light surfaces)
+     ------------------------------------------------------------------------- */
+  --blue-50: #c9f6ff;
+  --blue-100: #9ee8ff;
+  --blue-200: #70dbff;
+  --blue-300: #4dbaf5;
+  --blue-400: #089fd7;
+  --blue-500: #0284c7;
+  --blue-600: #0072b3;
+  --blue-700: #005a90;
+  --blue-800: #00416a;
+  --blue-900: #002a48;
+  --blue-950: #00182c;
+
+  /* -------------------------------------------------------------------------
+     Cyan (Competitive secondary only). Sharp ice accent, not a status colour.
+     300 #22d3ee dark secondary text
+     600 #007693 light secondary text (AA on light surfaces)
+     ------------------------------------------------------------------------- */
+  --cyan-50: #c0faff;
+  --cyan-100: #8ef3ff;
+  --cyan-200: #56efff;
+  --cyan-300: #22d3ee;
+  --cyan-400: #00bad1;
+  --cyan-500: #00a3bb;
+  --cyan-600: #007693;
+  --cyan-700: #005b73;
+  --cyan-800: #004155;
+  --cyan-900: #002a38;
+  --cyan-950: #001820;
+
+  /* -------------------------------------------------------------------------
+     Chart ramps (CVD-validated site values, from tokens.rs)
+     ------------------------------------------------------------------------- */
+  --chart-purple-dark: #8f73ff;
+  --chart-purple-light: #6d4aff;
+  --chart-mint-dark: #15ac7d;
+  --chart-mint-light: #0ea66e;
+  --chart-amber-dark: #b98a02;
+  --chart-amber-light: #c2830a;
+  --chart-red-dark: #ca474c;
+  --chart-red-light: #d63031;
+  --chart-blue-dark: #089fd7;
+  --chart-blue-light: #0284c7;
+  --chart-violet-dark: #984ab2;
+  --chart-violet-light: #7405c3;
+  --chart-wr-up-dark: #089fd7;
+  --chart-wr-up-light: #0284c7;
+  --chart-wr-down-dark: #aa5000;
+  --chart-wr-down-light: #843900;
+
+  /* -------------------------------------------------------------------------
+     Type families and scale (12px floor)
+     ------------------------------------------------------------------------- */
+  --font-family-urbanist: "Urbanist", "Urbanist Fallback", system-ui, sans-serif;
+  --font-family-ibm-plex-sans: "IBM Plex Sans", "IBM Plex Sans Fallback", system-ui, sans-serif;
+  --font-family-jetbrains: "JetBrains Mono", ui-monospace, monospace;
+
+  --font-size-11: 11px;
+  --font-size-12: 12px;
+  --font-size-13: 13px;
+  --font-size-14: 14px;
+  --font-size-16: 16px;
+  --font-size-18: 18px;
+  --font-size-20: 20px;
+  --font-size-24: 24px;
+  --font-size-28: 28px;
+  --font-size-30: 30px;
+  --font-size-32: 32px;
+  --font-size-36: 36px;
+
+  --font-weight-400: 400;
+  --font-weight-500: 500;
+  --font-weight-600: 600;
+  --font-weight-700: 700;
+  --font-weight-800: 800;
+
+  --tracking-tight: -0.03em;
+  --tracking-snug: -0.015em;
+  --tracking-normal: 0;
+  --tracking-open: 0.01em;
+  --tracking-caps: 0.08em;
+
+  --leading-tight: 1.2;
+  --leading-snug: 1.35;
+  --leading-normal: 1.5;
+  --leading-relaxed: 1.65;
+
+  /* -------------------------------------------------------------------------
+     Space scale, 4px grid (space-1 to space-8, plus 10 and 12 for comfortable gutters)
+     ------------------------------------------------------------------------- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 28px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  /* -------------------------------------------------------------------------
+     Radius scale
+     ------------------------------------------------------------------------- */
+  --radius-0: 0;
+  --radius-1: 4px;
+  --radius-2: 8px;
+  --radius-3: 12px;
+  --radius-3-5: 14px;
+  --radius-4: 16px;
+  --radius-5: 20px;
+  --radius-full: 999px;
+
+  /* -------------------------------------------------------------------------
+     Shadow scale (raw). Semantic roles pick a step per theme.
+     ------------------------------------------------------------------------- */
+  --shadow-0: none;
+  --shadow-1-dark: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2-dark: 0 8px 24px rgba(0, 0, 0, 0.4);
+  --shadow-3-dark: 0 16px 40px rgba(0, 0, 0, 0.45);
+  --shadow-4-dark: 0 24px 64px rgba(0, 0, 0, 0.55);
+  --shadow-1-light: 0 1px 2px rgba(23, 23, 29, 0.06);
+  --shadow-2-light: 0 8px 24px rgba(23, 23, 29, 0.08);
+  --shadow-3-light: 0 16px 40px rgba(23, 23, 29, 0.1);
+  --shadow-4-light: 0 24px 64px rgba(23, 23, 29, 0.14);
+
+  /* -------------------------------------------------------------------------
+     Layout constants
+     ------------------------------------------------------------------------- */
+  --size-hit-44: 44px;
+  --size-row-44: 44px;
+  --size-row-52: 52px;
+  --size-row-64: 64px;
+  --size-nav-52: 52px;
+  --size-nav-56: 56px;
+  --size-nav-64: 64px;
+  --container-sm-width: 640px;
+  --container-md-width: 880px;
+  --container-lg-width: 1120px;
+  --container-xl-width: 1280px;
+  --content-narrow-width: 720px;
+  --content-default-width: 1040px;
+  --content-wide-width: 1280px;
+  --size-control-32: 32px;
+
+  /* Canvas / planner (seeded from tokens.rs). Selection is not #00ff00. */
+  --canvas-space-bg: #14141c;
+  --canvas-tile: #2a2a3e;
+  --hp-small-fill: #ffeb3b;
+  --hp-small-stroke: #ffc107;
+  --hp-large-fill: #ff9800;
+  --hp-large-stroke: #f57c00;
+
+  /* Strategy planner brand, used only as --brand-accent under [data-accent=strategy]. */
+  --orange-strategy: #ff7a1a;
+
+  /* Calm Panels raised tints (3% mint over a surface stop, locked for contrast). */
+  --mint-raised-dark: #292d34;
+  --mint-raised-light: #f8fbfa;
+}
+
+
+/* Scuffed Crew site tokens: semantic
+   Pages and components may use these names. They must not use primitives.
+   Colour roles are filled by a theme file. This file owns the contract,
+   typography, layout, density remap, and the customisable override surface. */
+
+:root {
+  /* -----------------------------------------------------------------------
+     Override surface
+     Change these three, then re-derive accent roles (see tokens.md and
+     derive-accent.js). A future custom look can also ship a new theme file.
+     ----------------------------------------------------------------------- */
+  --brand-accent: #46d8a4;
+  --brand-font-display: var(--font-family-urbanist);
+  --density: default;
+
+  /* -----------------------------------------------------------------------
+     Type roles
+     ----------------------------------------------------------------------- */
+  --font-head: var(--brand-font-display);
+  --font-body: var(--font-family-ibm-plex-sans);
+  --font-mono: var(--font-family-jetbrains);
+  --font-head-weight: var(--font-weight-700);
+  --font-head-tracking: var(--tracking-snug);
+  --font-body-weight: var(--font-weight-400);
+  --font-label-weight: var(--font-weight-600);
+  --font-label-tracking: var(--tracking-open);
+  --font-head-transform: none;
+
+  --text-xs: var(--font-size-12);
+  --text-sm: var(--font-size-13);
+  --text-md: var(--font-size-14);
+  --text-lg: var(--font-size-16);
+  --text-xl: var(--font-size-18);
+  --text-2xl: var(--font-size-24);
+  --text-3xl: var(--font-size-30);
+  --leading-display: var(--leading-tight);
+  --leading-body: var(--leading-normal);
+  --leading-ui: var(--leading-snug);
+
+  /* -----------------------------------------------------------------------
+     Layout and density roles
+     ----------------------------------------------------------------------- */
+  --hit-target-min: var(--size-hit-44);
+  --row-height-compact: var(--size-row-44);
+  --row-height-default: var(--size-row-52);
+  --row-height-comfortable: var(--size-row-64);
+  --container-sm: var(--container-sm-width);
+  --container-md: var(--container-md-width);
+  --container-lg: var(--container-lg-width);
+  --container-xl: var(--container-xl-width);
+  --content-max-narrow: var(--content-narrow-width);
+  --content-max-default: var(--content-default-width);
+  --content-max-wide: var(--content-wide-width);
+  --content-max-full: none;
+  --control-size-sm: var(--size-control-32);
+  --frame-stroke: var(--border);
+  --nav-underline-width: 2px;
+  --nav-underline-color: var(--accent-text);
+  --radius-card: var(--radius-3);
+  --radius-control: var(--radius-2);
+  --radius-tile: var(--radius-2);
+  --radius-pill: var(--radius-full);
+
+  /* Fallback density (default). [data-density] remaps below. */
+  --density-row: var(--row-height-default);
+  --space-page: var(--space-6);
+  --space-section: var(--space-8);
+  --space-card-pad: var(--space-4);
+  --space-stack: var(--space-4);
+  --nav-height: var(--size-nav-56);
+
+  /* -----------------------------------------------------------------------
+     Colour roles (fallback = Mint Refined dark). Theme files override.
+     ----------------------------------------------------------------------- */
+  --bg: var(--neutral-900);
+  --surface: var(--neutral-850);
+  --surface-raised: var(--neutral-800);
+  --surface-sunken: var(--neutral-800);
+  --border: var(--neutral-700);
+  --border-strong: var(--neutral-450);
+  --text: var(--neutral-25);
+  --text-3: var(--neutral-300);
+  --text-subtle: var(--neutral-400);
+  --text-inverse: var(--neutral-900);
+
+  --accent: var(--brand-accent);
+  --accent-text: var(--mint-400);
+  --accent-solid: var(--mint-400);
+  --on-accent: var(--neutral-900);
+  /* Soft fills are opaque, pre-composited on --surface (A default
+     #1f1f27). Recipe is unchanged: 12% --win, 10% --loss/--warn/--info/
+     --text-subtle, 17% --brand-accent. Chrome serializes a transparent
+     color-mix as oklch(... / alpha); parsers that skip the "none" hue
+     then force alpha 1 and treat the wash as near-black. An opaque hex
+     keeps computed style as rgb() and contrast stable on any parent.
+     Themes B and C override these when --surface or the ink differs.
+     derive-accent.js rewrites --accent-soft the same way on a swap. */
+  --accent-soft: #263e3c;
+  --accent-secondary: var(--brand-accent);
+  --accent-secondary-text: var(--accent-text);
+
+  --win: var(--mint-400);
+  --loss: var(--red-300);
+  --warn: var(--amber-300);
+  --info: var(--blue-400);
+  --win-soft: #243536;
+  --loss-soft: #34262e;
+  --warn-soft: #352f27;
+  --info-soft: #1d2c39;
+  --neutral-soft: #2b2b33;
+  --on-win: var(--neutral-900);
+  --on-loss: var(--neutral-900);
+
+  --focus-ring: var(--accent-text);
+  --focus-ring-width: 2px;
+  --focus-ring-offset: 2px;
+  --link: var(--accent-text);
+  --link-hover: var(--accent-text);
+  --overlay: rgba(0, 0, 0, 0.6);
+  --header-bg: color-mix(in oklch, var(--bg) 92%, transparent);
+  --text-disabled: var(--neutral-445);
+  --selection-bg: var(--accent-soft);
+  --shadow-card: var(--shadow-0);
+  --shadow-raised: var(--shadow-1-dark);
+  --shadow-overlay: var(--shadow-3-dark);
+
+  --chart-1: var(--chart-purple-dark);
+  --chart-2: var(--chart-mint-dark);
+  --chart-3: var(--chart-amber-dark);
+  --chart-4: var(--chart-red-dark);
+  --chart-5: var(--chart-blue-dark);
+  --chart-6: var(--chart-violet-dark);
+  --chart-wr-up: var(--chart-wr-up-dark);
+  --chart-wr-down: var(--chart-wr-down-dark);
+
+  --boot-bg: var(--bg);
+  --boot-text: var(--text);
+  --status-pending: var(--text-subtle);
+  --sel-ring: var(--accent-solid);
+  --skip-bg: var(--accent-solid);
+  --skip-fg: var(--on-accent);
+  --banner-bg: var(--accent-soft);
+  --banner-fg: var(--text);
+  --banner-accent: var(--accent-text);
+  --banner-solid-bg: var(--accent-solid);
+  --banner-solid-fg: var(--on-accent);
+}
+
+
+/* Density remap. Pages should set data-density to match --density.
+   Direction defaults: A default, B compact, C comfortable.
+   An override of --density / data-density wins over the direction default. */
+[data-density="compact"] {
+  --density-row: var(--row-height-compact);
+  --space-page: var(--space-4);
+  --space-section: var(--space-5);
+  --space-card-pad: var(--space-3);
+  --space-stack: var(--space-3);
+  --nav-height: var(--size-nav-52);
+}
+
+[data-density="default"] {
+  --density-row: var(--row-height-default);
+  --space-page: var(--space-6);
+  --space-section: var(--space-8);
+  --space-card-pad: var(--space-4);
+  --space-stack: var(--space-4);
+  --nav-height: var(--size-nav-56);
+}
+
+[data-density="comfortable"] {
+  --density-row: var(--row-height-comfortable);
+  --space-page: var(--space-10);
+  --space-section: var(--space-12);
+  --space-card-pad: var(--space-7);
+  --space-stack: var(--space-6);
+  --nav-height: var(--size-nav-64);
+}
+
+/* Light-theme soft fills: same recipe at 8% status/neutral and 10%
+   accent, pre-composited on A --surface #ffffff. */
+[data-theme="light"] {
+  --win-soft: #ebf4f1;
+  --loss-soft: #fbeded;
+  --warn-soft: #f7f2eb;
+  --info-soft: #ebf4f9;
+  --neutral-soft: #f3f3f4;
+  --accent-soft: #ecfbf6;
+  --header-bg: color-mix(in oklch, var(--bg) 94%, transparent);
+  --overlay: rgba(23, 23, 29, 0.45);
+  --on-win: var(--neutral-0);
+  --on-loss: var(--neutral-0);
+  --text-disabled: var(--neutral-420);
+}
+
+
+/* Strategy planner: only the brand hex is set here. Ink, text, solid and
+   soft wash come from the same derivation as any other --brand-accent. */
+[data-accent="strategy"] {
+  --brand-accent: var(--orange-strategy);
+}
+
+/* Re-bind aliases on themed nodes so they follow the node's own roles. */
+[data-direction],
+[data-theme],
+[data-density],
+[data-accent] {
+  --font-head: var(--brand-font-display);
+  --accent: var(--brand-accent);
+  --link: var(--accent-text);
+  --link-hover: var(--accent-text);
+  --focus-ring: var(--accent-text);
+  --sel-ring: var(--accent-solid);
+  --selection-bg: var(--accent-soft);
+  --boot-bg: var(--bg);
+  --boot-text: var(--text);
+  --status-pending: var(--text-subtle);
+  --skip-bg: var(--accent-solid);
+  --skip-fg: var(--on-accent);
+  --banner-bg: var(--accent-soft);
+  --banner-fg: var(--text);
+  --banner-accent: var(--accent-text);
+  --banner-solid-bg: var(--accent-solid);
+  --banner-solid-fg: var(--on-accent);
+  --nav-underline-color: var(--accent-text);
+}
+
+/* Scuffed Crew site tokens: components
+   Defined only from semantic tokens. Pages may use these or semantic names.
+   Never reference primitives here. */
+
+:root,
+[data-direction],
+[data-theme],
+[data-density],
+[data-accent] {
+  /* Re-specified on every themed node so var() resolves against that
+     node's semantic values, instead of inheriting :root's computed hex. */
+  /* Buttons */
+  --button-height: var(--hit-target-min);
+  --button-pad-x: var(--space-4);
+  --button-radius: var(--radius-control);
+  --button-font: var(--font-head);
+  --button-font-size: var(--text-sm);
+  --button-font-weight: var(--font-label-weight);
+  --button-primary-bg: var(--accent-solid);
+  --button-primary-fg: var(--on-accent);
+  --button-primary-border: var(--accent-solid);
+  --button-primary-hover-bg: var(--accent-solid);
+  --button-secondary-bg: var(--surface);
+  --button-secondary-fg: var(--text);
+  --button-secondary-border: var(--border-strong);
+  --button-danger-bg: transparent;
+  --button-danger-fg: var(--loss);
+  --button-danger-border: var(--loss);
+
+  /* Chips / filter pills */
+  --chip-height: var(--hit-target-min);
+  --chip-pad-x: var(--space-3);
+  --chip-radius: var(--radius-pill);
+  --chip-font: var(--font-head);
+  --chip-font-size: var(--text-xs);
+  --chip-font-weight: var(--font-weight-500);
+  --chip-bg: var(--surface-sunken);
+  --chip-fg: var(--text-3);
+  --chip-border: var(--border);
+  --chip-selected-bg: var(--accent-soft);
+  --chip-selected-fg: var(--accent-text);
+  --chip-selected-border: var(--accent-text);
+  --chip-selected-border-width: 1px;
+  --chip-selected-weight: var(--font-weight-600);
+
+  /* Cards */
+  --card-bg: var(--surface);
+  --card-fg: var(--text);
+  --card-border: var(--frame-stroke);
+  --card-radius: var(--radius-card);
+  --card-shadow: var(--shadow-card);
+  --card-padding: var(--space-card-pad);
+
+  /* Tables */
+  --table-row-height: var(--density-row);
+  --table-row-bg: var(--surface);
+  --table-row-alt: var(--surface-sunken);
+  --table-row-border: var(--border);
+  --table-row-hover: var(--surface-raised);
+  --table-row-fg: var(--text);
+  --table-row-muted: var(--text-3);
+  --table-header-fg: var(--text-subtle);
+  --table-header-weight: var(--font-label-weight);
+  --table-font: var(--font-body);
+  --table-font-size: var(--text-sm);
+  --table-radius: var(--radius-card);
+  --table-pad-x: var(--space-3);
+
+  /* Nav */
+  --nav-bg: var(--header-bg);
+  --nav-fg: var(--text);
+  --nav-muted: var(--text-3);
+  --nav-active: var(--accent-text);
+  --nav-border: var(--border);
+  --nav-height-used: var(--nav-height);
+  --nav-font: var(--font-head);
+  --nav-font-size: var(--text-sm);
+  --nav-active-underline-width: var(--nav-underline-width);
+  --nav-active-underline-color: var(--nav-underline-color);
+  --nav-font-weight: var(--font-label-weight);
+  --nav-radius: var(--radius-control);
+  --nav-mark-bg: var(--accent-solid);
+  --nav-mark-fg: var(--on-accent);
+  --nav-mark-radius: var(--radius-tile);
+
+  /* Badges and verdict chips (shape plus word, never colour alone) */
+  --badge-height: 24px;
+  --badge-pad-x: var(--space-2);
+  --badge-radius: var(--radius-pill);
+  --badge-font: var(--font-head);
+  --badge-font-size: var(--font-size-11);
+  --badge-font-weight: var(--font-label-weight);
+  --badge-font-transform: uppercase;
+  --badge-bg: var(--surface-sunken);
+  --badge-fg: var(--text-3);
+  --badge-border: transparent;
+  --badge-win-bg: var(--win-soft);
+  --badge-win-fg: var(--win);
+  --badge-loss-bg: var(--loss-soft);
+  --badge-loss-fg: var(--loss);
+  --badge-warn-bg: var(--warn-soft);
+  --badge-warn-fg: var(--warn);
+  --badge-info-bg: var(--info-soft);
+  --badge-info-fg: var(--info);
+  --badge-neutral-bg: var(--neutral-soft);
+  --badge-neutral-fg: var(--text-3);
+
+  /* Initials tile (hero mark) */
+  --tile-size: 32px;
+  --tile-size-lg: 48px;
+  --tile-bg: var(--surface-sunken);
+  --tile-fg: var(--text);
+  --tile-radius: var(--radius-tile);
+  --tile-font: var(--font-head);
+  --tile-font-weight: var(--font-head-weight);
+
+  /* Skip link: derived ink on the solid accent */
+  --skip-link-bg: var(--skip-bg);
+  --skip-link-fg: var(--skip-fg);
+
+  /* Community / mint banner: soft fill with --text and --accent-text, or
+     solid fill with --on-accent. Never --text-3. */
+  --banner-soft-bg: var(--banner-bg);
+  --banner-soft-fg: var(--banner-fg);
+  --banner-soft-accent: var(--banner-accent);
+  --banner-solid-fill: var(--banner-solid-bg);
+  --banner-solid-ink: var(--banner-solid-fg);
+
+  /* Strategy canvas. Selection follows --sel-ring, not a literal lime. */
+  --canvas-bg: var(--canvas-space-bg);
+  --canvas-tile-placeholder: var(--canvas-tile);
+  --canvas-selection: var(--sel-ring);
+  --canvas-hp-small-fill: var(--hp-small-fill);
+  --canvas-hp-small-stroke: var(--hp-small-stroke);
+  --canvas-hp-large-fill: var(--hp-large-fill);
+  --canvas-hp-large-stroke: var(--hp-large-stroke);
+}
+
+/* Competitive: cards and stat tiles sit on the raised step so their
+   edges read against the flat canvas. Hairline comes from --frame-stroke. */
+[data-direction="b"] {
+  --card-bg: var(--surface-raised);
+  --table-row-bg: var(--surface-raised);
+  --table-row-alt: var(--surface-raised);
+}
+
+/* Calm Panels: a thicker selected chip border in the solid accent, so
+   the selected state is not colour alone on a soft wash. Weight stays 600. */
+[data-direction="c"] {
+  --chip-selected-border: var(--accent-solid);
+  --chip-selected-border-width: 2px;
+}
+
+
+/* Direction A: Mint Refined
+   The current Scuffed Crew look, tightened onto the semantic layer.
+   Default density: default. Radius 12 / 8 / 999. Surfaces match tokens.rs.
+   App copy of themes/a-mint-refined.css: the [data-direction="a"] scopes are
+   keyed on :root and [data-theme] here, because the app switches theme with
+   data-theme on <html> and ships one look. */
+
+:root {
+  --font-head-weight: var(--font-weight-700);
+  --font-head-tracking: var(--tracking-snug);
+  --radius-card: var(--radius-3);
+  --radius-control: var(--radius-2);
+  --radius-tile: var(--radius-2);
+  --radius-pill: var(--radius-full);
+  --text-xs: var(--font-size-12);
+  --text-sm: var(--font-size-13);
+  --text-md: var(--font-size-14);
+  --text-xl: var(--font-size-18);
+  --text-2xl: var(--font-size-24);
+  --text-3xl: var(--font-size-30);
+}
+
+[data-theme="dark"] {
+  --bg: var(--neutral-900);
+  --surface: var(--neutral-850);
+  --surface-raised: var(--neutral-800);
+  --surface-sunken: var(--neutral-800);
+  --border: var(--neutral-700);
+  --border-strong: var(--neutral-450);
+  --text: var(--neutral-30);
+  --text-3: var(--neutral-300);
+  --text-subtle: var(--neutral-400);
+  --text-inverse: var(--neutral-900);
+
+  --accent: var(--brand-accent);
+  --accent-text: var(--mint-400);
+  --accent-solid: var(--mint-400);
+  --on-accent: var(--neutral-900);
+  --accent-soft: #263e3c;
+  --accent-secondary: var(--brand-accent);
+  --accent-secondary-text: var(--accent-text);
+
+  --win: var(--mint-400);
+  --loss: var(--red-300);
+  --warn: var(--amber-300);
+  --info: var(--blue-400);
+  --on-win: var(--neutral-900);
+
+  --focus-ring: var(--accent-text);
+  --link: var(--accent-text);
+  --link-hover: var(--accent-text);
+  --shadow-card: var(--shadow-0);
+  --shadow-raised: var(--shadow-1-dark);
+  --shadow-overlay: var(--shadow-3-dark);
+
+  --chart-1: var(--chart-purple-dark);
+  --chart-2: var(--chart-mint-dark);
+  --chart-3: var(--chart-amber-dark);
+  --chart-4: var(--chart-red-dark);
+  --chart-5: var(--chart-blue-dark);
+  --chart-6: var(--chart-violet-dark);
+  --chart-wr-up: var(--chart-wr-up-dark);
+  --chart-wr-down: var(--chart-wr-down-dark);
+}
+
+[data-theme="light"] {
+  --bg: var(--neutral-50);
+  --surface: var(--neutral-0);
+  --surface-raised: var(--neutral-0);
+  --surface-sunken: var(--neutral-100);
+  --border: var(--neutral-200);
+  --border-strong: var(--neutral-420);
+  --text: var(--neutral-875);
+  --text-3: var(--neutral-600);
+  --text-subtle: var(--neutral-500);
+  --text-inverse: var(--neutral-0);
+
+  --accent: var(--brand-accent);
+  --accent-text: var(--mint-700);
+  --accent-solid: var(--mint-700);
+  --on-accent: var(--neutral-0);
+  --accent-soft: #ecfbf6;
+  --accent-secondary: var(--brand-accent);
+  --accent-secondary-text: var(--accent-text);
+
+  --win: var(--mint-700);
+  --loss: var(--red-550);
+  --warn: var(--amber-600);
+  --info: var(--blue-600);
+  --on-win: var(--neutral-0);
+
+  --focus-ring: var(--accent-text);
+  --link: var(--accent-text);
+  --link-hover: var(--accent-text);
+  --shadow-card: var(--shadow-1-light);
+  --shadow-raised: var(--shadow-2-light);
+  --shadow-overlay: var(--shadow-3-light);
+
+  --chart-1: var(--chart-purple-light);
+  --chart-2: var(--chart-mint-light);
+  --chart-3: var(--chart-amber-light);
+  --chart-4: var(--chart-red-light);
+  --chart-5: var(--chart-blue-light);
+  --chart-6: var(--chart-violet-light);
+  --chart-wr-up: var(--chart-wr-up-light);
+  --chart-wr-down: var(--chart-wr-down-light);
+}
+
+/* Brand accent roles, derived in brand.rs (port of derive-accent.js). */
+[data-theme="dark"] { --brand-accent: #8f73ff; --accent: #8f73ff; --accent-text: #aa91ff; --accent-solid: #8f73ff; --on-accent: #17171d; --accent-soft: #322d4c; }
+[data-theme="light"] { --brand-accent: #6d4aff; --accent: #6d4aff; --accent-text: #6944fa; --accent-solid: #6c49fe; --on-accent: #ffffff; --accent-soft: #f0edff; }
+[data-theme="dark"] [data-accent="strategy"] { --brand-accent: #ff7a1a; --accent: #ff7a1a; --accent-text: #ff8227; --accent-solid: #ff7a1a; --on-accent: #17171d; --accent-soft: #452e25; }
+[data-theme="light"] [data-accent="strategy"] { --brand-accent: #ff7a1a; --accent: #ff7a1a; --accent-text: #bf3f00; --accent-solid: #c24200; --on-accent: #ffffff; --accent-soft: #fff2e8; }
+
+html, body {
+  /* --page-bg-* set from admin Site Settings when customized */
+  background-color: var(--page-bg-color, var(--bg));
+  background-image: var(--page-bg-image, none);
+  background-size: cover;
+  background-position: center;
+  background-attachment: fixed;
+  background-repeat: no-repeat;
+  color: var(--text);
+  font-family: var(--font-body); font-size: var(--text-md);
+  font-variant-numeric: tabular-nums;
+}

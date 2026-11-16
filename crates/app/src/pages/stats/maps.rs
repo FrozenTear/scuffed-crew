@@ -44,7 +44,7 @@ fn mode_label_color(mode: &str) -> &'static str {
         "Push" => "var(--chart-3)",
         "Flashpoint" => "var(--chart-6)",
         "Clash" => "var(--chart-4)",
-        _ => "var(--text-3)",
+        _ => "var(--text-subtle)",
     }
 }
 

@@ -48,7 +48,7 @@ const PAGE_CSS: &str = r#"
         font-size: 0.75rem;
         letter-spacing: 0.04em;
         text-transform: uppercase;
-        color: var(--text-3);
+        color: var(--text-subtle);
         margin: 0;
     }
     .form-textarea.mono {

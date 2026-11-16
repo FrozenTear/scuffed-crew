@@ -37,7 +37,7 @@ const CSS: &str = r#"
     margin: 0 0 0.5rem;
 }
 .login-card p.lead {
-    color: var(--text-2);
+    color: var(--text-3);
     font-size: 0.9rem;
     margin: 0 0 1.5rem;
 }
@@ -50,7 +50,7 @@ const CSS: &str = r#"
 .login-field label {
     font-size: 0.85rem;
     font-weight: 600;
-    color: var(--text-2);
+    color: var(--text-3);
 }
 .login-field input {
     background: var(--bg);
@@ -61,7 +61,7 @@ const CSS: &str = r#"
     font-size: 1rem;
 }
 .login-error {
-    color: var(--danger);
+    color: var(--loss);
     font-size: 0.85rem;
     margin-bottom: 1rem;
 }
@@ -71,20 +71,20 @@ const CSS: &str = r#"
     border-radius: 6px;
     border: 1px solid var(--accent-soft);
     background: var(--surface);
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 0.9rem;
     font-weight: 600;
     cursor: pointer;
     transition: all 0.15s;
 }
 .login-nostr-btn:hover:not(:disabled) {
-    border-color: var(--accent);
+    border-color: var(--accent-solid);
     background: var(--accent-soft);
 }
 .login-nostr-btn:disabled { opacity: 0.6; cursor: default; }
 .login-nostr-hint {
     font-size: 0.75rem;
-    color: var(--text-3);
+    color: var(--text-subtle);
     margin: 0.4rem 0 0;
     text-align: center;
 }
@@ -94,7 +94,7 @@ const CSS: &str = r#"
     gap: 0.5rem;
     margin-bottom: 1rem;
     font-size: 0.85rem;
-    color: var(--text-2);
+    color: var(--text-3);
 }
 .login-switch {
     margin-top: 1rem;
@@ -103,7 +103,7 @@ const CSS: &str = r#"
 .login-linkish {
     background: none;
     border: none;
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 0.85rem;
     font-weight: 600;
     cursor: pointer;
@@ -123,12 +123,12 @@ const CSS: &str = r#"
     padding: 0.55rem;
     border: 1px solid var(--border);
     border-radius: 6px;
-    color: var(--text-2);
+    color: var(--text-3);
     font-size: 0.9rem;
 }
 .login-oauth a:hover {
     color: var(--text);
-    border-color: var(--accent);
+    border-color: var(--accent-solid);
 }
 .login-card button[type="submit"] {
     width: 100%;
@@ -900,7 +900,7 @@ pub fn Login() -> Element {
                     if cfg!(debug_assertions) {
                         a {
                             href: "/api/dev/login",
-                            style: "color: var(--accent);",
+                            style: "color: var(--accent-text);",
                             "Dev login (in-memory only)"
                         }
                     }

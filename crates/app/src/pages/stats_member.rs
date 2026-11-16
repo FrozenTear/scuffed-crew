@@ -113,7 +113,7 @@ const MEMBER_STATS_CSS: &str = r#"
         padding: 0.6rem 1.2rem;
         border: none;
         background: none;
-        color: var(--text-2);
+        color: var(--text-3);
         font-family: var(--font-head);
         font-size: 0.9rem;
         font-weight: 600;
@@ -127,8 +127,8 @@ const MEMBER_STATS_CSS: &str = r#"
     }
     .member-stats .stats-tab:hover { color: var(--text); }
     .member-stats .stats-tab.active {
-        color: var(--accent);
-        border-bottom-color: var(--accent);
+        color: var(--accent-text);
+        border-bottom-color: var(--accent-solid);
     }
     .member-stats .stats-summary {
         display: grid;
@@ -155,25 +155,25 @@ const MEMBER_STATS_CSS: &str = r#"
     }
     .member-stats .stat-tile-hero .stat-tile-value {
         font-size: 2.8rem;
-        color: var(--accent);
+        color: var(--accent-text);
     }
     .member-stats .stat-tile-label {
         font-size: 0.75rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-transform: uppercase;
         letter-spacing: 0.05em;
         margin-top: 0.35rem;
     }
     .member-stats .stat-tile-record {
         font-size: 0.9rem;
-        color: var(--text-2);
+        color: var(--text-3);
         margin-top: 0.4rem;
         white-space: nowrap;
     }
     .member-stats .stats-wr { font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
-    .member-stats .stats-wr.muted { color: var(--text-3); font-weight: 400; }
+    .member-stats .stats-wr.muted { color: var(--text-subtle); font-weight: 400; }
     .member-stats .stats-row-muted { opacity: 0.55; }
-    .member-stats .stats-gate-note { font-size: 0.75rem; color: var(--text-3); margin: 0 0 0.75rem; }
+    .member-stats .stats-gate-note { font-size: 0.75rem; color: var(--text-subtle); margin: 0 0 0.75rem; }
     .member-stats.stats-page .data-table th:not(:first-child),
     .member-stats.stats-page .data-table td:not(:first-child) {
         text-align: right;

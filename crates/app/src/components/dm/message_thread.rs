@@ -32,7 +32,7 @@ const MESSAGE_THREAD_CSS: &str = r#"
     height: 36px;
     border-radius: 50%;
     background: var(--accent-soft);
-    color: var(--accent);
+    color: var(--accent-text);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -49,7 +49,7 @@ const MESSAGE_THREAD_CSS: &str = r#"
 .dm-thread-pubkey {
     font-family: var(--font-mono);
     font-size: 0.7rem;
-    color: var(--text-3);
+    color: var(--text-subtle);
 }
 .dm-thread-scroll {
     flex: 1;
@@ -62,7 +62,7 @@ const MESSAGE_THREAD_CSS: &str = r#"
 .dm-thread-load-older {
     align-self: center;
     background: transparent;
-    color: var(--text-2);
+    color: var(--text-3);
     border: 1px solid var(--border);
     border-radius: 6px;
     padding: 0.35rem 0.75rem;
@@ -90,7 +90,7 @@ const MESSAGE_THREAD_CSS: &str = r#"
 }
 .dm-msg-meta {
     font-size: 0.65rem;
-    color: var(--text-3);
+    color: var(--text-subtle);
     margin-top: 0.25rem;
     display: flex;
     justify-content: flex-end;
@@ -102,7 +102,7 @@ const MESSAGE_THREAD_CSS: &str = r#"
     flex: 1;
     align-items: center;
     justify-content: center;
-    color: var(--text-3);
+    color: var(--text-subtle);
     font-size: 0.9rem;
     padding: 2rem;
     text-align: center;
@@ -112,7 +112,7 @@ const MESSAGE_THREAD_CSS: &str = r#"
     flex: 1;
     align-items: center;
     justify-content: center;
-    color: var(--text-3);
+    color: var(--text-subtle);
     font-size: 0.9rem;
 }
 "#;

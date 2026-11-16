@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 pub const LABEL_CSS: &str = r#"
 .ui-label { font-family: var(--font-mono); font-weight: 500; font-size: var(--text-xs);
-  letter-spacing: .08em; text-transform: uppercase; color: var(--text-3); }
+  letter-spacing: .08em; text-transform: uppercase; color: var(--text-subtle); }
 "#;
 
 /// Trimmed attribute text. Blank values are omitted so they do not render

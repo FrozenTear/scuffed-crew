@@ -33,7 +33,7 @@ const CREATE_CSS: &str = r#"
 .poll-create input[type="text"],
 .poll-create textarea {
     width: 100%;
-    background: var(--surface-2);
+    background: var(--surface-sunken);
     border: 1px solid var(--border);
     border-radius: 8px;
     padding: 0.5rem 0.75rem;
@@ -43,18 +43,18 @@ const CREATE_CSS: &str = r#"
 }
 .poll-create input[type="text"]:focus,
 .poll-create textarea:focus {
-    border-color: var(--accent);
+    border-color: var(--accent-solid);
 }
 .poll-create input::placeholder,
 .poll-create textarea::placeholder {
-    color: var(--text-3);
+    color: var(--text-subtle);
 }
 .poll-create-field {
     margin-bottom: 0.5rem;
 }
 .poll-create-field label {
     display: block;
-    color: var(--text-2);
+    color: var(--text-3);
     font-size: 0.75rem;
     margin-bottom: 0.25rem;
     text-transform: uppercase;
@@ -76,20 +76,20 @@ const CREATE_CSS: &str = r#"
 .poll-create-remove-btn {
     background: none;
     border: 1px solid var(--border);
-    color: var(--text-3);
+    color: var(--text-subtle);
     border-radius: 4px;
     padding: 0.25rem 0.5rem;
     font-size: 0.75rem;
     cursor: pointer;
 }
 .poll-create-remove-btn:hover {
-    border-color: var(--danger);
-    color: var(--danger);
+    border-color: var(--loss);
+    color: var(--loss);
 }
 .poll-create-add-btn {
     background: none;
     border: 1px dashed var(--border);
-    color: var(--text-3);
+    color: var(--text-subtle);
     border-radius: 6px;
     padding: 0.35rem 0.75rem;
     font-size: 0.8rem;
@@ -98,15 +98,15 @@ const CREATE_CSS: &str = r#"
     transition: border-color 0.15s, color 0.15s;
 }
 .poll-create-add-btn:hover {
-    border-color: var(--text-2);
-    color: var(--text-2);
+    border-color: var(--text-3);
+    color: var(--text-3);
 }
 .poll-create-check {
     display: flex;
     align-items: center;
     gap: 0.5rem;
     margin: 0.5rem 0;
-    color: var(--text-2);
+    color: var(--text-3);
     font-size: 0.85rem;
 }
 .poll-create-actions {

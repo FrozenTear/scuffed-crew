@@ -1,179 +1,70 @@
-use crate::theme::brand::{self, BrandConfig};
+//! Design tokens: primitives, semantic roles, component roles and the look
+//! (direction) that maps roles onto primitives, plus the brand accent roles.
+//!
+//! The CSS layers in `css/` are copied from the design system
+//! (`design-system/tokens/*.css` and `themes/a-mint-refined.css`). The look
+//! file is keyed on `[data-theme]` only, because that is how the app switches
+//! theme (see `provider.rs`). Pages use semantic or component tokens, never
+//! primitives or raw hex.
 
-/// Colours for one theme scope (dark or light). The brand accent is not here:
-/// the org picks it, so it is passed in separately.
-#[derive(Debug, Clone, Copy)]
-pub struct Palette {
-    pub bg: &'static str,
-    pub surface: &'static str,
-    pub surface_2: &'static str,
-    pub border: &'static str,
-    pub text: &'static str,
-    pub text_2: &'static str,
-    pub text_3: &'static str,
-    pub accent_fg: &'static str,
-    pub ok: &'static str,
-    pub warn: &'static str,
-    pub danger: &'static str,
-}
+use crate::theme::brand::{self, AccentRoles, BrandConfig, STRATEGY_BRAND, Scheme};
 
-/// One named look: fonts, the smallest text size, which theme it starts in,
-/// and a palette for each theme scope. A new template is a new `const`, not
-/// new page CSS.
+const PRIMITIVES: &str = include_str!("css/primitives.css");
+const SEMANTIC: &str = include_str!("css/semantic.css");
+const COMPONENTS: &str = include_str!("css/components.css");
+const LOOK_A: &str = include_str!("css/look_a.css");
+
+/// One named look: a direction file that remaps the semantic roles onto
+/// primitives for both theme scopes. A new look is a new CSS file and a new
+/// `const`, not new page CSS.
 #[derive(Debug, Clone, Copy)]
 pub struct Template {
     pub id: &'static str,
     pub label: &'static str,
-    pub font_head: &'static str,
-    pub font_body: &'static str,
-    pub font_mono: &'static str,
-    pub text_xs: &'static str,
-    /// `"dark"` or `"light"`. Not read by the app yet.
-    pub default_theme: &'static str,
-    pub dark: Palette,
-    pub light: Palette,
+    /// `:root` defaults plus `[data-theme="dark"]` and `[data-theme="light"]`.
+    pub css: &'static str,
 }
 
-/// Today's look. `theme_css` renders this one, so nothing on the site changes.
-pub const CLASSIC: Template = Template {
-    id: "classic",
-    label: "Classic",
-    font_head: "'Space Grotesk', system-ui, sans-serif",
-    font_body: "'Inter', system-ui, sans-serif",
-    font_mono: "'JetBrains Mono', ui-monospace, monospace",
-    text_xs: "12px",
-    default_theme: "light",
-    dark: Palette {
-        bg: "#17171d",
-        surface: "#1f1f27",
-        surface_2: "#282831",
-        border: "#353541",
-        text: "#f4f4f8",
-        text_2: "#c1c1cd",
-        text_3: "#9696a3",
-        accent_fg: "#ffffff",
-        ok: "#46d8a4",
-        warn: "#fbbf24",
-        danger: "#f06a6a",
-    },
-    light: Palette {
-        bg: "#f7f7f9",
-        surface: "#ffffff",
-        surface_2: "#f0f0f4",
-        border: "#e3e3e9",
-        text: "#16161c",
-        text_2: "#545462",
-        text_3: "#696975",
-        accent_fg: "#ffffff",
-        ok: "#087a50",
-        warn: "#c2830a",
-        danger: "#d63031",
-    },
-};
-
-/// The tracker app's look: dark and purple. Defined but not selectable yet
-/// (no setting picks it). Surface 2, border and the text greys are derived
-/// from Classic dark until the tracker's own values are confirmed. Plex and
-/// Urbanist are not loaded by the site yet, so they fall back to the system
-/// font.
-pub const APP: Template = Template {
-    id: "app",
-    label: "App",
-    font_head: "'Urbanist', system-ui, sans-serif",
-    font_body: "'IBM Plex Sans', system-ui, sans-serif",
-    font_mono: "'JetBrains Mono', ui-monospace, monospace",
-    text_xs: "12px",
-    default_theme: "dark",
-    dark: Palette {
-        bg: "#121218",
-        surface: "#1c1c25",
-        surface_2: "#282831",
-        border: "#353541",
-        text: "#f4f4f8",
-        text_2: "#c1c1cd",
-        text_3: "#9696a3",
-        accent_fg: "#ffffff",
-        ok: "#46d8a4",
-        warn: "#f5b84a",
-        danger: "#ff5c7a",
-    },
-    light: CLASSIC.light,
+/// Look A, Mint Refined: today's look tightened onto named roles.
+pub const MINT_REFINED: Template = Template {
+    id: "mint-refined",
+    label: "Mint Refined",
+    css: LOOK_A,
 };
 
 /// Every template, in menu order. The first is the fallback.
-pub const TEMPLATES: [Template; 2] = [CLASSIC, APP];
+pub const TEMPLATES: [Template; 1] = [MINT_REFINED];
 
-/// Look a template up by id. An unknown or empty id gives Classic.
+/// Look a template up by id. An unknown or empty id gives Mint Refined.
 pub fn template_by_id(id: &str) -> Template {
     TEMPLATES
         .iter()
         .find(|t| t.id == id.trim())
         .copied()
-        .unwrap_or(CLASSIC)
+        .unwrap_or(MINT_REFINED)
 }
 
-/// Build the full design-system stylesheet (primitives + both semantic scopes)
-/// for the Classic template. This is what the app renders today.
+/// The full token stylesheet for the default look and one brand config.
 pub fn theme_css(brand: &BrandConfig) -> String {
-    theme_css_for(&CLASSIC, brand)
+    theme_css_for(&MINT_REFINED, brand)
 }
 
-/// Build the stylesheet for one template and one brand config. The ONLY place
-/// raw color/scale literals live.
-///
-/// Light `--text-3` and `--ok` are normal-size text. They must clear WCAG AA
-/// 4.5:1 on `--bg`, `--surface`, and `--surface-2` (the darkest light surface).
-/// Dark `--accent-fg` on the product accent is a brand pair: it clears the 3:1
-/// large-text/UI floor and misses 4.5:1 for normal text. The light accent with
-/// the same white foreground clears 4.5:1. Brand purple is left as-is.
+/// Load order: primitives, semantic, components, the look, then the derived
+/// brand accent roles (they win over the look's mint defaults), then the
+/// page base. The strategy scope gets the same derivation from its orange.
 pub fn theme_css_for(template: &Template, brand: &BrandConfig) -> String {
-    let d = &template.dark;
-    let l = &template.light;
+    let strategy_dark = AccentRoles::derive(STRATEGY_BRAND, Scheme::Dark);
+    let strategy_light = AccentRoles::derive(STRATEGY_BRAND, Scheme::Light);
     format!(
-        r#"
-:root {{
-  --font-head: {font_head};
-  --font-body: {font_body};
-  --font-mono: {font_mono};
-
-  --text-xs: {text_xs};  --text-sm: 12.5px; --text-base: 14px; --text-lg: 15.5px;
-  --text-xl: 18px;  --text-2xl: 21px;  --text-3xl: 30px;
-
-  --space-1: 4px;  --space-2: 8px;  --space-3: 12px; --space-4: 16px;
-  --space-6: 24px; --space-8: 32px; --space-12: 48px;
-
-  --radius-sm: 7px; --radius-md: 9px; --radius-lg: 12px; --radius-pill: 999px;
-
-  --overlay: rgba(0,0,0,0.6);
-
-  /* Chart palette (dark values; light scope overrides). CVD-validated against
-     the dark surface (--surface). See docs/notes/stats-ui-w2-validation.md.
-     Snap-tuned to the dark lightness band; re-run the validator if edited. */
-  --chart-1: #8f73ff; --chart-2: #15ac7d; --chart-3: #b98a02; --chart-4: #ca474c; --chart-5: #089fd7; --chart-6: #984ab2;
-  /* Winrate bars: two-pole diverging encoding (W5a). Cool up-pole (> 50%),
-     warm down-pole (< 50%); exactly-50% and sub-min-games rows take the
-     neutral --text-3 midpoint. Chart poles, NOT status tokens. Pair
-     CVD-validated vs both surfaces. See docs/notes/stats-ui-w2-validation.md
-     (W5a section); re-run the validator if edited. */
-  --chart-wr-up: #089fd7; --chart-wr-down: #aa5000;
-}}
-
-[data-theme="dark"] {{
-  --bg: {d_bg}; --surface: {d_surface}; --surface-2: {d_surface_2}; --border: {d_border};
-  --text: {d_text}; --text-2: {d_text_2}; --text-3: {d_text_3};
-  --accent: {accent_d}; --accent-fg: {d_accent_fg}; --accent-soft: {soft_d};
-  --ok: {d_ok}; --warn: {d_warn}; --danger: {d_danger};
-}}
-
-[data-theme="light"] {{
-  --bg: {l_bg}; --surface: {l_surface}; --surface-2: {l_surface_2}; --border: {l_border};
-  --text: {l_text}; --text-2: {l_text_2}; --text-3: {l_text_3};
-  --accent: {accent_l}; --accent-fg: {l_accent_fg}; --accent-soft: {soft_l};
-  --ok: {l_ok}; --warn: {l_warn}; --danger: {l_danger};
-  /* CVD-validated against #ffffff. See docs/notes/stats-ui-w2-validation.md. */
-  --chart-1: #6d4aff; --chart-2: #0ea66e; --chart-3: #c2830a; --chart-4: #d63031; --chart-5: #0284c7; --chart-6: #7405c3;
-  --chart-wr-up: #0284c7; --chart-wr-down: #843900;
-}}
+        r#"{PRIMITIVES}
+{SEMANTIC}
+{COMPONENTS}
+{look}
+/* Brand accent roles, derived in brand.rs (port of derive-accent.js). */
+[data-theme="dark"] {{ {dark} }}
+[data-theme="light"] {{ {light} }}
+[data-theme="dark"] [data-accent="strategy"] {{ {strategy_dark} }}
+[data-theme="light"] [data-accent="strategy"] {{ {strategy_light} }}
 
 html, body {{
   /* --page-bg-* set from admin Site Settings when customized */
@@ -184,51 +75,36 @@ html, body {{
   background-attachment: fixed;
   background-repeat: no-repeat;
   color: var(--text);
-  font-family: var(--font-body); font-size: var(--text-base);
+  font-family: var(--font-body); font-size: var(--text-md);
+  font-variant-numeric: tabular-nums;
 }}
-
-[data-accent="strategy"] {{ --accent: #ff7a1a; --accent-soft: rgba(255,122,26,.16); }}
 "#,
-        font_head = template.font_head,
-        font_body = template.font_body,
-        font_mono = template.font_mono,
-        text_xs = template.text_xs,
-        d_bg = d.bg,
-        d_surface = d.surface,
-        d_surface_2 = d.surface_2,
-        d_border = d.border,
-        d_text = d.text,
-        d_text_2 = d.text_2,
-        d_text_3 = d.text_3,
-        d_accent_fg = d.accent_fg,
-        d_ok = d.ok,
-        d_warn = d.warn,
-        d_danger = d.danger,
-        l_bg = l.bg,
-        l_surface = l.surface,
-        l_surface_2 = l.surface_2,
-        l_border = l.border,
-        l_text = l.text,
-        l_text_2 = l.text_2,
-        l_text_3 = l.text_3,
-        l_accent_fg = l.accent_fg,
-        l_ok = l.ok,
-        l_warn = l.warn,
-        l_danger = l.danger,
-        accent_d = brand.accent_dark.as_str(),
-        accent_l = brand.accent_light.as_str(),
-        soft_d = brand.accent_soft_dark.as_str(),
-        soft_l = brand.accent_soft_light.as_str(),
+        look = template.css,
+        dark = brand.dark.css_decls(),
+        light = brand.light.css_decls(),
+        strategy_dark = strategy_dark.css_decls(),
+        strategy_light = strategy_light.css_decls(),
     )
 }
 
-/// Concrete colors for the strategy canvas (2D context needs literal strings, not CSS vars).
+/// Concrete colors for the strategy canvas. The 2D context takes literal
+/// strings, so the static planner colours live here and a test holds them to
+/// the `--canvas-*` primitives in `css/primitives.css`. The planner field
+/// stays dark in both themes.
 pub const CANVAS_BG: &str = "#14141c";
 pub const CANVAS_TILE_PLACEHOLDER: &str = "#2a2a3e";
 pub const CANVAS_GRID_LOADING: &str = "#333333";
 pub const CANVAS_TEXT_LOADING: &str = "#666666";
-pub const STRATEGY_ACCENT: &str = "#ff7a1a";
-pub const CANVAS_SELECTION_COLOR: &str = "#00ff00";
+pub const STRATEGY_ACCENT: &str = brand::STRATEGY_BRAND;
+/// Selection follows the brand and theme (`--sel-ring`, the solid accent), so
+/// the canvas reads it from computed style instead of a literal.
+pub const CANVAS_SELECTION_TOKEN: &str = "--canvas-selection";
+/// Selection ring when computed `--canvas-selection` is empty. Both canvases
+/// draw only inside `[data-accent="strategy"]`, so this is the strategy
+/// scope's dark ring (`--accent-solid` derived from the strategy orange; the
+/// planner field is dark in both themes). `desktop_canvas.js` carries the
+/// same literal; a test holds the two together.
+pub const CANVAS_SELECTION_FALLBACK: &str = STRATEGY_ACCENT;
 pub const CANVAS_BADGE_BG: &str = "rgba(0,0,0,0.7)";
 pub const CANVAS_WHITE: &str = "#ffffff";
 pub const HP_SMALL_FILL: &str = "#ffeb3b";
@@ -244,7 +120,7 @@ pub const CANVAS_UNKNOWN_HERO_FILL: &str = "#6b7280";
 pub const CANVAS_CHIP_RING_DARK: &str = "#111827";
 
 /// Dark-theme page background (matches `[data-theme="dark"] --bg`).
-pub const BG_DARK: &str = "#17171d";
+pub const BG_DARK: &str = brand::DARK_SURFACES[0];
 /// Product-default brand accents (matches `BrandConfig::product_default`).
 pub const BRAND_ACCENT_DARK: &str = "#8f73ff";
 pub const BRAND_ACCENT_LIGHT: &str = "#6d4aff";
@@ -254,220 +130,305 @@ pub fn theme_css_current() -> String {
     theme_css(&brand::current())
 }
 
+/// Every custom property a stylesheet resolves to for one theme scope, with
+/// `var()` chains followed. Applies `:root`, `[data-theme]` and
+/// `[data-theme="<theme>"]` rules in source order (they share specificity).
 #[cfg(test)]
-pub(crate) fn scope_decls(css: &str, scope: &str) -> std::collections::HashMap<String, String> {
-    let start = css.find(scope).unwrap_or_else(|| panic!("missing {scope}"));
-    let after = &css[start + scope.len()..];
-    let open = after.find('{').expect("scope brace");
-    let close = after.find('}').expect("scope end");
-    let mut map = std::collections::HashMap::new();
-    for part in after[open + 1..close].split(';') {
-        let Some((key, value)) = part.split_once(':') else {
+pub(crate) fn resolved_tokens(css: &str, theme: &str) -> std::collections::HashMap<String, String> {
+    let mut text = String::with_capacity(css.len());
+    let mut rest = css;
+    while let Some(start) = rest.find("/*") {
+        text.push_str(&rest[..start]);
+        rest = rest[start + 2..]
+            .split_once("*/")
+            .map_or("", |(_, tail)| tail);
+    }
+    text.push_str(rest);
+
+    let scoped = format!("[data-theme=\"{theme}\"]");
+    let mut raw = std::collections::HashMap::new();
+    for block in text.split('}') {
+        let Some((selector, body)) = block.split_once('{') else {
             continue;
         };
-        let key = key.trim();
-        if let Some(name) = key.strip_prefix("--") {
-            if name.contains("--") {
-                continue;
-            }
-            let hex = value.split_whitespace().next().unwrap_or("").trim();
-            if hex.starts_with('#') {
-                map.insert(format!("--{name}"), hex.to_string());
+        let applies = selector
+            .split(',')
+            .map(str::trim)
+            .any(|s| s == ":root" || s == "[data-theme]" || s == scoped);
+        if !applies {
+            continue;
+        }
+        for decl in body.split(';') {
+            if let Some((name, value)) = decl.split_once(':')
+                && name.trim().starts_with("--")
+            {
+                raw.insert(name.trim().to_string(), value.trim().to_string());
             }
         }
     }
-    map
-}
 
-#[cfg(test)]
-pub(crate) fn contrast_ratio(fg: &str, bg: &str) -> f64 {
-    let l1 = relative_luminance(fg);
-    let l2 = relative_luminance(bg);
-    let (hi, lo) = if l1 > l2 { (l1, l2) } else { (l2, l1) };
-    (hi + 0.05) / (lo + 0.05)
-}
-
-#[cfg(test)]
-pub(crate) fn relative_luminance(hex: &str) -> f64 {
-    let (r, g, b) = parse_hex(hex);
-    let lin = |c: u8| {
-        let c = f64::from(c) / 255.0;
-        if c <= 0.04045 {
-            c / 12.92
-        } else {
-            ((c + 0.055) / 1.055).powf(2.4)
+    fn resolve(
+        raw: &std::collections::HashMap<String, String>,
+        value: &str,
+        depth: usize,
+    ) -> String {
+        let Some(inner) = value.strip_prefix("var(").and_then(|v| v.strip_suffix(')')) else {
+            return value.to_string();
+        };
+        let (name, fallback) = inner.split_once(',').unwrap_or((inner, ""));
+        match raw.get(name.trim()) {
+            Some(next) if depth < 32 => resolve(raw, next, depth + 1),
+            _ => fallback.trim().to_string(),
         }
-    };
-    0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
-}
-
-#[cfg(test)]
-pub(crate) fn parse_hex(hex: &str) -> (u8, u8, u8) {
-    let hex = hex.trim().trim_start_matches('#');
-    assert_eq!(hex.len(), 6, "{hex}");
-    let n = u32::from_str_radix(hex, 16).unwrap_or_else(|_| panic!("bad hex {hex}"));
-    (
-        ((n >> 16) & 0xff) as u8,
-        ((n >> 8) & 0xff) as u8,
-        (n & 0xff) as u8,
-    )
+    }
+    raw.iter()
+        .map(|(k, v)| (k.clone(), resolve(&raw, v, 0)))
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{BrandConfig, contrast_ratio, scope_decls, theme_css};
+    use super::{
+        BrandConfig, CANVAS_BG, CANVAS_SELECTION_FALLBACK, CANVAS_TILE_PLACEHOLDER, HP_LARGE_FILL,
+        HP_LARGE_STROKE, HP_SMALL_FILL, HP_SMALL_STROKE, MINT_REFINED, STRATEGY_ACCENT, TEMPLATES,
+        resolved_tokens, template_by_id, theme_css, theme_css_for,
+    };
+    use crate::theme::brand::{
+        AccentRoles, DARK_SURFACES, LIGHT_SURFACES, STRATEGY_BRAND, Scheme, contrast_ratio,
+    };
+
+    const SURFACES: [&str; 4] = ["--bg", "--surface", "--surface-raised", "--surface-sunken"];
+
+    fn live_mint() -> BrandConfig {
+        BrandConfig::from_accents("#46d8a4", "#0ea66e")
+    }
+
+    fn get<'a>(map: &'a std::collections::HashMap<String, String>, name: &str) -> &'a str {
+        map.get(name)
+            .unwrap_or_else(|| panic!("missing {name}"))
+            .as_str()
+    }
 
     #[test]
-    fn emits_both_theme_scopes_and_uses_brand_accent() {
+    fn emits_every_layer_and_both_brand_scopes() {
         let brand = BrandConfig::product_default();
         let css = theme_css(&brand);
-        assert!(css.contains("[data-theme=\"dark\"]"));
-        assert!(css.contains("[data-theme=\"light\"]"));
-        assert!(css.contains(brand.accent_dark.as_str()));
-        assert!(css.contains(brand.accent_light.as_str()));
-        assert!(css.contains("--bg:"));
-        assert!(css.contains("--text-2:"));
-        assert!(css.contains("--space-1:"));
-        assert!(css.contains("[data-accent=\"strategy\"]"));
+        for needle in [
+            "--neutral-900:",
+            "--accent-text:",
+            "--button-primary-fg: var(--on-accent)",
+            "[data-theme=\"dark\"] {",
+            "[data-theme=\"light\"] {",
+            "[data-theme=\"dark\"] [data-accent=\"strategy\"]",
+            "[data-theme=\"light\"] [data-accent=\"strategy\"]",
+            "--space-1:",
+            "font-size: var(--text-md)",
+        ] {
+            assert!(css.contains(needle), "missing {needle}");
+        }
+        assert!(css.contains(&brand.dark.css_decls()));
+        assert!(css.contains(&brand.light.css_decls()));
+        assert!(
+            !css.contains("data-direction=\"a\"]["),
+            "look A keys on data-theme only"
+        );
     }
 
     #[test]
     fn smallest_text_token_is_twelve_px() {
-        let css = theme_css(&BrandConfig::product_default());
-        assert!(css.contains("--text-xs: 12px;"), "{css}");
-    }
-
-    #[test]
-    fn contrast_formula_anchors() {
-        let black_on_white = contrast_ratio("#000000", "#ffffff");
-        assert!((black_on_white - 21.0).abs() < 0.05, "{black_on_white}");
-        let same = contrast_ratio("#ffffff", "#ffffff");
-        assert!((same - 1.0).abs() < 0.001, "{same}");
-    }
-
-    /// Light muted text and success green are normal-size text on the light
-    /// surfaces they actually sit on (`--bg`, `--surface`, `--surface-2`).
-    #[test]
-    fn light_text_tokens_meet_wcag_aa() {
-        let css = theme_css(&BrandConfig::product_default());
-        let light = scope_decls(&css, "[data-theme=\"light\"]");
-        let text3 = light.get("--text-3").expect("--text-3");
-        let ok = light.get("--ok").expect("--ok");
-        for surface in ["--bg", "--surface", "--surface-2"] {
-            let bg = light.get(surface).expect(surface);
-            let text_ratio = contrast_ratio(text3, bg);
-            let ok_ratio = contrast_ratio(ok, bg);
-            assert!(
-                text_ratio >= 4.5,
-                "light --text-3 {text3} on {surface} {bg} = {text_ratio:.2}"
-            );
-            assert!(
-                ok_ratio >= 4.5,
-                "light --ok {ok} on {surface} {bg} = {ok_ratio:.2}"
-            );
+        let css = theme_css(&live_mint());
+        for theme in ["dark", "light"] {
+            let tokens = resolved_tokens(&css, theme);
+            assert_eq!(get(&tokens, "--text-xs"), "12px");
+            assert_eq!(get(&tokens, "--text-sm"), "13px");
+            assert_eq!(get(&tokens, "--text-md"), "14px");
+            assert_eq!(get(&tokens, "--radius-control"), "8px");
+            assert_eq!(get(&tokens, "--radius-card"), "12px");
         }
     }
 
-    /// Dark body/muted/success text already clears AA. White on the product
-    /// dark accent clears the 3:1 large-text/UI floor and not 4.5:1 normal
-    /// text; white on the light accent does clear 4.5:1. Brand purple stays.
+    /// Look A values from the semantic token table in `tokens.md`.
     #[test]
-    fn dark_text_and_accent_foreground_pairing() {
-        let brand = BrandConfig::product_default();
-        let css = theme_css(&brand);
-        let dark = scope_decls(&css, "[data-theme=\"dark\"]");
-        let text3 = dark.get("--text-3").expect("--text-3");
-        let ok = dark.get("--ok").expect("--ok");
-        for surface in ["--bg", "--surface", "--surface-2"] {
-            let bg = dark.get(surface).expect(surface);
-            let text_ratio = contrast_ratio(text3, bg);
-            let ok_ratio = contrast_ratio(ok, bg);
-            assert!(
-                text_ratio >= 4.5,
-                "dark --text-3 {text3} on {surface} {bg} = {text_ratio:.2}"
-            );
-            assert!(
-                ok_ratio >= 4.5,
-                "dark --ok {ok} on {surface} {bg} = {ok_ratio:.2}"
-            );
+    fn look_a_matches_the_token_table() {
+        let css = theme_css(&live_mint());
+        let table: [(&str, &str, &str); 19] = [
+            ("--bg", "#17171d", "#f7f7f9"),
+            ("--surface", "#1f1f27", "#ffffff"),
+            ("--surface-raised", "#282831", "#ffffff"),
+            ("--surface-sunken", "#282831", "#f0f0f4"),
+            ("--border", "#353541", "#e3e3e9"),
+            ("--border-strong", "#72727f", "#888896"),
+            ("--text", "#f4f4f8", "#16161c"),
+            ("--text-3", "#c1c1cd", "#545462"),
+            ("--text-subtle", "#9696a3", "#696975"),
+            ("--text-disabled", "#777784", "#888896"),
+            ("--accent-text", "#46d8a4", "#087a50"),
+            ("--accent-solid", "#46d8a4", "#087a50"),
+            ("--on-accent", "#17171d", "#ffffff"),
+            ("--win", "#46d8a4", "#087a50"),
+            ("--loss", "#f06a6a", "#c81d24"),
+            ("--warn", "#fbbf24", "#9b5f00"),
+            ("--info", "#089fd7", "#0072b3"),
+            ("--focus-ring", "#46d8a4", "#087a50"),
+            ("--on-win", "#17171d", "#ffffff"),
+        ];
+        let dark = resolved_tokens(&css, "dark");
+        let light = resolved_tokens(&css, "light");
+        for (name, d, l) in table {
+            assert_eq!(get(&dark, name), d, "dark {name}");
+            assert_eq!(get(&light, name), l, "light {name}");
         }
-        let dark_accent = contrast_ratio("#ffffff", &brand.accent_dark);
-        let light_accent = contrast_ratio("#ffffff", &brand.accent_light);
-        assert!(
-            dark_accent >= 3.0,
-            "white on {} = {dark_accent:.2}",
-            brand.accent_dark
-        );
-        assert!(
-            light_accent >= 4.5,
-            "white on {} = {light_accent:.2}",
-            brand.accent_light
-        );
     }
 
-    use super::{APP, CLASSIC, TEMPLATES, template_by_id, theme_css_for};
-
-    /// The refactor must not move one byte of the stylesheet the site renders.
-    /// The golden file was generated from `theme_css(&BrandConfig::product_default())`
-    /// before the template data existed.
+    /// The derivation in brand.rs uses the same four surfaces the look sets.
     #[test]
-    fn classic_template_css_is_unchanged() {
-        let css = theme_css(&BrandConfig::product_default());
-        assert_eq!(css, include_str!("classic.golden.css"));
-        assert_eq!(
-            css,
-            theme_css_for(&CLASSIC, &BrandConfig::product_default())
-        );
+    fn brand_surfaces_match_look_a() {
+        let css = theme_css(&live_mint());
+        for (theme, expected) in [("dark", DARK_SURFACES), ("light", LIGHT_SURFACES)] {
+            let tokens = resolved_tokens(&css, theme);
+            let got: Vec<&str> = SURFACES.iter().map(|n| get(&tokens, n)).collect();
+            assert_eq!(got, expected, "{theme}");
+        }
     }
 
+    /// Text roles clear AA on every text surface, disabled text and the
+    /// strong border clear 3:1, and the derived accent pairs hold for the
+    /// live mint, the product purple and the pending gray.
     #[test]
-    fn unknown_template_ids_fall_back_to_classic() {
-        assert_eq!(template_by_id("app").id, "app");
-        assert_eq!(template_by_id(" classic ").id, "classic");
-        assert_eq!(template_by_id("").id, "classic");
-        assert_eq!(template_by_id("nope").id, "classic");
-    }
-
-    #[test]
-    fn template_ids_are_unique_and_classic_is_first() {
-        assert_eq!(TEMPLATES[0].id, CLASSIC.id);
-        let mut ids: Vec<&str> = TEMPLATES.iter().map(|t| t.id).collect();
-        ids.sort_unstable();
-        ids.dedup();
-        assert_eq!(ids.len(), TEMPLATES.len());
-    }
-
-    /// Every template keeps the same AA floor Classic is held to, in both scopes.
-    #[test]
-    fn every_template_text_clears_wcag_aa() {
-        for template in TEMPLATES {
-            let css = theme_css_for(&template, &BrandConfig::product_default());
-            for scope in ["[data-theme=\"dark\"]", "[data-theme=\"light\"]"] {
-                let decls = scope_decls(&css, scope);
-                for text in ["--text", "--text-2", "--text-3", "--ok"] {
-                    for surface in ["--bg", "--surface", "--surface-2"] {
-                        let fg = decls.get(text).expect(text);
-                        let bg = decls.get(surface).expect(surface);
+    fn every_scope_clears_contrast_floors() {
+        for brand in [
+            live_mint(),
+            BrandConfig::product_default(),
+            BrandConfig::pending(),
+        ] {
+            let css = theme_css(&brand);
+            for theme in ["dark", "light"] {
+                let tokens = resolved_tokens(&css, theme);
+                for bg in SURFACES.iter().map(|n| get(&tokens, n)) {
+                    for (name, min) in [
+                        ("--text", 4.5),
+                        ("--text-3", 4.5),
+                        ("--text-subtle", 4.5),
+                        ("--accent-text", 4.5),
+                        ("--link", 4.5),
+                        ("--win", 4.5),
+                        ("--loss", 4.5),
+                        ("--warn", 4.5),
+                        ("--info", 4.5),
+                        ("--text-disabled", 3.0),
+                        ("--border-strong", 3.0),
+                        ("--focus-ring", 3.0),
+                        ("--accent-solid", 3.0),
+                    ] {
+                        let fg = get(&tokens, name);
                         let ratio = contrast_ratio(fg, bg);
-                        assert!(
-                            ratio >= 4.5,
-                            "{} {scope} {text} {fg} on {surface} {bg} = {ratio:.2}",
-                            template.id
-                        );
+                        assert!(ratio >= min, "{theme} {name} {fg} on {bg} = {ratio:.2}");
                     }
+                }
+                for (fg, bg) in [
+                    ("--on-accent", "--accent-solid"),
+                    ("--skip-fg", "--skip-bg"),
+                    ("--on-win", "--win"),
+                    ("--on-loss", "--loss"),
+                    ("--accent-text", "--accent-soft"),
+                    ("--text", "--accent-soft"),
+                    ("--win", "--win-soft"),
+                    ("--loss", "--loss-soft"),
+                    ("--warn", "--warn-soft"),
+                    ("--info", "--info-soft"),
+                    ("--text-3", "--neutral-soft"),
+                ] {
+                    let (f, b) = (get(&tokens, fg), get(&tokens, bg));
+                    let ratio = contrast_ratio(f, b);
+                    assert!(ratio >= 4.5, "{theme} {fg} {f} on {bg} {b} = {ratio:.2}");
                 }
             }
         }
     }
 
+    /// Soft fills are opaque hex so computed style stays rgb().
     #[test]
-    fn app_template_is_dark_with_the_app_palette_and_a_twelve_px_floor() {
-        assert_eq!(APP.default_theme, "dark");
-        let css = theme_css_for(&APP, &BrandConfig::product_default());
-        let dark = scope_decls(&css, "[data-theme=\"dark\"]");
-        assert_eq!(dark.get("--bg").map(String::as_str), Some("#121218"));
-        assert_eq!(dark.get("--surface").map(String::as_str), Some("#1c1c25"));
-        assert_eq!(dark.get("--danger").map(String::as_str), Some("#ff5c7a"));
-        assert!(css.contains("--text-xs: 12px;"), "{css}");
+    fn soft_fills_are_opaque() {
+        let css = theme_css(&BrandConfig::product_default());
+        for theme in ["dark", "light"] {
+            let tokens = resolved_tokens(&css, theme);
+            for name in [
+                "--accent-soft",
+                "--win-soft",
+                "--loss-soft",
+                "--warn-soft",
+                "--info-soft",
+                "--neutral-soft",
+            ] {
+                let value = get(&tokens, name);
+                assert!(
+                    value.len() == 7 && value.starts_with('#'),
+                    "{theme} {name} = {value}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn canvas_constants_match_the_primitives() {
+        let css = theme_css(&live_mint());
+        let tokens = resolved_tokens(&css, "dark");
+        for (name, value) in [
+            ("--canvas-bg", CANVAS_BG),
+            ("--canvas-tile-placeholder", CANVAS_TILE_PLACEHOLDER),
+            ("--canvas-hp-small-fill", HP_SMALL_FILL),
+            ("--canvas-hp-small-stroke", HP_SMALL_STROKE),
+            ("--canvas-hp-large-fill", HP_LARGE_FILL),
+            ("--canvas-hp-large-stroke", HP_LARGE_STROKE),
+            ("--orange-strategy", STRATEGY_ACCENT),
+        ] {
+            assert_eq!(get(&tokens, name), value, "{name}");
+        }
+        assert_eq!(
+            get(&tokens, "--canvas-selection"),
+            get(&tokens, "--accent-solid")
+        );
+    }
+
+    /// The canvas fallback is the strategy scope's dark selection ring
+    /// (`--sel-ring` is `--accent-solid`, derived from the strategy orange),
+    /// and the desktop canvas script uses the same literal.
+    #[test]
+    fn canvas_selection_fallback_matches_the_strategy_ring() {
+        let strategy_dark = AccentRoles::derive(STRATEGY_BRAND, Scheme::Dark);
+        assert_eq!(strategy_dark.solid, CANVAS_SELECTION_FALLBACK);
+        let js = include_str!("../../assets/desktop_canvas.js");
+        assert!(
+            js.contains(&format!("|| \"{CANVAS_SELECTION_FALLBACK}\"")),
+            "desktop_canvas.js selection fallback"
+        );
+    }
+
+    /// The default look renders through `theme_css` and is pinned by a
+    /// snapshot, so a refactor cannot move a byte of the sheet unnoticed.
+    #[test]
+    fn default_template_css_is_pinned() {
+        let css = theme_css(&BrandConfig::product_default());
+        assert_eq!(css, include_str!("mint_refined.golden.css"));
+        assert_eq!(
+            css,
+            theme_css_for(&MINT_REFINED, &BrandConfig::product_default())
+        );
+    }
+
+    #[test]
+    fn unknown_template_ids_fall_back_to_mint_refined() {
+        assert_eq!(template_by_id(" mint-refined ").id, "mint-refined");
+        assert_eq!(template_by_id("").id, "mint-refined");
+        assert_eq!(template_by_id("classic").id, "mint-refined");
+    }
+
+    #[test]
+    fn template_ids_are_unique_and_mint_refined_is_first() {
+        assert_eq!(TEMPLATES[0].id, MINT_REFINED.id);
+        let mut ids: Vec<&str> = TEMPLATES.iter().map(|t| t.id).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), TEMPLATES.len());
     }
 }

@@ -16,14 +16,14 @@ const REPLY_INPUT_CSS: &str = r#"
     background: var(--surface);
 }
 .dm-reply-banner {
-    background: color-mix(in srgb, var(--danger) 8%, transparent);
-    border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+    background: color-mix(in srgb, var(--loss) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--loss) 40%, transparent);
     border-radius: 8px;
     padding: 0.5rem 0.75rem;
-    color: var(--danger);
+    color: var(--loss);
     font-size: 0.8rem;
 }
-.dm-reply-banner a { color: var(--danger); font-weight: 600; text-decoration: underline; }
+.dm-reply-banner a { color: var(--loss); font-weight: 600; text-decoration: underline; }
 .dm-reply-row {
     display: flex;
     gap: 0.5rem;
@@ -43,11 +43,11 @@ const REPLY_INPUT_CSS: &str = r#"
     max-height: 160px;
     resize: vertical;
 }
-.dm-reply-textarea:focus { border-color: var(--accent); }
-.dm-reply-textarea::placeholder { color: var(--text-3); }
+.dm-reply-textarea:focus { border-color: var(--accent-solid); }
+.dm-reply-textarea::placeholder { color: var(--text-subtle); }
 .dm-reply-send {
-    background: var(--accent);
-    color: var(--accent-fg);
+    background: var(--accent-solid);
+    color: var(--on-accent);
     border: none;
     border-radius: 8px;
     padding: 0 1.1rem;
@@ -63,9 +63,9 @@ const REPLY_INPUT_CSS: &str = r#"
     display: flex;
     justify-content: space-between;
     font-size: 0.7rem;
-    color: var(--text-3);
+    color: var(--text-subtle);
 }
-.dm-reply-counter.over { color: var(--danger); }
+.dm-reply-counter.over { color: var(--loss); }
 "#;
 
 const MAX_BODY_CHARS: usize = 2000;

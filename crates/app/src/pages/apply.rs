@@ -347,21 +347,21 @@ const APPLY_CSS: &str = r#"
     .apply-page { min-height: 100vh; padding: 2rem; max-width: 600px; margin: 0 auto; }
     .apply-title { font-family: var(--font-head); font-size: 2.5rem; color: var(--text); letter-spacing: 3px; text-align: center; margin-bottom: 2rem; }
     .apply-card-title { font-family: var(--font-head); font-weight: 700; font-size: 1.3rem; color: var(--text); margin: 0 0 0.5rem; }
-    .apply-card-desc { color: var(--text-2); font-size: 0.9rem; line-height: 1.6; }
+    .apply-card-desc { color: var(--text-3); font-size: 0.9rem; line-height: 1.6; }
     .apply-auth-buttons { margin-top: 1.5rem; display: flex; gap: 0.75rem; flex-wrap: wrap; }
     .apply-status-row { margin: 1rem 0; }
     .apply-field { margin-top: 1.5rem; }
     .apply-label { font-family: var(--font-head); font-weight: 600; font-size: 0.85rem; color: var(--text); text-transform: uppercase; letter-spacing: 0.04em; display: block; margin-bottom: 0.5rem; }
     .apply-game-grid { display: flex; gap: 0.5rem; flex-wrap: wrap; }
-    .apply-game-btn { padding: 0.4rem 1rem; border-radius: 6px; border: 1px solid var(--border); background: var(--surface); color: var(--text-2); font-size: 0.85rem; cursor: pointer; transition: all 0.15s; }
+    .apply-game-btn { padding: 0.4rem 1rem; border-radius: 6px; border: 1px solid var(--border); background: var(--surface); color: var(--text-3); font-size: 0.85rem; cursor: pointer; transition: all 0.15s; }
     .apply-game-btn:hover { border-color: var(--accent-soft); color: var(--text); }
-    .apply-game-btn.selected { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+    .apply-game-btn.selected { background: var(--accent-solid); color: var(--on-accent); border-color: var(--accent-solid); }
     .apply-actions { margin-top: 1.5rem; }
     .apply-fieldset { border: 0; padding: 0; margin-inline: 0; min-width: 0; }
     .apply-fieldset > legend { padding: 0; }
-    .apply-status { color: var(--text-3); font-size: 0.88rem; margin: 0; }
+    .apply-status { color: var(--text-subtle); font-size: 0.88rem; margin: 0; }
     .apply-status:not(:empty) { margin: 0.5rem 0; }
-    .apply-loading { color: var(--text-3); text-align: center; padding: 2rem; }
+    .apply-loading { color: var(--text-subtle); text-align: center; padding: 2rem; }
 "#;
 
 #[component]

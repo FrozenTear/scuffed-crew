@@ -27,6 +27,18 @@ pub(super) fn png(width: u32, height: u32, noisy: bool) -> Vec<u8> {
     out.into_inner()
 }
 
+/// Grow a valid PNG to exactly `len` bytes by padding after the file
+/// (the header, and so [`png_size`], is unchanged).
+pub(super) fn pad_png(mut png: Vec<u8>, len: usize) -> Vec<u8> {
+    assert!(
+        png.len() <= len,
+        "base PNG is already {} bytes, cannot pad to {len}",
+        png.len()
+    );
+    png.resize(len, 0);
+    png
+}
+
 pub(super) fn token() -> String {
     random_token().expect("random token")
 }
@@ -135,6 +147,29 @@ fn png_size_reads_the_header() {
     assert_eq!(png_size(&png(40, 16, false)), Some((40, 16)));
     assert_eq!(png_size(b"GIF89a not a png at all"), None);
     assert_eq!(png_size(&[]), None);
+}
+
+/// A crop of exactly 65,536 bytes is kept; one byte over is refused.
+/// Kills `>` becoming `>=` in [`check_crop`], and a cap of cap+1.
+#[test]
+fn a_hero_icon_at_exactly_the_byte_cap_is_ok_and_one_byte_over_is_too_large() {
+    let cap = UploadKind::HeroIcon.crop_kind().max_crop_bytes();
+    assert_eq!(cap, 65_536);
+    let mut meta = hero_icon_meta(1920, 1080, "ana", 0.97, 0.5, "heroes-v2").unwrap();
+    meta.game_token = Some(token());
+    let at_cap = pad_png(png(64, 64, false), cap);
+    assert_eq!(at_cap.len(), 65_536);
+    assert_eq!(png_size(&at_cap), Some((64, 64)));
+    assert_eq!(
+        check_crop(UploadKind::HeroIcon, &crop(meta.clone(), at_cap)),
+        Ok(())
+    );
+    let over = pad_png(png(64, 64, false), cap + 1);
+    assert_eq!(over.len(), 65_537);
+    assert_eq!(
+        check_crop(UploadKind::HeroIcon, &crop(meta, over)),
+        Err(CropRefusal::TooLarge(65_537))
+    );
 }
 
 #[test]

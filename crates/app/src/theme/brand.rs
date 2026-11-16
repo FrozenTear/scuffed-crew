@@ -3,17 +3,176 @@
 //! Product default is a neutral purple. Live sites override via SiteSettings
 //! (`brand_accent_dark` / `brand_accent_light`). Homepage presets may suggest
 //! accents when applied in admin.
+//!
+//! Every other accent role (`--accent-text`, `--accent-solid`, `--on-accent`,
+//! `--accent-soft`) is derived from the brand hex by [`AccentRoles::derive`],
+//! a port of the design system's `derive-accent.js`, including its contrast
+//! lock and the mint lock for the live brand.
+//!
+//! Port source: the design-system package (`site-redesign/design-system/`),
+//! which is not vendored in this repo. Files and sha256 the port matches:
+//! - `tokens/derive-accent.js`
+//!   `adf946e17cdebd1f0c753527a8964af7e056a206ffabf85932d1b7d4049c21a5`
+//! - `tokens.md`
+//!   `c224092174343293c88ab6fd94821989b009445886aab86cc744a280e4b877b8`
 
-#[derive(Clone, PartialEq, Eq)]
+/// Dark ink for a fill that white text does not clear 4.5:1 on.
+/// Same value as `--neutral-900` and Look A dark `--bg`.
+pub const INK: &str = "#17171d";
+const WHITE: &str = "#ffffff";
+const MINT_DARK: &str = "#46d8a4";
+const MINT_LIVE_LIGHT: &str = "#0ea66e";
+const MINT_LIGHT_SOLID: &str = "#087a50";
+const MINT_LIGHT_TEXT_DEEP: &str = "#007046";
+
+/// Look A text surfaces in derivation order: `--bg`, `--surface`,
+/// `--surface-raised`, `--surface-sunken`. A test holds these to
+/// `css/look_a.css`.
+pub const DARK_SURFACES: [&str; 4] = ["#17171d", "#1f1f27", "#282831", "#282831"];
+pub const LIGHT_SURFACES: [&str; 4] = ["#f7f7f9", "#ffffff", "#ffffff", "#f0f0f4"];
+
+/// Strategy planner brand (`--orange-strategy`). `[data-accent="strategy"]`
+/// sets only this hex; every other accent role is derived from it.
+pub const STRATEGY_BRAND: &str = "#ff7a1a";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scheme {
+    Dark,
+    Light,
+}
+
+impl Scheme {
+    /// Alpha of the raw brand in `--accent-soft`.
+    fn soft_alpha(self) -> f64 {
+        match self {
+            Scheme::Dark => 0.17,
+            Scheme::Light => 0.1,
+        }
+    }
+
+    fn surfaces(self) -> [&'static str; 4] {
+        match self {
+            Scheme::Dark => DARK_SURFACES,
+            Scheme::Light => LIGHT_SURFACES,
+        }
+    }
+}
+
+/// The accent roles one theme scope gets from one brand hex. This is a port
+/// of `derive-accent.js` from the design system and must stay in step with it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccentRoles {
+    /// `--accent`: the raw brand. Not for 12px text or light-theme bars.
+    pub accent: String,
+    /// `--accent-text`: 4.5:1 on every text surface and on the soft fill.
+    pub text: String,
+    /// `--accent-solid`: solid fills (primary buttons, the mark, skip link).
+    pub solid: String,
+    /// `--on-accent`: white only when white clears 4.5:1 on the solid.
+    pub on_accent: String,
+    /// `--accent-soft`: the brand at 17% (dark) or 10% (light), composited
+    /// onto `--surface` as an opaque hex so contrast is stable on any parent.
+    pub soft: String,
+}
+
+impl AccentRoles {
+    /// Derive every accent role from a normalized `#rrggbb` brand.
+    ///
+    /// Dark: solid is the brand; text is the brand when it clears 4.5:1 on
+    /// every text surface, otherwise it is lightened in OKLCH until it does.
+    /// Light: solid is the brand darkened in OKLCH until 4.5:1 on the four
+    /// surfaces; text starts there and darkens further until it also clears
+    /// the soft fills. Mint lock: `#46d8a4` / `#0ea66e` keep the site values.
+    pub fn derive(brand: &str, scheme: Scheme) -> Self {
+        let brand = normalize_hex(brand).unwrap_or_else(|| "#000000".into());
+        let surfaces = scheme.surfaces();
+        let alpha = scheme.soft_alpha();
+        let soft = composite(&brand, alpha, surfaces[1]);
+        let mut text_surfaces: Vec<String> = surfaces.iter().map(|s| s.to_string()).collect();
+        for base in &surfaces[..3] {
+            text_surfaces.push(composite(&brand, alpha, base));
+        }
+        let text_surfaces: Vec<&str> = text_surfaces.iter().map(String::as_str).collect();
+        let ink_on = |solid: &str| {
+            if contrast_ratio(WHITE, solid) >= 4.5 {
+                WHITE
+            } else {
+                INK
+            }
+        };
+
+        let (solid, text, on) = match scheme {
+            Scheme::Light if brand == MINT_DARK || brand == MINT_LIVE_LIGHT => {
+                let text = if passes_all(MINT_LIGHT_SOLID, &text_surfaces, 4.5) {
+                    MINT_LIGHT_SOLID.to_string()
+                } else if passes_all(MINT_LIGHT_TEXT_DEEP, &text_surfaces, 4.5) {
+                    MINT_LIGHT_TEXT_DEEP.to_string()
+                } else {
+                    adjust_until(MINT_LIGHT_SOLID, &text_surfaces, 4.5, Toward::Dark)
+                };
+                (MINT_LIGHT_SOLID.to_string(), text, WHITE)
+            }
+            Scheme::Dark if brand == MINT_DARK => {
+                let text = if passes_all(MINT_DARK, &text_surfaces, 4.5) {
+                    MINT_DARK.to_string()
+                } else {
+                    adjust_until(MINT_DARK, &text_surfaces, 4.5, Toward::Light)
+                };
+                (MINT_DARK.to_string(), text, INK)
+            }
+            Scheme::Dark => {
+                let text = if passes_all(&brand, &text_surfaces, 4.5) {
+                    brand.clone()
+                } else {
+                    adjust_until(&brand, &text_surfaces, 4.5, Toward::Light)
+                };
+                let on = ink_on(&brand);
+                (brand.clone(), text, on)
+            }
+            Scheme::Light => {
+                let solid = adjust_until(&brand, &surfaces, 4.5, Toward::Dark);
+                let text = if passes_all(&solid, &text_surfaces, 4.5) {
+                    solid.clone()
+                } else {
+                    adjust_until(&solid, &text_surfaces, 4.5, Toward::Dark)
+                };
+                let on = ink_on(&solid);
+                (solid, text, on)
+            }
+        };
+
+        Self {
+            accent: brand,
+            text,
+            solid,
+            on_accent: on.to_string(),
+            soft,
+        }
+    }
+
+    /// The five accent declarations for one scope.
+    pub fn css_decls(&self) -> String {
+        format!(
+            "--brand-accent: {a}; --accent: {a}; --accent-text: {t}; --accent-solid: {s}; --on-accent: {o}; --accent-soft: {soft};",
+            a = self.accent,
+            t = self.text,
+            s = self.solid,
+            o = self.on_accent,
+            soft = self.soft,
+        )
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct BrandConfig {
-    /// Accent in dark mode (hex).
+    /// Brand hex for dark mode.
     pub accent_dark: String,
-    /// Accent in light mode (hex).
+    /// Brand hex for light mode.
     pub accent_light: String,
-    /// Soft accent fill, dark mode (rgba).
-    pub accent_soft_dark: String,
-    /// Soft accent fill, light mode (rgba).
-    pub accent_soft_light: String,
+    /// Accent roles derived from `accent_dark` for the dark scope.
+    pub dark: AccentRoles,
+    /// Accent roles derived from `accent_light` for the light scope.
+    pub light: AccentRoles,
 }
 
 impl BrandConfig {
@@ -22,13 +181,13 @@ impl BrandConfig {
         Self::from_accents("#8f73ff", "#6d4aff")
     }
 
-    /// Build from primary dark/light hex accents; soft fills are derived.
+    /// Build from primary dark/light hex accents; every other role is derived.
     pub fn from_accents(accent_dark: &str, accent_light: &str) -> Self {
         let dark = normalize_hex(accent_dark).unwrap_or_else(|| "#8f73ff".into());
         let light = normalize_hex(accent_light).unwrap_or_else(|| dark.clone());
         Self {
-            accent_soft_dark: soft_rgba(&dark, 0.17),
-            accent_soft_light: soft_rgba(&light, 0.10),
+            dark: AccentRoles::derive(&dark, Scheme::Dark),
+            light: AccentRoles::derive(&light, Scheme::Light),
             accent_dark: dark,
             accent_light: light,
         }
@@ -118,20 +277,132 @@ fn normalize_hex(raw: &str) -> Option<String> {
     }
 }
 
-fn soft_rgba(hex: &str, alpha: f32) -> String {
-    let (r, g, b) = parse_rgb(hex).unwrap_or((143, 115, 255));
-    format!("rgba({r},{g},{b},{alpha})")
+type Rgb = (u8, u8, u8);
+
+fn parse_rgb(hex: &str) -> Rgb {
+    let h = hex.trim().trim_start_matches('#');
+    let byte = |i: usize| {
+        h.get(i..i + 2)
+            .and_then(|b| u8::from_str_radix(b, 16).ok())
+            .unwrap_or(0)
+    };
+    (byte(0), byte(2), byte(4))
 }
 
-fn parse_rgb(hex: &str) -> Option<(u8, u8, u8)> {
-    let h = hex.strip_prefix('#')?;
-    if h.len() != 6 {
-        return None;
+/// Round and clamp each channel, as `toHex` in `derive-accent.js` does.
+fn to_hex(r: f64, g: f64, b: f64) -> String {
+    let h = |n: f64| n.round().clamp(0.0, 255.0) as u8;
+    format!("#{:02x}{:02x}{:02x}", h(r), h(g), h(b))
+}
+
+fn srgb_to_linear(c: u8) -> f64 {
+    let c = f64::from(c) / 255.0;
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
     }
-    let r = u8::from_str_radix(&h[0..2], 16).ok()?;
-    let g = u8::from_str_radix(&h[2..4], 16).ok()?;
-    let b = u8::from_str_radix(&h[4..6], 16).ok()?;
-    Some((r, g, b))
+}
+
+fn linear_to_srgb(c: f64) -> f64 {
+    let c = c.clamp(0.0, 1.0);
+    let v = if c <= 0.0031308 {
+        12.92 * c
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    };
+    (v * 255.0).round()
+}
+
+/// WCAG relative luminance of a `#rrggbb` colour.
+pub fn relative_luminance(hex: &str) -> f64 {
+    let (r, g, b) = parse_rgb(hex);
+    0.2126 * srgb_to_linear(r) + 0.7152 * srgb_to_linear(g) + 0.0722 * srgb_to_linear(b)
+}
+
+/// WCAG contrast ratio between two `#rrggbb` colours.
+pub fn contrast_ratio(fg: &str, bg: &str) -> f64 {
+    let l1 = relative_luminance(fg);
+    let l2 = relative_luminance(bg);
+    let (hi, lo) = if l1 > l2 { (l1, l2) } else { (l2, l1) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
+fn passes_all(hex: &str, surfaces: &[&str], min: f64) -> bool {
+    surfaces.iter().all(|s| contrast_ratio(hex, s) >= min)
+}
+
+/// `fg` at `alpha` over `bg`, as an opaque hex.
+fn composite(fg: &str, alpha: f64, bg: &str) -> String {
+    let f = parse_rgb(fg);
+    let b = parse_rgb(bg);
+    let mix = |f: u8, b: u8| f64::from(f) * alpha + f64::from(b) * (1.0 - alpha);
+    to_hex(mix(f.0, b.0), mix(f.1, b.1), mix(f.2, b.2))
+}
+
+struct Oklch {
+    l: f64,
+    c: f64,
+    h: f64,
+}
+
+fn hex_to_oklch(hex: &str) -> Oklch {
+    let (r, g, b) = parse_rgb(hex);
+    let (r, g, b) = (srgb_to_linear(r), srgb_to_linear(g), srgb_to_linear(b));
+    let l = 0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b;
+    let m = 0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b;
+    let s = 0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b;
+    let (l_, m_, s_) = (l.cbrt(), m.cbrt(), s.cbrt());
+    let lab_l = 0.2104542553 * l_ + 0.793617785 * m_ - 0.0040720468 * s_;
+    let lab_a = 1.9779984951 * l_ - 2.428592205 * m_ + 0.4505937099 * s_;
+    let lab_b = 0.0259040371 * l_ + 0.7827717662 * m_ - 0.808675766 * s_;
+    let mut h = lab_b.atan2(lab_a).to_degrees();
+    if h < 0.0 {
+        h += 360.0;
+    }
+    Oklch {
+        l: lab_l,
+        c: (lab_a * lab_a + lab_b * lab_b).sqrt(),
+        h,
+    }
+}
+
+fn oklch_to_hex(l: f64, c: f64, h: f64) -> String {
+    let rad = h.to_radians();
+    let (a, b) = (c * rad.cos(), c * rad.sin());
+    let l_ = l + 0.3963377774 * a + 0.2158037573 * b;
+    let m_ = l - 0.1055613458 * a - 0.0638541728 * b;
+    let s_ = l - 0.0894841775 * a - 1.291485548 * b;
+    let (l3, m3, s3) = (l_ * l_ * l_, m_ * m_ * m_, s_ * s_ * s_);
+    let r = 4.0767416621 * l3 - 3.3077115913 * m3 + 0.2309699292 * s3;
+    let g = -1.2684380046 * l3 + 2.6097574011 * m3 - 0.3413193965 * s3;
+    let b2 = -0.0041960863 * l3 - 0.7034186147 * m3 + 1.707614701 * s3;
+    to_hex(linear_to_srgb(r), linear_to_srgb(g), linear_to_srgb(b2))
+}
+
+#[derive(Clone, Copy)]
+enum Toward {
+    Light,
+    Dark,
+}
+
+/// Step OKLCH lightness by 0.004 (at least once) until `hex` clears `min` on
+/// every surface, keeping chroma and hue. Gives up after 250 steps.
+fn adjust_until(hex: &str, surfaces: &[&str], min: f64, toward: Toward) -> String {
+    let lch = hex_to_oklch(hex);
+    let step = match toward {
+        Toward::Light => 0.004,
+        Toward::Dark => -0.004,
+    };
+    let mut l = lch.l;
+    for _ in 0..250 {
+        l = (l + step).clamp(0.0, 1.0);
+        let candidate = oklch_to_hex(l, lch.c, lch.h);
+        if passes_all(&candidate, surfaces, min) {
+            return candidate;
+        }
+    }
+    oklch_to_hex(l, lch.c, lch.h)
 }
 
 #[cfg(test)]
@@ -157,28 +428,27 @@ mod tests {
 
     #[test]
     fn pending_accent_meets_ui_contrast_on_both_themes() {
-        use crate::theme::tokens::{contrast_ratio, scope_decls};
         let pending = BrandConfig::pending();
-        let css = crate::theme::theme_css(&pending);
-        let dark = scope_decls(&css, "[data-theme=\"dark\"]");
-        let light = scope_decls(&css, "[data-theme=\"light\"]");
-        for (scope, name) in [
-            (&dark, "--bg"),
-            (&dark, "--surface"),
-            (&dark, "--surface-2"),
-            (&dark, "--border"),
-            (&light, "--bg"),
-            (&light, "--surface"),
-            (&light, "--surface-2"),
-            (&light, "--border"),
+        // `--border` is the field outline a focused input sits next to.
+        let dark = DARK_SURFACES.iter().copied().chain(["#353541"]);
+        let light = LIGHT_SURFACES.iter().copied().chain(["#e3e3e9"]);
+        for (roles, surfaces) in [
+            (&pending.dark, dark.collect::<Vec<_>>()),
+            (&pending.light, light.collect::<Vec<_>>()),
         ] {
-            let accent = scope
-                .get("--accent")
-                .unwrap_or_else(|| panic!("missing --accent"));
-            let bg = scope.get(name).unwrap_or_else(|| panic!("missing {name}"));
-            let ratio = contrast_ratio(accent, bg);
-            assert!(ratio >= 3.0, "{accent} on {name} {bg} = {ratio:.2}");
+            for bg in &surfaces {
+                for fg in [&roles.accent, &roles.solid] {
+                    let ratio = contrast_ratio(fg, bg);
+                    assert!(ratio >= 3.0, "{fg} on {bg} = {ratio:.2}");
+                }
+            }
+            // `--border` is not a text surface; text clears AA on the other four.
+            for bg in &surfaces[..4] {
+                let ratio = contrast_ratio(&roles.text, bg);
+                assert!(ratio >= 4.5, "text {} on {bg} = {ratio:.2}", roles.text);
+            }
         }
+        // The favicon draws white initials on the raw pending gray.
         let accent = pending.accent_dark.as_str();
         let white_on_pending = contrast_ratio("#ffffff", accent);
         assert!(
@@ -221,9 +491,125 @@ mod tests {
     }
 
     #[test]
-    fn from_accents_derives_soft() {
+    fn from_accents_derives_opaque_soft() {
         let b = BrandConfig::from_accents("#ff0000", "#cc0000");
         assert_eq!(b.accent_dark, "#ff0000");
-        assert!(b.accent_soft_dark.contains("255,0,0"));
+        assert_eq!(b.dark.accent, "#ff0000");
+        // 17% of #ff0000 over dark --surface #1f1f27, and 10% of #cc0000 over
+        // white, both as opaque hex (no rgba).
+        assert_eq!(b.dark.soft, "#451a20");
+        assert_eq!(b.light.soft, "#fae6e6");
+    }
+
+    /// Outputs of `derive-accent.js` `derive(brand, theme, lookASurfaces)`,
+    /// captured with node from the design system copy. The Rust port must
+    /// match them byte for byte.
+    /// Rows: brand, scheme, then text, solid, on-accent and soft.
+    const JS_REFERENCE: &[&str] = &[
+        "#46d8a4 dark #46d8a4 #46d8a4 #17171d #263e3c",
+        "#46d8a4 light #087a50 #087a50 #ffffff #edfbf6",
+        "#0ea66e dark #2fb77d #0ea66e #17171d #1c3633",
+        "#0ea66e light #087a50 #087a50 #ffffff #e7f6f1",
+        "#8f73ff dark #aa91ff #8f73ff #17171d #322d4c",
+        "#8f73ff light #7251db #7454de #ffffff #f4f1ff",
+        "#6d4aff dark #9f8aff #6d4aff #ffffff #2c264c",
+        "#6d4aff light #6944fa #6c49fe #ffffff #f0edff",
+        "#808088 dark #a1a1a9 #808088 #17171d #2f2f37",
+        "#808088 light #6a6a72 #6d6d75 #ffffff #f2f2f3",
+        "#ff7a1a dark #ff8227 #ff7a1a #17171d #452e25",
+        "#ff7a1a light #bf3f00 #c24200 #ffffff #fff2e8",
+        "#ffff00 dark #ffff00 #ffff00 #17171d #454520",
+        "#ffff00 light #777000 #777000 #ffffff #ffffe6",
+        "#1a1a1a dark #8f8f8f #1a1a1a #ffffff #1e1e25",
+        "#1a1a1a light #191919 #191919 #ffffff #e8e8e8",
+        "#ff0000 dark #ff614d #ff0000 #17171d #451a20",
+        "#ff0000 light #cf0000 #dc0000 #ffffff #ffe6e6",
+        "#cc0000 dark #ff5847 #cc0000 #ffffff #3c1a20",
+        "#cc0000 light #cb0000 #cb0000 #ffffff #fae6e6",
+    ];
+
+    #[test]
+    fn derivation_matches_derive_accent_js() {
+        for row in JS_REFERENCE {
+            let cols: Vec<&str> = row.split_whitespace().collect();
+            let scheme = if cols[1] == "dark" {
+                Scheme::Dark
+            } else {
+                Scheme::Light
+            };
+            let roles = AccentRoles::derive(cols[0], scheme);
+            let got = [
+                roles.accent.as_str(),
+                roles.text.as_str(),
+                roles.solid.as_str(),
+                roles.on_accent.as_str(),
+                roles.soft.as_str(),
+            ];
+            assert_eq!(got, [cols[0], cols[2], cols[3], cols[4], cols[5]], "{row}");
+        }
+    }
+
+    #[test]
+    fn mint_brand_is_locked() {
+        let live = BrandConfig::from_accents("#46d8a4", "#0ea66e");
+        assert_eq!(live.dark.solid, "#46d8a4");
+        assert_eq!(live.dark.on_accent, INK);
+        assert_eq!(live.dark.text, "#46d8a4");
+        assert_eq!(live.light.solid, "#087a50");
+        assert_eq!(live.light.text, "#087a50");
+        assert_eq!(live.light.on_accent, "#ffffff");
+        assert!(contrast_ratio("#ffffff", "#46d8a4") < 2.0);
+    }
+
+    /// A low-contrast brand is adjusted, never shipped as-is: yellow on a
+    /// light surface is darkened until 4.5:1, and every derived pair holds
+    /// for the brands listed here, including the product purple and the
+    /// strategy orange. Not for every brand: in dark, `--on-accent` falls
+    /// back to dark ink without a check, so for a dark solid with relative
+    /// luminance between about 0.1833 and 0.2148 neither white nor the ink
+    /// reaches 4.5:1 (`#d35400`: ink 4.28:1, white 4.17:1).
+    /// `derive-accent.js` has the same gap; the fix belongs there first.
+    #[test]
+    fn low_contrast_accent_is_adjusted_to_aa() {
+        let yellow = AccentRoles::derive("#ffff00", Scheme::Light);
+        assert!(contrast_ratio("#ffff00", "#ffffff") < 1.1);
+        assert_ne!(yellow.solid, "#ffff00");
+        assert!(!yellow.soft.starts_with("rgba"), "{}", yellow.soft);
+        for brand in [
+            "#ffff00",
+            "#8f73ff",
+            "#6d4aff",
+            STRATEGY_BRAND,
+            "#46d8a4",
+            "#808088",
+        ] {
+            for scheme in [Scheme::Dark, Scheme::Light] {
+                let roles = AccentRoles::derive(brand, scheme);
+                assert_eq!(roles.soft.len(), 7, "opaque #rrggbb soft: {}", roles.soft);
+                let ink = contrast_ratio(&roles.on_accent, &roles.solid);
+                assert!(ink >= 4.5, "{brand} {scheme:?} ink {ink:.2}");
+                let mut surfaces: Vec<String> =
+                    scheme.surfaces().iter().map(|s| s.to_string()).collect();
+                surfaces.push(roles.soft.clone());
+                for bg in &surfaces {
+                    let text = contrast_ratio(&roles.text, bg);
+                    assert!(text >= 4.5, "{brand} {scheme:?} text on {bg} {text:.2}");
+                }
+                if scheme == Scheme::Light {
+                    for bg in scheme.surfaces() {
+                        let solid = contrast_ratio(&roles.solid, bg);
+                        assert!(solid >= 4.5, "{brand} light solid on {bg} {solid:.2}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn contrast_formula_anchors() {
+        let black_on_white = contrast_ratio("#000000", "#ffffff");
+        assert!((black_on_white - 21.0).abs() < 0.05, "{black_on_white}");
+        let same = contrast_ratio("#ffffff", "#ffffff");
+        assert!((same - 1.0).abs() < 0.001, "{same}");
     }
 }

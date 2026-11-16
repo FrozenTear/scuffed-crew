@@ -27,7 +27,7 @@ const PAGE_CSS: &str = r#"
     margin: 0 0 0.35rem;
 }
 .team-chat-sub {
-    color: var(--text-2);
+    color: var(--text-3);
     font-size: 0.9rem;
     margin: 0 0 1.5rem;
 }
@@ -41,7 +41,7 @@ const PAGE_CSS: &str = r#"
 .team-chat-label {
     font-size: 0.8rem;
     font-weight: 600;
-    color: var(--text-2);
+    color: var(--text-3);
     text-transform: uppercase;
     letter-spacing: 0.04em;
 }
@@ -56,14 +56,14 @@ const PAGE_CSS: &str = r#"
     font-size: 0.9rem;
 }
 .team-chat-select:focus {
-    border-color: var(--accent);
+    border-color: var(--accent-solid);
 }
 .team-chat-empty {
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 10px;
     padding: 2rem 1.5rem;
-    color: var(--text-2);
+    color: var(--text-3);
     text-align: center;
 }
 @media (max-width: 640px) {

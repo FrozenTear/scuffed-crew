@@ -61,13 +61,13 @@ const PAGE_CSS: &str = r#"
         display: flex;
         gap: 1rem;
         font-size: 0.75rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         align-items: center;
         flex-wrap: wrap;
     }
     .wiki-detail-topic {
         font-family: var(--font-mono);
-        color: var(--accent);
+        color: var(--accent-text);
         font-size: 0.75rem;
     }
     .wiki-detail-actions {
@@ -85,8 +85,8 @@ const PAGE_CSS: &str = r#"
         transition: background 0.15s;
     }
     .wiki-btn-edit {
-        background: var(--accent);
-        color: var(--accent-fg);
+        background: var(--accent-solid);
+        color: var(--on-accent);
         border: none;
         font-weight: 600;
     }
@@ -95,7 +95,7 @@ const PAGE_CSS: &str = r#"
     }
     .wiki-btn-secondary {
         background: var(--surface);
-        color: var(--text-2);
+        color: var(--text-3);
         border: 1px solid var(--border);
     }
     .wiki-btn-secondary:hover {
@@ -108,7 +108,7 @@ const PAGE_CSS: &str = r#"
         border: 1px solid var(--border);
         border-radius: 10px;
         padding: 1.5rem;
-        color: var(--text-2);
+        color: var(--text-3);
         font-size: 0.85rem;
         line-height: 1.7;
         overflow-wrap: break-word;
@@ -122,7 +122,7 @@ const PAGE_CSS: &str = r#"
         margin: 0 0 var(--md-block-gap);
     }
     .wiki-content a {
-        color: var(--accent);
+        color: var(--accent-text);
     }
     .wiki-content img {
         max-width: 100%;
@@ -131,7 +131,7 @@ const PAGE_CSS: &str = r#"
     .wiki-content blockquote {
         border-left: 3px solid var(--border);
         padding-left: 1rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
     }
     .wiki-content pre {
         background: var(--bg);
@@ -176,10 +176,10 @@ const PAGE_CSS: &str = r#"
         gap: 0.5rem;
     }
     .wiki-revision-note {
-        color: var(--text-2);
+        color: var(--text-3);
     }
     .wiki-revision-date {
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-size: 0.7rem;
     }
     .wiki-edit-form {
@@ -215,7 +215,7 @@ const PAGE_CSS: &str = r#"
         border-color: var(--accent-soft);
     }
     .wiki-edit-form input::placeholder {
-        color: var(--text-3);
+        color: var(--text-subtle);
     }
     .wiki-edit-buttons {
         display: flex;
@@ -223,13 +223,13 @@ const PAGE_CSS: &str = r#"
         margin-top: 0.75rem;
     }
     .wiki-loading, .wiki-error {
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-align: center;
         padding: 3rem 0;
     }
     .wiki-back {
         display: inline-block;
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-size: 0.8rem;
         margin-bottom: 1rem;
         text-decoration: none;
@@ -361,7 +361,7 @@ pub fn WikiPage(topic: String) -> Element {
                                         oninput: move |e| revision_note.set(e.value()),
                                     }
                                     if let Some(err) = save_error() {
-                                        p { style: "color: var(--danger); font-size: 0.8rem; margin-top: 0.5rem;",
+                                        p { style: "color: var(--loss); font-size: 0.8rem; margin-top: 0.5rem;",
                                             "{err}"
                                         }
                                     }
