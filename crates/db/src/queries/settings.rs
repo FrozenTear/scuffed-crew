@@ -502,8 +502,19 @@ mod tests {
         assert_eq!(old.org_name, "Old Clan");
         assert_eq!(old.brand_font_display, "");
 
-        // Upgrade: the new field definition lands on the existing row.
+        // Upgrade: the new field definition lands on the existing row. The boot
+        // backfill inside run_migrations is the only write here; its error is
+        // only logged there, so the stored "" is the proof that it went through.
         run_migrations(&db.client).await.expect("migrate");
+        assert_eq!(
+            stored_font(&db).await.as_deref(),
+            Some(""),
+            "the boot backfill wrote the old row and the font default filled in"
+        );
+        backfill_officers_can_edit_teams(&db.client)
+            .await
+            .expect("boot backfill is accepted on a row from before the field");
+        assert_eq!(stored_flag(&db).await, Some(false));
         let read = db
             .get_settings()
             .await
@@ -519,5 +530,189 @@ mod tests {
         let set = set_font(&db, Some("ibm-plex-sans")).await;
         assert_eq!(set.brand_font_display, "ibm-plex-sans");
         assert_eq!(stored_font(&db).await.as_deref(), Some("ibm-plex-sans"));
+
+        // A stored font survives the same partial update on later boots.
+        backfill_officers_can_edit_teams(&db.client)
+            .await
+            .expect("backfill with a stored font");
+        run_migrations(&db.client).await.expect("restart");
+        assert_eq!(stored_font(&db).await.as_deref(), Some("ibm-plex-sans"));
+    }
+
+    /// The shipped definition: the default is the empty string and it is
+    /// `DEFAULT ALWAYS` (a plain DEFAULT would refuse the UNSET below).
+    #[tokio::test]
+    async fn brand_font_display_field_default_is_always_empty() {
+        let db = migrated().await;
+        db.client
+            .query("CREATE site_settings SET org_name = 'Raw Clan'")
+            .await
+            .expect("raw create")
+            .check()
+            .expect("raw create ok");
+        assert_eq!(stored_font(&db).await.as_deref(), Some(""));
+
+        // UNSET leaves no value in the written row, so only ALWAYS can refill it.
+        db.client
+            .query("UPDATE site_settings UNSET brand_font_display")
+            .await
+            .expect("unset")
+            .check()
+            .expect("unset is accepted and refilled");
+        assert_eq!(stored_font(&db).await.as_deref(), Some(""));
+    }
+
+    /// `DbSiteSettings` as it is on the merge base (6b098007): the row a
+    /// rolled-back build reads and writes. It has no `brand_font_display`.
+    #[derive(Debug, Clone, serde::Serialize, Deserialize, SurrealValue)]
+    struct OldBuildSiteSettings {
+        #[surreal(default)]
+        id: Option<surrealdb_types::RecordId>,
+        org_name: String,
+        site_description: String,
+        recruitment_open: bool,
+        #[surreal(default)]
+        strategies_enabled: Option<bool>,
+        #[surreal(default)]
+        officers_can_edit_teams: Option<bool>,
+        recruitment_message: String,
+        min_age: u32,
+        forum_backend: String,
+        #[surreal(default)]
+        extra_relay_urls: String,
+        #[surreal(default)]
+        home_shell: String,
+        #[surreal(default)]
+        home_skin: String,
+        #[surreal(default)]
+        public_layout: String,
+        #[surreal(default)]
+        homepage_json: String,
+        #[surreal(default)]
+        nav_json: String,
+        #[surreal(default)]
+        page_bg_color: String,
+        #[surreal(default)]
+        page_bg_image_url: String,
+        #[surreal(default)]
+        brand_accent_dark: String,
+        #[surreal(default)]
+        brand_accent_light: String,
+        updated_at: surrealdb::types::Datetime,
+    }
+
+    /// The old build's `update_settings`: select the row, change it, write it
+    /// back whole with `.content(..)`.
+    async fn old_build_save(db: &Database, org_name: &str) -> Result<String, String> {
+        let id = db.get_settings().await.expect("settings id").id;
+        let existing: Option<OldBuildSiteSettings> = db
+            .client
+            .select(("site_settings", id.as_str()))
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut row = existing.expect("row");
+        row.org_name = org_name.to_string();
+        let updated: Option<OldBuildSiteSettings> = db
+            .client
+            .update(("site_settings", id.as_str()))
+            .content(row)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(updated.expect("row after update").org_name)
+    }
+
+    /// Rollback A in docs/api/site-settings.md: revert only, the field
+    /// definition stays. The old build's settings save must still be accepted.
+    #[tokio::test]
+    async fn rollback_old_build_saves_settings_with_the_field_definition_in_place() {
+        let db = migrated().await;
+        db.get_settings().await.expect("create defaults");
+
+        // Stored default.
+        assert_eq!(
+            old_build_save(&db, "Rolled Back").await.as_deref(),
+            Ok("Rolled Back")
+        );
+        assert_eq!(stored_font(&db).await.as_deref(), Some(""));
+
+        // Stored non-default: the old build's write has no font, so it is
+        // accepted and the font goes back to the default.
+        set_font(&db, Some("ibm-plex-sans")).await;
+        assert_eq!(
+            old_build_save(&db, "Rolled Back Twice").await.as_deref(),
+            Ok("Rolled Back Twice")
+        );
+        assert_eq!(stored_font(&db).await.as_deref(), Some(""));
+
+        // The old build's boot backfill is the same statement as today's.
+        backfill_officers_can_edit_teams(&db.client)
+            .await
+            .expect("old build boot backfill");
+
+        // Rolling forward again needs nothing: the row reads and saves.
+        run_migrations(&db.client).await.expect("roll forward");
+        assert_eq!(set_font(&db, None).await.brand_font_display, "");
+        assert_eq!(
+            set_font(&db, Some("urbanist")).await.brand_font_display,
+            "urbanist"
+        );
+    }
+
+    /// The one fenced `surql` statement in the doc's rollback section.
+    fn documented_rollback_query() -> String {
+        let doc = include_str!("../../../../docs/api/site-settings.md");
+        let section = doc
+            .split("## Rollback")
+            .nth(1)
+            .expect("doc has a Rollback section");
+        let block = section
+            .split("```surql\n")
+            .nth(1)
+            .and_then(|rest| rest.split("```").next())
+            .expect("Rollback section has a surql block");
+        block.trim().to_string()
+    }
+
+    /// Rollback B: the optional cleanup query, run exactly as the doc gives it.
+    #[tokio::test]
+    async fn rollback_documented_remove_field_query_works() {
+        let query = documented_rollback_query();
+        assert_eq!(
+            query,
+            "REMOVE FIELD IF EXISTS brand_font_display ON TABLE site_settings;"
+        );
+
+        let db = migrated().await;
+        set_font(&db, Some("ibm-plex-sans")).await;
+
+        // With the definition gone the old build's save drops the stored font.
+        db.client
+            .query(&query)
+            .await
+            .expect("doc query")
+            .check()
+            .expect("doc query ok");
+        assert_eq!(
+            old_build_save(&db, "Cleaned Up").await.as_deref(),
+            Ok("Cleaned Up")
+        );
+        assert_eq!(stored_font(&db).await, None, "no font left on the row");
+        backfill_officers_can_edit_teams(&db.client)
+            .await
+            .expect("old build boot backfill");
+
+        // Idempotent, and a later roll forward starts from the default.
+        db.client
+            .query(&query)
+            .await
+            .expect("doc query twice")
+            .check()
+            .expect("doc query twice ok");
+        run_migrations(&db.client).await.expect("roll forward");
+        assert_eq!(
+            db.get_settings().await.expect("read").brand_font_display,
+            ""
+        );
+        assert_eq!(stored_font(&db).await.as_deref(), Some(""));
     }
 }

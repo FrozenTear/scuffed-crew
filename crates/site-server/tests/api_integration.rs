@@ -2018,6 +2018,9 @@ async fn put_settings_rejects_brand_font_display_outside_the_allow_list() {
 
     for bad in [
         "comic-sans",
+        // Looks like a listed id, and is not one.
+        "jetbrains-mono",
+        "ibm-plex-mono",
         "https://fonts.example.test/evil.woff2",
         "/assets/font.woff2",
         "Urbanist",
@@ -2055,8 +2058,17 @@ async fn put_settings_rejects_brand_font_display_outside_the_allow_list() {
         json!({ "brand_font_display": 1 }),
         json!({ "brand_font_display": ["urbanist"] }),
     ] {
-        let (status, _) = put_settings(&state, ADMIN_TOKEN, body.clone()).await;
-        assert!(status.is_client_error(), "{body}: {status}");
+        // axum's Json extractor answers before the handler runs.
+        let resp = create_router(state.clone())
+            .oneshot(authed_json_request(
+                Method::PUT,
+                "/api/settings",
+                ADMIN_TOKEN,
+                body.clone(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "{body}");
         let got = get_settings_json(&state).await;
         assert_eq!(got["brand_font_display"], "ibm-plex-sans", "{body}");
     }
@@ -2117,6 +2129,58 @@ async fn officer_cannot_set_brand_font_display() {
             put_settings(&state, OFFICER_TOKEN, json!({ "brand_font_display": font })).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{font:?}");
         assert_eq!(json["error"], "Admin access required");
+    }
+    let got = get_settings_json(&state).await;
+    assert_eq!(got["brand_font_display"], "");
+}
+
+#[tokio::test]
+async fn member_recruit_and_signed_out_cannot_set_brand_font_display() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    for font in ["ibm-plex-sans", "", "comic-sans"] {
+        for token in [MEMBER_TOKEN, RECRUIT_TOKEN] {
+            let (status, json) =
+                put_settings(&state, token, json!({ "brand_font_display": font })).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{token} {font:?}");
+            assert_eq!(json, json!({ "error": "Officer access required" }));
+        }
+
+        let (status, json) = put_settings(
+            &state,
+            "no-such-session-token",
+            json!({ "brand_font_display": font }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "unknown token {font:?}");
+        assert_eq!(json, json!({ "error": "Session expired or invalid" }));
+
+        // Signed out: the same body with no session cookie at all.
+        let resp = create_router(state.clone())
+            .oneshot(
+                rate_limit_ip(
+                    Request::builder()
+                        .method(Method::PUT)
+                        .uri("/api/settings")
+                        .header(header::CONTENT_TYPE, "application/json"),
+                )
+                .body(Body::from(
+                    json!({ "brand_font_display": font }).to_string(),
+                ))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "signed out {font:?}"
+        );
+        assert_eq!(
+            body_json(resp).await,
+            json!({ "error": "Authentication required" })
+        );
     }
     let got = get_settings_json(&state).await;
     assert_eq!(got["brand_font_display"], "");
