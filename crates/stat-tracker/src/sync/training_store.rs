@@ -292,7 +292,7 @@ pub(super) enum Kept {
     Yes,
     /// The cached consent for the kind is off. Nothing was written.
     NoConsent,
-    /// Over a cap or a `meta` bound ([`check_crop`]): skipped, not shrunk.
+    /// Over a cap or a `meta` bound ([`check_crop`]): skipped. This layer does not shrink.
     Refused,
     /// No crop id or a write error: a consented crop was lost.
     Failed,
