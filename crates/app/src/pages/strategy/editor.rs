@@ -41,7 +41,7 @@ use crate::components::strategy::{
     HeroPicker, HeroWinRate, MapCanvas, PropertiesPanel, TeamPanel, Timeline, Toolbar,
 };
 use crate::components::{Toast, use_toast};
-use crate::keybindings::{self, EditorAction};
+use crate::keybindings::{self, CanvasKey, EditorAction};
 use crate::state::editor::{CanvasState, DrawingState, StrategyState};
 use crate::state::maps::{
     PICKER_MODE_ORDER, display_map_name, game_mode_api_str, game_mode_for_map, map_id_for_create,
@@ -205,6 +205,24 @@ const EDITOR_CSS: &str = r#"
         flex: 1;
         position: relative;
         overflow: hidden;
+    }
+    /* Shown after Tab toggled the panel from inside the map, until focus
+       leaves the map: Tab does not move focus there, so say what does. */
+    .canvas-key-hint {
+        position: absolute;
+        left: 50%;
+        bottom: 0.5rem;
+        transform: translateX(-50%);
+        z-index: 4;
+        max-width: calc(100% - 1rem);
+        padding: 0.3rem 0.6rem;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        background: var(--surface);
+        color: var(--text);
+        font-size: 0.75rem;
+        text-align: center;
+        pointer-events: none;
     }
 
     /* Bottom panel (element list) */
@@ -570,6 +588,10 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
         opened_as_new: initial_strategy.is_none(),
     };
 
+    // The map's key hint: on after Tab toggled the panel from inside the
+    // canvas, off when focus leaves the canvas.
+    let mut canvas_key_hint = use_signal(|| false);
+
     // Track previous tool for space-to-pan behavior
     let _prev_tool = use_hook(|| std::cell::Cell::new(Tool::Select));
 
@@ -595,8 +617,11 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
     });
 
     // =========================================================================
-    // Keyboard shortcuts: document keydown, capture phase (so Tab is seen
-    // before the browser moves focus). Removed when the editor unmounts.
+    // Keyboard shortcuts: document keydown, capture phase. Removed when the
+    // editor unmounts. Tab is not handled here: `from_keyboard_event` never
+    // resolves it, so outside the map canvas Tab moves focus as on any page.
+    // The Tab panel toggle lives on the map canvas element's own `onkeydown`
+    // and reaches the editor through `on_canvas_key`.
     // =========================================================================
     crate::layouts::use_document_keydown_capture(move |event: web_sys::KeyboardEvent| {
         // Don't handle shortcuts when typing in an input
@@ -640,7 +665,8 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                 drawing_state.with_mut(|d| d.active_tool = Tool::Eraser);
             }
 
-            // Panel toggles
+            // Panel toggles. No default key resolves to the left panel
+            // here (it is Tab inside the canvas); a custom binding could.
             EditorAction::ToggleLeftPanel => {
                 event.prevent_default();
                 left_open.with_mut(|v| *v = !*v);
@@ -843,7 +869,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                         span { class: "sidebar-title", "Team & Heroes" }
                         button {
                             class: "sidebar-collapse-btn",
-                            title: "Toggle panel (Tab)",
+                            title: "Toggle panel (Tab while the map has focus)",
                             onclick: move |_| left_open.with_mut(|v| *v = !*v),
                             if left_collapsed { ">" } else { "<" }
                         }
@@ -998,6 +1024,12 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                     }
 
                     div { class: "canvas-container",
+                        onfocusout: move |_| canvas_key_hint.set(false),
+                        if canvas_key_hint() {
+                            p { class: "canvas-key-hint", role: "status",
+                                "Tab toggles the team panel. Esc or Shift+Tab leaves the map."
+                            }
+                        }
                         MapCanvas {
                             zoom: zoom_val,
                             pan_offset: pan_val,
@@ -1005,6 +1037,21 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                             show_health_packs: show_hp,
                             map_metadata: metadata_val,
                             current_map_id: map_id_val,
+                            // Keys the canvas element itself resolved while it
+                            // held focus (`keybindings::canvas_key`). Tab
+                            // toggles the left panel and focus stays. Esc sends
+                            // focus to the main landmark. Shift+Tab is left to
+                            // the browser, which moves to the previous stop.
+                            on_canvas_key: move |key: CanvasKey| match key {
+                                CanvasKey::ToggleLeftPanel => {
+                                    left_open.with_mut(|v| *v = !*v);
+                                    canvas_key_hint.set(true);
+                                }
+                                CanvasKey::LeaveToShell => {
+                                    crate::layouts::focus_element(crate::layouts::MAIN_ID);
+                                }
+                                CanvasKey::LeaveBackwards => {}
+                            },
                             active_tool: tool_val,
                             draw_color: color_val,
                             fill_opacity: opacity_val,
@@ -1207,7 +1254,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                     div { class: "sidebar-header",
                         button {
                             class: "sidebar-collapse-btn",
-                            title: "Toggle panel (Shift+Tab)",
+                            title: "Toggle panel (])",
                             onclick: move |_| right_open.with_mut(|v| *v = !*v),
                             if right_collapsed { "<" } else { ">" }
                         }

@@ -6,6 +6,7 @@ mod strategy;
 
 pub use admin::AdminLayout;
 pub use public::PublicLayout;
+pub(crate) use shell::MAIN_ID;
 pub use strategy::StrategyLayout;
 
 #[cfg(target_arch = "wasm32")]

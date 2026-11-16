@@ -7,6 +7,7 @@
 use dioxus::prelude::*;
 use uuid::Uuid;
 
+use crate::keybindings::{self, CanvasKey, Keybinding};
 use scuffed_types::strategy::{Color, ElementType, MapMetadata, Position, StrategyElement, Tool};
 
 // =============================================================================
@@ -62,6 +63,8 @@ pub fn DesktopMapCanvas(
     on_text_create: EventHandler<(Position, String)>,
     on_erase_at: EventHandler<Position>,
     on_element_drag_end: EventHandler<(Uuid, Position, Position)>,
+    // Tab, Esc or Shift+Tab while the canvas holds focus
+    on_canvas_key: EventHandler<CanvasKey>,
 ) -> Element {
     let mut is_panning = use_signal(|| false);
     let mut is_dragging = use_signal(|| false);
@@ -295,6 +298,7 @@ pub fn DesktopMapCanvas(
                 class: "map-canvas map-canvas-overlay",
                 style: "cursor: {cursor_style()};",
                 tabindex: 0,
+                aria_label: "Strategy map. Tab toggles the team panel. Esc or Shift+Tab leaves the map.",
                 onmounted: move |evt| {
                     let data = evt.data();
                     spawn(async move {
@@ -487,6 +491,15 @@ pub fn DesktopMapCanvas(
                 },
 
                 onkeydown: move |evt: Event<KeyboardData>| {
+                    // Keys that belong to the canvas while it holds focus.
+                    // This is the only place in the editor that takes Tab.
+                    let binding = Keybinding::from_key(&evt.key(), evt.modifiers());
+                    if let Some(canvas_key) = keybindings::canvas_key(&binding) {
+                        if canvas_key.prevents_default() {
+                            evt.prevent_default();
+                        }
+                        on_canvas_key.call(canvas_key);
+                    }
                     let key = evt.data().key();
                     match key {
                         Key::Delete | Key::Backspace => {

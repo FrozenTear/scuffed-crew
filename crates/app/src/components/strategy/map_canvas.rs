@@ -24,6 +24,7 @@ use scuffed_types::strategy::{
 
 use super::hero_chip::{HeroChip, hero_chip, portrait_ready};
 use crate::canvas::tile_manager::{SharedTileManager, create_tile_manager};
+use crate::keybindings::{self, CanvasKey, Keybinding};
 use crate::theme::tokens::{
     CANVAS_BADGE_BG, CANVAS_BG, CANVAS_GRID_LOADING, CANVAS_MARKER_BORDER,
     CANVAS_SELECTION_FALLBACK, CANVAS_SELECTION_TOKEN, CANVAS_TEXT_LOADING,
@@ -390,6 +391,8 @@ pub fn MapCanvas(
     on_text_create: EventHandler<(Position, String)>,
     on_erase_at: EventHandler<Position>,
     on_element_drag_end: EventHandler<(Uuid, Position, Position)>,
+    // Tab, Esc or Shift+Tab while the canvas holds focus
+    on_canvas_key: EventHandler<CanvasKey>,
 ) -> Element {
     // =========================================================================
     // Canvas element refs: stored as signals so effects can read them
@@ -867,7 +870,12 @@ pub fn MapCanvas(
                 height: "1080",
                 class: "map-canvas map-canvas-overlay",
                 style: "cursor: {cursor_style()};",
-                tabindex: 0,
+                // Focus by click only. As a Tab stop the canvas would hold
+                // keyboard focus: Tab toggles the left panel in here, so the
+                // controls after the map (and the phone tab bar) could not
+                // be reached going forward.
+                tabindex: "-1",
+                aria_label: "Strategy map. Tab toggles the team panel. Esc or Shift+Tab leaves the map.",
                 onmounted: move |evt| {
                     ov_canvas.set(Some(evt.data()));
                 },
@@ -1069,6 +1077,15 @@ pub fn MapCanvas(
 
                 // ---- Canvas keyboard shortcuts ----
                 onkeydown: move |evt: Event<KeyboardData>| {
+                    // Keys that belong to the canvas while it holds focus.
+                    // This is the only place in the editor that takes Tab.
+                    let binding = Keybinding::from_key(&evt.key(), evt.modifiers());
+                    if let Some(canvas_key) = keybindings::canvas_key(&binding) {
+                        if canvas_key.prevents_default() {
+                            evt.prevent_default();
+                        }
+                        on_canvas_key.call(canvas_key);
+                    }
                     let key = evt.data().key();
                     match key {
                         Key::Delete | Key::Backspace
