@@ -260,6 +260,7 @@ mod tests {
             hero_icon: true,
             stat_digits: false,
             map_name: true,
+            rank: false,
         };
         let parsed: CropConsent =
             serde_json::from_value(serde_json::to_value(shared).unwrap()).unwrap();

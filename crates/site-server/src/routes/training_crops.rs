@@ -71,8 +71,8 @@ use crate::extractors::{AdminUser, CropUploader, OfficerUser, OrgMember};
 use crate::hero_icons::{ensure_hero_icons_dir, is_icon_id};
 use crate::routes::audit_log::audit;
 use crate::routes::hero_icons::{
-    ADMIN_REQUIRED, CleanIcon, Reject, UploadReject, clean_png_within, configured, db_error,
-    discard_icon_file, internal, member_active, multipart_reject, read_png_part, reject,
+    ADMIN_REQUIRED, CleanIcon, Reject, UploadReject, clean_png_within, clean_reject, configured,
+    db_error, discard_icon_file, internal, member_active, multipart_reject, read_png_part, reject,
     remove_icon_file, write_private,
 };
 use crate::state::AppState;
@@ -305,8 +305,9 @@ async fn read_meta_part(field: &mut Field<'_>) -> Result<Vec<u8>, Reject> {
 /// Parse and check one `meta` part for `kind`.
 ///
 /// 400 `invalid_crop_meta` for bad JSON, an unknown field or a value out of
-/// bounds. 400 `unknown_hero` for a hero that is not on the list, or a
-/// missing hero on a `hero_icon` crop. Returns the hero key (`soldier-76`,
+/// bounds, and for a `rank` crop without a screen size of at least
+/// [`CropKind::min_screen`]. 400 `unknown_hero` for a hero that is not on
+/// the list, or a missing hero on a `hero_icon` crop. Returns the hero key (`soldier-76`,
 /// see [`hero_key`]) and the metadata to store.
 pub(crate) fn parse_meta(
     kind: CropKind,
@@ -332,6 +333,19 @@ pub(crate) fn parse_meta(
     if kind == CropKind::HeroIcon && hero.is_none() {
         return Err(reject(StatusCode::BAD_REQUEST, HERO_ICON_ERR_UNKNOWN_HERO));
     }
+    if let Some((min_w, min_h)) = kind.min_screen() {
+        let large_enough = matches!(
+            (stored.screen_width, stored.screen_height),
+            (Some(w), Some(h)) if w >= min_w && h >= min_h
+        );
+        if !large_enough {
+            tracing::debug!(
+                kind = kind.as_str(),
+                "training crop screen size missing or too small"
+            );
+            return Err(invalid());
+        }
+    }
     Ok((hero, stored))
 }
 
@@ -354,8 +368,8 @@ struct PendingCrop {
 /// (403), the stored cap (409),
 /// then the body: part names and order (400 `unexpected_field`), count (413),
 /// each `meta` (400), each `crop` (signature 415, size 413, dimensions and
-/// decode 400; bounds per kind, see `CropKind::max_edges` and
-/// `CropKind::max_crop_bytes`), at least one pair (400 `no_crops`), the cap
+/// decode 400, re-encode over the kind's byte limit 413; bounds per kind,
+/// see `CropKind::max_edges` and `CropKind::max_crop_bytes`), at least one pair (400 `no_crops`), the cap
 /// again (409). Nothing is stored unless every part passes. The tracker
 /// version comes from a `scuffed-stat-tracker/<semver>` User-Agent, like
 /// stats sync, and is dropped when too long ([`stored_tracker_version`]).
@@ -420,9 +434,10 @@ pub async fn upload_training_crops(
                 let Some((hero, meta)) = pending.take() else {
                     return Err(unexpected().into());
                 };
-                let data = read_png_part(&mut field, kind.max_crop_bytes()).await?;
+                let max_bytes = kind.max_crop_bytes();
+                let data = read_png_part(&mut field, max_bytes).await?;
                 let cleaned = tokio::task::spawn_blocking(move || {
-                    clean_png_within(&data, max_width, max_height)
+                    clean_png_within(&data, max_width, max_height, max_bytes)
                 })
                 .await
                 .map_err(|error| {
@@ -431,7 +446,7 @@ pub async fn upload_training_crops(
                 })?;
                 match cleaned {
                     Ok(image) => accepted.push(PendingCrop { hero, meta, image }),
-                    Err(code) => return Err(reject(StatusCode::BAD_REQUEST, code).into()),
+                    Err(code) => return Err(clean_reject(code).into()),
                 }
             }
             _ => return Err(unexpected().into()),
@@ -1078,6 +1093,38 @@ mod tests {
     }
 
     #[test]
+    fn rank_meta_needs_a_screen_size_above_its_largest_crop() {
+        let meta = |body: &str| code(parse_meta(CropKind::Rank, body.as_bytes()));
+        let invalid = "400 invalid_crop_meta";
+        assert_eq!(meta("{}"), invalid, "no screen size");
+        // A whole 720p screen would fit in a rank crop, so it is refused.
+        assert_eq!(
+            meta(r#"{"screen_width":1280,"screen_height":720}"#),
+            invalid
+        );
+        assert_eq!(
+            meta(r#"{"screen_width":1855,"screen_height":1080}"#),
+            invalid
+        );
+        assert_eq!(
+            meta(r#"{"screen_width":1920,"screen_height":1055}"#),
+            invalid
+        );
+        assert_eq!(meta(r#"{"screen_width":1856,"screen_height":1056}"#), "ok");
+        assert_eq!(meta(r#"{"screen_width":1920,"screen_height":1080}"#), "ok");
+        assert_eq!(meta(r#"{"screen_width":2560,"screen_height":1440}"#), "ok");
+        // Other kinds keep the screen size optional and take any valid one.
+        assert_eq!(code(parse_meta(CropKind::MapName, b"{}")), "ok");
+        assert_eq!(
+            code(parse_meta(
+                CropKind::StatDigits,
+                br#"{"screen_width":1280,"screen_height":720}"#
+            )),
+            "ok"
+        );
+    }
+
+    #[test]
     fn bad_meta_is_one_stable_code() {
         for body in [
             &b"not json"[..],
@@ -1203,7 +1250,7 @@ mod tests {
         canvas
             .write_to(&mut out, image::ImageFormat::Png)
             .expect("png");
-        clean_png_within(&out.into_inner(), 1024, 256).expect("clean")
+        clean_png_within(&out.into_inner(), 1024, 256, usize::MAX).expect("clean")
     }
 
     fn new_row(member: &str, kind: CropKind) -> NewTrainingCrop {
