@@ -1356,9 +1356,63 @@ mod tests {
         ] {
             assert!(prod.contains(wiring), "{wiring}");
         }
-        // After a load and after a successful save.
-        assert_eq!(prod.matches("pack_brand.write().clear();").count(), 2);
         assert_eq!(prod.matches("BrandSettingsLink {}").count(), 1);
+    }
+
+    const PACK_CLEAR: &str = "pack_brand.write().clear();";
+    const LOAD_CALL: &str = ".fetch::<SiteSettings>(\"/api/settings\")";
+    const SAVE_CALL: &str = ".put_json::<_, SiteSettings>(\"/api/settings\", &body)";
+
+    /// The `Ok(s)` arm of the match that follows `call`: from its opening
+    /// brace up to the `Err(e)` arm of the same match.
+    fn ok_arm_after<'a>(prod: &'a str, call: &str) -> &'a str {
+        assert_eq!(prod.matches(call).count(), 1, "{call}");
+        let after = prod.split_once(call).unwrap().1;
+        let arm = after.split_once("Ok(s) => {").expect("an Ok arm").1;
+        arm.split_once("Err(e) => {").expect("an Err arm").0
+    }
+
+    /// How often the pack pair is cleared in the load Ok arm, in the save Ok
+    /// arm, and on the whole page.
+    fn pack_clears(prod: &str) -> (usize, usize, usize) {
+        (
+            ok_arm_after(prod, LOAD_CALL).matches(PACK_CLEAR).count(),
+            ok_arm_after(prod, SAVE_CALL).matches(PACK_CLEAR).count(),
+            prod.matches(PACK_CLEAR).count(),
+        )
+    }
+
+    /// The pair is dropped after a load and after a good save, and nowhere
+    /// else. A failed save must keep it, so the admin can save again.
+    #[test]
+    fn the_pack_pair_is_cleared_in_the_load_arm_and_the_ok_save_arm_only() {
+        let src = include_str!("settings.rs");
+        let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        assert_eq!(pack_clears(prod), (1, 1, 2));
+
+        // The check sees a clear that leaves its arm. Moved after the save
+        // match, it would also run on a failed save: same count, wrong arm.
+        let (head, save) = prod.split_once(SAVE_CALL).unwrap();
+        let after_match = "saving.set(false);";
+        assert_eq!(save.matches(after_match).count(), 1);
+        let moved = save.replacen(PACK_CLEAR, "", 1).replacen(
+            after_match,
+            &format!("{PACK_CLEAR}\n{after_match}"),
+            1,
+        );
+        assert_eq!(pack_clears(&format!("{head}{SAVE_CALL}{moved}")), (1, 0, 2));
+
+        // The same for the load clear, moved after the load match.
+        let (head, load) = prod.split_once(LOAD_CALL).unwrap();
+        let err_arm_end =
+            "loaded.set(false);\n                    None\n                }\n            }\n";
+        assert_eq!(load.matches(err_arm_end).count(), 1);
+        let moved = load.replacen(PACK_CLEAR, "", 1).replacen(
+            err_arm_end,
+            &format!("{err_arm_end}{PACK_CLEAR}\n"),
+            1,
+        );
+        assert_eq!(pack_clears(&format!("{head}{LOAD_CALL}{moved}")), (0, 1, 2));
     }
 
     /// A router that mounts only the link, so it resolves without the
