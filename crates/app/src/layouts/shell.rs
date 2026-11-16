@@ -1995,7 +1995,8 @@ mod tests {
         assert_eq!(html.matches("<h1").count(), 1, "{html}");
 
         let guest = render(Who::Guest, "/admin", None);
-        assert!(guest.contains(">Log in<"), "{guest}");
+        let wall = section(&guest, "<main", "</main>");
+        assert!(wall.contains(">Log in<"), "{wall}");
         assert!(!guest.contains("admin-subnav\""), "{guest}");
     }
 
