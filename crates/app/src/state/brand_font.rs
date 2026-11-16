@@ -5,6 +5,12 @@
 //! `brand_font_display` key straight from the settings JSON, so the font
 //! picker switches on by itself once `GET /api/settings` carries that key.
 //! Until then [`BrandFontState::font`] is the default and nothing is sent.
+//!
+//! That holds only while `brand_font_display` stays out of the shared
+//! `SiteSettings` type. Brand settings flattens `SiteSettings` and
+//! [`BrandFontField`] into one view, and serde gives a flattened key to the
+//! first struct that declares it. Adding the field to `SiteSettings` without
+//! dropping [`BrandFontField`] from that view leaves the picker locked.
 
 use dioxus::prelude::*;
 use serde::Deserialize;

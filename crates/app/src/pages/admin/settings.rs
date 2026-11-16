@@ -12,8 +12,9 @@ use scuffed_types::{
     SiteSettings, homepage_preset_by_id, homepage_presets,
 };
 
-/// Admin Settings is the only `PUT /api/settings` in the app, and that page
-/// renders only for admins. Always send the key. `None` would omit it
+/// Two pages send `PUT /api/settings`, both admin-only: this one and brand
+/// settings, whose body carries the accent pair and nothing else. This page
+/// owns the officers flag, so it always sends the key. `None` would omit it
 /// (`skip_serializing_if`) and leave a stale flag on the server.
 fn admin_settings_officers_flag(enabled: bool) -> Option<bool> {
     Some(enabled)
@@ -24,6 +25,20 @@ fn admin_settings_officers_flag(enabled: bool) -> Option<bool> {
 fn officers_can_edit_teams_hint() -> &'static str {
     "On: Officers can edit a team's name, game, color, and division in Admin → Teams. Lore quote is not on that form, so this switch does not change it. Creating teams stays admin-only. Off (default): those edits stay admin-only. Roster changes are not affected."
 }
+
+/// The accent pair an applied identity pack will write on Save, in words.
+/// The accent fields that used to show it live on the brand settings page
+/// now, so this line is the only place the pending pair is visible.
+fn pending_pack_brand_note(pair: Option<&(String, String)>) -> Option<String> {
+    let (dark, light) = pair?;
+    Some(format!(
+        "Save will also set the brand accents from this pack: {dark} in dark, {light} in light. Untick \"Also set brand accents\" to keep the current accent."
+    ))
+}
+
+/// Next to the link out of this unsaved form.
+const BRAND_LINK_WARNING: &str =
+    "Save first. Opening brand settings leaves this page and drops unsaved edits here.";
 
 /// Checkbox values last accepted by the server. A failed save shows these
 /// again, not the draft the request tried to write.
@@ -334,7 +349,15 @@ pub fn AdminSettings() -> Element {
                             input {
                                 r#type: "checkbox",
                                 checked: apply_suggested_brand(),
-                                onchange: move |e| apply_suggested_brand.set(e.checked()),
+                                onchange: move |e| {
+                                    let on = e.checked();
+                                    apply_suggested_brand.set(on);
+                                    // Unticking takes back a pair an earlier
+                                    // Apply pack left waiting for Save.
+                                    if !on {
+                                        pack_brand.set(None);
+                                    }
+                                },
                             }
                             "Also set brand accents"
                         }
@@ -374,6 +397,10 @@ pub fn AdminSettings() -> Element {
                             },
                             "Apply pack"
                         }
+                    }
+                    // Always rendered; only the text changes.
+                    p { class: "settings-hint", role: "status", style: "margin-top:0.65rem;",
+                        {pending_pack_brand_note(pack_brand().as_ref()).unwrap_or_default()}
                     }
                 }
 
@@ -513,7 +540,18 @@ pub fn AdminSettings() -> Element {
                     p { class: "settings-hint", style: "margin-bottom:0.65rem;",
                         "One accent for both themes, with a live preview and a contrast check."
                     }
-                    Link { class: "btn-ghost", to: Route::AdminBrandSettings {}, "Open brand settings" }
+                    Link {
+                        class: "btn-ghost",
+                        to: Route::AdminBrandSettings {},
+                        "aria-describedby": "admin-settings-brand-link-warning",
+                        "Open brand settings"
+                    }
+                    p {
+                        class: "settings-hint",
+                        id: "admin-settings-brand-link-warning",
+                        style: "margin-top:0.4rem;",
+                        "{BRAND_LINK_WARNING}"
+                    }
                     div { class: "settings-divider" }
                     div { class: "settings-subhead", "Page background" }
                     div { class: "color-row", style: "margin-bottom:0.85rem;",
@@ -1060,6 +1098,61 @@ mod tests {
             ok_arm.contains("site_settings.apply_saved(s.clone())"),
             "a successful save must write the saved settings into the context"
         );
+    }
+
+    /// The accent fields moved to brand settings, so a pack's pending pair
+    /// has to be shown here, and unticking the box has to take it back.
+    #[test]
+    fn a_pending_pack_accent_pair_is_shown_and_can_be_cleared() {
+        assert_eq!(pending_pack_brand_note(None), None);
+        let pair = ("dark-hex".to_string(), "light-hex".to_string());
+        let note = pending_pack_brand_note(Some(&pair)).expect("note");
+        assert!(note.contains("dark-hex in dark"), "{note}");
+        assert!(note.contains("light-hex in light"), "{note}");
+        assert!(
+            note.contains("Save will also set the brand accents"),
+            "{note}"
+        );
+
+        let src = include_str!("settings.rs");
+        let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        assert!(
+            prod.contains("{pending_pack_brand_note(pack_brand().as_ref()).unwrap_or_default()}"),
+            "the pending pair must be on the page"
+        );
+        let checkbox = prod
+            .split("checked: apply_suggested_brand(),")
+            .nth(1)
+            .expect("brand accents checkbox");
+        let checkbox = &checkbox[..checkbox.find("\"Also set brand accents\"").unwrap()];
+        assert!(
+            checkbox.contains("if !on {") && checkbox.contains("pack_brand.set(None);"),
+            "unticking must clear the pending pair: {checkbox}"
+        );
+        // Save still sends exactly what the note names.
+        assert!(prod.contains("brand_accent_dark: pack_brand().map(|(dark, _)| dark),"));
+        assert!(prod.contains("brand_accent_light: pack_brand().map(|(_, light)| light),"));
+    }
+
+    #[test]
+    fn the_link_to_brand_settings_warns_about_unsaved_edits() {
+        assert!(BRAND_LINK_WARNING.contains("drops unsaved edits"));
+        let src = include_str!("settings.rs");
+        let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let link = prod
+            .split("to: Route::AdminBrandSettings {},")
+            .nth(1)
+            .expect("brand settings link");
+        let link = &link[..link.find("div { class: \"settings-divider\" }").unwrap()];
+        assert!(
+            link.contains("\"aria-describedby\": \"admin-settings-brand-link-warning\""),
+            "{link}"
+        );
+        assert!(
+            link.contains("id: \"admin-settings-brand-link-warning\""),
+            "{link}"
+        );
+        assert!(link.contains("\"{BRAND_LINK_WARNING}\""), "{link}");
     }
 
     #[test]

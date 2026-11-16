@@ -100,6 +100,26 @@ pub const CUSTOMISE_CSS: &str = r#"
         opacity: 0;
         cursor: pointer;
     }
+    /* The selected cue that is not colour: every choice draws a ring, and
+       the selected one has a dot in it. Both are borders, so they keep
+       their shape when forced colours replace backgrounds. */
+    .customise-choice-mark {
+        box-sizing: border-box;
+        flex: 0 0 auto;
+        width: var(--space-4);
+        height: var(--space-4);
+        margin-right: var(--space-2);
+        border: var(--focus-ring-width) solid currentColor;
+        border-radius: var(--radius-full);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+    }
+    .customise-choice.is-selected .customise-choice-mark::after {
+        content: "";
+        border: var(--space-1) solid currentColor;
+        border-radius: var(--radius-full);
+    }
     .customise-choice.is-selected {
         background: var(--chip-selected-bg);
         color: var(--chip-selected-fg);
@@ -107,9 +127,15 @@ pub const CUSTOMISE_CSS: &str = r#"
         border-width: var(--chip-selected-border-width);
         font-weight: var(--chip-selected-weight);
     }
-    .customise-choice:has(input:focus-visible) {
+    /* Fallback first: a browser without :has() rings the choice on any
+       focus inside it. One with :has() drops the second rule's ring unless
+       the focus came from the keyboard. */
+    .customise-choice:focus-within {
         outline: var(--focus-ring-width) solid var(--focus-ring);
         outline-offset: var(--focus-ring-offset);
+    }
+    .customise-choice:focus-within:not(:has(input:focus-visible)) {
+        outline: none;
     }
     .customise-choice.is-locked {
         color: var(--text-disabled);
@@ -145,9 +171,12 @@ pub const CUSTOMISE_CSS: &str = r#"
         opacity: 0;
         cursor: pointer;
     }
-    .customise-swatch:has(input:focus-visible) {
+    .customise-swatch:focus-within {
         outline: var(--focus-ring-width) solid var(--focus-ring);
         outline-offset: var(--focus-ring-offset);
+    }
+    .customise-swatch:focus-within:not(:has(input:focus-visible)) {
+        outline: none;
     }
     .customise-field {
         flex: 1 1 12rem;
@@ -322,7 +351,120 @@ pub const CUSTOMISE_CSS: &str = r#"
         font-size: var(--text-md);
     }
 
+    /* A note about what Save will do. It takes its own line above the
+       buttons and reads as body text, not as a dim hint. */
+    .customise .customise-note {
+        flex: 1 0 100%;
+        color: var(--text);
+        font-size: var(--text-sm);
+        font-weight: var(--font-label-weight);
+    }
+
     @media (max-width: 640px) {
         .customise-contrast-grid { grid-template-columns: 1fr; }
     }
+
+    /* Forced colours replace author backgrounds and text colours. The ring
+       and dot stay (they are borders); the selected choice also gets a
+       thicker border in the system selection colour. */
+    @media (forced-colors: active) {
+        .customise-choice { border-color: ButtonText; }
+        .customise-choice-mark { border-color: ButtonText; }
+        .customise-choice.is-selected {
+            border-color: Highlight;
+            border-width: var(--focus-ring-width);
+        }
+        .customise-choice.is-selected .customise-choice-mark,
+        .customise-choice.is-selected .customise-choice-mark::after {
+            border-color: Highlight;
+        }
+        .customise-choice.is-locked,
+        .customise-choice.is-locked .customise-choice-mark {
+            border-color: GrayText;
+            color: GrayText;
+        }
+        .customise-choice:focus-within,
+        .customise-swatch:focus-within {
+            outline-color: Highlight;
+        }
+    }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::CUSTOMISE_CSS;
+
+    /// The body of the first rule whose selector line is exactly `selector`.
+    fn rule<'a>(css: &'a str, selector: &str) -> &'a str {
+        let open = format!("{selector} {{");
+        let start = css
+            .find(&open)
+            .unwrap_or_else(|| panic!("no rule for {selector}"))
+            + open.len();
+        &css[start..start + css[start..].find('}').expect("end of rule")]
+    }
+
+    /// The selected choice must differ from the others by more than colour
+    /// (WCAG 1.4.1), and the difference must outlive forced colours.
+    #[test]
+    fn selected_choice_has_a_cue_that_is_not_colour() {
+        let (base, forced) = CUSTOMISE_CSS
+            .split_once("@media (forced-colors: active)")
+            .expect("forced colours block");
+
+        // Every choice draws the ring. It is a border, not a background.
+        let mark = rule(base, ".customise-choice-mark");
+        assert!(mark.contains("border:"), "{mark}");
+        assert!(!mark.contains("background"), "{mark}");
+        assert!(!mark.contains("display: none"), "{mark}");
+        // Only the selected one fills it, with a border as well.
+        let dot = rule(
+            base,
+            ".customise-choice.is-selected .customise-choice-mark::after",
+        );
+        assert!(dot.contains("content: \"\""), "{dot}");
+        assert!(dot.contains("border:"), "{dot}");
+        assert!(!dot.contains("background"), "{dot}");
+        assert_eq!(
+            base.matches(".customise-choice-mark::after").count(),
+            1,
+            "the dot belongs to the selected choice only"
+        );
+
+        // Forced colours: the cue is kept and the selection is marked with
+        // system colours, never hidden.
+        assert!(
+            forced.contains(".customise-choice.is-selected {"),
+            "{forced}"
+        );
+        assert!(forced.contains("border-color: Highlight;"), "{forced}");
+        assert!(
+            forced.contains(".customise-choice.is-selected .customise-choice-mark::after"),
+            "{forced}"
+        );
+        assert!(!forced.contains("display: none"), "{forced}");
+        assert!(!forced.contains("forced-color-adjust: none"), "{forced}");
+    }
+
+    /// `:has()` is not everywhere. Without it the focus ring must still show.
+    #[test]
+    fn focus_ring_has_a_focus_within_fallback() {
+        for host in [".customise-choice", ".customise-swatch"] {
+            let ring = rule(CUSTOMISE_CSS, &format!("{host}:focus-within"));
+            assert!(ring.contains("outline: var(--focus-ring-width)"), "{ring}");
+            let undo = rule(
+                CUSTOMISE_CSS,
+                &format!("{host}:focus-within:not(:has(input:focus-visible))"),
+            );
+            assert!(undo.contains("outline: none"), "{undo}");
+            // No rule depends on :has() alone for the ring.
+            assert!(
+                !CUSTOMISE_CSS.contains(&format!("{host}:has(input:focus-visible) {{")),
+                "{host}"
+            );
+            let fallback = CUSTOMISE_CSS.find(&format!("{host}:focus-within {{"));
+            let refine = CUSTOMISE_CSS.find(&format!("{host}:focus-within:not("));
+            assert!(fallback < refine, "the fallback rule comes first");
+        }
+    }
+}

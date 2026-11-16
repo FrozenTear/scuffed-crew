@@ -165,11 +165,7 @@ fn App() -> Element {
     });
     // Unknown settings use a gray accent. Product purple is a real brand and
     // must not paint before the embedded block or `/api/settings` says so.
-    let brand_theme_css = theme::chrome_theme_css(
-        loaded_settings
-            .as_ref()
-            .map(|s| (s.brand_accent_dark.as_str(), s.brand_accent_light.as_str())),
-    );
+    let brand_theme_css = theme::chrome_theme_css_for(loaded_settings);
     // Admin display font, once the server stores one (see `state::brand_font`).
     let display_font_css = state::provide_brand_font().font().root_css();
 

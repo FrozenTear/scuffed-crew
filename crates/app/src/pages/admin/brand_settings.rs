@@ -26,6 +26,13 @@ use scuffed_types::api::UpdateSettingsRequest;
 
 /// `GET` and `PUT /api/settings` as this page reads them: the shared
 /// settings plus the optional display font key (see `state::brand_font`).
+///
+/// Flatten trap: serde hands a flattened key to the first struct that
+/// declares it. This works only while `SiteSettings` has no
+/// `brand_font_display` field. The day the shared type gains one, `settings`
+/// takes the key, `font` reads `None`, the picker stays locked, and
+/// `settings_json_without_the_font_key_still_loads` fails. Drop
+/// `BrandFontField` here in the same change and read the typed field.
 #[derive(Debug, Clone, Deserialize)]
 struct BrandSettingsView {
     #[serde(flatten)]
@@ -97,6 +104,10 @@ impl BrandDraft {
     }
 }
 
+/// What the hex field accepts, as `normalize_hex` reads it: 3 or 6 hex
+/// digits, and the `#` is optional.
+const INVALID_HEX_REASON: &str = "Enter a hex color: 3 or 6 digits, with or without the #.";
+
 /// The draft accent, judged. `brand` is what the previews paint.
 struct Verdict {
     /// The accent to store: empty for the product default. `None` when the
@@ -123,7 +134,7 @@ impl Verdict {
         };
         let check = AccentCheck::for_brand(&brand);
         let reason = match &accent {
-            None => Some("Enter a hex colour with six digits after the #.".to_string()),
+            None => Some(INVALID_HEX_REASON.to_string()),
             Some(_) => check.fail_reason(),
         };
         Self {
@@ -165,6 +176,24 @@ fn field_id(record: &str, field: &str) -> String {
     format!("{record}-{field}")
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test seam: the body `GET /api/settings` answers with.
+    static TEST_BRAND_VIEW_JSON: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+async fn load_brand_view() -> Result<BrandSettingsView, String> {
+    #[cfg(test)]
+    if let Some(json) = TEST_BRAND_VIEW_JSON.with(|slot| slot.borrow().clone()) {
+        return serde_json::from_str(&json).map_err(|err| err.to_string());
+    }
+    ApiClient::web()
+        .fetch::<BrandSettingsView>("/api/settings")
+        .await
+        .map_err(|err| err.to_string())
+}
+
 #[component]
 pub fn AdminBrandSettings() -> Element {
     let auth = use_auth();
@@ -173,10 +202,7 @@ pub fn AdminBrandSettings() -> Element {
     let settings = use_resource(move || {
         let _tick = reload_tick();
         async move {
-            let view = ApiClient::web()
-                .fetch::<BrandSettingsView>("/api/settings")
-                .await
-                .map_err(|err| err.to_string())?;
+            let view = load_brand_view().await?;
             if let Some(brand_font) = brand_font {
                 brand_font.apply_saved(view.font.font());
             }
@@ -204,7 +230,7 @@ pub fn AdminBrandSettings() -> Element {
             header { class: "customise-header",
                 h1 { "Brand settings" }
                 p { class: "customise-lead",
-                    "Admins set the accent and the display font for everyone. Members still choose their own theme and density in Settings."
+                    "Admins set the accent and the display font for everyone. Members still choose their own theme and density on the Appearance page."
                 }
             }
             p { class: "customise-status", role: "status", "{status}" }
@@ -313,19 +339,31 @@ fn BrandFormBody(
         )
     };
     let save_locked = blocked || saving;
+    // Save rewrites a separate light accent, so the note that says so is
+    // part of what Save is described by, next to the block reason.
+    let light_note_id = field_id(&saved.id, "brand-accent-light-note");
+    let separate_light = saved.separate_light_accent().map(str::to_string);
+    let mut save_describedby = Vec::new();
+    if blocked {
+        save_describedby.push(reason_id.clone());
+    }
+    if separate_light.is_some() {
+        save_describedby.push(light_note_id.clone());
+    }
+    let save_describedby = save_describedby.join(" ");
 
     rsx! {
         section { class: "customise-card", "aria-labelledby": "{accent_title_id}",
             p { class: "customise-kicker", "Accent" }
-            h2 { class: "customise-title", id: "{accent_title_id}", "One brand colour" }
+            h2 { class: "customise-title", id: "{accent_title_id}", "One brand color" }
             p {
-                "This accent is used in both dark and light. Soft, text, and ink-on-accent colours are derived from it."
+                "This accent is used in both dark and light. Soft, text, and ink-on-accent colors are derived from it."
             }
             div { class: "customise-accent-row",
                 label { class: "customise-swatch", style: "background-color: {swatch};",
                     input {
                         r#type: "color",
-                        "aria-label": "Pick accent colour",
+                        "aria-label": "Pick accent color",
                         value: "{swatch}",
                         oninput: move |e| draft.write().accent = e.value(),
                     }
@@ -346,11 +384,6 @@ fn BrandFormBody(
                 }
             }
             p { class: "customise-hint", "Leave the hex empty to use the product default." }
-            if let Some(light) = saved.separate_light_accent() {
-                p { class: "customise-hint",
-                    "The light theme has its own saved accent ({light}). Saving sets both themes to the one accent above."
-                }
-            }
             div { class: "customise-contrast-grid",
                 PreviewCard { check: verdict.check.dark.clone(), font: current.font }
                 PreviewCard { check: verdict.check.light.clone(), font: current.font }
@@ -392,6 +425,7 @@ fn BrandFormBody(
                                     disabled: !font_supported,
                                     onchange: move |_| draft.write().font = font,
                                 }
+                                span { class: "customise-choice-mark", "aria-hidden": "true" }
                                 "{font.label()}"
                             }
                         }
@@ -401,11 +435,16 @@ fn BrandFormBody(
             p { class: "customise-hint", id: "{font_note_id}", "{font_note}" }
         }
         div { class: "customise-actions",
+            if let Some(light) = separate_light {
+                p { class: "customise-note", id: "{light_note_id}",
+                    "The light theme has its own saved accent ({light}). Save brand replaces it: both themes get the one accent above."
+                }
+            }
             button {
                 class: if save_locked { "customise-btn" } else { "customise-btn is-primary" },
                 r#type: "button",
                 "aria-disabled": if save_locked { "true" } else { "false" },
-                "aria-describedby": if blocked { "{reason_id}" },
+                "aria-describedby": if !save_describedby.is_empty() { "{save_describedby}" },
                 onclick: move |_| on_save.call(()),
                 if saving { "Saving..." } else { "Save brand" }
             }
@@ -503,16 +542,19 @@ mod tests {
     /// The chrome stylesheet for `saved_accent` next to the form with
     /// `draft_accent`, as the app root and the page render them.
     fn render_form(saved_accent: &'static str, draft_accent: &'static str) -> String {
+        render_saved(saved(saved_accent), draft_accent)
+    }
+
+    /// The form for one stored brand and one typed accent.
+    fn render_saved(saved: SavedBrand, draft_accent: &'static str) -> String {
         #[component]
-        fn Harness(saved_accent: &'static str, draft_accent: &'static str) -> Element {
+        fn Harness(saved: SavedBrand, draft_accent: &'static str) -> Element {
             let draft = use_signal(|| draft(draft_accent));
-            let chrome = crate::theme::chrome_theme_css(Some((saved_accent, saved_accent)));
             rsx! {
-                style { id: "chrome", "{chrome}" }
                 ToastProvider {
                     BrandFormBody {
                         draft,
-                        saved: saved(saved_accent),
+                        saved,
                         saving: false,
                         on_save: move |_| {},
                     }
@@ -522,12 +564,45 @@ mod tests {
         let mut dom = VirtualDom::new_with_props(
             Harness,
             HarnessProps {
-                saved_accent,
+                saved,
                 draft_accent,
             },
         );
         dom.rebuild_in_place();
         dioxus_ssr::render(&dom)
+    }
+
+    /// Settings JSON as the server sends it today, with both accents set.
+    fn settings_json(accent: &str) -> String {
+        let accent = serde_json::to_string(accent.trim()).unwrap();
+        format!(
+            r#"{{"id":"site","org_name":"Clan","site_description":"desc","recruitment_open":true,"recruitment_message":"msg","min_age":16,"forum_backend":"local","extra_relay_urls":"","brand_accent_dark":{accent},"brand_accent_light":{accent},"updated_at":"2026-09-21T00:00:00Z"}}"#
+        )
+    }
+
+    fn settle(dom: &mut VirtualDom) {
+        for _ in 0..12 {
+            dom.render_immediate(&mut dioxus::dioxus_core::NoOpMutations);
+        }
+    }
+
+    thread_local! {
+        static TEST_DRAFT: std::cell::Cell<Option<Signal<BrandDraft>>> =
+            const { std::cell::Cell::new(None) };
+        static TEST_SITE: std::cell::Cell<Option<SiteSettingsState>> =
+            const { std::cell::Cell::new(None) };
+    }
+
+    struct ClearHooks;
+
+    impl Drop for ClearHooks {
+        fn drop(&mut self) {
+            crate::state::site_settings::set_test_embedded_json(None);
+            crate::state::site_settings::mock_settings_fetch(None);
+            TEST_BRAND_VIEW_JSON.with(|slot| *slot.borrow_mut() = None);
+            TEST_DRAFT.with(|slot| slot.set(None));
+            TEST_SITE.with(|slot| slot.set(None));
+        }
     }
 
     /// The opening tag of the Save button.
@@ -604,28 +679,147 @@ mod tests {
             assert!(button.contains("aria-disabled=\"true\""), "{typed}");
             assert!(html.contains("aria-invalid=\"true\""), "{typed}");
             assert!(
-                html.contains("Enter a hex colour with six digits after the #."),
+                html.contains("Enter a hex color: 3 or 6 digits, with or without the #."),
                 "{typed}"
             );
             assert!(save_body(&draft(typed), &saved(TEST_MINT_ACCENT)).is_none());
         }
     }
 
+    /// The message names every form the field takes, and each of them saves.
     #[test]
-    fn chrome_accent_does_not_change_before_save() {
+    fn the_hex_message_matches_what_the_field_accepts() {
+        assert!(INVALID_HEX_REASON.contains("3 or 6 digits"));
+        assert!(INVALID_HEX_REASON.contains("with or without the #"));
+        let six = TEST_OTHER_ACCENT.trim_start_matches('#');
+        for typed in [TEST_OTHER_ACCENT, six, TEST_SHORT_ACCENT, "abc"] {
+            let html = render_form(TEST_MINT_ACCENT, typed);
+            assert!(!html.contains(INVALID_HEX_REASON), "{typed}");
+            assert!(!html.contains("aria-invalid"), "{typed}");
+            let body = save_body(&draft(typed), &saved(TEST_MINT_ACCENT)).expect(typed);
+            let stored = body.settings.brand_accent_dark.expect("accent");
+            assert_eq!(stored.len(), 7, "{typed}");
+            assert!(stored.starts_with('#'), "{typed}");
+        }
+        for typed in ["ab", "abcd", "abcde", "abcdefa"] {
+            let html = render_form(TEST_MINT_ACCENT, typed);
+            assert!(html.contains(INVALID_HEX_REASON), "{typed}");
+        }
+    }
+
+    /// Save rewrites a separate light accent. The note that says so sits in
+    /// the action row and is part of the Save button's description.
+    #[test]
+    fn save_is_described_by_the_separate_light_accent_note() {
+        let mut split = saved(TEST_MINT_ACCENT);
+        split.accent_light = TEST_OTHER_ACCENT.into();
+        let html = render_saved(split.clone(), TEST_MINT_ACCENT);
+        let button = save_button(&html);
+        assert!(
+            button.contains("aria-describedby=\"site-brand-accent-light-note\""),
+            "{button}"
+        );
+        let actions = html
+            .split("class=\"customise-actions\"")
+            .nth(1)
+            .expect("action row");
+        let note = format!(
+            "<p class=\"customise-note\" id=\"site-brand-accent-light-note\">The light theme has its own saved accent ({TEST_OTHER_ACCENT}). Save brand replaces it: both themes get the one accent above.</p>"
+        );
+        assert!(actions.contains(&note), "{actions}");
+        assert!(actions.find(&note) < actions.find(">Save brand<"));
+
+        // Blocked as well: the reason comes first, the note is still there.
+        let html = render_saved(split, TEST_BLOCKED_ACCENT);
+        let button = save_button(&html);
+        assert!(
+            button.contains(
+                "aria-describedby=\"site-brand-accent-reason site-brand-accent-light-note\""
+            ),
+            "{button}"
+        );
+
+        // One saved accent: no note, and nothing for Save to point at.
+        let html = render_form(TEST_MINT_ACCENT, TEST_MINT_ACCENT);
+        assert!(!html.contains("brand-accent-light-note"), "{html}");
+        assert!(!save_button(&html).contains("aria-describedby"));
+    }
+
+    /// The selection is a shape: each font choice carries the ring the
+    /// selected dot is drawn in (the CSS half is pinned in
+    /// `styles::customise`).
+    #[test]
+    fn every_font_choice_draws_the_selection_mark() {
+        let html = render_form(TEST_MINT_ACCENT, TEST_MINT_ACCENT);
+        assert_eq!(
+            html.matches("<span class=\"customise-choice-mark\" aria-hidden=\"true\"></span>")
+                .count(),
+            DisplayFont::ALL.len(),
+            "{html}"
+        );
+        assert_eq!(html.matches("customise-choice is-selected").count(), 1);
+    }
+
+    /// The chrome stylesheet here is built the way the app root builds it
+    /// (`chrome_theme_css_for` over the shared settings), so it can move: the
+    /// last step proves that. A draft must not move it; a save must.
+    #[test]
+    fn chrome_accent_follows_saved_settings_and_not_the_draft() {
+        #[component]
+        fn Harness() -> Element {
+            let site = crate::state::provide_site_settings();
+            TEST_SITE.with(|slot| slot.set(Some(site)));
+            let chrome = {
+                let resolved = site.resolved.read();
+                crate::theme::chrome_theme_css_for(crate::state::loaded_site_settings(
+                    resolved.as_ref(),
+                ))
+            };
+            let draft = use_signal(|| draft(TEST_MINT_ACCENT));
+            TEST_DRAFT.with(|slot| slot.set(Some(draft)));
+            rsx! {
+                style { id: "chrome", "{chrome}" }
+                ToastProvider {
+                    BrandFormBody {
+                        draft,
+                        saved: saved(TEST_MINT_ACCENT),
+                        saving: false,
+                        on_save: move |_| {},
+                    }
+                }
+            }
+        }
+        fn split(html: &str) -> (&str, &str) {
+            let (before, rest) = html
+                .split_once("<style id=\"chrome\">")
+                .expect("chrome css");
+            assert!(!before.contains("--accent"), "{before}");
+            rest.split_once("</style>").expect("end of chrome css")
+        }
+
+        let _clear = ClearHooks;
+        crate::state::site_settings::set_test_embedded_json(Some(settings_json(TEST_MINT_ACCENT)));
+        crate::state::site_settings::mock_settings_fetch(Some(settings_json(TEST_MINT_ACCENT)));
         let saved_roles = BrandConfig::from_settings(TEST_MINT_ACCENT, TEST_MINT_ACCENT);
         let draft_roles = BrandConfig::from_settings(TEST_OTHER_ACCENT, TEST_OTHER_ACCENT);
-        let html = render_form(TEST_MINT_ACCENT, TEST_OTHER_ACCENT);
 
-        let (before, rest) = html
-            .split_once("<style id=\"chrome\">")
-            .expect("chrome css");
-        let (chrome, page) = rest.split_once("</style>").expect("end of chrome css");
-        assert!(!before.contains(TEST_OTHER_ACCENT));
-        // The chrome is still the saved brand, in both themes.
-        assert!(chrome.contains(&saved_roles.dark.css_decls()), "{chrome}");
-        assert!(chrome.contains(&saved_roles.light.css_decls()), "{chrome}");
-        assert!(!chrome.contains(TEST_OTHER_ACCENT));
+        let mut dom = VirtualDom::new(Harness);
+        dom.rebuild_in_place();
+        settle(&mut dom);
+        let html = dioxus_ssr::render(&dom);
+        let (chrome_saved, _) = split(&html);
+        let chrome_saved = chrome_saved.to_string();
+        assert!(chrome_saved.contains(&saved_roles.dark.css_decls()));
+        assert!(chrome_saved.contains(&saved_roles.light.css_decls()));
+
+        // Type a passing draft. The chrome stylesheet is byte for byte the
+        // same; only the previews change.
+        let mut typed = TEST_DRAFT.with(|slot| slot.get().expect("draft signal"));
+        typed.set(draft(TEST_OTHER_ACCENT));
+        settle(&mut dom);
+        let html = dioxus_ssr::render(&dom);
+        let (chrome, page) = split(&html);
+        assert_eq!(chrome, chrome_saved, "a draft must not reach the chrome");
         assert!(!chrome.contains(&draft_roles.dark.css_decls()));
 
         // The draft is on the two preview cards (and the swatch) only.
@@ -668,6 +862,20 @@ mod tests {
             !prod.contains("StyleLive"),
             "the draft must not write a document stylesheet"
         );
+
+        // What the success arm does: the saved settings reach the shared
+        // state, and now the same chrome stylesheet does move.
+        let saved_settings: SiteSettings =
+            serde_json::from_str(&settings_json(TEST_OTHER_ACCENT)).expect("settings JSON");
+        let site = TEST_SITE.with(|slot| slot.get().expect("settings state"));
+        site.apply_saved(saved_settings);
+        settle(&mut dom);
+        let html = dioxus_ssr::render(&dom);
+        let (chrome, _) = split(&html);
+        assert_ne!(chrome, chrome_saved, "a save must reach the chrome");
+        assert!(chrome.contains(&draft_roles.dark.css_decls()), "{chrome}");
+        assert!(chrome.contains(&draft_roles.light.css_decls()), "{chrome}");
+        assert!(!chrome.contains(&saved_roles.dark.css_decls()));
     }
 
     #[test]
@@ -751,19 +959,49 @@ mod tests {
         let html = render_form(TEST_MINT_ACCENT, TEST_MINT_ACCENT);
         assert!(html.contains("for=\"site-brand-accent-hex\""), "{html}");
         assert!(html.contains("id=\"site-brand-accent-hex\""), "{html}");
-        assert!(html.contains("aria-label=\"Pick accent colour\""), "{html}");
+        assert!(html.contains("aria-label=\"Pick accent color\""), "{html}");
     }
 
-    fn render_page(role: Option<OrgRole>) -> String {
+    /// Who is looking at `/admin/brand`.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Viewer {
+        Guest,
+        /// Signed in; `None` is an account with no member row.
+        Account(Option<OrgRole>),
+    }
+
+    /// A router that mounts the page alone, without the admin shell. The
+    /// shell has its own officer gate; this test is about the page's gate,
+    /// and `AccessDenied` needs a router for its link.
+    #[derive(Routable, Clone, PartialEq, Debug)]
+    enum PageOnly {
+        #[route("/")]
+        Page {},
+    }
+
+    #[component]
+    fn Page() -> Element {
+        rsx! {
+            ToastProvider { AdminBrandSettings {} }
+        }
+    }
+
+    /// The page for `viewer`, with the settings fetch answered (through the
+    /// test seam) and polled to the end. Returns the HTML before the fetch
+    /// resolved and after.
+    fn render_page(viewer: Viewer) -> (String, String) {
         #[component]
-        fn Harness(role: Option<OrgRole>) -> Element {
+        fn Harness(viewer: Viewer) -> Element {
             let auth = use_signal(|| AuthState {
-                user: Some(UserInfo {
-                    id: "u1".into(),
-                    username: "Player01".into(),
-                    avatar_url: None,
-                    role,
-                }),
+                user: match viewer {
+                    Viewer::Guest => None,
+                    Viewer::Account(role) => Some(UserInfo {
+                        id: "u1".into(),
+                        username: "Player01".into(),
+                        avatar_url: None,
+                        role,
+                    }),
+                },
                 loading: false,
             });
             use_context_provider(|| auth);
@@ -773,42 +1011,67 @@ mod tests {
             rsx! {
                 dioxus::router::components::HistoryProvider {
                     history: move |_| history.clone() as std::rc::Rc<dyn dioxus::history::History>,
-                    ToastProvider { AdminBrandSettings {} }
+                    Router::<PageOnly> {}
                 }
             }
         }
-        let mut dom = VirtualDom::new_with_props(Harness, HarnessProps { role });
+        TEST_BRAND_VIEW_JSON
+            .with(|slot| *slot.borrow_mut() = Some(settings_json(TEST_MINT_ACCENT)));
+        let mut dom = VirtualDom::new_with_props(Harness, HarnessProps { viewer });
         dom.rebuild_in_place();
-        dioxus_ssr::render(&dom)
+        let pending = dioxus_ssr::render(&dom);
+        settle(&mut dom);
+        (pending, dioxus_ssr::render(&dom))
     }
+
+    const BRAND_CONTROLS: [&str; 7] = [
+        "type=\"color\"",
+        "type=\"radio\"",
+        "Accent hex",
+        "Display font",
+        "Save brand",
+        "Reset to default",
+        "customise-contrast-card",
+    ];
 
     #[test]
     fn members_cannot_see_brand_controls() {
-        for role in [
-            None,
-            Some(OrgRole::Recruit),
-            Some(OrgRole::Member),
-            Some(OrgRole::Officer),
-        ] {
-            let html = render_page(role);
-            assert!(html.contains("Access Denied"), "{role:?}: {html}");
-            for control in [
-                "type=\"color\"",
-                "Accent hex",
-                "Display font",
-                "Save brand",
-                "Reset to default",
-            ] {
-                assert!(!html.contains(control), "{role:?} sees {control}");
-            }
-        }
-        let admin = render_page(Some(OrgRole::Admin));
+        let _clear = ClearHooks;
+
+        // The settings have loaded, so an admin gets every control. This is
+        // what makes the absence below mean something: the same needles in
+        // the same loaded state.
+        let (pending, admin) = render_page(Viewer::Account(Some(OrgRole::Admin)));
+        assert!(
+            pending.contains("role=\"status\">Loading brand settings...</p>"),
+            "{pending}"
+        );
+        assert!(!pending.contains("Save brand"), "{pending}");
         assert!(!admin.contains("Access Denied"), "{admin}");
         assert_eq!(admin.matches("<h1").count(), 1, "{admin}");
         assert!(admin.contains("Brand settings"), "{admin}");
-        assert!(
-            admin.contains("role=\"status\">Loading brand settings...</p>"),
-            "{admin}"
-        );
+        for control in BRAND_CONTROLS {
+            assert!(
+                admin.contains(control),
+                "admin is missing {control}: {admin}"
+            );
+        }
+
+        for viewer in [
+            Viewer::Guest,
+            Viewer::Account(None),
+            Viewer::Account(Some(OrgRole::Recruit)),
+            Viewer::Account(Some(OrgRole::Member)),
+            Viewer::Account(Some(OrgRole::Officer)),
+        ] {
+            let (pending, loaded) = render_page(viewer);
+            for html in [pending, loaded] {
+                assert!(html.contains("Access Denied"), "{viewer:?}: {html}");
+                assert!(!html.contains("Brand settings"), "{viewer:?}: {html}");
+                for control in BRAND_CONTROLS {
+                    assert!(!html.contains(control), "{viewer:?} sees {control}");
+                }
+            }
+        }
     }
 }

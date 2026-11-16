@@ -12,7 +12,9 @@
 //! A missing or invalid block is not the template: callers stay pending until
 //! the fetch resolves, and a failed fetch with no prior value is an error.
 //!
-//! Admin Settings hands a successful `PUT /api/settings` to
+//! Two admin pages send `PUT /api/settings`: Admin Settings (everything but
+//! the brand) and brand settings (the accent, and the display font once the
+//! server stores it). Each hands a successful response to
 //! [`SiteSettingsState::apply_saved`]. The saved value paints at once and a
 //! refetch revalidates it, so nav, accent, org name and the strategies gate
 //! follow the save without a reload.
@@ -193,6 +195,16 @@ pub fn set_test_embedded_json(json: Option<String>) {
 #[cfg(test)]
 fn set_test_settings_fetch(mock: Option<SettingsFetchMock>) {
     TEST_SETTINGS_FETCH.with(|slot| *slot.borrow_mut() = mock);
+}
+
+/// For tests in other modules: answer the first `GET /api/settings` with
+/// `body` and park any refetch. `None` removes the mock.
+#[cfg(test)]
+pub(crate) fn mock_settings_fetch(body: Option<String>) {
+    set_test_settings_fetch(body.map(|json| SettingsFetchMock {
+        hits: std::rc::Rc::new(std::cell::Cell::new(0)),
+        body: std::rc::Rc::new(std::cell::RefCell::new(Some(json))),
+    }));
 }
 
 /// Text of `#sc-settings`, when the shell embedded anonymous settings.

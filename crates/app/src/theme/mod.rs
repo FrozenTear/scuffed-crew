@@ -5,7 +5,7 @@ pub mod tokens;
 
 #[allow(unused_imports)]
 pub use provider::{DENSITY_ATTR, Density, ThemeCtx, ThemeMode, ThemeProvider, ThemeToggle};
-pub use tokens::chrome_theme_css;
+pub use tokens::chrome_theme_css_for;
 #[allow(unused_imports)]
 pub use tokens::{MINT_REFINED, TEMPLATES, Template, template_by_id, theme_css_for};
 #[allow(unused_imports)]

@@ -14,6 +14,10 @@ use crate::theme::{Density, ThemeCtx, ThemeMode};
 
 const THEMES: [ThemeMode; 2] = [ThemeMode::Dark, ThemeMode::Light];
 
+/// Where density reaches today. Only the redesigned pages read the density
+/// tokens, so the page says so until the rest of the site is ported.
+const DENSITY_SCOPE_NOTE: &str = "Density applies to the settings pages now. The rest of the site follows as each page is redesigned.";
+
 /// The line under Save. `saved` is what the root element has now.
 fn status_text(
     draft: (ThemeMode, Density),
@@ -42,7 +46,11 @@ pub fn AppearanceSettings() -> Element {
     use_effect(move || density.set((ctx.density)()));
 
     let auth_now = auth();
-    let signed_out = !auth_now.loading && !auth_now.is_logged_in();
+    // While the session is still loading the page shows neither the account
+    // links nor the sign-in hint, so a signed-out visitor never gets a flash
+    // of links they cannot use.
+    let signed_in = auth_now.is_logged_in();
+    let signed_out = !auth_now.loading && !signed_in;
     // The account uses its own id so two accounts on one page never share
     // radio groups or label targets.
     let owner = auth_now
@@ -56,6 +64,7 @@ pub fn AppearanceSettings() -> Element {
         .collect();
     let theme_title_id = format!("{owner}-appearance-theme-title");
     let density_title_id = format!("{owner}-appearance-density-title");
+    let density_note_id = format!("{owner}-appearance-density-note");
     let theme_name = format!("{owner}-appearance-theme");
     let density_name = format!("{owner}-appearance-density");
     let status = status_text(
@@ -75,7 +84,7 @@ pub fn AppearanceSettings() -> Element {
             }
             section { class: "customise-card", "aria-labelledby": "{theme_title_id}",
                 p { class: "customise-kicker", "Theme" }
-                h2 { class: "customise-title", id: "{theme_title_id}", "Colour theme" }
+                h2 { class: "customise-title", id: "{theme_title_id}", "Color theme" }
                 div {
                     class: "customise-choice-row",
                     role: "radiogroup",
@@ -94,6 +103,7 @@ pub fn AppearanceSettings() -> Element {
                                     just_saved.set(false);
                                 },
                             }
+                            span { class: "customise-choice-mark", "aria-hidden": "true" }
                             "{mode.label()}"
                         }
                     }
@@ -102,10 +112,12 @@ pub fn AppearanceSettings() -> Element {
             section { class: "customise-card", "aria-labelledby": "{density_title_id}",
                 p { class: "customise-kicker", "Density" }
                 h2 { class: "customise-title", id: "{density_title_id}", "Spacing" }
+                p { class: "customise-hint", id: "{density_note_id}", "{DENSITY_SCOPE_NOTE}" }
                 div {
                     class: "customise-choice-row",
                     role: "radiogroup",
                     "aria-labelledby": "{density_title_id}",
+                    "aria-describedby": "{density_note_id}",
                     for option in Density::ALL {
                         label {
                             key: "{option.as_attr()}",
@@ -120,6 +132,7 @@ pub fn AppearanceSettings() -> Element {
                                     just_saved.set(false);
                                 },
                             }
+                            span { class: "customise-choice-mark", "aria-hidden": "true" }
                             "{option.label()}"
                         }
                     }
@@ -145,7 +158,7 @@ pub fn AppearanceSettings() -> Element {
                 p { class: "customise-hint",
                     "Sign in to reach your profile, account keys and reports."
                 }
-            } else {
+            } else if signed_in {
                 nav { "aria-label": "Account pages",
                     ul { class: "customise-links",
                         li { Link { to: Route::ProfileSettings {}, "Edit your profile" } }
@@ -167,8 +180,12 @@ mod tests {
     /// `/settings` through the real router, so the account links resolve.
     /// Returns the page (`<main>`) without the public chrome around it.
     fn render(role: Option<OrgRole>, signed_in: bool) -> String {
+        render_with(role, signed_in, false)
+    }
+
+    fn render_with(role: Option<OrgRole>, signed_in: bool, loading: bool) -> String {
         #[component]
-        fn Harness(role: Option<OrgRole>, signed_in: bool) -> Element {
+        fn Harness(role: Option<OrgRole>, signed_in: bool, loading: bool) -> Element {
             let auth = use_signal(|| AuthState {
                 user: signed_in.then(|| UserInfo {
                     id: "u1".into(),
@@ -176,7 +193,7 @@ mod tests {
                     avatar_url: None,
                     role,
                 }),
-                loading: false,
+                loading,
             });
             use_context_provider(|| auth);
             crate::state::provide_site_settings();
@@ -194,7 +211,14 @@ mod tests {
                 }
             }
         }
-        let mut dom = VirtualDom::new_with_props(Harness, HarnessProps { role, signed_in });
+        let mut dom = VirtualDom::new_with_props(
+            Harness,
+            HarnessProps {
+                role,
+                signed_in,
+                loading,
+            },
+        );
         dom.rebuild_in_place();
         let html = dioxus_ssr::render(&dom);
         let start = html
@@ -242,7 +266,7 @@ mod tests {
         assert_eq!(html.matches("customise-choice is-selected").count(), 2);
         // Off wasm there is no stored choice: dark theme, default density.
         for selected in ["Dark", "Default"] {
-            let at = html.find(&format!(">{selected}</label>")).expect(selected);
+            let at = html.find(&format!("{selected}</label>")).expect(selected);
             let label = &html[html[..at].rfind("<label").unwrap()..at];
             assert!(label.contains("is-selected"), "{label}");
         }
@@ -260,11 +284,81 @@ mod tests {
         );
     }
 
+    const ACCOUNT_LINKS: [&str; 3] = [
+        "href=\"/profile/edit\"",
+        "href=\"/identity\"",
+        "href=\"/reports\"",
+    ];
+    const SIGN_IN_HINT: &str = "Sign in to reach your profile";
+
     #[test]
     fn signed_out_visitors_get_no_account_links() {
         let html = render(None, false);
-        assert!(!html.contains("href=\"/profile/edit\""), "{html}");
+        for link in ACCOUNT_LINKS {
+            assert!(!html.contains(link), "{link}: {html}");
+        }
+        assert!(html.contains(SIGN_IN_HINT), "{html}");
         assert!(html.contains("Save appearance"), "{html}");
+    }
+
+    /// The session check has not answered yet: no links (a signed-out
+    /// visitor would see them flash) and no sign-in hint (a member would).
+    #[test]
+    fn nothing_account_related_shows_while_the_session_loads() {
+        let html = render_with(None, false, true);
+        for link in ACCOUNT_LINKS {
+            assert!(!html.contains(link), "{link}: {html}");
+        }
+        assert!(!html.contains("Account pages"), "{html}");
+        assert!(!html.contains(SIGN_IN_HINT), "{html}");
+        assert!(html.contains("Save appearance"), "{html}");
+
+        // A session that is already known keeps its links during a refresh.
+        let html = render_with(Some(OrgRole::Member), true, true);
+        for link in ACCOUNT_LINKS {
+            assert!(html.contains(link), "{link}: {html}");
+        }
+    }
+
+    /// Every choice carries the ring the selected dot is drawn in, so the
+    /// selection is a shape and not only a colour (the CSS half is pinned in
+    /// `styles::customise`).
+    #[test]
+    fn every_choice_draws_the_selection_mark() {
+        let html = render(Some(OrgRole::Member), true);
+        assert_eq!(
+            html.matches("<span class=\"customise-choice-mark\" aria-hidden=\"true\"></span>")
+                .count(),
+            5,
+            "{html}"
+        );
+        for label in html.split("<label").skip(1) {
+            let label = &label[..label.find("</label>").expect("end of label")];
+            assert!(label.contains("type=\"radio\""), "{label}");
+            assert!(label.contains("customise-choice-mark"), "{label}");
+        }
+    }
+
+    /// Density only restyles the redesigned pages today, and the page says so
+    /// next to the control.
+    #[test]
+    fn density_card_says_where_density_applies() {
+        let html = render(Some(OrgRole::Member), true);
+        assert!(
+            html.contains(
+                "id=\"u1-appearance-density-note\">Density applies to the settings pages now. The rest of the site follows as each page is redesigned.</p>"
+            ),
+            "{html}"
+        );
+        let group = html
+            .split("role=\"radiogroup\"")
+            .nth(2)
+            .expect("density group");
+        let group = &group[..group.find('>').expect("end of tag")];
+        assert!(
+            group.contains("aria-describedby=\"u1-appearance-density-note\""),
+            "{group}"
+        );
     }
 
     #[test]
