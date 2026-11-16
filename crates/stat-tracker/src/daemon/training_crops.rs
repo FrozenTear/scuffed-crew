@@ -8,9 +8,10 @@
 //!
 //! * `hero_icon`: the career panel's portrait card near the box the
 //!   heroes-v2 read found (`PanelRead::box_px`), cut from the full frame,
-//!   raw pixels, no pack preprocess. A stored `hero_icon` is that native
-//!   card, or a downscale to 171 px (smaller if needed) when its PNG is
-//!   over 64 KiB; `screen_width`/`screen_height` stay the game's. The
+//!   raw pixels, no pack preprocess. A `hero_icon` is shrunk to 171 px
+//!   with Lanczos3 (smaller steps only if still needed) only when its
+//!   PNG is over the 65,536-byte cap; otherwise it is stored as the
+//!   native card; screen fields stay the game's. The
 //!   read's box can sit off the card
 //!   (the matcher slides the template inside it), so the cut is snapped to
 //!   the card's own left and top edges ([`snap_to_card`]) and kept only
@@ -173,8 +174,9 @@ pub(crate) fn stat_digit_row(row: Option<usize>, own_row: Option<OwnRow>) -> Opt
 /// side is within the `hero_icon` edge cap, and [`snap_to_card`] finds the
 /// card next to the read's box. `None` for no read (ocr-v1, no hero pack),
 /// an abstain, a hero already offered, a card over the 256 px edge cap
-/// (a game height of 1624 or more, including 4K: never resized, so never
-/// kept), a box outside the frame, or no card found. The
+/// (a game height of 1624 or more, including 4K: skipped, not resized
+/// to fit the edge cap, so never kept), a box outside the frame, or no
+/// card found. The
 /// checks before the snap keep its pixel work off a Tab whose crop could
 /// not be kept anyway.
 fn hero_icon_crop(
@@ -680,8 +682,9 @@ pub(crate) fn encode_png(image: &image::DynamicImage) -> Option<Vec<u8>> {
 pub(crate) const HERO_ICON_BYTE_FALLBACK_SIDE: u32 = 171;
 
 /// Smallest side the shrink loop tries. Any 8-bit RGB square of 147 px or
-/// less always fits the 65,536-byte cap even uncompressed (147 x 147 x 3 =
-/// 64,974), so after 171 and 155 the next step (139) always fits. The
+/// less always fits the 65,536-byte cap even uncompressed: the raw PNG
+/// image data is 147 x (147 x 3 + 1) = 64,974 bytes (one filter byte per
+/// row). After 171 and 155 the next step (139) always fits. The
 /// store-layer 8 px min edge is not used here.
 pub(crate) const HERO_ICON_BYTE_SHRINK_FLOOR: u32 = 139;
 
@@ -749,6 +752,22 @@ pub(crate) fn encode_hero_icon(image: &image::DynamicImage) -> Result<Vec<u8>, H
     }
 }
 
+/// Apply an [`encode_hero_icon`] result: keep a fitting PNG, warn on an
+/// encode error, and skip an over-cap miss without marking the hero offered.
+pub(crate) fn keep_hero_icon_result(
+    dir: &Path,
+    session: &str,
+    hero: &str,
+    meta: scuffed_types::api::training_crops::TrainingCropUploadMeta,
+    result: Result<Vec<u8>, HeroIconEncodeMiss>,
+) {
+    match result {
+        Ok(png) => keep_encoded_hero_icon(dir, session, hero, meta, png),
+        Err(HeroIconEncodeMiss::Encode) => sync::warn_crop_lost(dir, sync::UploadKind::HeroIcon),
+        Err(HeroIconEncodeMiss::OverCap) => {}
+    }
+}
+
 /// Keep an already-encoded `hero_icon` PNG. The hero is marked offered
 /// only when at least one crop was actually kept, so a cap refusal or a
 /// write error can be retried on a later Tab of the same game.
@@ -773,18 +792,13 @@ fn keep_hero_icon(
     frame: &image::DynamicImage,
     crop: HeroCrop,
 ) {
-    let kind = sync::UploadKind::HeroIcon;
     let Some(meta) = sync::hero_icon_meta(w, h, &crop.hero, crop.score, crop.lead, crop.pack)
     else {
         return;
     };
     let (x, y, cw, ch) = crop.rect;
     let cut = frame.crop_imm(x, y, cw, ch);
-    match encode_hero_icon(&cut) {
-        Ok(png) => keep_encoded_hero_icon(dir, session, &crop.hero, meta, png),
-        Err(HeroIconEncodeMiss::Encode) => sync::warn_crop_lost(dir, kind),
-        Err(HeroIconEncodeMiss::OverCap) => {}
-    }
+    keep_hero_icon_result(dir, session, &crop.hero, meta, encode_hero_icon(&cut));
 }
 
 fn keep_stat_digits(

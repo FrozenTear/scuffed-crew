@@ -110,7 +110,7 @@ fn tab_crops_are_kept_with_the_game_token_only_with_consent() {
 fn an_over_cap_or_heroless_crop_is_skipped_without_a_warning() {
     let dir = tempfile::tempdir().unwrap();
     consent(dir.path(), all_consent());
-    // 257 px on an edge: over the cap, skipped, never shrunk.
+    // 257 px on an edge: over the 256 px edge cap, skipped, not resized.
     let wide = vec![(hero_meta(), png(257, 200, false))];
     assert_eq!(
         keep_tab_crops(dir.path(), "s1", UploadKind::HeroIcon, wide),

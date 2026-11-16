@@ -227,7 +227,7 @@ all with `screen` `tab`:
 
 | Kind | `slot_type` | What the crop is |
 |------|-------------|------------------|
-| `hero_icon` | `career_panel` | The career panel's hero portrait: the native card, or a downscale to 171 px (smaller if needed) when its PNG is over 64 KiB, with `hero`, `score`, `runner_up`, `margin` and the hero pack name as `icon_set_version`. `screen_width`/`screen_height` stay the game's |
+| `hero_icon` | `career_panel` | The career panel's hero portrait: a `hero_icon` is shrunk to 171 px with Lanczos3 (smaller steps only if still needed) only when its PNG is over the 65,536-byte cap; otherwise stored as the native card; screen fields stay the game's. Carries `hero`, `score`, `runner_up`, `margin` and the hero pack name as `icon_set_version` |
 | `stat_digits` | `elims`, `assists`, `deaths`, `damage`, `healing`, `mitigation` | One stat cell of the member's own row, named by its column left to right, with `hero` only when that Tab's own read named it |
 | `map_name` | none | The map name banner |
 

@@ -3,7 +3,10 @@
 //!
 //! The daemon cuts and encodes the pixels; this file adds the game's random
 //! token and keeps each crop the kind's caps allow ([`super::keep_training_crop`]'s
-//! rules: cached consent, caps checked, never shrunk). A crop the caps
+//! rules: cached consent, caps checked; this layer does not shrink). A
+//! `hero_icon` may already have been downscaled to 171 px with Lanczos3
+//! (smaller steps only if still needed) when its PNG was over 65,536 bytes;
+//! otherwise it is the native card, and screen fields stay the game's. A crop the caps
 //! refuse is skipped with a debug line. A consented crop lost to an error
 //! (no game token, a failed write, a crop that could not be encoded) leaves
 //! the training warning for the desktop app ([`warn_crop_lost`]). Nothing

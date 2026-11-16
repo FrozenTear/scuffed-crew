@@ -4,8 +4,8 @@
 //! hero offered, so a later Tab of the same game can retry.
 
 use super::super::training_crops::{
-    HERO_ICON_BYTE_FALLBACK_SIDE, HERO_ICON_BYTE_SHRINK_FLOOR, card_side, encode_hero_icon,
-    encode_png, keep_encoded_hero_icon,
+    HERO_ICON_BYTE_FALLBACK_SIDE, HERO_ICON_BYTE_SHRINK_FLOOR, HeroIconEncodeMiss, card_side,
+    encode_hero_icon, encode_png, keep_encoded_hero_icon, keep_hero_icon_result,
 };
 use super::*;
 
@@ -66,8 +66,8 @@ async fn a_noisy_228_card_over_the_byte_cap_is_stored_at_the_1080p_side() {
     );
     assert_eq!(
         sync::png_size(&encoded),
-        Some((HERO_ICON_BYTE_FALLBACK_SIDE, HERO_ICON_BYTE_FALLBACK_SIDE)),
-        "expected the 1080p fallback side"
+        Some((171, 171)),
+        "the first shrink step is 171 px, not a later rung"
     );
 
     let dir = tempfile::tempdir().unwrap();
@@ -226,10 +226,7 @@ fn a_pure_noise_228_card_lands_at_the_shrink_floor() {
         encoded, at_floor,
         "the stored PNG is the Lanczos3 139 px encode"
     );
-    assert_eq!(
-        sync::png_size(&encoded),
-        Some((HERO_ICON_BYTE_SHRINK_FLOOR, HERO_ICON_BYTE_SHRINK_FLOOR))
-    );
+    assert_eq!(sync::png_size(&encoded), Some((139, 139)));
 }
 
 /// Incompressible RGB so Best PNG stays close to the raw pixel count:
@@ -248,4 +245,260 @@ fn noise_card(side: u32) -> DynamicImage {
 #[test]
 fn the_byte_fallback_side_is_the_1080p_card_side() {
     assert_eq!(card_side(1920, 1080), HERO_ICON_BYTE_FALLBACK_SIDE);
+    assert_eq!(HERO_ICON_BYTE_FALLBACK_SIDE, 171);
+    assert_eq!(HERO_ICON_BYTE_SHRINK_FLOOR, 139);
+}
+
+/// Grow a valid PNG to exactly `len` bytes by padding after the file
+/// (the header, and so [`sync::png_size`], is unchanged).
+fn pad_png(mut png: Vec<u8>, len: usize) -> Vec<u8> {
+    assert!(
+        png.len() <= len,
+        "base PNG is already {} bytes, cannot pad to {len}",
+        png.len()
+    );
+    png.resize(len, 0);
+    png
+}
+
+/// A `hero_icon` of exactly 65,536 bytes is kept; one of 65,537 is refused
+/// and does not mark the hero offered, so a later Tab can retry. Kills
+/// `>` becoming `>=` in `check_crop`, and a cap of cap + 1.
+#[tokio::test]
+async fn a_hero_icon_at_exactly_the_byte_cap_is_kept_and_one_byte_over_is_refused() {
+    let cap = cap();
+    assert_eq!(cap, 65_536);
+    let dir = tempfile::tempdir().unwrap();
+    set_consent(dir.path(), true, false);
+    let session = "tc-bytecap-exact";
+    let meta = sync::hero_icon_meta(2560, 1440, "ana", 0.97, 0.5, "heroes-v2").unwrap();
+    let at_cap = pad_png(encode_png(&noisy_card(64)).expect("base encodes"), cap);
+    assert_eq!(at_cap.len(), 65_536);
+    assert_eq!(sync::png_size(&at_cap), Some((64, 64)));
+    keep_encoded_hero_icon(dir.path(), session, "ana", meta.clone(), at_cap.clone());
+    let queued = sync::queued_crops(dir.path(), UploadKind::HeroIcon);
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].png.len(), 65_536);
+    assert_eq!(queued[0].png, at_cap);
+    assert_eq!(sync::training_warning(dir.path()), None);
+
+    let dir = tempfile::tempdir().unwrap();
+    set_consent(dir.path(), true, false);
+    let session = "tc-bytecap-capplus1";
+    let over = pad_png(encode_png(&noisy_card(64)).expect("base encodes"), cap + 1);
+    assert_eq!(over.len(), 65_537);
+    keep_encoded_hero_icon(dir.path(), session, "ana", meta, over);
+    assert!(
+        sync::queued_crops(dir.path(), UploadKind::HeroIcon).is_empty(),
+        "one byte over the cap must not be stored"
+    );
+    assert_eq!(sync::training_warning(dir.path()), None);
+    let frame = tab_frame();
+    let read = panel((1600, 200, 1800, 400), "ana", 0.97);
+    assert!(
+        run(
+            dir.path(),
+            session,
+            &frame,
+            source(Some(&read), Some("ana"))
+        )
+        .await,
+        "a cap+1 refusal must not mark the hero offered"
+    );
+    assert_eq!(
+        sync::queued_crops(dir.path(), UploadKind::HeroIcon).len(),
+        1
+    );
+}
+
+/// A 228 px card that is still over the cap at 171 px but fits at 155 px
+/// must be stored at 155, the second shrink step. Kills a 32 px step
+/// (171 then 139) and a floor that skips this rung.
+#[test]
+fn a_card_over_the_cap_at_171_is_stored_at_155() {
+    let card = card_over_at_171_under_at_155();
+    let at_155 = encode_png(&card.resize_exact(155, 155, image::imageops::FilterType::Lanczos3))
+        .expect("the 155 px copy encodes");
+    assert!(
+        at_155.len() <= cap(),
+        "the fixture's 155 px copy must fit, got {} bytes",
+        at_155.len()
+    );
+    let encoded = encode_hero_icon(&card).expect("the card shrinks to 155");
+    assert_eq!(
+        encoded, at_155,
+        "the stored PNG is the Lanczos3 155 px encode"
+    );
+    assert_eq!(sync::png_size(&encoded), Some((155, 155)));
+}
+
+/// A 171 px over-cap card must not stay at 171 or be upscaled; it steps
+/// down the ladder and lands at 139. Pins the same-side skip: a 171 px
+/// native miss goes to 155, then 139.
+#[test]
+fn a_171_px_over_cap_card_lands_at_139() {
+    let card = noise_card(171);
+    let native = encode_png(&card).expect("the 171 px fixture encodes");
+    assert!(
+        native.len() > cap(),
+        "the 171 px fixture must be over the cap, got {} bytes",
+        native.len()
+    );
+    let at_155 = encode_png(&card.resize_exact(155, 155, image::imageops::FilterType::Lanczos3))
+        .expect("the 155 px copy encodes");
+    assert!(
+        at_155.len() > cap(),
+        "155 must still be over so the loop reaches 139, got {} bytes",
+        at_155.len()
+    );
+    let at_139 = encode_png(&card.resize_exact(139, 139, image::imageops::FilterType::Lanczos3))
+        .expect("the 139 px copy encodes");
+    assert!(
+        at_139.len() <= cap(),
+        "139 must fit, got {} bytes",
+        at_139.len()
+    );
+    let encoded = encode_hero_icon(&card).expect("the 171 px card shrinks to 139");
+    assert_eq!(encoded, at_139);
+    assert_eq!(sync::png_size(&encoded), Some((139, 139)));
+}
+
+/// A card already smaller than 171 px and over the cap is not upscaled.
+/// It starts at its own side and lands at 139. Kills dropping
+/// `.min(image.width())` (which would first try 171).
+#[test]
+fn a_155_px_over_cap_card_is_not_upscaled_and_lands_at_139() {
+    let card = noise_card(155);
+    let native = encode_png(&card).expect("the 155 px fixture encodes");
+    assert!(
+        native.len() > cap(),
+        "the 155 px fixture must be over the cap, got {} bytes",
+        native.len()
+    );
+    let at_171 = encode_png(&card.resize_exact(171, 171, image::imageops::FilterType::Lanczos3))
+        .expect("an upscale to 171 encodes");
+    // If the shrink loop wrongly starts at 171, it may store this 171 px
+    // copy when that encode fits. The own-side path must land at 139.
+    let at_139 = encode_png(&card.resize_exact(139, 139, image::imageops::FilterType::Lanczos3))
+        .expect("the 139 px copy encodes");
+    assert!(
+        at_139.len() <= cap(),
+        "139 must fit, got {} bytes",
+        at_139.len()
+    );
+    let encoded = encode_hero_icon(&card).expect("the 155 px card shrinks to 139");
+    assert_eq!(encoded, at_139);
+    assert_eq!(sync::png_size(&encoded), Some((139, 139)));
+    assert_ne!(encoded, at_171, "must not store an upscale to 171");
+}
+
+/// Mix high-frequency noise into [`noisy_card`] until 171 is over the cap
+/// and 155 still fits, so the shrink loop has to take the second step.
+fn card_over_at_171_under_at_155() -> DynamicImage {
+    let base = noisy_card(228).to_rgb8();
+    let noise = noise_card(228).to_rgb8();
+    for mix in 1..=32u16 {
+        let img = image::RgbImage::from_fn(228, 228, |x, y| {
+            let a = base.get_pixel(x, y).0;
+            let b = noise.get_pixel(x, y).0;
+            image::Rgb([
+                ((u16::from(a[0]) * (32 - mix) + u16::from(b[0]) * mix) / 32) as u8,
+                ((u16::from(a[1]) * (32 - mix) + u16::from(b[1]) * mix) / 32) as u8,
+                ((u16::from(a[2]) * (32 - mix) + u16::from(b[2]) * mix) / 32) as u8,
+            ])
+        });
+        let card = DynamicImage::ImageRgb8(img);
+        let native = encode_png(&card).expect("mix encodes");
+        if native.len() <= cap() {
+            continue;
+        }
+        let at_171 =
+            encode_png(&card.resize_exact(171, 171, image::imageops::FilterType::Lanczos3))
+                .expect("171 encodes");
+        let at_155 =
+            encode_png(&card.resize_exact(155, 155, image::imageops::FilterType::Lanczos3))
+                .expect("155 encodes");
+        if at_171.len() > cap() && at_155.len() <= cap() {
+            return card;
+        }
+    }
+    panic!("no 228 px mix was over the cap at 171 and under at 155");
+}
+
+/// An encode failure warns and does not mark the hero offered, so a later
+/// Tab can retry. Kills a silent Encode arm, or one that marks offered.
+#[tokio::test]
+async fn an_encode_miss_warns_and_does_not_mark_the_hero_offered() {
+    let dir = tempfile::tempdir().unwrap();
+    set_consent(dir.path(), true, false);
+    let session = "tc-bytecap-encode-miss";
+    let meta = sync::hero_icon_meta(1920, 1080, "ana", 0.97, 0.5, "heroes-v2").unwrap();
+    keep_hero_icon_result(
+        dir.path(),
+        session,
+        "ana",
+        meta,
+        Err(HeroIconEncodeMiss::Encode),
+    );
+    assert!(sync::queued_crops(dir.path(), UploadKind::HeroIcon).is_empty());
+    let warning = sync::training_warning(dir.path()).expect("an encode miss is an error");
+    assert!(warning.contains("hero icons"), "{warning}");
+
+    let frame = tab_frame();
+    let read = panel((1600, 200, 1800, 400), "ana", 0.97);
+    assert!(
+        run(
+            dir.path(),
+            session,
+            &frame,
+            source(Some(&read), Some("ana"))
+        )
+        .await,
+        "an encode miss must not mark the hero offered"
+    );
+    assert_eq!(
+        sync::queued_crops(dir.path(), UploadKind::HeroIcon).len(),
+        1
+    );
+}
+
+/// An over-cap miss after shrinking does not warn and does not mark the
+/// hero offered, so a later Tab can retry. Kills an OverCap arm that
+/// warns or marks offered.
+#[tokio::test]
+async fn an_overcap_miss_does_not_warn_or_mark_the_hero_offered() {
+    let dir = tempfile::tempdir().unwrap();
+    set_consent(dir.path(), true, false);
+    let session = "tc-bytecap-overcap-miss";
+    let meta = sync::hero_icon_meta(1920, 1080, "ana", 0.97, 0.5, "heroes-v2").unwrap();
+    keep_hero_icon_result(
+        dir.path(),
+        session,
+        "ana",
+        meta,
+        Err(HeroIconEncodeMiss::OverCap),
+    );
+    assert!(sync::queued_crops(dir.path(), UploadKind::HeroIcon).is_empty());
+    assert_eq!(
+        sync::training_warning(dir.path()),
+        None,
+        "an over-cap miss is not an error"
+    );
+
+    let frame = tab_frame();
+    let read = panel((1600, 200, 1800, 400), "ana", 0.97);
+    assert!(
+        run(
+            dir.path(),
+            session,
+            &frame,
+            source(Some(&read), Some("ana"))
+        )
+        .await,
+        "an over-cap miss must not mark the hero offered"
+    );
+    assert_eq!(
+        sync::queued_crops(dir.path(), UploadKind::HeroIcon).len(),
+        1
+    );
 }

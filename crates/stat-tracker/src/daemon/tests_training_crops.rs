@@ -1,7 +1,8 @@
 //! Hero icon and stat digit training crops from a Tab: cut only from a
 //! stored Tab of a known game, only with consent, and never in the way of
-//! recording. The cut is the raw card; a `hero_icon` over 64 KiB may be
-//! stored as a 171 px downscale (`tests_training_crops_bytecap`).
+//! recording. The cut is the raw card; a `hero_icon` over the 65,536-byte
+//! cap may be stored as a 171, 155 or 139 px Lanczos3 downscale
+//! (`tests_training_crops_bytecap`). Screen fields stay the game's.
 
 use std::path::Path;
 use std::time::Duration;
@@ -1442,6 +1443,23 @@ async fn a_crop_that_cannot_be_written_warns_and_the_tab_still_records() {
     let warning = sync::training_warning(dir.path()).expect("the member is told");
     assert!(warning.contains("hero icons"), "{warning}");
     assert!(sync::queued_crops(dir.path(), UploadKind::HeroIcon).is_empty());
+
+    // A write error must not mark the hero offered: once the outbox can be
+    // written, a later Tab of the same game still queues.
+    std::fs::remove_file(outbox.join("hero_icon")).unwrap();
+    let (recorded, _) = record_tab(
+        &ctx,
+        "tc-writefail",
+        panel_tab((1600, 200, 1800, 400)),
+        sure_board(),
+    )
+    .await;
+    assert!(recorded);
+    let hero = || sync::queued_crops(dir.path(), UploadKind::HeroIcon).len() == 1;
+    assert!(
+        wait_for(hero).await,
+        "the next Tab retries after a write error"
+    );
 }
 
 #[path = "tests_training_crops_bytecap.rs"]
