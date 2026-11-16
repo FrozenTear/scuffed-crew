@@ -23,6 +23,9 @@ pub const CUSTOMISE_CSS: &str = r#"
         letter-spacing: var(--font-head-tracking);
         line-height: var(--leading-display);
         font-size: var(--text-3xl);
+        /* The admin shell upper-cases its page titles. These two pages keep
+           the sentence case of the frames in either shell. */
+        text-transform: none;
         color: var(--text);
     }
     .customise .customise-lead {
@@ -288,10 +291,19 @@ pub const CUSTOMISE_CSS: &str = r#"
         outline: var(--focus-ring-width) solid var(--focus-ring);
         outline-offset: var(--focus-ring-offset);
     }
+    /* The status line belongs to the block above it, so it sits a small
+       step under that block instead of a whole section gap away. */
     .customise .customise-status {
         color: var(--text-3);
         font-size: var(--text-sm);
         min-height: var(--space-5);
+        margin-top: calc(var(--space-2) - var(--space-section));
+    }
+    /* Under the page header it only speaks while loading or on a failed
+       load. Empty, it stays in the tree and gives back all of its space. */
+    .customise-header + .customise-status:empty {
+        min-height: 0;
+        margin-top: calc(-1 * var(--space-section));
     }
 
     .customise-links {
