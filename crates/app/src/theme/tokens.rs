@@ -76,6 +76,12 @@ html, body {{
   background-repeat: no-repeat;
   color: var(--text);
   font-family: var(--font-body); font-size: var(--text-md);
+}}
+
+/* Tabular figures only where numbers line up in columns or tick in place.
+   On the page root they also reach headings, and the display font's tabular
+   "1" has no flag. Stat values opt in with their own rule or .tabular-nums. */
+table, time, input[type="number"], .tabular-nums {{
   font-variant-numeric: tabular-nums;
 }}
 "#,
