@@ -845,6 +845,77 @@ mod tests {
         assert!(consent.map_name && consent.hero_icon && !consent.rank);
     }
 
+    /// Rollback B step 4 in `docs/api/training-crops.md`, read from the
+    /// doc: it clears stat_digits, map_name and rank consent and their
+    /// fields. Without its `UNSET`, every later save fails; with it, saves
+    /// work, no training crop consent is left and the hero icon opt-in
+    /// (from before #653) stays.
+    #[tokio::test]
+    async fn rollback_b_clears_training_crop_consent_and_saves_still_work() {
+        const DOC: &str = include_str!("../../../../docs/api/training-crops.md");
+        const REMOVE: &str = "REMOVE FIELD stat_digits_opt_in ON member_settings; REMOVE FIELD map_name_opt_in ON member_settings; REMOVE FIELD rank_opt_in ON member_settings;";
+        const CLEAR: &str = "REMOVE FIELD stat_digits_opt_in ON member_settings; REMOVE FIELD map_name_opt_in ON member_settings; REMOVE FIELD rank_opt_in ON member_settings; UPDATE member_settings UNSET stat_digits_opt_in, map_name_opt_in, rank_opt_in;";
+        assert!(DOC.contains(CLEAR), "the doc runs this exact query");
+
+        async fn with_consent_on() -> Database {
+            let db = test_db().await;
+            for member in ["b1", "b2"] {
+                db.set_training_crop_consent(
+                    member,
+                    TrainingCropConsentUpdate {
+                        hero_icon: Some(true),
+                        stat_digits: Some(true),
+                        map_name: Some(true),
+                        rank: Some(true),
+                    },
+                )
+                .await
+                .unwrap();
+            }
+            db
+        }
+
+        // The REMOVE FIELDs alone: the stats settings save fails.
+        let db = with_consent_on().await;
+        db.client.query(REMOVE).await.unwrap().check().unwrap();
+        let error = db
+            .upsert_member_settings("b1", Some("Name"), None)
+            .await
+            .expect_err("a row still carrying the removed fields cannot be written");
+        assert!(error.to_string().contains("opt_in"), "{error}");
+
+        // The doc's query: saves work, the three consents are gone.
+        let db = with_consent_on().await;
+        db.client.query(CLEAR).await.unwrap().check().unwrap();
+        db.upsert_member_settings("b1", Some("Name"), Some(StatsVisibility::Members))
+            .await
+            .expect("stats settings save after the rollback");
+        assert!(!db.set_hero_icon_opt_in("b2", false).await.unwrap());
+        #[derive(Debug, Deserialize, SurrealValue, PartialEq)]
+        struct Left {
+            stat_digits_opt_in: Option<bool>,
+            map_name_opt_in: Option<bool>,
+            rank_opt_in: Option<bool>,
+        }
+        let mut result = db
+            .client
+            .query("SELECT stat_digits_opt_in, map_name_opt_in, rank_opt_in FROM member_settings")
+            .await
+            .unwrap();
+        let rows: Vec<Left> = result.take(0).unwrap();
+        let none = Left {
+            stat_digits_opt_in: None,
+            map_name_opt_in: None,
+            rank_opt_in: None,
+        };
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|row| *row == none), "{rows:?}");
+        assert!(
+            db.get_hero_icon_opt_in("b1").await.unwrap(),
+            "hero icon opt-in kept"
+        );
+    }
+
     /// `hero_icon_opt_in` has `DEFAULT ALWAYS false` too. Every writer in
     /// this crate assigns it, so this uses a write that does not, on a row
     /// without it: with a plain `DEFAULT` the update would fail `TYPE bool`.

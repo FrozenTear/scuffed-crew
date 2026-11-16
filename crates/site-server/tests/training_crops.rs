@@ -2144,21 +2144,24 @@ fn iccp_bomb_png(width: u32, height: u32, profile_bytes: usize) -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn an_iccp_bomb_rank_crop_is_refused() {
+async fn an_iccp_bomb_rank_crop_is_stored_without_its_profile() {
     let w = world().await;
     set_consent(&w.app, OWNER_SESSION, json!({ "rank": true })).await;
-    // 40 MiB of colour profile in a small upload: the decoder's 32 MiB
-    // limit stops the inflate, and the crop is refused.
+    // 40 MiB of colour profile in a small upload. The server drops the
+    // profile chunk before decoding (nothing is inflated) and stores the
+    // pixels; the stored file has no iCCP chunk.
     let bomb = iccp_bomb_png(1536, 720, 40 * 1024 * 1024);
     assert!(bomb.len() <= RANK_MAX_BYTES, "{}", bomb.len());
     let got = upload_parts(&w, "rank", vec![meta(rank_meta()), ("crop", bomb)]).await;
-    assert_error(&got, StatusCode::BAD_REQUEST, "invalid_png");
-    assert!(files_on_disk(w.dir()).is_empty());
-    assert!(w.rows_of(OWNER).await.is_empty());
-    // A small, normal profile is fine.
-    let normal = iccp_bomb_png(1536, 720, 4096);
-    let got = upload_parts(&w, "rank", vec![meta(rank_meta()), ("crop", normal)]).await;
     assert_eq!(got.0, StatusCode::CREATED, "{}", got.1);
+    assert_eq!(got.1["crops"][0]["width"], json!(1536));
+    let files = files_on_disk(w.dir());
+    assert_eq!(files.len(), 1);
+    let stored = std::fs::read(w.dir().join(&files[0])).unwrap();
+    assert!(
+        !stored.windows(4).any(|kind| kind == b"iCCP"),
+        "the stored file has no colour profile"
+    );
     w.cleanup();
 }
 

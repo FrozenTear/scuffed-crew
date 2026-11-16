@@ -237,11 +237,26 @@ consent are checked again: if another upload pushed the caller over the cap
 rows and files are removed again.
 
 The PNG is decoded and re-encoded before it is stored, as for hero icons, so
-text chunks and other metadata in the file are dropped. Decoding is capped
-at 32 MiB of decoder memory (`PNG_DECODE_MAX_ALLOC`), header read included,
-and a file whose `iCCP` colour profile does not fit that cap is 400
-`invalid_png` (the largest accepted crop, 1536x720 16-bit RGBA, needs about
-8.4 MiB). The re-encode is
+text chunks and other metadata in the file are dropped. Before decoding,
+the width and height are read from the `IHDR` bytes and checked (an
+absurd header is 400 `icon_bad_dimensions`, nothing decoded), and only
+`IHDR`, `PLTE`, `tRNS`, `IDAT` and `IEND` are passed to the decoder: colour
+profiles (`iCCP`), text and every other ancillary chunk are dropped
+without being inflated, so they never cause an error and cost no memory.
+The decoder is also capped at 32 MiB (`PNG_DECODE_MAX_ALLOC`) as a
+backstop. Measured peak heap for one whole crop (check, decode, 8-bit
+conversion, re-encode; db-free unit test
+`one_png_read_stays_within_its_measured_peak`, which also asserts it stays
+under 20 MiB):
+
+| Upload | Peak heap now | Same file, read as in 920c695f |
+|--------|---------------|-------------------------------|
+| 58 KB, 1536x720, `iCCP` inflating to 40 MiB | 3.6 MiB | 33.2 MiB |
+| 49 KB, 1536x720, `iCCP` inflating to 31 MiB | 3.6 MiB | 67.5 MiB |
+| 47 KB, 1536x720 16-bit RGBA (the largest accepted crop) | 12.7 MiB | 8.7 MiB (decode only) |
+
+The heap is per crop and per request in flight; uploads are not
+serialized, so concurrent uploads add up. The re-encode is
 8 bits per sample (gray, gray with alpha, RGB or RGBA, as the upload has
 them; a 16-bit upload is rounded to 8 bits, a palette upload becomes RGB or
 RGBA) at the default PNG compression level. Only when that is over the
@@ -495,7 +510,7 @@ Every error body is `{"error": "<code>"}`, except the shared 429 body
 | 400 | `no_crops` | No `meta`/`crop` pair |
 | 400 | `invalid_multipart` | Body is not readable multipart |
 | 400 | `icon_bad_dimensions` | PNG width or height outside the kind's bound (8 to 256; `map_name` 8 to 1536 wide, 8 to 256 tall; `rank` 8 to 1536 wide, 8 to 720 tall) |
-| 400 | `invalid_png` | PNG signature present but the image does not decode within the 32 MiB decoder memory cap, or its `iCCP` colour profile does not fit that cap |
+| 400 | `invalid_png` | PNG signature present but the chunk list is broken (no leading 13-byte `IHDR`, or a chunk past the end) or the pixels do not decode within the 32 MiB decoder cap. Colour profiles (`iCCP`) and other ancillary chunks are dropped before decoding and never cause it |
 | 400 | `invalid_consent` | Consent body not JSON, unknown kind (`full_screen` included), or not a bool |
 | 401 | session error (as for every member route) | `PUT /consent` without a session; a sync token is not a session there |
 | 403 | `Admin access required` | Officer session on another member's image or delete; non-admin on the admin list or `/resolutions` |
