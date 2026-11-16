@@ -1,137 +1,19 @@
 use dioxus::prelude::*;
 
-use super::{focus_element, use_document_keydown};
+use super::nav::{NavContext, admin_entries, is_current};
+use super::shell::SiteShell;
 use crate::routes::Route;
 use crate::state::use_auth;
-use crate::theme::ThemeToggle;
-
-const ADMIN_NAV_TOGGLE_ID: &str = "admin-nav-toggle";
-const ADMIN_NAV_ID: &str = "admin-nav";
 
 const ADMIN_CSS: &str = r#"
     .admin-layout {
-        display: flex;
-        min-height: 100vh;
         background: var(--bg);
         color: var(--text);
         font-family: var(--font-body);
     }
-    .admin-sidebar {
-        width: 220px;
-        flex-shrink: 0;
-        background: var(--surface);
-        border-right: 1px solid var(--border);
-        padding: 1.5rem 0;
-        display: flex;
-        flex-direction: column;
-        position: sticky;
-        top: 0;
-        height: 100vh;
-        z-index: 40;
-        overflow-y: auto;
-    }
-    .admin-sidebar .brand {
-        padding: 0 1.25rem 1.25rem;
-        border-bottom: 1px solid var(--border);
-        margin-bottom: 1rem;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 0.5rem;
-    }
-    .admin-sidebar .brand-text h2 {
-        font-family: var(--font-head);
-        font-size: 1.2rem;
-        color: var(--accent-text);
-        text-transform: uppercase;
-        margin: 0;
-    }
-    .admin-sidebar .brand-text span {
-        font-size: 0.7rem;
-        color: var(--text-subtle);
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-    }
-    .admin-sidebar nav {
-        display: flex;
-        flex-direction: column;
-        gap: 0.15rem;
-        flex: 1;
-    }
-    .admin-sidebar nav a {
-        display: block;
-        padding: 0.6rem 1.25rem;
-        color: var(--text-3);
-        text-decoration: none;
-        font-size: 0.9rem;
-        transition: background 0.15s, color 0.15s;
-    }
-    .admin-sidebar nav a:hover {
-        background: var(--surface-sunken);
-        color: var(--text);
-    }
-    .admin-nav-group {
-        display: flex;
-        flex-direction: column;
-        gap: 0.15rem;
-        margin-top: 0.85rem;
-    }
-    .admin-nav-label {
-        margin: 0;
-        padding: 0.45rem 1.25rem 0.15rem;
-        font-size: 0.65rem;
-        font-weight: 700;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-        color: var(--text-subtle);
-    }
-    .admin-sidebar nav a.admin-view-site {
-        margin-top: auto;
-        border-top: 1px solid var(--border);
-        color: var(--accent-text);
-        font-weight: 600;
-    }
-    .admin-sidebar .user-info {
-        padding: 1rem 1.25rem 0;
-        border-top: 1px solid var(--border);
-        margin-top: auto;
-    }
-    .admin-sidebar .user-info .name {
-        color: var(--text);
-        font-size: 0.85rem;
-        font-weight: 600;
-    }
-    .admin-sidebar .user-info .role {
-        font-size: 0.7rem;
-        color: var(--text-subtle);
-        text-transform: uppercase;
-    }
-    .admin-sidebar-close {
-        display: none;
-        margin-left: auto;
-        background: transparent;
-        border: 1px solid var(--border);
-        color: var(--text-3);
-        border-radius: 6px;
-        width: 2.25rem;
-        height: 2.25rem;
-        cursor: pointer;
-        font-size: 1.1rem;
-        line-height: 1;
-        flex-shrink: 0;
-    }
-    .admin-sidebar-close:hover { color: var(--text); border-color: var(--accent-soft); }
-    .admin-mobile-bar {
-        display: none;
-    }
-    .admin-nav-overlay {
-        display: none;
-    }
     .admin-main {
-        flex: 1;
         min-width: 0;
         padding: 2rem 2.5rem;
-        overflow-y: auto;
     }
     .admin-main h1 {
         font-family: var(--font-head);
@@ -141,251 +23,124 @@ const ADMIN_CSS: &str = r#"
         text-transform: uppercase;
         letter-spacing: 0.04em;
     }
+    .admin-gate {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: var(--space-2);
+        min-height: 50vh;
+        text-align: center;
+        color: var(--text-3);
+    }
+    .admin-gate p {
+        margin: 0;
+        max-width: var(--content-max-narrow);
+    }
+    .admin-gate-actions {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: var(--space-2) var(--space-4);
+        margin-top: var(--space-3);
+    }
+    .admin-gate-actions a {
+        display: inline-flex;
+        align-items: center;
+        min-height: var(--hit-target-min);
+        color: var(--accent-text);
+    }
     @media (max-width: 768px) {
-        .admin-layout { flex-direction: column; }
-        .admin-mobile-bar {
-            display: flex;
-            align-items: center;
-            gap: 0.75rem;
-            position: sticky;
-            top: 0;
-            z-index: 30;
-            padding: 0.65rem 0.85rem;
-            background: color-mix(in srgb, var(--surface) 94%, transparent);
-            backdrop-filter: blur(10px);
-            border-bottom: 1px solid var(--border);
-        }
-        .admin-mobile-bar .menu-btn {
-            background: var(--surface-sunken);
-            border: 1px solid var(--border);
-            color: var(--text);
-            border-radius: 6px;
-            min-width: 2.75rem;
-            min-height: 2.75rem;
-            font-size: 1.15rem;
-            cursor: pointer;
-            line-height: 1;
-        }
-        .admin-mobile-bar .menu-btn:hover { border-color: var(--accent-soft); }
-        .admin-mobile-bar .title {
-            font-family: var(--font-head);
-            font-size: 0.95rem;
-            font-weight: 700;
-            color: var(--accent-text);
-            text-transform: uppercase;
-            letter-spacing: 0.04em;
-        }
-        .admin-sidebar {
-            position: fixed;
-            left: 0;
-            top: 0;
-            bottom: 0;
-            height: 100vh;
-            width: min(18rem, 86vw);
-            transform: translateX(-105%);
-            transition: transform 0.2s ease-out;
-            box-shadow: none;
-            border-right: 1px solid var(--border);
-        }
-        .admin-sidebar.is-open {
-            transform: translateX(0);
-            box-shadow: 8px 0 24px var(--overlay, color-mix(in srgb, var(--bg) 40%, transparent));
-        }
-        .admin-sidebar-close { display: inline-flex; align-items: center; justify-content: center; }
-        .admin-nav-overlay {
-            display: block;
-            position: fixed;
-            inset: 0;
-            z-index: 35;
-            background: var(--overlay);
-            border: none;
-            padding: 0;
-            cursor: pointer;
-        }
         .admin-main {
             padding: 1rem;
-            width: 100%;
         }
         .admin-main h1 { font-size: 1.35rem; margin-bottom: 1rem; }
     }
 "#;
 
+/// Admin pages keep the site shell and add a horizontal sub-nav under the
+/// top bar. Officers and admins get in; everyone else sees why not, with the
+/// site nav still around them.
 #[component]
 pub fn AdminLayout() -> Element {
     let auth = use_auth();
-    let mut nav_open = use_signal(|| false);
+    let route = use_route::<Route>();
     // A signed-out visit comes back to this page after sign-in.
-    let return_path = use_route::<Route>().to_string();
+    let return_path = route.to_string();
 
-    // Off wasm this listener is a no-op, so Escape does nothing on desktop builds.
-    use_document_keydown(move |evt| {
-        if evt.key() != "Escape" || !nav_open() {
-            return;
-        }
-        evt.prevent_default();
-        nav_open.set(false);
-        focus_element(ADMIN_NAV_TOGGLE_ID);
-    });
-
-    let is_admin = auth().is_admin();
-    let username = auth()
+    let session = auth();
+    let signed_in = session.is_logged_in();
+    let allowed = session.is_officer_or_above();
+    let username = session
         .user
         .as_ref()
         .map(|u| u.username.clone())
         .unwrap_or_default();
-    let role_display = auth()
-        .user
-        .as_ref()
-        .and_then(|u| u.role.as_ref())
-        .map(|r| format!("{r:?}"))
-        .unwrap_or_else(|| "-".into());
+    let entries = admin_entries(NavContext {
+        signed_in,
+        admin_access: allowed,
+        is_admin: session.is_admin(),
+        strategies_enabled: true,
+        relay_on: true,
+    });
 
-    // Auth loading: avoid flashing Access Denied before /api/auth/me resolves
-    if auth().loading {
-        return rsx! {
-            div {
-                style: "display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;color:var(--text-subtle);",
-                p { "Checking session…" }
-            }
-        };
-    }
-
-    // Auth guard: officer+ only
-    if !auth().is_officer_or_above() {
-        return rsx! {
-            div {
-                style: "display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;color:var(--text-3);gap:0.5rem;",
-                h2 { style: "color:var(--text);margin-bottom:0.5rem;", "Access Denied" }
-                p { "You need officer permissions to access the admin panel." }
-                Link {
-                    to: Route::Login {},
-                    style: "color:var(--accent-text);margin-top:0.5rem;",
-                    onclick: move |_| {
-                        if !auth().is_logged_in() {
-                            crate::pages::remember_login_return(&return_path);
-                        }
-                    },
-                    "Sign in"
-                }
-                if cfg!(debug_assertions) {
-                    a {
-                        href: "/api/dev/login",
-                        style: "color:var(--text-3);",
-                        "Dev login (in-memory only)"
+    // The sub-nav is only for people who can open the pages it lists.
+    let subnav = (!session.loading && allowed).then(|| {
+        rsx! {
+            nav { class: "admin-subnav", aria_label: "Admin",
+                for entry in entries.iter() {
+                    Link {
+                        key: "{entry.id}",
+                        to: entry.route.clone(),
+                        class: if is_current(&entry.route, &route) { "is-active" } else { "" },
+                        "{entry.label}"
                     }
                 }
-                Link { to: Route::Home {}, style: "color:var(--accent-text);margin-top:1rem;", "Return home" }
             }
-        };
-    }
-
-    let sidebar_class = if nav_open() {
-        "admin-sidebar is-open"
-    } else {
-        "admin-sidebar"
-    };
-
-    // Close drawer after navigation (mobile); desktop ignores open state via CSS.
-    let close_nav = move |_| {
-        nav_open.set(false);
-        focus_element(ADMIN_NAV_TOGGLE_ID);
-    };
+        }
+    });
 
     rsx! {
         crate::styles::StyleOnce { id: "scuffed-css-layouts-admin-admin-css", css: ADMIN_CSS }
         crate::styles::StyleOnce { id: "scuffed-css-admin-shared", css: crate::styles::admin::CSS }
-        div { class: "admin-layout",
-            div { class: "admin-mobile-bar",
-                button {
-                    id: ADMIN_NAV_TOGGLE_ID,
-                    class: "menu-btn",
-                    r#type: "button",
-                    "aria-label": "Open admin menu",
-                    "aria-expanded": if nav_open() { "true" } else { "false" },
-                    "aria-controls": ADMIN_NAV_ID,
-                    onclick: move |_| nav_open.set(true),
-                    "☰"
-                }
-                span { class: "title", "Admin" }
-            }
-            if nav_open() {
-                button {
-                    class: "admin-nav-overlay",
-                    r#type: "button",
-                    "aria-label": "Close admin menu",
-                    onclick: close_nav,
-                }
-            }
-            aside { id: ADMIN_NAV_ID, class: "{sidebar_class}",
-                div { class: "brand",
-                    div { class: "brand-text",
-                        h2 { "Scuffed Crew" }
-                        span { "Admin Panel" }
-                    }
-                    ThemeToggle {}
-                    button {
-                        class: "admin-sidebar-close",
-                        r#type: "button",
-                        "aria-label": "Close admin menu",
-                        onclick: close_nav,
-                        "×"
-                    }
-                }
-                nav {
-                    Link { to: Route::AdminDashboard {}, onclick: close_nav, "Dashboard" }
-                    div { class: "admin-nav-group",
-                        p { class: "admin-nav-label", "Community" }
-                        Link { to: Route::AdminMembers {}, onclick: close_nav, "Members" }
-                        Link { to: Route::AdminTeams {}, onclick: close_nav, "Teams" }
-                        Link { to: Route::AdminApplications {}, onclick: close_nav, "Applications" }
-                        Link { to: Route::AdminForum {}, onclick: close_nav, "Forum" }
-                        // Moderation is OfficerUser-gated server-side (list/create), so it is
-                        // visible to every officer+, matching the AdminLayout access tier.
-                        Link { to: Route::AdminModeration {}, onclick: close_nav, "Moderation" }
-                    }
-                    div { class: "admin-nav-group",
-                        p { class: "admin-nav-label", "Content" }
-                        Link { to: Route::AdminGames {}, onclick: close_nav, "Games" }
-                        Link { to: Route::AdminAnnouncements {}, onclick: close_nav, "Announcements" }
-                        Link { to: Route::AdminArticles {}, onclick: close_nav, "Articles" }
-                        Link { to: Route::AdminPatchNotes {}, onclick: close_nav, "Patch Notes" }
-                    }
-                    div { class: "admin-nav-group",
-                        p { class: "admin-nav-label", "Competition" }
-                        Link { to: Route::AdminSchedule {}, onclick: close_nav, "Schedule" }
-                        Link { to: Route::AdminMatches {}, onclick: close_nav, "Matches" }
-                        Link { to: Route::AdminTournaments {}, onclick: close_nav, "Tournaments" }
-                    }
-                    div { class: "admin-nav-group",
-                        p { class: "admin-nav-label", "Stats" }
-                        Link { to: Route::AdminReports {}, onclick: close_nav, "Reports" }
-                        Link { to: Route::AdminHeroIcons {}, onclick: close_nav, "Hero icons" }
-                        if is_admin {
-                            Link { to: Route::AdminSeasons {}, onclick: close_nav, "Seasons" }
+        SiteShell { subnav,
+            div { class: "admin-layout",
+                div { class: "admin-main",
+                    if session.loading {
+                        // Wait for /api/auth/me so a refresh does not flash the no-access page.
+                        div { class: "admin-gate",
+                            p { "Checking session…" }
                         }
-                    }
-                    if is_admin {
-                        div { class: "admin-nav-group",
-                            p { class: "admin-nav-label", "Site settings" }
-                            Link { to: Route::AdminRelay {}, onclick: close_nav, "Relay" }
-                            Link { to: Route::AdminAuditLog {}, onclick: close_nav, "Audit Log" }
-                            Link { to: Route::AdminSettings {}, onclick: close_nav, "Settings" }
+                    } else if !allowed {
+                        div { class: "admin-gate",
+                            h1 { "You do not have access" }
+                            if signed_in {
+                                p {
+                                    "Admin is limited to officers and admins. You are signed in as {username}, and this page is not part of your role."
+                                }
+                            } else {
+                                p { "Admin is limited to officers and admins. Sign in with an account that has that role." }
+                            }
+                            div { class: "admin-gate-actions",
+                                Link { to: Route::Home {}, "Return home" }
+                                if signed_in {
+                                    Link { to: Route::ProfileSettings {}, "Open your profile" }
+                                } else {
+                                    Link {
+                                        to: Route::Login {},
+                                        onclick: move |_| crate::pages::remember_login_return(&return_path),
+                                        "Sign in"
+                                    }
+                                    if cfg!(debug_assertions) {
+                                        a { href: "/api/dev/login", "Dev login (in-memory only)" }
+                                    }
+                                }
+                            }
                         }
-                    }
-                    Link {
-                        to: Route::Home {},
-                        class: "admin-view-site",
-                        onclick: close_nav,
-                        "View site"
+                    } else {
+                        Outlet::<Route> {}
                     }
                 }
-                div { class: "user-info",
-                    div { class: "name", "{username}" }
-                    div { class: "role", "{role_display}" }
-                }
-            }
-            main { class: "admin-main",
-                Outlet::<Route> {}
             }
         }
     }

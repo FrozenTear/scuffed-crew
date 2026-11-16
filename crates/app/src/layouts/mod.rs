@@ -1,5 +1,7 @@
 mod admin;
+mod nav;
 mod public;
+mod shell;
 mod strategy;
 
 pub use admin::AdminLayout;

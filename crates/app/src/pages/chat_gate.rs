@@ -19,7 +19,7 @@ pub(crate) fn chat_status_copy(availability: RelayAvailability) -> &'static str 
 
 const CSS: &str = r#"
 .chat-unavailable {
-    min-height: calc(100vh - 48px);
+    min-height: calc(100vh - var(--nav-height-used));
     display: flex;
     align-items: center;
     justify-content: center;
