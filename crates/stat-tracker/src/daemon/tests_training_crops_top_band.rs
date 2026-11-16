@@ -1,13 +1,14 @@
 //! The `hero_icon` card snap under a black row band over the card's top:
 //! a black bar, or a black game world above a card whose bottom drop lands
 //! early. Both keep no cut ([`SnapMiss::FarEdge`]), by design: the cut is
-//! never moved up to the top the bottom drop implies.
+//! never moved up to the top the bottom drop implies. The bar models a
+//! frame rebuilt from a debug board crop, not a capture.
 
 use super::*;
 
 /// `frame`, a [`range_frame`] of `card`, with every row above `top + clip`
-/// (`clip` px at 1440p) at luma `bar`: a black bar over the card's top.
-fn letterbox_frame(
+/// (`clip` px at 1440p) at luma `bar`: a bar over the card's top.
+fn bar_frame(
     frame: DynamicImage,
     card: (u32, u32, u32),
     u: u32,
@@ -37,10 +38,11 @@ fn a_black_bar_over_the_card_top_keeps_no_cut() {
         let scale = |v: f64| (v * f64::from(u) / 1440.0).round() as u32;
         let corner = (left - scale(23.0), top - scale(2.0));
         let boxed = |patch, clip, bar| {
-            let frame = letterbox_frame(range_frame(w, h, card, u, patch), card, u, clip, bar);
+            let frame = bar_frame(range_frame(w, h, card, u, patch), card, u, clip, bar);
             snap_to_card(&frame, corner)
         };
         for (clip, bar) in [
+            (1.0, 0),
             (7.0, 0),
             (16.0, 0),
             (7.0, 4),
@@ -86,10 +88,11 @@ fn a_black_game_world_keeps_no_shifted_or_short_cut() {
         let world = |patch, width| range_frame_around(w, h, card, u, patch, (24, 0), width);
         let got = snap_to_card(&world(RangePatch::LitLeftPartial, 60.0), corner);
         let shifted = (left - scale(60.0), top, side);
-        assert!(
-            matches!(got, Err(SnapMiss::OuterTop { cut, .. }) if cut == shifted),
-            "{name}: {got:?}"
-        );
+        let want = Err(SnapMiss::OuterTop {
+            cut: shifted,
+            tops: [Some(top + scale(20.0)), Some(top)],
+        });
+        assert_eq!(got, want, "{name} 60 px partial");
         let mut short = world(RangePatch::Bare, 30.0).to_rgb8();
         let y = top + side - 2;
         for x in left..left + side {
@@ -105,16 +108,17 @@ fn a_black_game_world_keeps_no_shifted_or_short_cut() {
     }
 }
 
-/// Over a black world (luma 0 above and around the card) with the card
-/// painted `k` px short at its bottom (1, 8 and 16 px at 1440p; 1, 6 and
-/// 12 at 1080p), so the bottom drop lands `k` px early, the snap is
-/// FarEdge at the card's own cut, never the cut moved up `k` px.
+/// Over a black world (luma 0 above and left of the card) with the card
+/// painted `k` px shorter than the range card (1, 8 and 16 px at 1440p;
+/// 1, 6 and 12 at 1080p; `k + 1` px short of the cut side, so 1 is the
+/// 2 px short case above), the bottom drop lands `k` px early and the
+/// snap is FarEdge at the card's own cut, never the cut moved up `k` px.
 #[test]
 fn a_short_card_over_a_black_world_keeps_no_cut_moved_up() {
     for (name, (w, h), u) in RANGE_FRAMES {
         let card = range_card(u);
         let (left, top, side) = card;
-        let scale = |v: f64| ((v * f64::from(u) / 1440.0).round() as u32).max(1);
+        let scale = |v: f64| (v * f64::from(u) / 1440.0).round() as u32;
         let corner = (left - scale(23.0), top - scale(2.0));
         let bottom = top + side - 1;
         for k in [1.0, 8.0, 16.0] {
@@ -133,7 +137,6 @@ fn a_short_card_over_a_black_world_keeps_no_cut_moved_up() {
                 bottom: Some(bottom - k),
             });
             assert_eq!(got, want, "{name} {k} px short");
-            assert_ne!(got, Ok((left, top - k, side)), "{name} {k} px short");
         }
     }
 }

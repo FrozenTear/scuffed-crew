@@ -13,9 +13,9 @@
 //!   the card's own left and top edges ([`snap_to_card`]) and kept only
 //!   when its far edges hold and its outer tops agree with the cut's top.
 //!   A Tab where an edge is not found, a far edge does not hold, or an
-//!   outer top is off the cut keeps none. Only when the panel read passed its gate and
-//!   names the Tab's hero authority. ocr-v1 reads no panel box, so it
-//!   offers none.
+//!   outer top is off the cut keeps none. Only when the panel read passed
+//!   its gate and names the Tab's hero authority. ocr-v1 reads no panel
+//!   box, so it offers none.
 //! * `stat_digits`: the own row's six stat cells, each on its own window
 //!   under the header labels ([`training_stat_columns`]), never the name
 //!   column and never another row. Only under the new reader, when its own
@@ -343,12 +343,18 @@ pub(crate) enum SnapMiss {
 /// tall or partial lit world patch.
 ///
 /// A black row band over the card's top (a bar, or a black game world
-/// above a card whose bottom drop lands early) keeps no cut
-/// ([`SnapMiss::FarEdge`]), by design: the cut is never moved up to the
-/// top the bottom drop implies, which would also keep a cut shifted up by
-/// a card bottom that reads short. Debug board crops, and frames rebuilt
-/// from them, clip the card's top 7 px at 1440p (5 at 1080p), so they
-/// cannot test the top edge: test this snap on full frames only.
+/// above a card whose bottom drop lands early) keeps no cut, by design:
+/// [`SnapMiss::FarEdge`] while the band's edge is inside the top search,
+/// [`SnapMiss::NearEdge`] past it. The cut is never moved up to the top
+/// the bottom drop implies, which would also keep a cut shifted up by a
+/// card bottom that reads short. Only a band inside the far edge's 1 px
+/// tolerance still cuts, from the band's edge (1 px on a card painted the
+/// full cut side; none on the measured cards, a px short). No full
+/// capture has shown such a band: the one measured was the top edge of a
+/// `debug/accepted` board crop (`debug_accepted_board`). Those crops, and
+/// frames rebuilt from them, clip the card's top 7 px at 1440p (5 at
+/// 1080p), so they cannot test the top edge: test this snap on full
+/// frames only.
 ///
 /// [`SnapMiss::NearEdge`] when either near edge is not found or the square
 /// would leave the frame, [`SnapMiss::FarEdge`] when a far edge does not

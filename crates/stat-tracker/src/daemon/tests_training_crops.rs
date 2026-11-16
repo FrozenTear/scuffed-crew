@@ -1443,5 +1443,5 @@ async fn a_crop_that_cannot_be_written_warns_and_the_tab_still_records() {
     assert!(sync::queued_crops(dir.path(), UploadKind::HeroIcon).is_empty());
 }
 
-#[path = "tests_training_crops_letterbox.rs"]
-mod letterbox;
+#[path = "tests_training_crops_top_band.rs"]
+mod top_band;
