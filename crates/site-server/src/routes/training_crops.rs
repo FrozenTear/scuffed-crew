@@ -368,8 +368,8 @@ struct PendingCrop {
 /// (403), the stored cap (409),
 /// then the body: part names and order (400 `unexpected_field`), count (413),
 /// each `meta` (400), each `crop` (signature 415, size 413, dimensions and
-/// decode 400; bounds per kind, see `CropKind::max_edges` and
-/// `CropKind::max_crop_bytes`), at least one pair (400 `no_crops`), the cap
+/// decode 400, re-encode over the kind's byte limit 413; bounds per kind,
+/// see `CropKind::max_edges` and `CropKind::max_crop_bytes`), at least one pair (400 `no_crops`), the cap
 /// again (409). Nothing is stored unless every part passes. The tracker
 /// version comes from a `scuffed-stat-tracker/<semver>` User-Agent, like
 /// stats sync, and is dropped when too long ([`stored_tracker_version`]).

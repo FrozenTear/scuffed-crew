@@ -2070,8 +2070,12 @@ async fn stored_rank_crops_stay_within_the_byte_limit() {
     let w = world().await;
     set_consent(&w.app, OWNER_SESSION, json!({ "rank": true })).await;
 
-    // A 16-bit RGBA 1536x720 upload (as QA sent: small upload, 8 bytes per
-    // pixel decoded) is stored as 8-bit RGBA within the rank byte limit.
+    // A 16-bit RGBA 1536x720 upload (small as an upload, 8 bytes per pixel
+    // decoded) is stored as 8-bit RGBA within the rank byte limit. This
+    // input is written with fast compression and compresses well, so the
+    // byte check alone would also pass on the old 16-bit re-encode; the
+    // `Rgba8` check is what pins the 8-bit storage here, and the unit tests
+    // in `routes/hero_icons.rs` pin the size bound.
     let sixteen = image::ImageBuffer::from_fn(1536, 720, |x, y| {
         let v = |k: u32| (((x / 64) * 7 + (y / 64) * 13 + k * 29) % 256) as u16 * 257;
         image::Rgba([v(0), v(1), v(2), 65535u16])
@@ -2110,6 +2114,51 @@ async fn stored_rank_crops_stay_within_the_byte_limit() {
     let got = upload_parts(&w, "stat_digits", vec![meta(json!({})), ("crop", palette)]).await;
     assert_error(&got, StatusCode::PAYLOAD_TOO_LARGE, "icon_too_large");
     assert_eq!(files_on_disk(w.dir()).len(), 1);
+    w.cleanup();
+}
+
+/// A plain RGB PNG with an `iCCP` chunk that inflates to `profile_bytes`
+/// zeros, right after IHDR.
+fn iccp_bomb_png(width: u32, height: u32, profile_bytes: usize) -> Vec<u8> {
+    use std::io::Write;
+    let mut plain = Cursor::new(Vec::new());
+    image::RgbImage::from_pixel(width, height, image::Rgb([20, 120, 220]))
+        .write_to(&mut plain, ImageFormat::Png)
+        .unwrap();
+    let plain = plain.into_inner();
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+    let zeros = vec![0u8; 1024 * 1024];
+    let mut left = profile_bytes;
+    while left > 0 {
+        let n = left.min(zeros.len());
+        z.write_all(&zeros[..n]).unwrap();
+        left -= n;
+    }
+    let mut data = b"bomb\0\0".to_vec();
+    data.extend(z.finish().unwrap());
+    let at = 8 + 12 + 13; // signature and IHDR
+    let mut out = plain[..at].to_vec();
+    out.extend(png_chunk(b"iCCP", &data));
+    out.extend_from_slice(&plain[at..]);
+    out
+}
+
+#[tokio::test]
+async fn an_iccp_bomb_rank_crop_is_refused() {
+    let w = world().await;
+    set_consent(&w.app, OWNER_SESSION, json!({ "rank": true })).await;
+    // 40 MiB of colour profile in a small upload: the decoder's 32 MiB
+    // limit stops the inflate, and the crop is refused.
+    let bomb = iccp_bomb_png(1536, 720, 40 * 1024 * 1024);
+    assert!(bomb.len() <= RANK_MAX_BYTES, "{}", bomb.len());
+    let got = upload_parts(&w, "rank", vec![meta(rank_meta()), ("crop", bomb)]).await;
+    assert_error(&got, StatusCode::BAD_REQUEST, "invalid_png");
+    assert!(files_on_disk(w.dir()).is_empty());
+    assert!(w.rows_of(OWNER).await.is_empty());
+    // A small, normal profile is fine.
+    let normal = iccp_bomb_png(1536, 720, 4096);
+    let got = upload_parts(&w, "rank", vec![meta(rank_meta()), ("crop", normal)]).await;
+    assert_eq!(got.0, StatusCode::CREATED, "{}", got.1);
     w.cleanup();
 }
 

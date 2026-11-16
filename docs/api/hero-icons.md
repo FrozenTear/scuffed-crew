@@ -113,15 +113,22 @@ in the request passes.
 2. The part is at most `HERO_ICON_MAX_BYTES`. Otherwise 413 `icon_too_large`.
 3. The PNG header gives a width and height in `8..=256`. Otherwise 400
    `icon_bad_dimensions`.
-4. The image decodes. Otherwise 400 `invalid_png`.
+4. The image decodes, with the decoder's memory capped at 32 MiB
+   (`PNG_DECODE_MAX_ALLOC`), and any `iCCP` colour profile fits in that
+   cap. Otherwise 400 `invalid_png`. The cap covers the header read too,
+   where the PNG decoder inflates a colour profile before the size check;
+   a small upload with a profile that inflates past the cap is refused
+   instead of taking hundreds of MiB.
 5. The re-encode (below) is at most `HERO_ICON_MAX_BYTES`. Otherwise 413
    `icon_too_large`.
 
 The server then re-encodes the decoded pixels as a new PNG and stores that, so
 text chunks and other metadata from the upload are dropped. The re-encode is
 8 bits per sample (gray, gray with alpha, RGB or RGBA, as the upload has
-them) with the best PNG compression, so a stored file is never larger than
-`HERO_ICON_MAX_BYTES`. `size_bytes` is the size of the stored file. File names on disk are `<id>.png`, where `id` is 32
+them; 16-bit samples are rounded to 8 bits) at the default PNG compression
+level, again at the best level only when the default result is over the
+limit, so from this version on a stored file is never larger than
+`HERO_ICON_MAX_BYTES` (files stored by an earlier build keep their size). `size_bytes` is the size of the stored file. File names on disk are `<id>.png`, where `id` is 32
 lowercase hex characters made by the server. Nothing in a path comes from the
 request.
 

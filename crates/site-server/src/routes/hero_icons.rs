@@ -47,7 +47,7 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
 use image::codecs::png::{CompressionType, FilterType, PngEncoder};
-use image::{ColorType, DynamicImage, ImageFormat};
+use image::{ColorType, DynamicImage, ImageDecoder, ImageFormat};
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{AuditAction, AuditTargetType, DbError, HeroIcon, NewHeroIcon, OrgRole};
 use scuffed_types::api::{
@@ -389,9 +389,11 @@ pub(crate) fn clean_png(data: &[u8]) -> Result<CleanIcon, &'static str> {
 ///
 /// The stored file is never larger than `max_bytes`, the same limit as the
 /// upload part: the image is re-encoded at 8 bits per sample (gray, gray
-/// with alpha, RGB or RGBA, as the upload has them) with the best PNG
-/// compression, and a re-encode over `max_bytes` is refused with
-/// `icon_too_large` (413, like an oversized upload). Without this a small
+/// with alpha, RGB or RGBA, as the upload has them; 16-bit samples are
+/// rounded) at the default PNG compression level, again at the best level
+/// only when the default result is over `max_bytes`, and a re-encode still
+/// over it is refused with `icon_too_large` (413, like an oversized
+/// upload). Decoding is capped at [`PNG_DECODE_MAX_ALLOC`]. Without this a small
 /// 16-bit or palette upload could be stored many times larger than its
 /// kind's limit.
 pub(crate) fn clean_png_within(
@@ -400,24 +402,33 @@ pub(crate) fn clean_png_within(
     max_height: u32,
     max_bytes: usize,
 ) -> Result<CleanIcon, &'static str> {
-    let reader = image::ImageReader::with_format(Cursor::new(data), ImageFormat::Png);
-    let Ok((width, height)) = reader.into_dimensions() else {
+    // One decoder, under PNG_DECODE_MAX_ALLOC, for the header read and the
+    // decode.
+    let Ok(mut decoder) = png_reader(data).into_decoder() else {
         return Err(HERO_ICON_ERR_INVALID_PNG);
     };
+    let (width, height) = decoder.dimensions();
     let edge_ok = |edge: u32, max: u32| (HERO_ICON_MIN_EDGE..=max).contains(&edge);
     if !edge_ok(width, max_width) || !edge_ok(height, max_height) {
         return Err(HERO_ICON_ERR_BAD_DIMENSIONS);
     }
-    let Ok(decoded) = image::load_from_memory_with_format(data, ImageFormat::Png) else {
+    // The PNG decoder skips an `iCCP` profile that does not fit the memory
+    // limit and goes on. Such a profile is hostile (real ones are a few
+    // KiB), so refuse the file instead of storing it as if it were fine.
+    if has_png_chunk(data, b"iCCP") && !matches!(decoder.icc_profile(), Ok(Some(_))) {
+        return Err(HERO_ICON_ERR_INVALID_PNG);
+    }
+    let Ok(decoded) = DynamicImage::from_decoder(decoder) else {
         return Err(HERO_ICON_ERR_INVALID_PNG);
     };
     let (width, height) = (decoded.width(), decoded.height());
     let eight_bit = to_eight_bit(decoded);
-    let mut bytes = Vec::new();
-    let encoder =
-        PngEncoder::new_with_quality(&mut bytes, CompressionType::Best, FilterType::Adaptive);
-    if eight_bit.write_with_encoder(encoder).is_err() {
-        return Err(HERO_ICON_ERR_INVALID_PNG);
+    // The default level first: fast, and enough for nearly every crop. Best
+    // only when that is over the limit, since it costs far more CPU.
+    let mut bytes =
+        encode_png(&eight_bit, CompressionType::Default).ok_or(HERO_ICON_ERR_INVALID_PNG)?;
+    if bytes.len() > max_bytes {
+        bytes = encode_png(&eight_bit, CompressionType::Best).ok_or(HERO_ICON_ERR_INVALID_PNG)?;
     }
     if bytes.len() > max_bytes {
         return Err(HERO_ICON_ERR_TOO_LARGE);
@@ -427,6 +438,53 @@ pub(crate) fn clean_png_within(
         width,
         height,
     })
+}
+
+/// Most memory one PNG read may allocate: 32 MiB. The image crate's default
+/// is 512 MiB, and the PNG decoder inflates an `iCCP` (colour profile)
+/// chunk inside the header read, before the edge check, so a few hundred
+/// KiB of upload could take hundreds of MiB. The largest crop that is
+/// accepted, 1536x720 16-bit RGBA, needs about 8.4 MiB decoded.
+pub(crate) const PNG_DECODE_MAX_ALLOC: u64 = 32 * 1024 * 1024;
+
+/// A PNG reader over `data` with [`PNG_DECODE_MAX_ALLOC`] as its memory
+/// limit.
+fn png_reader(data: &[u8]) -> image::ImageReader<Cursor<&[u8]>> {
+    let mut reader = image::ImageReader::with_format(Cursor::new(data), ImageFormat::Png);
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(PNG_DECODE_MAX_ALLOC);
+    reader.limits(limits);
+    reader
+}
+
+/// `image` as a PNG at `level` with adaptive filtering. `None` when the
+/// encoder fails.
+fn encode_png(image: &DynamicImage, level: CompressionType) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let encoder = PngEncoder::new_with_quality(&mut bytes, level, FilterType::Adaptive);
+    image.write_with_encoder(encoder).ok()?;
+    Some(bytes)
+}
+
+/// True when `data` (a PNG) has a chunk of type `kind`. Walks the chunk
+/// headers only; nothing is inflated. A truncated file reads as having no
+/// more chunks.
+fn has_png_chunk(data: &[u8], kind: &[u8; 4]) -> bool {
+    let mut at = 8; // after the signature
+    while let Some(header) = data.get(at..at + 8) {
+        if &header[4..8] == kind {
+            return true;
+        }
+        if &header[4..8] == b"IEND" {
+            return false;
+        }
+        let len = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize;
+        match at.checked_add(12).and_then(|n| n.checked_add(len)) {
+            Some(next) => at = next,
+            None => return false,
+        }
+    }
+    false
 }
 
 /// `image` at 8 bits per sample, keeping gray and alpha where it has them.
@@ -467,7 +525,8 @@ pub(crate) async fn read_icon_part(field: &mut Field<'_>) -> Result<Vec<u8>, Rej
 }
 
 /// [`read_icon_part`] with its own byte limit (413 `icon_too_large` past
-/// `max_bytes`). Training crops use it for the larger `map_name` limit.
+/// `max_bytes`). Training crops use it for each kind's limit
+/// (`CropKind::max_crop_bytes`).
 pub(crate) async fn read_png_part(
     field: &mut Field<'_>,
     max_bytes: usize,
@@ -585,7 +644,7 @@ pub struct HeroIconUploadQuery {
 /// Multipart body with one or more parts named `icon`. Order of checks: 503
 /// when disabled, the per-member limiter (429), opt-in (403), hero (400), the
 /// stored cap (409), then each part (signature 415, size 413, dimensions and
-/// decode 400). Nothing is stored unless every part passes. A body that is not
+/// decode 400, re-encode over `HERO_ICON_MAX_BYTES` 413). Nothing is stored unless every part passes. A body that is not
 /// multipart is 400 `invalid_multipart` after the stored cap check.
 pub async fn upload_hero_icons(
     State(state): State<AppState>,
@@ -1063,6 +1122,39 @@ mod tests {
         out.into_inner()
     }
 
+    /// A `width` x `height` RGB PNG whose `iCCP` chunk inflates to
+    /// `profile_bytes` zeros (a few KiB compressed per MiB).
+    fn iccp_png(width: u32, height: u32, profile_bytes: usize) -> Vec<u8> {
+        use std::io::Write;
+        let plain = encode(DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            width,
+            height,
+            image::Rgb([20, 120, 220]),
+        )));
+        let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+        let zeros = vec![0u8; 1024 * 1024];
+        let mut left = profile_bytes;
+        while left > 0 {
+            let n = left.min(zeros.len());
+            z.write_all(&zeros[..n]).unwrap();
+            left -= n;
+        }
+        let mut data = b"bomb\0\0".to_vec(); // profile name, NUL, compression method 0
+        data.extend(z.finish().unwrap());
+        let mut chunk = u32::try_from(data.len()).unwrap().to_be_bytes().to_vec();
+        chunk.extend_from_slice(b"iCCP");
+        chunk.extend_from_slice(&data);
+        let mut crc = flate2::Crc::new();
+        crc.update(&chunk[4..]);
+        chunk.extend_from_slice(&crc.sum().to_be_bytes());
+        // After the signature (8) and IHDR (12 + 13).
+        let at = 8 + 12 + 13;
+        let mut out = plain[..at].to_vec();
+        out.extend(chunk);
+        out.extend_from_slice(&plain[at..]);
+        out
+    }
+
     /// Encode `image` as a PNG with the image crate's defaults (fast
     /// compression, the image's own bit depth), as a client might.
     fn encode(image: DynamicImage) -> Vec<u8> {
@@ -1103,7 +1195,9 @@ mod tests {
             let original = blocks_16bit(alpha).to_rgba8();
             assert_eq!(stored.to_rgba8(), original);
         }
-        // Gray stays gray, at 8 bits.
+        // Gray stays gray, and gray with alpha keeps its alpha, at 8 bits.
+        // 16-bit samples are rounded to 8 bits ((v + 128) / 257), not cut
+        // to the high byte: 40_000 is 155.6, so 156.
         let gray = DynamicImage::ImageLuma16(image::ImageBuffer::from_pixel(
             64,
             64,
@@ -1112,6 +1206,16 @@ mod tests {
         let clean = clean_png_within(&encode(gray), 256, 256, LIMIT).unwrap();
         let stored = image::load_from_memory_with_format(&clean.bytes, ImageFormat::Png).unwrap();
         assert_eq!(stored.color(), ColorType::L8);
+        assert_eq!(stored.to_luma8().get_pixel(0, 0).0, [156]);
+        let gray_alpha = DynamicImage::ImageLumaA16(image::ImageBuffer::from_pixel(
+            64,
+            64,
+            image::LumaA([40_000u16, 20_000]),
+        ));
+        let clean = clean_png_within(&encode(gray_alpha), 256, 256, LIMIT).unwrap();
+        let stored = image::load_from_memory_with_format(&clean.bytes, ImageFormat::Png).unwrap();
+        assert_eq!(stored.color(), ColorType::La8);
+        assert_eq!(stored.to_luma_alpha8().get_pixel(0, 0).0, [156, 78]);
     }
 
     #[test]
@@ -1125,15 +1229,20 @@ mod tests {
             state ^= state << 5;
             image::Rgba(state.to_le_bytes())
         });
-        let upload = encode(DynamicImage::ImageRgba8(noise));
-        let fits = clean_png_within(&upload, 256, 256, usize::MAX).expect("no limit");
-        let stored = fits.bytes.len();
+        let noise = DynamicImage::ImageRgba8(noise);
+        let upload = encode(noise.clone());
+        // The smallest the server can make it: the better of both levels.
+        let smallest = [CompressionType::Default, CompressionType::Best]
+            .map(|level| encode_png(&noise, level).unwrap().len())
+            .into_iter()
+            .min()
+            .unwrap();
         assert!(
-            clean_png_within(&upload, 256, 256, stored).is_ok(),
+            clean_png_within(&upload, 256, 256, smallest).is_ok(),
             "exactly at the limit"
         );
         assert_eq!(
-            clean_png_within(&upload, 256, 256, stored - 1).err(),
+            clean_png_within(&upload, 256, 256, smallest - 1).err(),
             Some(HERO_ICON_ERR_TOO_LARGE)
         );
         assert_eq!(
@@ -1146,6 +1255,124 @@ mod tests {
         );
         // The hero icon route's own limit applies to its re-encode too.
         assert_eq!(clean_png(&upload).err(), Some(HERO_ICON_ERR_TOO_LARGE));
+    }
+
+    #[test]
+    fn a_normal_crop_is_stored_at_the_default_level() {
+        let image = blocks_16bit(true);
+        let clean = clean_png_within(&encode(image.clone()), 1536, 720, 384 * 1024).unwrap();
+        let eight = to_eight_bit(image);
+        let default = encode_png(&eight, CompressionType::Default).unwrap();
+        let best = encode_png(&eight, CompressionType::Best).unwrap();
+        assert_ne!(default, best, "the two levels give different files here");
+        assert_eq!(
+            clean.bytes, default,
+            "stored at the default level, not re-encoded at best"
+        );
+    }
+
+    #[test]
+    fn a_crop_over_the_limit_at_default_but_not_at_best_is_stored_at_best() {
+        // Half noise, half flat: the levels differ by enough to put a limit
+        // between them.
+        let mut state = 0x2545_f491u32;
+        let image = DynamicImage::ImageRgb8(image::RgbImage::from_fn(256, 256, |x, y| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            if (x / 16 + y / 16) % 2 == 0 {
+                image::Rgb([(state & 0x0f) as u8, 90, 180])
+            } else {
+                image::Rgb([30, 60, (x % 7) as u8 * 30])
+            }
+        }));
+        let default = encode_png(&image, CompressionType::Default).unwrap();
+        let best = encode_png(&image, CompressionType::Best).unwrap();
+        assert!(
+            best.len() < default.len(),
+            "best {} default {}",
+            best.len(),
+            default.len()
+        );
+        let upload = encode(image);
+        // Limit between the two: accepted, stored at best.
+        let clean = clean_png_within(&upload, 256, 256, best.len()).expect("fits at best");
+        assert_eq!(clean.bytes, best);
+        // Limit under best: 413.
+        assert_eq!(
+            clean_png_within(&upload, 256, 256, best.len() - 1).err(),
+            Some(HERO_ICON_ERR_TOO_LARGE)
+        );
+        // Limit at the default size: stored at default.
+        let clean = clean_png_within(&upload, 256, 256, default.len()).unwrap();
+        assert_eq!(clean.bytes, default);
+    }
+
+    #[test]
+    fn an_iccp_profile_over_the_memory_limit_is_refused() {
+        // 40 MiB of profile in a 58 KB upload. Without the limit the decoder
+        // inflates all of it; with it, it stops at PNG_DECODE_MAX_ALLOC.
+        let bomb = iccp_png(1536, 720, 40 * 1024 * 1024);
+        assert!(bomb.len() < 64 * 1024, "{}", bomb.len());
+        let mut open = image::ImageReader::with_format(Cursor::new(&bomb[..]), ImageFormat::Png);
+        open.no_limits();
+        let profile = open.into_decoder().unwrap().icc_profile().unwrap();
+        assert_eq!(
+            profile.map(|p| p.len()),
+            Some(40 * 1024 * 1024),
+            "unbounded inflates it all"
+        );
+        let profile = png_reader(&bomb)
+            .into_decoder()
+            .unwrap()
+            .icc_profile()
+            .unwrap();
+        assert_eq!(profile, None, "the limit stops the inflate");
+        // And the upload is refused with the usual 400, for every kind's bound.
+        assert_eq!(
+            clean_png_within(&bomb, 1536, 720, 384 * 1024).err(),
+            Some(HERO_ICON_ERR_INVALID_PNG)
+        );
+        let wide_bomb = iccp_png(1536, 256, 40 * 1024 * 1024);
+        assert_eq!(
+            clean_png_within(&wide_bomb, 1536, 256, 256 * 1024).err(),
+            Some(HERO_ICON_ERR_INVALID_PNG)
+        );
+        assert_eq!(
+            clean_reject(HERO_ICON_ERR_INVALID_PNG).0,
+            StatusCode::BAD_REQUEST
+        );
+        let small_bomb = iccp_png(64, 64, 40 * 1024 * 1024);
+        assert_eq!(
+            clean_png(&small_bomb).err(),
+            Some(HERO_ICON_ERR_INVALID_PNG)
+        );
+    }
+
+    #[test]
+    fn a_normal_iccp_profile_is_accepted_and_dropped() {
+        let png = iccp_png(1536, 720, 4 * 1024);
+        assert!(has_png_chunk(&png, b"iCCP"));
+        let clean = clean_png_within(&png, 1536, 720, 384 * 1024).expect("accepted");
+        assert!(
+            !has_png_chunk(&clean.bytes, b"iCCP"),
+            "the re-encode drops it"
+        );
+        assert!(has_png_chunk(&clean.bytes, b"IDAT"));
+        assert!(
+            !has_png_chunk(&clean.bytes[..20], b"IDAT"),
+            "truncated reads as no chunk"
+        );
+    }
+
+    #[test]
+    fn the_largest_accepted_crop_decodes_under_the_memory_limit() {
+        // 1536x720 16-bit RGBA is 8.4 MiB decoded, the most any kind takes.
+        let upload = encode(blocks_16bit(true));
+        let decoded = png_reader(&upload)
+            .decode()
+            .expect("decodes under the limit");
+        assert_eq!(decoded.color(), ColorType::Rgba16);
     }
 
     /// Store two icons for `member_id` the way the upload route does.
