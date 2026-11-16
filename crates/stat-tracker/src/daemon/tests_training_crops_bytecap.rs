@@ -4,7 +4,8 @@
 //! hero offered, so a later Tab of the same game can retry.
 
 use super::super::training_crops::{
-    HERO_ICON_BYTE_FALLBACK_SIDE, encode_hero_icon, encode_png, keep_encoded_hero_icon,
+    HERO_ICON_BYTE_FALLBACK_SIDE, HERO_ICON_BYTE_SHRINK_FLOOR, card_side, encode_hero_icon,
+    encode_png, keep_encoded_hero_icon,
 };
 use super::*;
 
@@ -59,10 +60,9 @@ async fn a_noisy_228_card_over_the_byte_cap_is_stored_at_the_1080p_side() {
     );
 
     let encoded = encode_hero_icon(&card).expect("the over-cap card shrinks to fit");
-    assert!(
-        encoded.len() <= cap(),
-        "nothing over the cap is stored, got {} bytes",
-        encoded.len()
+    assert_eq!(
+        encoded, at_fallback,
+        "the first fitting side is the Lanczos3 171 px encode, not another filter or side"
     );
     assert_eq!(
         sync::png_size(&encoded),
@@ -93,14 +93,9 @@ async fn a_noisy_228_card_over_the_byte_cap_is_stored_at_the_1080p_side() {
     );
     let queued = sync::queued_crops(dir.path(), UploadKind::HeroIcon);
     assert_eq!(queued.len(), 1);
-    assert!(
-        queued[0].png.len() <= cap(),
-        "stored {} bytes, over the cap",
-        queued[0].png.len()
-    );
     assert_eq!(
-        sync::png_size(&queued[0].png),
-        Some((HERO_ICON_BYTE_FALLBACK_SIDE, HERO_ICON_BYTE_FALLBACK_SIDE))
+        queued[0].png, at_fallback,
+        "the stored PNG is the Lanczos3 171 px encode"
     );
     assert_eq!(
         (queued[0].meta.screen_width, queued[0].meta.screen_height),
@@ -189,4 +184,68 @@ async fn a_1080p_card_under_the_cap_is_stored_as_the_native_best_encode() {
         (queued[0].meta.screen_width, queued[0].meta.screen_height),
         (Some(1920), Some(1080))
     );
+}
+
+/// A pure-noise 228 px card is still over the cap at 171 and 155, so the
+/// shrink loop must take the third step and land at
+/// [`HERO_ICON_BYTE_SHRINK_FLOOR`] (139). Kills a mutant that gives up
+/// after the first fallback side, or that downscales with Nearest instead
+/// of Lanczos3.
+#[test]
+fn a_pure_noise_228_card_lands_at_the_shrink_floor() {
+    let card = noise_card(228);
+    let native = encode_png(&card).expect("the fixture encodes");
+    assert!(
+        native.len() > cap(),
+        "the fixture itself must be over the cap, got {} bytes",
+        native.len()
+    );
+    for side in [HERO_ICON_BYTE_FALLBACK_SIDE, 155] {
+        let png = encode_png(&card.resize_exact(side, side, image::imageops::FilterType::Lanczos3))
+            .expect("the mid-step copy encodes");
+        assert!(
+            png.len() > cap(),
+            "side {side} must still be over the cap so the loop continues, got {} bytes",
+            png.len()
+        );
+    }
+    let at_floor = encode_png(&card.resize_exact(
+        HERO_ICON_BYTE_SHRINK_FLOOR,
+        HERO_ICON_BYTE_SHRINK_FLOOR,
+        image::imageops::FilterType::Lanczos3,
+    ))
+    .expect("the 139 px copy encodes");
+    assert!(
+        at_floor.len() <= cap(),
+        "the 139 px copy must fit, got {} bytes",
+        at_floor.len()
+    );
+
+    let encoded = encode_hero_icon(&card).expect("the over-cap card shrinks to the floor");
+    assert_eq!(
+        encoded, at_floor,
+        "the stored PNG is the Lanczos3 139 px encode"
+    );
+    assert_eq!(
+        sync::png_size(&encoded),
+        Some((HERO_ICON_BYTE_SHRINK_FLOOR, HERO_ICON_BYTE_SHRINK_FLOOR))
+    );
+}
+
+/// Incompressible RGB so Best PNG stays close to the raw pixel count:
+/// 171 and 155 stay over the cap, 139 (raw 57,963 B) fits.
+fn noise_card(side: u32) -> DynamicImage {
+    DynamicImage::ImageRgb8(RgbImage::from_fn(side, side, |x, y| {
+        let n = x.wrapping_mul(73856093) ^ y.wrapping_mul(19349663) ^ x.wrapping_mul(y);
+        Rgb([
+            (n & 0xff) as u8,
+            ((n >> 8) & 0xff) as u8,
+            ((n >> 16) & 0xff) as u8,
+        ])
+    }))
+}
+
+#[test]
+fn the_byte_fallback_side_is_the_1080p_card_side() {
+    assert_eq!(card_side(1920, 1080), HERO_ICON_BYTE_FALLBACK_SIDE);
 }

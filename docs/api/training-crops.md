@@ -214,7 +214,7 @@ Every field is optional unless noted. Unknown fields are refused (400
 | `spot_version` | string | Same as `icon_set_version` |
 | `vote_card_filled` | bool | |
 | `locked_in` | bool | |
-| `screen_width`, `screen_height` | int | Game resolution. Both or neither, each 320 to 16384 |
+| `screen_width`, `screen_height` | int | Game resolution in pixels, both or neither, each 320 to 16384. These stay the game's size even when a `hero_icon` PNG is a 171 px downscale |
 | `ui_scale` | float | Above 0, at most 200 (same range as the report bundle) |
 | `found_spot` | object `{x, y, w, h}` | Unsigned ints, `w` and `h` at least 1, the box inside the resolution when one is given (inside 16384 otherwise). Unknown keys refused. Sending it only for unknown screen sizes is the tracker's rule: the server accepts it at any resolution, since it cannot know the tracker's layouts |
 | `found_confidence` | float | 0 to 1. `found_spot` and `found_confidence` come together or not at all |
@@ -227,7 +227,7 @@ all with `screen` `tab`:
 
 | Kind | `slot_type` | What the crop is |
 |------|-------------|------------------|
-| `hero_icon` | `career_panel` | The career panel's hero portrait, with `hero`, `score`, `runner_up`, `margin` and the hero pack name as `icon_set_version` |
+| `hero_icon` | `career_panel` | The career panel's hero portrait: the native card, or a downscale to 171 px (smaller if needed) when its PNG is over 64 KiB, with `hero`, `score`, `runner_up`, `margin` and the hero pack name as `icon_set_version`. `screen_width`/`screen_height` stay the game's |
 | `stat_digits` | `elims`, `assists`, `deaths`, `damage`, `healing`, `mitigation` | One stat cell of the member's own row, named by its column left to right, with `hero` only when that Tab's own read named it |
 | `map_name` | none | The map name banner |
 

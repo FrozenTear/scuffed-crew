@@ -15,6 +15,14 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## Unreleased
+
+At 1440p, most hero icon training crops were dropped because their PNG was over the size cap. They are now kept at 171 px, the same size as a 1080p card. A 4K portrait is still skipped.
+
+### Highlights
+
+- If a hero icon crop still cannot be kept, a later Tab of the same game can try again.
+
 ## 0.6.0-alpha.3.1
 
 **Read my rank after Comp games** now works: with it on, the tracker reads your rank screen after each Comp game and sends the rank it read with your game uploads. Every reader switch now sits together under one Readers heading in Settings, and the rank packs come from the site like the other reader packs.
@@ -38,7 +46,6 @@ Other fixes in this patch:
 - Rank screen: at shutdown a held rank screen settles as when the game closes, is stored on its game and in `live_snapshot.json`, and uploads with the next sync. An update the store refused earlier gets one last try at shutdown.
 - Startup: the auto-vacuum no longer runs at every start for a store whose live data sits near the 32 MiB threshold. It now also waits until the store has grown 8 MiB past the size the last vacuum left (kept in `vacuum.last-size` in the data folder, written by the auto-vacuum and by `--vacuum`). A missing or unreadable file, or a recorded size more than twice the live store, falls back to the threshold alone.
 - Docs: the hero select read is each own-team player's preferred hero, not their pick (`docs/bans-picks-cv1.md`, `read_hero_select`).
-- Training crops: a `hero_icon` crop whose PNG is over the 65,536-byte cap is compressed at the encoder's best setting, then downscaled to the 1080p card side (171 px) and smaller only if needed, so the stored PNG fits. Nothing over the cap is kept. A crop over the 256 px edge cap is still dropped, not shrunk: at 4K the portrait box is over 256 px and is not sent. If a crop is still refused, that hero is not marked offered, so a later Tab of the same game can retry.
 
 ## 0.6.0-alpha.3
 

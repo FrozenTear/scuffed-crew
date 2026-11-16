@@ -74,8 +74,9 @@ pub struct QueuedCrop {
     pub png: Vec<u8>,
 }
 
-/// Why a crop is not sent. Such a crop is dropped, never shrunk: the point
-/// of a training crop is the pixels the reader saw.
+/// Why a crop is not sent. This store-layer check drops a crop that misses
+/// a cap; it does not shrink. A `hero_icon` may already have been downscaled
+/// before it is checked (see `docs/api/training-crops.md`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CropRefusal {
     /// No PNG signature or no readable header.

@@ -1,6 +1,7 @@
 //! Hero icon and stat digit training crops from a Tab: cut only from a
-//! stored Tab of a known game, only with consent, raw and never resized,
-//! and never in the way of recording.
+//! stored Tab of a known game, only with consent, and never in the way of
+//! recording. The cut is the raw card; a `hero_icon` over 64 KiB may be
+//! stored as a 171 px downscale (`tests_training_crops_bytecap`).
 
 use std::path::Path;
 use std::time::Duration;

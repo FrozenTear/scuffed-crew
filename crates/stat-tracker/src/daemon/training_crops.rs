@@ -8,7 +8,10 @@
 //!
 //! * `hero_icon`: the career panel's portrait card near the box the
 //!   heroes-v2 read found (`PanelRead::box_px`), cut from the full frame,
-//!   raw pixels, no pack preprocess. The read's box can sit off the card
+//!   raw pixels, no pack preprocess. A stored `hero_icon` is that native
+//!   card, or a downscale to 171 px (smaller if needed) when its PNG is
+//!   over 64 KiB; `screen_width`/`screen_height` stay the game's. The
+//!   read's box can sit off the card
 //!   (the matcher slides the template inside it), so the cut is snapped to
 //!   the card's own left and top edges ([`snap_to_card`]) and kept only
 //!   when its far edges hold and its outer tops agree with the cut's top.
@@ -29,13 +32,10 @@
 //! One set per kind per game (`hero_icon`: per hero), so a game does not
 //! fill the outbox. A miss (no box, no card edge, no header, chat over the
 //! row, or a card over the 256 px edge cap) skips that crop and nothing
-//! else. A snapped `hero_icon` over the 65,536-byte cap is compressed with
-//! the existing Best PNG encoder, then downscaled to the 1080p card side
-//! (171 px) and smaller only if still over, so the stored PNG fits; nothing
-//! over the cap is kept. If a crop is still refused, that hero is not marked
-//! offered, so a later Tab of the same game can retry. A consented
-//! crop lost to an error leaves the training warning. The Tab records
-//! either way.
+//! else. If a `hero_icon` is still refused after that downscale, that hero
+//! is not marked offered, so a later Tab of the same game can retry. A
+//! consented crop lost to an error leaves the training warning. The Tab
+//! records either way.
 //!
 //! The card snap runs inline in `handle_capture`, after the Tab's row is
 //! committed: it reads a few thin luma profiles, well under 1 ms. The frame
@@ -504,7 +504,7 @@ fn gap_edge(
 
 /// The card's side in px in a `w` x `h` frame: [`CARD_SIDE`] of the 16:9
 /// game rect's height.
-fn card_side(w: u32, h: u32) -> u32 {
+pub(crate) fn card_side(w: u32, h: u32) -> u32 {
     let (_, _, _, gh) = stat_tracker::frame::geometry::game_rect_16_9(w, h);
     (CARD_SIDE * f64::from(gh)).round() as u32
 }
@@ -673,37 +673,58 @@ pub(crate) fn encode_png(image: &image::DynamicImage) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// The 1080p career panel card side ([`CARD_SIDE`] of 1080 px). A larger
-/// card whose Best-encoded PNG is over the 65,536-byte `hero_icon` cap is
-/// first downscaled to this, then smaller only if that PNG is still over.
+/// The 1080p career panel card side ([`card_side`] of 1920x1080). A larger
+/// square card whose Best-encoded PNG is over the 65,536-byte `hero_icon`
+/// cap is first downscaled to this, then 16 px smaller at a time down to
+/// [`HERO_ICON_BYTE_SHRINK_FLOOR`] only if that PNG is still over.
 pub(crate) const HERO_ICON_BYTE_FALLBACK_SIDE: u32 = 171;
 
-/// Encode a `hero_icon` crop so the PNG fits the kind's byte cap.
+/// Smallest side the shrink loop tries. Any 8-bit RGB square of 147 px or
+/// less always fits the 65,536-byte cap even uncompressed (147 x 147 x 3 =
+/// 64,974), so after 171 and 155 the next step (139) always fits. The
+/// store-layer 8 px min edge is not used here.
+pub(crate) const HERO_ICON_BYTE_SHRINK_FLOOR: u32 = 139;
+
+/// Why [`encode_hero_icon`] did not produce a storeable PNG.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HeroIconEncodeMiss {
+    /// The PNG encoder failed, at the native side or after a downscale.
+    Encode,
+    /// Every tried side is still over the cap. For 8-bit RGB this cannot
+    /// happen at [`HERO_ICON_BYTE_SHRINK_FLOOR`] or below.
+    OverCap,
+}
+
+/// Encode a square `hero_icon` crop so the PNG fits the kind's byte cap.
 /// At the card's own side this is [`encode_png`] (already Best). If that
 /// PNG is over the cap, downscale with Lanczos3 to
 /// [`HERO_ICON_BYTE_FALLBACK_SIDE`], then 16 px smaller at a time down to
-/// [`scuffed_types::HERO_ICON_MIN_EDGE`]. `None` when it cannot be encoded,
-/// or when even the smallest allowed side is still over the cap: the
-/// caller must not store it or mark the hero offered.
-pub(crate) fn encode_hero_icon(image: &image::DynamicImage) -> Option<Vec<u8>> {
+/// [`HERO_ICON_BYTE_SHRINK_FLOOR`]. `Err` when it cannot be encoded, or
+/// when even that floor is still over the cap: the caller must not store
+/// it or mark the hero offered.
+pub(crate) fn encode_hero_icon(image: &image::DynamicImage) -> Result<Vec<u8>, HeroIconEncodeMiss> {
+    debug_assert_eq!(
+        image.width(),
+        image.height(),
+        "hero_icon encode expects a square card"
+    );
     let cap = sync::UploadKind::HeroIcon.crop_kind().max_crop_bytes();
-    let png = encode_png(image)?;
+    let png = encode_png(image).ok_or(HeroIconEncodeMiss::Encode)?;
     if png.len() <= cap {
-        return Some(png);
+        return Ok(png);
     }
-    let min = scuffed_types::HERO_ICON_MIN_EDGE;
     let mut side = HERO_ICON_BYTE_FALLBACK_SIDE
         .min(image.width())
         .min(image.height());
-    if side < min {
-        return None;
+    if side < HERO_ICON_BYTE_SHRINK_FLOOR {
+        return Err(HeroIconEncodeMiss::OverCap);
     }
     loop {
         // The native Best encode at this side already missed the cap;
         // a same-size resize would not help.
         if side != image.width() || side != image.height() {
             let resized = image.resize_exact(side, side, image::imageops::FilterType::Lanczos3);
-            let png = encode_png(&resized)?;
+            let png = encode_png(&resized).ok_or(HeroIconEncodeMiss::Encode)?;
             if png.len() <= cap {
                 tracing::debug!(
                     target: "scuffed_stat_tracker",
@@ -712,13 +733,19 @@ pub(crate) fn encode_hero_icon(image: &image::DynamicImage) -> Option<Vec<u8>> {
                     bytes = png.len(),
                     "hero icon downscaled to fit the byte cap"
                 );
-                return Some(png);
+                return Ok(png);
             }
         }
-        if side <= min {
-            return None;
+        if side <= HERO_ICON_BYTE_SHRINK_FLOOR {
+            tracing::debug!(
+                target: "scuffed_stat_tracker",
+                from = image.width(),
+                to = side,
+                "hero icon still over the byte cap after downscale"
+            );
+            return Err(HeroIconEncodeMiss::OverCap);
         }
-        side = side.saturating_sub(16).max(min);
+        side = side.saturating_sub(16).max(HERO_ICON_BYTE_SHRINK_FLOOR);
     }
 }
 
@@ -753,16 +780,11 @@ fn keep_hero_icon(
     };
     let (x, y, cw, ch) = crop.rect;
     let cut = frame.crop_imm(x, y, cw, ch);
-    let Some(png) = encode_hero_icon(&cut) else {
-        // Still over the cap after shrinking, or the native encode failed
-        // after we already saw an over-cap PNG. A native encode failure
-        // with no bytes at all is an error and is warned below.
-        if encode_png(&cut).is_none() {
-            sync::warn_crop_lost(dir, kind);
-        }
-        return;
-    };
-    keep_encoded_hero_icon(dir, session, &crop.hero, meta, png);
+    match encode_hero_icon(&cut) {
+        Ok(png) => keep_encoded_hero_icon(dir, session, &crop.hero, meta, png),
+        Err(HeroIconEncodeMiss::Encode) => sync::warn_crop_lost(dir, kind),
+        Err(HeroIconEncodeMiss::OverCap) => {}
+    }
 }
 
 fn keep_stat_digits(
