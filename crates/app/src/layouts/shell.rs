@@ -284,6 +284,9 @@ const SHELL_CSS: &str = r#"
         outline-offset: var(--focus-ring-offset);
     }
     .site-app {
+        /* What the shell takes from the viewport height: the top bar, plus
+           the tab bar on phone. Full-height tools subtract it. */
+        --shell-chrome-height: var(--nav-height-used);
         min-height: 100vh;
         display: flex;
         flex-direction: column;
@@ -301,7 +304,10 @@ const SHELL_CSS: &str = r#"
         position: sticky;
         top: 0;
         z-index: 100;
-        min-height: var(--nav-height-used);
+        /* Exactly the token, border included: pages subtract it. */
+        box-sizing: border-box;
+        height: var(--nav-height-used);
+        flex: 0 0 auto;
         display: flex;
         align-items: center;
         gap: var(--space-3);
@@ -351,14 +357,15 @@ const SHELL_CSS: &str = r#"
     .d1-groups {
         display: flex;
         align-items: stretch;
+        align-self: stretch;
         min-width: 0;
         margin-left: var(--space-2);
     }
     .d1-group {
         position: relative;
+        display: flex;
     }
     .d1-group-btn {
-        height: var(--nav-height-used);
         min-height: var(--hit-target-min);
         padding: 0 var(--space-3);
         background: transparent;
@@ -886,7 +893,10 @@ const SHELL_CSS: &str = r#"
             padding: 0 var(--space-2);
         }
         .site-app {
-            padding-bottom: calc(var(--hit-target-min) + env(safe-area-inset-bottom, 0px));
+            /* The tab bar is one hit target plus its 1px top border. */
+            --tab-bar-height: calc(var(--hit-target-min) + 1px + env(safe-area-inset-bottom, 0px));
+            --shell-chrome-height: calc(var(--nav-height-used) + var(--tab-bar-height));
+            padding-bottom: var(--tab-bar-height);
         }
         .site-tab-bar {
             display: grid;
@@ -2092,6 +2102,40 @@ mod tests {
         assert_eq!(safe_avatar_url(Some("javascript:alert(1)")), None);
         assert_eq!(safe_avatar_url(Some("http://plain.example/a.png")), None);
         assert_eq!(safe_avatar_url(None), None);
+    }
+
+    /// Browser pass: the bar was 1px taller than its token (button height
+    /// plus the border), and full-height tools had nothing to subtract.
+    #[test]
+    fn shell_reports_the_height_it_takes() {
+        let bar = css_rule(SHELL_CSS, ".d1-top {");
+        assert!(has_decl(&bar, "height: var(--nav-height-used)"), "{bar}");
+        assert!(has_decl(&bar, "box-sizing: border-box"), "{bar}");
+        let button = css_rule(SHELL_CSS, ".d1-group-btn {");
+        assert!(
+            !button.contains("height: var(--nav-height-used)"),
+            "group buttons stretch inside the bar, they do not set its height: {button}"
+        );
+        let app = css_rule(SHELL_CSS, ".site-app {");
+        assert!(
+            has_decl(&app, "--shell-chrome-height: var(--nav-height-used)"),
+            "{app}"
+        );
+        let phone = SHELL_CSS
+            .split("@media (max-width: 820px)")
+            .nth(1)
+            .expect("phone rules");
+        assert!(
+            phone.contains(
+                "--shell-chrome-height: calc(var(--nav-height-used) + var(--tab-bar-height))"
+            ),
+            "{phone}"
+        );
+        assert!(
+            phone.contains("padding-bottom: var(--tab-bar-height)"),
+            "{phone}"
+        );
+        assert_eq!(MAIN_ID, "main");
     }
 
     #[test]

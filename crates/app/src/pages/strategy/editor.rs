@@ -111,7 +111,10 @@ const EDITOR_CSS: &str = r#"
     .editor-page {
         display: flex;
         flex-direction: column;
-        height: 100vh;
+        /* The site shell keeps its top bar (and the tab bar on phone) on
+           screen, so the editor takes the rest of the viewport. */
+        height: calc(100vh - var(--shell-chrome-height, 0px));
+        height: calc(100dvh - var(--shell-chrome-height, 0px));
         background: var(--bg);
         color: var(--text);
         overflow: hidden;
@@ -455,7 +458,7 @@ pub fn StrategyEditor(id: String) -> Element {
     match data.as_ref() {
         None => rsx! {
             div {
-                style: "display: flex; align-items: center; justify-content: center; height: 100vh; color: var(--text-subtle);",
+                style: "display: flex; align-items: center; justify-content: center; height: calc(100vh - var(--shell-chrome-height, 0px)); color: var(--text-subtle);",
                 "Loading strategy..."
             }
         },
@@ -465,7 +468,7 @@ pub fn StrategyEditor(id: String) -> Element {
             let label = retry_label(retrying);
             rsx! {
                 div {
-                    style: "display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.75rem; height: 100vh; color: var(--loss);",
+                    style: "display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.75rem; height: calc(100vh - var(--shell-chrome-height, 0px)); color: var(--loss);",
                     role: "alert",
                     aria_busy: if retrying { "true" },
                     "{shown.message}"

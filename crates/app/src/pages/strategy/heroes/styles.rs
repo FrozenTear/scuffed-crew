@@ -2,7 +2,7 @@
 //! apart from heading margins and the role tinted portrait fallback.
 
 pub(super) const PAGE_CSS: &str = r#"
-.heroes-page { display:flex; height:100%; min-height:calc(100vh - 60px); }
+.heroes-page { display:flex; height:100%; min-height:calc(100vh - var(--shell-chrome-height, 0px)); }
 
 /* Left panel */
 .heroes-left { width:340px; min-width:280px; border-right:1px solid var(--border); overflow-y:auto; padding:1.25rem; background:var(--surface); flex-shrink:0; }

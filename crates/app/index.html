@@ -28,7 +28,7 @@
         color: #f4f4f8;
         font-family: system-ui, sans-serif;
       }
-      #main {
+      #app-root {
         min-height: 100vh;
       }
       /* First paint before WASM boots */
@@ -76,12 +76,12 @@
       <div class="mark"></div>
       <div class="label">Loading</div>
     </div>
-    <div id="main"></div>
+    <div id="app-root"></div>
     <!-- Dioxus injects the WASM loader here, before the closing body tag. -->
     <script>
-      // Hide boot skeleton once the app mounts content into #main
+      // Hide boot skeleton once the app mounts content into #app-root
       (function () {
-        var main = document.getElementById("main");
+        var main = document.getElementById("app-root");
         var boot = document.getElementById("sc-boot");
         if (!main || !boot) return;
         var hide = function () {
