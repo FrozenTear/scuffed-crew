@@ -12,13 +12,10 @@
 //!   (the matcher slides the template inside it), so the cut is snapped to
 //!   the card's own left and top edges ([`snap_to_card`]) and kept only
 //!   when its far edges hold and its outer tops agree with the cut's top.
-//!   On a Tab whose top rows are letterboxed to black (the top 7 px of the
-//!   card lost on live 1440p captures) the cut's top is taken from the
-//!   bottom gap and [`CARD_SIDE`] instead, so the cut keeps the card's
-//!   framing with those rows black. A Tab where an edge is not found, a
-//!   far edge does not hold, or an outer top is off the cut keeps none.
-//!   Only when the panel read passed its gate and names the Tab's hero
-//!   authority. ocr-v1 reads no panel box, so it offers none.
+//!   A Tab where an edge is not found, a far edge does not hold, or an
+//!   outer top is off the cut keeps none. Only when the panel read passed its gate and
+//!   names the Tab's hero authority. ocr-v1 reads no panel box, so it
+//!   offers none.
 //! * `stat_digits`: the own row's six stat cells, each on its own window
 //!   under the header labels ([`training_stat_columns`]), never the name
 //!   column and never another row. Only under the new reader, when its own
@@ -110,9 +107,9 @@ fn mark_offered(key: String) {
 /// `session_id` and keep them on a blocking thread. Only the consent, gate
 /// and box checks, for a hero icon still wanted the card snap (six thin
 /// luma profiles, plus a re-read of the right one inside the cut when a
-/// drop lands there, and the far edge ones again on a letterboxed top),
-/// and the frame clone run here; the rest of the pixel work runs on that
-/// thread. `None` when there is nothing to cut. The handle is for tests.
+/// drop lands there), and the frame clone run here; the rest of the pixel
+/// work runs on that thread. `None` when there is nothing to cut. The
+/// handle is for tests.
 pub(crate) fn archive_tab_training_crops(
     data_dir: &Path,
     session_id: &str,
@@ -282,19 +279,6 @@ const CARD_MIN_STEP: f64 = 16.0;
 /// [`CARD_GAP_MAX_LUMA`]: the dim fill's own windows (about 27) are under
 /// that.
 const CARD_SUSTAIN: f64 = 0.045;
-/// Most a letterboxed card's found top may sit below the top its bottom
-/// gap implies, in `u` (16 px at 1440p, 12 at 1080p). On 29 accepted live
-/// 1440p Tabs a black bar covered every row down to y 215: the top 7 px of
-/// the card and of the scoreboard header were lost, the found top was 216,
-/// and the bottom gap stayed at 436, the same as on unclipped Tabs (top
-/// 209).
-const CARD_CLIP_MAX: f64 = 0.011;
-/// Most mean luma of a letterbox-black row: the bar measured 0. Strict, so
-/// a lit patch of the game world (16 and up) never counts as black. The
-/// check cannot tell a letterbox bar from a black game world (luma 0 on
-/// some Practice Range Tabs), so the outer-band exception in
-/// [`snap_to_card`] also needs a cut the correction moved.
-const CARD_BLACK_MAX_LUMA: f64 = 4.0;
 
 /// Why [`snap_to_card`] keeps no cut.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -311,9 +295,7 @@ pub(crate) enum SnapMiss {
     },
     /// The cut `(x, y, side)`'s far edges hold, but its top edge, searched
     /// again over its outer left and right column bands, is not within 1 px
-    /// of the cut's top (nor, on a cut the letterbox correction moved up,
-    /// within 1 px of the found top past only letterbox-black rows): the
-    /// top found on each band, `None` where none was.
+    /// of the cut's top: the top found on each band, `None` where none was.
     OuterTop {
         cut: (u32, u32, u32),
         tops: [Option<u32>; 2],
@@ -354,34 +336,20 @@ pub(crate) enum SnapMiss {
 /// with little margin. The top version can also drop a correct card once
 /// dark art covers about a quarter of an outer band near the top.
 ///
-/// Letterbox: when the bottom drop lands earlier than the cut's bottom,
-/// the top it implies (`bottom_drop - side + 1`) is above the found top by
-/// at most [`CARD_CLIP_MAX`], and every middle band row from the implied
-/// top to the found one is letterbox-black (mean luma at most
-/// [`CARD_BLACK_MAX_LUMA`]), the cut is moved up to the implied top and
-/// its far edges checked again. That is a card whose top rows a black bar
-/// clipped: the cut keeps the card's side and framing, and its top rows
-/// are black. The side is not measured from the visible height (220 px on
-/// the clipped Tabs, which would cut 7 px off the card's right). On a cut
-/// so moved, and only there, an outer band whose first step lies within 1
-/// px of the found top, with only black rows from the cut's top to it,
-/// holds too. On an unmoved cut that exception would also pass a black
-/// game world above a wide lit patch, which the black check cannot tell
-/// from a bar. Residuals: on a letterboxed Tab beside the navy panel the
-/// outer-top guard catches no left shift (both outer bands see the bar
-/// and step at the found top) and the right drop catches none either, so
-/// a lit patch left of the card that reaches the bar (tall, or on the
-/// card's rows) is kept shifted at any width the left search reaches, and
-/// a partial one under about 45 px; a wider partial one is still
-/// OuterTop. And with black above the card, a bottom drop k px early (up
-/// to [`CARD_CLIP_MAX`]) moves the cut up k px: a card painted 2 px short
-/// beside the navy panel is cut from 1 px above its top rather than
-/// dropped (the measured bottoms, a drop of at least 18 on the 55 Practice
-/// Range Tabs, make this unlikely). The outer top caps stay
-/// at [`CARD_GAP_MAX_LUMA`] and [`CARD_MIN_STEP`]: on live 5v5 Tabs a soft
-/// navy rim over an outer band (a gap of 21 to 31, a rise of 8 to 15)
-/// drops some true cards, but caps loose enough to keep them also keep a
-/// cut shifted 30 px left onto a tall or partial lit world patch.
+/// The outer top caps stay at [`CARD_GAP_MAX_LUMA`] and [`CARD_MIN_STEP`]:
+/// on live 5v5 Tabs (full captures) a soft navy rim over an outer band (a
+/// gap of 21 to 31, a rise of 8 to 15) drops some true cards, while caps
+/// loose enough to keep them also keep a cut shifted 30 px left onto a
+/// tall or partial lit world patch.
+///
+/// A black row band over the card's top (a bar, or a black game world
+/// above a card whose bottom drop lands early) keeps no cut
+/// ([`SnapMiss::FarEdge`]), by design: the cut is never moved up to the
+/// top the bottom drop implies, which would also keep a cut shifted up by
+/// a card bottom that reads short. Debug board crops, and frames rebuilt
+/// from them, clip the card's top 7 px at 1440p (5 at 1080p), so they
+/// cannot test the top edge: test this snap on full frames only.
+///
 /// [`SnapMiss::NearEdge`] when either near edge is not found or the square
 /// would leave the frame, [`SnapMiss::FarEdge`] when a far edge does not
 /// hold, [`SnapMiss::OuterTop`] when an outer top does not.
@@ -414,72 +382,31 @@ pub(crate) fn snap_to_card(
         let top = card_edge(row, y0, (reach, window, sustain), h)?;
         (left + side <= w && top + side <= h).then_some((left, top))
     };
-    let (left, found_top) = near().ok_or(SnapMiss::NearEdge)?;
-    let cols = band(left, w).ok_or(SnapMiss::NearEdge)?;
-    let n_cols = f64::from(cols.len() as u32);
+    let (left, top) = near().ok_or(SnapMiss::NearEdge)?;
+    let (rows, cols) = (band(top, h), band(left, w));
+    let (rows, cols) = rows.zip(cols).ok_or(SnapMiss::NearEdge)?;
+    let (n_rows, n_cols) = (f64::from(rows.len() as u32), f64::from(cols.len() as u32));
+    let column = |x: u32| rows.clone().map(|y| luma(x, y)).sum::<f64>() / n_rows;
     let row = |y: u32| cols.clone().map(|x| luma(x, y)).sum::<f64>() / n_cols;
-    let black = |rows: std::ops::Range<u32>, row: &dyn Fn(u32) -> f64| {
-        rows.into_iter().all(|y| row(y) <= CARD_BLACK_MAX_LUMA)
-    };
     let right_reach = (CARD_RIGHT_SEARCH * u).round() as i64;
     let far = (right_reach, reach, window);
-    let far_check = |top: u32| {
-        let rows = band(top, h).ok_or(SnapMiss::NearEdge)?;
-        let n_rows = f64::from(rows.len() as u32);
-        let column = |x: u32| rows.clone().map(|y| luma(x, y)).sum::<f64>() / n_rows;
-        far_edges_hold(column, (left + side, w), row, (top + side, h), far).map_err(
-            |(right, bottom)| SnapMiss::FarEdge {
-                cut: (left, top, side),
-                right,
-                bottom,
-            },
-        )
-    };
-    let top = match far_check(found_top) {
-        Ok(()) => found_top,
-        Err(miss) => {
-            let clip = (CARD_CLIP_MAX * u).round() as u32;
-            let implied = match miss {
-                SnapMiss::FarEdge {
-                    bottom: Some(drop), ..
-                } => (drop + 1).checked_sub(side),
-                _ => None,
-            };
-            match implied {
-                Some(top)
-                    if top < found_top
-                        && found_top - top <= clip
-                        && black(top..found_top, &row) =>
-                {
-                    far_check(top)?;
-                    top
-                }
-                _ => return Err(miss),
-            }
-        }
-    };
     let cut = (left, top, side);
+    far_edges_hold(column, (left + side, w), row, (top + side, h), far)
+        .map_err(|(right, bottom)| SnapMiss::FarEdge { cut, right, bottom })?;
     let outer_top = |(from, to): (u32, u32)| {
         let cols = (left + from).min(w)..(left + to).min(w);
         if cols.is_empty() {
-            return (None, false);
+            return None;
         }
         let n_cols = f64::from(cols.len() as u32);
         let row = |y: u32| cols.clone().map(|x| luma(x, y)).sum::<f64>() / n_cols;
-        let found = card_edge(row, top, (reach, window, sustain), h);
-        let holds = match found {
-            Some(t) if t.abs_diff(top) <= 1 => true,
-            Some(t) if top < found_top && t.abs_diff(found_top) <= 1 => black(top..t, &row),
-            _ => false,
-        };
-        (found, holds)
+        card_edge(row, top, (reach, window, sustain), h)
     };
-    let (outer_left, outer_right) = (
+    let tops = [
         outer_top((side / 16, side / 4)),
         outer_top((side * 3 / 4, side * 15 / 16)),
-    );
-    let tops = [outer_left.0, outer_right.0];
-    if outer_left.1 && outer_right.1 {
+    ];
+    if tops.iter().all(|t| t.is_some_and(|t| t.abs_diff(top) <= 1)) {
         Ok(cut)
     } else {
         Err(SnapMiss::OuterTop { cut, tops })
@@ -520,14 +447,6 @@ pub(crate) fn snap_to_card(
 /// drop inside the cut is the card's edge only when the gap runs on from
 /// it to past the cut's edge, as it does when a cut lands right of a card
 /// that has a gap beside it.
-///
-/// On 29 accepted live 1440p Tabs a black bar clipped the card's top 7 px:
-/// the found top was 216, so the cut's bottom (444) sat 8 px past the gap
-/// at 436 and this check failed. [`snap_to_card`] then moves the cut's top
-/// to the one the bottom drop implies when the clipped rows are
-/// letterbox-black, and runs this check again on the moved cut, where the
-/// bottom holds. The right drop there is as on the Practice Range: the navy
-/// panel (37) starts 227 px right of the card's left and gives none.
 ///
 /// `Err((right, bottom))` with the drops found (`None` where none was) when
 /// a far edge does not hold.
