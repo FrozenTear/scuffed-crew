@@ -256,7 +256,7 @@ pub(super) const BANS_PICKS_CSS: &str = r#"
         font-weight: 600;
         letter-spacing: 0.04em;
         text-transform: uppercase;
-        color: var(--text-3);
+        color: var(--text-subtle);
     }
     .game-bp-list {
         display: flex;
@@ -269,14 +269,14 @@ pub(super) const BANS_PICKS_CSS: &str = r#"
     .game-bp-item {
         max-width: 100%;
         padding: 0.3rem 0.65rem;
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         border: 1px solid var(--border);
         border-radius: 999px;
         font-size: 0.9rem;
         color: var(--text);
         overflow-wrap: anywhere;
     }
-    .game-bp-item-muted { color: var(--text-3); }
+    .game-bp-item-muted { color: var(--text-subtle); }
 "#;
 
 /// The section for one game. Renders nothing when the field is absent, empty,
@@ -359,7 +359,7 @@ pub(super) const BANS_PICKS_CARD_CSS: &str = r#"
         padding: 0;
         list-style: none;
         font-size: 0.75rem;
-        color: var(--text-2);
+        color: var(--text-3);
     }
     .match-card .match-bp-group {
         display: flex;
@@ -369,7 +369,7 @@ pub(super) const BANS_PICKS_CARD_CSS: &str = r#"
         min-width: 0;
     }
     .match-card .match-bp-label {
-        color: var(--text-3);
+        color: var(--text-subtle);
         white-space: nowrap;
     }
     .match-card .match-bp-pills {
@@ -384,14 +384,14 @@ pub(super) const BANS_PICKS_CARD_CSS: &str = r#"
     .match-card .match-bp-pill {
         max-width: 100%;
         padding: 0 0.45rem;
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         border: 1px solid var(--border);
         border-radius: 999px;
         color: var(--text);
         overflow-wrap: anywhere;
     }
     .match-card:hover .match-bp-pill { background: var(--surface); }
-    .match-card .match-bp-pill-muted { color: var(--text-3); }
+    .match-card .match-bp-pill-muted { color: var(--text-subtle); }
 "#;
 
 /// A compact read-only line for a match list card. Renders nothing when the

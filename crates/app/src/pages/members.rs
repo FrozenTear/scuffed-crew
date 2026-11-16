@@ -136,7 +136,7 @@ const PAGE_CSS: &str = r#"
         border-radius: 50%;
         margin: 0 auto 1rem;
         overflow: hidden;
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         display: flex;
         align-items: center;
         justify-content: center;
@@ -149,7 +149,7 @@ const PAGE_CSS: &str = r#"
     .member-initials {
         font-family: var(--font-head);
         font-size: 1.4rem;
-        color: var(--accent);
+        color: var(--accent-text);
         letter-spacing: 2px;
     }
     .member-name {
@@ -160,7 +160,7 @@ const PAGE_CSS: &str = r#"
         margin: 0 0 0.5rem;
     }
     .member-bio {
-        color: var(--text-2);
+        color: var(--text-3);
         font-size: 0.8rem;
         line-height: 1.5;
         margin-top: 0.75rem;
@@ -173,21 +173,21 @@ const PAGE_CSS: &str = r#"
         margin-top: 0.75rem;
         font-family: var(--font-head);
         font-size: 0.8rem;
-        color: var(--accent);
+        color: var(--accent-text);
         letter-spacing: 0.5px;
     }
     .member-hero-stat.muted {
-        color: var(--text-3);
+        color: var(--text-subtle);
     }
     .members-rule-note {
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-size: 0.8rem;
         margin: 0 0 1rem;
     }
     .member-main-role {
         margin-top: 0.4rem;
         font-size: 0.75rem;
-        color: var(--text-2);
+        color: var(--text-3);
         text-transform: capitalize;
     }
     .member-pills {

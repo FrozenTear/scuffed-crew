@@ -70,7 +70,7 @@ const PAGE_CSS: &str = r#"
         display: inline-flex;
         align-items: center;
         gap: 0.35rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-size: 0.8rem;
         margin-bottom: 1.5rem;
         text-decoration: none;
@@ -102,19 +102,19 @@ const PAGE_CSS: &str = r#"
     }
     .thread-badge-pin {
         background: color-mix(in srgb, var(--accent) 20%, transparent);
-        color: var(--accent);
+        color: var(--accent-text);
     }
     .thread-badge-locked {
-        background: color-mix(in srgb, var(--danger) 20%, transparent);
-        color: var(--danger);
+        background: color-mix(in srgb, var(--loss) 20%, transparent);
+        color: var(--loss);
     }
     .thread-badge-cat {
-        background: color-mix(in srgb, var(--text-2) 15%, transparent);
-        color: var(--text-2);
+        background: color-mix(in srgb, var(--text-3) 15%, transparent);
+        color: var(--text-3);
     }
     .thread-meta {
         font-size: 0.75rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
     }
     .thread-op {
         background: var(--surface);
@@ -124,7 +124,7 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 2rem;
     }
     .thread-op-content {
-        color: var(--text-2);
+        color: var(--text-3);
         font-size: 0.9rem;
         line-height: 1.7;
         white-space: pre-wrap;
@@ -151,11 +151,11 @@ const PAGE_CSS: &str = r#"
     }
     .thread-reply-meta {
         font-size: 0.7rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         margin-bottom: 0.5rem;
     }
     .thread-reply-content {
-        color: var(--text-2);
+        color: var(--text-3);
         font-size: 0.85rem;
         line-height: 1.6;
         white-space: pre-wrap;
@@ -192,7 +192,7 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 0.75rem;
     }
     .thread-compose-textarea:focus {
-        border-color: var(--accent);
+        border-color: var(--accent-solid);
     }
     .thread-compose-actions {
         display: flex;
@@ -200,8 +200,8 @@ const PAGE_CSS: &str = r#"
     }
     .thread-reply-btn {
         padding: 0.5rem 1rem;
-        background: var(--accent);
-        color: var(--accent-fg);
+        background: var(--accent-solid);
+        color: var(--on-accent);
         border: none;
         border-radius: 6px;
         font-size: 0.85rem;
@@ -211,7 +211,7 @@ const PAGE_CSS: &str = r#"
     .thread-reply-btn:hover { filter: brightness(1.15); }
     .thread-reply-btn:disabled { opacity: 0.5; cursor: not-allowed; }
     .thread-locked-notice {
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-size: 0.85rem;
         text-align: center;
         padding: 1rem;
@@ -220,12 +220,12 @@ const PAGE_CSS: &str = r#"
         border-radius: 8px;
     }
     .thread-loading, .thread-error {
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-align: center;
         padding: 3rem 0;
     }
     .thread-no-replies {
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-size: 0.85rem;
         text-align: center;
         padding: 1.5rem;

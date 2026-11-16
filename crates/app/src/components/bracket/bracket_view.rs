@@ -51,7 +51,7 @@ pub fn BracketView(
         },
 
         _ => rsx! {
-            p { style: "color: var(--text-3);", "Unknown tournament format." }
+            p { style: "color: var(--text-subtle);", "Unknown tournament format." }
         },
     }
 }

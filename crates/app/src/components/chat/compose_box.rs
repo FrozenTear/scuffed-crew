@@ -157,11 +157,11 @@ const COMPOSE_BOX_CSS: &str = r#"
 }
 
 .chat-compose__input::placeholder {
-    color: var(--text-3);
+    color: var(--text-subtle);
 }
 
 .chat-compose__input:focus {
-    border-color: var(--accent);
+    border-color: var(--accent-solid);
 }
 
 .chat-compose__input:disabled {
@@ -173,8 +173,8 @@ const COMPOSE_BOX_CSS: &str = r#"
     padding: 8px 14px;
     border: none;
     border-radius: 8px;
-    background: var(--accent);
-    color: var(--accent-fg);
+    background: var(--accent-solid);
+    color: var(--on-accent);
     font-size: 13px;
     font-weight: 600;
     cursor: pointer;
@@ -197,14 +197,14 @@ const COMPOSE_BOX_CSS: &str = r#"
 
 .chat-compose__hint {
     font-size: 10px;
-    color: var(--text-3);
+    color: var(--text-subtle);
     padding: 2px 12px 4px;
     background: var(--surface);
 }
 
 .chat-compose__counter {
     font-size: 11px;
-    color: var(--text-3);
+    color: var(--text-subtle);
     text-align: right;
     padding: 0 12px 6px;
     background: var(--surface);
@@ -214,7 +214,7 @@ const COMPOSE_BOX_CSS: &str = r#"
 }
 
 .chat-compose__counter--over {
-    color: var(--danger);
+    color: var(--loss);
 }
 "#;
 

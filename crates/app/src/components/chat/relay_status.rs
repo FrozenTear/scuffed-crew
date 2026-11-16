@@ -20,8 +20,8 @@ const RELAY_STATUS_CSS: &str = r#"
 }
 
 .relay-status--ready {
-    background-color: color-mix(in srgb, var(--ok) 15%, transparent);
-    color: var(--ok);
+    background-color: color-mix(in srgb, var(--win) 15%, transparent);
+    color: var(--win);
 }
 
 .relay-status--connected,
@@ -36,14 +36,14 @@ const RELAY_STATUS_CSS: &str = r#"
 }
 
 .relay-status--reconnecting {
-    background-color: color-mix(in srgb, var(--danger) 15%, transparent);
-    color: var(--danger);
+    background-color: color-mix(in srgb, var(--loss) 15%, transparent);
+    color: var(--loss);
 }
 
 .relay-status--disconnected,
 .relay-status--error {
-    background-color: color-mix(in srgb, var(--danger) 15%, transparent);
-    color: var(--danger);
+    background-color: color-mix(in srgb, var(--loss) 15%, transparent);
+    color: var(--loss);
 }
 
 .relay-status__dot {
@@ -55,7 +55,7 @@ const RELAY_STATUS_CSS: &str = r#"
 }
 
 .relay-status--ready .relay-status__dot {
-    background-color: var(--ok);
+    background-color: var(--win);
 }
 
 .relay-status--connected .relay-status__dot,
@@ -66,13 +66,13 @@ const RELAY_STATUS_CSS: &str = r#"
 }
 
 .relay-status--reconnecting .relay-status__dot {
-    background-color: var(--danger);
+    background-color: var(--loss);
     animation: relay-pulse 1s ease-in-out infinite;
 }
 
 .relay-status--disconnected .relay-status__dot,
 .relay-status--error .relay-status__dot {
-    background-color: var(--danger);
+    background-color: var(--loss);
 }
 
 .relay-status__retry {
@@ -89,7 +89,7 @@ const RELAY_STATUS_CSS: &str = r#"
 }
 
 .relay-status__retry:hover {
-    background-color: color-mix(in srgb, var(--danger) 20%, transparent);
+    background-color: color-mix(in srgb, var(--loss) 20%, transparent);
 }
 
 @keyframes relay-pulse {

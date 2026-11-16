@@ -168,7 +168,7 @@ const EDITOR_CSS: &str = r#"
     .sidebar-collapse-btn {
         background: none;
         border: none;
-        color: var(--text-3);
+        color: var(--text-subtle);
         cursor: pointer;
         padding: 0.2rem 0.4rem;
         font-size: 0.7rem;
@@ -177,7 +177,7 @@ const EDITOR_CSS: &str = r#"
         flex-shrink: 0;
     }
     .sidebar-collapse-btn:hover {
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         color: var(--text);
     }
     .sidebar-content {
@@ -222,9 +222,9 @@ const EDITOR_CSS: &str = r#"
         width: 100%;
         padding: 0.15rem;
         text-align: center;
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         border: none;
-        color: var(--text-3);
+        color: var(--text-subtle);
         cursor: pointer;
         font-size: 0.65rem;
         transition: background 0.15s, color 0.15s;
@@ -246,11 +246,11 @@ const EDITOR_CSS: &str = r#"
         border-radius: 4px;
         cursor: pointer;
         font-size: 0.8rem;
-        color: var(--text-2);
+        color: var(--text-3);
         transition: background 0.1s;
     }
     .element-list-item:hover {
-        background: var(--surface-2);
+        background: var(--surface-sunken);
     }
     .element-list-item.selected {
         background: var(--accent-soft);
@@ -258,7 +258,7 @@ const EDITOR_CSS: &str = r#"
     }
     .element-list-item .el-number {
         font-size: 0.7rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         width: 1.5em;
         text-align: right;
     }
@@ -267,7 +267,7 @@ const EDITOR_CSS: &str = r#"
         padding: 0.1rem 0.35rem;
         border-radius: 3px;
         background: var(--accent-soft);
-        color: var(--accent);
+        color: var(--accent-text);
         text-transform: uppercase;
         letter-spacing: 0.04em;
     }
@@ -288,7 +288,7 @@ const EDITOR_CSS: &str = r#"
         background: var(--surface);
         border-top: 1px solid var(--border);
         font-size: 0.75rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
     }
     .status-item {
         white-space: nowrap;
@@ -296,21 +296,21 @@ const EDITOR_CSS: &str = r#"
     .status-map-link {
         background: none;
         border: none;
-        color: var(--text-2);
+        color: var(--text-3);
         cursor: pointer;
         font-size: 0.75rem;
         padding: 0;
         transition: color 0.15s;
     }
     .status-map-link:hover {
-        color: var(--accent);
+        color: var(--accent-text);
     }
     .status-item.unsaved {
-        color: var(--accent);
+        color: var(--accent-text);
         font-weight: 600;
     }
     .status-item.collaborators {
-        color: var(--text-2);
+        color: var(--text-3);
     }
 
     /* Map picker modal */
@@ -351,7 +351,7 @@ const EDITOR_CSS: &str = r#"
     .map-picker-close {
         background: none;
         border: none;
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-size: 1.2rem;
         cursor: pointer;
         padding: 0.25rem;
@@ -371,15 +371,15 @@ const EDITOR_CSS: &str = r#"
     .map-picker-error {
         margin: 0;
         padding: 0.65rem 0.75rem;
-        border: 1px solid var(--danger);
+        border: 1px solid var(--loss);
         border-radius: 8px;
-        background: color-mix(in srgb, var(--danger) 12%, transparent);
-        color: var(--danger);
+        background: color-mix(in srgb, var(--loss) 12%, transparent);
+        color: var(--loss);
         font-size: 0.85rem;
     }
     .map-picker-mode-title {
         margin: 0 0 0.5rem;
-        color: var(--text-2);
+        color: var(--text-3);
         font-size: 0.7rem;
         font-weight: 600;
         letter-spacing: 0.06em;
@@ -402,14 +402,14 @@ const EDITOR_CSS: &str = r#"
         transition: border-color 0.15s, background 0.15s, color 0.15s;
     }
     .map-picker-item:hover {
-        border-color: var(--accent);
+        border-color: var(--accent-solid);
         color: var(--text);
-        background: var(--surface-2);
+        background: var(--surface-sunken);
     }
     .map-picker-item.selected {
-        border-color: var(--accent);
+        border-color: var(--accent-solid);
         background: var(--accent-soft);
-        color: var(--accent);
+        color: var(--accent-text);
         font-weight: 600;
     }
 
@@ -417,7 +417,7 @@ const EDITOR_CSS: &str = r#"
     .panel-placeholder {
         padding: 0.75rem;
         text-align: center;
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-size: 0.8rem;
         font-style: italic;
     }
@@ -455,7 +455,7 @@ pub fn StrategyEditor(id: String) -> Element {
     match data.as_ref() {
         None => rsx! {
             div {
-                style: "display: flex; align-items: center; justify-content: center; height: 100vh; color: var(--text-3);",
+                style: "display: flex; align-items: center; justify-content: center; height: 100vh; color: var(--text-subtle);",
                 "Loading strategy..."
             }
         },
@@ -465,7 +465,7 @@ pub fn StrategyEditor(id: String) -> Element {
             let label = retry_label(retrying);
             rsx! {
                 div {
-                    style: "display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.75rem; height: 100vh; color: var(--danger);",
+                    style: "display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.75rem; height: 100vh; color: var(--loss);",
                     role: "alert",
                     aria_busy: if retrying { "true" },
                     "{shown.message}"
@@ -1181,7 +1181,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                                             }
                                             span { class: "el-type", "{type_name}" }
                                             if !label.is_empty() {
-                                                span { style: "color: var(--text-2);", "{label}" }
+                                                span { style: "color: var(--text-3);", "{label}" }
                                             }
                                         }
                                     }

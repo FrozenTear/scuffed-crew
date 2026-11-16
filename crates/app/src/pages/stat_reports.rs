@@ -103,9 +103,9 @@ const REPORTS_CSS: &str = r#"
     font-family: var(--font-head); font-size: 1.8rem; color: var(--text);
     letter-spacing: 0.04em; margin: 0 0 0.75rem;
 }
-.reports-intro { color: var(--text-2); font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem; }
-.reports-status { color: var(--text-3); padding: 1.5rem 0; }
-.reports-error { color: var(--danger); }
+.reports-intro { color: var(--text-3); font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem; }
+.reports-status { color: var(--text-subtle); padding: 1.5rem 0; }
+.reports-error { color: var(--loss); }
 /* The download status region stays mounted; take no space while it is empty. */
 .reports-error:empty { margin-top: 0; }
 /* The table scrolls here. max-width and min-width keep that scroll off the page. */
@@ -121,9 +121,9 @@ const REPORTS_CSS: &str = r#"
 }
 .reports-table th {
     font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em;
-    color: var(--text-3); font-weight: 600;
+    color: var(--text-subtle); font-weight: 600;
 }
-.reports-sub { display: block; color: var(--text-2); font-size: 0.8rem; margin-top: 0.2rem; }
+.reports-sub { display: block; color: var(--text-3); font-size: 0.8rem; margin-top: 0.2rem; }
 .report-when { white-space: nowrap; font-variant-numeric: tabular-nums; }
 /* The control label is position:absolute. Without a positioned parent its
    containing block is the viewport, so a label sitting in the wide table
@@ -131,12 +131,12 @@ const REPORTS_CSS: &str = r#"
 .reports-actions { display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; position: relative; }
 .report-btn {
     font-family: var(--font-body); font-weight: 600; font-size: 0.85rem;
-    border-radius: var(--radius-md); padding: 0.4rem 0.75rem; cursor: pointer;
+    border-radius: var(--radius-control); padding: 0.4rem 0.75rem; cursor: pointer;
     background: var(--surface); color: var(--text); border: 1px solid var(--border);
     text-decoration: none; display: inline-flex; align-items: center;
     overflow-wrap: normal; word-break: normal;
 }
-.report-btn-danger { background: var(--danger); color: var(--accent-fg); border: none; }
+.report-btn-danger { background: var(--loss); color: var(--on-loss); border: none; }
 .report-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .report-member-name {
     display: block; overflow-wrap: anywhere; word-break: break-word;
@@ -150,7 +150,7 @@ const REPORTS_CSS: &str = r#"
     font-family: var(--font-mono); font-size: 0.8rem;
 }
 .report-member-id-sub {
-    color: var(--text-3); font-size: 0.72rem; margin-top: 0.15rem;
+    color: var(--text-subtle); font-size: 0.72rem; margin-top: 0.15rem;
 }
 td.report-member, td.report-note {
     min-width: 0; max-width: 100%; overflow: hidden;
@@ -166,7 +166,7 @@ td.report-member, td.report-note {
 }
 .report-note-more { margin-top: 0.25rem; }
 .report-note-more summary {
-    cursor: pointer; color: var(--accent); font-size: 0.8rem;
+    cursor: pointer; color: var(--accent-text); font-size: 0.8rem;
 }
 .report-type { white-space: nowrap; }
 .report-control-label {
@@ -182,7 +182,7 @@ td.report-member, td.report-note {
     padding: 1.5rem; max-width: 28rem; width: 100%;
 }
 .report-dialog h2 { font-family: var(--font-head); color: var(--text); font-size: 1.2rem; margin: 0 0 0.75rem; }
-.report-dialog p { color: var(--text-2); line-height: 1.5; margin: 0 0 1rem; }
+.report-dialog p { color: var(--text-3); line-height: 1.5; margin: 0 0 1rem; }
 .report-dialog-actions { display: flex; justify-content: flex-end; gap: 0.6rem; flex-wrap: wrap; }
 .report-card-label { display: none; }
 /* Wide pages: fit the table to the page so Delete and Withdraw stay on screen. */
@@ -236,7 +236,7 @@ td.report-member, td.report-note {
     .report-when { white-space: normal; }
     .report-card-label {
         display: block; font-size: 0.7rem; letter-spacing: 0.04em;
-        text-transform: uppercase; color: var(--text-3); font-weight: 600;
+        text-transform: uppercase; color: var(--text-subtle); font-weight: 600;
         margin-bottom: 0.15rem;
     }
     .reports-table td > .reports-actions {

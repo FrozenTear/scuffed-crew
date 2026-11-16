@@ -456,7 +456,7 @@ const CSS: &str = r#"
 .link-card p.lead,
 .link-card h2.link-step,
 .link-card p.note {
-    color: var(--text-2);
+    color: var(--text-3);
     font-size: 0.9rem;
     font-weight: 400;
     font-family: inherit;
@@ -464,7 +464,7 @@ const CSS: &str = r#"
     line-height: 1.45;
 }
 .link-card h2.link-step:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--focus-ring);
     outline-offset: 2px;
 }
 .link-field {
@@ -475,7 +475,7 @@ const CSS: &str = r#"
 }
 .link-field label {
     font-size: 0.75rem;
-    color: var(--text-3);
+    color: var(--text-subtle);
     text-transform: uppercase;
     letter-spacing: 0.04em;
 }
@@ -490,7 +490,7 @@ const CSS: &str = r#"
     letter-spacing: 0.08em;
 }
 .link-error {
-    color: var(--danger);
+    color: var(--loss);
     font-size: 0.85rem;
     margin: 0 0 1rem;
 }
@@ -506,7 +506,7 @@ const CSS: &str = r#"
     font-size: 0.9rem;
 }
 .link-facts dt {
-    color: var(--text-3);
+    color: var(--text-subtle);
     margin: 0;
 }
 .link-facts dd {
@@ -524,11 +524,11 @@ const CSS: &str = r#"
     flex: 1;
 }
 .link-card a {
-    color: var(--accent);
+    color: var(--accent-text);
     font-weight: 600;
 }
 .link-wait {
-    color: var(--text-2);
+    color: var(--text-3);
     text-align: center;
 }
 "#;

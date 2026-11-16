@@ -8,21 +8,21 @@
 use dioxus::prelude::*;
 
 pub const INLINE_CONFIRM_CSS: &str = r#"
-.inline-confirm { border: 1px solid var(--danger); border-radius: var(--radius-md);
+.inline-confirm { border: 1px solid var(--loss); border-radius: var(--radius-control);
   padding: var(--space-3); background: transparent; color: var(--text);
   display: flex; flex-direction: column; gap: var(--space-2); }
 .inline-confirm__title { font-size: var(--text-sm); font-weight: 600; margin: 0; }
-.inline-confirm__body { font-size: var(--text-sm); color: var(--text-2); margin: 0; line-height: 1.5; }
+.inline-confirm__body { font-size: var(--text-sm); color: var(--text-3); margin: 0; line-height: 1.5; }
 .inline-confirm__actions { display: flex; justify-content: flex-end; gap: var(--space-2); }
 .inline-confirm__cancel, .inline-confirm__go { font-family: var(--font-body); font-size: var(--text-sm);
-  font-weight: 600; border-radius: var(--radius-md); padding: var(--space-2) var(--space-4);
+  font-weight: 600; border-radius: var(--radius-control); padding: var(--space-2) var(--space-4);
   cursor: pointer; }
 .inline-confirm__cancel { background: transparent; color: var(--text); border: 1px solid var(--border); }
-.inline-confirm__cancel:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.inline-confirm__go { background: var(--danger); color: var(--accent-fg); border: 1px solid var(--danger); }
+.inline-confirm__cancel:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.inline-confirm__go { background: var(--loss); color: var(--on-loss); border: 1px solid var(--loss); }
 .inline-confirm__go:hover:not(:disabled) { filter: brightness(1.08); }
 .inline-confirm__cancel:disabled, .inline-confirm__go:disabled { opacity: .5; cursor: not-allowed; }
-.inline-confirm__hint { font-size: var(--text-xs); color: var(--text-3); margin: 0; text-align: right; }
+.inline-confirm__hint { font-size: var(--text-xs); color: var(--text-subtle); margin: 0; text-align: right; }
 "#;
 
 /// True for the key that cancels the strip. Pure so it can be tested.

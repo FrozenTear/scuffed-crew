@@ -278,7 +278,7 @@ pub(super) const RANK_CSS: &str = r#"
         gap: 0.1rem 0.35rem;
         max-width: 100%;
         padding: 0.05rem 0.5rem;
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         border: 1px solid var(--border);
         border-radius: 999px;
         font-size: 0.75rem;
@@ -286,7 +286,7 @@ pub(super) const RANK_CSS: &str = r#"
         font-variant-numeric: tabular-nums;
         overflow-wrap: anywhere;
     }
-    .rank-badge-sep { color: var(--text-3); }
+    .rank-badge-sep { color: var(--text-subtle); }
     .match-card .match-rank {
         grid-column: 1 / -1;
         min-width: 0;
@@ -295,7 +295,7 @@ pub(super) const RANK_CSS: &str = r#"
     .game-rank-queue {
         display: inline-block;
         white-space: nowrap;
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-size: 0.8rem;
         margin-left: 0.4rem;
     }
@@ -314,13 +314,13 @@ pub(super) const RANK_CSS: &str = r#"
         font-size: 1rem;
         color: var(--text);
     }
-    .rank-chart-status { margin: 0.5rem 0; font-size: 0.8rem; color: var(--text-2); }
+    .rank-chart-status { margin: 0.5rem 0; font-size: 0.8rem; color: var(--text-3); }
     /* The svg scales to its width, text too. Capped so the axis labels stay
        about 11 to 13px from a 360px phone up to desktop. */
     .rank-chart-plot { max-width: 360px; }
     .rank-chart-svg { display: block; width: 100%; height: auto; overflow: visible; }
     .rank-chart-grid { stroke: var(--border); stroke-width: 1; }
-    .rank-chart-axis { fill: var(--text-3); font-size: 11.75px; }
+    .rank-chart-axis { fill: var(--text-subtle); font-size: 11.75px; }
     .rank-chart-line { fill: none; stroke: var(--chart-1); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
     .rank-chart-dot { fill: var(--chart-1); stroke: var(--surface); stroke-width: 2; }
     .rank-chart-ends {
@@ -328,11 +328,11 @@ pub(super) const RANK_CSS: &str = r#"
         justify-content: space-between;
         gap: 0.5rem;
         font-size: 0.75rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
     }
-    .rank-chart-note { margin: 0.4rem 0 0; font-size: 0.75rem; color: var(--text-3); }
+    .rank-chart-note { margin: 0.4rem 0 0; font-size: 0.75rem; color: var(--text-subtle); }
     .rank-chart-table-wrap { margin-top: 0.5rem; font-size: 0.8rem; }
-    .rank-chart-table-wrap summary { cursor: pointer; color: var(--text-2); }
+    .rank-chart-table-wrap summary { cursor: pointer; color: var(--text-3); }
     .rank-chart-table { width: 100%; border-collapse: collapse; margin-top: 0.4rem; }
     .rank-chart-table th,
     .rank-chart-table td {
@@ -342,7 +342,7 @@ pub(super) const RANK_CSS: &str = r#"
         font-variant-numeric: tabular-nums;
         overflow-wrap: anywhere;
     }
-    .rank-chart-table th { color: var(--text-3); font-weight: 600; }
+    .rank-chart-table th { color: var(--text-subtle); font-weight: 600; }
 "#;
 
 /// A compact read-only badge for a match card. Renders nothing without a rank

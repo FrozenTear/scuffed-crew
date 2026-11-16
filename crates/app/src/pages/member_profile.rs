@@ -87,7 +87,7 @@ const PAGE_CSS: &str = r#"
         margin: 0 auto;
     }
     .profile-loading {
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-align: center;
         padding: 3rem 0;
     }
@@ -102,7 +102,7 @@ const PAGE_CSS: &str = r#"
         height: 120px;
         border-radius: 50%;
         overflow: hidden;
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         display: flex;
         align-items: center;
         justify-content: center;
@@ -116,7 +116,7 @@ const PAGE_CSS: &str = r#"
     .profile-avatar-large .member-initials {
         font-family: var(--font-head);
         font-size: 2.4rem;
-        color: var(--accent);
+        color: var(--accent-text);
         letter-spacing: 3px;
     }
     .profile-info {
@@ -133,7 +133,7 @@ const PAGE_CSS: &str = r#"
         line-height: 1;
     }
     .profile-joined {
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-size: 0.8rem;
         margin: 0;
     }
@@ -150,7 +150,7 @@ const PAGE_CSS: &str = r#"
         letter-spacing: 0.04em;
     }
     .profile-bio {
-        color: var(--text-2);
+        color: var(--text-3);
         font-size: 0.9rem;
         line-height: 1.7;
         margin: 0;
@@ -167,7 +167,7 @@ const PAGE_CSS: &str = r#"
         min-width: 0;
     }
     .profile-team-link:hover .profile-team-name {
-        color: var(--accent);
+        color: var(--accent-text);
     }
     .profile-team-name {
         font-family: var(--font-head);
@@ -176,7 +176,7 @@ const PAGE_CSS: &str = r#"
     }
     .profile-team-role {
         font-size: 0.7rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-transform: uppercase;
     }
     .profile-account-name {
@@ -187,7 +187,7 @@ const PAGE_CSS: &str = r#"
     .profile-account-id {
         font-family: var(--font-mono);
         font-size: 0.75rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
     }
     .profile-card-row {
         display: flex;
@@ -201,7 +201,7 @@ const PAGE_CSS: &str = r#"
         border-top: 1px solid var(--border);
     }
     .profile-back a {
-        color: var(--accent);
+        color: var(--accent-text);
         text-decoration: none;
         font-size: 0.85rem;
         font-weight: 600;
@@ -221,7 +221,7 @@ const PAGE_CSS: &str = r#"
         margin-top: 0.2rem;
     }
     .profile-socials a {
-        color: var(--accent);
+        color: var(--accent-text);
         text-decoration: none;
         font-size: 0.8rem;
         font-weight: 600;
@@ -234,7 +234,7 @@ const PAGE_CSS: &str = r#"
         gap: 0.5rem;
         margin-top: 0.4rem;
         font-size: 0.72rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-transform: uppercase;
         letter-spacing: 0.03em;
     }
@@ -251,7 +251,7 @@ const PAGE_CSS: &str = r#"
     }
     .profile-hero-meta {
         font-size: 0.75rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         margin-top: 0.25rem;
     }
     .profile-show-all {
@@ -260,7 +260,7 @@ const PAGE_CSS: &str = r#"
         border: none;
         padding: 0;
         cursor: pointer;
-        color: var(--accent);
+        color: var(--accent-text);
         font-size: 0.85rem;
         font-weight: 600;
         font-family: inherit;

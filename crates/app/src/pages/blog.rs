@@ -67,7 +67,7 @@ const PAGE_CSS: &str = r#"
         align-items: center;
         gap: 0.75rem;
         font-size: 0.7rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         margin-bottom: 0.5rem;
     }
     .blog-card-title {
@@ -78,13 +78,13 @@ const PAGE_CSS: &str = r#"
         margin: 0 0 0.5rem;
     }
     .blog-card-summary {
-        color: var(--text-2);
+        color: var(--text-3);
         font-size: 0.85rem;
         line-height: 1.7;
         margin: 0;
     }
     .blog-loading, .blog-empty {
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-align: center;
         padding: 3rem 0;
     }

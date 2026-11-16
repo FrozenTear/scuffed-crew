@@ -37,7 +37,7 @@ const CSS: &str = r#"
     font-size: 1rem;
 }
 .setup-hint {
-    color: var(--text-3);
+    color: var(--text-subtle);
     font-size: 0.8rem;
     margin: 0.25rem 0 0;
 }
@@ -48,7 +48,7 @@ const CSS: &str = r#"
     margin: 0 0 0.5rem;
 }
 .setup-card p.lead {
-    color: var(--text-2);
+    color: var(--text-3);
     font-size: 0.9rem;
     margin: 0 0 1.5rem;
 }
@@ -60,7 +60,7 @@ const CSS: &str = r#"
 }
 .setup-field label {
     font-size: 0.75rem;
-    color: var(--text-3);
+    color: var(--text-subtle);
     text-transform: uppercase;
     letter-spacing: 0.04em;
 }
@@ -73,7 +73,7 @@ const CSS: &str = r#"
     font-size: 1rem;
 }
 .setup-error {
-    color: var(--danger);
+    color: var(--loss);
     font-size: 0.85rem;
     margin-bottom: 1rem;
 }
@@ -84,7 +84,7 @@ const CSS: &str = r#"
 .setup-pack-meta {
     font-family: var(--font-mono);
     font-size: 0.72rem;
-    color: var(--text-2);
+    color: var(--text-3);
     margin: 0.35rem 0 0;
     letter-spacing: 0.02em;
 }

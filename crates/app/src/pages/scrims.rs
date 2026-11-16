@@ -68,7 +68,7 @@ const PAGE_CSS: &str = r#"
     margin: 0 0 0.25rem;
 }
 .scrims-subtitle {
-    color: var(--text-2);
+    color: var(--text-3);
     font-size: 0.9rem;
     margin: 0 0 2rem;
 }
@@ -83,8 +83,8 @@ const PAGE_CSS: &str = r#"
     gap: 0.5rem;
 }
 .scrims-section-title .count {
-    background: var(--surface-2);
-    color: var(--text-3);
+    background: var(--surface-sunken);
+    color: var(--text-subtle);
     font-size: 0.7rem;
     padding: 0.1rem 0.5rem;
     border-radius: var(--radius-pill);
@@ -103,10 +103,10 @@ const PAGE_CSS: &str = r#"
     flex-direction: column;
     gap: 0.5rem;
 }
-.scrim-card.open { border-left: 3px solid var(--ok); }
-.scrim-card.confirmed { border-left: 3px solid var(--accent); }
-.scrim-card.completed { border-left: 3px solid var(--text-3); }
-.scrim-card.cancelled { border-left: 3px solid var(--danger); opacity: 0.6; }
+.scrim-card.open { border-left: 3px solid var(--win); }
+.scrim-card.confirmed { border-left: 3px solid var(--accent-text); }
+.scrim-card.completed { border-left: 3px solid var(--text-subtle); }
+.scrim-card.cancelled { border-left: 3px solid var(--loss); opacity: 0.6; }
 .scrim-header {
     display: flex;
     align-items: center;
@@ -130,32 +130,32 @@ const PAGE_CSS: &str = r#"
     letter-spacing: 0.04em;
 }
 .scrim-status.open {
-    background: color-mix(in srgb, var(--ok) 15%, transparent);
-    color: var(--ok);
+    background: color-mix(in srgb, var(--win) 15%, transparent);
+    color: var(--win);
 }
 .scrim-status.confirmed {
     background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
 }
 .scrim-status.completed {
-    background: color-mix(in srgb, var(--text-2) 15%, transparent);
-    color: var(--text-2);
+    background: color-mix(in srgb, var(--text-3) 15%, transparent);
+    color: var(--text-3);
 }
 .scrim-status.cancelled {
-    background: color-mix(in srgb, var(--danger) 15%, transparent);
-    color: var(--danger);
+    background: color-mix(in srgb, var(--loss) 15%, transparent);
+    color: var(--loss);
 }
 .scrim-details {
     display: flex;
     gap: 1.25rem;
     font-size: 0.8rem;
-    color: var(--text-2);
+    color: var(--text-3);
     flex-wrap: wrap;
 }
 .scrim-details span { display: flex; align-items: center; gap: 0.25rem; }
 .scrim-notes {
     font-size: 0.8rem;
-    color: var(--text-3);
+    color: var(--text-subtle);
     font-style: italic;
 }
 .scrim-opponent {
@@ -175,35 +175,35 @@ const PAGE_CSS: &str = r#"
     text-transform: uppercase;
     letter-spacing: 0.03em;
     border: 1px solid var(--border);
-    background: var(--surface-2);
-    color: var(--text-2);
+    background: var(--surface-sunken);
+    color: var(--text-3);
     cursor: pointer;
     transition: all 0.15s;
 }
 .scrim-btn:hover { border-color: var(--accent-soft); color: var(--text); }
 .scrim-btn.confirm {
     border-color: color-mix(in srgb, var(--accent) 40%, transparent);
-    color: var(--accent);
+    color: var(--accent-text);
 }
 .scrim-btn.confirm:hover {
     background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 .scrim-btn.cancel {
-    border-color: color-mix(in srgb, var(--danger) 40%, transparent);
-    color: var(--danger);
+    border-color: color-mix(in srgb, var(--loss) 40%, transparent);
+    color: var(--loss);
 }
 .scrim-btn.cancel:hover {
-    background: color-mix(in srgb, var(--danger) 12%, transparent);
+    background: color-mix(in srgb, var(--loss) 12%, transparent);
 }
 .scrim-btn.complete {
-    border-color: color-mix(in srgb, var(--ok) 40%, transparent);
-    color: var(--ok);
+    border-color: color-mix(in srgb, var(--win) 40%, transparent);
+    color: var(--win);
 }
 .scrim-btn.complete:hover {
-    background: color-mix(in srgb, var(--ok) 12%, transparent);
+    background: color-mix(in srgb, var(--win) 12%, transparent);
 }
 .scrims-loading, .scrims-empty {
-    color: var(--text-3);
+    color: var(--text-subtle);
     text-align: center;
     padding: 3rem 0;
 }
@@ -239,7 +239,7 @@ const PAGE_CSS: &str = r#"
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    color: var(--text-3);
+    color: var(--text-subtle);
 }
 .scrim-form-input, .scrim-form-select, .scrim-form-textarea {
     background: var(--bg);
@@ -251,7 +251,7 @@ const PAGE_CSS: &str = r#"
     font-family: inherit;
 }
 .scrim-form-input:focus, .scrim-form-select:focus, .scrim-form-textarea:focus {
-    border-color: var(--accent);
+    border-color: var(--accent-solid);
 }
 .scrim-form-textarea { resize: vertical; min-height: 60px; }
 .scrim-form-submit {
@@ -262,8 +262,8 @@ const PAGE_CSS: &str = r#"
     text-transform: uppercase;
     letter-spacing: 0.03em;
     border: none;
-    background: var(--accent);
-    color: var(--accent-fg);
+    background: var(--accent-solid);
+    color: var(--on-accent);
     cursor: pointer;
     transition: all 0.15s;
 }
