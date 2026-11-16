@@ -345,7 +345,7 @@ pub fn LiveBlock(
                             if shows_empty_copy(events_phase, !has_events) {
                                 p { class: "home-muted", "{content.schedule_empty}" }
                             } else if events_phase == ListPhase::Ready && has_events {
-                                ul { class: "home-list",
+                                ul { class: "home-list", role: "list",
                                     for e in events.iter() {
                                         {
                                             let day = day_name(e.day_of_week);
@@ -380,7 +380,7 @@ pub fn LiveBlock(
                             if shows_empty_copy(tourneys_phase, !has_tourneys) {
                                 p { class: "home-muted", "{content.tournaments_empty}" }
                             } else if tourneys_phase == ListPhase::Ready && has_tourneys {
-                                ul { class: "home-list",
+                                ul { class: "home-list", role: "list",
                                     for t in live_tournaments.iter() {
                                         {
                                             let (status, tone) = tournament_badge(&t.status);
@@ -729,9 +729,8 @@ pub fn NewsBlock(
                 p { class: "home-muted", "{content.news_empty}" }
             } else if phase == ListPhase::Ready {
                 div { class: "home-stack",
-                    for a in announcements.iter().take(4) {
-                        {render_news_card(a)}
-                    }
+                    // Mapped, so the key on each card's root reaches the list.
+                    {announcements.iter().take(4).map(render_news_card)}
                 }
                 Link { to: Route::News {}, class: "home-link", "{content.news_view_all}" }
             }
@@ -742,14 +741,16 @@ pub fn NewsBlock(
 /// The date is the same "8 Nov 2026" the News page prints.
 fn render_news_card(a: &Announcement) -> Element {
     rsx! {
+        // The heading comes first in the document, so a card is announced
+        // by its title; CSS draws the Pinned badge and date above it.
         article { key: "{a.id}", class: "home-card home-news-card",
+            h3 { class: "home-card-title", "{a.title}" }
             div { class: "home-news-meta",
                 if a.pinned {
                     Pill { "Pinned" }
                 }
                 {entry_date(&a.created_at)}
             }
-            h3 { class: "home-card-title", "{a.title}" }
             p { class: "home-news-body", "{a.content}" }
         }
     }
@@ -1594,6 +1595,26 @@ mod tests {
         assert!(
             html.contains("<h3 class=\"home-card-title\">Stat Tracker update</h3>"),
             "{html}"
+        );
+        // Each card starts with its heading; the badge and date follow it in
+        // the document and are drawn above it by `order`.
+        assert_eq!(
+            html.matches(
+                "<article class=\"home-card home-news-card\"><h3 class=\"home-card-title\">"
+            )
+            .count(),
+            2,
+            "{html}"
+        );
+        assert_eq!(
+            html.matches("</h3><div class=\"home-news-meta\">").count(),
+            2,
+            "{html}"
+        );
+        let css = super::super::css::home_css_layers();
+        assert!(
+            css.contains(".home-news-card .home-news-meta { order: -1;"),
+            "the meta row is drawn first"
         );
         let view_all = HomepageContent::default().news_view_all;
         assert!(

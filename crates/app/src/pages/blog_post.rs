@@ -21,6 +21,12 @@ struct FullArticle {
     published_at: Option<String>,
 }
 
+/// API path of one article. The slug is one encoded path segment, so a `/`
+/// or `%2F` in the address cannot point the request at another `/api` path.
+fn article_api_path(slug: &str) -> String {
+    format!("/api/articles/{}", crate::util::encode_query(slug))
+}
+
 #[component]
 pub fn BlogPost(slug: String) -> Element {
     let mut refresh = use_signal(|| 0u32);
@@ -33,7 +39,7 @@ pub fn BlogPost(slug: String) -> Element {
                 return Err("HTTP error: 404".to_string());
             }
             ApiClient::web()
-                .fetch::<FullArticle>(&format!("/api/articles/{s}"))
+                .fetch::<FullArticle>(&article_api_path(&s))
                 .await
                 .map_err(|e| e.to_string())
         }
@@ -196,6 +202,17 @@ mod tests {
 
     fn names() -> AuthorNames {
         AuthorNames::from([(AUTHOR.to_string(), Some("Player02".to_string()))])
+    }
+
+    #[test]
+    fn the_slug_is_one_encoded_path_segment() {
+        assert_eq!(article_api_path("post-1"), "/api/articles/post-1");
+        assert_eq!(
+            article_api_path("../auth/me"),
+            "/api/articles/..%2Fauth%2Fme"
+        );
+        assert_eq!(article_api_path("a%2Fb"), "/api/articles/a%252Fb");
+        assert_eq!(article_api_path("a/b?c").matches('/').count(), 3);
     }
 
     #[test]

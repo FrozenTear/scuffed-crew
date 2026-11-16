@@ -16,12 +16,18 @@ pub const HOME_SHARED_CSS: &str = r#"
     }
 
     /* --- Hero. Left by default, centred with `is-centered`. --- */
+    /* With an admin page background (colour or image) the layout sets
+       `--page-hero-fill` and `--page-hero-pad`: the hero becomes an opaque
+       `--bg` panel, so the H1 and lead keep the contrast they are inked for.
+       Unset, the hero is open on the page as before. */
     .home-hero {
         display: flex;
         flex-direction: column;
         align-items: flex-start;
         gap: var(--space-4);
-        padding: var(--space-section) 0;
+        padding: var(--space-section) var(--page-hero-pad, 0);
+        background: var(--page-hero-fill, transparent);
+        border-radius: var(--card-radius);
     }
     .home-hero.is-centered {
         align-items: center;
@@ -512,7 +518,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         font-size: var(--text-xs);
         font-variant-numeric: tabular-nums;
     }
-    .home-news-card .home-news-meta { margin-bottom: calc(var(--space-1) * -1); }
+    .home-news-card .home-news-meta { order: -1; margin-bottom: calc(var(--space-1) * -1); }
     .home-news-body { overflow-wrap: anywhere; }
 
     /* --- Recruit tags --- */
@@ -631,7 +637,21 @@ mod tests {
     fn hero_is_left_by_default_and_centred_by_modifier() {
         let base = css_rule(HOME_SHARED_CSS, ".home-hero {");
         assert!(has_decl(&base, "align-items: flex-start"), "{base}");
-        assert!(has_decl(&base, "padding: var(--space-section) 0"), "{base}");
+        // No side padding and no fill unless a page background is set.
+        assert!(
+            has_decl(
+                &base,
+                "padding: var(--space-section) var(--page-hero-pad, 0)"
+            ),
+            "{base}"
+        );
+        assert!(
+            has_decl(&base, "background: var(--page-hero-fill, transparent)"),
+            "{base}"
+        );
+        // The hero's inks are checked against the panel's fill.
+        assert_ink_clears_aa("--text", "--bg", 4.5);
+        assert_ink_clears_aa("--text-3", "--bg", 4.5);
         let centred = css_rule(HOME_SHARED_CSS, ".home-hero.is-centered {");
         assert!(has_decl(&centred, "align-items: center"), "{centred}");
         assert!(has_decl(&centred, "text-align: center"), "{centred}");

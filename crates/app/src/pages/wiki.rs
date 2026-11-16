@@ -308,9 +308,11 @@ fn WikiIndex(
                     },
                     Load::Ready(list) => rsx! {
                         div { class: "entry-list",
-                            for entry in page_slice(list, page, ENTRY_PAGE_SIZE) {
-                                {render_wiki_card(entry, names.as_ref())}
-                            }
+                            // Mapped, not wrapped in a `for` body, so the
+                            // key on each card's root reaches this list.
+                            {page_slice(list, page, ENTRY_PAGE_SIZE)
+                                .iter()
+                                .map(|entry| render_wiki_card(entry, names.as_ref()))}
                         }
                     },
                 }}

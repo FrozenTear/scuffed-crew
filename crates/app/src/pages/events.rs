@@ -1,11 +1,13 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::components::ui::inline_confirm::focus_element_by_id;
+use crate::components::ui::toggle::toggle_class;
 use crate::components::ui::{
-    ChipButton, ChipRow, EmptyCard, LoadError, PageHeader, PageShell, PageWidth, Pager, Pill,
-    PillTone, SkeletonBars, btn_class, page_slice, show_list_top,
+    EmptyCard, LoadError, PageHeader, PageShell, PageWidth, Pager, Pill, PillTone, SkeletonBars,
+    btn_class, page_slice, show_list_top,
 };
 use crate::components::{Toast, list_cap_notice, use_toast};
 use crate::hooks::use_api_list;
@@ -196,11 +198,11 @@ const PAGE_CSS: &str = r#"
     /* The answers are the card's only action. At rest they take the button
        edge and the full ink, so they do not read as the muted tags next to
        the title. The pressed look stays the shared chip's. */
-    .event-rsvp .chip:not([aria-pressed="true"]) {
+    .event-rsvp .chip:not(.active) {
         border-color: var(--border-strong);
         color: var(--text);
     }
-    .event-rsvp .chip:not([aria-pressed="true"]):hover {
+    .event-rsvp .chip:not(.active):hover {
         border-color: var(--text);
     }
     .event-rsvp-counts {
@@ -324,6 +326,46 @@ fn EventsBody(
 ) -> Element {
     let mut page = use_signal(|| 1usize);
     let mut answers = use_signal(HashMap::<String, Rsvp>::new);
+    let mut toast = use_toast();
+    // Event ids with a save in flight, and how many saves each event has had
+    // (a card refetches its counts when its number goes up).
+    let mut saving = use_signal(HashSet::<String>::new);
+    let mut saved = use_signal(HashMap::<String, u64>::new);
+    // The save runs here, in the list, not in the card: a card unmounts when
+    // the pager moves on, and a task tied to it would be dropped mid-save,
+    // taking the toast and the revert of a failed answer with it.
+    let save_rsvp = use_callback(move |(id, choice): (String, Rsvp)| {
+        if saving.peek().contains(&id) {
+            return;
+        }
+        let previous = answers.peek().get(&id).copied();
+        answers.write().insert(id.clone(), choice);
+        saving.write().insert(id.clone());
+        spawn(async move {
+            let body = RsvpRequest {
+                status: choice.wire(),
+            };
+            let path = format!("/api/events/{}/rsvp", crate::util::encode_query(&id));
+            match ApiClient::web()
+                .post_json::<_, serde_json::Value>(&path, &body)
+                .await
+            {
+                Ok(_) => {
+                    toast.show(Toast::success(format!("RSVP: {}", choice.label())));
+                    *saved.write().entry(id.clone()).or_default() += 1;
+                }
+                Err(e) => {
+                    log_client_error("event rsvp", &e);
+                    toast.show(Toast::error(rsvp_failure_text(&e)));
+                    match previous {
+                        Some(answer) => answers.write().insert(id.clone(), answer),
+                        None => answers.write().remove(&id),
+                    };
+                }
+            }
+            saving.write().remove(&id);
+        });
+    });
     let status = events_status(&load, retrying);
     let total = match &load {
         EventsLoad::Ready(events) => events.len(),
@@ -351,21 +393,19 @@ fn EventsBody(
                     tabindex: "-1",
                     aria_labelledby: "events-schedule-title",
                     h2 { id: "events-schedule-title", class: "ui-section-title", "Schedule" }
-                    ul { class: "events-list",
+                    // `list-style: none` drops the list role in some browsers.
+                    ul { class: "events-list", role: "list",
                         for event in page_slice(events, page(), PAGE_SIZE) {
                             li { key: "{event.id}",
                                 EventCard {
                                     event: event.clone(),
                                     can_rsvp: viewer.can_rsvp(),
                                     selected: answers.read().get(&event.id).copied(),
-                                    on_select: {
+                                    busy: saving.read().contains(&event.id),
+                                    saved: saved.read().get(&event.id).copied().unwrap_or(0),
+                                    on_choose: {
                                         let id = event.id.clone();
-                                        move |answer: Option<Rsvp>| {
-                                            match answer {
-                                                Some(answer) => answers.write().insert(id.clone(), answer),
-                                                None => answers.write().remove(&id),
-                                            };
-                                        }
+                                        move |choice: Rsvp| save_rsvp.call((id.clone(), choice))
                                     },
                                 }
                             }
@@ -440,28 +480,28 @@ fn EventsEmpty(viewer: Viewer) -> Element {
     }
 }
 
-/// One event with its live RSVP counts. An RSVP refetches only this card's
-/// counts, not the whole list. `selected` is the answer given in this visit;
-/// the list owns it.
+/// One event with its live RSVP counts. `saved` counts this event's saved
+/// answers; when it goes up only this card refetches its counts, not the
+/// whole list. `selected` is the answer given in this visit and `busy` is a
+/// save in flight; the list owns both, and runs the save.
 #[component]
 fn EventCard(
     event: Event,
     can_rsvp: bool,
     selected: Option<Rsvp>,
-    on_select: EventHandler<Option<Rsvp>>,
+    busy: bool,
+    saved: u64,
+    on_choose: EventHandler<Rsvp>,
 ) -> Element {
-    let mut refresh = use_signal(|| 0u64);
     let event_id = event.id.clone();
-    let summary = use_resource(move || {
-        let eid = event_id.clone();
-        async move {
-            let _ = refresh();
-            ApiClient::web()
-                .fetch::<RsvpSummary>(&format!("/api/events/{eid}/rsvp-summary"))
-                .await
-                .ok()
-        }
-    });
+    let summary = use_resource(use_reactive!(|(event_id, saved)| async move {
+        let _ = saved;
+        let path = format!(
+            "/api/events/{}/rsvp-summary",
+            crate::util::encode_query(&event_id)
+        );
+        ApiClient::web().fetch::<RsvpSummary>(&path).await.ok()
+    }));
     let summary: Option<RsvpSummary> = summary.read().clone().flatten();
 
     rsx! {
@@ -470,8 +510,8 @@ fn EventCard(
             summary,
             can_rsvp,
             selected,
-            on_select,
-            on_rsvp_saved: move |_| refresh += 1,
+            busy,
+            on_choose,
         }
     }
 }
@@ -482,8 +522,8 @@ fn EventCardView(
     summary: Option<RsvpSummary>,
     can_rsvp: bool,
     selected: Option<Rsvp>,
-    on_select: EventHandler<Option<Rsvp>>,
-    on_rsvp_saved: EventHandler<()>,
+    #[props(default = false)] busy: bool,
+    on_choose: EventHandler<Rsvp>,
 ) -> Element {
     let when = when_text(&event);
     let duration = format_duration(event.duration_minutes);
@@ -520,8 +560,8 @@ fn EventCardView(
                             event_id: event.id.clone(),
                             title: event.title.clone(),
                             selected,
-                            on_select,
-                            on_saved: on_rsvp_saved,
+                            busy,
+                            on_choose,
                         }
                     }
                 }
@@ -530,59 +570,87 @@ fn EventCardView(
     }
 }
 
-/// Three toggle chips. While a save runs they stay focusable and ignore
-/// clicks; a failed save puts the previous answer back.
+/// Toast for a failed RSVP. Only a failure a retry can fix says "try again".
+fn rsvp_failure_text(err: &scuffed_api_client::ClientError) -> &'static str {
+    match err.http_status() {
+        Some(401) => "Couldn't save your RSVP. Your session has ended. Log in again.",
+        Some(403) => "Couldn't save your RSVP. Only crew members can RSVP.",
+        Some(404) => "Couldn't save your RSVP. This event no longer exists.",
+        Some(_) => "Couldn't save your RSVP. Try again in a moment.",
+        None => "Couldn't save your RSVP. Check your connection and try again.",
+    }
+}
+
+/// DOM id of one RSVP radio, from the event id and the answer.
+fn rsvp_id(event_id: &str, choice: Rsvp) -> String {
+    format!("event-{event_id}-rsvp-{}", choice.wire())
+}
+
+/// The one radio in the Tab order: the checked answer, or the first radio
+/// when no answer is given yet. The others are reached with the arrow keys.
+fn rsvp_tab_stop(selected: Option<Rsvp>) -> Rsvp {
+    selected.unwrap_or(Rsvp::ALL[0])
+}
+
+/// The radio an arrow key, Home or End moves focus to, wrapping at the ends.
+fn rsvp_key_target(from: Rsvp, key: &Key) -> Option<Rsvp> {
+    let all = Rsvp::ALL;
+    let at = all.iter().position(|choice| *choice == from)?;
+    match key {
+        Key::ArrowRight | Key::ArrowDown => Some(all[(at + 1) % all.len()]),
+        Key::ArrowLeft | Key::ArrowUp => Some(all[(at + all.len() - 1) % all.len()]),
+        Key::Home => Some(all[0]),
+        Key::End => Some(all[all.len() - 1]),
+        _ => None,
+    }
+}
+
+/// The RSVP answers as a radio group in the chip look. An answer can be
+/// changed but not taken back (the API has no "no answer"), which is what a
+/// radio group says; a toggle button would promise it can be switched off.
+///
+/// One Tab stop; the arrow keys, Home and End move focus between the radios.
+/// Moving focus does not answer: every answer is a save on the server, so it
+/// takes Space, Enter or a click. While a save runs the radios stay
+/// focusable and ignore clicks; the list puts the previous answer back if
+/// the save fails.
 #[component]
 fn RsvpButtons(
     event_id: String,
     title: String,
     selected: Option<Rsvp>,
-    on_select: EventHandler<Option<Rsvp>>,
-    on_saved: EventHandler<()>,
+    #[props(default = false)] busy: bool,
+    on_choose: EventHandler<Rsvp>,
 ) -> Element {
-    let mut toast = use_toast();
-    let mut submitting = use_signal(|| false);
+    let tab_stop = rsvp_tab_stop(selected);
 
     rsx! {
-        ChipRow { label: "Your RSVP for {title}",
+        div { class: "chip-row", role: "radiogroup", aria_label: "Your RSVP for {title}",
             for choice in Rsvp::ALL {
-                ChipButton {
+                button {
                     key: "{choice.wire()}",
-                    class: "chip",
-                    label: choice.label(),
-                    pressed: selected == Some(choice),
-                    id: "event-{event_id}-rsvp-{choice.wire()}",
-                    busy: submitting(),
-                    onclick: {
-                        let eid = event_id.clone();
-                        move |_| {
-                            let eid = eid.clone();
-                            let previous = selected;
-                            on_select.call(Some(choice));
-                            submitting.set(true);
-                            spawn(async move {
-                                let body = RsvpRequest { status: choice.wire() };
-                                match ApiClient::web()
-                                    .post_json::<_, serde_json::Value>(
-                                        &format!("/api/events/{eid}/rsvp"),
-                                        &body,
-                                    )
-                                    .await
-                                {
-                                    Ok(_) => {
-                                        toast.show(Toast::success(format!("RSVP: {}", choice.label())));
-                                        on_saved.call(());
-                                    }
-                                    Err(e) => {
-                                        log_client_error("event rsvp", &e);
-                                        toast.show(Toast::error("Couldn't save your RSVP. Try again."));
-                                        on_select.call(previous);
-                                    }
-                                }
-                                submitting.set(false);
-                            });
+                    r#type: "button",
+                    id: rsvp_id(&event_id, choice),
+                    role: "radio",
+                    aria_checked: if selected == Some(choice) { "true" } else { "false" },
+                    aria_disabled: if busy { "true" },
+                    tabindex: if choice == tab_stop { "0" } else { "-1" },
+                    class: toggle_class("chip", selected == Some(choice)),
+                    onclick: move |_| {
+                        if !busy && selected != Some(choice) {
+                            on_choose.call(choice);
                         }
                     },
+                    onkeydown: {
+                        let eid = event_id.clone();
+                        move |e: KeyboardEvent| {
+                            if let Some(next) = rsvp_key_target(choice, &e.key()) {
+                                e.prevent_default();
+                                focus_element_by_id(&rsvp_id(&eid, next));
+                            }
+                        }
+                    },
+                    "{choice.label()}"
                 }
             }
         }
@@ -642,8 +710,7 @@ mod tests {
                     summary,
                     can_rsvp: viewer.can_rsvp(),
                     selected,
-                    on_select: move |_| {},
-                    on_rsvp_saved: move |_| {},
+                    on_choose: move |_| {},
                 }
             },
         }
@@ -972,29 +1039,83 @@ mod tests {
     }
 
     #[test]
-    fn members_get_three_named_toggle_chips_with_ids_from_the_event() {
+    fn members_get_a_named_radio_group_with_ids_from_the_event() {
         let html = render(
             Show::Card(event("e7", "Play night", 0, "19:00"), None, None),
             Viewer::Member,
         );
+        // An answer can be changed but not removed, so the three chips are
+        // radios in a radio group, not toggle buttons.
         assert!(
-            html.contains("role=\"group\"")
-                && html.contains("aria-label=\"Your RSVP for Play night\""),
+            html.contains(
+                "<div class=\"chip-row\" role=\"radiogroup\" aria-label=\"Your RSVP for Play night\">"
+            ),
             "{html}"
         );
-        for (wire, label) in [("yes", "Going"), ("maybe", "Maybe")] {
+        assert!(!html.contains("aria-pressed"), "{html}");
+        // No answer yet: none is checked and the first radio is the Tab stop.
+        for (wire, label, tabindex) in [("yes", "Going", "0"), ("maybe", "Maybe", "-1")] {
             assert!(
                 html.contains(&format!(
-                    "<button type=\"button\" id=\"event-e7-rsvp-{wire}\" aria-pressed=\"false\" class=\"chip\">{label}</button>"
+                    "<button type=\"button\" id=\"event-e7-rsvp-{wire}\" role=\"radio\" aria-checked=\"false\" tabindex=\"{tabindex}\" class=\"chip\">{label}</button>"
                 )),
                 "{wire}: {html}"
             );
         }
         assert!(html.contains("id=\"event-e7-rsvp-no\""), "{html}");
         assert_eq!(html.matches("<button").count(), 3, "{html}");
-        assert_eq!(html.matches("aria-pressed=\"false\"").count(), 3, "{html}");
+        assert_eq!(html.matches("role=\"radio\"").count(), 3, "{html}");
+        assert_eq!(html.matches("aria-checked=\"false\"").count(), 3, "{html}");
+        assert_eq!(html.matches("tabindex=\"0\"").count(), 1, "{html}");
         assert!(!html.contains("aria-disabled"), "{html}");
         assert!(links(&html).is_empty(), "no button sits in a link: {html}");
+    }
+
+    #[test]
+    fn rsvp_radios_have_one_tab_stop_and_arrow_keys_wrap() {
+        assert_eq!(rsvp_tab_stop(None), Rsvp::Yes);
+        for choice in Rsvp::ALL {
+            assert_eq!(rsvp_tab_stop(Some(choice)), choice);
+        }
+        for key in [Key::ArrowRight, Key::ArrowDown] {
+            assert_eq!(rsvp_key_target(Rsvp::Yes, &key), Some(Rsvp::Maybe));
+            assert_eq!(rsvp_key_target(Rsvp::Maybe, &key), Some(Rsvp::No));
+            assert_eq!(rsvp_key_target(Rsvp::No, &key), Some(Rsvp::Yes));
+        }
+        for key in [Key::ArrowLeft, Key::ArrowUp] {
+            assert_eq!(rsvp_key_target(Rsvp::Yes, &key), Some(Rsvp::No));
+            assert_eq!(rsvp_key_target(Rsvp::No, &key), Some(Rsvp::Maybe));
+        }
+        assert_eq!(rsvp_key_target(Rsvp::No, &Key::Home), Some(Rsvp::Yes));
+        assert_eq!(rsvp_key_target(Rsvp::Yes, &Key::End), Some(Rsvp::No));
+        // Tab, Enter and Space are left to the browser.
+        for key in [Key::Tab, Key::Enter, Key::Character(" ".into())] {
+            assert_eq!(rsvp_key_target(Rsvp::Maybe, &key), None);
+        }
+        assert_eq!(rsvp_id("e7", Rsvp::No), "event-e7-rsvp-no");
+    }
+
+    #[test]
+    fn a_failed_rsvp_names_its_cause() {
+        use scuffed_api_client::ClientError;
+        let http = |status| ClientError::http(status, "", None);
+        assert_eq!(
+            rsvp_failure_text(&http(403)),
+            "Couldn't save your RSVP. Only crew members can RSVP."
+        );
+        for status in [401, 403, 404] {
+            let text = rsvp_failure_text(&http(status)).to_lowercase();
+            assert!(!text.contains("try again"), "{status}: {text}");
+            assert!(!text.contains("connection"), "{status}: {text}");
+        }
+        assert_eq!(
+            rsvp_failure_text(&http(500)),
+            "Couldn't save your RSVP. Try again in a moment."
+        );
+        assert_eq!(
+            rsvp_failure_text(&ClientError::Network("offline".into())),
+            "Couldn't save your RSVP. Check your connection and try again."
+        );
     }
 
     /// The answer lives with the list, not the card, so a card that leaves
@@ -1011,12 +1132,15 @@ mod tests {
         );
         assert!(
             html.contains(
-                "<button type=\"button\" id=\"event-e7-rsvp-maybe\" aria-pressed=\"true\" class=\"chip active\">Maybe</button>"
+                "<button type=\"button\" id=\"event-e7-rsvp-maybe\" role=\"radio\" aria-checked=\"true\" tabindex=\"0\" class=\"chip active\">Maybe</button>"
             ),
             "{html}"
         );
-        assert_eq!(html.matches("aria-pressed=\"true\"").count(), 1, "{html}");
-        assert_eq!(html.matches("aria-pressed=\"false\"").count(), 2, "{html}");
+        assert_eq!(html.matches("aria-checked=\"true\"").count(), 1, "{html}");
+        assert_eq!(html.matches("aria-checked=\"false\"").count(), 2, "{html}");
+        // The checked radio is the group's one Tab stop.
+        assert_eq!(html.matches("tabindex=\"0\"").count(), 1, "{html}");
+        assert_eq!(html.matches("tabindex=\"-1\"").count(), 2, "{html}");
     }
 
     #[test]

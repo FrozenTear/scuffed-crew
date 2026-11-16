@@ -137,9 +137,11 @@ fn NewsIndex(
                     },
                     Load::Ready(list) => rsx! {
                         div { class: "entry-list",
-                            for a in page_slice(list, page, ENTRY_PAGE_SIZE) {
-                                {render_news_card(a, names.as_ref())}
-                            }
+                            // Mapped, not wrapped in a `for` body, so the
+                            // key on each card's root reaches this list.
+                            {page_slice(list, page, ENTRY_PAGE_SIZE)
+                                .iter()
+                                .map(|a| render_news_card(a, names.as_ref()))}
                         }
                     },
                 }}
@@ -166,6 +168,8 @@ fn render_news_card(a: &Announcement, names: Option<&AuthorNames>) -> Element {
             h2 {
                 span { "{a.title}" }
                 if a.pinned {
+                    // A real space, so the name reads "Notice 1 Pinned".
+                    " "
                     Pill { "Pinned" }
                 }
             }
@@ -255,7 +259,7 @@ mod tests {
         assert!(!html.contains("<main"), "{html}");
         assert!(
             html.contains(
-                "<h2><span>Notice 1</span><span class=\"ui-pill ui-pill--neutral\">Pinned</span></h2>"
+                "<h2><span>Notice 1</span> <span class=\"ui-pill ui-pill--neutral\">Pinned</span></h2>"
             ),
             "{html}"
         );

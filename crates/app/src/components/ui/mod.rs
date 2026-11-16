@@ -145,6 +145,51 @@ pub(crate) mod test_support {
             .to_string()
     }
 
+    /// Body of the first at-rule block that starts at `head`
+    /// (`"@media (forced-colors: active)"`), nested rules included.
+    pub fn media_block(css: &str, head: &str) -> String {
+        let start = css.find(head).unwrap_or_else(|| panic!("missing {head}"));
+        let open = start
+            + css[start..]
+                .find('{')
+                .unwrap_or_else(|| panic!("unopened {head}"));
+        let mut depth = 0usize;
+        for (at, ch) in css[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return css[open + 1..open + at].to_string();
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unclosed {head}")
+    }
+
+    /// Resolve two font-weight tokens to numbers in every scope and require
+    /// `heavy` to be at least 100 above `base`. Asserting only that a rule
+    /// names a weight token cannot catch two tokens with the same value.
+    pub fn assert_weight_heavier(heavy: &str, base: &str) {
+        let number = |tokens: &HashMap<String, String>, scope: &str, name: &str| {
+            let value = tokens
+                .get(name)
+                .unwrap_or_else(|| panic!("{scope}: {name} is not a token"));
+            value
+                .parse::<u32>()
+                .unwrap_or_else(|_| panic!("{scope}: {name} resolves to {value}, not a weight"))
+        };
+        for (scope, tokens) in scopes() {
+            let (h, b) = (number(tokens, scope, heavy), number(tokens, scope, base));
+            assert!(
+                h >= b + 100,
+                "{scope}: {heavy} is {h} and {base} is {b}, so there is no weight cue"
+            );
+        }
+    }
+
     pub fn has_decl(block: &str, decl: &str) -> bool {
         block.split(';').any(|part| part.trim() == decl)
     }

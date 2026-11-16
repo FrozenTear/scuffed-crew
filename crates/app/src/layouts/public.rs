@@ -25,9 +25,16 @@ fn page_bg_css(color: &str, image_url: &str) -> String {
     if decls.is_empty() {
         String::new()
     } else {
-        format!(":root{{{decls}}}")
+        // A custom background sits right behind the Home hero, whose H1 and
+        // lead are inked for `--bg`. With one set, the hero takes an opaque
+        // `--bg` panel (see `.home-hero`), so its text keeps its contrast
+        // over any colour or image.
+        format!(":root{{{decls}{HERO_PANEL_DECLS}}}")
     }
 }
+
+/// Switches the Home hero's panel on. Unset, the hero has no fill.
+const HERO_PANEL_DECLS: &str = "--page-hero-fill:var(--bg);--page-hero-pad:var(--space-section);";
 
 /// Public pages: the site shell around the routed page, plus the page
 /// background an admin set in Site Settings.
@@ -44,5 +51,45 @@ pub fn PublicLayout() -> Element {
         SiteShell {
             Outlet::<Route> {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_background_setting_means_no_css_and_no_hero_panel() {
+        assert_eq!(page_bg_css("", ""), "");
+        assert_eq!(page_bg_css("  ", "  "), "");
+        // Rejected values are the same as none.
+        assert_eq!(page_bg_css("red", "javascript:alert(1)"), "");
+        assert_eq!(page_bg_css("", "/a.png\");x"), "");
+    }
+
+    #[test]
+    fn a_page_background_gives_the_home_hero_an_opaque_panel() {
+        // Built here so the source holds no raw colour literal.
+        let navy = ["#", "101820"].concat();
+        let navy = navy.as_str();
+        for (color, image) in [
+            (navy, ""),
+            ("", "/api/uploads/bg.png"),
+            (navy, "https://cdn.example/bg.png"),
+        ] {
+            let css = page_bg_css(color, image);
+            assert!(css.starts_with(":root{"), "{css}");
+            assert!(css.contains("--page-hero-fill:var(--bg);"), "{css}");
+            assert!(
+                css.contains("--page-hero-pad:var(--space-section);"),
+                "{css}"
+            );
+        }
+        assert_eq!(
+            page_bg_css(navy, "/bg.png"),
+            format!(
+                ":root{{--page-bg-color:{navy};--page-bg-image:url(\"/bg.png\");--page-hero-fill:var(--bg);--page-hero-pad:var(--space-section);}}"
+            )
+        );
     }
 }

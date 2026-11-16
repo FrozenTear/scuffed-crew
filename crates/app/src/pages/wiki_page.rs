@@ -12,9 +12,9 @@ use crate::components::ui::inline_confirm::{
 use crate::components::ui::{FieldError, LoadError, PageHeader, PageShell, PageWidth};
 use crate::components::{Toast, is_http_status, use_toast};
 use crate::routes::Route;
-use crate::state::auth::use_auth;
+use crate::state::auth::{AuthState, use_auth};
 use crate::util::{FetchClass, classify_fetch, local_time_node, log_client_error, pluralize};
-use scuffed_api_client::ApiClient;
+use scuffed_api_client::{ApiClient, ClientError};
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 struct WikiPageData {
@@ -125,7 +125,30 @@ const PAGE_CSS: &str = r#"
 }
 "#;
 
-const SAVE_FAILED_TEXT: &str = "Couldn't save the page. Check your connection and try again.";
+/// Text under the editor after a failed save. Only a failure that a retry
+/// can fix says "try again": a 403 is a viewer who is not a crew member, a
+/// 401 is an ended session, and only no answer at all is the connection.
+fn save_failed_text(err: &ClientError) -> &'static str {
+    match err.http_status() {
+        Some(401) => "Couldn't save the page. Your session has ended. Log in again.",
+        Some(403) => "Couldn't save the page. Only crew members can edit the wiki.",
+        Some(404) => "Couldn't save the page. It no longer exists.",
+        Some(_) => "Couldn't save the page. Try again in a moment.",
+        None => "Couldn't save the page. Check your connection and try again.",
+    }
+}
+
+/// Edit shows for a crew member who is not already editing. A logged-in
+/// account with no membership gets no Edit: its save could only come back 403.
+fn can_edit(auth: &AuthState, editing: bool) -> bool {
+    auth.is_org_member() && !editing
+}
+
+/// API path of a wiki page. The topic is one encoded path segment, so a `/`
+/// or `%2F` in the address cannot point the request at another `/api` path.
+fn wiki_api_path(topic: &str) -> String {
+    format!("/api/wiki/{}", crate::util::encode_query(topic))
+}
 
 /// What the revision history shows.
 #[derive(Debug, Clone, PartialEq)]
@@ -192,7 +215,7 @@ pub fn WikiPage(topic: String) -> Element {
                 return Err("HTTP error: 404".to_string());
             }
             ApiClient::web()
-                .fetch::<WikiPageData>(&format!("/api/wiki/{t}"))
+                .fetch::<WikiPageData>(&wiki_api_path(&t))
                 .await
                 .map_err(|e| e.to_string())
         }
@@ -210,7 +233,7 @@ pub fn WikiPage(topic: String) -> Element {
                 return Ok(None);
             }
             ApiClient::web()
-                .fetch::<WikiRevisionsResponse>(&format!("/api/wiki/{t}/revisions"))
+                .fetch::<WikiRevisionsResponse>(&format!("{}/revisions", wiki_api_path(&t)))
                 .await
                 .map(Some)
                 .map_err(|e| e.to_string())
@@ -283,7 +306,9 @@ pub fn WikiPage(topic: String) -> Element {
                             title: page.title.clone(),
                             author: author_label(Some(&names), &page.author_member_id),
                             updated_at: page.updated_at.clone(),
-                            can_edit: auth().is_logged_in() && !editing(),
+                            // Saving needs membership (the API answers 403
+                            // otherwise), so only a crew member gets Edit.
+                            can_edit: can_edit(&auth(), editing()),
                             history_open: show_revisions(),
                             edit_id: ids.edit.clone(),
                             history_panel_id: ids.history_panel.clone(),
@@ -368,7 +393,7 @@ pub fn WikiPage(topic: String) -> Element {
                                                     };
                                                     match ApiClient::web()
                                                         .put_json::<_, WikiPageData>(
-                                                            &format!("/api/wiki/{pt}"),
+                                                            &wiki_api_path(&pt),
                                                             &body,
                                                         )
                                                         .await
@@ -384,7 +409,7 @@ pub fn WikiPage(topic: String) -> Element {
                                                         }
                                                         Err(e) => {
                                                             log_client_error("wiki save", &e);
-                                                            save_error.set(Some(SAVE_FAILED_TEXT));
+                                                            save_error.set(Some(save_failed_text(&e)));
                                                         }
                                                     }
                                                 });
@@ -541,10 +566,10 @@ fn WikiRevisions(
                     }
                 },
                 RevisionsView::List(rows) => rsx! {
-                    ul { class: "wiki-revision-list",
-                        for rev in rows.iter() {
-                            {render_revision(rev)}
-                        }
+                    ul { class: "wiki-revision-list", role: "list",
+                        // Mapped, not wrapped in a `for` body, so the key on
+                        // each row reaches this list.
+                        {rows.iter().map(render_revision)}
                     }
                 },
                 RevisionsView::Closed | RevisionsView::Loading | RevisionsView::Empty => rsx! {},
@@ -641,6 +666,78 @@ mod tests {
             ),
             "{html}"
         );
+    }
+
+    #[test]
+    fn edit_is_for_crew_members_only() {
+        use scuffed_types::{OrgRole, UserInfo};
+        let viewer = |role: Option<OrgRole>| AuthState {
+            user: Some(UserInfo {
+                id: "user:1".into(),
+                username: "Visitor01".into(),
+                avatar_url: None,
+                role,
+            }),
+            loading: false,
+        };
+        let guest = AuthState {
+            user: None,
+            loading: false,
+        };
+        assert!(!can_edit(&guest, false));
+        assert!(!can_edit(&AuthState::new(), false));
+        // Logged in with no membership: the save would be a 403.
+        assert!(viewer(None).is_logged_in());
+        assert!(!can_edit(&viewer(None), false));
+        for role in [
+            OrgRole::Recruit,
+            OrgRole::Member,
+            OrgRole::Officer,
+            OrgRole::Admin,
+        ] {
+            assert!(can_edit(&viewer(Some(role)), false), "{role:?}");
+            assert!(!can_edit(&viewer(Some(role)), true));
+        }
+    }
+
+    #[test]
+    fn a_failed_save_names_its_cause() {
+        let http = |status| ClientError::http(status, r#"{"error":"Not an org member"}"#, None);
+        // 403 is membership, not the network, and a retry cannot fix it.
+        let forbidden = save_failed_text(&http(403));
+        assert_eq!(
+            forbidden,
+            "Couldn't save the page. Only crew members can edit the wiki."
+        );
+        let expired = save_failed_text(&http(401));
+        assert_eq!(
+            expired,
+            "Couldn't save the page. Your session has ended. Log in again."
+        );
+        for text in [forbidden, expired, save_failed_text(&http(404))] {
+            let lower = text.to_lowercase();
+            assert!(!lower.contains("connection"), "{text}");
+            assert!(!lower.contains("try again"), "{text}");
+        }
+        // A server fault may pass; it is still not the viewer's connection.
+        let fault = save_failed_text(&http(500));
+        assert_eq!(fault, "Couldn't save the page. Try again in a moment.");
+        // Only no answer at all blames the connection.
+        let offline = save_failed_text(&ClientError::Network("failed to fetch".into()));
+        assert_eq!(
+            offline,
+            "Couldn't save the page. Check your connection and try again."
+        );
+    }
+
+    #[test]
+    fn the_topic_is_one_encoded_path_segment() {
+        assert_eq!(wiki_api_path("tank-basics"), "/api/wiki/tank-basics");
+        // A decoded `%2F` or `..` cannot leave `/api/wiki/`.
+        assert_eq!(wiki_api_path("../auth/me"), "/api/wiki/..%2Fauth%2Fme");
+        assert_eq!(wiki_api_path("a%2Fb"), "/api/wiki/a%252Fb");
+        assert_eq!(wiki_api_path("a?b#c"), "/api/wiki/a%3Fb%23c");
+        assert_eq!(wiki_api_path("a/b").matches('/').count(), 3);
     }
 
     #[test]

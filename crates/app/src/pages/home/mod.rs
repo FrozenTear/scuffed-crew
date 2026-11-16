@@ -37,6 +37,27 @@ fn home_body(phase: FetchClass) -> HomeBody {
     }
 }
 
+/// What the page knows about the viewer's membership.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewerMembership {
+    /// The session check has not answered yet.
+    Unknown,
+    Member,
+    /// A guest, or an account with no member row.
+    NotMember,
+}
+
+impl ViewerMembership {
+    /// No auth context (a bare mount) is a settled guest.
+    fn of(auth: Option<&crate::state::AuthState>) -> Self {
+        match auth {
+            Some(auth) if auth.loading => ViewerMembership::Unknown,
+            Some(auth) if auth.is_org_member() => ViewerMembership::Member,
+            _ => ViewerMembership::NotMember,
+        }
+    }
+}
+
 /// `UseResourceState::Pending` stays pending even when the previous value is
 /// still `Some(None)`, so a Retry reads as loading and not as the old error.
 /// Otherwise `None` is still in flight, `Some(None)` failed, and `Some(Some)` settled.
@@ -63,11 +84,9 @@ fn show_next_match_panel(
     blocks::keep_section(phase, has_upcoming, live_keep_empty && schedule_on)
 }
 
-/// Page class on the `PageShell`. The alignment class is the admin setting;
-/// only the hero reads it (see `hero_class`).
-fn page_class(align: ContentAlign) -> String {
-    format!("home-page {}", align.css_class())
-}
+/// Page class on the `PageShell`. The admin alignment setting is not a page
+/// class: only the hero follows it, through `hero_class`.
+const PAGE_CLASS: &str = "home-page";
 
 /// Text of the page status line: only the settings wait has something to say.
 fn home_status(body: HomeBody) -> &'static str {
@@ -81,13 +100,7 @@ fn home_status(body: HomeBody) -> &'static str {
 /// attributes, the page container and the status line. One template for the
 /// skeleton, the error and the loaded page, so the status line is the same
 /// node in all three and its text change is announced.
-fn home_frame(
-    shell: HomeShell,
-    skin: HomeSkin,
-    align: ContentAlign,
-    state: HomeBody,
-    body: Element,
-) -> Element {
+fn home_frame(shell: HomeShell, skin: HomeSkin, state: HomeBody, body: Element) -> Element {
     let shell_attr = shell.as_str();
     let skin_attr = skin.as_str();
     let status = home_status(state);
@@ -99,7 +112,7 @@ fn home_frame(
             "data-home-shell": "{shell_attr}",
             "data-home-skin": "{skin_attr}",
             p { class: "visually-hidden", role: "status", "{status}" }
-            PageShell { width: PageWidth::Default, class: page_class(align), {body} }
+            PageShell { width: PageWidth::Default, class: PAGE_CLASS, {body} }
         }
     }
 }
@@ -112,27 +125,30 @@ fn pending_home(body: HomeBody, refresh: Signal<u32>) -> Element {
     } else {
         rsx! { HeroSkeleton {} }
     };
-    home_frame(
-        HomeShell::default(),
-        HomeSkin::default(),
-        ContentAlign::default(),
-        body,
-        inner,
-    )
+    home_frame(HomeShell::default(), HomeSkin::default(), body, inner)
 }
 
 /// Whether the page offers its apply actions (the hero's first button and the
 /// recruit block). An org member has nothing to apply for: /apply only tells
 /// them they are already in.
-fn offers_apply(recruitment_open: bool, viewer_is_member: bool) -> bool {
-    recruitment_open && !viewer_is_member
+///
+/// While the session check runs the viewer is unknown, and unknown is not
+/// "guest": the actions stay out until the answer is in. Showing them first
+/// and taking them away from a member made the page jump on every load (the
+/// Recruit block is the first section of the recruit_landing shell). The rest
+/// of the page does not wait for the session.
+fn offers_apply(recruitment_open: bool, viewer: ViewerMembership) -> bool {
+    recruitment_open && viewer == ViewerMembership::NotMember
 }
 
 #[component]
 pub fn Home() -> Element {
     let site_settings = use_site_settings();
-    let viewer_is_member = try_use_context::<Signal<crate::state::AuthState>>()
-        .is_some_and(|auth| auth.read().is_org_member());
+    let viewer = {
+        let auth = try_use_context::<Signal<crate::state::AuthState>>();
+        let auth = auth.as_ref().map(|auth| auth.read());
+        ViewerMembership::of(auth.as_deref())
+    };
     // Refresh ticks are read in the sync part of each resource, not inside the
     // future, so Retry restarts that fetch without subscribing to its result.
     let overview_refresh = use_signal(|| 0u32);
@@ -195,7 +211,7 @@ pub fn Home() -> Element {
     let content = crate::copy::plain_homepage(&settings.homepage);
     let home_shell: HomeShell = settings.home_shell;
     let home_skin: HomeSkin = settings.home_skin;
-    let recruitment_open = offers_apply(settings.recruitment_open, viewer_is_member);
+    let recruitment_open = offers_apply(settings.recruitment_open, viewer);
 
     // Resolve list data for blocks (Home owns resources).
     // Pending keeps a section mounted (loading / skeleton) even when the shell
@@ -390,13 +406,7 @@ pub fn Home() -> Element {
             p { class: "home-foot", "{content.footer_note}" }
         }
     };
-    home_frame(
-        home_shell,
-        home_skin,
-        content.content_align,
-        HomeBody::Ready,
-        body,
-    )
+    home_frame(home_shell, home_skin, HomeBody::Ready, body)
 }
 
 /// Textless hero in the loaded hero's layout: banner, title, lead, actions.
@@ -462,10 +472,28 @@ mod tests {
 
     #[test]
     fn apply_actions_are_for_non_members_while_recruitment_is_open() {
-        assert!(offers_apply(true, false));
-        assert!(!offers_apply(true, true), "a member is not asked to apply");
-        assert!(!offers_apply(false, false));
-        assert!(!offers_apply(false, true));
+        use ViewerMembership::{Member, NotMember, Unknown};
+        assert!(offers_apply(true, NotMember));
+        assert!(
+            !offers_apply(true, Member),
+            "a member is not asked to apply"
+        );
+        // Still checking the session: unknown is not treated as a guest.
+        assert!(!offers_apply(true, Unknown));
+        for viewer in [NotMember, Member, Unknown] {
+            assert!(!offers_apply(false, viewer));
+        }
+        // No auth context is a settled guest; a loading one is unknown.
+        assert_eq!(ViewerMembership::of(None), NotMember);
+        assert_eq!(
+            ViewerMembership::of(Some(&crate::state::AuthState::new())),
+            Unknown
+        );
+        assert_eq!(ViewerMembership::of(Some(&viewer(None))), NotMember);
+        assert_eq!(
+            ViewerMembership::of(Some(&viewer(Some(scuffed_types::OrgRole::Recruit)))),
+            Member
+        );
     }
 
     #[test]
@@ -507,14 +535,13 @@ mod tests {
             home_frame(
                 HomeShell::default(),
                 HomeSkin::default(),
-                ContentAlign::default(),
                 HomeBody::Ready,
                 rsx! { h1 { "Loaded" } },
             )
         }
         let line = |text: &str| {
             format!(
-                "data-home-skin=\"clean\"><p class=\"visually-hidden\" role=\"status\">{text}</p><div class=\"ui-shell home-page align-left\">"
+                "data-home-skin=\"clean\"><p class=\"visually-hidden\" role=\"status\">{text}</p><div class=\"ui-shell home-page\">"
             )
         };
         let loading = render(loading);
@@ -541,6 +568,79 @@ mod tests {
         assert_eq!(home_body(FetchClass::Loading), HomeBody::Skeleton);
         assert_eq!(home_body(FetchClass::Error), HomeBody::Error);
         assert_eq!(home_body(FetchClass::Ready), HomeBody::Ready);
+    }
+
+    /// Home with settings already loaded (recruitment open, default copy)
+    /// for the given viewer.
+    fn render_home_for(auth: crate::state::AuthState) -> String {
+        const SETTINGS: &str = r#"{"id":"site","org_name":"Test Crew","site_description":"desc","recruitment_open":true,"recruitment_message":"msg","min_age":16,"forum_backend":"local","extra_relay_urls":"","updated_at":"2026-10-06T00:00:00Z"}"#;
+        crate::state::set_test_embedded_json(Some(SETTINGS.to_string()));
+        let html = crate::components::ui::test_support::render_routed(move || {
+            use_context_provider(|| Signal::new(auth.clone()));
+            crate::state::provide_site_settings();
+            rsx! { Home {} }
+        });
+        crate::state::set_test_embedded_json(None);
+        html
+    }
+
+    fn viewer(role: Option<scuffed_types::OrgRole>) -> crate::state::AuthState {
+        crate::state::AuthState {
+            user: Some(scuffed_types::UserInfo {
+                id: "user:1".into(),
+                username: "Player01".into(),
+                avatar_url: None,
+                role,
+            }),
+            loading: false,
+        }
+    }
+
+    #[test]
+    fn a_member_gets_no_apply_actions_and_a_guest_gets_both() {
+        let cta = scuffed_types::HomepageContent::default().cta_primary;
+        let apply_link = "href=\"/apply\"";
+        let recruit = "<section id=\"recruit\"";
+
+        let guest = render_home_for(crate::state::AuthState {
+            user: None,
+            loading: false,
+        });
+        assert!(guest.contains(apply_link), "{guest}");
+        assert!(guest.contains(&format!(">{cta}</a>")), "{guest}");
+        assert!(guest.contains(recruit), "{guest}");
+        // Logged in with no membership can still apply.
+        let visitor = render_home_for(viewer(None));
+        assert!(visitor.contains(apply_link), "{visitor}");
+        assert!(visitor.contains(recruit), "{visitor}");
+
+        for role in [
+            scuffed_types::OrgRole::Recruit,
+            scuffed_types::OrgRole::Member,
+            scuffed_types::OrgRole::Admin,
+        ] {
+            let member = render_home_for(viewer(Some(role)));
+            // The loaded page, not the skeleton.
+            assert!(member.contains("class=\"home-hero-title\""), "{member}");
+            assert!(!member.contains("home-skel-title"), "{member}");
+            assert!(!member.contains(apply_link), "{role:?}: {member}");
+            assert!(!member.contains(recruit), "{role:?}: {member}");
+            assert_eq!(member.matches("<h1").count(), 1, "{member}");
+        }
+    }
+
+    #[test]
+    fn apply_actions_stay_out_while_the_viewer_is_unknown() {
+        // Session check still running. The page is painted (it does not wait
+        // for the session), but the apply actions are not: they only appear
+        // once the viewer is known not to be a member, so they are never
+        // shown to a member and then taken away.
+        let html = render_home_for(crate::state::AuthState::new());
+        assert!(html.contains("class=\"home-hero-title\""), "{html}");
+        assert!(!html.contains("home-skel-title"), "{html}");
+        assert!(!html.contains("href=\"/apply\""), "{html}");
+        assert!(!html.contains("id=\"recruit\""), "{html}");
+        assert_eq!(html.matches("<h1").count(), 1, "{html}");
     }
 
     #[test]
@@ -603,7 +703,7 @@ mod tests {
         for html in [render(loading), render(failed)] {
             // The shell owns `<main>`; the page body is a default-width div.
             assert!(
-                html.contains("<div class=\"ui-shell home-page align-left\">"),
+                html.contains("<div class=\"ui-shell home-page\">"),
                 "{html}"
             );
             assert!(html.contains("<section class=\"home-hero\">"), "{html}");
@@ -614,9 +714,20 @@ mod tests {
     }
 
     #[test]
-    fn page_class_carries_the_alignment_setting() {
-        assert_eq!(page_class(ContentAlign::Left), "home-page align-left");
-        assert_eq!(page_class(ContentAlign::Center), "home-page align-center");
+    fn alignment_is_a_hero_class_not_a_page_class() {
+        // No CSS reads `align-left` or `align-center`; the setting reaches
+        // the page only as the hero's `is-centered`.
+        assert_eq!(PAGE_CLASS, "home-page");
+        assert_eq!(hero_class(ContentAlign::Left), "home-hero");
+        assert_eq!(hero_class(ContentAlign::Center), "home-hero is-centered");
+        let css = home_css_layers();
+        assert!(
+            css.contains(".home-hero.is-centered"),
+            "the hero rule exists"
+        );
+        for dead in [".align-left", ".align-center"] {
+            assert!(!css.contains(dead), "{dead}");
+        }
     }
 
     #[test]

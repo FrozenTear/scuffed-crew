@@ -210,8 +210,8 @@ pub(crate) const LIST_BATCH: usize = 100;
 /// Requests one load follows before it stops and says so.
 pub(crate) const LIST_MAX_BATCHES: usize = 10;
 
-/// A list loaded in batches. `truncated` is true when the last batch allowed
-/// was still full, so older rows exist that were not loaded.
+/// A list loaded in batches. `truncated` is true when rows exist past the
+/// last batch allowed, so older rows were not loaded.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Batched<T> {
     pub items: Vec<T>,
@@ -221,17 +221,29 @@ pub(crate) struct Batched<T> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BatchStep {
     Continue,
+    /// The budget is spent and its last batch was full. One more request
+    /// tells a list of exactly that many rows from a longer one; its rows
+    /// are not kept.
+    Probe,
     Done,
     Truncated,
 }
 
 /// What to do after batch number `batches_done` (counted from 1) came back
-/// with `batch_len` rows. A short batch is the end of the list.
+/// with `batch_len` rows. A short batch is the end of the list. Batch
+/// `LIST_MAX_BATCHES + 1` is the probe: empty means the list ended exactly
+/// on the budget, anything else means it was cut.
 fn batch_step(batch_len: usize, batches_done: usize) -> BatchStep {
-    if batch_len < LIST_BATCH {
+    if batches_done > LIST_MAX_BATCHES {
+        if batch_len == 0 {
+            BatchStep::Done
+        } else {
+            BatchStep::Truncated
+        }
+    } else if batch_len < LIST_BATCH {
         BatchStep::Done
-    } else if batches_done >= LIST_MAX_BATCHES {
-        BatchStep::Truncated
+    } else if batches_done == LIST_MAX_BATCHES {
+        BatchStep::Probe
     } else {
         BatchStep::Continue
     }
@@ -250,10 +262,14 @@ where
     loop {
         let batch = fetch_batch(batches_done * LIST_BATCH).await?;
         let batch_len = batch.len();
-        items.extend(batch);
         batches_done += 1;
+        // The probe's rows are past the budget: they only answer "is there
+        // more", so the list stays at the newest rows the budget allows.
+        if batches_done <= LIST_MAX_BATCHES {
+            items.extend(batch);
+        }
         match batch_step(batch_len, batches_done) {
-            BatchStep::Continue => {}
+            BatchStep::Continue | BatchStep::Probe => {}
             BatchStep::Done => {
                 return Ok(Batched {
                     items,
@@ -485,7 +501,8 @@ fn distinct_author_ids(ids: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-/// The ids in `wanted` that have no finished lookup in `known` yet.
+/// The ids in `wanted` that have no finished lookup in `known` yet. A lookup
+/// that failed has no entry, so it is asked for again.
 fn missing_author_ids(wanted: Vec<String>, known: &AuthorNames) -> Vec<String> {
     distinct_author_ids(wanted)
         .into_iter()
@@ -493,13 +510,22 @@ fn missing_author_ids(wanted: Vec<String>, known: &AuthorNames) -> Vec<String> {
         .collect()
 }
 
-/// Display name for one member id, `None` if it failed to resolve.
-async fn fetch_author_name(id: &str) -> Option<String> {
-    let path = format!("/api/public/members/{}", crate::util::encode_query(id));
-    match fetch_public::<PublicMemberName>(&path).await {
-        PublicFetch::Found(m) => Some(m.display_name),
-        _ => None,
+/// What a finished lookup stores. `Some(Some(name))` for a public member and
+/// `Some(None)` for a member the API does not show (the fallback label).
+/// `None` for a request that failed: nothing is stored, so the name is asked
+/// for again the next time its row is shown, not only after a reload.
+fn author_lookup_entry(fetched: PublicFetch<PublicMemberName>) -> Option<Option<String>> {
+    match fetched {
+        PublicFetch::Found(m) => Some(Some(m.display_name)),
+        PublicFetch::NotFound => Some(None),
+        PublicFetch::Failed => None,
     }
+}
+
+/// Look one member id up. See [`author_lookup_entry`].
+async fn fetch_author_name(id: &str) -> Option<Option<String>> {
+    let path = format!("/api/public/members/{}", crate::util::encode_query(id));
+    author_lookup_entry(fetch_public::<PublicMemberName>(&path).await)
 }
 
 /// Display names for the authors on screen.
@@ -517,8 +543,9 @@ pub(crate) fn use_author_names(
         let wanted = missing_author_ids(visible_ids(), &names.peek());
         async move {
             for id in wanted {
-                let name = fetch_author_name(&id).await;
-                names.write().insert(id, name);
+                if let Some(entry) = fetch_author_name(&id).await {
+                    names.write().insert(id, entry);
+                }
             }
         }
     });
@@ -575,7 +602,7 @@ mod tests {
     fn only_authors_without_a_finished_lookup_are_requested() {
         let known = AuthorNames::from([
             ("a".to_string(), Some("Player01".to_string())),
-            // A failed lookup is finished too: it is not asked for again.
+            // A member the API does not show is finished too: not asked again.
             ("b".to_string(), None),
         ]);
         let wanted = ["a", "c", "b", "", "c", "d"].map(String::from).to_vec();
@@ -592,12 +619,142 @@ mod tests {
             batch_step(LIST_BATCH, LIST_MAX_BATCHES - 1),
             BatchStep::Continue
         );
+        // A full last batch does not prove a cut: one probe request does.
+        assert_eq!(batch_step(LIST_BATCH, LIST_MAX_BATCHES), BatchStep::Probe);
+        assert_eq!(batch_step(0, LIST_MAX_BATCHES + 1), BatchStep::Done);
+        assert_eq!(batch_step(1, LIST_MAX_BATCHES + 1), BatchStep::Truncated);
         assert_eq!(
-            batch_step(LIST_BATCH, LIST_MAX_BATCHES),
+            batch_step(LIST_BATCH, LIST_MAX_BATCHES + 1),
             BatchStep::Truncated
         );
         // A short last batch is the end of the list, not a cut.
         assert_eq!(batch_step(3, LIST_MAX_BATCHES), BatchStep::Done);
+    }
+
+    /// Run the batched loader over a list of `total` rows. Returns the result
+    /// and the offsets it asked for. The fake fetch is ready at once, so one
+    /// poll finishes it.
+    fn load_batched(total: usize) -> (Batched<usize>, Vec<usize>) {
+        use std::cell::RefCell;
+        use std::pin::pin;
+        use std::task::{Context, Poll, Waker};
+        let offsets = RefCell::new(Vec::new());
+        let result = {
+            let future = fetch_offset_list(|offset| {
+                offsets.borrow_mut().push(offset);
+                let end = total.min(offset + LIST_BATCH);
+                let rows: Vec<usize> = (offset.min(end)..end).collect();
+                async move { Ok::<_, String>(rows) }
+            });
+            let mut future = pin!(future);
+            match future
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+            {
+                Poll::Ready(result) => result.expect("the fake fetch never fails"),
+                Poll::Pending => panic!("the fake fetch is always ready"),
+            }
+        };
+        (result, offsets.into_inner())
+    }
+
+    #[test]
+    fn a_list_of_exactly_the_budget_is_not_called_cut() {
+        let budget = LIST_BATCH * LIST_MAX_BATCHES;
+        assert_eq!(budget, 1000);
+        // Exactly 1,000 rows: every batch is full, the probe comes back
+        // empty, and nothing claims older rows exist.
+        let (exact, offsets) = load_batched(budget);
+        assert_eq!(exact.items.len(), budget);
+        assert!(!exact.truncated);
+        assert_eq!(offsets.len(), LIST_MAX_BATCHES + 1);
+        assert_eq!(offsets.last(), Some(&budget));
+        let status = list_status(
+            &Load::Ready(exact.items),
+            false,
+            exact.truncated,
+            "Loading",
+            "posts",
+        );
+        assert_eq!(status, "");
+        // One row more: cut, and the probe's row is not shown.
+        let (over, offsets) = load_batched(budget + 1);
+        assert_eq!(over.items.len(), budget);
+        assert_eq!(over.items.last(), Some(&(budget - 1)));
+        assert!(over.truncated);
+        assert_eq!(offsets.len(), LIST_MAX_BATCHES + 1);
+        // Short lists stop at the first short batch, with no probe.
+        let (short, offsets) = load_batched(250);
+        assert_eq!(short.items.len(), 250);
+        assert!(!short.truncated);
+        assert_eq!(offsets, [0, 100, 200]);
+        let (empty, offsets) = load_batched(0);
+        assert!(empty.items.is_empty() && !empty.truncated);
+        assert_eq!(offsets, [0]);
+    }
+
+    #[test]
+    fn keyed_cards_are_mapped_into_their_lists() {
+        // `for x in xs { {render_card(x)} }` puts each card inside an unkeyed
+        // wrapper, so the `key` on the card's root never reaches the list
+        // and rows are patched in place when the page changes. Mapping the
+        // iterator makes each keyed card a direct child.
+        for (file, src, card) in [
+            ("blog.rs", include_str!("blog.rs"), "render_blog_card"),
+            ("news.rs", include_str!("news.rs"), "render_news_card"),
+            ("wiki.rs", include_str!("wiki.rs"), "render_wiki_card"),
+            (
+                "wiki_page.rs",
+                include_str!("wiki_page.rs"),
+                "render_revision",
+            ),
+            (
+                "home/blocks.rs",
+                include_str!("home/blocks.rs"),
+                "render_news_card",
+            ),
+            (
+                "strategy/patch_notes.rs",
+                include_str!("strategy/patch_notes.rs"),
+                "render_patch_row",
+            ),
+        ] {
+            let page = src.split("#[cfg(test)]").next().unwrap_or(src);
+            let wrapped = ["{", card, "("].concat();
+            assert!(!page.contains(&wrapped), "{file}: {card} is wrapped");
+            let by_closure = ["| ", card, "("].concat();
+            let by_name = [".map(", card, ")"].concat();
+            assert!(
+                page.contains(&by_closure) || page.contains(&by_name),
+                "{file}: {card} is not mapped"
+            );
+            // The card's root carries the key.
+            let body = page
+                .split(&["fn ", card, "("].concat())
+                .nth(1)
+                .unwrap_or_else(|| panic!("{file}: no {card}"));
+            let root = body.split("rsx! {").nth(1).unwrap_or_default();
+            let head: String = root.chars().take(400).collect();
+            assert!(head.contains("key:"), "{file}: {card} root has no key");
+        }
+    }
+
+    #[test]
+    fn a_failed_author_lookup_is_not_cached() {
+        let found = PublicFetch::Found(PublicMemberName {
+            display_name: "Player02".to_string(),
+        });
+        assert_eq!(
+            author_lookup_entry(found),
+            Some(Some("Player02".to_string()))
+        );
+        // Not public: finished, shown with the fallback label.
+        assert_eq!(author_lookup_entry(PublicFetch::NotFound), Some(None));
+        // A failed request stores nothing, so the id is still missing and is
+        // asked for again the next time its row is shown.
+        assert_eq!(author_lookup_entry(PublicFetch::Failed), None);
+        let known = AuthorNames::new();
+        assert_eq!(missing_author_ids(vec!["a".to_string()], &known), ["a"]);
     }
 
     #[test]

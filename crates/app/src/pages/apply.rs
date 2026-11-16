@@ -6,13 +6,13 @@ use crate::components::ui::{
     Card, ChipButton, FieldError, InlineConfirm, PageHeader, PageShell, PageWidth, Pill, PillTone,
     btn_class,
 };
-use crate::components::{Toast, list_cap_notice, retry_label, use_toast};
+use crate::components::{Toast, is_http_status, list_cap_notice, retry_label, use_toast};
 use crate::hooks::{use_api_list, use_api_when};
 use crate::routes::Route;
-use crate::state::auth::use_auth;
+use crate::state::auth::{AuthState, use_auth};
 use crate::state::{loaded_site_settings, use_site_settings};
 use crate::util::{FetchClass, classify_fetch, log_client_error};
-use scuffed_api_client::ApiClient;
+use scuffed_api_client::{ApiClient, ClientError};
 use scuffed_types::Game;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -388,11 +388,17 @@ struct ApplyBody {
 /// is the value, because the admin review page prints the stored text.
 const MAIN_ROLES: [&str; 4] = ["Tank", "Damage", "Support", "Flex"];
 
-/// Shortest "Why you want to join" text the form sends.
-const MIN_MESSAGE_CHARS: usize = 40;
+/// Shortest "Why you want to join" text the form sends. A short message is
+/// enough; the rule only stops an empty or one-word answer.
+const MIN_MESSAGE_CHARS: usize = 10;
 
 /// DOM id of the error summary, focused after a failed submit.
 const SUMMARY_ID: &str = "apply-error-summary";
+/// DOM id of the summary heading, which names the summary when it takes focus.
+const SUMMARY_HEADING_ID: &str = "apply-error-summary-title";
+/// DOM id of the "Log in to apply" heading, focused when the session ended
+/// under the page (a withdrawn trial).
+const SIGN_IN_HEADING_ID: &str = "apply-sign-in-heading";
 /// DOM id of the status card heading, focused after a successful submit.
 const STATUS_HEADING_ID: &str = "apply-status-heading";
 /// DOM id of the always-rendered hint under "Why you want to join".
@@ -442,9 +448,7 @@ impl ApplyField {
         match self {
             ApplyField::Games => "Choose at least one game.",
             ApplyField::Role => "Choose a role so we can place you.",
-            ApplyField::Message => {
-                "Write at least 40 characters so we know how you play and when you can show up."
-            }
+            ApplyField::Message => "Write at least 10 characters so we know why you want to join.",
         }
     }
 }
@@ -512,6 +516,57 @@ fn status_focus_step(wait: StatusFocus, pending: bool, has_app: bool) -> (Status
         StatusFocus::AfterRefetch => (StatusFocus::AfterRefetch, false),
         StatusFocus::WhenLoaded if pending => (StatusFocus::WhenLoaded, false),
         StatusFocus::WhenLoaded => (StatusFocus::Idle, has_app),
+    }
+}
+
+/// The `error` text of a JSON error body, trimmed. `None` when the server
+/// sent no reason.
+fn server_reason(err: &ClientError) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(err.http_body()?).ok()?;
+    let reason = value.get("error")?.as_str()?.trim();
+    (!reason.is_empty()).then(|| reason.to_string())
+}
+
+/// Toast for a failed send or withdraw. `what` is the opening clause with no
+/// full stop ("Couldn't send the application").
+///
+/// "Try again" is only said when trying again can work. A 403 (recruitment
+/// closed, banned) or a 409 (already applied, already a member) comes back
+/// the same on every retry, so the toast gives the server's reason instead.
+/// A 401 means the session ended, and no answer at all is a network failure.
+fn action_failure_text(what: &str, err: &ClientError) -> String {
+    match err.http_status() {
+        Some(400 | 403 | 404 | 409) => match server_reason(err) {
+            Some(reason) => {
+                let stop = if reason.ends_with(['.', '!', '?']) {
+                    ""
+                } else {
+                    "."
+                };
+                format!("{what}: {reason}{stop}")
+            }
+            None => format!("{what}. The server refused it."),
+        },
+        Some(401) => format!("{what}. Your session has ended. Log in again."),
+        Some(_) => format!("{what}. Try again."),
+        None => format!("{what}. Check your connection and try again."),
+    }
+}
+
+/// True when the application fetch failed because the session is gone. A
+/// trial applicant who withdraws is logged out by the server, so the refetch
+/// that follows comes back 401 and a Retry could never work.
+fn session_ended(logged_in: bool, mine_error: Option<&str>) -> bool {
+    logged_in && mine_error.is_some_and(|err| is_http_status(err, 401))
+}
+
+/// Body of the withdraw confirm. Withdrawing during a trial also ends the
+/// trial and logs the applicant out, so the strip says so before the click.
+fn withdraw_confirm_body(status: &str) -> &'static str {
+    if status == "trial" {
+        "This ends your trial and logs you out. You can apply again later if recruitment is open."
+    } else {
+        "You can apply again later if recruitment is open."
     }
 }
 
@@ -645,12 +700,16 @@ fn ApplyForm(
                 on_submit.call(());
             },
             if !errors.is_empty() {
+                // Not a live region: a failed submit moves focus here, which
+                // reads it once. As `role="alert"` it would be read a second
+                // time, and again each time a corrected field shortens it.
                 div {
                     class: "apply-summary",
                     id: SUMMARY_ID,
-                    role: "alert",
+                    role: "group",
                     tabindex: "-1",
-                    h2 { "The application could not be sent" }
+                    aria_labelledby: SUMMARY_HEADING_ID,
+                    h2 { id: SUMMARY_HEADING_ID, "The application could not be sent" }
                     p { "{summary_count_text(errors.len())}" }
                     ul {
                         for field in errors.iter().copied() {
@@ -757,7 +816,7 @@ fn ApplyForm(
 
 #[component]
 pub fn Apply() -> Element {
-    let auth = use_auth();
+    let mut auth = use_auth();
     let mut toast = use_toast();
 
     let mut settings = use_site_settings();
@@ -808,6 +867,21 @@ pub fn Apply() -> Element {
         }
         if focus_now {
             focus_element_by_id_soon(STATUS_HEADING_ID.to_string());
+        }
+    });
+
+    // The server ended the session (a withdrawn trial): drop the stale login
+    // so the page shows "Log in to apply" instead of a Retry that cannot
+    // work, and put focus on that card.
+    use_effect(move || {
+        let logged_in = auth().is_logged_in();
+        if session_ended(logged_in, my_app.error.read().as_deref()) {
+            auth.set(AuthState {
+                user: None,
+                loading: false,
+            });
+            focus_status.set(StatusFocus::Idle);
+            focus_element_by_id_soon(SIGN_IN_HEADING_ID.to_string());
         }
     });
 
@@ -904,7 +978,12 @@ pub fn Apply() -> Element {
                         },
                         (ApplyBodyView::SignIn, _) => rsx! {
                             Card {
-                                h2 { class: "apply-card-title", "Log in to apply" }
+                                h2 {
+                                    class: "apply-card-title",
+                                    id: SIGN_IN_HEADING_ID,
+                                    tabindex: "-1",
+                                    "Log in to apply"
+                                }
                                 p { class: "apply-card-desc", "Log in before you send an application." }
                                 div { class: "apply-actions",
                                     Link { to: Route::Login {}, class: btn_class(true), "Log in" }
@@ -974,7 +1053,7 @@ pub fn Apply() -> Element {
                                             InlineConfirm {
                                                 id: WITHDRAW_ID.to_string(),
                                                 title: "Withdraw your application?".to_string(),
-                                                body: "You can apply again later if recruitment is open.".to_string(),
+                                                body: withdraw_confirm_body(app.status.as_str()).to_string(),
                                                 confirm_label: withdraw_label.to_string(),
                                                 busy: submitting(),
                                                 on_confirm: move |_| {
@@ -1000,9 +1079,15 @@ pub fn Apply() -> Element {
                                                             }
                                                             Err(e) => {
                                                                 log_client_error("withdraw application", &e);
-                                                                toast.show(Toast::error(
-                                                                    "Couldn't withdraw the application. Try again.",
-                                                                ));
+                                                                toast.show(Toast::error(action_failure_text(
+                                                                    "Couldn't withdraw the application",
+                                                                    &e,
+                                                                )));
+                                                                // A refused withdraw means the status on
+                                                                // screen is stale: show the current one.
+                                                                if matches!(e.http_status(), Some(400 | 401 | 403 | 404 | 409)) {
+                                                                    my_app.refresh += 1;
+                                                                }
                                                                 // Back to the button that opened the strip.
                                                                 focus_element_by_id_soon(WITHDRAW_TRIGGER_ID.to_string());
                                                             }
@@ -1089,9 +1174,10 @@ pub fn Apply() -> Element {
                                                 }
                                                 Err(e) => {
                                                     log_client_error("send application", &e);
-                                                    toast.show(Toast::error(
-                                                        "Couldn't send the application. Try again.",
-                                                    ));
+                                                    toast.show(Toast::error(action_failure_text(
+                                                        "Couldn't send the application",
+                                                        &e,
+                                                    )));
                                                 }
                                             }
                                             submitting.set(false);
@@ -1657,12 +1743,15 @@ mod tests {
         // Padding does not reach the minimum, and the count is characters.
         let padded = format!("Hi{}", " ".repeat(60));
         assert_eq!(validate(&ow, "Tank", &padded), [ApplyField::Message]);
-        assert_eq!(
-            validate(&ow, "Tank", &"a".repeat(39)),
-            [ApplyField::Message]
-        );
-        assert_eq!(validate(&ow, "Tank", &"a".repeat(40)), []);
-        assert_eq!(validate(&ow, "Tank", &"å".repeat(40)), []);
+        assert_eq!(MIN_MESSAGE_CHARS, 10);
+        assert_eq!(validate(&ow, "Tank", &"a".repeat(9)), [ApplyField::Message]);
+        assert_eq!(validate(&ow, "Tank", &"a".repeat(10)), []);
+        // Two bytes each: 5 of them are 10 bytes but only 5 characters.
+        assert_eq!(validate(&ow, "Tank", &"å".repeat(5)), [ApplyField::Message]);
+        assert_eq!(validate(&ow, "Tank", &"å".repeat(10)), []);
+        // A short real answer passes; the old 40 character floor is gone.
+        assert_eq!(validate(&ow, "Tank", "I main Ana."), []);
+        assert_eq!(validate(&ow, "Tank", &"a".repeat(39)), []);
     }
 
     #[test]
@@ -1678,6 +1767,8 @@ mod tests {
                 GAMES_HINT_ID,
                 MESSAGE_HINT_ID,
                 WITHDRAW_TRIGGER_ID,
+                SUMMARY_HEADING_ID,
+                SIGN_IN_HEADING_ID,
             ])
             .collect();
         let count = ids.len();
@@ -1689,6 +1780,114 @@ mod tests {
                 .error()
                 .contains(&MIN_MESSAGE_CHARS.to_string())
         );
+    }
+
+    #[test]
+    fn the_send_body_carries_the_main_role_as_the_one_preferred_role() {
+        // `POST /api/applications` takes `preferred_roles: Vec<String>` and
+        // stores it as sent. The form sends the chosen main role as the one
+        // entry; the rest of the body is as before.
+        let body = ApplyBody {
+            preferred_games: vec!["game-ow".to_string()],
+            preferred_roles: vec!["Support".to_string()],
+            message: Some("I main Ana.".to_string()),
+        };
+        assert_eq!(
+            serde_json::to_value(&body).unwrap(),
+            serde_json::json!({
+                "preferred_games": ["game-ow"],
+                "preferred_roles": ["Support"],
+                "message": "I main Ana.",
+            })
+        );
+    }
+
+    #[test]
+    fn a_refused_send_shows_the_servers_reason_and_no_try_again() {
+        let send = "Couldn't send the application";
+        // 403: recruitment closed. A retry gets the same answer.
+        let closed = ClientError::http(403, r#"{"error":"recruitment is currently closed"}"#, None);
+        assert_eq!(
+            action_failure_text(send, &closed),
+            "Couldn't send the application: recruitment is currently closed."
+        );
+        // 409: already applied.
+        let dup = ClientError::http(
+            409,
+            r#"{"error":"You already have an open application (pending)"}"#,
+            None,
+        );
+        assert_eq!(
+            action_failure_text(send, &dup),
+            "Couldn't send the application: You already have an open application (pending)."
+        );
+        // A reason that already ends a sentence is not given a second stop.
+        let stopped = ClientError::http(409, r#"{"error":"Already withdrawn."}"#, None);
+        assert_eq!(
+            action_failure_text("Couldn't withdraw the application", &stopped),
+            "Couldn't withdraw the application: Already withdrawn."
+        );
+        // No usable reason: still no "try again".
+        for body in ["", "<html>", r#"{"error":"  "}"#, r#"{"error":7}"#] {
+            let bare = ClientError::http(403, body, None);
+            assert_eq!(
+                action_failure_text(send, &bare),
+                "Couldn't send the application. The server refused it.",
+                "{body}"
+            );
+        }
+        for status in [400, 401, 403, 404, 409] {
+            let err = ClientError::http(status, r#"{"error":"nope"}"#, None);
+            let text = action_failure_text(send, &err).to_lowercase();
+            assert!(!text.contains("try again"), "{status}: {text}");
+            assert!(!text.contains("connection"), "{status}: {text}");
+        }
+        assert_eq!(
+            action_failure_text(send, &ClientError::http(401, "", None)),
+            "Couldn't send the application. Your session has ended. Log in again."
+        );
+    }
+
+    #[test]
+    fn only_failures_a_retry_can_fix_say_try_again() {
+        let send = "Couldn't send the application";
+        // The server's text for a 500 is not shown; a retry may work.
+        let down = ClientError::http(500, r#"{"error":"Internal server error"}"#, None);
+        assert_eq!(
+            action_failure_text(send, &down),
+            "Couldn't send the application. Try again."
+        );
+        // No answer from the server is the only case that names the connection.
+        let offline = ClientError::Network("failed to fetch".to_string());
+        assert_eq!(
+            action_failure_text(send, &offline),
+            "Couldn't send the application. Check your connection and try again."
+        );
+    }
+
+    #[test]
+    fn a_401_on_the_application_fetch_ends_the_session() {
+        // Only for a viewer the page still takes as logged in, so the effect
+        // that clears the login runs once.
+        assert!(session_ended(true, Some("HTTP error 401: Unauthorized")));
+        assert!(session_ended(true, Some("HTTP error: 401")));
+        assert!(!session_ended(false, Some("HTTP error 401: Unauthorized")));
+        assert!(!session_ended(
+            true,
+            Some("HTTP error 500: Internal server error")
+        ));
+        assert!(!session_ended(true, Some("Network error: failed to fetch")));
+        assert!(!session_ended(true, None));
+    }
+
+    #[test]
+    fn the_trial_withdraw_confirm_says_it_ends_the_trial() {
+        let trial = withdraw_confirm_body("trial");
+        assert!(trial.contains("ends your trial"), "{trial}");
+        assert!(trial.contains("logs you out"), "{trial}");
+        let pending = withdraw_confirm_body("pending");
+        assert!(!pending.contains("trial"), "{pending}");
+        assert_eq!(pending, "You can apply again later if recruitment is open.");
     }
 
     #[test]
@@ -1838,11 +2037,11 @@ mod tests {
             assert!(html.contains(&format!(r#"for="{id}""#)), "{html}");
         }
         assert!(!tag_with_id(&html, "apply-role").contains("aria-describedby"));
-        // The 40 character minimum is said before the first submit: a hint
+        // The 10 character minimum is said before the first submit: a hint
         // that is always there and always describes the field.
         assert!(
             html.contains(
-                r#"<p class="field-hint" id="apply-message-hint">At least 40 characters.</p>"#
+                r#"<p class="field-hint" id="apply-message-hint">At least 10 characters.</p>"#
             ),
             "{html}"
         );
@@ -1877,13 +2076,28 @@ mod tests {
     #[test]
     fn failed_submit_marks_each_field_and_links_the_summary() {
         let html = html_of(form_failed);
-        // One alert, at the top of the form, with a heading and a count.
-        assert_eq!(html.matches(r#"role="alert""#).count(), 1, "{html}");
+        // One summary, at the top of the form, with a heading and a count.
+        // It takes focus on a failed submit, so it is not a live region: as
+        // an alert it would be read twice, and again as the list shrinks.
+        assert!(!html.contains(r#"role="alert""#), "{html}");
+        assert!(!html.contains("aria-live"), "{html}");
+        assert_eq!(
+            html.matches(r#"class="apply-summary""#).count(),
+            1,
+            "{html}"
+        );
         let summary = tag_with_id(&html, SUMMARY_ID);
-        assert!(summary.contains(r#"role="alert""#), "{summary}");
+        assert!(summary.starts_with("<div"), "{summary}");
+        assert!(summary.contains(r#"role="group""#), "{summary}");
         assert!(summary.contains(r#"tabindex="-1""#), "{summary}");
         assert!(
-            html.contains("<h2>The application could not be sent</h2>"),
+            summary.contains(r#"aria-labelledby="apply-error-summary-title""#),
+            "{summary}"
+        );
+        assert!(
+            html.contains(
+                r#"<h2 id="apply-error-summary-title">The application could not be sent</h2>"#
+            ),
             "{html}"
         );
         assert!(
@@ -1897,7 +2111,7 @@ mod tests {
             .unwrap_or_else(|| panic!("role link in {html}"));
         let message_link = html
             .find(
-                r##"<a href="#apply-message">Why you want to join: Write at least 40 characters"##,
+                r##"<a href="#apply-message">Why you want to join: Write at least 10 characters so we know why you want to join.</a>"##,
             )
             .unwrap_or_else(|| panic!("message link in {html}"));
         assert!(role_link < message_link);

@@ -135,9 +135,11 @@ fn BlogIndex(
                     },
                     Load::Ready(list) => rsx! {
                         div { class: "entry-list",
-                            for a in page_slice(list, page, ENTRY_PAGE_SIZE) {
-                                {render_blog_card(a, names.as_ref())}
-                            }
+                            // Mapped, not wrapped in a `for` body, so the
+                            // key on each card's root reaches this list.
+                            {page_slice(list, page, ENTRY_PAGE_SIZE)
+                                .iter()
+                                .map(|a| render_blog_card(a, names.as_ref()))}
                         }
                     },
                 }}

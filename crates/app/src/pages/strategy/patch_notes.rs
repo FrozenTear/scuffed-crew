@@ -657,6 +657,10 @@ const PAGE_CSS: &str = r#"
         height: var(--hit-target-min);
         text-overflow: ellipsis;
     }
+    .pn-search-label {
+        flex: 0 0 auto;
+        margin: 0;
+    }
     .pn-expand {
         flex: 0 0 auto;
         white-space: nowrap;
@@ -673,11 +677,16 @@ const PAGE_CSS: &str = r#"
         gap: var(--space-stack);
         min-width: 0;
     }
+    /* A heading (h2) for heading navigation, in the quiet label look. */
     .pn-year {
         margin: 0;
         color: var(--text-3);
         font-family: var(--font-body);
         font-size: var(--text-sm);
+        font-weight: var(--font-body-weight);
+        line-height: var(--leading-ui);
+        letter-spacing: normal;
+        text-transform: none;
     }
     .pn-row {
         min-width: 0;
@@ -896,6 +905,16 @@ const PAGE_CSS: &str = r#"
     .pn-mark-dot {
         border-radius: var(--radius-pill);
     }
+    /* Forced colours repaint backgrounds to the page colour and make the
+       transparent sides of a border triangle solid, so the dot and diamond
+       would vanish and the arrows would turn into blocks. The marks opt out
+       and are drawn in the system text colour instead. */
+    @media (forced-colors: active) {
+        .pn-mark {
+            forced-color-adjust: none;
+            color: CanvasText;
+        }
+    }
     .pn-dev-comment {
         margin: 0;
         padding-inline-start: var(--space-3);
@@ -1083,12 +1102,16 @@ fn PatchNotesView(
             if show_toolbar {
                 div { class: "pn-controls",
                     div { class: "pn-toolbar",
+                        // A visible label: the placeholder goes away with
+                        // the first character typed.
+                        label { class: "field-label pn-search-label", r#for: PATCH_SEARCH_ID,
+                            "Search"
+                        }
                         input {
                             id: PATCH_SEARCH_ID,
                             class: "field-input pn-search",
                             r#type: "search",
-                            aria_label: "Search patch notes",
-                            placeholder: "Search heroes, maps, or text",
+                            placeholder: "Heroes, maps, or text",
                             value: "{search_query}",
                             oninput: move |evt| search_query.set(evt.value()),
                         }
@@ -1146,20 +1169,20 @@ fn PatchNotesView(
                 PatchFetchState::Ready => rsx! {
                     div { class: "pn-list",
                         for (year, rows) in group_by_year(&visible) {
-                            div { class: "pn-year-block",
-                                p { class: "pn-year", "{year}" }
-                                for (idx, patch) in rows.iter() {
-                                    {render_patch_row(
-                                        PatchRow {
-                                            key: keys[*idx].clone(),
-                                            is_latest: *idx == 0,
-                                            open_rows: open_rows.clone(),
-                                        },
-                                        patch,
-                                        expanded,
-                                        open_hero,
-                                    )}
-                                }
+                            div { key: "{year}", class: "pn-year-block",
+                                h2 { class: "pn-year", "{year}" }
+                                // Mapped, not wrapped in a `for` body, so the
+                                // key on each row's root reaches this list.
+                                {rows.iter().map(|(idx, patch)| render_patch_row(
+                                    PatchRow {
+                                        key: keys[*idx].clone(),
+                                        is_latest: *idx == 0,
+                                        open_rows: open_rows.clone(),
+                                    },
+                                    patch,
+                                    expanded,
+                                    open_hero,
+                                ))}
                             }
                         }
                     }
@@ -1243,9 +1266,10 @@ fn render_patch_row(
 
     rsx! {
         div {
+            key: "{row_id}",
             class: if is_expanded { "pn-row is-open" } else { "pn-row" },
             id: "{row_id}",
-            h2 { class: "pn-row-title",
+            h3 { class: "pn-row-title",
                 button {
                     class: "pn-row-head",
                     r#type: "button",
@@ -1405,7 +1429,7 @@ fn render_hero_update(list: &HeroList<'_>, hi: usize) -> Element {
         div {
             class: if is_open { "pn-hero-card is-open" } else { "pn-hero-card" },
             id: "{dom_id}",
-            h3 { class: "pn-hero-title",
+            h4 { class: "pn-hero-title",
                 button {
                     class: "pn-hero-head",
                     r#type: "button",
@@ -1428,7 +1452,7 @@ fn render_hero_update(list: &HeroList<'_>, hi: usize) -> Element {
                     }
 
                     if !hu.changes.is_empty() {
-                        ul { class: "pn-change-list",
+                        ul { class: "pn-change-list", role: "list",
                             for change in hu.changes.iter() {
                                 {render_change_item(change, verdict)}
                             }
@@ -1478,7 +1502,7 @@ fn render_section(section: &PatchSection) -> Element {
 
     rsx! {
         section { class: "pn-section",
-            h3 { class: "pn-section-title", "{section.category}" }
+            h4 { class: "pn-section-title", "{section.category}" }
             ul { class: "pn-section-items",
                 for item in section.items.iter() {
                     li { "{item}" }
@@ -1492,7 +1516,7 @@ fn render_section(section: &PatchSection) -> Element {
 mod tests {
     use super::*;
     use crate::components::ui::test_support::{
-        assert_ink_clears_aa, assert_sizes_from_tokens, css_rule, has_decl, render,
+        assert_ink_clears_aa, assert_sizes_from_tokens, css_rule, has_decl, media_block, render,
     };
 
     fn change(description: &str, change_type: &str) -> PatchChange {
@@ -1998,18 +2022,27 @@ mod tests {
     }
 
     #[test]
-    fn search_field_is_named_by_aria_label() {
+    fn search_field_has_a_visible_label() {
         assert_eq!(PATCH_SEARCH_ID, "patch-notes-search");
         let html = render(ready_app);
+        // A real label right before the field, not an aria-label: the
+        // placeholder is gone after the first character.
         assert!(
-            html.contains("id=\"patch-notes-search\" class=\"field-input pn-search\" type=\"search\" aria-label=\"Search patch notes\""),
+            html.contains("<label class=\"field-label pn-search-label\" for=\"patch-notes-search\">Search</label><input id=\"patch-notes-search\" class=\"field-input pn-search\" type=\"search\""),
             "{html}"
         );
+        assert_eq!(html.matches("<label").count(), 1, "{html}");
+        assert!(!html.contains("aria-label=\"Search"), "{html}");
         assert!(
-            html.contains("placeholder=\"Search heroes, maps, or text\""),
+            html.contains("placeholder=\"Heroes, maps, or text\""),
             "{html}"
         );
-        assert!(!html.contains("<label"), "{html}");
+        for hidden in ["visually-hidden", "display: none", "clip"] {
+            assert!(
+                !css_rule(PAGE_CSS, ".pn-search-label {").contains(hidden),
+                "{hidden}"
+            );
+        }
     }
 
     #[test]
@@ -2281,6 +2314,27 @@ mod tests {
     }
 
     #[test]
+    fn verdict_marks_stay_visible_in_forced_colours() {
+        // The dot and diamond are a `currentColor` background and the arrows
+        // are border triangles with transparent sides. Forced colours would
+        // repaint both, so the marks opt out and take the system text colour.
+        let dot = css_rule(PAGE_CSS, ".pn-mark-diamond,\n    .pn-mark-dot {");
+        assert!(has_decl(&dot, "background: currentColor"), "{dot}");
+        let forced = media_block(PAGE_CSS, "@media (forced-colors: active)");
+        let mark = css_rule(&forced, ".pn-mark {");
+        assert!(has_decl(&mark, "forced-color-adjust: none"), "{mark}");
+        assert!(has_decl(&mark, "color: CanvasText"), "{mark}");
+        // Every mark shape carries the `.pn-mark` class the rule targets.
+        for verdict in [Verdict::Buff, Verdict::Nerf, Verdict::Adjust, Verdict::Fix] {
+            assert!(verdict.mark_class().is_some(), "{verdict:?}");
+        }
+        let html = render(ready_app);
+        assert!(html.contains("class=\"pn-mark pn-mark-"), "{html}");
+        // The system colour is only used inside the forced-colours block.
+        assert!(!PAGE_CSS.replace(&forced, "").contains("CanvasText"));
+    }
+
+    #[test]
     fn page_has_one_h1_and_no_main() {
         for html in [
             render(ready_app),
@@ -2419,11 +2473,14 @@ mod tests {
     #[test]
     fn rows_expose_expanded_state_and_data_ids() {
         let html = render(ready_app);
-        assert!(html.contains("<p class=\"pn-year\">2026</p>"), "{html}");
-        assert!(html.contains("<p class=\"pn-year\">2025</p>"), "{html}");
+        // Years are headings, so heading navigation stops at them: year h2,
+        // patch h3, hero and section h4.
+        assert!(html.contains("<h2 class=\"pn-year\">2026</h2>"), "{html}");
+        assert!(html.contains("<h2 class=\"pn-year\">2025</h2>"), "{html}");
+        assert!(!html.contains("<p class=\"pn-year\""), "{html}");
         assert!(
             html.contains(
-                "<div class=\"pn-row is-open\" id=\"patch-9-1\"><h2 class=\"pn-row-title\"><button class=\"pn-row-head\" type=\"button\" aria-expanded=\"true\" aria-controls=\"patch-9-1-body\">"
+                "<div class=\"pn-row is-open\" id=\"patch-9-1\"><h3 class=\"pn-row-title\"><button class=\"pn-row-head\" type=\"button\" aria-expanded=\"true\" aria-controls=\"patch-9-1-body\">"
             ),
             "{html}"
         );
@@ -2433,7 +2490,7 @@ mod tests {
         );
         assert!(
             html.contains(
-                "<div class=\"pn-row\" id=\"patch-8-0\"><h2 class=\"pn-row-title\"><button class=\"pn-row-head\" type=\"button\" aria-expanded=\"false\">"
+                "<div class=\"pn-row\" id=\"patch-8-0\"><h3 class=\"pn-row-title\"><button class=\"pn-row-head\" type=\"button\" aria-expanded=\"false\">"
             ),
             "{html}"
         );
@@ -2448,12 +2505,12 @@ mod tests {
         // Hero cards start closed, named by a heading, with their own state.
         assert!(
             html.contains(
-                "<div class=\"pn-hero-card\" id=\"patch-9-1-hero-wrecking-ball\"><h3 class=\"pn-hero-title\"><button class=\"pn-hero-head\" type=\"button\" aria-expanded=\"false\">"
+                "<div class=\"pn-hero-card\" id=\"patch-9-1-hero-wrecking-ball\"><h4 class=\"pn-hero-title\"><button class=\"pn-hero-head\" type=\"button\" aria-expanded=\"false\">"
             ),
             "{html}"
         );
         assert!(
-            html.contains("<h3 class=\"pn-section-title\">General</h3>"),
+            html.contains("<h4 class=\"pn-section-title\">General</h4>"),
             "{html}"
         );
         // The hero group is named after its row, so two open rows differ.

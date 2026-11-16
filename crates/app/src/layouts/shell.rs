@@ -2697,30 +2697,29 @@ mod tests {
         );
     }
 
-    /// QA nit 13: the patch notes table of contents sticks under the top bar
-    /// and the toolbar, so its height has to subtract the same offset.
+    /// QA nit 13: what sticks on the patch notes page sits under the top bar
+    /// by the bar's real height (`--nav-height-used`), never a fixed length.
+    /// The redesigned page has no table of contents column; its sticky parts
+    /// are the controls and the shared scroll offset, so those are pinned.
     #[test]
-    fn patch_notes_toc_height_matches_its_sticky_offset() {
+    fn patch_notes_sticky_offsets_follow_the_top_bar() {
         let notes = include_str!("../pages/strategy/patch_notes.rs");
-        let toc = css_rule(notes, "\n    .patch-hero-toc {");
+        let controls = css_rule(notes, "\n    .pn-controls {");
+        assert!(has_decl(&controls, "position: sticky"), "{controls}");
         assert!(
-            has_decl(&toc, "top: calc(var(--nav-height-used) + 5.5rem)"),
-            "{toc}"
+            has_decl(&controls, "top: var(--nav-height-used)"),
+            "{controls}"
         );
-        // Vision nit 11: between 721 and 820px the phone tab bar is on
-        // screen too, so the height subtracts the whole shell chrome (top
-        // bar plus tab bar on phone, the top bar alone on desktop).
+        let page = css_rule(notes, "\n    .patch-page {");
         assert!(
-            has_decl(
-                &toc,
-                "max-height: calc(100vh - var(--shell-chrome-height, var(--nav-height-used)) - 5.5rem)"
-            ),
-            "{toc}"
+            page.contains("--pn-sticky-offset: calc(")
+                && page.contains("var(--nav-height-used) + var(--hit-target-min) * 2"),
+            "{page}"
         );
-        assert!(!has_decl(
-            &toc,
-            "max-height: calc(100vh - var(--nav-height-used) - 5.5rem)"
-        ));
+        // Vision nit 11 (PR 693): on phone the shell chrome is the top bar
+        // plus the tab bar. The page's sticky parts sit at the top, so they
+        // only need the top bar; the chrome height stays pinned for the
+        // rules that fill the viewport.
         let phone = SHELL_CSS
             .split("@media (max-width: 820px) {")
             .nth(1)
@@ -2728,8 +2727,22 @@ mod tests {
         assert!(phone.contains(
             "--shell-chrome-height: calc(var(--nav-height-used) + var(--tab-bar-height))"
         ));
+        // Every sticky or viewport-height rule on the page uses the bar's
+        // height; the old fixed offsets are gone with the old column.
         let old = ["100vh - 8.5", "rem"].concat();
         assert!(!notes.contains(&old), "the old fixed offset is gone");
+        let css = notes
+            .split("const PAGE_CSS: &str = r#\"")
+            .nth(1)
+            .and_then(|rest| rest.split("\"#;").next())
+            .expect("PAGE_CSS");
+        for line in css.lines() {
+            let line = line.trim();
+            if line.starts_with("top:") || line.contains("100vh") {
+                assert!(line.contains("var(--nav-height-used)"), "{line}");
+            }
+        }
+        assert!(!css.contains(".patch-hero-toc"), "the old column is gone");
     }
 
     fn settings_json() -> String {

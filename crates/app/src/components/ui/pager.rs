@@ -302,14 +302,15 @@ pub const PAGER_CSS: &str = r#"
   text-box-edge: cap alphabetic;
 }
 .pager-pages button:hover { border-color: var(--text); }
-/* Current page: soft fill and accent ink, plus a doubled edge and a heavier
-   weight so it is not colour alone. */
+/* Current page: soft fill and accent ink, plus a doubled edge and the head
+   weight (700 against 600 on every other page button) so it is not colour
+   alone. */
 .pager-pages .page-btn.is-current {
   background: var(--accent-soft);
   color: var(--accent-text);
   border-color: var(--accent-text);
   box-shadow: inset 0 0 0 1px var(--accent-text);
-  font-weight: var(--chip-selected-weight);
+  font-weight: var(--font-head-weight);
   cursor: default;
 }
 .pager-pages .is-disabled,
@@ -329,6 +330,24 @@ pub const PAGER_CSS: &str = r#"
 }
 @supports not (text-box-trim: trim-both) {
   .pager-pages button { padding-top: 0.08em; }
+}
+/* Forced colours remove fills and shadows and paint every border in one
+   system colour, so the cues above are gone. The current page gets a thick
+   edge in the system highlight colour and an underline; a step that cannot
+   move gets the system grey text colour and a dashed edge. Both differ from
+   the other buttons in shape, not only ink. */
+@media (forced-colors: active) {
+  .pager-pages .page-btn.is-current {
+    border: calc(var(--focus-ring-width) + 1px) solid Highlight;
+    text-decoration: underline;
+    text-decoration-thickness: var(--focus-ring-width);
+    text-underline-offset: 0.25em;
+  }
+  .pager-pages .is-disabled,
+  .pager-pages .is-disabled:hover {
+    color: GrayText;
+    border: 1px dashed GrayText;
+  }
 }
 "#;
 
@@ -453,7 +472,8 @@ mod tests {
     use super::PageSlot::{Gap, Page};
     use super::*;
     use crate::components::ui::test_support::{
-        assert_ink_clears_aa, assert_sizes_from_tokens, css_rule, has_decl, render,
+        assert_ink_clears_aa, assert_sizes_from_tokens, assert_weight_heavier, css_rule, has_decl,
+        media_block, render,
     };
 
     #[test]
@@ -917,10 +937,18 @@ mod tests {
             "color: var(--accent-text)",
             "border-color: var(--accent-text)",
             "box-shadow: inset 0 0 0 1px var(--accent-text)",
-            "font-weight: var(--chip-selected-weight)",
+            "font-weight: var(--font-head-weight)",
         ] {
             assert!(has_decl(&current, decl), "missing {decl}: {current}");
         }
+        // The weight cue is a real difference: the tokens are resolved to
+        // numbers, so two tokens with the same value fail here.
+        let button = css_rule(PAGER_CSS, ".pager-pages button {");
+        assert!(
+            has_decl(&button, "font-weight: var(--font-label-weight)"),
+            "{button}"
+        );
+        assert_weight_heavier("--font-head-weight", "--font-label-weight");
         assert_ink_clears_aa("--accent-text", "--accent-soft", 4.5);
         assert_ink_clears_aa("--text", "--surface", 4.5);
         // Hover uses the same edge as the other outlined buttons.
@@ -938,5 +966,42 @@ mod tests {
         assert!(has_decl(&off, "color: var(--text-disabled)"), "{off}");
         assert!(has_decl(&off, "background: var(--surface)"), "{off}");
         assert_ink_clears_aa("--text-disabled", "--surface", 3.0);
+    }
+
+    #[test]
+    fn forced_colours_keep_the_current_page_and_the_dead_step_apart() {
+        let forced = media_block(PAGER_CSS, "@media (forced-colors: active)");
+        // Current page: a thicker edge in a system colour plus an underline.
+        // Neither is a fill or a shadow, which forced colours remove.
+        let current = css_rule(&forced, ".pager-pages .page-btn.is-current {");
+        for decl in [
+            "border: calc(var(--focus-ring-width) + 1px) solid Highlight",
+            "text-decoration: underline",
+            "text-decoration-thickness: var(--focus-ring-width)",
+        ] {
+            assert!(has_decl(&current, decl), "missing {decl}: {current}");
+        }
+        assert!(!current.contains("background"), "{current}");
+        assert!(!current.contains("box-shadow"), "{current}");
+        // The edge is thicker than the 1px every page button has.
+        let button = css_rule(PAGER_CSS, ".pager-pages button {");
+        assert!(
+            has_decl(&button, "border: 1px solid var(--border-strong)"),
+            "{button}"
+        );
+        assert!(has_decl(&button, "box-sizing: border-box"), "{button}");
+        // Disabled Previous / Next: system GrayText and a dashed edge, also
+        // on hover.
+        let off = css_rule(&forced, ".pager-pages .is-disabled:hover {");
+        assert!(has_decl(&off, "color: GrayText"), "{off}");
+        assert!(has_decl(&off, "border: 1px dashed GrayText"), "{off}");
+        assert!(
+            forced.contains(".pager-pages .is-disabled,\n  .pager-pages .is-disabled:hover {"),
+            "{forced}"
+        );
+        // The rules only exist inside the forced-colours block.
+        let outside = PAGER_CSS.replace(&forced, "");
+        assert!(!outside.contains("Highlight"), "{outside}");
+        assert!(!outside.contains("GrayText"), "{outside}");
     }
 }
