@@ -589,7 +589,7 @@ mod tests {
         // to that script must update this hash or the enforcing CSP will block it.
         assert_eq!(
             expected,
-            "'sha256-9MxM3NkezF2qDsR/EtUZQ8F8U5geo0hZOsFpJn1Q+fM='"
+            "'sha256-vXSjw7WaczigfZS6XictBnrkp6FuyOiIFht6xtaPr4g='"
         );
 
         let with_loader = format!(
