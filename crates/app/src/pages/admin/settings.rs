@@ -519,7 +519,7 @@ pub fn AdminSettings() -> Element {
                         {
                             let shells = [
                                 (HomeShell::OpsHub, "Ops hub", "Dense board. Schedule, roster table."),
-                                (HomeShell::RecruitLanding, "Recruit landing", "Apply-first, team cards, more space."),
+                                (HomeShell::RecruitLanding, "Recruit landing", "Apply-first, with team cards."),
                                 (HomeShell::Minimal, "Minimal", "Hero + apply; lean front door."),
                                 (HomeShell::Manifesto, "Manifesto", "Principles first; comps quieter."),
                             ];
@@ -549,8 +549,8 @@ pub fn AdminSettings() -> Element {
                     div { class: "option-tiles", style: "margin-bottom:1rem;",
                         {
                             let skins = [
-                                (HomeSkin::Clean, "Clean", "Calmer product look. Default for most packs."),
-                                (HomeSkin::Esports, "Esports", "Clipped badges, denser competitive DNA."),
+                                (HomeSkin::Clean, "Clean", "Sentence-case headings. Default for most packs."),
+                                (HomeSkin::Esports, "Esports", "Upper-case headings, wider label tracking."),
                             ];
                             rsx! {
                                 for (skin, title, blurb) in skins {

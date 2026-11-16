@@ -6,15 +6,16 @@ mod data;
 
 use dioxus::prelude::*;
 use scuffed_api_client::ApiClient;
-use scuffed_types::{HomeSectionId, HomeShell, HomeSkin, org_initials};
+use scuffed_types::{ContentAlign, HomeSectionId, HomeShell, HomeSkin};
 
 use crate::components::fetch_error;
+use crate::components::ui::{PageShell, PageWidth};
 use crate::hooks::CursorPage;
 use crate::state::{loaded_site_settings, use_site_settings};
 use crate::util::{FetchClass, classify_fetch};
 use blocks::{
-    EthosBlock, HeroBlock, ListPhase, LiveBlock, NewsBlock, RecruitBlock, TeamsBlock,
-    live_panel_flags, teams_will_render,
+    EthosBlock, HeroBlock, ListPhase, LiveBlock, NewsBlock, RecruitBlock, StatsBlock, TeamsBlock,
+    hero_class, live_panel_flags, teams_will_render,
 };
 use css::home_css_layers;
 use data::{Announcement, Event, HomeTournament, Overview};
@@ -37,7 +38,7 @@ fn home_body(phase: FetchClass) -> HomeBody {
 }
 
 /// `UseResourceState::Pending` stays pending even when the previous value is
-/// still `Some(None)`, so Retry shows "Loading…" instead of the error.
+/// still `Some(None)`, so a Retry reads as loading and not as the old error.
 /// Otherwise `None` is still in flight, `Some(None)` failed, and `Some(Some)` settled.
 fn resource_list_phase<T>(state: UseResourceState, slot: Option<&Option<T>>) -> ListPhase {
     if state == UseResourceState::Pending {
@@ -62,11 +63,34 @@ fn show_next_match_panel(
     blocks::keep_section(phase, has_upcoming, live_keep_empty && schedule_on)
 }
 
-/// Pending and error share one wrapper so the error branch can be mounted in tests.
-/// Default shell and skin match a fresh install. The 128px rail note lives in `css.rs`.
-fn pending_home(body: HomeBody, refresh: Signal<u32>) -> Element {
-    let shell_attr = HomeShell::default().as_str();
-    let skin_attr = HomeSkin::default().as_str();
+/// Page class on the `PageShell`. The alignment class is the admin setting;
+/// only the hero reads it (see `hero_class`).
+fn page_class(align: ContentAlign) -> String {
+    format!("home-page {}", align.css_class())
+}
+
+/// Text of the page status line: only the settings wait has something to say.
+fn home_status(body: HomeBody) -> &'static str {
+    match body {
+        HomeBody::Skeleton => "Loading the home page",
+        HomeBody::Error | HomeBody::Ready => "",
+    }
+}
+
+/// The wrapper every state of Home renders through: the shell and skin
+/// attributes, the page container and the status line. One template for the
+/// skeleton, the error and the loaded page, so the status line is the same
+/// node in all three and its text change is announced.
+fn home_frame(
+    shell: HomeShell,
+    skin: HomeSkin,
+    align: ContentAlign,
+    state: HomeBody,
+    body: Element,
+) -> Element {
+    let shell_attr = shell.as_str();
+    let skin_attr = skin.as_str();
+    let status = home_status(state);
     let css = home_css_layers();
     rsx! {
         crate::styles::StyleLive { id: "scuffed-css-home", css }
@@ -74,13 +98,27 @@ fn pending_home(body: HomeBody, refresh: Signal<u32>) -> Element {
             class: "home-wrap",
             "data-home-shell": "{shell_attr}",
             "data-home-skin": "{skin_attr}",
-            if body == HomeBody::Error {
-                HeroSettingsError { refresh }
-            } else {
-                HeroSkeleton {}
-            }
+            p { class: "visually-hidden", role: "status", "{status}" }
+            PageShell { width: PageWidth::Default, class: page_class(align), {body} }
         }
     }
+}
+
+/// Pending and error share one wrapper so the error branch can be mounted in tests.
+/// Default shell, skin and alignment match a fresh install.
+fn pending_home(body: HomeBody, refresh: Signal<u32>) -> Element {
+    let inner = if body == HomeBody::Error {
+        rsx! { HeroSettingsError { refresh } }
+    } else {
+        rsx! { HeroSkeleton {} }
+    };
+    home_frame(
+        HomeShell::default(),
+        HomeSkin::default(),
+        ContentAlign::default(),
+        body,
+        inner,
+    )
 }
 
 #[component]
@@ -141,14 +179,13 @@ pub fn Home() -> Element {
     let body = home_body(settings_fetch);
     let Some(settings) = loaded.filter(|_| body == HomeBody::Ready) else {
         // A parsed `#sc-settings` block is Ready above and uses that org's
-        // shell and skin. Width numbers for this default wrapper are in css.rs.
+        // shell and skin.
         return pending_home(body, site_settings.refresh);
     };
 
     let content = crate::copy::plain_homepage(&settings.homepage);
     let home_shell: HomeShell = settings.home_shell;
     let home_skin: HomeSkin = settings.home_skin;
-    let initials = org_initials(&settings.org_name);
     let recruitment_open = settings.recruitment_open;
 
     // Resolve list data for blocks (Home owns resources).
@@ -258,10 +295,7 @@ pub fn Home() -> Element {
         }
     };
 
-    let home_class = format!("home {}", content.content_align.css_class());
-    let shell_attr = home_shell.as_str();
-    let skin_attr = home_skin.as_str();
-    let css = home_css_layers();
+    let show_stats = metrics_pending || metric_squads.or(metric_members).or(metric_games).is_some();
     let section_order = home_shell.section_order();
     let teams_presentation = home_shell.teams_presentation();
 
@@ -272,129 +306,123 @@ pub fn Home() -> Element {
         "#squads".to_string()
     };
 
-    rsx! {
-        crate::styles::StyleLive { id: "scuffed-css-home", css }
-        div {
-            class: "home-wrap",
-            "data-home-shell": "{shell_attr}",
-            "data-home-skin": "{skin_attr}",
-            // Full-bleed hero sits outside the constrained body column.
-            HeroBlock {
-                content: content.clone(),
-                initials: initials.clone(),
-                recruitment_open,
-                show_secondary_cta,
-                secondary_href,
+    let body = rsx! {
+        HeroBlock {
+            content: content.clone(),
+            recruitment_open,
+            show_secondary_cta,
+            secondary_href,
+        }
+        // Not mounted when empty: an empty flex child would still
+        // take a `--space-section` gap.
+        if show_stats {
+            StatsBlock {
                 metric_squads,
                 metric_members,
                 metric_games,
                 metrics_pending,
             }
-            div { class: "{home_class}",
-                for id in section_order.iter().copied() {
+        }
+        for id in section_order.iter().copied() {
+            {
+                match id {
+                    HomeSectionId::Ethos if content.sections.ethos => rsx! {
+                        EthosBlock { content: content.clone() }
+                    },
+                    HomeSectionId::Live
+                        if show_schedule || show_tourneys || show_next_match || show_results =>
                     {
-                        match id {
-                            HomeSectionId::Ethos if content.sections.ethos => rsx! {
-                                EthosBlock { content: content.clone() }
-                            },
-                            HomeSectionId::Live
-                                if show_schedule || show_tourneys || show_next_match || show_results =>
-                            {
-                                rsx! {
-                                    LiveBlock {
-                                        content: content.clone(),
-                                        events: event_list.clone(),
-                                        events_phase,
-                                        live_tournaments: live_tournaments.clone(),
-                                        tourneys_phase,
-                                        upcoming_matches: upcoming_matches.clone(),
-                                        upcoming_phase,
-                                        recent_results: recent_results.clone(),
-                                        show_schedule,
-                                        show_tourneys,
-                                        show_next_match,
-                                        show_results,
-                                        retry_events: events_refresh,
-                                        retry_tourneys: tournaments_refresh,
-                                        retry_overview: overview_refresh,
-                                    }
-                                }
-                            },
-                            HomeSectionId::Teams if show_teams => rsx! {
-                                TeamsBlock {
-                                    content: content.clone(),
-                                    overview: overview_data.clone(),
-                                    phase: upcoming_phase,
-                                    presentation: teams_presentation,
-                                    retry: overview_refresh,
-                                }
-                            },
-                            HomeSectionId::News if show_news => rsx! {
-                                NewsBlock {
-                                    content: content.clone(),
-                                    announcements: news_list.clone(),
-                                    phase: news_phase,
-                                    retry: announcements_refresh,
-                                }
-                            },
-                            HomeSectionId::Recruit if content.sections.recruit && recruitment_open => rsx! {
-                                RecruitBlock { content: content.clone() }
-                            },
-                            _ => rsx! {},
+                        rsx! {
+                            LiveBlock {
+                                content: content.clone(),
+                                events: event_list.clone(),
+                                events_phase,
+                                live_tournaments: live_tournaments.clone(),
+                                tourneys_phase,
+                                upcoming_matches: upcoming_matches.clone(),
+                                upcoming_phase,
+                                recent_results: recent_results.clone(),
+                                show_schedule,
+                                show_tourneys,
+                                show_next_match,
+                                show_results,
+                                retry_events: events_refresh,
+                                retry_tourneys: tournaments_refresh,
+                                retry_overview: overview_refresh,
+                            }
                         }
-                    }
-                }
-
-                if !content.footer_note.trim().is_empty() {
-                    p { class: "home-foot", "{content.footer_note}" }
+                    },
+                    HomeSectionId::Teams if show_teams => rsx! {
+                        TeamsBlock {
+                            content: content.clone(),
+                            overview: overview_data.clone(),
+                            phase: upcoming_phase,
+                            presentation: teams_presentation,
+                            retry: overview_refresh,
+                        }
+                    },
+                    HomeSectionId::News if show_news => rsx! {
+                        NewsBlock {
+                            content: content.clone(),
+                            announcements: news_list.clone(),
+                            phase: news_phase,
+                            retry: announcements_refresh,
+                        }
+                    },
+                    HomeSectionId::Recruit if content.sections.recruit && recruitment_open => rsx! {
+                        RecruitBlock { content: content.clone() }
+                    },
+                    _ => rsx! {},
                 }
             }
         }
-    }
+
+        if !content.footer_note.trim().is_empty() {
+            p { class: "home-foot", "{content.footer_note}" }
+        }
+    };
+    home_frame(
+        home_shell,
+        home_skin,
+        content.content_align,
+        HomeBody::Ready,
+        body,
+    )
 }
 
-/// Textless hero. Bars use the loaded hero's type scale.
+/// Textless hero in the loaded hero's layout: banner, title, lead, actions.
 ///
-/// The parent `.home-wrap` sets `data-home-shell` so the rail width matches the
-/// loaded page (`pending_home` uses the default shell). `data-home-skin` is set
-/// for consistency; no skin rule affects this skeleton. Width numbers live next
-/// to `.home-skel` in css.rs. `aria-busy` is omitted: it suppresses the
-/// `role="status"` announcement.
+/// `pending_home` sets the default shell, skin and alignment on the wrappers
+/// so the skeleton matches a fresh install. The page has no title to show
+/// yet, so its one H1 is the page's name, for assistive tech only. The
+/// loading words are the page status line in `home_frame`. `aria-busy` is
+/// omitted: it suppresses the `role="status"` announcement.
 #[component]
 fn HeroSkeleton() -> Element {
+    let class = hero_class(ContentAlign::default());
     rsx! {
-        header {
-            class: "home-hero",
-            span { class: "home-skel-status", role: "status", "Loading…" }
-            div { class: "home-hero-rail",
-                div { class: "home-hero-inner",
-                    div { class: "home-skel home-skel-badge", aria_hidden: "true" }
-                    div { class: "home-skel home-skel-title", aria_hidden: "true" }
-                    div { class: "home-skel home-skel-title home-skel-title-short", aria_hidden: "true" }
-                    div { class: "home-skel home-skel-sub", aria_hidden: "true" }
-                    div { class: "home-skel-actions", aria_hidden: "true",
-                        div { class: "home-skel home-skel-btn" }
-                        div { class: "home-skel home-skel-btn" }
-                    }
-                }
+        section { class: "{class}",
+            h1 { class: "visually-hidden", "Home" }
+            div { class: "home-skel home-skel-badge", aria_hidden: "true" }
+            div { class: "home-skel home-skel-title", aria_hidden: "true" }
+            div { class: "home-skel home-skel-sub", aria_hidden: "true" }
+            div { class: "home-skel-actions", aria_hidden: "true",
+                div { class: "home-skel home-skel-btn" }
+                div { class: "home-skel home-skel-btn" }
             }
         }
     }
 }
 
-/// Settings failed. Same hero chrome, no template copy, retry refetches settings.
+/// Settings failed. Same hero box, no template copy, retry refetches settings.
+/// The failure is the page's H1, so the page still has a heading.
 #[component]
 fn HeroSettingsError(refresh: Signal<u32>) -> Element {
+    let class = hero_class(ContentAlign::default());
     rsx! {
-        header { class: "home-hero",
-            div { class: "home-hero-rail",
-                div { class: "home-hero-inner",
-                    {fetch_error(
-                        "Couldn't load this page. Check your connection and try again.",
-                        refresh,
-                    )}
-                }
-            }
+        section { class: "{class}",
+            h1 { class: "home-hero-title", "Couldn't load this page" }
+            {fetch_error("Check your connection and try again.", refresh)}
         }
     }
 }
@@ -433,10 +461,62 @@ mod tests {
         );
         assert!(html.contains("home-skel-title"), "{html}");
         assert!(!html.contains("aria-busy"), "{html}");
-        assert!(html.contains("role=\"status\""), "{html}");
-        assert!(html.contains("Loading…"), "{html}");
         assert!(!html.contains("aria-label"), "{html}");
+        // One H1 even with no title to show: the page's name, not drawn.
+        assert_eq!(html.matches("<h1").count(), 1, "{html}");
+        assert!(
+            html.contains("<h1 class=\"visually-hidden\">Home</h1>"),
+            "{html}"
+        );
+        // The loading words are the page status line, not part of the hero.
+        assert!(!html.contains("role=\"status\""), "{html}");
         assert_no_template_copy(&html);
+    }
+
+    #[test]
+    fn status_line_is_one_node_in_every_state_and_only_its_text_changes() {
+        assert_eq!(home_status(HomeBody::Skeleton), "Loading the home page");
+        assert_eq!(home_status(HomeBody::Error), "");
+        assert_eq!(home_status(HomeBody::Ready), "");
+        fn loading() -> Element {
+            let refresh = use_signal(|| 0u32);
+            pending_home(HomeBody::Skeleton, refresh)
+        }
+        fn failed() -> Element {
+            let refresh = use_signal(|| 0u32);
+            pending_home(HomeBody::Error, refresh)
+        }
+        fn ready() -> Element {
+            home_frame(
+                HomeShell::default(),
+                HomeSkin::default(),
+                ContentAlign::default(),
+                HomeBody::Ready,
+                rsx! { h1 { "Loaded" } },
+            )
+        }
+        let line = |text: &str| {
+            format!(
+                "data-home-skin=\"clean\"><p class=\"visually-hidden\" role=\"status\">{text}</p><div class=\"ui-shell home-page align-left\">"
+            )
+        };
+        let loading = render(loading);
+        assert!(
+            loading.contains(&line("Loading the home page")),
+            "{loading}"
+        );
+        let failed = render(failed);
+        assert!(failed.contains(&line("")), "{failed}");
+        let ready = render(ready);
+        assert!(ready.contains(&line("")), "{ready}");
+        // Every state has exactly one H1.
+        for html in [&loading, &failed, &ready] {
+            assert_eq!(html.matches("<h1").count(), 1, "{html}");
+        }
+        assert!(
+            failed.contains("<h1 class=\"home-hero-title\">Couldn&#39;t load this page</h1>"),
+            "{failed}"
+        );
     }
 
     #[test]
@@ -463,7 +543,7 @@ mod tests {
             html.contains("class=\"home-skel home-skel-badge\""),
             "{html}"
         );
-        assert!(html.contains("Loading…"), "{html}");
+        assert!(html.contains("Loading the home page"), "{html}");
         assert!(!html.contains("aria-busy"), "{html}");
         assert_no_template_copy(&html);
     }
@@ -491,6 +571,35 @@ mod tests {
             "{html}"
         );
         assert_no_template_copy(&html);
+    }
+
+    #[test]
+    fn pending_and_error_bodies_sit_in_the_default_width_shell() {
+        fn loading() -> Element {
+            let refresh = use_signal(|| 0u32);
+            pending_home(HomeBody::Skeleton, refresh)
+        }
+        fn failed() -> Element {
+            let refresh = use_signal(|| 0u32);
+            pending_home(HomeBody::Error, refresh)
+        }
+        for html in [render(loading), render(failed)] {
+            // The shell owns `<main>`; the page body is a default-width div.
+            assert!(
+                html.contains("<div class=\"ui-shell home-page align-left\">"),
+                "{html}"
+            );
+            assert!(html.contains("<section class=\"home-hero\">"), "{html}");
+            assert!(!html.contains("<main"), "{html}");
+            assert!(!html.contains("<header"), "{html}");
+            assert!(!html.contains("ui-shell--"), "{html}");
+        }
+    }
+
+    #[test]
+    fn page_class_carries_the_alignment_setting() {
+        assert_eq!(page_class(ContentAlign::Left), "home-page align-left");
+        assert_eq!(page_class(ContentAlign::Center), "home-page align-center");
     }
 
     #[test]

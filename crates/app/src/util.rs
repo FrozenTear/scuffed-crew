@@ -424,6 +424,17 @@ pub fn season_url(path: &str, season: Option<&str>) -> String {
     }
 }
 
+/// Log a raw client error to the browser console. User-facing copy stays a
+/// plain sentence; the technical text goes here for whoever debugs it.
+pub fn log_client_error(what: &str, err: &dyn std::fmt::Display) {
+    #[cfg(target_arch = "wasm32")]
+    web_sys::console::warn_1(&format!("{what}: {err}").into());
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = (what, err);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

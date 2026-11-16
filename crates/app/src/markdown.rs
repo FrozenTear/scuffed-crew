@@ -16,11 +16,19 @@
 //! Layout rules:
 //! - A single line break inside a paragraph becomes `<br>`, so posts written
 //!   as plain text (shown with `pre-wrap` before markdown) keep their lines.
-//! - Each table is wrapped in `<div class="md-table-wrap">` so a wide table
-//!   scrolls sideways inside the content card instead of overflowing it.
+//! - Each table is wrapped in a `md-table-wrap` box and each code block is a
+//!   `md-code` box. Both scroll sideways inside the article instead of
+//!   widening the page, and both take keyboard focus (`tabindex="0"` plus a
+//!   name) so they can be scrolled without a pointer. They are named groups,
+//!   not landmarks: an article with several would otherwise list several
+//!   regions with the same name.
+//! - A task list checkbox is named "Done" or "Not done". It is disabled, so
+//!   the name says what the mark means and the item text follows it.
+//! - A paragraph that is only an image with a title (`![alt](url "caption")`)
+//!   becomes a `<figure>` with the title as its `<figcaption>`.
 //!
 //! Containers that hold rendered markdown add the `md-body` class and inject
-//! [`MARKDOWN_CSS`] once, so blog and wiki share one set of element styles.
+//! [`MARKDOWN_CSS`] once, so blog and wiki share one prose style.
 
 use pulldown_cmark::{
     CodeBlockKind, CowStr, Event, HeadingLevel, Options, Parser, Tag, TagEnd, html,
@@ -29,60 +37,72 @@ use pulldown_cmark::{
 /// `StyleOnce` id for [`MARKDOWN_CSS`].
 pub const MARKDOWN_CSS_ID: &str = "scuffed-css-markdown-body";
 
-/// Element styles for rendered markdown inside an `.md-body` container.
+/// The one prose style for rendered markdown inside an `.md-body` container
+/// (blog posts and wiki pages). Pages add no element rules of their own.
 ///
 /// Tailwind preflight resets headings to body size and weight and removes
-/// list markers and indent, so this restores them. Colors, fonts and sizes
-/// come from the design tokens only. Page CSS keeps the container's own look
-/// (font size, paragraph spacing, `pre` background).
+/// list markers and indent, so this restores them. Colors, fonts, sizes and
+/// spacing come from the design tokens only.
 ///
-/// The first/last-child margin resets sit last on purpose: they tie on
-/// specificity with `.md-body .md-table-wrap` (0,2,0), and inside one sheet
-/// the later rule wins, so a leading or trailing table loses its outer margin
-/// no matter which `StyleOnce` mounts first. They also beat page rules like
-/// `.wiki-content p` (0,1,1), so pages must not repeat them.
-///
-/// The table wrapper's bottom margin follows `--md-block-gap` (default
-/// `1rem`), so a page whose blocks use a different gap sets that property on
-/// its container and tables line up with its other blocks.
+/// Blocks are spaced by `--md-block-gap`. The first/last-child margin resets
+/// sit last on purpose: they tie on specificity with
+/// `.md-body .md-table-wrap` (0,2,0), and inside one sheet the later rule
+/// wins, so a leading or trailing table loses its outer margin. They beat the
+/// element rules (0,1,1) in any order.
 ///
 /// Task items drop their marker in both shapes: tight (`li > input`) and
 /// loose (`li > p > input`, where the parser wraps the item text in `<p>`).
 pub const MARKDOWN_CSS: &str = r#"
-    .md-body h1,
+    .md-body {
+        --md-block-gap: var(--space-4);
+        min-width: 0;
+        max-width: var(--content-max-narrow);
+        color: var(--text);
+        font-family: var(--font-body);
+        font-size: var(--text-md);
+        line-height: var(--leading-body);
+        overflow-wrap: anywhere;
+    }
     .md-body h2,
     .md-body h3,
     .md-body h4,
     .md-body h5,
     .md-body h6 {
+        margin: var(--space-5) 0 var(--space-2);
         color: var(--text);
-        line-height: 1.3;
-        margin: 1.6em 0 0.6em;
-    }
-    .md-body h1,
-    .md-body h2,
-    .md-body h3 {
         font-family: var(--font-head);
+        font-weight: var(--font-label-weight);
+        letter-spacing: var(--font-head-tracking);
+        line-height: var(--leading-ui);
     }
-    .md-body h1 { font-size: var(--text-3xl); font-weight: 700; }
-    .md-body h2 { font-size: var(--text-2xl); font-weight: 700; }
-    .md-body h3 { font-size: var(--text-xl); font-weight: 600; }
-    .md-body h4 { font-size: var(--text-lg); font-weight: 600; }
-    .md-body h5 { font-size: var(--text-md); font-weight: 600; }
+    .md-body h2 {
+        margin-top: var(--space-6);
+        font-size: var(--text-lg);
+    }
+    .md-body h3 { font-size: var(--text-lg); }
+    .md-body h4 { font-size: var(--text-md); }
+    .md-body h5 { font-size: var(--text-sm); }
     .md-body h6 {
         font-size: var(--text-sm);
-        font-weight: 600;
         color: var(--text-3);
         text-transform: uppercase;
-        letter-spacing: 0.04em;
+        letter-spacing: var(--font-label-tracking);
+    }
+    .md-body p,
+    .md-body ul,
+    .md-body ol,
+    .md-body blockquote,
+    .md-body pre,
+    .md-body figure {
+        margin: 0 0 var(--md-block-gap);
     }
     .md-body ul {
         list-style: disc;
-        padding-left: 1.5rem;
+        padding-inline-start: var(--space-5);
     }
     .md-body ol {
         list-style: decimal;
-        padding-left: 1.5rem;
+        padding-inline-start: var(--space-5);
     }
     .md-body ul ul {
         list-style: circle;
@@ -92,10 +112,10 @@ pub const MARKDOWN_CSS: &str = r#"
     }
     .md-body li > ul,
     .md-body li > ol {
-        margin: 0.25rem 0;
+        margin: var(--space-2) 0 0;
     }
     .md-body li + li {
-        margin-top: 0.25rem;
+        margin-top: var(--space-2);
     }
     .md-body li:has(
         > input[type="checkbox"],
@@ -105,21 +125,102 @@ pub const MARKDOWN_CSS: &str = r#"
     }
     .md-body li > input[type="checkbox"],
     .md-body li > p:first-child > input[type="checkbox"]:first-child {
-        margin-right: 0.5rem;
+        margin-inline-end: var(--space-2);
         vertical-align: middle;
+    }
+    /* In-text links: accent ink plus an underline, so not colour alone. */
+    .md-body a {
+        color: var(--accent-text);
+        text-decoration: underline;
+    }
+    .md-body a:hover {
+        text-decoration: none;
+    }
+    .md-body blockquote {
+        padding: var(--space-3) var(--space-4);
+        border-inline-start: var(--space-1) solid var(--accent-solid);
+        background: var(--surface);
+        color: var(--text-3);
+    }
+    .md-body blockquote > :last-child {
+        margin-bottom: 0;
+    }
+    .md-body img {
+        display: block;
+        max-width: 100%;
+        height: auto;
+        border-radius: var(--radius-card);
+    }
+    .md-body figure img {
+        box-sizing: border-box;
+        width: 100%;
+        border: 1px solid var(--border);
+    }
+    .md-body figcaption {
+        margin-top: var(--space-2);
+        color: var(--text-3);
+        font-size: var(--text-sm);
+    }
+    .md-body hr {
+        margin: var(--space-6) 0;
+        border: 0;
+        border-top: 1px solid var(--border);
+    }
+    /* Code scrolls sideways inside its own box; the page never does. */
+    .md-body pre {
+        max-width: 100%;
+        padding: var(--space-4);
+        overflow-x: auto;
+        border: 1px solid var(--border);
+        border-radius: var(--radius-card);
+        background: var(--surface-sunken);
+        color: var(--text);
+        font-family: var(--font-mono);
+        font-size: var(--text-sm);
+        line-height: var(--leading-body);
+        white-space: pre;
+        overflow-wrap: normal;
+    }
+    .md-body code {
+        font-family: var(--font-mono);
+        font-size: var(--text-sm);
+    }
+    .md-body :not(pre) > code {
+        padding: 0 var(--space-1);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-control);
+        background: var(--surface-sunken);
+    }
+    .md-body pre,
+    .md-body .md-table-wrap {
+        scrollbar-width: thin;
+        scrollbar-color: var(--border-strong) transparent;
+    }
+    .md-body pre:focus-visible,
+    .md-body .md-table-wrap:focus-visible {
+        outline: var(--focus-ring-width) solid var(--focus-ring);
+        outline-offset: var(--focus-ring-offset);
     }
     .md-body .md-table-wrap {
         max-width: 100%;
         overflow-x: auto;
-        margin: 0 0 var(--md-block-gap, 1rem);
+        margin: 0 0 var(--md-block-gap);
     }
     .md-body .md-table-wrap > table {
         margin: 0;
+        border-collapse: collapse;
+        font-size: var(--text-sm);
+        overflow-wrap: normal;
+    }
+    .md-body th,
+    .md-body td {
+        padding: var(--space-2) var(--space-3);
+        border: 1px solid var(--border);
+        text-align: left;
     }
     .md-body th {
         color: var(--text);
-        font-weight: 600;
-        text-align: left;
+        font-weight: var(--font-label-weight);
     }
     .md-body > :first-child {
         margin-top: 0;
@@ -131,31 +232,198 @@ pub const MARKDOWN_CSS: &str = r#"
 
 /// Render untrusted markdown to HTML that is safe to inject.
 pub fn render_markdown(source: &str) -> String {
-    let options =
-        Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-    let events = Parser::new_ext(source, options).flat_map(|event| match event {
-        // Our own wrapper markup. Author HTML is never emitted as HTML: the
-        // parser reports it as `Html`/`InlineHtml`, which `sanitize` turns
-        // into escaped text.
-        Event::Start(Tag::Table(align)) => [
-            Some(Event::Html(CowStr::Borrowed(TABLE_WRAP_OPEN))),
-            Some(Event::Start(Tag::Table(align))),
-        ],
-        Event::End(TagEnd::Table) => [
-            Some(Event::End(TagEnd::Table)),
-            Some(Event::Html(CowStr::Borrowed(TABLE_WRAP_CLOSE))),
-        ],
-        other => [Some(sanitize(other)), None],
-    });
+    // Author HTML is never emitted as HTML: the parser reports it as
+    // `Html`/`InlineHtml`, which `sanitize` turns into escaped text. Every
+    // `Html` event pushed below is our own wrapper markup.
+    let events: Vec<Event<'_>> = Parser::new_ext(source, parser_options())
+        .map(sanitize)
+        .collect();
+    let mut laid_out: Vec<Event<'_>> = Vec::with_capacity(events.len() + 8);
+    let mut index = 0;
+    while index < events.len() {
+        match &events[index] {
+            Event::Start(Tag::Table(_)) => {
+                laid_out.push(Event::Html(CowStr::Borrowed(TABLE_WRAP_OPEN)));
+                laid_out.push(events[index].clone());
+            }
+            Event::End(TagEnd::Table) => {
+                laid_out.push(events[index].clone());
+                laid_out.push(Event::Html(CowStr::Borrowed(TABLE_WRAP_CLOSE)));
+            }
+            Event::Start(Tag::CodeBlock(kind)) => {
+                laid_out.push(Event::Html(CowStr::from(code_open(kind))));
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                laid_out.push(Event::Html(CowStr::Borrowed(CODE_CLOSE)));
+            }
+            Event::TaskListMarker(checked) => {
+                laid_out.push(Event::Html(CowStr::Borrowed(task_marker(*checked))));
+            }
+            Event::Start(Tag::Paragraph) => {
+                if let Some(figure) = captioned_image(&events, index) {
+                    push_figure(&mut laid_out, &events, index, &figure);
+                    index = figure.paragraph_end + 1;
+                    continue;
+                }
+                laid_out.push(events[index].clone());
+            }
+            other => laid_out.push(other.clone()),
+        }
+        index += 1;
+    }
     let mut out = String::with_capacity(source.len() * 3 / 2);
-    html::push_html(&mut out, events.flatten());
+    html::push_html(&mut out, laid_out.into_iter());
     out
 }
 
-const TABLE_WRAP_OPEN: &str = "<div class=\"md-table-wrap\">";
+fn parser_options() -> Options {
+    Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS
+}
+
+/// Plain text of the first paragraph of `source`, cut to `max_chars` with
+/// `...` when longer. Empty when the source has no paragraph. Used for list
+/// excerpts, so it carries no markup at all.
+pub fn plain_excerpt(source: &str, max_chars: usize) -> String {
+    let mut text = String::new();
+    let mut in_paragraph = false;
+    let mut image_depth = 0usize;
+    for event in Parser::new_ext(source, parser_options()) {
+        match event {
+            Event::Start(Tag::Paragraph) => in_paragraph = true,
+            Event::End(TagEnd::Paragraph) if in_paragraph => {
+                if !text.trim().is_empty() {
+                    break;
+                }
+                // A paragraph that was only an image: try the next one.
+                text.clear();
+                in_paragraph = false;
+            }
+            Event::Start(Tag::Image { .. }) => image_depth += 1,
+            Event::End(TagEnd::Image) => image_depth = image_depth.saturating_sub(1),
+            Event::Text(part) | Event::Code(part) if in_paragraph && image_depth == 0 => {
+                text.push_str(&part);
+            }
+            Event::SoftBreak | Event::HardBreak if in_paragraph => text.push(' '),
+            _ => {}
+        }
+    }
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let cut = crate::util::truncate_chars(&text, max_chars);
+    if cut.len() < text.len() {
+        format!("{}...", cut.trim_end())
+    } else {
+        text
+    }
+}
+
+/// Opens the scroll box around a table. Focusable and named so a wide table
+/// can be scrolled from the keyboard. A group, not a landmark.
+const TABLE_WRAP_OPEN: &str =
+    "<div class=\"md-table-wrap\" tabindex=\"0\" role=\"group\" aria-label=\"Table\">";
 const TABLE_WRAP_CLOSE: &str = "</div>";
 
-/// Per-event safety and layout rewrites (everything except table wrapping).
+/// Opens a code block. The `pre` is the scroll box: focusable and named.
+const CODE_OPEN: &str =
+    "<pre class=\"md-code\" tabindex=\"0\" role=\"group\" aria-label=\"Code sample\">";
+const CODE_CLOSE: &str = "</code></pre>\n";
+
+/// The checkbox of a task list item, named by its state. Same shape as the
+/// writer's own (`disabled`, then `type`), plus the name.
+fn task_marker(checked: bool) -> &'static str {
+    if checked {
+        "<input disabled=\"\" type=\"checkbox\" checked=\"\" aria-label=\"Done\"/>\n"
+    } else {
+        "<input disabled=\"\" type=\"checkbox\" aria-label=\"Not done\"/>\n"
+    }
+}
+
+/// `<pre ...><code>` for a block. `sanitize` has already reduced a fenced
+/// block's info string to a safe language word (or nothing).
+fn code_open(kind: &CodeBlockKind<'_>) -> String {
+    match kind {
+        CodeBlockKind::Fenced(lang) if !lang.is_empty() => {
+            format!("{CODE_OPEN}<code class=\"language-{lang}\">")
+        }
+        _ => format!("{CODE_OPEN}<code>"),
+    }
+}
+
+/// A paragraph that holds one titled image and nothing else.
+struct CaptionedImage<'a> {
+    /// Index of the image's `End` event.
+    image_end: usize,
+    /// Index of the paragraph's `End` event.
+    paragraph_end: usize,
+    caption: CowStr<'a>,
+}
+
+/// `Some` when the paragraph opening at `start` is exactly one image whose
+/// title is not blank.
+fn captioned_image<'a>(events: &[Event<'a>], start: usize) -> Option<CaptionedImage<'a>> {
+    let Some(Event::Start(Tag::Image { title, .. })) = events.get(start + 1) else {
+        return None;
+    };
+    if title.trim().is_empty() {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut image_end = None;
+    for (offset, event) in events[start + 1..].iter().enumerate() {
+        match event {
+            Event::Start(Tag::Image { .. }) => depth += 1,
+            Event::End(TagEnd::Image) => {
+                depth -= 1;
+                if depth == 0 {
+                    image_end = Some(start + 1 + offset);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let image_end = image_end?;
+    match events.get(image_end + 1) {
+        Some(Event::End(TagEnd::Paragraph)) => Some(CaptionedImage {
+            image_end,
+            paragraph_end: image_end + 1,
+            caption: title.clone(),
+        }),
+        _ => None,
+    }
+}
+
+/// `<figure><img ...><figcaption>caption</figcaption></figure>` in place of
+/// the paragraph at `start`. The caption is pushed as text, so the writer
+/// escapes it; the image loses its `title` since the caption now shows it.
+fn push_figure<'a>(
+    out: &mut Vec<Event<'a>>,
+    events: &[Event<'a>],
+    start: usize,
+    figure: &CaptionedImage<'a>,
+) {
+    out.push(Event::Html(CowStr::Borrowed("<figure>")));
+    for event in &events[start + 1..=figure.image_end] {
+        out.push(match event {
+            Event::Start(Tag::Image {
+                link_type,
+                dest_url,
+                id,
+                ..
+            }) => Event::Start(Tag::Image {
+                link_type: *link_type,
+                dest_url: dest_url.clone(),
+                title: CowStr::Borrowed(""),
+                id: id.clone(),
+            }),
+            other => other.clone(),
+        });
+    }
+    out.push(Event::Html(CowStr::Borrowed("<figcaption>")));
+    out.push(Event::Text(figure.caption.clone()));
+    out.push(Event::Html(CowStr::Borrowed("</figcaption></figure>\n")));
+}
+
+/// Per-event safety rewrites. Wrapper markup is added after this pass.
 fn sanitize(event: Event<'_>) -> Event<'_> {
     match event {
         Event::Html(raw) | Event::InlineHtml(raw) => Event::Text(raw),
@@ -410,14 +678,17 @@ mod tests {
             let html = render_markdown(src);
             match class {
                 Some(c) => assert!(
-                    html.starts_with(&format!("<pre><code class=\"{c}\">")),
+                    html.starts_with(&format!("{CODE_OPEN}<code class=\"{c}\">")),
                     "{src:?} -> {html}"
                 ),
-                None => assert!(html.starts_with("<pre><code>"), "{src:?} -> {html}"),
+                None => assert!(
+                    html.starts_with(&format!("{CODE_OPEN}<code>")),
+                    "{src:?} -> {html}"
+                ),
             }
         }
         let html = render_markdown("    indented\n");
-        assert!(html.starts_with("<pre><code>"), "{html}");
+        assert!(html.starts_with(&format!("{CODE_OPEN}<code>")), "{html}");
     }
 
     #[test]
@@ -432,7 +703,7 @@ mod tests {
     fn tables_are_wrapped_for_sideways_scroll() {
         let html = render_markdown("| a | b |\n|---|---|\n| 1 | 2 |\n\nafter\n");
         assert!(
-            html.starts_with("<div class=\"md-table-wrap\"><table>"),
+            html.starts_with(&format!("{TABLE_WRAP_OPEN}<table>")),
             "{html}"
         );
         assert!(html.contains("</table>\n</div>"), "{html}");
@@ -469,7 +740,7 @@ mod tests {
         assert_eq!(html.matches("<div").count(), 1, "{html}");
         assert_eq!(html.matches("</div>").count(), 1, "{html}");
         assert!(
-            html.starts_with("<div class=\"md-table-wrap\"><table>"),
+            html.starts_with(&format!("{TABLE_WRAP_OPEN}<table>")),
             "{html}"
         );
         assert!(
@@ -488,10 +759,15 @@ mod tests {
     fn code_block_newlines_stay_newlines() {
         let html = render_markdown("```\nline one\nline two\n```\n\n    a\n    b\n");
         assert!(
-            html.contains("<pre><code>line one\nline two\n</code></pre>"),
+            html.contains(&format!(
+                "{CODE_OPEN}<code>line one\nline two\n</code></pre>"
+            )),
             "{html}"
         );
-        assert!(html.contains("<pre><code>a\nb\n</code></pre>"), "{html}");
+        assert!(
+            html.contains(&format!("{CODE_OPEN}<code>a\nb\n</code></pre>")),
+            "{html}"
+        );
         assert!(!html.contains("<br"), "{html}");
     }
 
@@ -509,17 +785,159 @@ mod tests {
         // Tight: the checkbox is a direct child of the `li`.
         let html = render_markdown("- [ ] todo\n- [x] done\n");
         assert!(
-            html.contains("<li><input disabled=\"\" type=\"checkbox\"/>\ntodo</li>"),
+            html.contains(
+                "<li><input disabled=\"\" type=\"checkbox\" aria-label=\"Not done\"/>\ntodo</li>"
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                "<li><input disabled=\"\" type=\"checkbox\" checked=\"\" aria-label=\"Done\"/>\ndone</li>"
+            ),
+            "{html}"
+        );
+        // Every checkbox has a name.
+        assert_eq!(
+            html.matches("<input ").count(),
+            html.matches("aria-label=").count(),
             "{html}"
         );
         // Loose: the parser wraps the item in `<p>` and the checkbox is that
         // paragraph's first child, which is what MARKDOWN_CSS matches.
         let html = render_markdown("- [ ] todo\n\n- [x] done\n");
         assert!(
-            html.contains("<li>\n<p><input disabled=\"\" type=\"checkbox\"/>\ntodo</p>\n</li>"),
+            html.contains(
+                "<li>\n<p><input disabled=\"\" type=\"checkbox\" aria-label=\"Not done\"/>\ntodo</p>\n</li>"
+            ),
             "{html}"
         );
         assert!(MARKDOWN_CSS.contains("> p:first-child > input[type=\"checkbox\"]:first-child"));
+    }
+
+    #[test]
+    fn scroll_regions_are_focusable_and_named() {
+        // A scrollable box needs keyboard focus and a name to announce. It
+        // is a group: several landmarks with one name could not be told apart.
+        for open in [CODE_OPEN, TABLE_WRAP_OPEN] {
+            assert!(open.contains(" tabindex=\"0\""), "{open}");
+            assert!(open.contains(" role=\"group\""), "{open}");
+            assert!(open.contains(" aria-label=\""), "{open}");
+            assert!(!open.contains("region"), "{open}");
+        }
+        let html = render_markdown("```py\nprint(1)\n```\n\n| a |\n|---|\n| 1 |\n");
+        assert_eq!(html.matches("tabindex=\"0\"").count(), 2, "{html}");
+        assert_eq!(html.matches("<pre ").count(), 1, "{html}");
+        assert_eq!(html.matches("</pre>").count(), 1, "{html}");
+    }
+
+    #[test]
+    fn code_block_text_is_escaped_and_cannot_close_the_block() {
+        let html = render_markdown("```\n</code></pre><script>alert(1)</script>\n```\n");
+        assert!(!html.contains("<script"), "{html}");
+        assert_eq!(html.matches("</pre>").count(), 1, "{html}");
+        assert!(html.contains("&lt;/code&gt;&lt;/pre&gt;"), "{html}");
+    }
+
+    #[test]
+    fn author_markup_cannot_forge_a_focusable_region() {
+        let html = render_markdown("<pre class=\"md-code\" tabindex=\"0\">x</pre>\n");
+        assert!(!html.contains("<pre"), "{html}");
+        assert!(html.starts_with("&lt;pre class="), "{html}");
+    }
+
+    #[test]
+    fn titled_image_alone_in_a_paragraph_becomes_a_figure() {
+        let html = render_markdown("![Night schedule](/img/night.png \"A typical Friday\")\n");
+        assert_eq!(
+            html,
+            "<figure><img src=\"/img/night.png\" alt=\"Night schedule\" />\
+             <figcaption>A typical Friday</figcaption></figure>\n"
+        );
+    }
+
+    #[test]
+    fn figure_caption_and_url_stay_safe() {
+        let html =
+            render_markdown("![a](javascript:alert(1) \"<script>x</script> \\\" onload=\\\"y\")\n");
+        assert!(
+            html.starts_with("<figure><img src=\"#\" alt=\"a\" />"),
+            "{html}"
+        );
+        assert!(!html.contains("<script"), "{html}");
+        assert!(
+            html.contains("<figcaption>&lt;script&gt;x&lt;/script&gt;"),
+            "{html}"
+        );
+        assert!(!html.contains("javascript:"), "{html}");
+    }
+
+    #[test]
+    fn untitled_or_inline_images_stay_plain_images() {
+        let html = render_markdown("![alt](/a.png)\n");
+        assert_eq!(html, "<p><img src=\"/a.png\" alt=\"alt\" /></p>\n");
+
+        let html = render_markdown("Before ![alt](/a.png \"T\") after\n");
+        assert!(!html.contains("<figure"), "{html}");
+        assert!(html.contains("title=\"T\""), "{html}");
+
+        let html = render_markdown("![alt](/a.png \"T\") trailing\n");
+        assert!(!html.contains("<figure"), "{html}");
+    }
+
+    #[test]
+    fn excerpt_is_the_first_paragraph_as_plain_text() {
+        let src = "# Tank basics\n\n![map](/m.png)\n\nSpace, **peels**, and `when`\nto [hold](/x) a shield.\n\nSecond.\n";
+        assert_eq!(
+            plain_excerpt(src, 200),
+            "Space, peels, and when to hold a shield."
+        );
+        assert_eq!(plain_excerpt(src, 12), "Space, peels...");
+        assert_eq!(plain_excerpt("# Only a heading\n", 50), "");
+        assert_eq!(plain_excerpt("", 50), "");
+        // Raw HTML is dropped, not carried into the excerpt.
+        assert_eq!(plain_excerpt("Hi <b>there</b> you\n", 50), "Hi there you");
+    }
+
+    #[test]
+    fn prose_style_follows_the_article_spec() {
+        use crate::components::ui::test_support::{assert_sizes_from_tokens, css_rule, has_decl};
+
+        assert_sizes_from_tokens(MARKDOWN_CSS);
+        let h2 = css_rule(MARKDOWN_CSS, ".md-body h2 {");
+        assert!(has_decl(&h2, "font-size: var(--text-lg)"), "{h2}");
+        assert!(has_decl(&h2, "margin-top: var(--space-6)"), "{h2}");
+        let shared = css_rule(MARKDOWN_CSS, ".md-body h5,\n    .md-body h6 {");
+        for decl in [
+            "margin: var(--space-5) 0 var(--space-2)",
+            "font-family: var(--font-head)",
+            "font-weight: var(--font-label-weight)",
+        ] {
+            assert!(has_decl(&shared, decl), "missing {decl}: {shared}");
+        }
+        // H2 and H3 share the weight (the frame draws both semibold), and
+        // page CSS uses semantic tokens, not primitives.
+        let h3 = css_rule(MARKDOWN_CSS, ".md-body h3 {");
+        assert!(!h3.contains("font-weight"), "{h3}");
+        for primitive in ["--font-weight-", "--tracking-"] {
+            assert!(!MARKDOWN_CSS.contains(primitive), "{primitive}");
+        }
+        let pre = css_rule(MARKDOWN_CSS, ".md-body pre {");
+        for decl in [
+            "overflow-x: auto",
+            "max-width: 100%",
+            "font-family: var(--font-mono)",
+            "white-space: pre",
+        ] {
+            assert!(has_decl(&pre, decl), "missing {decl}: {pre}");
+        }
+        let body = css_rule(MARKDOWN_CSS, ".md-body {");
+        assert!(
+            has_decl(&body, "max-width: var(--content-max-narrow)"),
+            "{body}"
+        );
+        assert!(has_decl(&body, "min-width: 0"), "{body}");
+        let link = css_rule(MARKDOWN_CSS, ".md-body a {");
+        assert!(has_decl(&link, "text-decoration: underline"), "{link}");
     }
 
     #[test]

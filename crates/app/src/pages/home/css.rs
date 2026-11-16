@@ -1,105 +1,210 @@
-//! Shared homepage CSS. Shell/skin layers add overrides via data attributes.
-//! Current base styles match ops_hub + esports DNA (clipped badges, dense metrics).
+//! Homepage CSS for the redesign (Direction 1, Look A).
+//!
+//! The page body is a `PageShell` at the default content width, so the gutter
+//! and the gap between blocks come from `--space-page` and `--space-section`.
+//! Every size here is a token, so `data-density` applies. Shell and skin layers
+//! add overrides through the data attributes on `.home-wrap`.
 
-/// Structural + default visual styles (shared by all shells).
+/// Structure and look shared by every shell and skin.
 pub const HOME_SHARED_CSS: &str = r#"
-    .home-wrap {
-        --home-pad-x: clamp(1.25rem, 3.5vw, 2.75rem);
-        --home-max: min(72rem, 100%);
-        position: relative;
-        min-height: 100%;
-    }
-    /* Constrained body column under full-bleed hero */
-    .home {
-        width: 100%;
-        max-width: var(--home-max);
-        margin: 0 auto;
-        padding: 0.5rem var(--home-pad-x) 4.5rem;
-        position: relative;
-        z-index: 1;
-        box-sizing: border-box;
+    .home-wrap { min-width: 0; }
+    .home-page {
+        font-family: var(--font-body);
+        font-size: var(--text-md);
+        line-height: var(--leading-body);
+        color: var(--text);
     }
 
-    /* --- HERO: full viewport bleed, content rail constrained --- */
+    /* --- Hero. Left by default, centred with `is-centered`. --- */
     .home-hero {
-        position: relative;
-        width: 100%;
-        margin: 0;
-        padding: 0;
-        overflow: hidden;
-        border-bottom: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
-        background:
-            radial-gradient(ellipse 70% 90% at 12% 20%, color-mix(in srgb, var(--accent) 16%, transparent) 0%, transparent 55%),
-            radial-gradient(ellipse 50% 70% at 88% 80%, color-mix(in srgb, var(--accent) 8%, transparent) 0%, transparent 50%),
-            linear-gradient(180deg, color-mix(in srgb, var(--surface) 92%, var(--bg)) 0%, var(--bg) 100%);
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: var(--space-4);
+        padding: var(--space-section) 0;
     }
-    .home-hero::before {
-        content: '';
-        position: absolute;
-        right: 0;
-        top: -15%;
-        width: min(48vw, 560px);
-        height: 130%;
-        background:
-            repeating-linear-gradient(
-                -18deg,
-                transparent,
-                transparent 14px,
-                color-mix(in srgb, var(--accent) 7%, transparent) 14px,
-                color-mix(in srgb, var(--accent) 7%, transparent) 15px
-            );
-        transform: skewX(-10deg);
-        pointer-events: none;
-        opacity: 0.9;
-        mask-image: linear-gradient(90deg, transparent 0%, black 35%);
-        -webkit-mask-image: linear-gradient(90deg, transparent 0%, black 35%);
+    .home-hero.is-centered {
+        align-items: center;
+        text-align: center;
     }
-    .home-hero::after {
-        content: '';
-        position: absolute;
-        inset: auto 0 0 0;
-        height: 4rem;
-        background: linear-gradient(180deg, transparent, var(--bg));
-        pointer-events: none;
-        z-index: 3;
-    }
-    /* Decorative org initials: fills the empty right half of wide viewports */
-    .home-hero-mark {
-        position: absolute;
-        right: max(2%, calc((100% - var(--home-max)) / 2 + 4%));
-        bottom: -0.08em;
+    .home-banner {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-2);
+        min-height: var(--hit-target-min);
+        padding: var(--space-2) var(--space-3);
+        border-radius: var(--radius-pill);
+        background: var(--banner-soft-bg);
+        color: var(--banner-soft-fg);
         font-family: var(--font-head);
-        font-size: clamp(7rem, 28vw, 16rem);
-        line-height: 0.78;
-        letter-spacing: 0.02em;
-        color: transparent;
-        -webkit-text-stroke: 1.5px color-mix(in srgb, var(--accent) 18%, transparent);
-        opacity: 0.55;
-        pointer-events: none;
-        user-select: none;
-        z-index: 1;
+        font-size: var(--text-xs);
+        font-weight: var(--font-label-weight);
+        letter-spacing: var(--font-head-tracking);
+        text-transform: uppercase;
+        line-height: var(--leading-ui);
+        overflow-wrap: anywhere;
+        text-box-trim: trim-both;
+        text-box-edge: cap alphabetic;
     }
-    /* Aligns hero copy with body column */
-    .home-hero-rail {
-        position: relative;
-        z-index: 2;
+    .home-hero-title,
+    .home-card-title {
+        margin: 0;
+        font-family: var(--font-head);
+        font-weight: var(--font-head-weight);
+        letter-spacing: var(--font-head-tracking);
+        text-transform: var(--font-head-transform);
+        line-height: var(--leading-display);
+        color: var(--text);
+        overflow-wrap: anywhere;
+    }
+    .home-hero-title {
+        font-size: var(--text-3xl);
+        max-width: var(--content-max-narrow);
+        text-box-trim: trim-both;
+        text-box-edge: cap alphabetic;
+    }
+    /* The second title line. It is a block, so it reads as its own line. */
+    .home-hero-title em {
+        display: block;
+        font-style: normal;
+        color: var(--accent-text);
+    }
+    .home-hero-sub {
+        margin: 0;
+        max-width: var(--content-max-narrow);
+        color: var(--text-3);
+        font-size: var(--text-lg);
+    }
+    .home-actions,
+    .home-action-row,
+    .home-tag-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: var(--space-2);
+    }
+    .home-hero.is-centered .home-actions {
+        justify-content: center;
         width: 100%;
-        max-width: var(--home-max);
+    }
+
+    /* Buttons are the shared `btn` (components/ui/button.rs). */
+    .home-link:focus-visible,
+    .home-list a:focus-visible,
+    .home-team-name a:focus-visible,
+    .home-team-card:focus-visible,
+    .home-team-chip:focus-visible {
+        outline: var(--focus-ring-width) solid var(--focus-ring);
+        outline-offset: var(--focus-ring-offset);
+    }
+
+    /* --- Stat tiles: one row at every width --- */
+    .home-stats {
+        display: grid;
+        grid-auto-flow: column;
+        grid-auto-columns: minmax(0, 1fr);
+        gap: var(--space-3);
+    }
+    .home-stat {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: var(--space-1);
+        min-width: 0;
+        padding: var(--card-padding);
+        background: var(--card-bg);
+        border: 1px solid var(--card-border);
+        border-radius: var(--card-radius);
+        box-shadow: var(--card-shadow);
+        text-align: center;
+    }
+    .home-stat-n {
+        display: block;
+        font-family: var(--font-head);
+        font-weight: var(--font-head-weight);
+        font-size: var(--text-2xl);
+        letter-spacing: var(--font-head-tracking);
+        line-height: var(--leading-ui);
+        font-variant-numeric: tabular-nums;
+        color: var(--text);
+    }
+    .home-stat-l {
+        display: block;
+        color: var(--text-3);
+        font-size: var(--text-sm);
+        line-height: var(--leading-ui);
+    }
+
+    /* --- Skeletons. One line box tall, so nothing moves when data lands. --- */
+    .home-skel {
+        display: block;
+        border-radius: var(--radius-control);
+        background: color-mix(in srgb, var(--text) 12%, var(--surface-sunken));
+    }
+    .home-skel-badge {
+        width: calc(var(--space-12) * 3);
+        height: var(--hit-target-min);
+        border-radius: var(--radius-pill);
+    }
+    .home-skel-title {
+        width: min(calc(var(--space-12) * 6), 80%);
+        height: var(--text-3xl);
+    }
+    .home-skel-sub {
+        width: min(calc(var(--space-12) * 9), 100%);
+        height: var(--text-lg);
+    }
+    .home-skel-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--space-2);
+    }
+    .home-hero.is-centered .home-skel-actions { justify-content: center; }
+    .home-skel-btn {
+        width: calc(var(--space-12) * 2);
+        height: var(--button-height);
+    }
+    .home-skel-stat {
+        width: var(--space-6);
+        height: 1lh;
         margin: 0 auto;
-        padding: 3.5rem var(--home-pad-x) 3.25rem;
-        box-sizing: border-box;
     }
-    .home-hero-inner {
-        position: relative;
-        z-index: 2;
-        max-width: min(40rem, 100%);
+
+    /* --- Sections and cards --- */
+    .home-section {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-3);
+        min-width: 0;
+        /* The hero's second button jumps here: land below the sticky top bar. */
+        scroll-margin-top: calc(var(--nav-height-used) + var(--space-section));
     }
-    /* Neutral stand-in for the hero copy. Same type scale as the loaded hero.
-       Column width comes from `.home-wrap[data-home-shell]`: default `ops_hub`
-       is 80rem and the unset base is 72rem. A pending wrapper without that
-       attribute grows the rail by 8rem (128px) at 1280px and the text shifts
-       64px. No readable text except the visually hidden status. */
-    .home-skel-status {
+    .home-head { min-width: 0; }
+    .home-kicker {
+        margin: 0 0 var(--space-2);
+        font-family: var(--font-head);
+        font-weight: var(--font-label-weight);
+        font-size: var(--text-xs);
+        letter-spacing: var(--font-head-tracking);
+        text-transform: uppercase;
+        line-height: var(--leading-ui);
+        color: var(--accent-text);
+    }
+    .home-card-title { font-size: var(--text-lg); }
+    .home-body {
+        margin: 0;
+        max-width: var(--content-max-narrow);
+        color: var(--text-3);
+    }
+    .home-muted {
+        margin: 0;
+        color: var(--text-3);
+        font-size: var(--text-sm);
+    }
+    /* A list's status line with nothing to say: out of the layout, still in
+       the tree so its next text is announced. */
+    .home-list-status:empty {
         position: absolute;
         width: 1px;
         height: 1px;
@@ -110,959 +215,548 @@ pub const HOME_SHARED_CSS: &str = r#"
         white-space: nowrap;
         border: 0;
     }
-    .home-skel {
-        border-radius: 6px;
-        background: color-mix(in srgb, var(--text) 12%, var(--surface-sunken));
-    }
-    .home-skel-badge {
-        width: 9.5rem;
-        height: 1.65rem;
-        margin-bottom: 1.1rem;
-    }
-    .home-skel-title {
-        height: 0.92em;
-        font-size: clamp(2.85rem, 9.5vw, 5.5rem);
-        width: min(18rem, 78%);
-        margin: 0 0 0.08em;
-    }
-    .home-skel-title-short { width: min(12rem, 52%); margin-bottom: 0; }
-    .home-skel-sub {
-        height: 1.55rem;
-        width: min(28rem, 86%);
-        margin-top: 1.35rem;
-    }
-    .home-skel-actions {
+    .home-card {
+        box-sizing: border-box;
         display: flex;
-        flex-wrap: wrap;
-        gap: 0.65rem;
-        margin-top: 1.85rem;
-    }
-    .home-skel-btn { width: 8.75rem; height: 2.35rem; }
-    /* Matches `.home-metric strong` (1.85rem / line-height 1) so an empty
-       strong does not collapse the metrics row while overview is loading. */
-    .home-skel-metric { width: 2.4rem; height: 1.85rem; }
-    /* `.home-metric span` adds 0.3rem above captions. The skeleton is the
-       number, so that margin must not apply or the row grows while loading. */
-    .home-metric .home-skel-metric { margin-top: 0; }
-    .home-badge {
-        display: inline-flex;
-        align-items: center;
-        gap: 0.5rem;
-        font-family: var(--font-mono);
-        font-size: 0.68rem;
-        letter-spacing: 0.16em;
-        text-transform: uppercase;
-        color: var(--accent-text);
-        margin-bottom: 1.1rem;
-        padding: 0.35rem 0.7rem 0.35rem 0.5rem;
-        border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
-        background: color-mix(in srgb, var(--accent) 12%, transparent);
-        clip-path: polygon(0 0, 100% 0, 100% calc(100% - 6px), calc(100% - 6px) 100%, 0 100%);
-        box-shadow: 0 0 24px color-mix(in srgb, var(--accent) 12%, transparent);
-    }
-    .home-badge::before {
-        content: '';
-        width: 6px;
-        height: 6px;
-        background: var(--accent-solid);
-        box-shadow: 0 0 8px var(--accent-solid);
-        animation: pulse-dot 1.6s ease-in-out infinite;
-    }
-    @keyframes pulse-dot {
-        0%, 100% { opacity: 1; }
-        50% { opacity: 0.35; }
-    }
-    .home-title {
-        font-family: var(--font-head);
-        font-size: clamp(2.85rem, 9.5vw, 5.5rem);
-        line-height: 0.92;
-        letter-spacing: 0.01em;
-        color: var(--text);
-        margin: 0;
-        text-transform: uppercase;
-        text-shadow: 3px 0 0 color-mix(in srgb, var(--accent) 28%, transparent);
-    }
-    .home-title em {
-        font-style: normal;
-        display: block;
-        color: var(--accent-text);
-        text-shadow:
-            0 0 48px color-mix(in srgb, var(--accent) 40%, transparent),
-            -2px 0 0 color-mix(in srgb, var(--accent) 22%, transparent);
-    }
-    .home-sub {
-        margin: 1.35rem 0 0;
-        max-width: 32rem;
-        color: var(--text-3);
-        font-size: 1.05rem;
-        line-height: 1.6;
-        font-weight: 400;
-        border-left: 3px solid var(--accent-text);
-        padding-left: 0.95rem;
-    }
-    .home-actions {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.65rem;
-        margin-top: 1.85rem;
-    }
-    .home-metrics {
-        display: inline-flex;
-        flex-wrap: wrap;
-        margin-top: 2rem;
-        border: 1px solid var(--border);
-        background: color-mix(in srgb, var(--bg) 65%, var(--surface));
-        box-shadow: 0 8px 32px color-mix(in srgb, var(--bg) 40%, transparent);
-    }
-    .home-metric {
-        padding: 0.9rem 1.35rem;
-        border-right: 1px solid var(--border);
-        min-width: 5.75rem;
-        flex: 0 1 auto;
-    }
-    .home-metric:last-child { border-right: none; }
-    .home-metric strong {
-        display: block;
-        font-family: var(--font-head);
-        font-size: 1.85rem;
-        letter-spacing: 0.04em;
-        color: var(--text);
-        line-height: 1;
-        font-variant-numeric: tabular-nums;
-    }
-    .home-metric span {
-        display: block;
-        margin-top: 0.3rem;
-        font-family: var(--font-mono);
-        font-size: 0.58rem;
-        letter-spacing: 0.14em;
-        text-transform: uppercase;
-        color: var(--text-subtle);
-    }
-    @media (max-width: 520px) {
-        .home-metrics { display: flex; width: 100%; }
-        .home-metric { border-right: none; border-bottom: 1px solid var(--border); flex: 1 1 100%; }
-        .home-metric:last-child { border-bottom: none; }
-        .home-hero-mark { font-size: clamp(5rem, 40vw, 8rem); opacity: 0.35; }
-        .home-hero-rail { padding-top: 2.5rem; padding-bottom: 2.5rem; }
-    }
-
-    /* --- Sections (quieter than hero; denser rhythm) --- */
-    .home-block {
-        padding: 2rem 0;
-        border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
-    }
-    .home-block:last-of-type { border-bottom: none; }
-    .home-kicker {
-        font-family: var(--font-mono);
-        font-size: 0.62rem;
-        letter-spacing: 0.14em;
-        text-transform: uppercase;
-        color: var(--text-subtle);
-        margin-bottom: 0.4rem;
-    }
-    .home-kicker.compete {
-        color: var(--warn);
-    }
-    .home-heading {
-        font-family: var(--font-head);
-        font-weight: 700;
-        font-size: clamp(1.2rem, 2.4vw, 1.5rem);
-        color: var(--text);
-        letter-spacing: 0.01em;
-        margin: 0 0 0.4rem;
-        text-transform: none;
-        line-height: 1.25;
-    }
-    /* Underlines only on hero; sections stay quiet */
-    .home-heading::after {
-        content: none;
-    }
-    .home-body {
-        color: var(--text-3);
-        font-size: 0.95rem;
-        line-height: 1.65;
-        max-width: 40rem;
-        margin: 0.4rem 0 0;
-    }
-
-    /* Numbered rules: punchy 2×2 board */
-    .rules {
-        list-style: none;
-        margin: 1.25rem 0 0;
-        padding: 0;
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 0.65rem;
-    }
-    @media (max-width: 700px) {
-        .rules { grid-template-columns: 1fr; }
-    }
-    .rules li {
-        display: grid;
-        grid-template-columns: auto 1fr;
-        gap: 0.75rem;
-        align-items: start;
-        padding: 0.9rem 1rem 0.9rem 0.85rem;
-        background: color-mix(in srgb, var(--surface-sunken) 88%, var(--bg));
-        border: 1px solid var(--border);
-        border-left: 3px solid var(--accent-text);
-        color: var(--text);
-        font-size: 0.9rem;
-        line-height: 1.45;
-        transition: border-color 0.15s, background 0.15s, transform 0.15s;
-    }
-    .rules li:hover {
-        border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
-        background: color-mix(in srgb, var(--accent) 6%, var(--surface-sunken));
-        transform: translateX(2px);
-    }
-    .rules li .rn {
-        font-family: var(--font-head);
-        font-size: 1.35rem;
-        letter-spacing: 0.04em;
-        color: var(--accent-text);
-        line-height: 1;
-        min-width: 1.4rem;
-        opacity: 0.95;
-    }
-
-    /* Live board: one column when only one side has data */
-    .live-grid {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 1rem;
-        margin-top: 0.85rem;
-    }
-    .live-grid.single {
-        grid-template-columns: 1fr;
-        max-width: 36rem;
-    }
-    @media (max-width: 720px) {
-        .live-grid { grid-template-columns: 1fr; }
-    }
-    .live-panel {
-        background: var(--surface-sunken);
-        border: 1px solid var(--border);
-        padding: 1.1rem 1.15rem 1.25rem;
-        position: relative;
-        overflow: hidden;
-    }
-    .live-panel::before {
-        content: '';
-        position: absolute;
-        top: 0; left: 0; right: 0;
-        height: 2px;
-        background: linear-gradient(90deg, var(--border), transparent 80%);
-    }
-    /* Compete / tournaments: gold accent (not brand purple) */
-    .live-panel.compete::before {
-        background: linear-gradient(90deg, var(--warn), transparent 75%);
-    }
-    .live-panel .home-heading {
-        font-size: 1.15rem;
-    }
-    .live-list {
-        list-style: none;
-        margin: 0.85rem 0 0;
-        padding: 0;
-    }
-    .live-list li {
-        display: flex;
-        justify-content: space-between;
-        gap: 1rem;
-        align-items: baseline;
-        padding: 0.65rem 0;
-        border-bottom: 1px solid var(--border);
-        font-size: 0.9rem;
-    }
-    .live-list li:last-child { border-bottom: none; }
-    .live-list a {
-        color: var(--text);
-        font-family: var(--font-head);
-        font-weight: 700;
-        font-size: 1rem;
-    }
-    .live-list a:hover { color: var(--accent-text); }
-    .live-meta {
-        font-family: var(--font-mono);
-        font-size: 0.68rem;
-        color: var(--text-subtle);
-        white-space: nowrap;
-    }
-    .tag {
-        font-family: var(--font-mono);
-        font-size: 0.58rem;
-        letter-spacing: 0.1em;
-        text-transform: uppercase;
-        color: var(--warn);
-        border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
-        padding: 0.15rem 0.4rem;
-        background: color-mix(in srgb, var(--warn) 10%, transparent);
-    }
-    .tag.live {
-        color: var(--loss);
-        border-color: color-mix(in srgb, var(--loss) 50%, transparent);
-        background: color-mix(in srgb, var(--loss) 12%, transparent);
-    }
-    .tag.open {
-        color: var(--warn);
-        border-color: color-mix(in srgb, var(--warn) 45%, transparent);
-        background: color-mix(in srgb, var(--warn) 10%, transparent);
-    }
-    .home-link.compete {
-        color: var(--warn);
-    }
-    .home-link.compete:hover {
-        color: var(--warn);
-        border-bottom-color: var(--warn);
-    }
-
-    /* Section 2: next match card + results ticker */
-    .live-panel.next-match::before {
-        background: linear-gradient(90deg, var(--accent), transparent 75%);
-    }
-    .next-match-card {
-        margin-top: 0.85rem;
-    }
-    .next-match-vs {
-        margin: 0;
-        font-family: var(--font-head);
-        font-weight: 700;
-        font-size: 1.15rem;
-        color: var(--text);
-        line-height: 1.3;
-    }
-    .next-match-sep {
-        color: var(--text-subtle);
-        font-weight: 500;
-        font-size: 0.9rem;
-    }
-    .next-match-opp {
-        color: var(--accent-text);
-    }
-    .next-match-when {
-        margin: 0.45rem 0 0.2rem;
-        font-family: var(--font-mono);
-        font-size: 0.78rem;
-        color: var(--text-3);
-        letter-spacing: 0.04em;
-    }
-    .results-ticker {
-        display: flex;
-        align-items: center;
-        gap: 0.75rem;
-        margin: 0 0 1rem;
-        padding: 0.55rem 0.75rem;
-        background: color-mix(in srgb, var(--surface-sunken) 90%, var(--bg));
-        border: 1px solid var(--border);
-        overflow: hidden;
-    }
-    .results-ticker-label {
-        font-family: var(--font-mono);
-        font-size: 0.62rem;
-        letter-spacing: 0.14em;
-        text-transform: uppercase;
-        color: var(--text-subtle);
-        flex-shrink: 0;
-    }
-    .results-ticker-track {
-        display: flex;
-        gap: 0.5rem;
-        overflow-x: auto;
-        flex: 1;
-        scrollbar-width: thin;
-        padding-bottom: 0.1rem;
-    }
-    .ticker-chip {
-        display: inline-flex;
-        align-items: baseline;
-        gap: 0.45rem;
-        flex-shrink: 0;
-        padding: 0.3rem 0.55rem;
-        border: 1px solid var(--border);
-        background: var(--surface);
-        font-size: 0.78rem;
-        white-space: nowrap;
-    }
-    .ticker-chip .ticker-teams {
-        color: var(--text);
-        font-weight: 600;
-    }
-    .ticker-chip .ticker-score {
-        font-family: var(--font-mono);
-        font-weight: 700;
-        color: var(--text-3);
-    }
-    .ticker-chip .ticker-date {
-        font-family: var(--font-mono);
-        font-size: 0.65rem;
-        color: var(--text-subtle);
-    }
-    .ticker-chip.win .ticker-score { color: var(--win); }
-    .ticker-chip.loss .ticker-score { color: var(--loss); }
-    .ticker-chip.draw .ticker-score { color: var(--warn); }
-
-    /* Team rows: shared fixed tracks so every column lines up across rows */
-    .team-rows {
-        margin-top: 1.1rem;
-        border-top: 1px solid var(--border);
-        /* name | game | roster | division | record */
-        --tm-cols: minmax(0, 1.4fr) minmax(7.5rem, 0.9fr) 5.5rem 6.5rem 4.75rem;
-    }
-    .team-head,
-    .team-row {
-        display: grid;
-        grid-template-columns: var(--tm-cols);
-        column-gap: 1rem;
-        align-items: baseline;
-        padding: 0.7rem 0.5rem 0.7rem 0.65rem;
-    }
-    .team-head {
-        padding-top: 0.55rem;
-        padding-bottom: 0.45rem;
-        border-bottom: 1px solid var(--border);
-        font-family: var(--font-mono);
-        font-size: 0.58rem;
-        letter-spacing: 0.12em;
-        text-transform: uppercase;
-        color: var(--text-subtle);
-    }
-    .team-head span:nth-child(3),
-    .team-head span:nth-child(4),
-    .team-head span:nth-child(5) {
-        text-align: right;
-    }
-    .team-row {
-        border-bottom: 1px solid var(--border);
-        font-size: 0.88rem;
-        position: relative;
-        transition: background 0.15s;
-    }
-    .team-row::before {
-        content: '';
-        position: absolute;
-        left: 0; top: 0; bottom: 0;
-        width: 0;
-        background: var(--accent-solid);
-        transition: width 0.15s;
-    }
-    .team-row:hover {
-        background: color-mix(in srgb, var(--accent) 6%, transparent);
-    }
-    .team-row:hover::before { width: 3px; }
-    .team-row .tm-name {
-        font-family: var(--font-head);
-        font-weight: 700;
-        color: var(--text);
-        font-size: 1.05rem;
-        letter-spacing: 0.02em;
+        flex-direction: column;
+        gap: var(--space-3);
         min-width: 0;
+        padding: var(--card-padding);
+        background: var(--card-bg);
+        color: var(--card-fg);
+        border: 1px solid var(--card-border);
+        border-radius: var(--card-radius);
+        box-shadow: var(--card-shadow);
     }
-    .team-row .tm-name-link {
-        color: inherit;
+    .home-card p { margin: 0; }
+    .home-grid-2 {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: var(--space-4);
+    }
+    .home-grid-2.is-single { grid-template-columns: 1fr; }
+    .home-stack {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-3);
+    }
+    .home-link {
+        display: inline-flex;
+        align-items: center;
+        align-self: flex-start;
+        min-height: var(--hit-target-min);
+        color: var(--accent-text);
+        font-size: var(--text-md);
         text-decoration: none;
     }
-    .team-row .tm-name-link:hover {
+    .home-link:hover { text-decoration: underline; }
+
+    /* --- Ethos rules --- */
+    .home-rules {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-2);
+    }
+    .home-rules li {
+        display: flex;
+        align-items: flex-start;
+        gap: var(--space-3);
+        padding: var(--card-padding);
+        background: var(--card-bg);
+        border: 1px solid var(--card-border);
+        border-radius: var(--card-radius);
+    }
+    .home-rule-num {
+        min-width: var(--space-6);
+        font-family: var(--font-head);
+        font-weight: var(--font-head-weight);
+        font-size: var(--text-lg);
+        font-variant-numeric: tabular-nums;
+        line-height: var(--leading-body);
+        color: var(--accent-text);
+    }
+
+    /* --- Lists inside cards (schedule, tournaments, expectations) --- */
+    .home-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+    }
+    .home-list li {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: var(--space-1) var(--space-4);
+        min-height: var(--density-row);
+        padding: var(--space-1) 0;
+        border-bottom: 1px solid var(--border);
+    }
+    .home-list li:last-child { border-bottom: 0; }
+    .home-list a {
+        display: inline-flex;
+        align-items: center;
+        min-height: var(--hit-target-min);
+        color: var(--text);
+        font-weight: var(--font-label-weight);
+        text-decoration: underline;
+    }
+    .home-list a:hover { color: var(--accent-text); }
+    .home-meta {
+        color: var(--text-3);
+        font-size: var(--text-sm);
+        font-variant-numeric: tabular-nums;
+    }
+    .home-bullets {
+        margin: 0;
+        padding: 0 0 0 var(--space-5);
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-2);
+        color: var(--text-3);
+    }
+
+    /* --- Next match and results --- */
+    .home-match-vs {
+        font-family: var(--font-head);
+        font-weight: var(--font-head-weight);
+        font-size: var(--text-lg);
+        line-height: var(--leading-display);
+        color: var(--text);
+        overflow-wrap: anywhere;
+    }
+    .home-match-sep {
+        color: var(--text-3);
+        font-weight: var(--font-label-weight);
+    }
+    .home-match-when {
+        color: var(--text);
+        font-variant-numeric: tabular-nums;
+    }
+    .home-results {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: var(--space-3);
+        padding: var(--space-3) var(--card-padding);
+        background: var(--card-bg);
+        border: 1px solid var(--card-border);
+        border-radius: var(--card-radius);
+    }
+    .home-results p { margin: 0; }
+    .home-results-label {
+        font-family: var(--font-head);
+        font-weight: var(--font-label-weight);
+        font-size: var(--text-xs);
+        letter-spacing: var(--font-head-tracking);
+        text-transform: uppercase;
+        color: var(--text-3);
+    }
+    .home-results-track {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--space-2);
+        flex: 1;
+        min-width: 0;
+    }
+    .home-result {
+        display: inline-flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: var(--space-1) var(--space-2);
+        padding: var(--space-1) var(--space-3);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-control);
+        font-size: var(--text-sm);
+    }
+    .home-result-teams {
+        color: var(--text);
+        font-weight: var(--font-label-weight);
+    }
+    .home-result-score {
+        color: var(--text);
+        font-weight: var(--font-head-weight);
+        font-variant-numeric: tabular-nums;
+    }
+    .home-result-date {
+        color: var(--text-3);
+        font-size: var(--text-xs);
+        font-variant-numeric: tabular-nums;
+    }
+
+    /* --- Teams: table (ops hub), cards, chips --- */
+    .home-team-table {
+        /* name, game, roster, division, record */
+        --home-team-cols: minmax(0, 1.4fr) minmax(0, 0.9fr) minmax(0, 0.5fr) minmax(0, 0.7fr) minmax(0, 0.6fr);
+        background: var(--card-bg);
+        border: 1px solid var(--card-border);
+        border-radius: var(--card-radius);
+        box-shadow: var(--card-shadow);
+        overflow: hidden;
+    }
+    .home-team-head,
+    .home-team-row {
+        display: grid;
+        grid-template-columns: var(--home-team-cols);
+        column-gap: var(--space-4);
+        align-items: center;
+        min-height: var(--density-row);
+        padding: var(--space-1) var(--card-padding);
+    }
+    .home-team-head {
+        font-family: var(--font-head);
+        font-weight: var(--font-label-weight);
+        font-size: var(--text-xs);
+        letter-spacing: var(--font-head-tracking);
+        text-transform: uppercase;
+        color: var(--text-3);
+    }
+    .home-team-row { border-top: 1px solid var(--border); }
+    .home-team-head > :nth-child(n+3),
+    .home-team-row > :nth-child(n+3) {
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+    }
+    .home-team-row > * { min-width: 0; overflow-wrap: anywhere; }
+    .home-team-name {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0 var(--space-2);
+    }
+    .home-team-name a {
+        display: inline-flex;
+        align-items: center;
+        min-height: var(--hit-target-min);
+        color: var(--text);
+        font-family: var(--font-head);
+        font-weight: var(--font-head-weight);
+        font-size: var(--text-lg);
+        text-decoration: none;
+    }
+    .home-team-name a:hover {
         color: var(--accent-text);
         text-decoration: underline;
     }
-    .team-row .tm-game {
-        font-family: var(--font-mono);
-        font-size: 0.65rem;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-        color: var(--text-subtle);
-        min-width: 0;
-    }
-    .team-row .tm-roster {
-        font-family: var(--font-mono);
-        font-size: 0.65rem;
-        letter-spacing: 0.06em;
-        text-transform: uppercase;
-        color: var(--text-subtle);
-        text-align: right;
-        font-variant-numeric: tabular-nums;
-        white-space: nowrap;
-    }
-    .team-row .tm-div {
+    .home-team-lore {
+        flex-basis: 100%;
+        padding-bottom: var(--space-2);
         color: var(--text-3);
-        font-size: 0.8rem;
-        text-align: right;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-    }
-    .team-row .tm-wl {
-        font-family: var(--font-mono);
-        font-size: 0.8rem;
-        letter-spacing: 0.04em;
-        color: var(--text-3);
-        text-align: right;
-        font-variant-numeric: tabular-nums;
-        white-space: nowrap;
-    }
-    .team-row.forming {
-        opacity: 0.92;
-    }
-    .team-row .tm-forming {
-        display: inline-block;
-        margin-left: 0.45rem;
-        font-family: var(--font-mono);
-        font-size: 0.58rem;
-        letter-spacing: 0.1em;
-        text-transform: uppercase;
-        color: var(--warn);
-        border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
-        background: color-mix(in srgb, var(--warn) 10%, transparent);
-        padding: 0.1rem 0.35rem;
-        vertical-align: middle;
-    }
-    .team-row .tm-roster.forming {
-        color: var(--warn);
-    }
-    .team-lore {
-        grid-column: 1 / -1;
-        color: var(--text-subtle);
-        font-size: 0.8rem;
+        font-size: var(--text-sm);
         font-style: italic;
-        margin-top: 0.15rem;
     }
-    @media (max-width: 720px) {
-        .team-rows {
-            --tm-cols: minmax(0, 1fr) auto;
-        }
-        .team-head span:nth-child(n+3),
-        .team-row .tm-roster,
-        .team-row .tm-div { display: none; }
-        .team-head span:nth-child(2) { display: none; }
-        .team-row .tm-game { display: none; }
-        .team-row .tm-wl { justify-self: end; }
-    }
-
-    /* News */
-    .news-rows { margin-top: 1rem; }
-    .news-row {
-        padding: 1rem 0 1.1rem;
-        border-bottom: 1px solid var(--border);
-        transition: padding-left 0.15s;
-    }
-    .news-row:hover { padding-left: 0.4rem; }
-    .news-row:last-child { border-bottom: none; }
-    .news-row time {
-        font-family: var(--font-mono);
-        font-size: 0.65rem;
-        color: var(--text-subtle);
-        letter-spacing: 0.1em;
-    }
-    .news-row h3 {
-        font-family: var(--font-head);
-        font-weight: 700;
-        font-size: 1.2rem;
-        color: var(--text);
-        margin: 0.25rem 0 0.4rem;
-    }
-    .news-row p {
+    .home-team-game,
+    .home-team-roster,
+    .home-team-div,
+    .home-team-record {
         color: var(--text-3);
-        font-size: 0.9rem;
-        line-height: 1.55;
-        margin: 0;
-        max-width: 40rem;
+        font-size: var(--text-sm);
     }
-    .pin {
-        font-family: var(--font-mono);
-        font-size: 0.58rem;
-        letter-spacing: 0.1em;
-        text-transform: uppercase;
-        color: var(--accent-text);
-        margin-left: 0.5rem;
-        border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
-        padding: 0.05rem 0.3rem;
-    }
-
-    /* Recruit banner */
-    .recruit-banner {
-        margin-top: 0.75rem;
+    .home-team-cards {
         display: grid;
-        grid-template-columns: 1.15fr 1fr;
-        gap: 0;
-        border: 1px solid var(--border);
-        background: var(--surface-sunken);
-        overflow: hidden;
-        box-shadow: 0 12px 40px color-mix(in srgb, var(--bg) 35%, transparent);
+        grid-template-columns: repeat(auto-fit, minmax(min(calc(var(--space-12) * 5), 100%), 1fr));
+        gap: var(--space-3);
     }
-    @media (max-width: 720px) {
-        .recruit-banner { grid-template-columns: 1fr; }
+    a.home-team-card {
+        text-decoration: none;
+        min-height: var(--hit-target-min);
     }
-    .recruit-left {
-        padding: 1.6rem 1.45rem;
-        background:
-            linear-gradient(135deg, color-mix(in srgb, var(--accent) 16%, transparent) 0%, transparent 55%),
-            var(--surface-sunken);
-        border-right: 1px solid var(--border);
-    }
-    @media (max-width: 720px) {
-        .recruit-left { border-right: none; border-bottom: 1px solid var(--border); }
-    }
-    .recruit-right {
-        padding: 1.4rem 1.3rem;
-        background: color-mix(in srgb, var(--surface) 90%, var(--bg));
-    }
-    .expect-list {
-        list-style: none;
-        margin: 0.5rem 0 0;
-        padding: 0;
-    }
-    .expect-list li {
-        display: flex;
-        gap: 0.55rem;
-        padding: 0.45rem 0;
-        color: var(--text-3);
-        font-size: 0.86rem;
-        border-bottom: 1px solid var(--border);
-    }
-    .expect-list li::before {
-        content: "▸";
-        color: var(--accent-text);
-        font-weight: 700;
-        flex-shrink: 0;
-    }
-    .never-box {
-        margin-top: 1rem;
-        padding: 0.85rem 0.9rem;
-        border: 1px dashed color-mix(in srgb, var(--accent) 35%, transparent);
-        background: color-mix(in srgb, var(--bg) 40%, transparent);
-    }
-    .never-box h4 {
-        font-family: var(--font-mono);
-        font-size: 0.62rem;
-        letter-spacing: 0.12em;
-        text-transform: uppercase;
-        color: var(--accent-text);
-        margin: 0 0 0.4rem;
-    }
-    .never-box p {
-        margin: 0;
-        font-size: 0.8rem;
-        color: var(--text-3);
-        line-height: 1.5;
-    }
-    .seek-tags {
+    a.home-team-card:hover { border-color: var(--border-strong); }
+    a.home-team-card:hover .home-card-title { text-decoration: underline; }
+    .home-team-card.is-forming,
+    .home-team-chip.is-forming { border-style: dashed; }
+    .home-team-chips {
         display: flex;
         flex-wrap: wrap;
-        gap: 0.4rem;
-        margin-top: 1rem;
+        gap: var(--space-2);
     }
-    .seek-tag {
-        font-family: var(--font-mono);
-        font-size: 0.65rem;
-        letter-spacing: 0.08em;
-        text-transform: uppercase;
-        padding: 0.3rem 0.55rem;
-        border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
-        color: var(--text);
-        background: color-mix(in srgb, var(--accent) 12%, transparent);
-    }
-
-    .home-link {
-        display: inline-block;
-        margin-top: 0.9rem;
-        font-family: var(--font-mono);
-        font-size: 0.7rem;
-        letter-spacing: 0.12em;
-        text-transform: uppercase;
-        color: var(--accent-text);
-        border-bottom: 1px solid transparent;
-    }
-    .home-link:hover {
-        color: var(--text);
-        border-bottom-color: var(--accent-solid);
-    }
-
-    .btn {
+    .home-team-chip {
         display: inline-flex;
         align-items: center;
-        padding: 0.7rem 1.25rem;
-        font-family: var(--font-mono);
-        font-size: 0.72rem;
-        letter-spacing: 0.14em;
-        text-transform: uppercase;
-        border-radius: 0;
-        border: 1px solid transparent;
-        cursor: pointer;
+        min-height: var(--hit-target-min);
+        padding: var(--space-1) var(--space-4);
+        border: 1px solid var(--border-strong);
+        border-radius: var(--radius-pill);
+        background: var(--card-bg);
+        color: var(--text);
+        font-size: var(--text-sm);
         text-decoration: none;
-        transition: transform 0.15s, filter 0.15s, border-color 0.15s, color 0.15s, box-shadow 0.15s;
-        clip-path: polygon(0 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%);
     }
-    .btn-primary {
-        background: var(--accent-solid);
-        color: var(--on-accent);
-        box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 40%, transparent);
+    .home-team-chip:hover { border-color: var(--text); }
+
+    /* --- News --- */
+    .home-news-meta {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: var(--space-2);
+        color: var(--text-3);
+        font-size: var(--text-xs);
+        font-variant-numeric: tabular-nums;
     }
-    .btn-primary:hover {
-        filter: brightness(1.12);
-        transform: translateY(-1px);
-        box-shadow: 0 0 28px color-mix(in srgb, var(--accent) 40%, transparent);
+    .home-news-card .home-news-meta { margin-bottom: calc(var(--space-1) * -1); }
+    .home-news-body { overflow-wrap: anywhere; }
+
+    /* --- Recruit tags --- */
+    .home-tag-label {
+        color: var(--text-3);
+        font-size: var(--text-sm);
     }
-    .btn-outline {
-        background: transparent;
-        border-color: var(--border);
+    .home-tag {
+        display: inline-flex;
+        align-items: center;
+        padding: var(--space-1) var(--space-2);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-control);
+        background: var(--surface);
         color: var(--text);
-    }
-    .btn-outline:hover {
-        border-color: var(--text-3);
-        color: var(--text);
-        transform: translateY(-1px);
+        font-size: var(--text-xs);
+        line-height: var(--leading-body);
     }
 
-    .muted {
-        color: var(--text-subtle);
-        font-size: 0.88rem;
-    }
     .home-foot {
-        margin-top: 2.5rem;
-        padding-top: 1.25rem;
+        margin: 0;
+        padding-top: var(--space-4);
         border-top: 1px solid var(--border);
-        font-family: var(--font-mono);
-        font-size: 0.65rem;
-        letter-spacing: 0.1em;
-        text-transform: uppercase;
-        color: var(--text-subtle);
+        color: var(--text-3);
+        font-size: var(--text-xs);
     }
 
-    /* --- Alignment: Center = hero only; body always left --- */
-    .home-wrap:has(.home.align-center) .home-hero-inner {
-        margin-left: auto;
-        margin-right: auto;
-        text-align: center;
-        max-width: 42rem;
+    @supports not (text-box-trim: trim-both) {
+        /* The display face leaves extra room under the cap height. */
+        .home-banner { padding-top: calc(var(--space-2) + 0.08em); }
     }
-    .home-wrap:has(.home.align-center) .home-sub {
-        margin-left: auto;
-        margin-right: auto;
-        border-left: none;
-        border-top: 3px solid var(--accent-solid);
-        padding-left: 0;
-        padding-top: 0.85rem;
-        max-width: 32rem;
-    }
-    .home-wrap:has(.home.align-center) .home-actions {
-        justify-content: center;
-    }
-    .home-wrap:has(.home.align-center) .home-metrics {
-        margin-left: auto;
-        margin-right: auto;
-    }
-    .home-wrap:has(.home.align-center) .home-badge {
-        margin-left: auto;
-        margin-right: auto;
-    }
-    .home-wrap:has(.home.align-center) .home-hero-mark {
-        right: 50%;
-        transform: translateX(50%);
-        opacity: 0.35;
-    }
-    /* Body blocks intentionally stay left; no mixed centered headers over left lists */
-    .home.align-center .home-block {
-        text-align: left;
-    }
-    .home.align-center .recruit-left {
-        text-align: left;
+
+    @media (max-width: 820px) {
+        .home-grid-2 { grid-template-columns: 1fr; }
+        .home-stats { gap: var(--space-2); }
+        .home-stat {
+            min-height: var(--hit-target-min);
+            padding: var(--space-2);
+        }
+        .home-stat-n { font-size: var(--text-lg); }
+        .home-stat-l {
+            font-size: var(--text-xs);
+            overflow-wrap: anywhere;
+        }
+        /* Name and record only. The team page has the rest. */
+        .home-team-table { --home-team-cols: minmax(0, 1fr) auto; }
+        .home-team-head > :nth-child(2),
+        .home-team-head > :nth-child(3),
+        .home-team-head > :nth-child(4),
+        .home-team-row .home-team-game,
+        .home-team-row .home-team-roster,
+        .home-team-row .home-team-div { display: none; }
     }
 "#;
 
-/// Clean skin overrides (calmer radii, less clip, softer watermark).
-pub const HOME_SKIN_CLEAN_CSS: &str = r#"
-.home-wrap[data-home-skin="clean"] .home-badge {
-    clip-path: none;
-    border-radius: var(--radius-control, 7px);
-    letter-spacing: 0.1em;
-}
-.home-wrap[data-home-skin="clean"] .home-title {
-    letter-spacing: -0.02em;
-    font-weight: 600;
-}
-.home-wrap[data-home-skin="clean"] .home-hero-mark {
-    -webkit-text-stroke: 1px color-mix(in srgb, var(--accent) 12%, transparent);
-    opacity: 0.45;
-}
-.home-wrap[data-home-skin="clean"] .home-metrics {
-    border-radius: var(--radius-control, 9px);
-    overflow: hidden;
-}
-.home-wrap[data-home-skin="clean"] .rules li {
-    border-radius: 0 var(--radius-control, 7px) var(--radius-control, 7px) 0;
-}
-.home-wrap[data-home-skin="clean"] .recruit-banner {
-    border-radius: var(--radius-control, 9px);
-    overflow: hidden;
-}
-.home-wrap[data-home-skin="clean"] .btn {
-    clip-path: none;
-    border-radius: var(--radius-control, 7px);
-}
-.home-wrap[data-home-skin="clean"] .seek-tag {
-    border-radius: var(--radius-pill, 999px);
-}
-"#;
-
-/// Esports skin: current base already is esports; keep hook for future motif tweaks.
+/// Esports skin: upper-case display type on the same tokens. The clean skin
+/// is the Look A base with no layer of its own.
 pub const HOME_SKIN_ESPORTS_CSS: &str = r#"
-.home-wrap[data-home-skin="esports"] .home-badge {
-    /* clipped badge geometry lives in shared CSS */
-}
+.home-wrap[data-home-skin="esports"] .home-hero-title,
+.home-wrap[data-home-skin="esports"] .ui-section-title { text-transform: uppercase; }
+.home-wrap[data-home-skin="esports"] .home-kicker { letter-spacing: var(--font-label-tracking); }
 "#;
 
-/// Shell-specific composition tweaks.
+/// Shell-specific composition tweaks. Every shell is the default content
+/// width. What a shell changes is in Rust (`HomeShell`): section order, the
+/// empty policy and the teams presentation.
 pub const HOME_SHELL_CSS: &str = r#"
-/* Ops hub: slightly wider body for dense boards */
-.home-wrap[data-home-shell="ops_hub"] {
-    --home-max: min(80rem, 100%);
-}
-
-/* Recruit landing: more air, recruit emphasis */
-.home-wrap[data-home-shell="recruit_landing"] {
-    --home-max: min(72rem, 100%);
-}
-.home-wrap[data-home-shell="recruit_landing"] .home-hero-rail {
-    padding-top: 4.25rem;
-    padding-bottom: 3.5rem;
-}
-.home-wrap[data-home-shell="recruit_landing"] .home-hero-inner {
-    max-width: min(44rem, 100%);
-}
-.home-wrap[data-home-shell="recruit_landing"] .home-sub {
-    font-size: 1.08rem;
-    max-width: min(36rem, 100%);
-}
-.home-wrap[data-home-shell="recruit_landing"] .home-metrics {
-    opacity: 0.92;
-}
-
-/* Minimal: compact column */
-.home-wrap[data-home-shell="minimal"] {
-    --home-max: min(48rem, 100%);
-}
-.home-wrap[data-home-shell="minimal"] .home-hero-rail {
-    padding-top: 2.5rem;
-    padding-bottom: 2rem;
-}
-.home-wrap[data-home-shell="minimal"] .home-hero-inner {
-    max-width: 100%;
-}
-.home-wrap[data-home-shell="minimal"] .home-hero-mark {
-    font-size: clamp(4rem, 16vw, 8rem);
-    opacity: 0.4;
-}
-.home-wrap[data-home-shell="minimal"] .home-title {
-    font-size: clamp(2.4rem, 8vw, 3.6rem);
-}
-.home-wrap[data-home-shell="minimal"] .home-metrics {
-    display: none;
-}
-
-/* Manifesto: editorial reading width */
-.home-wrap[data-home-shell="manifesto"] {
-    --home-max: min(64rem, 100%);
-}
-.home-wrap[data-home-shell="manifesto"] .home-hero-inner {
-    max-width: min(38rem, 100%);
-}
-.home-wrap[data-home-shell="manifesto"] .home-hero-rail {
-    padding-top: 3.75rem;
-    padding-bottom: 3.25rem;
-}
-.home-wrap[data-home-shell="manifesto"] .home-body {
-    font-size: 1.02rem;
-    line-height: 1.65;
-    max-width: min(42rem, 100%);
-}
-.home-wrap[data-home-shell="manifesto"] .never-box {
-    border-style: solid;
-}
-.home-wrap[data-home-shell="manifesto"] .rules {
-    max-width: 48rem;
-}
-
-/* Teams presentations */
-.home-wrap .team-cards {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr));
-    gap: 0.75rem;
-    margin-top: 0.85rem;
-}
-.home-wrap a.team-card {
-    display: block;
-    color: inherit;
-    text-decoration: none;
-}
-.home-wrap a.team-chip {
-    display: inline-block;
-    text-decoration: none;
-}
-.home-wrap .team-card {
-    border: 1px solid var(--border);
-    background: color-mix(in srgb, var(--surface) 92%, var(--bg));
-    padding: 1rem 1.1rem;
-    border-radius: var(--radius-control, 9px);
-    transition: border-color 0.15s, background 0.15s;
-}
-.home-wrap .team-card:hover {
-    border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
-    background: color-mix(in srgb, var(--accent) 5%, var(--surface));
-}
-.home-wrap .team-card .tc-name {
-    font-family: var(--font-head);
-    font-weight: 600;
-    font-size: 1.05rem;
-}
-.home-wrap .team-card .tc-meta {
-    margin-top: 0.35rem;
-    font-size: 0.8rem;
-    color: var(--text-3);
-}
-.home-wrap .team-card.forming {
-    border-style: dashed;
-    opacity: 0.9;
-}
-.home-wrap .team-compact {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-    margin-top: 0.85rem;
-}
-.home-wrap .team-chip {
-    font-family: var(--font-mono);
-    font-size: 0.72rem;
-    letter-spacing: 0.04em;
-    padding: 0.4rem 0.75rem;
-    border: 1px solid var(--border);
-    background: var(--surface-sunken);
-    border-radius: var(--radius-pill, 999px);
-    color: var(--text-3);
-    transition: border-color 0.15s, color 0.15s;
-}
-.home-wrap .team-chip:hover {
-    border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
-    color: var(--text);
-}
-.home-wrap .team-chip.forming {
-    border-style: dashed;
-    color: var(--text-subtle);
-}
+/* Minimal: no stat tiles. */
+.home-wrap[data-home-shell="minimal"] .home-stats { display: none; }
 "#;
 
 pub fn home_css_layers() -> String {
-    let mut s = String::with_capacity(
-        HOME_SHARED_CSS.len()
-            + HOME_SHELL_CSS.len()
-            + HOME_SKIN_CLEAN_CSS.len()
-            + HOME_SKIN_ESPORTS_CSS.len()
-            + 8,
-    );
-    s.push_str(HOME_SHARED_CSS);
-    s.push_str(HOME_SHELL_CSS);
-    s.push_str(HOME_SKIN_CLEAN_CSS);
-    s.push_str(HOME_SKIN_ESPORTS_CSS);
-    s
+    [HOME_SHARED_CSS, HOME_SHELL_CSS, HOME_SKIN_ESPORTS_CSS].concat()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::components::ui::test_support::{
+        assert_ink_clears_aa, assert_sizes_from_tokens, css_rule, has_decl, rules,
+    };
+
+    #[test]
+    fn home_sizes_and_type_come_from_tokens() {
+        // The hidden status box is the one place a 1px size is not a hairline,
+        // and the audit already allows 1px.
+        assert_sizes_from_tokens(&home_css_layers());
+    }
+
+    #[test]
+    fn home_css_uses_no_banned_or_raw_colour_names() {
+        let css = home_css_layers();
+        // Split so this file does not contain the banned names itself.
+        for banned in [
+            ["--text", "-muted"].concat(),
+            ["--text", "-secondary"].concat(),
+            ["--font", "-display"].concat(),
+            ["--succ", "ess"].concat(),
+            ["--warn", "ing"].concat(),
+            ["rg", "b("].concat(),
+            ["rg", "ba("].concat(),
+        ] {
+            assert!(!css.contains(banned.as_str()), "{banned}");
+        }
+        for (selector, body) in rules(&css) {
+            for decl in body.split(';') {
+                let Some((_, value)) = decl.split_once(':') else {
+                    continue;
+                };
+                assert!(!value.contains('#'), "{selector}: {decl}");
+            }
+        }
+    }
+
+    #[test]
+    fn hero_is_left_by_default_and_centred_by_modifier() {
+        let base = css_rule(HOME_SHARED_CSS, ".home-hero {");
+        assert!(has_decl(&base, "align-items: flex-start"), "{base}");
+        assert!(has_decl(&base, "padding: var(--space-section) 0"), "{base}");
+        let centred = css_rule(HOME_SHARED_CSS, ".home-hero.is-centered {");
+        assert!(has_decl(&centred, "align-items: center"), "{centred}");
+        assert!(has_decl(&centred, "text-align: center"), "{centred}");
+        // Cards and section heads never take the centring.
+        for (selector, body) in rules(HOME_SHARED_CSS) {
+            if body.contains("text-align: center") {
+                assert!(
+                    selector == ".home-hero.is-centered" || selector == ".home-stat",
+                    "{selector} is centred"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn community_banner_uses_the_soft_banner_tokens() {
+        let banner = css_rule(HOME_SHARED_CSS, ".home-banner {");
+        for decl in [
+            "background: var(--banner-soft-bg)",
+            "color: var(--banner-soft-fg)",
+            "border-radius: var(--radius-pill)",
+            "font-size: var(--text-xs)",
+            "text-transform: uppercase",
+        ] {
+            assert!(has_decl(&banner, decl), "missing {decl}: {banner}");
+        }
+        assert_ink_clears_aa("--banner-soft-fg", "--banner-soft-bg", 4.5);
+    }
+
+    #[test]
+    fn cards_and_tiles_use_the_card_tokens() {
+        for marker in [".home-card {", ".home-stat {"] {
+            let rule = css_rule(HOME_SHARED_CSS, marker);
+            for decl in [
+                "padding: var(--card-padding)",
+                "background: var(--card-bg)",
+                "border: 1px solid var(--card-border)",
+                "border-radius: var(--card-radius)",
+            ] {
+                assert!(has_decl(&rule, decl), "{marker} missing {decl}");
+            }
+        }
+        let n = css_rule(HOME_SHARED_CSS, ".home-stat-n {");
+        assert!(has_decl(&n, "font-size: var(--text-2xl)"), "{n}");
+        assert!(has_decl(&n, "font-variant-numeric: tabular-nums"), "{n}");
+    }
+
+    #[test]
+    fn interactive_controls_are_at_least_the_hit_target() {
+        // Buttons and Retry are the shared 44px ones, with no home copy.
+        for gone in [".home-btn", "fetch-error__retry"] {
+            assert!(!HOME_SHARED_CSS.contains(gone), "{gone} is shared now");
+        }
+        for marker in [
+            ".home-link {",
+            ".home-list a {",
+            ".home-team-name a {",
+            ".home-team-chip {",
+            "a.home-team-card {",
+        ] {
+            let rule = css_rule(HOME_SHARED_CSS, marker);
+            assert!(
+                has_decl(&rule, "min-height: var(--hit-target-min)"),
+                "{marker}: {rule}"
+            );
+        }
+    }
+
+    #[test]
+    fn anchored_sections_land_below_the_sticky_top_bar() {
+        let section = css_rule(HOME_SHARED_CSS, ".home-section {");
+        assert!(
+            section
+                .contains("scroll-margin-top: calc(var(--nav-height-used) + var(--space-section))"),
+            "{section}"
+        );
+    }
+
+    #[test]
+    fn tags_follow_the_frame_recipe() {
+        let tag = css_rule(HOME_SHARED_CSS, ".home-tag {");
+        for decl in [
+            "padding: var(--space-1) var(--space-2)",
+            "font-size: var(--text-xs)",
+            "line-height: var(--leading-body)",
+        ] {
+            assert!(has_decl(&tag, decl), "missing {decl}: {tag}");
+        }
+    }
+
+    #[test]
+    fn skins_and_shells_add_only_what_they_still_change() {
+        // Clean is the base: no empty layer is shipped for it.
+        let css = home_css_layers();
+        assert!(!css.contains("data-home-skin=\"clean\""), "{css}");
+        assert!(css.contains("[data-home-skin=\"esports\"] .ui-section-title"));
+        assert!(css.contains("[data-home-shell=\"minimal\"] .home-stats"));
+        // No size literal slips past the rem and px audit as an em.
+        assert!(has_decl(
+            &css_rule(HOME_SHARED_CSS, ".home-skel-stat {"),
+            "width: var(--space-6)"
+        ));
+    }
+
+    #[test]
+    fn phone_keeps_three_tiles_in_a_row_and_stacks_the_card_grid() {
+        let stats = css_rule(HOME_SHARED_CSS, ".home-stats {");
+        assert!(has_decl(&stats, "grid-auto-flow: column"), "{stats}");
+        let (_, phone) = HOME_SHARED_CSS
+            .split_once("@media (max-width: 820px) {")
+            .expect("phone block");
+        assert!(
+            has_decl(
+                &css_rule(phone, ".home-grid-2 {"),
+                "grid-template-columns: 1fr"
+            ),
+            "{phone}"
+        );
+        // The row stays a row: the phone block only tightens it.
+        let phone_stats = css_rule(phone, ".home-stats {");
+        assert!(!phone_stats.contains("grid-auto-flow"), "{phone_stats}");
+        assert!(
+            has_decl(
+                &css_rule(phone, ".home-stat-l {"),
+                "font-size: var(--text-xs)"
+            ),
+            "{phone}"
+        );
+    }
+
+    #[test]
+    fn body_copy_tokens_clear_text_contrast_on_page_and_card() {
+        for ink in ["--text", "--text-3", "--accent-text"] {
+            for fill in ["--bg", "--surface"] {
+                assert_ink_clears_aa(ink, fill, 4.5);
+            }
+        }
+        assert_ink_clears_aa("--on-accent", "--accent-solid", 4.5);
+    }
 }

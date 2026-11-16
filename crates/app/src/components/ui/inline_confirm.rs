@@ -1,7 +1,9 @@
 //! Inline confirm strip for destructive or hard-to-undo actions.
 //!
 //! No modal. The strip replaces the action buttons it guards, takes focus on
-//! Cancel first, and gives focus back to the trigger on Cancel or Esc. The
+//! Cancel first, and gives focus back to the trigger on Cancel or Esc. While
+//! `busy` its buttons are `aria-disabled` and ignore clicks: a natively
+//! disabled button is blurred, which drops focus to the page body. The
 //! caller owns the "is the strip open" state and the trigger button, which
 //! must carry the id `{id}-trigger`. See `0.6/redesign/ux-spec/games-delete.md`.
 
@@ -21,7 +23,8 @@ pub const INLINE_CONFIRM_CSS: &str = r#"
 .inline-confirm__cancel:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
 .inline-confirm__go { background: var(--loss); color: var(--on-loss); border: 1px solid var(--loss); }
 .inline-confirm__go:hover:not(:disabled) { filter: brightness(1.08); }
-.inline-confirm__cancel:disabled, .inline-confirm__go:disabled { opacity: .5; cursor: not-allowed; }
+.inline-confirm__cancel:disabled, .inline-confirm__go:disabled,
+.inline-confirm__cancel[aria-disabled="true"], .inline-confirm__go[aria-disabled="true"] { opacity: .5; cursor: not-allowed; }
 .inline-confirm__hint { font-size: var(--text-xs); color: var(--text-subtle); margin: 0; text-align: right; }
 "#;
 
@@ -98,7 +101,9 @@ pub fn InlineConfirm(
             onkeydown: move |e| {
                 if key_cancels(&e.key()) {
                     e.stop_propagation();
-                    cancel.call(());
+                    if !busy {
+                        cancel.call(());
+                    }
                 }
             },
             p { id: "{title_id}", class: "inline-confirm__title", "{title}" }
@@ -110,15 +115,24 @@ pub fn InlineConfirm(
                     id: "{cancel_id}",
                     class: "inline-confirm__cancel",
                     r#type: "button",
-                    disabled: busy,
-                    onclick: move |_| cancel.call(()),
+                    aria_disabled: if busy { "true" },
+                    onclick: move |_| {
+                        if !busy {
+                            cancel.call(());
+                        }
+                    },
                     "Cancel"
                 }
                 button {
                     class: "inline-confirm__go",
                     r#type: "button",
-                    disabled: busy,
-                    onclick: move |_| on_confirm.call(()),
+                    aria_busy: if busy { "true" },
+                    aria_disabled: if busy { "true" },
+                    onclick: move |_| {
+                        if !busy {
+                            on_confirm.call(());
+                        }
+                    },
                     "{confirm_label}"
                 }
             }
@@ -194,7 +208,10 @@ mod tests {
     #[test]
     fn busy_strip_disables_both_buttons_and_omits_missing_body() {
         let html = render(busy_strip);
-        assert_eq!(html.matches("disabled").count(), 2, "{html}");
+        // Busy, but still focusable: never the native attribute.
+        assert_eq!(html.matches("aria-disabled=\"true\"").count(), 2, "{html}");
+        assert!(!html.contains(" disabled"), "{html}");
+        assert!(html.contains("aria-busy=\"true\""), "{html}");
         assert!(!html.contains("inline-confirm__body"), "{html}");
     }
 }
