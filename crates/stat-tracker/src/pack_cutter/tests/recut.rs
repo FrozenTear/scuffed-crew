@@ -979,10 +979,8 @@ fn eval_rank_two_days_learn_from_the_other_day() {
     );
 }
 
-/// Header parses, body does not. `image::image_dimensions` succeeds and the
-/// full decode is what fails.
-/// Header parses, body does not. 64 bytes keeps the IHDR and drops the
-/// image data, so `image_dimensions` succeeds and the full decode fails.
+/// 64 bytes keeps the IHDR and drops the image data, so `image_dimensions`
+/// succeeds and the full decode fails.
 fn truncate_after_ihdr(src: &Path, dest: &Path) {
     let bytes = std::fs::read(src).unwrap();
     assert!(bytes.len() > 64, "{}", bytes.len());
@@ -1109,6 +1107,20 @@ fn rank_label_errors_name_the_file_line() {
         "bad-game.jsonl",
         serde_json::json!({"game": "20260101/x", "file": "a.png", "readable": true}),
         "rank game \"20260101/x\" is not a single path component",
+    );
+    // `file: "a/b.png"` is refused by `reject_name("file")` before any read.
+    check(
+        "bad-file.jsonl",
+        serde_json::json!({"game": "20260101-game", "file": "a/b.png", "readable": true}),
+        "rank file \"a/b.png\" is not a single path component",
+    );
+    // A missing frame passes the name check and fails the header read.
+    let missing = files.frames.join("20260101-game/missing.png");
+    let missing_line = format!("reading {}", missing.display());
+    check(
+        "missing-frame.jsonl",
+        serde_json::json!({"game": "20260101-game", "file": "missing.png", "readable": true}),
+        &missing_line,
     );
     truncate_after_ihdr(
         &files.frames.join("20260101-game/a.png"),

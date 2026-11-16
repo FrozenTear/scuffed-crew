@@ -202,6 +202,9 @@ lists their names. Any other key is refused as `unknown key`, so a typo such
 as `hero_sr_chnage` stops the cut instead of blinding the gate to that
 field. A duplicate key in one row, or a value of the wrong type (a non-string
 queue `frame` included), is an error. Queue errors name the file line.
+Rank label errors name the file line too: a spaced word, a bad game or
+file name, an image header read, and a full decode. `pack` writes
+`<out>/packs/manifest.json` as mode 0600, the same as each tar.
 
 A queue row with `visible: false` marks a title the frame does not show. It
 is skipped: not learned and not scored, and `cut` and `eval` print
