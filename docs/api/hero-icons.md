@@ -123,9 +123,13 @@ in the request passes.
    memory however large it would inflate. The image then decodes, with the
    decoder's memory capped at 32 MiB (`PNG_DECODE_MAX_ALLOC`) as a
    backstop. Otherwise 400 `invalid_png`. Measured peak heap for one whole
-   check, decode and re-encode: 0.8 MiB for the largest hero icon
-   (256x256 16-bit RGBA); see `training-crops.md` for the training crop
-   kinds, whose largest (a 1536x720 16-bit RGBA rank crop) peaks higher.
+   check, decode and re-encode: 0.8 MiB for the largest accepted hero icon
+   (256x256 16-bit RGBA) and 0.9 MiB for a refused one (a 256x256 file
+   built so its re-encode is over 64 KiB at both levels, 413). The
+   re-encode writes into a writer capped at `HERO_ICON_MAX_BYTES`, so a
+   refused file never builds a larger output. See `training-crops.md` for
+   the training crop kinds, whose largest (rank, 1536x720) peaks at about
+   13 MiB, accepted or refused.
 5. The re-encode (below) is at most `HERO_ICON_MAX_BYTES`. Otherwise 413
    `icon_too_large`.
 

@@ -252,13 +252,19 @@ multiple of 3 (png 0.18.1 panics on one, which was a 500), and any
 critical chunk (uppercase first letter) other than the four above, since
 the PNG spec says a decoder must not ignore an unknown critical chunk.
 The decoder is also capped at 32 MiB (`PNG_DECODE_MAX_ALLOC`) as a
-backstop.
+backstop. Each re-encode attempt (default level, then Best) writes into a
+writer capped at the kind's byte limit, so an attempt that goes over stops
+there and keeps nothing, and the default attempt's output is gone before
+Best runs. The PNG encoder's own compression buffer is not capped (png
+0.18 compresses the whole image before writing it out); the figures below
+include it.
 
-Measured peak heap for one whole crop: chunk walk, decode, 8-bit
-conversion and re-encode in one `clean_png_within` call, counted by a
-test-only allocator in the unit test
+Measured peak heap for one whole crop, accepted or refused: chunk walk,
+decode, 8-bit conversion and re-encode in one `clean_png_within` call,
+counted by a test-only allocator in the unit test
 `one_png_read_stays_within_its_measured_peak` (debug build), which also
-asserts each of these four stays under 20 MiB. The right column is the
+asserts the rank cases stay under 20 MiB and the refused hero icon under
+4 MiB. The right column is the
 same test's stand-in for how the previous version of this change read a
 PNG (one decoder over the whole upload, colour profile included and
 copied, then the decode); it is a re-creation, not the old code.
@@ -269,6 +275,11 @@ copied, then the decode); it is a re-creation, not the old code.
 | 49 KB, 1536x720, `iCCP` inflating to 31 MiB | 3.6 MiB | 67.5 MiB |
 | 47 KB, 1536x720 16-bit RGBA, the largest `rank` crop (the most pixel memory any kind accepts) | 12.7 MiB | 8.7 MiB (decode only) |
 | 4 KB, 256x256 16-bit RGBA, the largest `hero_icon` (also the `stat_digits` bound) | 0.8 MiB | 0.8 MiB |
+| 265 KB, 1536x720 Adam7 RGBA built to re-encode to about 4.4 MiB at both levels: refused, 413 (QA's input) | 12.9 MiB | about 29 MiB (the two uncapped encodes measured 24.9 MiB on top of the 4.2 MiB image; QA counted 29.4 MiB) |
+| 51 KB, 256x256 Adam7 RGBA, the same attack at the `hero_icon` bound: refused, 413 | 0.9 MiB | not measured |
+
+So the largest peak measured, accepted or refused, is 12.9 MiB, for the
+refused `rank` crop; the largest accepted `rank` crop peaks at 12.7 MiB.
 
 Measured another way, by process RSS on real builds, the Site review
 found the same order: the 40 MiB-profile bomb at +3.4 MiB now against

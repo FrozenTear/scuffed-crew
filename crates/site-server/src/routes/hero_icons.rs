@@ -402,7 +402,13 @@ pub(crate) fn clean_png(data: &[u8]) -> Result<CleanIcon, &'static str> {
 /// chunk (colour profiles, text, EXIF, animation) is dropped without being
 /// inflated, so a compressed `iCCP` or `zTXt` costs nothing however large it
 /// inflates. What a decode can allocate is then the pixel buffer plus small
-/// working buffers; [`PNG_DECODE_MAX_ALLOC`] is a backstop on top.
+/// working buffers; [`PNG_DECODE_MAX_ALLOC`] is a backstop on top. Each
+/// re-encode attempt writes into a writer capped at `max_bytes` and a
+/// failed default-level attempt is dropped before Best runs, so a refused
+/// crop costs about what an accepted one does (measured figures on
+/// [`PNG_DECODE_MAX_ALLOC`]). The PNG encoder's own compression buffer is
+/// not capped (png 0.18 compresses the whole image before writing it out);
+/// the measured peaks include it.
 pub(crate) fn clean_png_within(
     data: &[u8],
     max_width: u32,
@@ -422,15 +428,19 @@ pub(crate) fn clean_png_within(
     let (width, height) = (decoded.width(), decoded.height());
     let eight_bit = to_eight_bit(decoded);
     // The default level first: fast, and enough for nearly every crop. Best
-    // only when that is over the limit, since it costs far more CPU.
-    let mut bytes =
-        encode_png(&eight_bit, CompressionType::Default).ok_or(HERO_ICON_ERR_INVALID_PNG)?;
-    if bytes.len() > max_bytes {
-        bytes = encode_png(&eight_bit, CompressionType::Best).ok_or(HERO_ICON_ERR_INVALID_PNG)?;
-    }
-    if bytes.len() > max_bytes {
-        return Err(HERO_ICON_ERR_TOO_LARGE);
-    }
+    // only when that is over the limit, since it costs far more CPU. Each
+    // attempt writes into a writer capped at `max_bytes`, so an attempt that
+    // goes over stops there and keeps nothing; the default attempt's output
+    // is gone before Best runs.
+    let bytes = match encode_png(&eight_bit, CompressionType::Default, max_bytes) {
+        Encoded::Fits(bytes) => bytes,
+        Encoded::OverLimit => match encode_png(&eight_bit, CompressionType::Best, max_bytes) {
+            Encoded::Fits(bytes) => bytes,
+            Encoded::OverLimit => return Err(HERO_ICON_ERR_TOO_LARGE),
+            Encoded::Failed => return Err(HERO_ICON_ERR_INVALID_PNG),
+        },
+        Encoded::Failed => return Err(HERO_ICON_ERR_INVALID_PNG),
+    };
     Ok(CleanIcon {
         bytes,
         width,
@@ -443,7 +453,12 @@ pub(crate) fn clean_png_within(
 /// [`png_pixel_chunks`] and the edge check: only pixel data reaches the
 /// decoder, and the largest accepted crop, 1536x720 16-bit RGBA, is about
 /// 8.4 MiB decoded. Measured peak heap for a whole [`clean_png_within`]
-/// call is in the test `one_png_read_stays_within_its_measured_peak`.
+/// call (test `one_png_read_stays_within_its_measured_peak`, debug build):
+/// 12.7 MiB for the largest accepted rank crop (1536x720 16-bit RGBA),
+/// 12.9 MiB for a refused rank crop whose re-encode is about 4.4 MiB at
+/// both levels (413), 3.6 MiB for a colour profile bomb, 0.8 MiB for the
+/// largest hero icon and 0.9 MiB for a refused one. The test asserts the
+/// rank cases stay under 20 MiB.
 pub(crate) const PNG_DECODE_MAX_ALLOC: u64 = 32 * 1024 * 1024;
 
 /// The chunks the decoder needs for the pixels. Everything else is dropped.
@@ -472,12 +487,16 @@ fn png_pixel_chunks(data: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
         let chunk = data.get(at..end)?;
         let kind = &header[4..8];
         if size.is_none() {
+            // The length check comes first; the fields are then read with
+            // `get`, so even a short IHDR can never index out of bounds.
             if kind != b"IHDR" || len != 13 {
                 return None;
             }
-            let field =
-                |i: usize| u32::from_be_bytes([chunk[i], chunk[i + 1], chunk[i + 2], chunk[i + 3]]);
-            size = Some((field(8), field(12)));
+            let fields = chunk.get(8..16)?;
+            let field = |i: usize| {
+                u32::from_be_bytes([fields[i], fields[i + 1], fields[i + 2], fields[i + 3]])
+            };
+            size = Some((field(0), field(4)));
         }
         // A PLTE that is not whole RGB triples makes png 0.18.1 panic
         // (decoder/transform/palette.rs), which would be a 500.
@@ -510,13 +529,63 @@ fn png_reader(data: &[u8]) -> image::ImageReader<Cursor<&[u8]>> {
     reader
 }
 
-/// `image` as a PNG at `level` with adaptive filtering. `None` when the
-/// encoder fails.
-fn encode_png(image: &DynamicImage, level: CompressionType) -> Option<Vec<u8>> {
-    let mut bytes = Vec::new();
-    let encoder = PngEncoder::new_with_quality(&mut bytes, level, FilterType::Adaptive);
-    image.write_with_encoder(encoder).ok()?;
-    Some(bytes)
+/// The result of one capped PNG encode.
+enum Encoded {
+    /// The whole PNG, at most the cap.
+    Fits(Vec<u8>),
+    /// The output passed the cap; nothing is kept.
+    OverLimit,
+    /// The encoder failed for another reason.
+    Failed,
+}
+
+/// A `Vec` writer that refuses any write that would take it past `cap`
+/// bytes, so the output of one encode never grows past the limit.
+struct CappedWriter {
+    bytes: Vec<u8>,
+    cap: usize,
+    over: bool,
+}
+
+impl std::io::Write for CappedWriter {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        if self.bytes.len().saturating_add(data.len()) > self.cap {
+            self.over = true;
+            return Err(std::io::Error::other("PNG re-encode over the byte limit"));
+        }
+        self.bytes.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// `image` as a PNG at `level` with adaptive filtering, into a writer
+/// capped at `max_bytes`. The PNG encoder (png 0.18) still compresses the
+/// whole image into its own buffer before writing it out, so that buffer
+/// is not capped; the measured peak covers it (see
+/// `one_png_read_stays_within_its_measured_peak`).
+fn encode_png(image: &DynamicImage, level: CompressionType, max_bytes: usize) -> Encoded {
+    let mut writer = CappedWriter {
+        bytes: Vec::new(),
+        cap: max_bytes,
+        over: false,
+    };
+    let encoder = PngEncoder::new_with_quality(&mut writer, level, FilterType::Adaptive);
+    let result = image.write_with_encoder(encoder);
+    // Check `over` first, even on `Ok`: png 0.18 writes the closing `IEND`
+    // when its writer is dropped and ignores an error there, so a cap that
+    // falls inside the last 12 bytes would otherwise come back as `Ok` with
+    // a PNG missing its `IEND`.
+    if writer.over {
+        return Encoded::OverLimit;
+    }
+    match result {
+        Ok(()) => Encoded::Fits(writer.bytes),
+        Err(_) => Encoded::Failed,
+    }
 }
 
 /// `image` at 8 bits per sample, keeping gray and alpha where it has them.
@@ -1187,6 +1256,14 @@ mod tests {
         out
     }
 
+    /// `image` encoded at `level` with no cap, for comparisons.
+    fn encode_at(image: &DynamicImage, level: CompressionType) -> Vec<u8> {
+        match encode_png(image, level, usize::MAX) {
+            Encoded::Fits(bytes) => bytes,
+            _ => panic!("an uncapped encode fits"),
+        }
+    }
+
     /// Encode `image` as a PNG with the image crate's defaults (fast
     /// compression, the image's own bit depth), as a client might.
     fn encode(image: DynamicImage) -> Vec<u8> {
@@ -1267,7 +1344,7 @@ mod tests {
         let upload = encode(noise.clone());
         // The smallest the server can make it: the better of both levels.
         let smallest = [CompressionType::Default, CompressionType::Best]
-            .map(|level| encode_png(&noise, level).unwrap().len())
+            .map(|level| encode_at(&noise, level).len())
             .into_iter()
             .min()
             .unwrap();
@@ -1296,8 +1373,8 @@ mod tests {
         let image = blocks_16bit(true);
         let clean = clean_png_within(&encode(image.clone()), 1536, 720, 384 * 1024).unwrap();
         let eight = to_eight_bit(image);
-        let default = encode_png(&eight, CompressionType::Default).unwrap();
-        let best = encode_png(&eight, CompressionType::Best).unwrap();
+        let default = encode_at(&eight, CompressionType::Default);
+        let best = encode_at(&eight, CompressionType::Best);
         assert_ne!(default, best, "the two levels give different files here");
         assert_eq!(
             clean.bytes, default,
@@ -1320,8 +1397,8 @@ mod tests {
                 image::Rgb([30, 60, (x % 7) as u8 * 30])
             }
         }));
-        let default = encode_png(&image, CompressionType::Default).unwrap();
-        let best = encode_png(&image, CompressionType::Best).unwrap();
+        let default = encode_at(&image, CompressionType::Default);
+        let best = encode_at(&image, CompressionType::Best);
         assert!(
             best.len() < default.len(),
             "best {} default {}",
@@ -1631,6 +1708,133 @@ mod tests {
 
     const MIB: f64 = 1024.0 * 1024.0;
 
+    /// QA's refused crop (port of their generator): an Adam7 interlaced
+    /// RGBA PNG whose every interlace pass repeats one random `period`-byte
+    /// block. The upload compresses well, but the de-interlaced pixels have
+    /// no repeats inside deflate's window, so the 8-bit re-encode is about
+    /// raw size and over the limit at both levels. `period` shrinks until
+    /// the upload fits `upload_limit`.
+    fn adam7_amplifier(width: u32, height: u32, depth: u8, upload_limit: usize) -> Vec<u8> {
+        use std::io::Write;
+        const PASSES: [(u32, u32, u32, u32); 7] = [
+            (0, 0, 8, 8),
+            (4, 0, 8, 8),
+            (0, 4, 4, 8),
+            (2, 0, 4, 4),
+            (0, 2, 2, 4),
+            (1, 0, 2, 2),
+            (0, 1, 1, 2),
+        ];
+        let bytes_per_pixel = 4 * usize::from(depth) / 8;
+        let mut period = 32_000usize;
+        loop {
+            let mut state = 0x1234_5678u32;
+            let mut stream = Vec::new();
+            for (x0, y0, dx, dy) in PASSES {
+                let pass_w = (x0..width).step_by(dx as usize).count();
+                let pass_h = (y0..height).step_by(dy as usize).count();
+                if pass_w == 0 || pass_h == 0 {
+                    continue;
+                }
+                let block: Vec<u8> = (0..period)
+                    .map(|_| {
+                        state ^= state << 13;
+                        state ^= state >> 17;
+                        state ^= state << 5;
+                        state as u8
+                    })
+                    .collect();
+                let row = pass_w * bytes_per_pixel + 1;
+                let start = stream.len();
+                stream.extend(block.iter().cycle().take(pass_h * row));
+                for r in 0..pass_h {
+                    stream[start + r * row] = 0; // filter: none
+                }
+            }
+            let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+            z.write_all(&stream).unwrap();
+            let mut ihdr = width.to_be_bytes().to_vec();
+            ihdr.extend_from_slice(&height.to_be_bytes());
+            ihdr.extend_from_slice(&[depth, 6, 0, 0, 1]); // RGBA, Adam7
+            let mut png = PNG_SIGNATURE.to_vec();
+            png.extend(png_chunk(b"IHDR", &ihdr));
+            png.extend(png_chunk(b"IDAT", &z.finish().unwrap()));
+            png.extend(png_chunk(b"IEND", &[]));
+            if png.len() <= upload_limit {
+                return png;
+            }
+            period -= 4_000;
+        }
+    }
+
+    #[test]
+    fn a_cap_inside_the_closing_iend_is_over_the_limit() {
+        // png writes IEND (12 bytes) when its writer drops and ignores an
+        // error there; every cap short of the full size must be OverLimit,
+        // never a PNG without IEND.
+        let image = blocks_16bit(false);
+        let eight = to_eight_bit(image);
+        let full = encode_at(&eight, CompressionType::Default);
+        assert!(full.ends_with(&png_chunk(b"IEND", &[])));
+        for short in 1..=13 {
+            assert!(
+                matches!(
+                    encode_png(&eight, CompressionType::Default, full.len() - short),
+                    Encoded::OverLimit
+                ),
+                "cap {short} bytes short"
+            );
+        }
+        assert!(matches!(
+            encode_png(&eight, CompressionType::Default, full.len()),
+            Encoded::Fits(bytes) if bytes == full
+        ));
+    }
+
+    #[test]
+    fn the_chunk_walk_refuses_a_chunk_past_the_end_and_a_late_ihdr() {
+        let png = palette_png(8, 8, &RED_AND_BLACK, None, &[]);
+        // Cut inside the first IDAT's data: its 8-byte header is whole, its
+        // data and CRC are not.
+        let first_idat = 8 + 25 + 12 + RED_AND_BLACK.len();
+        assert_eq!(&png[first_idat + 4..first_idat + 8], b"IDAT");
+        assert!(
+            png_pixel_chunks(&png[..first_idat + 8 + 2]).is_none(),
+            "an IDAT that runs past the end"
+        );
+        // IHDR present, but not first: a tEXt chunk before it.
+        let mut late_ihdr = PNG_SIGNATURE.to_vec();
+        late_ihdr.extend(png_chunk(b"tEXt", b"Comment\0first"));
+        late_ihdr.extend_from_slice(&png[8..]);
+        assert!(
+            png_pixel_chunks(&late_ihdr).is_none(),
+            "IHDR must be the first chunk"
+        );
+        assert_eq!(clean_png(&late_ihdr).err(), Some(HERO_ICON_ERR_INVALID_PNG));
+    }
+
+    #[test]
+    fn a_short_ihdr_is_refused_without_reading_past_it() {
+        for len in [0usize, 4, 12] {
+            let mut png = PNG_SIGNATURE.to_vec();
+            png.extend(png_chunk(b"IHDR", &vec![0; len]));
+            png.extend(png_chunk(b"IEND", &[]));
+            assert!(png_pixel_chunks(&png).is_none(), "IHDR of {len} bytes");
+            assert_eq!(clean_png(&png).err(), Some(HERO_ICON_ERR_INVALID_PNG));
+        }
+    }
+
+    /// The re-encode as it was before the capped writer: the default-level
+    /// output kept while Best ran. Only used to compare peaks.
+    fn reencode_uncapped_like_before(image: &DynamicImage, max_bytes: usize) -> usize {
+        let default = encode_at(image, CompressionType::Default);
+        if default.len() <= max_bytes {
+            return default.len();
+        }
+        let best = encode_at(image, CompressionType::Best);
+        best.len() + default.len()
+    }
+
     /// A stand-in for how the previous version of this PR read a PNG: one
     /// decoder over the whole upload (profile included), its
     /// `icc_profile()` copy, then the decode. Only used to compare peaks.
@@ -1683,6 +1887,43 @@ mod tests {
             // four, the largest rank crop included.
             assert!(now < 20 * 1024 * 1024, "{name}: {now} bytes");
         }
+        // QA's refused crop: 1536x720 Adam7 RGBA, within the rank upload
+        // limit, re-encodes to about 4.4 MiB at both levels, so it is 413.
+        let refused = adam7_amplifier(1536, 720, 8, 384 * 1024);
+        let (result, now) = heap::peak_during(|| clean_png_within(&refused, 1536, 720, 384 * 1024));
+        assert_eq!(
+            result.err(),
+            Some(HERO_ICON_ERR_TOO_LARGE),
+            "refused at both levels"
+        );
+        let decoded = png_reader(&refused).decode().unwrap();
+        let eight = to_eight_bit(decoded);
+        let ((), before) = heap::peak_during(|| {
+            let _ = reencode_uncapped_like_before(&eight, 384 * 1024);
+        });
+        let eight_bytes = eight.as_bytes().len();
+        drop(eight);
+        report.push(format!(
+            "refused rank 1536x720 Adam7 RGBA ({} B upload): peak heap {:.1} MiB now; \
+             the two encodes alone, uncapped as before, {:.1} MiB on top of the {:.1} MiB image",
+            refused.len(),
+            now as f64 / MIB,
+            before as f64 / MIB,
+            eight_bytes as f64 / MIB
+        ));
+        // Asserted bound for a refused crop, the largest case measured.
+        assert!(now < 20 * 1024 * 1024, "refused crop: {now} bytes");
+        // The same attack at the hero icon bound (256x256, 64 KiB).
+        let refused_icon = adam7_amplifier(256, 256, 8, 64 * 1024);
+        let (result, now) =
+            heap::peak_during(|| clean_png_within(&refused_icon, 256, 256, 64 * 1024));
+        assert_eq!(result.err(), Some(HERO_ICON_ERR_TOO_LARGE));
+        report.push(format!(
+            "refused hero icon 256x256 Adam7 RGBA ({} B upload): peak heap {:.1} MiB now",
+            refused_icon.len(),
+            now as f64 / MIB
+        ));
+        assert!(now < 4 * 1024 * 1024, "refused hero icon: {now} bytes");
         println!("{}", report.join("\n"));
         // The profile no longer counts: both profile cases cost what the
         // same pixels cost without one.
