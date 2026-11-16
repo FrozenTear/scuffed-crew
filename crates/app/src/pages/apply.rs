@@ -1,13 +1,13 @@
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::components::ui::inline_confirm::{focus_element_by_id, focus_element_by_id_soon};
+use crate::components::ui::inline_confirm::{focus_element_by_id_soon, focus_field_by_id};
 use crate::components::ui::{
     Card, ChipButton, FieldError, InlineConfirm, PageHeader, PageShell, PageWidth, Pill, PillTone,
     btn_class,
 };
 use crate::components::{Toast, list_cap_notice, retry_label, use_toast};
-use crate::hooks::{use_api, use_api_list};
+use crate::hooks::{use_api_list, use_api_when};
 use crate::routes::Route;
 use crate::state::auth::use_auth;
 use crate::state::{loaded_site_settings, use_site_settings};
@@ -556,8 +556,15 @@ const APPLY_CSS: &str = r#"
     .apply-status-row { margin: var(--space-3) 0; }
     .apply-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-top: var(--space-5); }
     .apply-page .inline-confirm { margin-top: var(--space-5); }
+    /* The confirm strip's two buttons take the page's button type and sit
+       where the page's other actions do, so the strip reads as part of the
+       card it opens in. */
+    .apply-page .inline-confirm__actions { justify-content: flex-start; }
+    .apply-page .inline-confirm__hint { text-align: left; }
     .apply-page .inline-confirm__cancel,
-    .apply-page .inline-confirm__go { min-height: var(--hit-target-min); }
+    .apply-page .inline-confirm__go { min-height: var(--hit-target-min); padding: var(--space-2) var(--button-pad-x); font-family: var(--button-font); font-size: var(--button-font-size); font-weight: var(--button-font-weight); letter-spacing: var(--font-head-tracking); line-height: var(--leading-ui); border-radius: var(--button-radius); }
+    .apply-page .inline-confirm__cancel { border-color: var(--border-strong); }
+    .apply-page .inline-confirm__cancel:hover { border-color: var(--text); }
     .apply-status { margin: 0; color: var(--text-3); font-size: var(--text-sm); line-height: var(--leading-body); }
     .apply-status:not(:empty) { margin: 0 0 var(--space-3); }
 
@@ -565,7 +572,7 @@ const APPLY_CSS: &str = r#"
     .apply-summary { margin: 0 0 var(--space-5); padding: var(--space-4); border: 1px solid var(--loss); border-radius: var(--radius-card); background: var(--loss-soft); color: var(--text); }
     .apply-summary h2 { margin: 0 0 var(--space-2); font-family: var(--font-head); font-size: var(--text-md); font-weight: var(--font-label-weight); line-height: var(--leading-ui); color: var(--loss); }
     .apply-summary p { margin: 0 0 var(--space-3); font-size: var(--text-md); line-height: var(--leading-body); }
-    .apply-summary ul { margin: 0; padding-inline-start: var(--space-5); }
+    .apply-summary ul { margin: 0; padding-inline-start: var(--space-5); list-style: disc; }
     .apply-summary li { font-size: var(--text-md); line-height: var(--leading-body); }
     .apply-summary li + li { margin-top: var(--space-2); }
     .apply-summary a { color: var(--accent-text); text-decoration: underline; }
@@ -584,8 +591,12 @@ const APPLY_CSS: &str = r#"
     @media (max-width: 820px) {
         .apply-form .apply-actions { flex-direction: column; align-items: stretch; }
         .apply-form .apply-actions .btn { width: 100%; }
+        .apply-page .inline-confirm__actions { flex-direction: column; align-items: stretch; }
+        /* 44px targets from block padding, not a min-height: a link that
+           wraps to two lines keeps the same space around it as a short one,
+           so neighbours never run together. */
         .apply-summary li + li { margin-top: 0; }
-        .apply-summary a { display: inline-flex; align-items: center; min-height: var(--hit-target-min); }
+        .apply-summary a { display: block; padding-block: var(--space-3); }
     }
 "#;
 
@@ -648,7 +659,9 @@ fn ApplyForm(
                                     href: "#{field.id()}",
                                     onclick: move |e: MouseEvent| {
                                         e.prevent_default();
-                                        focus_element_by_id(field.id());
+                                        // Focus the control and show the whole
+                                        // field, error line included.
+                                        focus_field_by_id(field.id(), ".apply-field");
                                     },
                                     "{field.label()}: {field.error()}"
                                 }
@@ -752,7 +765,11 @@ pub fn Apply() -> Element {
     let settings_phase = classify_fetch(resolved.as_ref());
     let s = loaded_site_settings(resolved.as_ref());
     let mut games = use_api_list::<Game>("/api/games");
-    let mut my_app = use_api::<Option<Application>>("/api/applications/mine");
+    // Only a signed-in viewer has an application to ask for. A guest gets the
+    // "Log in to apply" card and sends no request.
+    let mut my_app = use_api_when::<Option<Application>>("/api/applications/mine", move || {
+        auth().is_logged_in()
+    });
 
     let mut selected_games = use_signal(Vec::<String>::new);
     let mut role = use_signal(String::new);

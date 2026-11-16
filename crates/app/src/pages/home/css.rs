@@ -63,9 +63,9 @@ pub const HOME_SHARED_CSS: &str = r#"
         text-box-trim: trim-both;
         text-box-edge: cap alphabetic;
     }
-    /* The second title line. It is a block, so it reads as its own line. */
+    /* The accent part of the title. It runs on in the same line, as the
+       frame draws the title; a long title wraps like any other text. */
     .home-hero-title em {
-        display: block;
         font-style: normal;
         color: var(--accent-text);
     }
@@ -128,12 +128,16 @@ pub const HOME_SHARED_CSS: &str = r#"
         line-height: var(--leading-ui);
         font-variant-numeric: tabular-nums;
         color: var(--text);
+        text-box-trim: trim-both;
+        text-box-edge: cap alphabetic;
     }
     .home-stat-l {
         display: block;
         color: var(--text-3);
         font-size: var(--text-sm);
         line-height: var(--leading-ui);
+        text-box-trim: trim-both;
+        text-box-edge: cap alphabetic;
     }
 
     /* --- Skeletons. One line box tall, so nothing moves when data lands. --- */
@@ -169,6 +173,11 @@ pub const HOME_SHARED_CSS: &str = r#"
         width: var(--space-6);
         height: 1lh;
         margin: 0 auto;
+    }
+    /* Where the tile number is trimmed to its cap height, so is its
+       placeholder, and the tile keeps its height when the number lands. */
+    @supports (text-box-trim: trim-both) {
+        .home-skel-stat { height: 1cap; }
     }
 
     /* --- Sections and cards --- */
@@ -228,7 +237,8 @@ pub const HOME_SHARED_CSS: &str = r#"
         border-radius: var(--card-radius);
         box-shadow: var(--card-shadow);
     }
-    .home-card p { margin: 0; }
+    /* Not the kicker: it keeps its gap to the title, as in a section head. */
+    .home-card p:not(.home-kicker) { margin: 0; }
     .home-grid-2 {
         display: grid;
         grid-template-columns: 1fr 1fr;
@@ -310,9 +320,11 @@ pub const HOME_SHARED_CSS: &str = r#"
         font-size: var(--text-sm);
         font-variant-numeric: tabular-nums;
     }
+    /* The reset sheet removes list markers; a bulleted list sets its own. */
     .home-bullets {
         margin: 0;
         padding: 0 0 0 var(--space-5);
+        list-style: disc;
         display: flex;
         flex-direction: column;
         gap: var(--space-2);

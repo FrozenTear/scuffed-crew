@@ -655,6 +655,7 @@ const PAGE_CSS: &str = r#"
         flex: 1 1 0;
         min-width: 0;
         height: var(--hit-target-min);
+        text-overflow: ellipsis;
     }
     .pn-expand {
         flex: 0 0 auto;
@@ -949,18 +950,29 @@ const PAGE_CSS: &str = r#"
         padding-inline-start: var(--space-3);
         border-inline-start: var(--space-1) solid var(--accent-solid);
     }
+    /* The reset sheet removes list markers, so the list sets its own. The
+       gap keeps a wrapped item apart from the next one on a phone. */
     .pn-section-items {
         margin: 0;
         padding-inline-start: var(--space-5);
+        list-style: disc;
         color: var(--text);
         font-size: var(--text-md);
         line-height: var(--leading-body);
         overflow-wrap: anywhere;
     }
+    .pn-section-items li + li {
+        margin-top: var(--space-2);
+    }
+    .pn-section-items li::marker {
+        color: var(--text-subtle);
+    }
     .pn-external-link {
         align-self: flex-start;
         display: inline-flex;
         align-items: center;
+        /* A flex box drops the space between the words and the arrow. */
+        gap: var(--space-1);
         min-height: var(--hit-target-min);
         color: var(--accent-text);
         font-size: var(--text-sm);
@@ -976,6 +988,12 @@ const PAGE_CSS: &str = r#"
     @media (max-width: 820px) {
         .pn-heroes {
             grid-template-columns: minmax(0, 1fr);
+        }
+        /* The field itself stays at the phone input size (no zoom on focus).
+           Only its hint text drops a step, so the whole hint fits beside the
+           Expand all button. */
+        .pn-search::placeholder {
+            font-size: var(--text-md);
         }
     }
 "#;

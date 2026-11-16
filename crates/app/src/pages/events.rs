@@ -193,6 +193,16 @@ const PAGE_CSS: &str = r#"
         padding-top: var(--space-3);
         border-top: 1px solid var(--border);
     }
+    /* The answers are the card's only action. At rest they take the button
+       edge and the full ink, so they do not read as the muted tags next to
+       the title. The pressed look stays the shared chip's. */
+    .event-rsvp .chip:not([aria-pressed="true"]) {
+        border-color: var(--border-strong);
+        color: var(--text);
+    }
+    .event-rsvp .chip:not([aria-pressed="true"]):hover {
+        border-color: var(--text);
+    }
     .event-rsvp-counts {
         margin: 0;
         color: var(--text-3);

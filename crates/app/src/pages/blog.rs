@@ -9,6 +9,7 @@ use super::article_author::{
 };
 use crate::components::ui::{
     EmptyCard, LoadError, PageHeader, PageShell, PageWidth, Pager, page_slice, show_list_top,
+    use_url_page,
 };
 use crate::routes::Route;
 
@@ -35,7 +36,9 @@ const LIST_ID: &str = "blog-list";
 #[component]
 pub fn Blog() -> Element {
     let mut refresh = use_signal(|| 0u32);
-    let mut page = use_signal(|| 1usize);
+    // The page lives in the address (`?page=2`), so Back from a post returns
+    // to the page it was opened from.
+    let page = use_url_page();
     let articles = use_resource(move || {
         let _ = refresh();
         fetch_offset_list(|offset| async move {
@@ -47,7 +50,7 @@ pub fn Blog() -> Element {
     });
     // Names for the authors of the page on screen only.
     let names = use_author_names(move || {
-        let page = page();
+        let page = page.get();
         articles
             .read()
             .as_ref()
@@ -67,12 +70,12 @@ pub fn Blog() -> Element {
         BlogIndex {
             load,
             names: Some(names()),
-            page: page(),
+            page: page.get(),
             capped,
             retrying,
             on_retry: move |_| refresh += 1,
             on_page: move |next| {
-                page.set(next);
+                page.go(next);
                 show_list_top(LIST_ID);
             },
         }

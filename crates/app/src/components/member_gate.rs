@@ -142,10 +142,10 @@ fn home_link() -> Element {
 fn sign_in_panel(what: &str) -> Element {
     rsx! {
         Wall {
-            title: "Sign in required",
-            lead: "Sign in to view {what}.",
+            title: "Log in required",
+            lead: "Log in to view {what}.",
             actions: rsx! {
-                Link { to: Route::Login {}, class: btn_class(true), "Sign in" }
+                Link { to: Route::Login {}, class: btn_class(true), "Log in" }
                 {home_link()}
             },
         }
@@ -406,10 +406,10 @@ mod tests {
         assert_eq!(html.matches("<h1").count(), 1, "{html}");
         let wall = wall(&html);
         assert!(
-            wall.contains("<h2 class=\"wall-title\">Sign in required</h2>"),
+            wall.contains("<h2 class=\"wall-title\">Log in required</h2>"),
             "{wall}"
         );
-        assert!(wall.contains("Sign in to view polls."), "{wall}");
+        assert!(wall.contains("Log in to view polls."), "{wall}");
         assert_eq!(wall.matches("<a ").count(), 2, "{wall}");
         assert!(!wall.contains("<button"), "{wall}");
         let sign_in = wall.find("href=\"/login\"").expect("sign in link");

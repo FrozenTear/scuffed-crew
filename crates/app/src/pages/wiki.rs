@@ -87,11 +87,12 @@ const SEARCH_DEBOUNCE_MS: u32 = 300;
 const NO_MATCH_STATUS: &str = "No pages match your search.";
 
 const PAGE_CSS: &str = r#"
+/* The field spans the column, so its edges line up with the cards under
+   it (the frames' toolbar search fills its row the same way). */
 .wiki-search {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-  max-width: var(--content-max-narrow);
   min-width: 0;
 }
 "#;
@@ -277,7 +278,13 @@ fn WikiIndex(
                 class: "ui-stack pager-target",
                 tabindex: "-1",
                 aria_label: "Wiki pages",
-                p { class: "entry-status", role: "status", "{status}" }
+                // With no hits the card below says the same thing, so the
+                // line is for assistive tech only then.
+                p {
+                    class: if status == NO_MATCH_STATUS { "entry-status visually-hidden" } else { "entry-status" },
+                    role: "status",
+                    "{status}"
+                }
                 {match &load {
                     Load::Loading => rsx! {},
                     Load::Failed | Load::Missing => rsx! {
@@ -485,7 +492,7 @@ mod tests {
         // A search with no hits is announced, not only drawn.
         assert!(
             miss.contains(
-                "<p class=\"entry-status\" role=\"status\">No pages match your search.</p>"
+                "<p class=\"entry-status visually-hidden\" role=\"status\">No pages match your search.</p>"
             ),
             "{miss}"
         );

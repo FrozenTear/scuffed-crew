@@ -6,7 +6,9 @@ use super::article_author::{
     is_retrying, load_status, use_author_names,
 };
 use super::not_found::{NotFoundLink, NotFoundPanel};
-use crate::components::ui::inline_confirm::focus_element_by_id_soon;
+use crate::components::ui::inline_confirm::{
+    focus_element_by_id_soon, focus_text_start_by_id_soon,
+};
 use crate::components::ui::{FieldError, LoadError, PageHeader, PageShell, PageWidth};
 use crate::components::{Toast, is_http_status, use_toast};
 use crate::routes::Route;
@@ -54,7 +56,7 @@ const PAGE_CSS: &str = r#"
   min-width: 0;
 }
 .wiki-edit-field textarea.field-input {
-  min-height: calc(var(--space-12) * 6);
+  min-height: max(calc(var(--space-12) * 6), 50vh);
   font-family: var(--font-mono);
 }
 .wiki-edit-buttons {
@@ -77,12 +79,18 @@ const PAGE_CSS: &str = r#"
 }
 .wiki-revisions h2 {
   margin: 0;
+  /* Focused when History opens: land below the sticky top bar. */
+  scroll-margin-top: calc(var(--nav-height-used) + var(--space-section));
   color: var(--text);
   font-family: var(--font-head);
   font-size: var(--text-lg);
   font-weight: var(--font-label-weight);
   letter-spacing: var(--font-head-tracking);
   line-height: var(--leading-ui);
+}
+.wiki-revisions h2:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
 }
 .wiki-revision-list {
   display: grid;
@@ -232,6 +240,11 @@ pub fn WikiPage(topic: String) -> Element {
         Load::Ready(page) => Some(page.title.clone()),
         _ => None,
     };
+    crate::head::use_page_title(match &load {
+        Load::Ready(page) => Some(format!("{} | Wiki", page.title.trim())),
+        Load::Missing => Some("Page not found | Wiki".to_string()),
+        Load::Loading | Load::Failed => None,
+    });
     let rev_view = revisions_view(show_revisions(), revisions.read().as_ref());
     let rev_retrying =
         revisions.state()() == UseResourceState::Pending && rev_view == RevisionsView::Failed;
@@ -242,7 +255,10 @@ pub fn WikiPage(topic: String) -> Element {
         crate::styles::StyleOnce { id: crate::markdown::MARKDOWN_CSS_ID, css: crate::markdown::MARKDOWN_CSS }
 
         PageShell { width: PageWidth::Narrow, class: "wiki-detail",
-            ArticleCrumb { to: Route::Wiki {}, section: "Wiki", current }
+            // The not-found card has its own "Back to the wiki" link.
+            if load != Load::Missing {
+                ArticleCrumb { to: Route::Wiki {}, section: "Wiki", current }
+            }
             {wiki_state_head(&load)}
             p { class: "entry-status", role: "status", "{status}" }
 
@@ -278,11 +294,24 @@ pub fn WikiPage(topic: String) -> Element {
                                     edit_content.set(c.clone());
                                     revision_note.set(String::new());
                                     editing.set(true);
-                                    // The Edit button unmounts; the form takes focus.
-                                    focus_element_by_id_soon(content_id.clone());
+                                    // The Edit button unmounts; the form takes
+                                    // focus, at the first line of the page.
+                                    focus_text_start_by_id_soon(content_id.clone());
                                 }
                             },
-                            on_history: move |_| show_revisions.set(!show_revisions()),
+                            on_history: {
+                                let title_id = ids.history_title.clone();
+                                move |_| {
+                                    let open = !show_revisions();
+                                    show_revisions.set(open);
+                                    // The panel is below the article, so opening it
+                                    // moves focus (and the view) to its heading.
+                                    // Closing leaves focus on the button.
+                                    if open {
+                                        focus_element_by_id_soon(title_id.clone());
+                                    }
+                                }
+                            },
                         }
 
                         if editing() {
@@ -500,7 +529,7 @@ fn WikiRevisions(
             class: if open { "wiki-revisions ui-stack" } else { "wiki-revisions is-closed" },
             aria_labelledby: open.then(|| title_id.clone()),
             if open {
-                h2 { id: "{title_id}", "Revision history" }
+                h2 { id: "{title_id}", tabindex: "-1", "Revision history" }
             }
             p { class: "entry-status", role: "status", "{status}" }
             {match &view {
@@ -599,7 +628,7 @@ mod tests {
         assert_eq!(html.matches("<h1").count(), 1, "{html}");
         assert!(html.contains("<h1>Tank basics</h1>"), "{html}");
         assert!(
-            html.contains("<span class=\"article-avatar\" aria-hidden=\"true\">P</span>"),
+            html.contains("<span class=\"article-avatar\" aria-hidden=\"true\">PL</span>"),
             "{html}"
         );
         assert!(
@@ -738,7 +767,7 @@ mod tests {
             "{loading}"
         );
         assert!(
-            loading.contains("<h2 id=\"wiki-p1-history\">Revision history</h2>"),
+            loading.contains("<h2 id=\"wiki-p1-history\" tabindex=\"-1\">Revision history</h2>"),
             "{loading}"
         );
         assert!(

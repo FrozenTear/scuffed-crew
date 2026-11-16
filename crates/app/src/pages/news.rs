@@ -8,6 +8,7 @@ use super::article_author::{
 use crate::components::list_cap_notice;
 use crate::components::ui::{
     EmptyCard, LoadError, PageHeader, PageShell, PageWidth, Pager, Pill, page_slice, show_list_top,
+    use_url_page,
 };
 use crate::hooks::use_api_list;
 
@@ -37,12 +38,13 @@ const PAGE_CSS: &str = r#"
 
 #[component]
 pub fn News() -> Element {
-    let mut page = use_signal(|| 1usize);
+    // The page lives in the address (`?page=2`), as on the blog list.
+    let page = use_url_page();
     let announcements = use_api_list::<Announcement>(LIST_URL);
     let mut refresh = announcements.refresh;
     // Names for the authors of the page on screen only.
     let names = use_author_names(move || {
-        let page = page();
+        let page = page.get();
         announcements
             .data
             .read()
@@ -63,11 +65,11 @@ pub fn News() -> Element {
         NewsIndex {
             load,
             names: Some(names()),
-            page: page(),
+            page: page.get(),
             retrying,
             on_retry: move |_| refresh += 1,
             on_page: move |next| {
-                page.set(next);
+                page.go(next);
                 show_list_top(LIST_ID);
             },
             notice: list_cap_notice(&announcements, "announcements"),

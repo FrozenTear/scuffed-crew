@@ -34,7 +34,7 @@ pub use label::Label;
 #[allow(unused_imports)]
 pub use pager::{
     PageSlot, Pager, clamp_page, page_count, page_range, page_slice, page_window, range_text,
-    show_list_top,
+    remember_landing_url, show_list_top, use_url_page,
 };
 pub use pill::{Pill, PillTone};
 pub use season_select::{SeasonSelect, use_season_change, use_stats_season};

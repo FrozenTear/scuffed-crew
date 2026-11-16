@@ -64,13 +64,26 @@ pub(crate) fn author_byline(
     }
 }
 
-/// Up to two initials of a display name, upper case ("Player Two" is "PT").
+/// Up to two initials of a display name, upper case. Two or more words give
+/// the first letter of the first two ("Player Two" is "PT"); a single word
+/// gives its first two letters or digits ("Player02" is "PL"), the same two
+/// the account avatar in the top bar shows for that name.
 pub(crate) fn initials(name: &str) -> String {
-    name.split_whitespace()
-        .filter_map(|word| word.chars().next())
-        .take(2)
-        .flat_map(char::to_uppercase)
-        .collect()
+    let mut words = name.split_whitespace();
+    let (first, second) = (words.next().unwrap_or(""), words.next());
+    let picked: Vec<char> = match second {
+        Some(second) => first
+            .chars()
+            .take(1)
+            .chain(second.chars().take(1))
+            .collect(),
+        None => first
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .take(2)
+            .collect(),
+    };
+    picked.into_iter().flat_map(char::to_uppercase).collect()
 }
 
 const MONTHS: [&str; 12] = [
@@ -281,11 +294,9 @@ pub(crate) const ARTICLE_CSS: &str = r#"
   border-radius: var(--card-radius);
   box-shadow: var(--card-shadow);
 }
+/* Plain text flow, not a flex row: a pill after the title follows its last
+   word and wraps with it, on a phone too. */
 .entry-row h2 {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-2);
   margin: 0 0 var(--space-2);
   font-family: var(--font-head);
   font-size: var(--text-lg);
@@ -295,8 +306,14 @@ pub(crate) const ARTICLE_CSS: &str = r#"
   color: var(--text);
   overflow-wrap: anywhere;
 }
+.entry-row h2 .ui-pill {
+  margin-inline-start: var(--space-2);
+  vertical-align: middle;
+}
+/* A linked title is in the link ink, as the frames draw it: on a touch
+   screen there is no hover to tell a card that opens from one that does not. */
 .entry-row h2 a {
-  color: inherit;
+  color: var(--accent-text);
   text-decoration: none;
 }
 /* The title link covers the whole card, so the target is the card, not one
@@ -352,9 +369,11 @@ pub(crate) const ARTICLE_CSS: &str = r#"
   border: 0;
 }
 
+/* One line: the current page is cut with an ellipsis when it does not fit.
+   The H1 right under it carries the full title. */
 .article-crumb {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   gap: var(--space-2);
   margin: 0;
@@ -364,18 +383,27 @@ pub(crate) const ARTICLE_CSS: &str = r#"
   line-height: var(--leading-ui);
   color: var(--text-3);
 }
+/* 44px each way. A short label ("Blog") gets its width from inline padding,
+   pulled back by the same margin so the text stays on the column edge. */
 .article-crumb a {
+  flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   min-height: var(--hit-target-min);
+  min-width: var(--hit-target-min);
+  padding-inline: var(--space-3);
+  margin-inline: calc(-1 * var(--space-3));
   color: var(--accent-text);
   text-decoration: underline;
 }
 .article-crumb a:hover { text-decoration: none; }
 .article-crumb [aria-current="page"] {
-  color: var(--text);
-  overflow-wrap: anywhere;
+  flex: 0 1 auto;
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
 }
 
 .article-byline {
@@ -739,7 +767,8 @@ mod tests {
 
     #[test]
     fn initials_take_up_to_two_words() {
-        assert_eq!(initials("Player02"), "P");
+        assert_eq!(initials("Player02"), "PL");
+        assert_eq!(initials("x"), "X");
         assert_eq!(initials("player two extra"), "PT");
         assert_eq!(initials("  "), "");
     }
@@ -785,10 +814,18 @@ mod tests {
 
         assert_sizes_from_tokens(ARTICLE_CSS);
         let crumb = css_rule(ARTICLE_CSS, ".article-crumb a {");
-        assert!(
-            has_decl(&crumb, "min-height: var(--hit-target-min)"),
-            "{crumb}"
-        );
+        for decl in [
+            "min-height: var(--hit-target-min)",
+            "min-width: var(--hit-target-min)",
+        ] {
+            assert!(has_decl(&crumb, decl), "{decl}: {crumb}");
+        }
+        // The trail is one line; a long current page is cut, not wrapped.
+        let current = css_rule(ARTICLE_CSS, ".article-crumb [aria-current=\"page\"] {");
+        assert!(has_decl(&current, "text-overflow: ellipsis"), "{current}");
+        // A pill in a card title follows the title text.
+        let title = css_rule(ARTICLE_CSS, ".entry-row h2 {");
+        assert!(!title.contains("display"), "{title}");
         // Buttons, the empty card and the scroll offset are the shared ones.
         for gone in [".article-btn", ".entry-empty", "scroll-margin-top"] {
             assert!(!ARTICLE_CSS.contains(gone), "{gone} is shared now");

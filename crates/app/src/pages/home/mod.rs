@@ -121,9 +121,18 @@ fn pending_home(body: HomeBody, refresh: Signal<u32>) -> Element {
     )
 }
 
+/// Whether the page offers its apply actions (the hero's first button and the
+/// recruit block). An org member has nothing to apply for: /apply only tells
+/// them they are already in.
+fn offers_apply(recruitment_open: bool, viewer_is_member: bool) -> bool {
+    recruitment_open && !viewer_is_member
+}
+
 #[component]
 pub fn Home() -> Element {
     let site_settings = use_site_settings();
+    let viewer_is_member = try_use_context::<Signal<crate::state::AuthState>>()
+        .is_some_and(|auth| auth.read().is_org_member());
     // Refresh ticks are read in the sync part of each resource, not inside the
     // future, so Retry restarts that fetch without subscribing to its result.
     let overview_refresh = use_signal(|| 0u32);
@@ -186,7 +195,7 @@ pub fn Home() -> Element {
     let content = crate::copy::plain_homepage(&settings.homepage);
     let home_shell: HomeShell = settings.home_shell;
     let home_skin: HomeSkin = settings.home_skin;
-    let recruitment_open = settings.recruitment_open;
+    let recruitment_open = offers_apply(settings.recruitment_open, viewer_is_member);
 
     // Resolve list data for blocks (Home owns resources).
     // Pending keeps a section mounted (loading / skeleton) even when the shell
@@ -449,6 +458,14 @@ mod tests {
         ] {
             assert!(!html.contains(needle), "{needle} in {html}");
         }
+    }
+
+    #[test]
+    fn apply_actions_are_for_non_members_while_recruitment_is_open() {
+        assert!(offers_apply(true, false));
+        assert!(!offers_apply(true, true), "a member is not asked to apply");
+        assert!(!offers_apply(false, false));
+        assert!(!offers_apply(false, true));
     }
 
     #[test]

@@ -154,9 +154,11 @@ fn AdminNoAccess(signed_in: bool, username: String, return_path: String) -> Elem
             "Admin is limited to officers and admins. You are signed in as {username}, and this page is not part of your role."
         )
     } else {
-        "Admin is limited to officers and admins. Sign in with an account that has that role."
+        "Admin is limited to officers and admins. Log in with an account that has that role."
             .to_string()
     };
+    // The tab says what the page shows, not the admin page that was asked for.
+    crate::head::use_page_title(Some("No access".to_string()));
     rsx! {
         PageShell { width: PageWidth::Narrow, class: "admin-no-access",
             Wall {
@@ -176,7 +178,7 @@ fn AdminNoAccess(signed_in: bool, username: String, return_path: String) -> Elem
                             to: Route::Login {},
                             class: btn_class(true),
                             onclick: move |_| crate::pages::remember_login_return(&return_path),
-                            "Sign in"
+                            "Log in"
                         }
                         Link { to: Route::Home {}, class: btn_class(false), "Return home" }
                         if cfg!(debug_assertions) {
@@ -248,7 +250,7 @@ mod tests {
         let wall = wall(&html);
         assert!(!wall.contains("signed in as"), "{wall}");
         let actions = &wall[wall.find("wall-actions").expect("actions")..];
-        let sign_in = actions.find(">Sign in<").expect("sign in");
+        let sign_in = actions.find(">Log in<").expect("sign in");
         let home = actions.find(">Return home<").expect("home");
         assert!(sign_in < home, "{actions}");
         assert!(actions.contains("href=\"/login\""), "{actions}");

@@ -52,6 +52,19 @@ textarea.field-input {
   color: var(--text-subtle);
   opacity: 1;
 }
+/* The browser's own clear button of a search field is drawn in a fixed
+   colour that ignores the theme. Redraw it as a cross in the muted ink. */
+.field-input[type="search"]::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 0 0 auto;
+  width: var(--space-3);
+  height: var(--space-3);
+  margin-inline-start: var(--space-2);
+  background: var(--text-3);
+  clip-path: polygon(15% 0%, 50% 35%, 85% 0%, 100% 15%, 65% 50%, 100% 85%, 85% 100%, 50% 65%, 15% 100%, 0% 85%, 35% 50%, 0% 15%);
+  cursor: pointer;
+}
 .field-input:focus { border-color: var(--accent-solid); }
 .field-input[aria-invalid="true"] { border-color: var(--loss); }
 .field-hint {

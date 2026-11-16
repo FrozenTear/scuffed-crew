@@ -49,6 +49,7 @@ pub fn BlogPost(slug: String) -> Element {
     });
     let load = Load::of(article.read().as_ref());
     let retrying = is_retrying(article.state()(), &load);
+    crate::head::use_page_title(tab_label(&load));
 
     rsx! {
         BlogPostView {
@@ -57,6 +58,16 @@ pub fn BlogPost(slug: String) -> Element {
             retrying,
             on_retry: move |_| refresh += 1,
         }
+    }
+}
+
+/// The browser tab names the post by its title once it has loaded, not by the
+/// slug in the address. `None` keeps the route's default label.
+fn tab_label(load: &Load<FullArticle>) -> Option<String> {
+    match load {
+        Load::Ready(a) => Some(format!("{} | Blog", a.title.trim())),
+        Load::Missing => Some("Post not found | Blog".to_string()),
+        Load::Loading | Load::Failed => None,
     }
 }
 
@@ -82,7 +93,11 @@ fn BlogPostView(
         crate::styles::StyleOnce { id: crate::markdown::MARKDOWN_CSS_ID, css: crate::markdown::MARKDOWN_CSS }
 
         PageShell { width: PageWidth::Narrow, class: "blog-post-page",
-            ArticleCrumb { to: Route::Blog {}, section: "Blog", current }
+            // The not-found card has its own "Back to the blog" link, so a
+            // one item trail above it would only repeat it.
+            if load != Load::Missing {
+                ArticleCrumb { to: Route::Blog {}, section: "Blog", current }
+            }
             {match &load {
                 // The title is not known yet, so the page is named by its kind.
                 Load::Loading => rsx! { PageHeader { title: "Blog post" } },
@@ -203,7 +218,7 @@ mod tests {
             "{html}"
         );
         assert!(
-            html.contains("<span class=\"article-avatar\" aria-hidden=\"true\">P</span>"),
+            html.contains("<span class=\"article-avatar\" aria-hidden=\"true\">PL</span>"),
             "{html}"
         );
         assert!(
@@ -274,6 +289,22 @@ mod tests {
         assert!(html.contains(">Return home</a>"), "{html}");
         assert!(!html.contains("role=\"alert\""), "{html}");
         assert!(!html.contains("aria-current=\"page\""), "{html}");
+        // No one item trail above the card: its first action is the way back.
+        assert!(!html.contains("article-crumb"), "{html}");
+    }
+
+    #[test]
+    fn tab_is_named_by_the_post_title_not_the_slug() {
+        assert_eq!(
+            tab_label(&Load::Ready(post())).as_deref(),
+            Some("How we run play nights | Blog")
+        );
+        assert_eq!(
+            tab_label(&Load::Missing).as_deref(),
+            Some("Post not found | Blog")
+        );
+        assert_eq!(tab_label(&Load::Loading), None);
+        assert_eq!(tab_label(&Load::Failed), None);
     }
 
     #[test]

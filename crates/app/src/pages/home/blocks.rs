@@ -139,6 +139,9 @@ pub fn HeroBlock(
             h1 { class: "home-hero-title",
                 "{content.hero_title}"
                 if !content.hero_title_accent.is_empty() {
+                    // A real space, so the two parts are two words on screen,
+                    // in a copy and to a screen reader.
+                    " "
                     em { "{content.hero_title_accent}" }
                 }
             }

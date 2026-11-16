@@ -124,6 +124,117 @@ pub fn show_list_top(dom_id: &str) {
     }
 }
 
+/// The page number a route string carries as `?page=N` ("/blog?page=3" is
+/// 3). 1 when there is none or it is not a positive number.
+pub fn page_in_route(route: &str) -> usize {
+    let without_hash = route.split('#').next().unwrap_or(route);
+    without_hash
+        .split_once('?')
+        .map(|(_, query)| query)
+        .unwrap_or("")
+        .split('&')
+        .filter_map(|pair| pair.strip_prefix("page="))
+        .filter_map(|value| value.parse::<usize>().ok())
+        .find(|page| *page >= 1)
+        .unwrap_or(1)
+}
+
+/// `route` pointing at `page`: other query pairs are kept, page 1 has no
+/// `page` pair (so the first page keeps its plain address) and a fragment is
+/// dropped.
+pub fn route_for_page(route: &str, page: usize) -> String {
+    let without_hash = route.split('#').next().unwrap_or(route);
+    let (path, query) = without_hash.split_once('?').unwrap_or((without_hash, ""));
+    let mut pairs: Vec<String> = query
+        .split('&')
+        .filter(|pair| !pair.is_empty() && *pair != "page" && !pair.starts_with("page="))
+        .map(str::to_string)
+        .collect();
+    if page > 1 {
+        pairs.push(format!("page={page}"));
+    }
+    if pairs.is_empty() {
+        path.to_string()
+    } else {
+        format!("{path}?{}", pairs.join("&"))
+    }
+}
+
+thread_local! {
+    /// Path and query the browser was opened on. The router rewrites the
+    /// address without undeclared query pairs when it mounts, so `main`
+    /// snapshots it first and the first paged list to mount takes it.
+    static LANDING_URL: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Snapshot the address the app was opened on. Call once from `main`, before
+/// the router mounts. Does nothing outside the browser.
+pub fn remember_landing_url() {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let Some(location) = web_sys::window().map(|w| w.location()) else {
+            return;
+        };
+        let url = location.pathname().unwrap_or_default() + &location.search().unwrap_or_default();
+        LANDING_URL.with(|slot| *slot.borrow_mut() = Some(url));
+    }
+}
+
+/// The page to restore on the first mount of a paged list: the landing
+/// address's page when it was opened on this same path past page 1.
+fn landing_page(landing: Option<&str>, current: &str) -> Option<usize> {
+    let landing = landing?;
+    let path = |route: &str| {
+        route
+            .split(['?', '#'])
+            .next()
+            .unwrap_or("")
+            .trim_end_matches('/')
+            .to_string()
+    };
+    let page = page_in_route(landing);
+    (path(landing) == path(current) && page > 1 && page_in_route(current) == 1).then_some(page)
+}
+
+/// The page of a list, kept in the address as `?page=N`, so a page can be
+/// linked and reloaded and Back from an entry returns to the page it was
+/// opened from. Needs a router above it.
+#[derive(Clone, Copy, PartialEq)]
+pub struct UrlPage {
+    page: Memo<usize>,
+}
+
+impl UrlPage {
+    /// Current page, counted from 1. Reading it subscribes like a signal.
+    pub fn get(&self) -> usize {
+        (self.page)()
+    }
+
+    /// Go to `page` as a new history entry.
+    pub fn go(&self, page: usize) {
+        let router = router();
+        let target = route_for_page(&router.full_route_string(), page);
+        router.push(target);
+    }
+}
+
+/// See [`UrlPage`]. The page follows the address, so Back, Forward and a nav
+/// link to the list all move it.
+pub fn use_url_page() -> UrlPage {
+    let page = use_memo(|| page_in_route(&router().full_route_string()));
+    use_effect(|| {
+        let Some(landing) = LANDING_URL.with(|slot| slot.borrow_mut().take()) else {
+            return;
+        };
+        let router = router();
+        let current = router.full_route_string();
+        if let Some(page) = landing_page(Some(&landing), &current) {
+            router.replace(route_for_page(&current, page));
+        }
+    });
+    UrlPage { page }
+}
+
 pub const PAGER_CSS: &str = r#"
 /* The list a pager pages through. It takes focus after a page change and
    lands below the sticky top bar. */
@@ -256,6 +367,9 @@ pub fn Pager(
     let current = clamp_page(page, pages);
     let mut meta = match (total, noun_singular) {
         (1, Some(one)) => format!("1 {one}"),
+        // One page and no number row: a plain count. "1 to 4 of 4" under a
+        // list with no buttons reads like a pager that lost its controls.
+        _ if pages == 1 && total > 1 => format!("{total} {noun}"),
         _ => range_text(current, total, page_size, &noun),
     };
     if show_page_count && pages > 1 {
@@ -341,6 +455,38 @@ mod tests {
     use crate::components::ui::test_support::{
         assert_ink_clears_aa, assert_sizes_from_tokens, css_rule, has_decl, render,
     };
+
+    #[test]
+    fn page_number_is_read_from_and_written_to_the_route_query() {
+        assert_eq!(page_in_route("/blog"), 1);
+        assert_eq!(page_in_route("/blog?page=3"), 3);
+        assert_eq!(page_in_route("/blog?q=a&page=2#top"), 2);
+        for bad in [
+            "/blog?page=0",
+            "/blog?page=x",
+            "/blog?page=",
+            "/blog?pages=4",
+            "/blog#page=4",
+        ] {
+            assert_eq!(page_in_route(bad), 1, "{bad}");
+        }
+        assert_eq!(route_for_page("/blog", 2), "/blog?page=2");
+        assert_eq!(route_for_page("/blog?page=2", 3), "/blog?page=3");
+        // Page 1 keeps the plain address.
+        assert_eq!(route_for_page("/blog?page=2", 1), "/blog");
+        assert_eq!(route_for_page("/news?q=a&page=5#x", 1), "/news?q=a");
+        assert_eq!(route_for_page("/news?q=a", 4), "/news?q=a&page=4");
+    }
+
+    #[test]
+    fn landing_page_is_restored_only_on_the_path_it_was_opened_on() {
+        assert_eq!(landing_page(Some("/blog?page=2"), "/blog"), Some(2));
+        assert_eq!(landing_page(Some("/blog/?page=2"), "/blog"), Some(2));
+        assert_eq!(landing_page(Some("/blog?page=2"), "/news"), None);
+        assert_eq!(landing_page(Some("/blog"), "/blog"), None);
+        assert_eq!(landing_page(Some("/blog?page=2"), "/blog?page=3"), None);
+        assert_eq!(landing_page(None, "/blog"), None);
+    }
 
     #[test]
     fn page_count_rounds_up_and_is_never_zero() {
@@ -682,7 +828,7 @@ mod tests {
         let html = render(one_page);
         assert_eq!(
             html,
-            "<div id=\"m\" class=\"pager\"><p id=\"m-meta\" class=\"pager-meta\" role=\"status\">1 to 5 of 5 members</p></div>"
+            "<div id=\"m\" class=\"pager\"><p id=\"m-meta\" class=\"pager-meta\" role=\"status\">5 members</p></div>"
         );
 
         fn empty() -> Element {

@@ -72,6 +72,15 @@ pub const CSS: &str = r#"
     .fetch-error__retry:hover,
     .list-cap-notice__more:hover { border-color: var(--text); }
     .fetch-error__retry { margin: var(--space-1) auto var(--space-section); }
+    /* In a redesigned page column (`PageShell`) every block starts at the
+       left edge, under the left aligned title. The failed state does too,
+       and it takes its spacing from the column, not from a section pad. */
+    .ui-shell .fetch-error-wrap { text-align: start; }
+    .ui-shell .fetch-error {
+        text-align: start;
+        padding: 0 0 var(--space-3);
+    }
+    .ui-shell .fetch-error__retry:not(.is-compact) { margin: 0; }
     /* In-panel retries. The page-level button keeps the section margin. */
     .fetch-error__retry.is-compact { margin: var(--space-1) 0 0; }
     /* Retry stays focusable while a retry runs ("Retrying..."). */

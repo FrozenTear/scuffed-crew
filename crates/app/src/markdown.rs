@@ -10,8 +10,11 @@
 //!   of its info string is `[A-Za-z0-9_+-]+`; otherwise it gets no class.
 //! - Headings never carry an id, classes or other attributes.
 //!
-//! Headings are shifted down one level (`#` becomes `h2`) because the page
-//! title is already the `h1`.
+//! The page title is already the `h1`, so a body never emits one. A body that
+//! uses `#` is shifted down one level (`#` becomes `h2`, `##` becomes `h3`).
+//! A body that starts at `##`, the usual way to write sections, is left as
+//! written, so its sections are `h2` and the outline has no gap after the
+//! title.
 //!
 //! Layout rules:
 //! - A single line break inside a paragraph becomes `<br>`, so posts written
@@ -173,7 +176,16 @@ pub const MARKDOWN_CSS: &str = r#"
         overflow-x: auto;
         border: 1px solid var(--border);
         border-radius: var(--radius-card);
-        background: var(--surface-sunken);
+        /* Scroll hint: a soft edge on the side that has more to show. The
+           two edge shades stay put; the two fills travel with the text and
+           cover the shade at the end they have reached. Without it a long
+           line just stops at the border and reads as cut off. */
+        background:
+            linear-gradient(to right, var(--surface-sunken) 50%, transparent) left center / var(--space-8) 100% no-repeat local,
+            linear-gradient(to left, var(--surface-sunken) 50%, transparent) right center / var(--space-8) 100% no-repeat local,
+            linear-gradient(to right, var(--border-strong), transparent) left center / var(--space-3) 100% no-repeat scroll,
+            linear-gradient(to left, var(--border-strong), transparent) right center / var(--space-3) 100% no-repeat scroll,
+            var(--surface-sunken);
         color: var(--text);
         font-family: var(--font-mono);
         font-size: var(--text-sm);
@@ -235,8 +247,11 @@ pub fn render_markdown(source: &str) -> String {
     // Author HTML is never emitted as HTML: the parser reports it as
     // `Html`/`InlineHtml`, which `sanitize` turns into escaped text. Every
     // `Html` event pushed below is our own wrapper markup.
-    let events: Vec<Event<'_>> = Parser::new_ext(source, parser_options())
-        .map(sanitize)
+    let parsed: Vec<Event<'_>> = Parser::new_ext(source, parser_options()).collect();
+    let shift = uses_title_level(&parsed);
+    let events: Vec<Event<'_>> = parsed
+        .into_iter()
+        .map(|event| sanitize(event, shift))
         .collect();
     let mut laid_out: Vec<Event<'_>> = Vec::with_capacity(events.len() + 8);
     let mut index = 0;
@@ -423,15 +438,30 @@ fn push_figure<'a>(
     out.push(Event::Html(CowStr::Borrowed("</figcaption></figure>\n")));
 }
 
+/// True when the body has a `#` heading. The page title owns `h1`, so such a
+/// body has every heading moved down one level.
+fn uses_title_level(events: &[Event<'_>]) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event,
+            Event::Start(Tag::Heading {
+                level: HeadingLevel::H1,
+                ..
+            })
+        )
+    })
+}
+
 /// Per-event safety rewrites. Wrapper markup is added after this pass.
-fn sanitize(event: Event<'_>) -> Event<'_> {
+/// `shift` moves headings down one level (see [`uses_title_level`]).
+fn sanitize(event: Event<'_>, shift: bool) -> Event<'_> {
     match event {
         Event::Html(raw) | Event::InlineHtml(raw) => Event::Text(raw),
         Event::SoftBreak => Event::HardBreak,
         // Heading attributes are off in `options`; clear them anyway so
         // turning that option on later cannot let authors set ids or classes.
         Event::Start(Tag::Heading { level, .. }) => Event::Start(Tag::Heading {
-            level: demote(level),
+            level: heading_level(level, shift),
             id: None,
             classes: Vec::new(),
             attrs: Vec::new(),
@@ -439,7 +469,9 @@ fn sanitize(event: Event<'_>) -> Event<'_> {
         Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info))) => {
             Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(code_lang(&info))))
         }
-        Event::End(TagEnd::Heading(level)) => Event::End(TagEnd::Heading(demote(level))),
+        Event::End(TagEnd::Heading(level)) => {
+            Event::End(TagEnd::Heading(heading_level(level, shift)))
+        }
         Event::Start(Tag::Link {
             link_type,
             dest_url,
@@ -464,6 +496,10 @@ fn sanitize(event: Event<'_>) -> Event<'_> {
         }),
         other => other,
     }
+}
+
+fn heading_level(level: HeadingLevel, shift: bool) -> HeadingLevel {
+    if shift { demote(level) } else { level }
 }
 
 fn demote(level: HeadingLevel) -> HeadingLevel {
@@ -532,11 +568,27 @@ mod tests {
     }
 
     #[test]
-    fn headings_shift_down_one_level_and_cap_at_h6() {
-        let html = render_markdown("## Two\n\n###### Six\n");
+    fn a_body_with_a_title_level_heading_shifts_down_one_and_caps_at_h6() {
+        let html = render_markdown("# One\n\n## Two\n\n###### Six\n");
+        assert!(html.contains("<h2>One</h2>"), "{html}");
         assert!(html.contains("<h3>Two</h3>"), "{html}");
         assert!(html.contains("<h6>Six</h6>"), "{html}");
         assert!(!html.contains("<h1"), "{html}");
+    }
+
+    /// Sections written as `##` are the article's `h2`: the spec size and
+    /// spacing apply to them and the outline does not jump from `h1` to `h3`.
+    #[test]
+    fn a_body_that_starts_at_level_two_keeps_its_levels() {
+        let html = render_markdown("## Two\n\n### Three\n\n###### Six\n");
+        assert!(html.contains("<h2>Two</h2>"), "{html}");
+        assert!(html.contains("<h3>Three</h3>"), "{html}");
+        assert!(html.contains("<h6>Six</h6>"), "{html}");
+        assert!(!html.contains("<h1"), "{html}");
+        // A late `#` still shifts the whole body, so levels stay relative.
+        let late = render_markdown("## Two\n\n# One\n");
+        assert!(late.contains("<h3>Two</h3>"), "{late}");
+        assert!(late.contains("<h2>One</h2>"), "{late}");
     }
 
     #[test]

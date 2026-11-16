@@ -57,13 +57,81 @@ pub fn focus_element_by_id(id: &str) {
 
 /// Focus an element after the next render, so a button that is about to be
 /// mounted again (the trigger) exists by the time focus moves to it.
+///
+/// The wait runs on the root scope, not the caller's: the caller is often
+/// the very thing that unmounts (a confirm strip closing on Cancel), and a
+/// task tied to it would be dropped before it could move focus, leaving
+/// focus on the page body.
 pub fn focus_element_by_id_soon(id: String) {
-    spawn(async move {
+    dioxus::core::spawn_forever(async move {
         #[cfg(feature = "web")]
         {
             gloo_timers::future::TimeoutFuture::new(0).await;
         }
         focus_element_by_id(&id);
+    });
+}
+
+/// Focus a form control and bring its whole field into view: the element
+/// that matches `field_selector` around it (label, hint, control and error
+/// line), centred in the viewport. A plain `focus()` leaves a control that
+/// is partly below the fold where it is, with its error line out of sight.
+pub fn focus_field_by_id(id: &str, field_selector: &str) {
+    focus_element_by_id(id);
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen::JsCast;
+        let Some(el) = web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.get_element_by_id(id))
+        else {
+            return;
+        };
+        let field = el.closest(field_selector).ok().flatten().unwrap_or(el);
+        let options = js_sys::Object::new();
+        let _ = js_sys::Reflect::set(&options, &"block".into(), &"center".into());
+        let scroll = js_sys::Reflect::get(&field, &"scrollIntoView".into()).ok();
+        if let Some(scroll) = scroll
+            .as_ref()
+            .and_then(|f| f.dyn_ref::<js_sys::Function>())
+        {
+            let _ = scroll.call1(&field, &options);
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = field_selector;
+    }
+}
+
+/// Focus a text area after the next render with the caret and the view at
+/// its first line. A text area that takes focus right after its value is set
+/// puts the caret at the end and shows the last lines.
+pub fn focus_text_start_by_id_soon(id: String) {
+    dioxus::core::spawn_forever(async move {
+        #[cfg(feature = "web")]
+        {
+            gloo_timers::future::TimeoutFuture::new(0).await;
+        }
+        focus_element_by_id(&id);
+        #[cfg(target_arch = "wasm32")]
+        {
+            use wasm_bindgen::JsCast;
+            let Some(el) = web_sys::window()
+                .and_then(|window| window.document())
+                .and_then(|document| document.get_element_by_id(&id))
+            else {
+                return;
+            };
+            let select = js_sys::Reflect::get(&el, &"setSelectionRange".into()).ok();
+            if let Some(select) = select
+                .as_ref()
+                .and_then(|f| f.dyn_ref::<js_sys::Function>())
+            {
+                let _ = select.call2(&el, &0.into(), &0.into());
+            }
+            el.set_scroll_top(0);
+        }
     });
 }
 
