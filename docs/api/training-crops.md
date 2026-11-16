@@ -248,9 +248,10 @@ text and every other ancillary chunk (lowercase first letter) are dropped
 without being inflated, so they never cause an error and cost no memory.
 The walk refuses with 400 `invalid_png`: a missing or wrong-length leading
 `IHDR`, a chunk running past the end, a `PLTE` whose length is not a
-multiple of 3 (png 0.18.1 panics on one, which was a 500), and any
-critical chunk (uppercase first letter) other than the four above, since
-the PNG spec says a decoder must not ignore an unknown critical chunk.
+multiple of 3 (for any colour type; png 0.18.1 panics on one in a
+palette image), and any critical chunk (uppercase first letter) other than
+`IHDR`, `PLTE`, `IDAT` and `IEND`, wherever it appears, since the PNG spec
+says a decoder must not ignore an unknown critical chunk.
 The decoder is also capped at 32 MiB (`PNG_DECODE_MAX_ALLOC`) as a
 backstop. Each re-encode attempt (default level, then Best) writes into a
 writer capped at the kind's byte limit, so an attempt that goes over stops
@@ -263,23 +264,26 @@ Measured peak heap for one whole crop, accepted or refused: chunk walk,
 decode, 8-bit conversion and re-encode in one `clean_png_within` call,
 counted by a test-only allocator in the unit test
 `one_png_read_stays_within_its_measured_peak` (debug build), which also
-asserts the rank cases stay under 20 MiB and the refused hero icon under
-4 MiB. The right column is the
-same test's stand-in for how the previous version of this change read a
-PNG (one decoder over the whole upload, colour profile included and
-copied, then the decode); it is a re-creation, not the old code.
+asserts the accepted rank crop under 20 MiB, the refused rank crop under
+16 MiB and the refused hero icon under 1.2 MiB. The right column is the
+same test's stand-in for the earlier code path of each row: for the
+accepted rows, one decoder over the whole upload with the colour profile
+included and copied, then the decode; for the refused rank row, the two
+re-encodes uncapped with the default output kept while Best runs. Each is
+a re-creation, not the old code.
 
-| Upload | Peak heap now | Stand-in for the previous read |
+| Upload | Peak heap now | Stand-in for the earlier code path |
 |--------|---------------|-------------------------------|
 | 58 KB, 1536x720, `iCCP` inflating to 40 MiB | 3.6 MiB | 33.2 MiB |
 | 49 KB, 1536x720, `iCCP` inflating to 31 MiB | 3.6 MiB | 67.5 MiB |
 | 47 KB, 1536x720 16-bit RGBA, the largest `rank` crop (the most pixel memory any kind accepts) | 12.7 MiB | 8.7 MiB (decode only) |
 | 4 KB, 256x256 16-bit RGBA, the largest `hero_icon` (also the `stat_digits` bound) | 0.8 MiB | 0.8 MiB |
-| 265 KB, 1536x720 Adam7 RGBA built to re-encode to about 4.4 MiB at both levels: refused, 413 (QA's input) | 12.9 MiB | about 29 MiB (the two uncapped encodes measured 24.9 MiB on top of the 4.2 MiB image; QA counted 29.4 MiB) |
+| 265 KB, 1536x720 Adam7 RGBA built to re-encode to about 4.4 MB (4.2 MiB) at both levels: refused, 413 (QA's input) | 12.9 MiB | about 29 MiB (the two uncapped encodes measured 24.9 MiB on top of the 4.2 MiB decoded image; QA counted 29.4 MiB) |
 | 51 KB, 256x256 Adam7 RGBA, the same attack at the `hero_icon` bound: refused, 413 | 0.9 MiB | not measured |
 
-So the largest peak measured, accepted or refused, is 12.9 MiB, for the
-refused `rank` crop; the largest accepted `rank` crop peaks at 12.7 MiB.
+So one `rank` crop, accepted or refused, peaks at about 13 MiB of heap:
+12.9 MiB here for the refused crop and 12.7 MiB for the largest accepted
+one; the Site review measured up to 13.0 MiB for an accepted crop.
 
 Measured another way, by process RSS on real builds, the Site review
 found the same order: the 40 MiB-profile bomb at +3.4 MiB now against
@@ -287,7 +291,10 @@ found the same order: the 40 MiB-profile bomb at +3.4 MiB now against
 peak 64.2 MiB) before.
 
 The heap is per crop and per request in flight; uploads are not
-serialized, so concurrent uploads add up. The re-encode is
+serialized, so concurrent uploads add up, and process RSS grows by more
+than the heap (the allocator keeps freed memory). QA measured one 20-crop
+`rank` request at +12.6 to +80.7 MiB RSS on a fresh server and eight at
+once at about +231 MiB. The re-encode is
 8 bits per sample (gray, gray with alpha, RGB or RGBA, as the upload has
 them; a 16-bit upload is rounded to 8 bits, a palette upload becomes RGB or
 RGBA) at the default PNG compression level. Only when that is over the
@@ -541,7 +548,7 @@ Every error body is `{"error": "<code>"}`, except the shared 429 body
 | 400 | `no_crops` | No `meta`/`crop` pair |
 | 400 | `invalid_multipart` | Body is not readable multipart |
 | 400 | `icon_bad_dimensions` | PNG width or height outside the kind's bound (8 to 256; `map_name` 8 to 1536 wide, 8 to 256 tall; `rank` 8 to 1536 wide, 8 to 720 tall) |
-| 400 | `invalid_png` | PNG signature present but the chunk list is refused (no leading 13-byte `IHDR`, a chunk past the end, a `PLTE` whose length is not a multiple of 3, or a critical chunk other than `IHDR`, `PLTE`, `IDAT`, `IEND`), or the pixels do not decode within the 32 MiB decoder cap. Colour profiles (`iCCP`) and other ancillary chunks are dropped before decoding and never cause it |
+| 400 | `invalid_png` | PNG signature present but the chunk list is refused (no leading 13-byte `IHDR`, a chunk past the end, a `PLTE` whose length is not a multiple of 3, or a critical chunk other than `IHDR`, `PLTE`, `IDAT`, `IEND`), or the pixels do not decode (a broken `IDAT`, for example). The decoder's 32 MiB cap is a backstop only: the edge check keeps every accepted size far below it. Colour profiles (`iCCP`) and other ancillary chunks are dropped before decoding and never cause it |
 | 400 | `invalid_consent` | Consent body not JSON, unknown kind (`full_screen` included), or not a bool |
 | 401 | session error (as for every member route) | `PUT /consent` without a session; a sync token is not a session there |
 | 403 | `Admin access required` | Officer session on another member's image or delete; non-admin on the admin list or `/resolutions` |

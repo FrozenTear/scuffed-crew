@@ -399,9 +399,9 @@ pub(crate) fn clean_png(data: &[u8]) -> Result<CleanIcon, &'static str> {
 /// Before anything is decoded, the width and height are read from the
 /// `IHDR` bytes and checked, and only `IHDR`, `PLTE`, `tRNS`, `IDAT` and
 /// `IEND` are passed to the decoder ([`png_pixel_chunks`]). Every other
-/// chunk (colour profiles, text, EXIF, animation) is dropped without being
-/// inflated, so a compressed `iCCP` or `zTXt` costs nothing however large it
-/// inflates. What a decode can allocate is then the pixel buffer plus small
+/// ancillary chunk (colour profiles, text, EXIF, animation) is dropped
+/// without being inflated, so a compressed `iCCP` or `zTXt` costs nothing
+/// however large it inflates; any other critical chunk is refused. What a decode can allocate is then the pixel buffer plus small
 /// working buffers; [`PNG_DECODE_MAX_ALLOC`] is a backstop on top. Each
 /// re-encode attempt writes into a writer capped at `max_bytes` and a
 /// failed default-level attempt is dropped before Best runs, so a refused
@@ -455,13 +455,17 @@ pub(crate) fn clean_png_within(
 /// 8.4 MiB decoded. Measured peak heap for a whole [`clean_png_within`]
 /// call (test `one_png_read_stays_within_its_measured_peak`, debug build):
 /// 12.7 MiB for the largest accepted rank crop (1536x720 16-bit RGBA),
-/// 12.9 MiB for a refused rank crop whose re-encode is about 4.4 MiB at
-/// both levels (413), 3.6 MiB for a colour profile bomb, 0.8 MiB for the
-/// largest hero icon and 0.9 MiB for a refused one. The test asserts the
-/// rank cases stay under 20 MiB.
+/// 12.9 MiB for a refused rank crop whose re-encode is about 4.4 MB
+/// (4.2 MiB) at both levels (413), 3.6 MiB for a colour profile bomb,
+/// 0.8 MiB for the largest hero icon and 0.9 MiB for a refused one. The
+/// test asserts the accepted rank crop under 20 MiB, the refused rank crop
+/// under 16 MiB and the refused hero icon under 1.2 MiB. No accepted size
+/// reaches this cap; the test `the_decode_backstop_refuses_a_pixel_buffer_over_32_mib`
+/// reaches it with bounds wider than any kind's.
 pub(crate) const PNG_DECODE_MAX_ALLOC: u64 = 32 * 1024 * 1024;
 
-/// The chunks the decoder needs for the pixels. Everything else is dropped.
+/// The chunks the decoder needs for the pixels. Other ancillary chunks are
+/// dropped; other critical chunks are refused ([`png_pixel_chunks`]).
 const PNG_PIXEL_CHUNKS: [&[u8; 4]; 5] = [b"IHDR", b"PLTE", b"tRNS", b"IDAT", b"IEND"];
 
 /// Width, height and a copy of `data` (a PNG) that keeps only
@@ -499,7 +503,8 @@ fn png_pixel_chunks(data: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
             size = Some((field(0), field(4)));
         }
         // A PLTE that is not whole RGB triples makes png 0.18.1 panic
-        // (decoder/transform/palette.rs), which would be a 500.
+        // (decoder/transform/palette.rs) on a palette image. It is refused
+        // for every colour type, since such a chunk is invalid either way.
         if kind == b"PLTE" && !len.is_multiple_of(3) {
             return None;
         }
@@ -1489,7 +1494,10 @@ mod tests {
             let _ = png_reader(&bad).decode();
         }))
         .is_err();
-        assert!(panicked, "png 0.18.1 panics on a PLTE of 4 bytes");
+        assert!(
+            panicked,
+            "png no longer panics on a PLTE of 4 bytes: drop this assert, keep the walker check"
+        );
         assert!(png_pixel_chunks(&bad).is_none());
         assert_eq!(
             clean_png_within(&bad, 1536, 720, 384 * 1024).err(),
@@ -1499,6 +1507,140 @@ mod tests {
         // Whole triples are fine.
         let good = palette_png(8, 8, &RED_AND_BLACK, None, &[]);
         assert!(clean_png(&good).is_ok());
+    }
+
+    /// `png` with `chunk` inserted right before the chunk at chunk index
+    /// `before` (0 is IHDR).
+    fn insert_chunk_before(png: &[u8], before: usize, chunk: &[u8]) -> Vec<u8> {
+        let mut at = 8;
+        for _ in 0..before {
+            let len = u32::from_be_bytes([png[at], png[at + 1], png[at + 2], png[at + 3]]) as usize;
+            at += 12 + len;
+        }
+        let mut out = png[..at].to_vec();
+        out.extend_from_slice(chunk);
+        out.extend_from_slice(&png[at..]);
+        out
+    }
+
+    #[test]
+    fn a_plte_of_any_bad_length_is_refused_for_every_colour_type() {
+        // Remainder 1 and remainder 2, in a palette image: png 0.18.1
+        // panics on both, so both must be refused before decoding.
+        for plte in [&[0u8, 0, 0, 255][..], &[0, 0, 0, 255, 0][..]] {
+            let bad = palette_png(8, 8, plte, None, &[]);
+            assert!(
+                png_pixel_chunks(&bad).is_none(),
+                "PLTE of {} bytes",
+                plte.len()
+            );
+            assert_eq!(clean_png(&bad).err(), Some(HERO_ICON_ERR_INVALID_PNG));
+        }
+        // The same broken PLTE in an RGB and in a gray image is refused
+        // too; a whole PLTE there is allowed (the decoder ignores it).
+        let rgb = encode(DynamicImage::ImageRgb8(image::RgbImage::new(8, 8)));
+        let gray = encode(DynamicImage::ImageLuma8(image::GrayImage::new(8, 8)));
+        for (name, png) in [("RGB", &rgb), ("gray", &gray)] {
+            for plte in [&[0u8, 0, 0, 255][..], &[0, 0, 0, 255, 0][..]] {
+                let bad = insert_chunk_before(png, 1, &png_chunk(b"PLTE", plte));
+                assert!(
+                    png_pixel_chunks(&bad).is_none(),
+                    "{name} with a PLTE of {} bytes",
+                    plte.len()
+                );
+                assert_eq!(clean_png(&bad).err(), Some(HERO_ICON_ERR_INVALID_PNG));
+            }
+            let whole = insert_chunk_before(png, 1, &png_chunk(b"PLTE", &RED_AND_BLACK));
+            assert!(clean_png(&whole).is_ok(), "{name} with a whole PLTE");
+        }
+    }
+
+    #[test]
+    fn an_unknown_critical_chunk_is_refused_after_the_first_idat_too() {
+        // Chunks: IHDR, PLTE, IDAT, IDAT, IEND. Put JUNK between the IDATs
+        // and between the last IDAT and IEND.
+        let png = palette_png(8, 8, &RED_AND_BLACK, None, &[]);
+        assert_eq!(
+            chunk_kinds(&png),
+            vec![*b"IHDR", *b"PLTE", *b"IDAT", *b"IDAT", *b"IEND"]
+        );
+        for before in [3, 4] {
+            let bad = insert_chunk_before(&png, before, &png_chunk(b"JUNK", b"x"));
+            assert!(
+                png_pixel_chunks(&bad).is_none(),
+                "JUNK before chunk {before}"
+            );
+            assert_eq!(clean_png(&bad).err(), Some(HERO_ICON_ERR_INVALID_PNG));
+            // As ancillary (lowercase first letter) it is dropped, wherever.
+            let fine = insert_chunk_before(&png, before, &png_chunk(b"jUNK", b"x"));
+            assert!(clean_png(&fine).is_ok(), "jUNK before chunk {before}");
+        }
+    }
+
+    /// A header-only PNG claiming `width` x `height` 16-bit RGBA, with a
+    /// tiny IDAT that holds none of its pixels.
+    fn rgba16_header_png(width: u32, height: u32) -> Vec<u8> {
+        let mut ihdr = width.to_be_bytes().to_vec();
+        ihdr.extend_from_slice(&height.to_be_bytes());
+        ihdr.extend_from_slice(&[16, 6, 0, 0, 0]);
+        let mut png = PNG_SIGNATURE.to_vec();
+        png.extend(png_chunk(b"IHDR", &ihdr));
+        png.extend(png_chunk(
+            b"IDAT",
+            &[0x78, 0x01, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01],
+        ));
+        png.extend(png_chunk(b"IEND", &[]));
+        png
+    }
+
+    #[test]
+    fn the_decode_cap_is_exactly_32_mib() {
+        // 2048x2048 16-bit RGBA is exactly 32 MiB of pixels: within the cap,
+        // so the decode gets past the limit and fails on the missing data.
+        // One row more is over it and refused by the limit itself.
+        let at_cap = rgba16_header_png(2048, 2048);
+        assert_eq!(2048u64 * 2048 * 8, PNG_DECODE_MAX_ALLOC);
+        assert!(
+            !matches!(
+                png_reader(&at_cap).decode(),
+                Err(image::ImageError::Limits(_))
+            ),
+            "exactly 32 MiB is within the cap"
+        );
+        let over_cap = rgba16_header_png(2048, 2049);
+        assert!(
+            matches!(
+                png_reader(&over_cap).decode(),
+                Err(image::ImageError::Limits(_))
+            ),
+            "one row over 32 MiB is refused by the cap"
+        );
+    }
+
+    #[test]
+    fn rgb16_and_rgba16_are_rounded_not_cut() {
+        // (v + 128) / 257 against v >> 8: 511 -> 2 (cut 1), 200 -> 1 (cut
+        // 0), 65_400 -> 254 (cut 255).
+        let rgb = DynamicImage::ImageRgb16(image::ImageBuffer::from_pixel(
+            16,
+            16,
+            image::Rgb([511u16, 200, 65_400]),
+        ));
+        let rgba = DynamicImage::ImageRgba16(image::ImageBuffer::from_pixel(
+            16,
+            16,
+            image::Rgba([511u16, 200, 65_400, 65_400]),
+        ));
+        for (image, color, pixel) in [
+            (rgb, ColorType::Rgb8, [2u8, 1, 254, 255]),
+            (rgba, ColorType::Rgba8, [2u8, 1, 254, 254]),
+        ] {
+            let clean = clean_png_within(&encode(image), 256, 256, 64 * 1024).unwrap();
+            let stored =
+                image::load_from_memory_with_format(&clean.bytes, ImageFormat::Png).unwrap();
+            assert_eq!(stored.color(), color);
+            assert_eq!(stored.to_rgba8().get_pixel(0, 0).0, pixel);
+        }
     }
 
     #[test]
@@ -1888,7 +2030,8 @@ mod tests {
             assert!(now < 20 * 1024 * 1024, "{name}: {now} bytes");
         }
         // QA's refused crop: 1536x720 Adam7 RGBA, within the rank upload
-        // limit, re-encodes to about 4.4 MiB at both levels, so it is 413.
+        // limit, re-encodes to about 4.4 MB (4.2 MiB) at both levels, so it
+        // is 413.
         let refused = adam7_amplifier(1536, 720, 8, 384 * 1024);
         let (result, now) = heap::peak_during(|| clean_png_within(&refused, 1536, 720, 384 * 1024));
         assert_eq!(
@@ -1912,7 +2055,9 @@ mod tests {
             eight_bytes as f64 / MIB
         ));
         // Asserted bound for a refused crop, the largest case measured.
-        assert!(now < 20 * 1024 * 1024, "refused crop: {now} bytes");
+        // 16 MiB: the cap taken off the writer (size compared afterwards)
+        // costs 20.9 MiB here, the old code 29.4 MiB.
+        assert!(now < 16 * 1024 * 1024, "refused crop: {now} bytes");
         // The same attack at the hero icon bound (256x256, 64 KiB).
         let refused_icon = adam7_amplifier(256, 256, 8, 64 * 1024);
         let (result, now) =
@@ -1923,7 +2068,11 @@ mod tests {
             refused_icon.len(),
             now as f64 / MIB
         ));
-        assert!(now < 4 * 1024 * 1024, "refused hero icon: {now} bytes");
+        // 1.2 MiB: the old re-encode (both outputs alive) costs 1.5 MiB.
+        assert!(
+            now < 1_258_291, // 1.2 MiB
+            "refused hero icon: {now} bytes"
+        );
         println!("{}", report.join("\n"));
         // The profile no longer counts: both profile cases cost what the
         // same pixels cost without one.
