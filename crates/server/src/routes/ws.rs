@@ -942,6 +942,7 @@ mod strategies_gate_tests {
                 None,
                 Some(enabled),
                 None,
+                None,
             )
             .await
             .expect("update strategies_enabled");

@@ -57,6 +57,10 @@ struct DbSiteSettings {
     #[surreal(default)]
     #[serde(default)]
     brand_accent_light: String,
+    /// Older rows omit this. Missing reads as "" (Urbanist).
+    #[surreal(default)]
+    #[serde(default)]
+    brand_font_display: String,
     updated_at: SurrealDatetime,
 }
 
@@ -116,6 +120,7 @@ fn db_to_settings(db: DbSiteSettings) -> SiteSettings {
         page_bg_image_url: db.page_bg_image_url,
         brand_accent_dark: db.brand_accent_dark,
         brand_accent_light: db.brand_accent_light,
+        brand_font_display: db.brand_font_display,
         updated_at: db.updated_at.into(),
     }
 }
@@ -183,6 +188,7 @@ impl Database {
                 page_bg_image_url: String::new(),
                 brand_accent_dark: String::new(),
                 brand_accent_light: String::new(),
+                brand_font_display: String::new(),
                 updated_at: SurrealDatetime::from(Utc::now()),
             };
             apply_shell_skin_dual_write(&mut defaults);
@@ -222,6 +228,7 @@ impl Database {
         home_skin: Option<&str>,
         strategies_enabled: Option<bool>,
         officers_can_edit_teams: Option<bool>,
+        brand_font_display: Option<&str>,
     ) -> DbResult<SiteSettings> {
         with_timeout(async {
             let current = self.get_settings().await?;
@@ -280,6 +287,9 @@ impl Database {
             }
             if let Some(c) = brand_accent_light {
                 db.brand_accent_light = c.to_string();
+            }
+            if let Some(font) = brand_font_display {
+                db.brand_font_display = font.to_string();
             }
 
             // Shell preferred; layout-only updates map to shell for legacy clients.
@@ -395,6 +405,7 @@ mod tests {
             None,
             None,
             Some(true),
+            None,
         )
         .await
         .expect("admin sets flag");
@@ -405,5 +416,108 @@ mod tests {
             .await
             .expect("restart migrations");
         assert_eq!(stored_flag(&db).await, Some(true));
+    }
+
+    async fn set_font(db: &Database, font: Option<&str>) -> crate::types::SiteSettings {
+        db.update_settings(
+            None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+            None, None, None, None, font,
+        )
+        .await
+        .expect("update brand_font_display")
+    }
+
+    /// Raw stored value: `None` when the row has no such field at all.
+    async fn stored_font(db: &Database) -> Option<String> {
+        #[derive(Debug, Deserialize, SurrealValue)]
+        struct FontRow {
+            brand_font_display: Option<String>,
+        }
+        let mut q = db
+            .client
+            .query("SELECT brand_font_display FROM site_settings")
+            .await
+            .expect("select font")
+            .check()
+            .expect("select font ok");
+        let rows: Vec<FontRow> = q.take(0).expect("take font");
+        assert_eq!(rows.len(), 1, "one site_settings row");
+        rows[0].brand_font_display.clone()
+    }
+
+    #[tokio::test]
+    async fn brand_font_display_defaults_empty_and_round_trips() {
+        let db = migrated().await;
+        let created = db.get_settings().await.expect("create defaults");
+        assert_eq!(created.brand_font_display, "");
+        assert_eq!(stored_font(&db).await.as_deref(), Some(""));
+
+        for font in ["ibm-plex-sans", "urbanist", ""] {
+            let written = set_font(&db, Some(font)).await;
+            assert_eq!(written.brand_font_display, font);
+            assert_eq!(stored_font(&db).await.as_deref(), Some(font));
+            let read = db.get_settings().await.expect("read");
+            assert_eq!(read.brand_font_display, font);
+        }
+    }
+
+    #[tokio::test]
+    async fn brand_font_display_none_keeps_the_stored_value() {
+        let db = migrated().await;
+        set_font(&db, Some("ibm-plex-sans")).await;
+
+        // An unrelated update passes None for the font.
+        let written = set_font(&db, None).await;
+        assert_eq!(written.brand_font_display, "ibm-plex-sans");
+        assert_eq!(
+            db.get_settings().await.expect("read").brand_font_display,
+            "ibm-plex-sans"
+        );
+        // Restarting (re-running migrations) does not reset it either.
+        run_migrations(&db.client).await.expect("re-migrate");
+        assert_eq!(stored_font(&db).await.as_deref(), Some("ibm-plex-sans"));
+    }
+
+    #[tokio::test]
+    async fn row_written_before_brand_font_display_reads_as_empty() {
+        let db = migrated().await;
+        // Schema as it was before this field existed, then a row written under it.
+        db.client
+            .query("REMOVE FIELD IF EXISTS brand_font_display ON TABLE site_settings")
+            .await
+            .expect("remove field")
+            .check()
+            .expect("remove field ok");
+        db.client
+            .query("CREATE site_settings SET org_name = 'Old Clan', brand_accent_dark = '#38bdf8'")
+            .await
+            .expect("create old row")
+            .check()
+            .expect("create old row ok");
+        assert_eq!(stored_font(&db).await, None, "old row has no font field");
+        let old = db
+            .get_settings()
+            .await
+            .expect("old row reads before migrating");
+        assert_eq!(old.org_name, "Old Clan");
+        assert_eq!(old.brand_font_display, "");
+
+        // Upgrade: the new field definition lands on the existing row.
+        run_migrations(&db.client).await.expect("migrate");
+        let read = db
+            .get_settings()
+            .await
+            .expect("old row reads after migrating");
+        assert_eq!(read.org_name, "Old Clan");
+        assert_eq!(read.brand_accent_dark, "#38bdf8");
+        assert_eq!(read.brand_font_display, "");
+
+        // An update that does not mention the font keeps it empty, and a later one sets it.
+        let kept = set_font(&db, None).await;
+        assert_eq!(kept.brand_font_display, "");
+        assert_eq!(kept.org_name, "Old Clan");
+        let set = set_font(&db, Some("ibm-plex-sans")).await;
+        assert_eq!(set.brand_font_display, "ibm-plex-sans");
+        assert_eq!(stored_font(&db).await.as_deref(), Some("ibm-plex-sans"));
     }
 }

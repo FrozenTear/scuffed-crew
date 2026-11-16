@@ -191,6 +191,7 @@ pub async fn seed_dev_data(
             Some(scuffed.suggested_skin.as_str()),
             None,
             None,
+            None,
         )
         .await?;
         tracing::info!("Dev site settings: Scuffed Crew homepage + brand + shell/skin applied");

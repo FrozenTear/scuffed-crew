@@ -171,6 +171,8 @@ pub fn AdminSettings() -> Element {
             page_bg_image_url: Some(page_bg_image_url().trim().to_string()),
             brand_accent_dark: Some(brand_accent_dark().trim().to_string()),
             brand_accent_light: Some(brand_accent_light().trim().to_string()),
+            // No picker here yet: None keeps the stored display font.
+            brand_font_display: None,
         };
 
         saving.set(true);
