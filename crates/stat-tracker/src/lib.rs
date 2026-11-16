@@ -18,6 +18,7 @@ pub mod mapcrops;
 pub mod names;
 pub mod ocr;
 pub mod ocr_switch;
+pub mod pack_cutter;
 pub mod packs;
 pub mod query;
 pub mod reader_apply;
