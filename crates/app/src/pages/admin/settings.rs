@@ -13,7 +13,8 @@ use scuffed_types::{
 };
 
 /// Two pages send `PUT /api/settings`, both admin-only: this one and brand
-/// settings, whose body carries the accent pair and nothing else. This page
+/// settings, whose body carries the accent pair (and `brand_font_display`
+/// once the server returns that key) and no other settings key. This page
 /// owns the officers flag, so it always sends the key. `None` would omit it
 /// (`skip_serializing_if`) and leave a stale flag on the server.
 fn admin_settings_officers_flag(enabled: bool) -> Option<bool> {
@@ -26,14 +27,110 @@ fn officers_can_edit_teams_hint() -> &'static str {
     "On: Officers can edit a team's name, game, color, and division in Admin → Teams. Lore quote is not on that form, so this switch does not change it. Creating teams stays admin-only. Off (default): those edits stay admin-only. Roster changes are not affected."
 }
 
-/// The accent pair an applied identity pack will write on Save, in words.
-/// The accent fields that used to show it live on the brand settings page
-/// now, so this line is the only place the pending pair is visible.
-fn pending_pack_brand_note(pair: Option<&(String, String)>) -> Option<String> {
-    let (dark, light) = pair?;
-    Some(format!(
-        "Save will also set the brand accents from this pack: {dark} in dark, {light} in light. Untick \"Also set brand accents\" to keep the current accent."
-    ))
+/// The accents the last applied identity pack suggests.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PackAccents {
+    /// The applied pack's name. The highlighted card can be a different
+    /// pack, so the note names this one.
+    pack: String,
+    dark: String,
+    light: String,
+}
+
+/// Brand accents from an identity pack, waiting for Save. The accent itself
+/// is edited on the brand settings page, so without a pending pair this
+/// page's save leaves it alone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PackBrand {
+    /// The "Also set brand accents" box.
+    ticked: bool,
+    /// What the last Apply pack offered. Kept while the box is unticked, so
+    /// ticking it again brings the same pair back without a second Apply
+    /// pack (which would also reset copy, shell and skin).
+    offer: Option<PackAccents>,
+}
+
+impl PackBrand {
+    fn new() -> Self {
+        Self {
+            ticked: true,
+            offer: None,
+        }
+    }
+
+    /// Apply pack was pressed for `preset`. A pack with no suggested accent
+    /// offers nothing and drops an older pack's offer.
+    fn apply(&mut self, preset: &scuffed_types::HomepagePreset) {
+        let brand = preset.suggested_brand;
+        self.offer = (!brand.accent_dark.is_empty()).then(|| PackAccents {
+            pack: preset.name.to_string(),
+            dark: brand.accent_dark.to_string(),
+            light: brand.accent_light.to_string(),
+        });
+    }
+
+    fn set_ticked(&mut self, on: bool) {
+        self.ticked = on;
+    }
+
+    /// The server answered (a load or a successful save): nothing is waiting.
+    fn clear(&mut self) {
+        self.offer = None;
+    }
+
+    /// The pair Save will write, if any.
+    fn pending(&self) -> Option<&PackAccents> {
+        self.offer.as_ref().filter(|_| self.ticked)
+    }
+
+    /// The dark and light accent keys of the save body. `None` omits the
+    /// key, so the server keeps the stored accent.
+    fn save_accents(&self) -> (Option<String>, Option<String>) {
+        match self.pending() {
+            Some(accents) => (Some(accents.dark.clone()), Some(accents.light.clone())),
+            None => (None, None),
+        }
+    }
+
+    /// The pending pair in words, or nothing. The accent fields that used
+    /// to show it live on the brand settings page now, so this line is the
+    /// only place the pending pair is visible.
+    fn note(&self) -> String {
+        match self.pending() {
+            Some(PackAccents { pack, dark, light }) => format!(
+                "Save will also set the brand accents from the {pack} pack: {dark} in dark, {light} in light. Untick \"Also set brand accents\" to keep the current accent."
+            ),
+            None => String::new(),
+        }
+    }
+}
+
+/// The live line under Apply pack. Always rendered; only the text changes.
+/// Its spacing is in the stylesheet, where the empty line gives it back.
+#[component]
+fn PackBrandStatus(note: String) -> Element {
+    rsx! {
+        p { class: "settings-hint pack-brand-status", role: "status", "{note}" }
+    }
+}
+
+/// The way out to brand settings, with the warning it is described by.
+#[component]
+fn BrandSettingsLink() -> Element {
+    rsx! {
+        Link {
+            class: "btn-ghost",
+            to: Route::AdminBrandSettings {},
+            "aria-describedby": "admin-settings-brand-link-warning",
+            "Open brand settings"
+        }
+        p {
+            class: "settings-hint",
+            id: "admin-settings-brand-link-warning",
+            style: "margin-top:0.4rem;",
+            "{BRAND_LINK_WARNING}"
+        }
+    }
 }
 
 /// Next to the link out of this unsaved form.
@@ -98,16 +195,14 @@ pub fn AdminSettings() -> Element {
     let mut nav = use_signal(NavConfig::default);
     let mut page_bg_color = use_signal(String::new);
     let mut page_bg_image_url = use_signal(String::new);
-    // Brand accents an identity pack suggested, waiting for Save. The accent
-    // itself is edited on the brand settings page, so without a pack this
-    // save leaves it alone.
-    let mut pack_brand = use_signal(|| None::<(String, String)>);
+    // Brand accents an identity pack suggested, and the box that decides
+    // whether Save writes them.
+    let mut pack_brand = use_signal(PackBrand::new);
     let mut strategies_enabled = use_signal(|| true);
     let mut officers_can_edit_teams = use_signal(|| false);
     let mut committed_toggles = use_signal(|| None::<SettingsToggles>);
     // Selected identity pack id for “Apply pack”.
     let mut homepage_preset_id = use_signal(|| "neutral".to_string());
-    let mut apply_suggested_brand = use_signal(|| true);
     // Which homepage-copy accordion panels are expanded (ids: hero, ethos, …).
     let mut open_copy = use_signal(|| {
         let mut s = std::collections::HashSet::new();
@@ -144,7 +239,7 @@ pub fn AdminSettings() -> Element {
                     nav.set(n);
                     page_bg_color.set(s.page_bg_color);
                     page_bg_image_url.set(s.page_bg_image_url);
-                    pack_brand.set(None);
+                    pack_brand.write().clear();
                     strategies_enabled.set(s.strategies_enabled);
                     officers_can_edit_teams.set(s.officers_can_edit_teams);
                     committed_toggles.set(Some(committed));
@@ -169,6 +264,7 @@ pub fn AdminSettings() -> Element {
         n.normalize();
         // Dual-write layout from shell (no separate layout control).
         let shell = home_shell();
+        let (brand_accent_dark, brand_accent_light) = pack_brand.read().save_accents();
         let body = UpdateSettingsRequest {
             org_name: Some(org_name().trim().to_string()),
             site_description: Some(site_description().trim().to_string()),
@@ -186,8 +282,8 @@ pub fn AdminSettings() -> Element {
             nav: Some(n),
             page_bg_color: Some(page_bg_color().trim().to_string()),
             page_bg_image_url: Some(page_bg_image_url().trim().to_string()),
-            brand_accent_dark: pack_brand().map(|(dark, _)| dark),
-            brand_accent_light: pack_brand().map(|(_, light)| light),
+            brand_accent_dark,
+            brand_accent_light,
         };
 
         saving.set(true);
@@ -212,7 +308,7 @@ pub fn AdminSettings() -> Element {
                     nav.set(n);
                     page_bg_color.set(s.page_bg_color);
                     page_bg_image_url.set(s.page_bg_image_url);
-                    pack_brand.set(None);
+                    pack_brand.write().clear();
                     strategies_enabled.set(s.strategies_enabled);
                     officers_can_edit_teams.set(s.officers_can_edit_teams);
                     recruitment_open.set(s.recruitment_open);
@@ -348,16 +444,11 @@ pub fn AdminSettings() -> Element {
                         label { class: "section-chip",
                             input {
                                 r#type: "checkbox",
-                                checked: apply_suggested_brand(),
-                                onchange: move |e| {
-                                    let on = e.checked();
-                                    apply_suggested_brand.set(on);
-                                    // Unticking takes back a pair an earlier
-                                    // Apply pack left waiting for Save.
-                                    if !on {
-                                        pack_brand.set(None);
-                                    }
-                                },
+                                checked: pack_brand.read().ticked,
+                                // Unticking takes back a pair an earlier
+                                // Apply pack left waiting for Save, and
+                                // ticking again restores it.
+                                onchange: move |e| pack_brand.write().set_ticked(e.checked()),
                             }
                             "Also set brand accents"
                         }
@@ -367,21 +458,12 @@ pub fn AdminSettings() -> Element {
                             onclick: move |_| {
                                 let id = homepage_preset_id();
                                 if let Some(preset) = homepage_preset_by_id(&id) {
+                                    pack_brand.write().apply(&preset);
                                     content_align.set(preset.content.content_align);
                                     homepage.set(preset.content);
                                     home_shell.set(preset.suggested_shell);
                                     home_skin.set(preset.suggested_skin);
                                     public_layout.set(preset.suggested_shell.to_public_layout());
-                                    if apply_suggested_brand()
-                                        && !preset.suggested_brand.accent_dark.is_empty()
-                                    {
-                                        pack_brand.set(Some((
-                                            preset.suggested_brand.accent_dark.into(),
-                                            preset.suggested_brand.accent_light.into(),
-                                        )));
-                                    } else {
-                                        pack_brand.set(None);
-                                    }
                                     open_copy.set({
                                         let mut s = std::collections::HashSet::new();
                                         s.insert("hero".to_string());
@@ -398,10 +480,7 @@ pub fn AdminSettings() -> Element {
                             "Apply pack"
                         }
                     }
-                    // Always rendered; only the text changes.
-                    p { class: "settings-hint", role: "status", style: "margin-top:0.65rem;",
-                        {pending_pack_brand_note(pack_brand().as_ref()).unwrap_or_default()}
-                    }
+                    PackBrandStatus { note: pack_brand.read().note() }
                 }
 
                 div { class: "form-section-card", style: "margin-top:0.85rem;",
@@ -540,18 +619,7 @@ pub fn AdminSettings() -> Element {
                     p { class: "settings-hint", style: "margin-bottom:0.65rem;",
                         "One accent for both themes, with a live preview and a contrast check."
                     }
-                    Link {
-                        class: "btn-ghost",
-                        to: Route::AdminBrandSettings {},
-                        "aria-describedby": "admin-settings-brand-link-warning",
-                        "Open brand settings"
-                    }
-                    p {
-                        class: "settings-hint",
-                        id: "admin-settings-brand-link-warning",
-                        style: "margin-top:0.4rem;",
-                        "{BRAND_LINK_WARNING}"
-                    }
+                    BrandSettingsLink {}
                     div { class: "settings-divider" }
                     div { class: "settings-subhead", "Page background" }
                     div { class: "color-row", style: "margin-bottom:0.85rem;",
@@ -1100,59 +1168,250 @@ mod tests {
         );
     }
 
+    fn preset(id: &str) -> scuffed_types::HomepagePreset {
+        homepage_preset_by_id(id).unwrap_or_else(|| panic!("pack {id}"))
+    }
+
+    /// Two packs whose suggested accents differ, from the shared catalog.
+    fn two_packs() -> (scuffed_types::HomepagePreset, scuffed_types::HomepagePreset) {
+        let packs = homepage_presets();
+        let first = packs
+            .iter()
+            .find(|p| !p.suggested_brand.accent_dark.is_empty())
+            .expect("a pack with accents");
+        let second = packs
+            .iter()
+            .find(|p| {
+                !p.suggested_brand.accent_dark.is_empty()
+                    && p.suggested_brand.accent_dark != first.suggested_brand.accent_dark
+            })
+            .expect("a second pack with other accents");
+        (preset(first.id), preset(second.id))
+    }
+
+    fn body_accents(state: &PackBrand) -> serde_json::Value {
+        let (brand_accent_dark, brand_accent_light) = state.save_accents();
+        serde_json::to_value(UpdateSettingsRequest {
+            brand_accent_dark,
+            brand_accent_light,
+            ..UpdateSettingsRequest::default()
+        })
+        .expect("serialize")
+    }
+
     /// The accent fields moved to brand settings, so a pack's pending pair
-    /// has to be shown here, and unticking the box has to take it back.
+    /// has to be shown here. Unticking the box takes it back, and ticking
+    /// it again restores the same pair without a second Apply pack.
     #[test]
-    fn a_pending_pack_accent_pair_is_shown_and_can_be_cleared() {
-        assert_eq!(pending_pack_brand_note(None), None);
-        let pair = ("dark-hex".to_string(), "light-hex".to_string());
-        let note = pending_pack_brand_note(Some(&pair)).expect("note");
-        assert!(note.contains("dark-hex in dark"), "{note}");
-        assert!(note.contains("light-hex in light"), "{note}");
+    fn a_pending_pack_accent_pair_is_shown_cleared_and_restored() {
+        let (pack, _) = two_packs();
+        let dark = pack.suggested_brand.accent_dark;
+        let light = pack.suggested_brand.accent_light;
+
+        // The page opens ticked with nothing waiting: no note, no keys.
+        let mut state = PackBrand::new();
+        assert!(state.ticked);
+        assert_eq!(state.note(), "");
+        assert_eq!(body_accents(&state), serde_json::json!({}));
+
+        // Apply pack: the note names the pair, and Save sends exactly it.
+        state.apply(&pack);
+        let note = state.note();
         assert!(
             note.contains("Save will also set the brand accents"),
             "{note}"
         );
+        assert!(note.contains(&format!("{dark} in dark")), "{note}");
+        assert!(note.contains(&format!("{light} in light")), "{note}");
+        assert_eq!(
+            body_accents(&state),
+            serde_json::json!({ "brand_accent_dark": dark, "brand_accent_light": light })
+        );
 
+        // Untick: nothing is pending, and the accent keys are omitted so
+        // the server keeps the stored accent.
+        state.set_ticked(false);
+        assert_eq!(state.pending(), None);
+        assert_eq!(state.note(), "");
+        assert_eq!(body_accents(&state), serde_json::json!({}));
+
+        // Tick again: the same pair is back, with the same note.
+        state.set_ticked(true);
+        assert_eq!(state.note(), note);
+        assert_eq!(
+            body_accents(&state),
+            serde_json::json!({ "brand_accent_dark": dark, "brand_accent_light": light })
+        );
+
+        // A load or a successful save: nothing waits, the box stays ticked.
+        state.clear();
+        assert!(state.ticked);
+        assert_eq!(state.note(), "");
+        assert_eq!(body_accents(&state), serde_json::json!({}));
+    }
+
+    /// Apply pack with the box unticked writes nothing on Save, and the
+    /// box never reads ticked with a blank note while a pack is applied:
+    /// ticking it afterwards shows that pack's pair.
+    #[test]
+    fn applying_a_pack_with_the_box_unticked_sets_no_accents() {
+        let (pack, _) = two_packs();
+        let mut state = PackBrand::new();
+        state.set_ticked(false);
+        state.apply(&pack);
+        assert_eq!(state.note(), "");
+        assert_eq!(body_accents(&state), serde_json::json!({}));
+
+        state.set_ticked(true);
+        assert!(state.note().contains(pack.suggested_brand.accent_dark));
+        assert_eq!(
+            body_accents(&state)["brand_accent_dark"],
+            pack.suggested_brand.accent_dark
+        );
+    }
+
+    /// The note names the applied pack. Highlighting another card does not
+    /// touch this state; applying another pack replaces the pair.
+    #[test]
+    fn the_note_names_the_applied_pack() {
+        let (first, second) = two_packs();
+        assert_ne!(first.name, second.name);
+        let mut state = PackBrand::new();
+        state.apply(&first);
+        let note = state.note();
+        assert!(
+            note.contains(&format!("from the {} pack:", first.name)),
+            "{note}"
+        );
+        assert!(!note.contains("this pack"), "{note}");
+        assert!(!note.contains(second.name), "{note}");
+
+        state.apply(&second);
+        let note = state.note();
+        assert!(
+            note.contains(&format!("from the {} pack:", second.name)),
+            "{note}"
+        );
+        assert!(!note.contains(first.name), "{note}");
+        assert!(note.contains(second.suggested_brand.accent_dark), "{note}");
+        assert_eq!(
+            body_accents(&state)["brand_accent_light"],
+            second.suggested_brand.accent_light
+        );
+
+        // A pack without a suggested accent offers nothing and does not
+        // leave the older pack's pair waiting.
+        let mut plain = second.clone();
+        plain.suggested_brand = scuffed_types::PresetBrand::default();
+        state.apply(&plain);
+        assert_eq!(state.pending(), None);
+        assert_eq!(state.note(), "");
+        assert_eq!(body_accents(&state), serde_json::json!({}));
+    }
+
+    fn render_element(element: fn() -> Element) -> String {
+        let mut dom = VirtualDom::new(element);
+        dom.rebuild_in_place();
+        dioxus_ssr::render(&dom)
+    }
+
+    /// The status line is always in the tree and carries no inline margin:
+    /// the stylesheet spaces it, and gives the space back when it is empty.
+    #[test]
+    fn the_pack_status_line_is_always_rendered_and_leaves_no_gap_when_empty() {
+        let empty = render_element(|| rsx! { PackBrandStatus { note: String::new() } });
+        assert_eq!(
+            empty,
+            "<p class=\"settings-hint pack-brand-status\" role=\"status\"></p>"
+        );
+        let said = render_element(|| rsx! { PackBrandStatus { note: "Pending.".to_string() } });
+        assert_eq!(
+            said,
+            "<p class=\"settings-hint pack-brand-status\" role=\"status\">Pending.</p>"
+        );
+
+        let css = crate::styles::admin::CSS;
+        let hint = css.find(".settings-hint {").expect("hint rule");
+        let spaced = css
+            .find(".pack-brand-status { margin-top: 0.65rem; }")
+            .expect("spacing rule");
+        let empty_rule = css
+            .find(".pack-brand-status:empty { margin: 0; }")
+            .expect("the empty line gives its margin back");
+        assert!(hint < spaced && spaced < empty_rule);
+    }
+
+    /// The page shows the state through these calls. Behaviour is covered
+    /// above; this only holds the wiring.
+    #[test]
+    fn the_page_is_wired_to_the_pack_brand_state() {
         let src = include_str!("settings.rs");
         let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap();
-        assert!(
-            prod.contains("{pending_pack_brand_note(pack_brand().as_ref()).unwrap_or_default()}"),
-            "the pending pair must be on the page"
-        );
-        let checkbox = prod
-            .split("checked: apply_suggested_brand(),")
-            .nth(1)
-            .expect("brand accents checkbox");
-        let checkbox = &checkbox[..checkbox.find("\"Also set brand accents\"").unwrap()];
-        assert!(
-            checkbox.contains("if !on {") && checkbox.contains("pack_brand.set(None);"),
-            "unticking must clear the pending pair: {checkbox}"
-        );
-        // Save still sends exactly what the note names.
-        assert!(prod.contains("brand_accent_dark: pack_brand().map(|(dark, _)| dark),"));
-        assert!(prod.contains("brand_accent_light: pack_brand().map(|(_, light)| light),"));
+        for wiring in [
+            "PackBrandStatus { note: pack_brand.read().note() }",
+            "checked: pack_brand.read().ticked,",
+            "onchange: move |e| pack_brand.write().set_ticked(e.checked()),",
+            "pack_brand.write().apply(&preset);",
+            "let (brand_accent_dark, brand_accent_light) = pack_brand.read().save_accents();",
+        ] {
+            assert!(prod.contains(wiring), "{wiring}");
+        }
+        // After a load and after a successful save.
+        assert_eq!(prod.matches("pack_brand.write().clear();").count(), 2);
+        assert_eq!(prod.matches("BrandSettingsLink {}").count(), 1);
+    }
+
+    /// A router that mounts only the link, so it resolves without the
+    /// admin shell around it.
+    #[derive(Routable, Clone, PartialEq, Debug)]
+    enum LinkOnly {
+        #[route("/")]
+        LinkHost {},
+    }
+
+    #[component]
+    fn LinkHost() -> Element {
+        rsx! { BrandSettingsLink {} }
     }
 
     #[test]
     fn the_link_to_brand_settings_warns_about_unsaved_edits() {
         assert!(BRAND_LINK_WARNING.contains("drops unsaved edits"));
-        let src = include_str!("settings.rs");
-        let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap();
-        let link = prod
-            .split("to: Route::AdminBrandSettings {},")
-            .nth(1)
-            .expect("brand settings link");
-        let link = &link[..link.find("div { class: \"settings-divider\" }").unwrap()];
+        fn host() -> Element {
+            let history = use_hook(|| {
+                std::rc::Rc::new(dioxus::history::MemoryHistory::with_initial_path("/"))
+            });
+            rsx! {
+                dioxus::router::components::HistoryProvider {
+                    history: move |_| history.clone() as std::rc::Rc<dyn dioxus::history::History>,
+                    Router::<LinkOnly> {}
+                }
+            }
+        }
+        let html = render_element(host);
+        let link = &html[html.find("<a ").expect("link")..];
+        let (tag, rest) = link.split_once('>').expect("end of link tag");
+        assert!(tag.contains("href=\"/admin/brand\""), "{tag}");
         assert!(
-            link.contains("\"aria-describedby\": \"admin-settings-brand-link-warning\""),
-            "{link}"
+            tag.contains("aria-describedby=\"admin-settings-brand-link-warning\""),
+            "{tag}"
         );
+        assert!(rest.starts_with("Open brand settings</a>"), "{rest}");
+        // The id the link points at is the visible warning, once.
+        assert_eq!(
+            html.matches("id=\"admin-settings-brand-link-warning\"")
+                .count(),
+            1,
+            "{html}"
+        );
+        let warning = &html[html
+            .find("id=\"admin-settings-brand-link-warning\"")
+            .unwrap()..];
+        let warning = &warning[warning.find('>').unwrap() + 1..];
         assert!(
-            link.contains("id: \"admin-settings-brand-link-warning\""),
-            "{link}"
+            warning.starts_with(&format!("{BRAND_LINK_WARNING}</p>")),
+            "{warning}"
         );
-        assert!(link.contains("\"{BRAND_LINK_WARNING}\""), "{link}");
     }
 
     #[test]

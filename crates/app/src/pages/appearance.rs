@@ -14,9 +14,11 @@ use crate::theme::{Density, ThemeCtx, ThemeMode};
 
 const THEMES: [ThemeMode; 2] = [ThemeMode::Dark, ThemeMode::Light];
 
-/// Where density reaches today. Only the redesigned pages read the density
-/// tokens, so the page says so until the rest of the site is ported.
-const DENSITY_SCOPE_NOTE: &str = "Density applies to the settings pages now. The rest of the site follows as each page is redesigned.";
+/// Where density reaches today. Only this page and admin brand settings read
+/// the density tokens, so the page says so until the rest of the site is
+/// ported. "Settings" alone would point members at Admin Settings, which does
+/// not read them.
+const DENSITY_SCOPE_NOTE: &str = "Density changes this page and brand settings for now. The rest of the site follows as each page is redesigned.";
 
 /// The line under Save. `saved` is what the root element has now.
 fn status_text(
@@ -75,7 +77,8 @@ pub fn AppearanceSettings() -> Element {
 
     rsx! {
         crate::styles::StyleOnce { id: CUSTOMISE_CSS_ID, css: CUSTOMISE_CSS }
-        main { class: "customise is-page",
+        // No `main` here: the public shell already wraps the page in one.
+        div { class: "customise is-page",
             header { class: "customise-header",
                 h1 { "Appearance" }
                 p { class: "customise-lead",
@@ -178,12 +181,23 @@ mod tests {
     use scuffed_types::{OrgRole, UserInfo};
 
     /// `/settings` through the real router, so the account links resolve.
-    /// Returns the page (`<main>`) without the public chrome around it.
+    /// Returns the page without the public chrome around it.
     fn render(role: Option<OrgRole>, signed_in: bool) -> String {
         render_with(role, signed_in, false)
     }
 
     fn render_with(role: Option<OrgRole>, signed_in: bool, loading: bool) -> String {
+        let html = render_document(role, signed_in, loading);
+        let start = html
+            .find("<div class=\"customise is-page\"")
+            .unwrap_or_else(|| panic!("appearance page: {html}"));
+        // The page is the last thing in the shell's `main`.
+        let end = start + html[start..].find("</main>").expect("end of page");
+        html[start..end].to_string()
+    }
+
+    /// The whole document: the public shell with the page in it.
+    fn render_document(role: Option<OrgRole>, signed_in: bool, loading: bool) -> String {
         #[component]
         fn Harness(role: Option<OrgRole>, signed_in: bool, loading: bool) -> Element {
             let auth = use_signal(|| AuthState {
@@ -220,12 +234,22 @@ mod tests {
             },
         );
         dom.rebuild_in_place();
-        let html = dioxus_ssr::render(&dom);
-        let start = html
-            .find("<main class=\"customise is-page\"")
-            .unwrap_or_else(|| panic!("appearance page: {html}"));
-        let end = start + html[start..].find("</main>").expect("end of page");
-        html[start..end].to_string()
+        dioxus_ssr::render(&dom)
+    }
+
+    /// The public shell provides the one `main` landmark. The page must not
+    /// nest a second one inside it.
+    #[test]
+    fn the_page_adds_no_second_main_landmark() {
+        for (role, signed_in) in [(None, false), (Some(OrgRole::Member), true)] {
+            let html = render_document(role, signed_in, false);
+            assert_eq!(html.matches("<main").count(), 1, "{html}");
+            assert_eq!(html.matches("role=\"main\"").count(), 0, "{html}");
+            let main = &html[html.find("<main").expect("shell main")..];
+            let main = &main[..main.find("</main>").expect("end of main")];
+            assert!(main.contains("<div class=\"customise is-page\""), "{main}");
+            assert_eq!(main.matches("<h1").count(), 1, "{main}");
+        }
     }
 
     #[test]
@@ -346,7 +370,7 @@ mod tests {
         let html = render(Some(OrgRole::Member), true);
         assert!(
             html.contains(
-                "id=\"u1-appearance-density-note\">Density applies to the settings pages now. The rest of the site follows as each page is redesigned.</p>"
+                "id=\"u1-appearance-density-note\">Density changes this page and brand settings for now. The rest of the site follows as each page is redesigned.</p>"
             ),
             "{html}"
         );

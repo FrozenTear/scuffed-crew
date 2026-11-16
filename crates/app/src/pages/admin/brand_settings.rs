@@ -183,6 +183,14 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test seam: the draft the mounted [`BrandSettingsForm`] owns, so a test
+    /// can type into the real form.
+    static TEST_FORM_DRAFT: std::cell::Cell<Option<Signal<BrandDraft>>> =
+        const { std::cell::Cell::new(None) };
+}
+
 async fn load_brand_view() -> Result<BrandSettingsView, String> {
     #[cfg(test)]
     if let Some(json) = TEST_BRAND_VIEW_JSON.with(|slot| slot.borrow().clone()) {
@@ -260,6 +268,8 @@ fn BrandSettingsForm(saved: SavedBrand) -> Element {
     let mut saved_now = use_signal(|| saved.clone());
     let mut draft = use_signal(|| BrandDraft::from_saved(&saved));
     let mut saving = use_signal(|| false);
+    #[cfg(test)]
+    TEST_FORM_DRAFT.with(|slot| slot.set(Some(draft)));
 
     let on_save = move |_| {
         if saving() {
@@ -539,8 +549,8 @@ mod tests {
         }
     }
 
-    /// The chrome stylesheet for `saved_accent` next to the form with
-    /// `draft_accent`, as the app root and the page render them.
+    /// The form body with `draft_accent` typed over a stored `saved_accent`.
+    /// No chrome stylesheet is rendered here; the chrome test builds its own.
     fn render_form(saved_accent: &'static str, draft_accent: &'static str) -> String {
         render_saved(saved(saved_accent), draft_accent)
     }
@@ -587,8 +597,6 @@ mod tests {
     }
 
     thread_local! {
-        static TEST_DRAFT: std::cell::Cell<Option<Signal<BrandDraft>>> =
-            const { std::cell::Cell::new(None) };
         static TEST_SITE: std::cell::Cell<Option<SiteSettingsState>> =
             const { std::cell::Cell::new(None) };
     }
@@ -600,7 +608,7 @@ mod tests {
             crate::state::site_settings::set_test_embedded_json(None);
             crate::state::site_settings::mock_settings_fetch(None);
             TEST_BRAND_VIEW_JSON.with(|slot| *slot.borrow_mut() = None);
-            TEST_DRAFT.with(|slot| slot.set(None));
+            TEST_FORM_DRAFT.with(|slot| slot.set(None));
             TEST_SITE.with(|slot| slot.set(None));
         }
     }
@@ -762,7 +770,9 @@ mod tests {
 
     /// The chrome stylesheet here is built the way the app root builds it
     /// (`chrome_theme_css_for` over the shared settings), so it can move: the
-    /// last step proves that. A draft must not move it; a save must.
+    /// last step proves that. A draft must not move it; a save must. The page
+    /// half is the real `BrandSettingsForm`, wrapper and body, so a leak
+    /// added in either is caught by the render and not only by source text.
     #[test]
     fn chrome_accent_follows_saved_settings_and_not_the_draft() {
         #[component]
@@ -775,17 +785,10 @@ mod tests {
                     resolved.as_ref(),
                 ))
             };
-            let draft = use_signal(|| draft(TEST_MINT_ACCENT));
-            TEST_DRAFT.with(|slot| slot.set(Some(draft)));
             rsx! {
                 style { id: "chrome", "{chrome}" }
                 ToastProvider {
-                    BrandFormBody {
-                        draft,
-                        saved: saved(TEST_MINT_ACCENT),
-                        saving: false,
-                        on_save: move |_| {},
-                    }
+                    BrandSettingsForm { saved: saved(TEST_MINT_ACCENT) }
                 }
             }
         }
@@ -807,20 +810,30 @@ mod tests {
         dom.rebuild_in_place();
         settle(&mut dom);
         let html = dioxus_ssr::render(&dom);
-        let (chrome_saved, _) = split(&html);
+        let (chrome_saved, page) = split(&html);
         let chrome_saved = chrome_saved.to_string();
+        // The real form mounted and started from the stored accent.
+        assert!(page.contains(">Save brand<"), "{page}");
+        assert!(
+            page.contains(&format!("value=\"{TEST_MINT_ACCENT}\"")),
+            "{page}"
+        );
         assert!(chrome_saved.contains(&saved_roles.dark.css_decls()));
         assert!(chrome_saved.contains(&saved_roles.light.css_decls()));
 
         // Type a passing draft. The chrome stylesheet is byte for byte the
         // same; only the previews change.
-        let mut typed = TEST_DRAFT.with(|slot| slot.get().expect("draft signal"));
+        let mut typed = TEST_FORM_DRAFT.with(|slot| slot.get().expect("the form's draft"));
         typed.set(draft(TEST_OTHER_ACCENT));
         settle(&mut dom);
         let html = dioxus_ssr::render(&dom);
         let (chrome, page) = split(&html);
         assert_eq!(chrome, chrome_saved, "a draft must not reach the chrome");
         assert!(!chrome.contains(&draft_roles.dark.css_decls()));
+        assert!(
+            page.contains(&format!("value=\"{TEST_OTHER_ACCENT}\"")),
+            "the typed draft is in the form: {page}"
+        );
 
         // The draft is on the two preview cards (and the swatch) only.
         assert_eq!(

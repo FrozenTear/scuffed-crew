@@ -365,10 +365,15 @@ pub const CUSTOMISE_CSS: &str = r#"
     }
 
     /* Forced colours replace author backgrounds and text colours. The ring
-       and dot stay (they are borders); the selected choice also gets a
-       thicker border in the system selection colour. */
+       and dot stay (they are borders). Every choice gets the same thick
+       border, so nothing shifts when the selection moves; the selected one
+       takes the system selection colour. The locked rule comes last: a
+       locked choice is grey all through, its selected dot included. */
     @media (forced-colors: active) {
-        .customise-choice { border-color: ButtonText; }
+        .customise-choice {
+            border-color: ButtonText;
+            border-width: var(--focus-ring-width);
+        }
         .customise-choice-mark { border-color: ButtonText; }
         .customise-choice.is-selected {
             border-color: Highlight;
@@ -379,7 +384,8 @@ pub const CUSTOMISE_CSS: &str = r#"
             border-color: Highlight;
         }
         .customise-choice.is-locked,
-        .customise-choice.is-locked .customise-choice-mark {
+        .customise-choice.is-locked .customise-choice-mark,
+        .customise-choice.is-locked .customise-choice-mark::after {
             border-color: GrayText;
             color: GrayText;
         }
@@ -393,6 +399,10 @@ pub const CUSTOMISE_CSS: &str = r#"
 #[cfg(test)]
 mod tests {
     use super::CUSTOMISE_CSS;
+
+    /// The semantic token layer, where the ring width the forced-colours
+    /// border reuses is set.
+    const CUSTOMISE_CSS_TOKENS: &str = include_str!("../theme/css/semantic.css");
 
     /// The body of the first rule whose selector line is exactly `selector`.
     fn rule<'a>(css: &'a str, selector: &str) -> &'a str {
@@ -433,17 +443,77 @@ mod tests {
 
         // Forced colours: the cue is kept and the selection is marked with
         // system colours, never hidden.
+        // Both declarations are read from the selected rule itself, so
+        // dropping either one, or moving it to another rule, fails here.
+        let selected = rule(forced, ".customise-choice.is-selected");
+        assert!(selected.contains("border-color: Highlight;"), "{selected}");
         assert!(
-            forced.contains(".customise-choice.is-selected {"),
-            "{forced}"
+            selected.contains("border-width: var(--focus-ring-width);"),
+            "{selected}"
         );
-        assert!(forced.contains("border-color: Highlight;"), "{forced}");
         assert!(
-            forced.contains(".customise-choice.is-selected .customise-choice-mark::after"),
-            "{forced}"
+            CUSTOMISE_CSS_TOKENS.contains("--focus-ring-width: 2px;"),
+            "the selected border is 2px"
+        );
+        // The ring and the dot of the selected choice follow it.
+        let selected_mark = rule(
+            forced,
+            ".customise-choice.is-selected .customise-choice-mark,\n        .customise-choice.is-selected .customise-choice-mark::after",
+        );
+        assert!(
+            selected_mark.contains("border-color: Highlight;"),
+            "{selected_mark}"
         );
         assert!(!forced.contains("display: none"), "{forced}");
         assert!(!forced.contains("forced-color-adjust: none"), "{forced}");
+    }
+
+    /// Moving the selection must not move the chips: in forced colours every
+    /// choice has the border width the selected one has.
+    #[test]
+    fn forced_colours_selection_does_not_shift_the_choices() {
+        let (_, forced) = CUSTOMISE_CSS
+            .split_once("@media (forced-colors: active)")
+            .expect("forced colours block");
+        let width = |body: &str| {
+            body.lines()
+                .find_map(|line| line.trim().strip_prefix("border-width:"))
+                .map(|value| value.trim().to_string())
+        };
+        let every = width(rule(forced, ".customise-choice"));
+        let selected = width(rule(forced, ".customise-choice.is-selected"));
+        assert_eq!(every.as_deref(), Some("var(--focus-ring-width);"));
+        assert_eq!(every, selected);
+        // No other forced rule sets a width or pads a choice differently.
+        assert_eq!(forced.matches("border-width:").count(), 2, "{forced}");
+        assert!(!forced.contains("padding"), "{forced}");
+    }
+
+    /// The font picker is locked today, so its selected choice is locked and
+    /// selected at once. In forced colours it is grey all through: no
+    /// `Highlight` border, ring or dot on a control that cannot be used.
+    #[test]
+    fn a_locked_choice_gets_no_highlight_in_forced_colours() {
+        let (_, forced) = CUSTOMISE_CSS
+            .split_once("@media (forced-colors: active)")
+            .expect("forced colours block");
+        let selectors = ".customise-choice.is-locked,\n        .customise-choice.is-locked .customise-choice-mark,\n        .customise-choice.is-locked .customise-choice-mark::after";
+        let locked = rule(forced, selectors);
+        assert!(locked.contains("border-color: GrayText;"), "{locked}");
+        assert!(locked.contains("color: GrayText;"), "{locked}");
+        assert!(!locked.contains("Highlight"), "{locked}");
+        // Same specificity as the selected rules, so it must come later to
+        // win on a choice that is both.
+        let selected_dot = forced
+            .find(".customise-choice.is-selected .customise-choice-mark::after")
+            .expect("selected dot rule");
+        let locked_at = forced.find(selectors).expect("locked rule");
+        assert!(selected_dot < locked_at, "the locked rule comes last");
+        assert_eq!(
+            forced.matches("Highlight").count(),
+            3,
+            "selected border, selected ring and dot, focus outline: {forced}"
+        );
     }
 
     /// `:has()` is not everywhere. Without it the focus ring must still show.

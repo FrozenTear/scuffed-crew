@@ -13,8 +13,9 @@
 //! the fetch resolves, and a failed fetch with no prior value is an error.
 //!
 //! Two admin pages send `PUT /api/settings`: Admin Settings (everything but
-//! the brand) and brand settings (the accent, and the display font once the
-//! server stores it). Each hands a successful response to
+//! the brand, except that it writes both accents when an applied identity
+//! pack's pair is pending) and brand settings (the accent, and the display
+//! font once the server stores it). Each hands a successful response to
 //! [`SiteSettingsState::apply_saved`]. The saved value paints at once and a
 //! refetch revalidates it, so nav, accent, org name and the strategies gate
 //! follow the save without a reload.

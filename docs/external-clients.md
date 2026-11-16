@@ -38,7 +38,7 @@ If you already have a Nostr identity, link it to your clan account:
 
 1. Install a NIP-07 browser extension (nos2x, Alby, or similar)
 2. Go to `/identity` on the clan site
-3. Click **Link Nostr Key**
+3. Click **Link & Verify**
 4. Approve the signing request in your extension
 5. Your Nostr pubkey is now linked — you're the same identity everywhere
 
@@ -47,7 +47,7 @@ If you already have a Nostr identity, link it to your clan account:
 If you started with a server-managed key and want to use it in external clients:
 
 1. Go to `/identity` on the clan site
-2. Click **Export Nostr Key**
+2. Click **Export Backup**
 3. Save your secret key (`nsec...`) securely — treat it like a password
 4. Import it into your preferred Nostr client
 5. Your key mode will change from "server-managed" to "external"
