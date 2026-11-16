@@ -453,6 +453,7 @@ fn pack_writes_ustar_and_a_second_pack_keeps_the_first() {
         assert_eq!(mode(&packs), 0o700);
         assert_eq!(mode(&packs.join("rank-v1.tar")), 0o600);
         assert_eq!(mode(&packs.join("queue-title-v1.tar")), 0o600);
+        assert_eq!(mode(&packs.join("manifest.json")), 0o600);
     }
 
     let list: Vec<serde_json::Value> =

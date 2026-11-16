@@ -359,10 +359,39 @@ fn cut_refuses_a_path_that_walks_out_with_dotdot() {
     std::fs::create_dir(repo.join(".git")).unwrap();
     let files = write_rank(&["20260101"], (2560, 1440), false);
     let tricky = scratch_dir.path().join("dotdot/missing/../repo/sub");
+    let before = paths_under(scratch_dir.path());
     let got = cut_rank(&files, &tricky);
     assert_eq!(got.code, 2, "{}", got.stderr);
-    assert!(got.stderr.contains(".."), "{}", got.stderr);
-    assert!(!repo.join("sub").exists());
+    assert!(
+        got.stderr.contains(": the path contains .."),
+        "{}",
+        got.stderr
+    );
+    assert_eq!(
+        paths_under(scratch_dir.path()),
+        before,
+        "a refused .. path must create nothing"
+    );
+}
+
+fn paths_under(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let mut kids: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        kids.sort();
+        for path in kids {
+            if path.is_dir() {
+                stack.push(path.clone());
+            }
+            out.push(path);
+        }
+    }
+    out.sort();
+    out
 }
 
 #[test]
@@ -786,6 +815,62 @@ fn cut_mixes_queue_templates_by_n_and_replace_keeps_the_new_cut() {
         "{}",
         missing.stderr
     );
+}
+
+#[test]
+fn cut_mixes_queue_templates_by_unequal_n() {
+    let root = scratch();
+    let base_files = write_queue(
+        &[
+            ("s1/a.png", 0, "ALPHA QUEUE"),
+            ("s1/b.png", 0, "ALPHA QUEUE"),
+        ],
+        false,
+    );
+    let next_files = write_queue(&[("s2/a.png", 1, "ALPHA QUEUE")], false);
+    let base = root.path().join("base");
+    let alone = root.path().join("alone");
+    let mixed = root.path().join("mixed");
+    assert_eq!(cut_queue(&base_files, &base).code, 0);
+    assert_eq!(cut_queue(&next_files, &alone).code, 0);
+    let mix = run(&[
+        "cut",
+        "--kind",
+        "queue-title",
+        "--labels",
+        next_files.labels.to_str().unwrap(),
+        "--frames",
+        next_files.frames.to_str().unwrap(),
+        "--base",
+        base.to_str().unwrap(),
+        "--out",
+        mixed.to_str().unwrap(),
+    ]);
+    assert_eq!(mix.code, 0, "{}", mix.stderr);
+    assert!(
+        mix.stdout.contains("class ALPHA QUEUE: learned n 2 -> 3"),
+        "{}",
+        mix.stdout
+    );
+    let (n_base, v_base) = queue_vector(&base, "ALPHA QUEUE");
+    let (n_new, v_new) = queue_vector(&alone, "ALPHA QUEUE");
+    let (n_mix, v_mix) = queue_vector(&mixed, "ALPHA QUEUE");
+    assert_eq!((n_base, n_new, n_mix), (2, 1, 3));
+    let weighted: Vec<f32> = v_base
+        .iter()
+        .zip(&v_new)
+        .map(|(b, l)| (2.0 * b + l) / 3.0)
+        .collect();
+    let flat: Vec<f32> = v_base
+        .iter()
+        .zip(&v_new)
+        .map(|(b, l)| (b + l) / 2.0)
+        .collect();
+    assert_ne!(
+        weighted, flat,
+        "these two cuts must differ, or a plain mean would pass"
+    );
+    assert_eq!(v_mix, weighted);
 }
 
 #[test]

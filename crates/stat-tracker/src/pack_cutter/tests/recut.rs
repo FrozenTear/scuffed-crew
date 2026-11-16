@@ -978,3 +978,170 @@ fn eval_rank_two_days_learn_from_the_other_day() {
         "{gate}"
     );
 }
+
+/// Header parses, body does not. `image::image_dimensions` succeeds and the
+/// full decode is what fails.
+/// Header parses, body does not. 64 bytes keeps the IHDR and drops the
+/// image data, so `image_dimensions` succeeds and the full decode fails.
+fn truncate_after_ihdr(src: &Path, dest: &Path) {
+    let bytes = std::fs::read(src).unwrap();
+    assert!(bytes.len() > 64, "{}", bytes.len());
+    std::fs::write(dest, &bytes[..64]).unwrap();
+}
+
+#[test]
+fn queue_decode_errors_name_the_label_line() {
+    let files = write_queue(&[("s1/a.png", 0, "ALPHA QUEUE")], false);
+    let base = files.dir.path().join("base");
+    assert_eq!(
+        run(&[
+            "cut",
+            "--kind",
+            "queue-title",
+            "--labels",
+            files.labels.to_str().unwrap(),
+            "--frames",
+            files.frames.to_str().unwrap(),
+            "--out",
+            base.to_str().unwrap(),
+        ])
+        .code,
+        0
+    );
+    truncate_after_ihdr(
+        &files.frames.join("s1/a.png"),
+        &files.frames.join("s1/trunc.png"),
+    );
+    let labels = files.dir.path().join("trunc.jsonl");
+    write(
+        &labels,
+        &format!(
+            "{}\n",
+            serde_json::json!({
+                "path": "s1/trunc.png",
+                "screen": "heroban",
+                "title_text": "ALPHA QUEUE",
+            })
+        ),
+    );
+    let want = format!("{}:1:", labels.display());
+    let cut = run(&[
+        "cut",
+        "--kind",
+        "queue-title",
+        "--labels",
+        labels.to_str().unwrap(),
+        "--frames",
+        files.frames.to_str().unwrap(),
+        "--out",
+        files.dir.path().join("trunc-out").to_str().unwrap(),
+    ]);
+    assert_eq!(cut.code, 2, "{}", cut.stderr);
+    assert!(cut.stderr.contains(&want), "{}", cut.stderr);
+    assert!(
+        cut.stderr.contains("unexpected end of file"),
+        "{}",
+        cut.stderr
+    );
+    let eval = run(&[
+        "eval",
+        "--kind",
+        "queue-title",
+        "--labels",
+        labels.to_str().unwrap(),
+        "--frames",
+        files.frames.to_str().unwrap(),
+        "--baseline",
+        base.to_str().unwrap(),
+        "--candidate",
+        base.to_str().unwrap(),
+        "--set-name",
+        "trunc",
+    ]);
+    assert_eq!(eval.code, 2, "{}", eval.stderr);
+    assert!(eval.stderr.contains(&want), "{}", eval.stderr);
+    assert!(
+        eval.stderr.contains("unexpected end of file"),
+        "{}",
+        eval.stderr
+    );
+}
+
+#[test]
+fn rank_label_errors_name_the_file_line() {
+    let files = write_rank(&["20260101"], (2560, 1440), false);
+    let out = files.dir.path().join("out");
+    assert_eq!(super::cut_rank(&files, &out).code, 0);
+    let check = |name: &str, row: Value, needle: &str| {
+        let labels = files.dir.path().join(name);
+        write(&labels, &format!("{row}\n"));
+        let got = cut_rank_to(
+            &labels,
+            &files.frames,
+            &files.dir.path().join(format!("{name}-out")),
+            &[],
+        );
+        assert_eq!(got.code, 2, "{}", got.stderr);
+        let line = format!("{}:1: {needle}", labels.display());
+        assert!(
+            got.stderr.contains(&line),
+            "want {line:?} in {}",
+            got.stderr
+        );
+        let eval = eval_rank(&labels, &files.frames, &out, &out, &[]);
+        assert_eq!(eval.code, 2, "{}", eval.stderr);
+        assert!(
+            eval.stderr.contains(&format!("{}:1:", labels.display())),
+            "{}",
+            eval.stderr
+        );
+        assert!(eval.stderr.contains(needle), "{}", eval.stderr);
+    };
+    let mut spaced =
+        serde_json::json!({"game": "20260101-game", "file": "a.png", "readable": true});
+    spaced["role_rank"] = serde_json::json!(" GOLD");
+    check(
+        "spaced.jsonl",
+        spaced,
+        "role_rank \" GOLD\" has leading, trailing or doubled spaces",
+    );
+    check(
+        "bad-game.jsonl",
+        serde_json::json!({"game": "20260101/x", "file": "a.png", "readable": true}),
+        "rank game \"20260101/x\" is not a single path component",
+    );
+    truncate_after_ihdr(
+        &files.frames.join("20260101-game/a.png"),
+        &files.frames.join("20260101-game/trunc.png"),
+    );
+    let labels = files.dir.path().join("trunc.jsonl");
+    write(
+        &labels,
+        &format!(
+            "{}\n",
+            serde_json::json!({"game": "20260101-game", "file": "trunc.png", "readable": true})
+        ),
+    );
+    let want = format!("{}:1:", labels.display());
+    let got = cut_rank_to(
+        &labels,
+        &files.frames,
+        &files.dir.path().join("trunc-out"),
+        &[],
+    );
+    assert_eq!(got.code, 2, "{}", got.stderr);
+    assert!(got.stderr.contains(&want), "{}", got.stderr);
+    assert!(
+        got.stderr.contains("unexpected end of file"),
+        "{}",
+        got.stderr
+    );
+    let eval = eval_rank(&labels, &files.frames, &out, &out, &[]);
+    assert_eq!(eval.code, 2, "{}", eval.stderr);
+    assert!(eval.stderr.contains(&want), "{}", eval.stderr);
+    assert!(
+        eval.stderr.contains("unexpected end of file"),
+        "{}",
+        eval.stderr
+    );
+}

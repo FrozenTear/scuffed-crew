@@ -27,7 +27,7 @@ pub fn cut(args: &CutArgs, out: &Path) -> Result<String, String> {
     let loaded = load(&args.labels, args.frames.as_deref())?;
     let mut learner = Learner::new();
     for sample in &loaded.samples {
-        let image = util::open_rgb(&sample.path)?;
+        let image = read_frame(&args.labels, sample)?;
         learner.add_frame(&image, sample.screen, &sample.title);
     }
     let learned = learner.build();
@@ -86,7 +86,7 @@ pub fn eval(args: &EvalArgs) -> Result<EvalDone, String> {
     sessions.dedup();
     let mut session_learners: BTreeMap<String, Learner> = BTreeMap::new();
     for sample in &loaded.samples {
-        let image = util::open_rgb(&sample.path)?;
+        let image = read_frame(&args.labels, sample)?;
         session_learners
             .entry(sample.session.clone())
             .or_default()
@@ -110,7 +110,7 @@ pub fn eval(args: &EvalArgs) -> Result<EvalDone, String> {
         }
         let fold = Reader::new(learner.build());
         for sample in loaded.samples.iter().filter(|s| s.session == *session) {
-            let image = util::open_rgb(&sample.path)?;
+            let image = read_frame(&args.labels, sample)?;
             folds
                 .get_mut(&sample.title)
                 .expect("title")
@@ -360,11 +360,18 @@ pub(super) fn reject_near(
 }
 
 struct Sample {
+    /// Line of this row in the labels file.
+    line: usize,
     label_path: String,
     session: String,
     screen: Screen,
     title: String,
     path: PathBuf,
+}
+
+/// Full decode. The error names the labels file line, same as the header read.
+fn read_frame(labels: &Path, sample: &Sample) -> Result<image::RgbImage, String> {
+    util::open_rgb(&sample.path).map_err(|e| format!("{}:{}: {e}", labels.display(), sample.line))
 }
 
 fn titles_of(samples: &[Sample]) -> Vec<String> {
@@ -474,6 +481,7 @@ fn load(labels: &Path, frames: Option<&Path>) -> Result<Loaded<Sample>, String> 
         }
         let session = session_of(&path).map_err(|e| format!("{}:{line}: {e}", labels.display()))?;
         samples.push(Sample {
+            line: *line,
             label_path: label_path.clone(),
             session,
             screen: *screen,

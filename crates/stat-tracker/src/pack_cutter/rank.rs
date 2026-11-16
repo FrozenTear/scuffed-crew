@@ -33,7 +33,7 @@ pub fn cut(args: &CutArgs, out: &Path) -> Result<String, String> {
         if !sample.readable {
             continue;
         }
-        let image = util::open_rgb(&sample.path)?;
+        let image = read_sample(&args.labels, sample)?;
         learner.add_frame(&image, &sample.labels);
         learned_rows += 1;
     }
@@ -95,7 +95,7 @@ pub fn eval(args: &EvalArgs) -> Result<EvalDone, String> {
     days.dedup();
     let mut day_learners: BTreeMap<String, Learner> = BTreeMap::new();
     for sample in loaded.samples.iter().filter(|s| s.readable) {
-        let image = util::open_rgb(&sample.path)?;
+        let image = read_sample(&args.labels, sample)?;
         day_learners
             .entry(sample.day.clone())
             .or_default()
@@ -112,7 +112,7 @@ pub fn eval(args: &EvalArgs) -> Result<EvalDone, String> {
         }
         let fold = Reader::new(learner.build());
         for sample in loaded.samples.iter().filter(|s| s.day == *day) {
-            let image = util::open_rgb(&sample.path)?;
+            let image = read_sample(&args.labels, sample)?;
             record(&base_reader, &fold, &pack_reader, sample, &image, &mut bag);
         }
     }
@@ -217,11 +217,17 @@ fn score(
 }
 
 struct Sample {
+    /// Line of this row in the labels file.
+    line: usize,
     id: String,
     day: String,
     path: PathBuf,
     readable: bool,
     labels: Labels,
+}
+
+fn read_sample(labels: &Path, sample: &Sample) -> Result<image::RgbImage, String> {
+    util::open_rgb(&sample.path).map_err(|e| format!("{}:{}: {e}", labels.display(), sample.line))
 }
 
 struct Bag {
@@ -791,10 +797,11 @@ fn load(
 ) -> Result<Loaded<Sample>, String> {
     let frames = frames.ok_or("missing --frames")?;
     let (values, mut notes) = util::read_jsonl(labels, RANK_KEYS, RANK_EXTRA_KEYS)?;
-    let mut rows: Vec<Row> = values
+    let mut rows: Vec<(usize, Row)> = values
         .into_iter()
         .map(|(line, obj)| {
             serde_json::from_value(fill_label_nulls(Value::Object(obj)))
+                .map(|row| (line, row))
                 .map_err(|e| format!("{}:{line}: {e}", labels.display()))
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -814,7 +821,7 @@ fn load(
                 return Err(format!("role labels list {} twice", role.game));
             }
         }
-        for row in &mut rows {
+        for (_, row) in &mut rows {
             if let Some(role) = roles.iter().find(|r| r.game == row.game) {
                 row.labels.role = role.role;
             }
@@ -823,15 +830,21 @@ fn load(
     let mut samples = Vec::new();
     let mut skipped = 0usize;
     let mut unreadable = 0usize;
-    for row in &rows {
-        check_words(&row.labels)?;
-        let day = day_of(&row.game)?;
-        reject_name("game", &row.game)?;
-        reject_name("file", &row.file)?;
+    for (line, row) in &rows {
+        let here = |e: String| format!("{}:{line}: {e}", labels.display());
+        check_words(&row.labels).map_err(&here)?;
+        let day = day_of(&row.game).map_err(&here)?;
+        reject_name("game", &row.game).map_err(&here)?;
+        reject_name("file", &row.file).map_err(&here)?;
         let rel = Path::new(&row.game).join(&row.file);
-        let path = util::under_root(frames, &rel)?;
-        let (width, height) = image::image_dimensions(&path)
-            .map_err(|e| format!("reading {}: {e}", path.display()))?;
+        let path = util::under_root(frames, &rel).map_err(&here)?;
+        let (width, height) = image::image_dimensions(&path).map_err(|e| {
+            format!(
+                "{}:{line}: reading {}: {e}",
+                labels.display(),
+                path.display()
+            )
+        })?;
         if Scale::from_dims(width, height).is_none() {
             skipped += 1;
             continue;
@@ -840,6 +853,7 @@ fn load(
             unreadable += 1;
         }
         samples.push(Sample {
+            line: *line,
             id: format!("{}/{}", row.game, row.file),
             day,
             path,

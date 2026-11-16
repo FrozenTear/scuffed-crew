@@ -1,5 +1,5 @@
 //! Build output stays outside any git work tree. The out directory is
-//! mode 0700 and each tar is mode 0600.
+//! mode 0700. Each tar and the list file `manifest.json` are mode 0600.
 
 use std::path::{Path, PathBuf};
 
@@ -230,16 +230,8 @@ fn read_list(path: &Path) -> Result<Vec<ListEntry>, String> {
 fn write_list(path: &Path, entries: &[ListEntry]) -> Result<(), String> {
     let mut bytes = serde_json::to_vec(entries).map_err(|e| e.to_string())?;
     bytes.push(b'\n');
-    let tmp = path.with_file_name(".manifest.json.partial");
-    let write = (|| -> Result<(), String> {
-        std::fs::write(&tmp, &bytes).map_err(|e| format!("writing {}: {e}", tmp.display()))?;
-        std::fs::rename(&tmp, path).map_err(|e| format!("writing {}: {e}", path.display()))?;
-        Ok(())
-    })();
-    if write.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    write
+    // Same 0600 path as the tar. `std::fs::write` would follow the umask.
+    write_private(path, &bytes)
 }
 
 fn chmod_owner(path: &Path, mode: u32) -> Result<(), String> {
