@@ -822,7 +822,7 @@ const PAGE_CSS: &str = r#"
         display: flex;
         flex-direction: column;
         gap: 0.28rem;
-        max-height: calc(100vh - 8.5rem);
+        max-height: calc(100vh - var(--nav-height-used) - 5.5rem);
         overflow-y: auto;
         padding-right: 0.15rem;
     }

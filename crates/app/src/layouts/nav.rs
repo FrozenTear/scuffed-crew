@@ -78,6 +78,9 @@ impl NavGroup {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct NavContext {
     pub signed_in: bool,
+    /// Has an org role (recruit and up). A signed-in account without a
+    /// member row is not a member: it can still apply.
+    pub is_member: bool,
     /// Officer or admin: the tier `AdminLayout` lets in.
     pub admin_access: bool,
     /// Full admin: sees the admin-only pages inside the admin section.
@@ -122,7 +125,16 @@ pub(crate) fn nav_groups(ctx: NavContext) -> Vec<NavGroup> {
             strategy.push(entry("strategy_my", "My strategies", Route::StrategyMy {}));
         }
         strategy.push(entry("strategy_heroes", "Heroes", Route::StrategyHeroes {}));
-        strategy.push(entry("strategy_meta", "Meta", Route::StrategyMeta {}));
+        // Meta is hidden until /api/strategy/meta has global hero data
+        // (it returns an empty list today, so the page is always empty).
+        // Saving needs an org membership, so only members get the entry.
+        if ctx.is_member {
+            strategy.push(entry(
+                "strategy_new",
+                "New strategy",
+                Route::StrategyEditorNew {},
+            ));
+        }
     }
     // Patch Notes is one public page. It stays when Strategies is off.
     strategy.push(entry("patch_notes", "Patch Notes", Route::PatchNotes {}));
@@ -155,6 +167,11 @@ pub(crate) fn account_entries(ctx: NavContext) -> Vec<NavEntry> {
     ));
     entries.push(entry("reports", "My reports", Route::MyReports {}));
     entries.push(entry("link", "Link a device", Route::LinkDevice {}));
+    // Signed in without a membership: the application page is where they
+    // apply, check on an application or withdraw it.
+    if !ctx.is_member {
+        entries.push(entry("apply", "Apply", Route::Apply {}));
+    }
     entries
 }
 
@@ -330,7 +347,10 @@ pub(crate) fn is_current(entry: &Route, current: &Route) -> bool {
     matches!(
         (entry, current),
         (Route::AdminMembers {}, Route::AdminMemberMatches { .. })
-            | (Route::Members {}, Route::MemberProfile { .. })
+            | (
+                Route::Members {},
+                Route::MemberProfile { .. } | Route::TeamPage { .. }
+            )
             | (Route::Blog {}, Route::BlogPost { .. })
             | (Route::Wiki {}, Route::WikiPage { .. })
             | (
@@ -343,12 +363,29 @@ pub(crate) fn is_current(entry: &Route, current: &Route) -> bool {
                 Route::StatsTokens {} | Route::StatsMember { .. } | Route::StatsMatch { .. }
             )
             | (Route::PatchNotes {}, Route::StrategyPatchNotes {})
-            | (
-                Route::StrategyBrowse {},
-                Route::StrategyEditorNew {} | Route::StrategyEditor { .. }
-            )
+            // The new-strategy editor has its own entry (members only).
+            | (Route::StrategyBrowse {}, Route::StrategyEditor { .. })
             | (Route::DmInbox {}, Route::DmThread { .. })
     )
+}
+
+/// `aria-current` for a nav link: `page` on the page itself, `true` on the
+/// list page a nested or detail page hangs under.
+pub(crate) fn aria_current(entry: &Route, current: &Route) -> Option<&'static str> {
+    if entry == current {
+        Some("page")
+    } else if is_current(entry, current) {
+        Some("true")
+    } else {
+        None
+    }
+}
+
+/// `aria-current` for a control that stands for a whole section (a top bar
+/// group, a phone tab, the Admin entry): `true` on every page in the section,
+/// so detail pages with no list entry of their own still mark something.
+pub(crate) fn section_aria_current(in_section: bool) -> Option<&'static str> {
+    in_section.then_some("true")
 }
 
 /// Direct messages, team chat and the strategy editor are full-height tools.
@@ -372,14 +409,20 @@ mod tests {
 
     const GUEST: NavContext = NavContext {
         signed_in: false,
+        is_member: false,
         admin_access: false,
         is_admin: false,
         strategies_enabled: true,
         relay_on: true,
     };
-    const MEMBER: NavContext = NavContext {
+    /// Signed in, no member row (a fresh account or a pending applicant).
+    const APPLICANT: NavContext = NavContext {
         signed_in: true,
         ..GUEST
+    };
+    const MEMBER: NavContext = NavContext {
+        is_member: true,
+        ..APPLICANT
     };
     const OFFICER: NavContext = NavContext {
         admin_access: true,
@@ -414,12 +457,7 @@ mod tests {
         );
         assert_eq!(
             group(GUEST, NavGroupId::Strategy),
-            [
-                "strategy",
-                "strategy_heroes",
-                "strategy_meta",
-                "patch_notes"
-            ]
+            ["strategy", "strategy_heroes", "patch_notes"]
         );
     }
 
@@ -445,10 +483,58 @@ mod tests {
                 "strategy",
                 "strategy_my",
                 "strategy_heroes",
-                "strategy_meta",
+                "strategy_new",
                 "patch_notes"
             ]
         );
+    }
+
+    /// Base hid Meta from the strategy bar because the API has no global
+    /// hero data. The grouped nav keeps it hidden for everyone.
+    #[test]
+    fn meta_stays_out_of_the_nav() {
+        for ctx in [GUEST, APPLICANT, MEMBER, OFFICER, ADMIN] {
+            for group in nav_groups(ctx) {
+                assert!(
+                    group
+                        .entries
+                        .iter()
+                        .all(|entry| entry.route != Route::StrategyMeta {}),
+                    "{:?}",
+                    group.id
+                );
+            }
+        }
+    }
+
+    /// Base had "New Strategy" on every strategy page for org members.
+    #[test]
+    fn new_strategy_is_for_members_and_leaves_with_strategies() {
+        assert!(!group(GUEST, NavGroupId::Strategy).contains(&"strategy_new"));
+        assert!(!group(APPLICANT, NavGroupId::Strategy).contains(&"strategy_new"));
+        assert!(group(APPLICANT, NavGroupId::Strategy).contains(&"strategy_my"));
+        for ctx in [MEMBER, OFFICER, ADMIN] {
+            assert!(group(ctx, NavGroupId::Strategy).contains(&"strategy_new"));
+        }
+        let off = NavContext {
+            strategies_enabled: false,
+            ..MEMBER
+        };
+        assert!(!group(off, NavGroupId::Strategy).contains(&"strategy_new"));
+    }
+
+    /// A signed-in account with no membership still needs the application
+    /// page, to apply, check on an application or withdraw it.
+    #[test]
+    fn signed_in_without_a_membership_gets_apply_in_the_account_menu() {
+        let applicant = account_entries(APPLICANT);
+        let apply = applicant.last().expect("entries");
+        assert_eq!((apply.id, apply.label), ("apply", "Apply"));
+        assert_eq!(apply.route, Route::Apply {});
+        for ctx in [MEMBER, OFFICER, ADMIN] {
+            assert!(!ids(&account_entries(ctx)).contains(&"apply"));
+        }
+        assert!(account_entries(GUEST).is_empty());
     }
 
     #[test]
@@ -608,13 +694,13 @@ mod tests {
             route,
             // First-run only. A finished setup redirects to Log in.
             Route::Setup {}
-            // Guest pages. A signed-in person has no Apply or Log in.
+            // Guest pages. A member has no Apply or Log in.
             | Route::Login {}
             | Route::Apply {}
             // Same page as Patch Notes. The nav links the public one.
             | Route::StrategyPatchNotes {}
-            // Opened from the New strategy buttons on Planner and My strategies.
-            | Route::StrategyEditorNew {}
+            // Hidden until /api/strategy/meta has global hero data.
+            | Route::StrategyMeta {}
             // Opened from the Stats page and the device link page.
             | Route::StatsTokens {}
         )
@@ -685,6 +771,19 @@ mod tests {
             &Route::PatchNotes {},
             &Route::StrategyPatchNotes {}
         ));
+        assert!(is_current(
+            &Route::Members {},
+            &Route::TeamPage { id: "t1".into() }
+        ));
+        // The new-strategy editor is its own entry, a saved one sits under Planner.
+        assert!(!is_current(
+            &Route::StrategyBrowse {},
+            &Route::StrategyEditorNew {}
+        ));
+        assert!(is_current(
+            &Route::StrategyBrowse {},
+            &Route::StrategyEditor { id: "s1".into() }
+        ));
         assert!(!is_current(&Route::Members {}, &Route::Forum {}));
         assert!(!is_current(
             &Route::AdminDashboard {},
@@ -699,5 +798,32 @@ mod tests {
         assert!(is_tool_route(&Route::StrategyEditorNew {}));
         assert!(!is_tool_route(&Route::Home {}));
         assert!(!is_tool_route(&Route::StrategyBrowse {}));
+    }
+
+    #[test]
+    fn aria_current_is_page_on_the_page_and_true_on_its_parent() {
+        assert_eq!(
+            aria_current(&Route::Members {}, &Route::Members {}),
+            Some("page")
+        );
+        for (parent, child) in [
+            (
+                Route::AdminMembers {},
+                Route::AdminMemberMatches { id: "m1".into() },
+            ),
+            (Route::Tournaments {}, Route::Tournament { id: "t1".into() }),
+            (Route::Members {}, Route::TeamPage { id: "t1".into() }),
+            (
+                Route::Forum {},
+                Route::ForumBoardPage {
+                    slug: "general".into(),
+                },
+            ),
+        ] {
+            assert_eq!(aria_current(&parent, &child), Some("true"), "{child}");
+        }
+        assert_eq!(aria_current(&Route::Members {}, &Route::Forum {}), None);
+        assert_eq!(section_aria_current(true), Some("true"));
+        assert_eq!(section_aria_current(false), None);
     }
 }

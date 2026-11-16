@@ -327,7 +327,8 @@ const EDITOR_CSS: &str = r#"
         display: flex;
         align-items: center;
         justify-content: center;
-        z-index: 100;
+        /* Above the site top bar and phone tab bar (100), below the drawer. */
+        z-index: 110;
     }
     .map-picker-dialog {
         background: var(--surface);

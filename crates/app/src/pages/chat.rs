@@ -70,6 +70,22 @@ const PAGE_CSS: &str = r#"
     .team-chat-page { padding: 1.25rem 1rem; }
     .team-chat-title { font-size: 1.75rem; }
 }
+/* Phone (the shell's breakpoint): the page is as tall as the shell leaves
+   and the chat takes the rest of it, so the page does not scroll by the few
+   pixels a fixed 70vh chat used to add. */
+@media (max-width: 820px) {
+    .team-chat-page {
+        display: flex;
+        flex-direction: column;
+        min-height: calc(100vh - var(--shell-chrome-height, 0px));
+        min-height: calc(100dvh - var(--shell-chrome-height, 0px));
+    }
+    .team-chat-page .chat-widget--embedded {
+        flex: 1 1 0;
+        height: auto;
+        min-height: 18rem;
+    }
+}
 "#;
 
 #[component]

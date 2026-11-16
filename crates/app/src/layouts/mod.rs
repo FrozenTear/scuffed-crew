@@ -103,6 +103,50 @@ fn keydown_target(capture: bool) -> Option<web_sys::EventTarget> {
     }
 }
 
+/// A DOM event listener for the lifetime of the calling component.
+///
+/// `target` runs once, on the first render, and the listener is removed from
+/// that same object on unmount (`matchMedia` returns a new object per call,
+/// so the target is kept, not looked up again). The handler captured on the
+/// first render stays registered, so it must read signals when the event
+/// fires. Wasm only: `Closure::wrap` aborts off `wasm32`.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn use_dom_listener(
+    target: impl FnOnce() -> Option<web_sys::EventTarget>,
+    event: &'static str,
+    on_event: impl FnMut(web_sys::Event) + 'static,
+) {
+    use std::rc::Rc;
+
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+
+    type Handler = Closure<dyn FnMut(web_sys::Event)>;
+
+    fn listener_fn(closure: &Handler) -> &js_sys::Function {
+        closure.as_ref().unchecked_ref()
+    }
+
+    let bound = use_hook(move || {
+        // Called between renders, so run in this component's scope
+        // (see `in_current_scope`).
+        let mut on_event = in_current_scope(on_event);
+        let closure: Handler =
+            Closure::wrap(Box::new(move |evt: web_sys::Event| on_event(evt))
+                as Box<dyn FnMut(web_sys::Event)>);
+        let target = target();
+        if let Some(target) = &target {
+            let _ = target.add_event_listener_with_callback(event, listener_fn(&closure));
+        }
+        Rc::new((target, closure))
+    });
+    use_drop(move || {
+        if let Some(target) = &bound.0 {
+            let _ = target.remove_event_listener_with_callback(event, listener_fn(&bound.1));
+        }
+    });
+}
+
 /// `Closure::wrap` aborts off wasm32, so the listener is not installed.
 /// Desktop still has a window; this stub is the non-wasm build, not a missing window.
 /// Escape handlers in the public and admin layouts therefore do not run here.

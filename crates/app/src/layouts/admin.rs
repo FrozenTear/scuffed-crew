@@ -1,6 +1,6 @@
 use dioxus::prelude::*;
 
-use super::nav::{NavContext, admin_entries, is_current};
+use super::nav::{NavContext, admin_entries, aria_current, is_current};
 use super::shell::SiteShell;
 use crate::routes::Route;
 use crate::state::use_auth;
@@ -14,6 +14,9 @@ const ADMIN_CSS: &str = r#"
     .admin-main {
         min-width: 0;
         padding: 2rem 2.5rem;
+        /* Wide admin content scrolls inside the admin area and never widens
+           the page. `overflow-y: auto` makes `overflow-x` compute to auto too. */
+        overflow-y: auto;
     }
     .admin-main h1 {
         font-family: var(--font-head);
@@ -80,6 +83,7 @@ pub fn AdminLayout() -> Element {
         signed_in,
         admin_access: allowed,
         is_admin: session.is_admin(),
+        is_member: session.is_org_member(),
         strategies_enabled: true,
         relay_on: true,
     });
@@ -87,12 +91,15 @@ pub fn AdminLayout() -> Element {
     // The sub-nav is only for people who can open the pages it lists.
     let subnav = (!session.loading && allowed).then(|| {
         rsx! {
-            nav { class: "admin-subnav", aria_label: "Admin",
+            // tabindex -1: Firefox makes a scrolling box a Tab stop of its
+            // own. Its links still scroll it when they take focus.
+            nav { class: "admin-subnav", aria_label: "Admin", tabindex: "-1",
                 for entry in entries.iter() {
                     Link {
                         key: "{entry.id}",
                         to: entry.route.clone(),
                         class: if is_current(&entry.route, &route) { "is-active" } else { "" },
+                        "aria-current": aria_current(&entry.route, &route),
                         "{entry.label}"
                     }
                 }

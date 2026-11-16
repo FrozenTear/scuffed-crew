@@ -9,9 +9,12 @@ use scuffed_api_client::ApiClient;
 use scuffed_types::SiteSettings;
 
 use super::nav::{
-    NavContext, NavEntry, NavGroupId, Section, account_entries, drawer_admin_entries,
-    guest_entries, is_current, is_tool_route, nav_groups, section_of, shows_admin_entry,
+    NavContext, NavEntry, NavGroupId, Section, account_entries, aria_current, drawer_admin_entries,
+    guest_entries, is_current, is_tool_route, nav_groups, section_aria_current, section_of,
+    shows_admin_entry,
 };
+#[cfg(target_arch = "wasm32")]
+use super::use_dom_listener;
 use super::{focus_element, use_document_keydown};
 use crate::routes::Route;
 use crate::state::auth::{AuthState, use_auth};
@@ -148,6 +151,59 @@ fn trap_tab_in_drawer(evt: &web_sys::KeyboardEvent) {
 #[cfg(not(target_arch = "wasm32"))]
 fn trap_tab_in_drawer(_evt: &web_sys::KeyboardEvent) {}
 
+/// The phone layout's media query, the same one `SHELL_CSS` uses. The drawer
+/// exists only while it matches.
+#[cfg(any(test, target_arch = "wasm32"))]
+const PHONE_QUERY: &str = "(max-width: 820px)";
+
+/// The drawer is a phone control. When the viewport grows past the phone
+/// breakpoint (a rotated tablet, a resized window) it closes, so it never
+/// sits over the desktop layout with the page inert and its toggle hidden.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn closes_on_resize(current: Option<Disclosure>, phone_layout: bool) -> bool {
+    current == Some(Disclosure::Drawer) && !phone_layout
+}
+
+/// A group panel or the account menu closes when focus moves to something
+/// outside it (Tab past its last link, Shift+Tab before its button). The
+/// drawer traps focus instead, so it is not closed this way.
+#[cfg(any(test, target_arch = "wasm32"))]
+fn closes_on_focus_move(current: Option<Disclosure>, focus_inside: bool) -> bool {
+    matches!(current, Some(Disclosure::Group(_) | Disclosure::Account)) && !focus_inside
+}
+
+/// The phone media query, as an event target for its `change` event.
+#[cfg(target_arch = "wasm32")]
+fn phone_query_target() -> Option<web_sys::EventTarget> {
+    let query = web_sys::window()?.match_media(PHONE_QUERY).ok()??;
+    Some(query.into())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn document_target() -> Option<web_sys::EventTarget> {
+    web_sys::window()?.document().map(Into::into)
+}
+
+/// True when the node that took focus sits in the open disclosure: its
+/// toggle and its panel share one wrapper element.
+#[cfg(target_arch = "wasm32")]
+fn focus_is_inside(current: Disclosure, evt: &web_sys::Event) -> bool {
+    use wasm_bindgen::JsCast;
+
+    let wrapper = web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.get_element_by_id(current.toggle_id()))
+        .and_then(|toggle| toggle.parent_element());
+    let focused = evt
+        .target()
+        .and_then(|target| target.dyn_into::<web_sys::Node>().ok());
+    match (wrapper, focused) {
+        (Some(wrapper), Some(focused)) => wrapper.contains(Some(&focused)),
+        // Cannot tell: leave the panel open.
+        _ => true,
+    }
+}
+
 // `use_signal` runs its initializer once. Tests set `STARTS_OPEN` so the real
 // shell mounts with one disclosure open; production always starts closed.
 #[cfg(test)]
@@ -187,7 +243,8 @@ impl ShellState {
     fn close(self, return_focus: bool) {
         let mut open = self.open;
         let mut refocus = self.refocus;
-        let Some(current) = open() else {
+        // `peek`: an effect that closes must not start following `open`.
+        let Some(current) = *open.peek() else {
             return;
         };
         open.set(None);
@@ -213,7 +270,35 @@ fn use_shell_state() -> ShellState {
             focus_element(DRAWER_CLOSE_ID);
         }
     });
-    ShellState { open, refocus }
+    let state = ShellState { open, refocus };
+
+    // Off wasm these two listeners are not installed (see `use_dom_listener`).
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen::JsCast;
+
+        // `change` fires when the viewport crosses the phone breakpoint.
+        use_dom_listener(phone_query_target, "change", move |evt| {
+            let phone_layout = evt
+                .target()
+                .and_then(|target| target.dyn_into::<web_sys::MediaQueryList>().ok())
+                .is_none_or(|query| query.matches());
+            let current = *state.open.peek();
+            if closes_on_resize(current, phone_layout) {
+                // The Menu tab is hidden now, so there is no toggle to refocus.
+                state.close(false);
+            }
+        });
+        use_dom_listener(document_target, "focusin", move |evt| {
+            let Some(current) = *state.open.peek() else {
+                return;
+            };
+            if closes_on_focus_move(Some(current), focus_is_inside(current, &evt)) {
+                state.close(false);
+            }
+        });
+    }
+    state
 }
 
 fn sign_out(mut auth: Signal<AuthState>) {
@@ -249,6 +334,16 @@ fn user_initials(username: &str) -> String {
 fn safe_avatar_url(url: Option<&str>) -> Option<String> {
     let url = url?.trim();
     (url.starts_with('/') || url.starts_with("https://")).then(|| url.to_string())
+}
+
+/// `aria-current` for a link that stands for a section (a phone tab, the
+/// Admin entry): `page` on its own page, `true` elsewhere in the section.
+fn section_link_current(to: &Route, current: &Route, in_section: bool) -> Option<&'static str> {
+    if to == current {
+        Some("page")
+    } else {
+        section_aria_current(in_section)
+    }
 }
 
 fn entry_class(entry: &NavEntry, current: &Route) -> &'static str {
@@ -916,6 +1011,16 @@ const SHELL_CSS: &str = r#"
             gap: var(--space-4);
         }
     }
+    /* Narrow phones: five tabs in 360px leave 72px each, and "Community" at
+       the nav size is wider than that in Firefox. */
+    @media (max-width: 380px) {
+        .site-tab-bar a,
+        .site-tab-bar button {
+            font-size: var(--text-xs);
+            padding-left: 0;
+            padding-right: 0;
+        }
+    }
 "#;
 
 /// The site chrome around a routed page.
@@ -927,6 +1032,15 @@ pub(crate) fn SiteShell(subnav: Option<Element>, children: Element) -> Element {
     let state = use_shell_state();
     let auth = use_auth();
     let route = use_route::<Route>();
+
+    // Any route change closes what is open: a followed link, and also the
+    // browser's Back and Forward, which no click handler sees. Focus is left
+    // to the new page. `peek`, so opening something does not re-run this.
+    use_effect(use_reactive((&route,), move |(_route,)| {
+        if state.open.peek().is_some() {
+            state.close(false);
+        }
+    }));
 
     // Off wasm the listener is not installed (see `use_document_keydown`).
     use_document_keydown(move |evt| {
@@ -952,6 +1066,7 @@ pub(crate) fn SiteShell(subnav: Option<Element>, children: Element) -> Element {
     let loading = session.loading;
     let ctx = NavContext {
         signed_in: session.is_logged_in(),
+        is_member: session.is_org_member(),
         admin_access: session.is_officer_or_above(),
         is_admin: session.is_admin(),
         strategies_enabled: strategies_enabled_or_default(loaded_settings),
@@ -1028,6 +1143,8 @@ pub(crate) fn SiteShell(subnav: Option<Element>, children: Element) -> Element {
         ""
     };
     let menu_tab_class = if drawer_open { "is-active" } else { "" };
+    let admin_current =
+        section_link_current(&Route::AdminDashboard {}, &route, section == Section::Admin);
 
     rsx! {
         crate::styles::StyleOnce { id: "scuffed-css-layouts-shell", css: SHELL_CSS }
@@ -1072,6 +1189,7 @@ pub(crate) fn SiteShell(subnav: Option<Element>, children: Element) -> Element {
                                 class: "d1-group-btn",
                                 r#type: "button",
                                 aria_expanded: expanded(open, Disclosure::Group(group.id)),
+                                "aria-current": section_aria_current(section == Section::Group(group.id)),
                                 aria_controls: Disclosure::Group(group.id).panel_id(),
                                 onclick: {
                                     let target = Disclosure::Group(group.id);
@@ -1085,6 +1203,7 @@ pub(crate) fn SiteShell(subnav: Option<Element>, children: Element) -> Element {
                                         key: "mega-{entry.id}",
                                         to: entry.route.clone(),
                                         class: entry_class(entry, &route),
+                                        "aria-current": aria_current(&entry.route, &route),
                                         onclick: move |_| state.close(false),
                                         "{entry.label}"
                                     }
@@ -1101,6 +1220,7 @@ pub(crate) fn SiteShell(subnav: Option<Element>, children: Element) -> Element {
                             Link {
                                 to: Route::AdminDashboard {},
                                 class: admin_class,
+                                "aria-current": admin_current,
                                 onclick: move |_| state.close(false),
                                 "Admin"
                             }
@@ -1131,6 +1251,7 @@ pub(crate) fn SiteShell(subnav: Option<Element>, children: Element) -> Element {
                                         key: "account-{entry.id}",
                                         to: entry.route.clone(),
                                         class: entry_class(entry, &route),
+                                        "aria-current": aria_current(&entry.route, &route),
                                         onclick: move |_| state.close(false),
                                         "{entry.label}"
                                     }
@@ -1139,6 +1260,7 @@ pub(crate) fn SiteShell(subnav: Option<Element>, children: Element) -> Element {
                                     Link {
                                         to: Route::AdminDashboard {},
                                         class: if section == Section::Admin { "is-active" } else { "" },
+                                        "aria-current": admin_current,
                                         onclick: move |_| state.close(false),
                                         "Admin"
                                     }
@@ -1200,6 +1322,7 @@ pub(crate) fn SiteShell(subnav: Option<Element>, children: Element) -> Element {
                             key: "drawer-{entry.id}",
                             to: entry.route.clone(),
                             class: entry_class(entry, &route),
+                            "aria-current": aria_current(&entry.route, &route),
                             onclick: move |_| state.close(false),
                             "{entry.label}"
                         }
@@ -1212,6 +1335,7 @@ pub(crate) fn SiteShell(subnav: Option<Element>, children: Element) -> Element {
                             key: "drawer-{entry.id}",
                             to: entry.route.clone(),
                             class: entry_class(entry, &route),
+                            "aria-current": aria_current(&entry.route, &route),
                             onclick: move |_| state.close(false),
                             "{entry.label}"
                         }
@@ -1225,6 +1349,7 @@ pub(crate) fn SiteShell(subnav: Option<Element>, children: Element) -> Element {
                                 key: "drawer-{entry.id}",
                                 to: entry.route.clone(),
                                 class: entry_class(entry, &route),
+                                "aria-current": aria_current(&entry.route, &route),
                                 onclick: move |_| state.close(false),
                                 "{entry.label}"
                             }
@@ -1244,6 +1369,7 @@ pub(crate) fn SiteShell(subnav: Option<Element>, children: Element) -> Element {
                                 key: "drawer-{entry.id}",
                                 to: entry.route.clone(),
                                 class: entry_class(entry, &route),
+                                "aria-current": aria_current(&entry.route, &route),
                                 onclick: move |_| state.close(false),
                                 "{entry.label}"
                             }
@@ -1281,6 +1407,7 @@ pub(crate) fn SiteShell(subnav: Option<Element>, children: Element) -> Element {
                                         key: "footer-{entry.id}",
                                         to: entry.route.clone(),
                                         class: entry_class(entry, &route),
+                                        "aria-current": aria_current(&entry.route, &route),
                                         "{entry.label}"
                                     }
                                 }
@@ -1294,6 +1421,7 @@ pub(crate) fn SiteShell(subnav: Option<Element>, children: Element) -> Element {
                                         key: "footer-{entry.id}",
                                         to: entry.route.clone(),
                                         class: entry_class(entry, &route),
+                                        "aria-current": aria_current(&entry.route, &route),
                                         "{entry.label}"
                                     }
                                 }
@@ -1309,6 +1437,7 @@ pub(crate) fn SiteShell(subnav: Option<Element>, children: Element) -> Element {
                                         key: "footer-{entry.id}",
                                         to: entry.route.clone(),
                                         class: entry_class(entry, &route),
+                                        "aria-current": aria_current(&entry.route, &route),
                                         "{entry.label}"
                                     }
                                 }
@@ -1337,8 +1466,13 @@ pub(crate) fn SiteShell(subnav: Option<Element>, children: Element) -> Element {
                     if let Some(landing) = group.landing() {
                         Link {
                             key: "tab-{group.id.toggle_id()}",
-                            to: landing,
+                            to: landing.clone(),
                             class: tab_class(open, section, group.id),
+                            "aria-current": section_link_current(
+                                &landing,
+                                &route,
+                                section == Section::Group(group.id),
+                            ),
                             onclick: move |_| state.close(false),
                             "{group.id.label()}"
                         }
@@ -1392,6 +1526,8 @@ mod tests {
     #[derive(Clone, Copy, PartialEq)]
     enum Who {
         Guest,
+        /// Signed in, no member row.
+        Applicant,
         Member,
         Officer,
         Admin,
@@ -1428,18 +1564,19 @@ mod tests {
         let path = PATH.with(|slot| slot.borrow().clone());
         let history =
             use_hook(|| std::rc::Rc::new(dioxus::history::MemoryHistory::with_initial_path(path)));
-        let role = match WHO.with(|slot| slot.get()) {
-            Who::Guest => None,
+        let who = WHO.with(|slot| slot.get());
+        let role = match who {
+            Who::Guest | Who::Applicant => None,
             Who::Member => Some(OrgRole::Member),
             Who::Officer => Some(OrgRole::Officer),
             Who::Admin => Some(OrgRole::Admin),
         };
         let auth = use_signal(|| AuthState {
-            user: role.map(|role| UserInfo {
+            user: (who != Who::Guest).then(|| UserInfo {
                 id: "member-1".into(),
                 username: "Player01".into(),
                 avatar_url: None,
-                role: Some(role),
+                role,
             }),
             loading: false,
         });
@@ -1960,13 +2097,15 @@ mod tests {
             "/stats",
             "/strategy",
             "/strategy/heroes",
-            "/strategy/meta",
             "/patch-notes",
             "/apply",
             "/login",
         ] {
             assert!(menu.contains(&format!("href=\"{href}\"")), "{href}: {menu}");
         }
+        // Meta stays hidden, as before the redesign. New strategy is for members.
+        assert!(!guest.contains("href=\"/strategy/meta\""), "{guest}");
+        assert!(!guest.contains("href=\"/strategy/editor\""), "{guest}");
         assert!(menu.contains("class=\"theme-toggle\""), "{menu}");
         assert!(!menu.contains("<h2>Admin</h2>"), "{menu}");
 
@@ -1978,6 +2117,7 @@ mod tests {
             "/chat",
             "/community",
             "/strategy/my",
+            "/strategy/editor",
             "/profile/edit",
             "/dm",
             "/identity",
@@ -2041,6 +2181,254 @@ mod tests {
         assert!(chat.contains("class=\"site-tab-bar\""), "{chat}");
         let home = render(Who::Member, "/", None);
         assert!(home.contains("<footer"), "{home}");
+    }
+
+    /// QA nit 11: a signed-in account with no membership had no way to the
+    /// application page from the shell.
+    #[test]
+    fn a_signed_in_account_without_a_membership_gets_apply_in_the_account_menu() {
+        let html = render(Who::Applicant, "/", None);
+        let account = section(&html, "id=\"nav-account-panel\"", "</header>");
+        assert!(account.contains("href=\"/apply\""), "{account}");
+        assert!(account.contains(">Apply<"), "{account}");
+        assert!(drawer(&html).contains("href=\"/apply\""), "{html}");
+        // Still no guest buttons, and no member-only entries.
+        assert!(!html.contains("href=\"/login\""), "{html}");
+        assert!(!html.contains("d1-btn is-primary"), "{html}");
+        assert!(!html.contains("href=\"/strategy/editor\""), "{html}");
+        assert!(!html.contains("href=\"/admin"), "{html}");
+    }
+
+    /// QA nit 6: a nested or detail page marks its parent link, and every
+    /// page in a section marks the section's group button and phone tab.
+    #[test]
+    fn nested_and_detail_pages_mark_their_parents_with_aria_current() {
+        let html = render(Who::Admin, "/admin/members/m1/matches", None);
+        let subnav = section(&html, "class=\"admin-subnav\"", "</nav>");
+        let members = section(subnav, "href=\"/admin/members\"", "</a>");
+        assert!(members.contains("aria-current=\"true\""), "{members}");
+        assert_eq!(subnav.matches("aria-current").count(), 1, "{subnav}");
+        let admin = tag_with_class(&html, "btn-admin is-current");
+        assert!(admin.contains("aria-current=\"true\""), "{admin}");
+
+        for (path, parent) in [
+            ("/tournaments/t1", "/tournaments"),
+            ("/teams/t1", "/members"),
+            ("/forum/b/general", "/forum"),
+        ] {
+            let html = render(Who::Guest, path, None);
+            let link = section(top_bar(&html), &format!("href=\"{parent}\""), "</a>");
+            assert!(link.contains("aria-current=\"true\""), "{path}: {link}");
+            assert!(link.contains("is-active"), "{path}: {link}");
+            let bar = section(&html, "class=\"site-tab-bar\"", "</nav>");
+            assert_eq!(bar.matches("aria-current").count(), 1, "{path}: {bar}");
+        }
+
+        // A detail page with no list entry still marks its section.
+        let html = render(Who::Guest, "/matches/m1", None);
+        let compete = tag_with_id(&html, NavGroupId::Compete.toggle_id());
+        assert!(compete.contains("aria-current=\"true\""), "{compete}");
+        let community = tag_with_id(&html, NavGroupId::Community.toggle_id());
+        assert!(!community.contains("aria-current"), "{community}");
+        let bar = section(&html, "class=\"site-tab-bar\"", "</nav>");
+        let tab = section(bar, "href=\"/tournaments\"", "</a>");
+        assert!(tab.contains("aria-current=\"true\""), "{tab}");
+
+        // The page itself is `page`, once per link, never doubled or mixed.
+        let html = render(Who::Guest, "/members", None);
+        let members = section(top_bar(&html), "href=\"/members\"", "</a>");
+        assert!(members.contains("aria-current=\"page\""), "{members}");
+        assert!(
+            !html.contains("aria-current=\"true\" aria-current"),
+            "{html}"
+        );
+        assert!(
+            !html.contains("aria-current=\"page\" aria-current=\"true\""),
+            "{html}"
+        );
+        assert_eq!(
+            section_link_current(&Route::Home {}, &Route::Home {}, true),
+            Some("page")
+        );
+        assert_eq!(
+            section_link_current(&Route::Members {}, &Route::Forum {}, true),
+            Some("true")
+        );
+        assert_eq!(
+            section_link_current(&Route::Members {}, &Route::Stats {}, false),
+            None
+        );
+    }
+
+    /// QA nits 3 and 5: what closes without a click or Escape.
+    #[test]
+    fn the_drawer_closes_past_the_phone_width_and_panels_close_when_focus_leaves() {
+        assert!(closes_on_resize(Some(Disclosure::Drawer), false));
+        assert!(!closes_on_resize(Some(Disclosure::Drawer), true));
+        assert!(!closes_on_resize(Some(COMMUNITY), false));
+        assert!(!closes_on_resize(Some(Disclosure::Account), false));
+        assert!(!closes_on_resize(None, false));
+        // The listener and the stylesheet agree on where phone ends.
+        assert_eq!(PHONE_QUERY, "(max-width: 820px)");
+        assert!(SHELL_CSS.contains(&format!("@media {PHONE_QUERY} {{")));
+
+        assert!(closes_on_focus_move(Some(COMMUNITY), false));
+        assert!(closes_on_focus_move(Some(Disclosure::Account), false));
+        assert!(!closes_on_focus_move(Some(COMMUNITY), true));
+        assert!(!closes_on_focus_move(Some(Disclosure::Account), true));
+        // The drawer traps focus instead.
+        assert!(!closes_on_focus_move(Some(Disclosure::Drawer), false));
+        assert!(!closes_on_focus_move(None, false));
+
+        // A toggle and its panel share a wrapper, which is what "inside" means.
+        let html = render(Who::Member, "/", Some(COMMUNITY));
+        let group = section(&html, "class=\"d1-group is-open\"", "</nav>");
+        assert!(group.contains(NavGroupId::Community.toggle_id()), "{group}");
+        assert!(group.contains(NavGroupId::Community.panel_id()), "{group}");
+        let wrap = section(&html, "class=\"account-wrap\"", "</header>");
+        assert!(wrap.contains(ACCOUNT_TOGGLE_ID) && wrap.contains(ACCOUNT_PANEL_ID));
+
+        // Route changes close too (Back and Forward included).
+        let src = include_str!("shell.rs");
+        let prod = src.split("mod tests").next().expect("production half");
+        assert!(
+            prod.contains("use_effect(use_reactive((&route,), move |(_route,)| {"),
+            "a route change closes the open disclosure"
+        );
+    }
+
+    /// QA blocking 1: `/admin/relay` was 518px wide at 390. Wide admin
+    /// content scrolls inside the admin area, and the relay tables sit in
+    /// the shared table scroller.
+    #[test]
+    fn wide_admin_content_scrolls_inside_the_admin_area() {
+        let admin = include_str!("admin.rs");
+        let rule = css_rule(admin, ".admin-main {");
+        assert!(has_decl(&rule, "overflow-y: auto"), "{rule}");
+        assert!(has_decl(&rule, "min-width: 0"), "{rule}");
+        let main = css_rule(SHELL_CSS, ".site-main {");
+        assert!(has_decl(&main, "min-width: 0"), "{main}");
+
+        let scroller = css_rule(crate::styles::admin::CSS, ".data-table-scroll {");
+        assert!(has_decl(&scroller, "overflow-x: auto"), "{scroller}");
+        let relay = include_str!("../pages/admin/relay.rs");
+        let tables = relay.matches("table { class: \"data-table\",").count();
+        assert_eq!(tables, 2, "relay tables");
+        assert_eq!(
+            relay
+                .matches("div { class: \"data-table-scroll\",\n")
+                .count(),
+            tables,
+            "every relay table sits in its own scroller"
+        );
+        for (at, _) in relay.match_indices("table { class: \"data-table\",") {
+            let before = relay[..at].trim_end();
+            assert!(
+                before.ends_with("div { class: \"data-table-scroll\","),
+                "a relay table is outside the scroller"
+            );
+        }
+    }
+
+    /// QA nit 8: Firefox made the scrolling sub-nav a Tab stop of its own.
+    #[test]
+    fn the_sub_nav_scroller_is_not_a_tab_stop() {
+        let html = render(Who::Admin, "/admin", None);
+        let subnav = tag_with_class(&html, "admin-subnav");
+        assert!(subnav.contains("tabindex=\"-1\""), "{subnav}");
+        // Its links are the stops, and they are plain links.
+        let links = section(&html, "class=\"admin-subnav\"", "</nav>");
+        assert!(links.matches("<a ").count() >= 19, "{links}");
+        assert!(!links.contains("<a tabindex"), "{links}");
+    }
+
+    /// QA nit 7: "Community" was 74px in a 72px column at 360 in Firefox.
+    #[test]
+    fn narrow_phones_give_the_tab_labels_room() {
+        let narrow = SHELL_CSS
+            .split("@media (max-width: 380px) {")
+            .nth(1)
+            .expect("narrow phone rules");
+        let rule = css_rule(narrow, ".site-tab-bar a,\n        .site-tab-bar button {");
+        assert!(has_decl(&rule, "font-size: var(--text-xs)"), "{rule}");
+        assert!(has_decl(&rule, "padding-left: 0"), "{rule}");
+        assert!(has_decl(&rule, "padding-right: 0"), "{rule}");
+    }
+
+    /// QA nit 12: the map picker and the tab bar were both at 100, and the
+    /// tab bar comes later in the document, so it painted over the picker.
+    #[test]
+    fn the_map_picker_sits_above_the_bars_and_below_the_drawer() {
+        fn z_index(rule: &str) -> u32 {
+            rule.lines()
+                .find_map(|line| line.trim().strip_prefix("z-index:"))
+                .and_then(|value| value.trim().trim_end_matches(';').parse().ok())
+                .unwrap_or_else(|| panic!("no z-index in {rule}"))
+        }
+        let editor = include_str!("../pages/strategy/editor.rs");
+        let picker = z_index(&css_rule(editor, ".map-picker-overlay {"));
+        let top = z_index(&css_rule(SHELL_CSS, ".d1-top {"));
+        let phone = SHELL_CSS
+            .split("@media (max-width: 820px) {")
+            .nth(1)
+            .expect("phone rules");
+        let tabs = z_index(&css_rule(phone, ".site-tab-bar {"));
+        let drawer = z_index(&css_rule(SHELL_CSS, ".site-drawer.is-open {"));
+        assert!(picker > top && picker > tabs, "{picker} {top} {tabs}");
+        assert!(picker < drawer, "{picker} {drawer}");
+    }
+
+    /// QA nit 9: `/chat` at 390 was 10px taller than the viewport. The
+    /// embedded chat was a fixed 70vh under a page header; on phone the page
+    /// now takes the height the shell leaves and the chat fills it.
+    #[test]
+    fn the_chat_page_fits_the_shell_on_phone() {
+        let chat = include_str!("../pages/chat.rs");
+        let phone = chat
+            .split("@media (max-width: 820px) {")
+            .nth(1)
+            .expect("phone rules");
+        let page = css_rule(phone, ".team-chat-page {");
+        assert!(
+            has_decl(
+                &page,
+                "min-height: calc(100dvh - var(--shell-chrome-height, 0px))"
+            ),
+            "{page}"
+        );
+        assert!(has_decl(&page, "flex-direction: column"), "{page}");
+        let widget = css_rule(phone, ".team-chat-page .chat-widget--embedded {");
+        assert!(has_decl(&widget, "flex: 1 1 0"), "{widget}");
+        assert!(has_decl(&widget, "height: auto"), "{widget}");
+
+        // The relay-off state subtracts the tab bar too, not only the top bar.
+        let gate = include_str!("../pages/chat_gate.rs");
+        let gate = css_rule(gate, ".chat-unavailable {");
+        assert!(
+            gate.contains("var(--shell-chrome-height, var(--nav-height-used))"),
+            "{gate}"
+        );
+    }
+
+    /// QA nit 13: the patch notes table of contents sticks under the top bar
+    /// and the toolbar, so its height has to subtract the same offset.
+    #[test]
+    fn patch_notes_toc_height_matches_its_sticky_offset() {
+        let notes = include_str!("../pages/strategy/patch_notes.rs");
+        let toc = css_rule(notes, "\n    .patch-hero-toc {");
+        assert!(
+            has_decl(&toc, "top: calc(var(--nav-height-used) + 5.5rem)"),
+            "{toc}"
+        );
+        assert!(
+            has_decl(
+                &toc,
+                "max-height: calc(100vh - var(--nav-height-used) - 5.5rem)"
+            ),
+            "{toc}"
+        );
+        let old = ["100vh - 8.5", "rem"].concat();
+        assert!(!notes.contains(&old), "the old fixed offset is gone");
     }
 
     fn settings_json() -> String {
