@@ -1,3 +1,4 @@
+mod appearance;
 mod apply;
 mod article_author;
 mod blog;
@@ -41,6 +42,7 @@ mod wiki_page;
 pub mod admin;
 pub mod strategy;
 
+pub use appearance::AppearanceSettings;
 pub use apply::Apply;
 pub use blog::Blog;
 pub use blog_post::BlogPost;

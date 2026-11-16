@@ -1,9 +1,10 @@
 use dioxus::prelude::*;
 
 use crate::components::{AccessDenied, Toast, use_toast};
+use crate::routes::Route;
 use crate::state::site_settings::SiteSettingsState;
 use crate::state::use_auth;
-use crate::theme::tokens::{BG_DARK, BRAND_ACCENT_DARK, BRAND_ACCENT_LIGHT};
+use crate::theme::tokens::BG_DARK;
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::UpdateSettingsRequest;
 use scuffed_types::{
@@ -82,8 +83,10 @@ pub fn AdminSettings() -> Element {
     let mut nav = use_signal(NavConfig::default);
     let mut page_bg_color = use_signal(String::new);
     let mut page_bg_image_url = use_signal(String::new);
-    let mut brand_accent_dark = use_signal(String::new);
-    let mut brand_accent_light = use_signal(String::new);
+    // Brand accents an identity pack suggested, waiting for Save. The accent
+    // itself is edited on the brand settings page, so without a pack this
+    // save leaves it alone.
+    let mut pack_brand = use_signal(|| None::<(String, String)>);
     let mut strategies_enabled = use_signal(|| true);
     let mut officers_can_edit_teams = use_signal(|| false);
     let mut committed_toggles = use_signal(|| None::<SettingsToggles>);
@@ -126,8 +129,7 @@ pub fn AdminSettings() -> Element {
                     nav.set(n);
                     page_bg_color.set(s.page_bg_color);
                     page_bg_image_url.set(s.page_bg_image_url);
-                    brand_accent_dark.set(s.brand_accent_dark);
-                    brand_accent_light.set(s.brand_accent_light);
+                    pack_brand.set(None);
                     strategies_enabled.set(s.strategies_enabled);
                     officers_can_edit_teams.set(s.officers_can_edit_teams);
                     committed_toggles.set(Some(committed));
@@ -169,8 +171,8 @@ pub fn AdminSettings() -> Element {
             nav: Some(n),
             page_bg_color: Some(page_bg_color().trim().to_string()),
             page_bg_image_url: Some(page_bg_image_url().trim().to_string()),
-            brand_accent_dark: Some(brand_accent_dark().trim().to_string()),
-            brand_accent_light: Some(brand_accent_light().trim().to_string()),
+            brand_accent_dark: pack_brand().map(|(dark, _)| dark),
+            brand_accent_light: pack_brand().map(|(_, light)| light),
         };
 
         saving.set(true);
@@ -195,8 +197,7 @@ pub fn AdminSettings() -> Element {
                     nav.set(n);
                     page_bg_color.set(s.page_bg_color);
                     page_bg_image_url.set(s.page_bg_image_url);
-                    brand_accent_dark.set(s.brand_accent_dark);
-                    brand_accent_light.set(s.brand_accent_light);
+                    pack_brand.set(None);
                     strategies_enabled.set(s.strategies_enabled);
                     officers_can_edit_teams.set(s.officers_can_edit_teams);
                     recruitment_open.set(s.recruitment_open);
@@ -351,10 +352,12 @@ pub fn AdminSettings() -> Element {
                                     if apply_suggested_brand()
                                         && !preset.suggested_brand.accent_dark.is_empty()
                                     {
-                                        brand_accent_dark
-                                            .set(preset.suggested_brand.accent_dark.into());
-                                        brand_accent_light
-                                            .set(preset.suggested_brand.accent_light.into());
+                                        pack_brand.set(Some((
+                                            preset.suggested_brand.accent_dark.into(),
+                                            preset.suggested_brand.accent_light.into(),
+                                        )));
+                                    } else {
+                                        pack_brand.set(None);
                                     }
                                     open_copy.set({
                                         let mut s = std::collections::HashSet::new();
@@ -503,67 +506,14 @@ pub fn AdminSettings() -> Element {
             div { class: "form-section",
                 h2 { "Appearance" }
                 p { class: "form-section-lead",
-                    "Brand accents and page background. Empty accent = product default purple."
+                    "Page background. The brand accent and the display font have their own page."
                 }
                 div { class: "form-section-card",
-                    div { class: "settings-subhead", "Brand accents" }
-                    div { class: "color-row",
-                        div { class: "color-field",
-                            label { class: "form-label", "Dark theme" }
-                            div { class: "swatch-row",
-                                input {
-                                    r#type: "color",
-                                    value: {
-                                        let c = brand_accent_dark();
-                                        if c.len() == 7 && c.starts_with('#') {
-                                            c
-                                        } else {
-                                            BRAND_ACCENT_DARK.into()
-                                        }
-                                    },
-                                    oninput: move |e| brand_accent_dark.set(e.value()),
-                                }
-                                input {
-                                    class: "form-input",
-                                    placeholder: "{BRAND_ACCENT_DARK}",
-                                    value: "{brand_accent_dark}",
-                                    oninput: move |e| brand_accent_dark.set(e.value()),
-                                }
-                            }
-                        }
-                        div { class: "color-field",
-                            label { class: "form-label", "Light theme" }
-                            div { class: "swatch-row",
-                                input {
-                                    r#type: "color",
-                                    value: {
-                                        let c = brand_accent_light();
-                                        if c.len() == 7 && c.starts_with('#') {
-                                            c
-                                        } else {
-                                            BRAND_ACCENT_LIGHT.into()
-                                        }
-                                    },
-                                    oninput: move |e| brand_accent_light.set(e.value()),
-                                }
-                                input {
-                                    class: "form-input",
-                                    placeholder: "{BRAND_ACCENT_LIGHT}",
-                                    value: "{brand_accent_light}",
-                                    oninput: move |e| brand_accent_light.set(e.value()),
-                                }
-                            }
-                        }
-                        button {
-                            class: "btn-ghost",
-                            r#type: "button",
-                            onclick: move |_| {
-                                brand_accent_dark.set(String::new());
-                                brand_accent_light.set(String::new());
-                            },
-                            "Clear accents"
-                        }
+                    div { class: "settings-subhead", "Brand" }
+                    p { class: "settings-hint", style: "margin-bottom:0.65rem;",
+                        "One accent for both themes, with a live preview and a contrast check."
                     }
+                    Link { class: "btn-ghost", to: Route::AdminBrandSettings {}, "Open brand settings" }
                     div { class: "settings-divider" }
                     div { class: "settings-subhead", "Page background" }
                     div { class: "color-row", style: "margin-bottom:0.85rem;",
@@ -1207,10 +1157,16 @@ mod tests {
         let mut users = Vec::new();
         collect_rs_containing(&root, &root, "UpdateSettingsRequest", &mut users);
         users.sort();
+        // Brand settings is admin-only too, and its body carries the two
+        // accents and nothing else (its own test holds that), so it omits
+        // this key and the server keeps the stored flag.
         assert_eq!(
             users,
-            vec!["pages/admin/settings.rs".to_string()],
-            "only Admin Settings builds a settings PUT, so officers never send this key"
+            vec![
+                "pages/admin/brand_settings.rs".to_string(),
+                "pages/admin/settings.rs".to_string(),
+            ],
+            "only the two admin settings pages build a settings PUT, so officers never send this key"
         );
     }
 }

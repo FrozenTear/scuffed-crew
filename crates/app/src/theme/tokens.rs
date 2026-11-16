@@ -49,6 +49,16 @@ pub fn theme_css(brand: &BrandConfig) -> String {
     theme_css_for(&MINT_REFINED, brand)
 }
 
+/// The stylesheet the site chrome paints with: the saved `(dark, light)`
+/// accents, or the pending gray while settings are still unknown. A draft
+/// on the brand settings page never reaches this; only saved settings do.
+pub fn chrome_theme_css(saved_accents: Option<(&str, &str)>) -> String {
+    match saved_accents {
+        Some((dark, light)) => theme_css(&BrandConfig::from_settings(dark, light)),
+        None => theme_css(&BrandConfig::pending()),
+    }
+}
+
 /// Load order: primitives, semantic, components, the look, then the derived
 /// brand accent roles (they win over the look's mint defaults), then the
 /// page base. The strategy scope gets the same derivation from its orange.
