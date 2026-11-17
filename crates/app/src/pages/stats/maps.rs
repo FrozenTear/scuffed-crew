@@ -3,7 +3,9 @@ use dioxus::prelude::*;
 use crate::components::charts::{BarEntry, HBarChart};
 use crate::components::ui::{EmptyCard, SkeletonBars, btn_class};
 use crate::hooks::ApiResource;
-use crate::pages::stats_member::{STATS_VIEWS_CSS, STATS_VIEWS_CSS_ID, stats_load_error};
+use crate::pages::stats_member::{
+    STATS_VIEWS_CSS, STATS_VIEWS_CSS_ID, stats_load_error, status_or_refusal,
+};
 
 use super::{MapStats, map_game_mode, wr_bar_color, wr_text_class};
 use crate::sample::{MAP_RULE_NOTE, TOO_FEW_GAMES, Tally, best_and_worst};
@@ -142,7 +144,12 @@ pub(super) fn maps_tab(maps: ApiResource<Vec<MapStats>>) -> Element {
     let failed = maps.error.read().is_some();
     let data = maps.data.read();
     let list = data.as_ref().and_then(|d| d.as_ref());
-    let status = maps_status(list.map(Vec::len), failed);
+    let map_err = maps.error.read().clone();
+    let status = status_or_refusal(
+        maps_status(list.map(Vec::len), failed),
+        "map stats",
+        map_err.as_deref().filter(|_| list.is_none()),
+    );
     let body = match list {
         None if failed => stats_load_error("map stats", maps.error.read().clone(), maps.refresh),
         None => rsx! { SkeletonBars { rows: 4 } },

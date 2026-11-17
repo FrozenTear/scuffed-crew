@@ -5,6 +5,7 @@ use crate::components::ui::{ChipButton, ChipRow, EmptyCard, SkeletonBars, btn_cl
 use crate::hooks::ApiResource;
 use crate::pages::stats_member::{
     Col, STATS_VIEWS_CSS, STATS_VIEWS_CSS_ID, StatsTable, rate_cell, stats_load_error,
+    status_or_refusal,
 };
 
 use super::role::hero_row_matches_filter;
@@ -78,7 +79,12 @@ pub(super) fn heroes_tab(
                 .collect()
         })
         .unwrap_or_default();
-    let status = heroes_status(list.map(Vec::len), failed, filtered.len());
+    let hero_err = heroes.error.read().clone();
+    let status = status_or_refusal(
+        heroes_status(list.map(Vec::len), failed, filtered.len()),
+        "hero stats",
+        hero_err.as_deref().filter(|_| list.is_none()),
+    );
 
     let body = match list {
         None if failed => {
@@ -202,7 +208,7 @@ pub(super) fn heroes_tab(
                                 Col::Num("Avg healing"),
                             ],
                             for hero in sorted.iter() {
-                                {
+                                Fragment { key: "{hero.hero}", {
                                     let tally = hero.tally();
                                     let result = tally.label();
                                     rsx! {
@@ -216,7 +222,7 @@ pub(super) fn heroes_tab(
                                             td { class: "num", "{hero.avg_healing:.0}" }
                                         }
                                     }
-                                }
+                                } }
                             }
                             if other_count > 0 {
                                 tr { key: "{OTHER_HEROES}", class: "stats-row-muted", title: "{other_names}",

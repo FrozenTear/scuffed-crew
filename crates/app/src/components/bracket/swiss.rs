@@ -23,6 +23,9 @@ pub enum StandingsLoad {
     #[default]
     Loading,
     Failed,
+    /// Failed, and Retry was pressed: the card stays, its button reads
+    /// "Retrying..." and keeps focus until the new answer lands.
+    Retrying,
     Ready(Vec<SwissStanding>),
 }
 
@@ -52,9 +55,10 @@ pub fn SwissStandings(
         StandingsLoad::Loading => {
             return rsx! { p { class: "bracket-note", "Loading standings..." } };
         }
-        StandingsLoad::Failed => {
+        StandingsLoad::Failed | StandingsLoad::Retrying => {
+            let retrying = standings == StandingsLoad::Retrying;
             return rsx! {
-                LoadError { message: "Couldn't load the standings.", on_retry }
+                LoadError { message: "Couldn't load the standings.", on_retry, retrying }
             };
         }
         StandingsLoad::Ready(rows) if rows.is_empty() => {
@@ -189,5 +193,27 @@ mod tests {
         assert!(html.contains("Couldn&#39;t load the standings."), "{html}");
         assert!(html.contains(">Retry</button>"), "{html}");
         assert!(!html.contains("<table"), "{html}");
+        // Retry gives feedback: the same card, busy, with "Retrying...".
+        fn retrying() -> Element {
+            rsx! {
+                SwissStandings {
+                    name: "Test Cup",
+                    standings: StandingsLoad::Retrying,
+                    on_retry: move |_| {},
+                }
+            }
+        }
+        let html = render(retrying);
+        assert!(html.contains("Couldn&#39;t load the standings."), "{html}");
+        assert!(html.contains(">Retrying...</button>"), "{html}");
+        assert!(html.contains(r#"aria-busy="true""#), "{html}");
+        assert!(html.contains(r#"aria-disabled="true""#), "{html}");
+        // The page maps a pending restart after an error to Retrying.
+        let page = include_str!("../../pages/tournament.rs");
+        let page = &page[..page.find("#[cfg(test)]").unwrap()];
+        assert!(
+            page.contains("UseResourceState::Pending => StandingsLoad::Retrying"),
+            "tournament.rs"
+        );
     }
 }

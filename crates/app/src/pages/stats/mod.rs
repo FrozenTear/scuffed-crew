@@ -288,6 +288,19 @@ pub(super) fn map_game_mode(name: &str) -> &'static str {
 /// the same page.
 pub(super) const TRACKER_ANCHOR: &str = "#stats-tracker";
 
+/// True when the picker holds one season by id and that season is not the
+/// current one. All time and "Current season" are not; a pinned id that is
+/// current now is not; an id missing from the list is treated as past.
+fn picked_season_is_not_current(
+    selected: Option<&str>,
+    seasons: Option<&[scuffed_types::Season]>,
+) -> bool {
+    match selected.map(str::trim).filter(|id| !id.is_empty()) {
+        None | Some("current") => false,
+        Some(id) => seasons.is_some_and(|list| !list.iter().any(|s| s.id == id && s.is_current)),
+    }
+}
+
 /// The zero-match card's message. All time has no season to name.
 fn no_logged_games_message(season: Option<&str>) -> &'static str {
     match season {
@@ -1435,6 +1448,20 @@ pub fn Stats() -> Element {
     });
     // Zero matches in this season window: the empty card is the overview.
     let no_matches = has_matches == Some(false);
+    // A season pinned by id that is not the current one: its newest game is
+    // not the member's current rank, so the rank chart says "latest".
+    let past_season = {
+        let list = season.season_list();
+        let list = list.read();
+        picked_season_is_not_current(
+            season.selected_id().as_deref(),
+            list.as_ref().and_then(|l| l.as_deref()),
+        )
+    };
+    let chart_for = rank::ChartFor {
+        player: auth().user.as_ref().map(|user| user.username.clone()),
+        past_season,
+    };
     let tab_body = match tab() {
         StatsTab::Overview if no_matches => rsx! {},
         StatsTab::Overview => overview::overview_tab(
@@ -1443,7 +1470,7 @@ pub fn Stats() -> Element {
             maps,
             form_matches,
             open_history,
-            auth().user.as_ref().map(|user| user.username.clone()),
+            chart_for.clone(),
         ),
         StatsTab::Heroes => heroes::heroes_tab(heroes, hero_role, hero_sort),
         StatsTab::Maps => maps::maps_tab(maps),
@@ -1454,7 +1481,7 @@ pub fn Stats() -> Element {
             hist_outcome,
             hist_role,
             hist_mode,
-            auth().user.as_ref().map(|user| user.username.clone()),
+            chart_for.clone(),
         ),
     };
 
@@ -2504,14 +2531,52 @@ mod signed_out_tests {
 #[cfg(test)]
 mod keyed_loop_tests {
     /// Loop bodies that are a block or a helper call give Dioxus no key to
-    /// diff by. These pages key each item with a `Fragment` or the element.
+    /// diff by. Every S4c page and the brackets key each item with a
+    /// `Fragment` or the element.
     #[test]
     fn list_loops_key_their_items() {
         for (name, src) in [
+            ("stats/mod.rs", include_str!("mod.rs")),
             ("stats/overview.rs", include_str!("overview.rs")),
             ("stats/rank.rs", include_str!("rank.rs")),
+            ("stats/heroes.rs", include_str!("heroes.rs")),
+            ("stats/maps.rs", include_str!("maps.rs")),
+            ("stats/history.rs", include_str!("history.rs")),
+            ("stats/history_filter.rs", include_str!("history_filter.rs")),
+            ("stats/bans_picks.rs", include_str!("bans_picks.rs")),
+            ("stats/game.rs", include_str!("game.rs")),
+            ("stats/role.rs", include_str!("role.rs")),
+            ("stats_member.rs", include_str!("../stats_member.rs")),
+            ("stats_tokens.rs", include_str!("../stats_tokens.rs")),
+            ("leaderboards.rs", include_str!("../leaderboards.rs")),
+            ("match_detail.rs", include_str!("../match_detail.rs")),
             ("team_page.rs", include_str!("../team_page.rs")),
+            ("tournament.rs", include_str!("../tournament.rs")),
             ("tournaments.rs", include_str!("../tournaments.rs")),
+            (
+                "bracket/bracket_view.rs",
+                include_str!("../../components/bracket/bracket_view.rs"),
+            ),
+            (
+                "bracket/double_elim.rs",
+                include_str!("../../components/bracket/double_elim.rs"),
+            ),
+            (
+                "bracket/single_elim.rs",
+                include_str!("../../components/bracket/single_elim.rs"),
+            ),
+            (
+                "bracket/round_robin.rs",
+                include_str!("../../components/bracket/round_robin.rs"),
+            ),
+            (
+                "bracket/swiss.rs",
+                include_str!("../../components/bracket/swiss.rs"),
+            ),
+            (
+                "bracket/match_card.rs",
+                include_str!("../../components/bracket/match_card.rs"),
+            ),
         ] {
             let body = src.split("#[cfg(test)]").next().unwrap();
             let lines: Vec<&str> = body.lines().collect();
@@ -2648,8 +2713,19 @@ mod local_day_tests {
             let body = source.split("#[cfg(test)]").next().unwrap();
             assert!(!body.contains("played_at.format(\"%-d"), "{name}");
             assert!(!body.contains("at.format(\"%-d"), "{name}");
+            // Nor a bare UTC day as a machine value: a `<time datetime>` is
+            // the instant (`to_rfc3339`), so it never names another day than
+            // the text. A labelled "UTC" title with the time is fine.
+            for line in body.lines().filter(|l| l.contains(".format(\"%Y-%m-%d")) {
+                assert!(line.contains(" UTC\")"), "{name}: {line}");
+            }
             assert!(body.contains("local_day("), "{name}");
         }
+        // The Recent form row says the same thing in its markup.
+        let overview = include_str!("overview.rs");
+        let form_row = &overview[overview.find("fn form_row(").unwrap()..];
+        let form_row = &form_row[..form_row.find("rsx!").unwrap()];
+        assert!(form_row.contains("played_at.to_rfc3339()"), "{form_row}");
     }
 }
 
@@ -3072,6 +3148,34 @@ mod shell_tests {
             !source.contains(&store_key),
             "the page keeps no density store"
         );
+    }
+
+    #[test]
+    fn only_a_pinned_season_that_is_not_current_is_past() {
+        let season = |id: &str, is_current: bool| scuffed_types::Season {
+            id: id.to_string(),
+            name: id.to_string(),
+            starts_at: Utc::now(),
+            ends_at: Utc::now(),
+            is_current,
+        };
+        let list = [season("s1", false), season("s2", true)];
+        let past = |sel| picked_season_is_not_current(sel, Some(&list));
+        assert!(!past(None), "all time");
+        assert!(!past(Some("current")), "follows the current season");
+        assert!(!past(Some("s2")), "pinned, but current now");
+        assert!(past(Some("s1")), "pinned past season");
+        assert!(past(Some("gone")), "an id missing from the list");
+        assert!(
+            !picked_season_is_not_current(Some("s1"), None),
+            "list not loaded"
+        );
+        // Both tabs pass it to the chart.
+        let source = include_str!("mod.rs");
+        let body = &source[source.find("let chart_for = rank::ChartFor").unwrap()..];
+        let body = &body[..body.find("if !auth().loading").unwrap()];
+        assert!(body.contains("past_season,\n    };"), "{body}");
+        assert_eq!(body.matches("chart_for.clone(),").count(), 2, "{body}");
     }
 
     #[test]

@@ -206,7 +206,7 @@ pub(super) fn map_table(rows: &[MapRow]) -> Element {
                 labelled_by: "history-maps-title",
                 cols: vec![Col::Text("Map"), Col::Text("Mode"), Col::Num("Games"), Col::Rate("Result")],
                 for r in rows.iter() {
-                    {
+                    Fragment { key: "{r.map}", {
                         let res = map_result(r.tally);
                         let row_class = if res.row_muted { "stats-row-muted" } else { "" };
                         rsx! {
@@ -217,7 +217,7 @@ pub(super) fn map_table(rows: &[MapRow]) -> Element {
                                 {rate_cell(r.tally, &res.text, res.text_class)}
                             }
                         }
-                    }
+                    } }
                 }
             }
         }

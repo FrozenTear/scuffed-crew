@@ -284,7 +284,7 @@ pub(super) fn bans_picks_section(match_id: &str, field: Option<&BansPicks>) -> E
             h2 { class: "ui-section-title game-bp-heading", id: "{heading}", "{SECTION_TITLE}" }
             div { class: "stats-view-card game-bp-groups",
                 for g in groups {
-                    {
+                    Fragment { key: "{g.key}", {
                         let title_id = group_title_id(match_id, g.key);
                         rsx! {
                             div { class: "game-bp-group", key: "{g.key}",
@@ -300,7 +300,7 @@ pub(super) fn bans_picks_section(match_id: &str, field: Option<&BansPicks>) -> E
                                 }
                             }
                         }
-                    }
+                    } }
                 }
             }
         }

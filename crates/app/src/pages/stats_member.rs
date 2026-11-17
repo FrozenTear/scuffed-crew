@@ -483,18 +483,39 @@ fn load_error_copy(what: &str, error: Option<&str>) -> (String, bool) {
     }
 }
 
+/// The panel's live status line, or the refusal when the load was refused.
+/// A refused load (401, 403) has no Retry, and a card that appears with its
+/// text already in it is not reliably announced, so the status line that
+/// was on the page since loading says it, once. Other failures keep `status`
+/// (empty): their card is an alert. `error` is `None` unless the block
+/// failed with nothing to show.
+pub(crate) fn status_or_refusal(status: String, what: &str, error: Option<&str>) -> String {
+    match (error, load_error_copy(what, error)) {
+        (Some(_), (text, false)) => text,
+        _ => status,
+    }
+}
+
 /// Failed load of one stats block: plain words, plus Retry when a retry can
-/// help. `error` is the fetch error text.
+/// help. `error` is the fetch error text. A refused load renders the same
+/// card without a live role: [`status_or_refusal`] announces it.
 pub(crate) fn stats_load_error(
     what: &'static str,
     error: Option<String>,
     mut refresh: Signal<u64>,
 ) -> Element {
     let (message, can_retry) = load_error_copy(what, error.as_deref());
+    if !can_retry {
+        return rsx! {
+            div { class: "fetch-error-wrap",
+                p { class: "fetch-error", "{message}" }
+            }
+        };
+    }
     rsx! {
         LoadError {
             message,
-            on_retry: can_retry.then(|| EventHandler::new(move |_: ()| refresh += 1)),
+            on_retry: EventHandler::new(move |_: ()| refresh += 1),
         }
     }
 }
@@ -773,11 +794,15 @@ pub fn StatsMember(id: String) -> Element {
                                         .collect(),
                                     _ => Vec::new(),
                                 };
-                                let status = panel_status(
-                                    "role stats",
-                                    matches!(panel, RolePanel::Pending),
-                                    matches!(panel, RolePanel::Failed),
-                                    shown.is_empty(),
+                                let status = status_or_refusal(
+                                    panel_status(
+                                        "role stats",
+                                        matches!(panel, RolePanel::Pending),
+                                        matches!(panel, RolePanel::Failed),
+                                        shown.is_empty(),
+                                    ),
+                                    "the role breakdown",
+                                    err.as_deref().filter(|_| matches!(panel, RolePanel::Failed)),
                                 );
                                 rsx! {
                                     h2 { id: "member-stats-roles-title", class: "ui-section-title", "Roles" }
@@ -793,7 +818,7 @@ pub fn StatsMember(id: String) -> Element {
                                                 labelled_by: "member-stats-roles-title",
                                                 cols: vec![Col::Text("Role"), Col::Num("Matches"), Col::Rate("Win rate")],
                                                 for agg in shown.iter() {
-                                                    {
+                                                    Fragment { key: "{agg.name}", {
                                                         let tally = agg.tally();
                                                         let result = role_result(tally);
                                                         let name = agg.name;
@@ -805,7 +830,7 @@ pub fn StatsMember(id: String) -> Element {
                                                                 {rate_cell(tally, &result, result_class(tally))}
                                                             }
                                                         }
-                                                    }
+                                                    } }
                                                 }
                                             }
                                         },
@@ -819,11 +844,16 @@ pub fn StatsMember(id: String) -> Element {
                             let failed = heroes.error.read().is_some();
                             let data = heroes.data.read();
                             let list = data.as_ref().and_then(|d| d.as_ref());
-                            let status = panel_status(
+                            let hero_err = heroes.error.read().clone();
+                            let status = status_or_refusal(
+                                panel_status(
+                                    "hero stats",
+                                    list.is_none(),
+                                    list.is_none() && failed,
+                                    list.is_some_and(|l| l.is_empty()),
+                                ),
                                 "hero stats",
-                                list.is_none(),
-                                list.is_none() && failed,
-                                list.is_some_and(|l| l.is_empty()),
+                                hero_err.as_deref().filter(|_| list.is_none()),
                             );
                             rsx! {
                                 h2 { id: "member-stats-heroes-title", class: "ui-section-title", "Heroes" }
@@ -863,7 +893,7 @@ pub fn StatsMember(id: String) -> Element {
                                                     Col::Num("Avg healing"),
                                                 ],
                                                 for hero in sorted.iter() {
-                                                    {
+                                                    Fragment { key: "{hero.hero}", {
                                                         let tally = hero.tally();
                                                         let result = tally.label();
                                                         rsx! {
@@ -877,7 +907,7 @@ pub fn StatsMember(id: String) -> Element {
                                                                 td { class: "num", "{hero.avg_healing:.0}" }
                                                             }
                                                         }
-                                                    }
+                                                    } }
                                                 }
                                                 if other_count > 0 {
                                                     tr { key: "{OTHER_HEROES}", class: "stats-row-muted", title: "{other_names}",
@@ -902,11 +932,16 @@ pub fn StatsMember(id: String) -> Element {
                             let failed = maps.error.read().is_some();
                             let data = maps.data.read();
                             let list = data.as_ref().and_then(|d| d.as_ref());
-                            let status = panel_status(
+                            let map_err = maps.error.read().clone();
+                            let status = status_or_refusal(
+                                panel_status(
+                                    "map stats",
+                                    list.is_none(),
+                                    list.is_none() && failed,
+                                    list.is_some_and(|l| l.is_empty()),
+                                ),
                                 "map stats",
-                                list.is_none(),
-                                list.is_none() && failed,
-                                list.is_some_and(|l| l.is_empty()),
+                                map_err.as_deref().filter(|_| list.is_none()),
                             );
                             rsx! {
                                 h2 { id: "member-stats-maps-title", class: "ui-section-title", "Maps" }
@@ -934,7 +969,7 @@ pub fn StatsMember(id: String) -> Element {
                                                     Col::Num("Draws"),
                                                 ],
                                                 for map in sorted.iter() {
-                                                    {
+                                                    Fragment { key: "{map.map_name}", {
                                                         let tally = map.tally();
                                                         let result = tally.label();
                                                         rsx! {
@@ -947,7 +982,7 @@ pub fn StatsMember(id: String) -> Element {
                                                                 td { class: "num", "{map.draws}" }
                                                             }
                                                         }
-                                                    }
+                                                    } }
                                                 }
                                             }
                                         }
@@ -1009,6 +1044,64 @@ mod tests {
     fn all_time_names_no_season() {
         assert!(!member_no_games_message(None).contains("season"));
         assert!(member_no_games_message(Some("s1")).contains("this season"));
+    }
+
+    #[test]
+    fn a_refused_load_is_announced_once_by_the_status_line() {
+        let forbidden = Some("HTTP error 403: Forbidden");
+        let said = status_or_refusal(String::new(), "hero stats", forbidden);
+        assert!(said.contains("your account can't see it"), "{said}");
+        // A retryable failure keeps the (empty) line: its card is the alert.
+        assert_eq!(
+            status_or_refusal(String::new(), "hero stats", Some("HTTP error 500: x")),
+            ""
+        );
+        assert_eq!(
+            status_or_refusal("Loading hero stats.".into(), "hero stats", None),
+            "Loading hero stats."
+        );
+        // The refused card itself has no live role, so it is not read twice;
+        // a retryable card stays an alert with Retry.
+        fn refused() -> Element {
+            stats_load_error(
+                "hero stats",
+                Some("HTTP error 401: Unauthorized".into()),
+                use_signal(|| 0),
+            )
+        }
+        fn broken() -> Element {
+            stats_load_error(
+                "hero stats",
+                Some("HTTP error 500: x".into()),
+                use_signal(|| 0),
+            )
+        }
+        fn card(app: fn() -> Element) -> String {
+            let mut dom = VirtualDom::new(app);
+            dom.rebuild_in_place();
+            dioxus_ssr::render(&dom)
+        }
+        let html = card(refused);
+        assert!(html.contains("Log in again"), "{html}");
+        assert!(!html.contains("role="), "{html}");
+        assert!(!html.contains("<button"), "{html}");
+        let html = card(broken);
+        assert!(html.contains(r#"role="alert""#), "{html}");
+        assert!(html.contains("<button"), "{html}");
+        // Every panel that can show the card routes its status through it.
+        for (file, src) in [
+            ("stats_member.rs", include_str!("stats_member.rs")),
+            ("heroes.rs", include_str!("stats/heroes.rs")),
+            ("maps.rs", include_str!("stats/maps.rs")),
+            ("history.rs", include_str!("stats/history.rs")),
+        ] {
+            let prod = &src[..src.find("#[cfg(test)]").unwrap()];
+            assert_eq!(
+                prod.matches("stats_load_error(").count() - usize::from(file == "stats_member.rs"),
+                prod.matches("status_or_refusal(").count() - usize::from(file == "stats_member.rs"),
+                "{file}"
+            );
+        }
     }
 
     #[test]

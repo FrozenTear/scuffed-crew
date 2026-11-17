@@ -393,7 +393,7 @@ pub fn StatsTokens() -> Element {
                                     Col::Actions("Actions"),
                                 ],
                                 for token in list.iter() {
-                                    {token_row(token, on_revoke)}
+                                    Fragment { key: "{token.id}", {token_row(token, on_revoke)} }
                                 }
                             }
                         },

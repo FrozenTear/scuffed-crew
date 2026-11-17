@@ -10,7 +10,7 @@ use super::game::{match_path, open_match};
 use super::history::outcome_word;
 use super::history_filter::{Outcome, outcome_kind};
 use super::rank::{
-    RankChart, RankChartLoading, RankWindow, chart_series, rank_series_with_outcomes,
+    ChartFor, RankChart, RankChartLoading, RankWindow, chart_series, rank_series_with_outcomes,
 };
 use super::role::{RolePanel, role_aggs_from_rows, role_panel, role_result, role_shares};
 use super::{HeroStats, MapStats, MatchPage, PersonalMatch, load_error_state, map_game_mode};
@@ -130,7 +130,7 @@ pub(super) fn overview_tab(
     maps: ApiResource<Vec<MapStats>>,
     form: ApiResource<MatchPage>,
     on_history: EventHandler<()>,
-    player: Option<String>,
+    chart_for: ChartFor,
 ) -> Element {
     let role_err = roles.error.read().clone();
     let role_data = roles.data.read();
@@ -205,7 +205,12 @@ pub(super) fn overview_tab(
             // fetch leaves it out: "Recent form" carries the error and Retry,
             // and an empty chart would wrongly say there are no ranked games.
             if !form_waiting {
-                RankChart { series: rank_chart, window: RankWindow::Recent(form_rows.len()), player }
+                RankChart {
+                    series: rank_chart,
+                    window: RankWindow::Recent(form_rows.len()),
+                    player: chart_for.player.clone(),
+                    past_season: chart_for.past_season,
+                }
             } else if !form_err {
                 RankChartLoading {}
             }
@@ -358,7 +363,9 @@ fn form_row(m: &PersonalMatch, now: &DateTime<Utc>) -> Element {
     let result = outcome_kind(&m.outcome);
     let word = outcome_word(&m.outcome);
     let date = form_date(&m.played_at, now);
-    let iso = m.played_at.format("%Y-%m-%d").to_string();
+    // The instant itself, like History: a UTC date here could name a
+    // different day from the viewer's local day the text shows.
+    let iso = m.played_at.to_rfc3339();
     let title_id = format!("form-{}-title", m.id);
     let map = if m.map_name.trim().is_empty() {
         "Unknown map"
@@ -502,7 +509,10 @@ mod tests {
             maps,
             form,
             EventHandler::new(|_| {}),
-            Some("Player01".to_string()),
+            ChartFor {
+                player: Some("Player01".to_string()),
+                past_season: false,
+            },
         )
     }
 
@@ -513,7 +523,14 @@ mod tests {
             let roles = resource_of(None::<Vec<RoleStats>>);
             let maps = resource_of(None::<Vec<MapStats>>);
             let form = resource_of(None::<MatchPage>);
-            overview_tab(heroes, roles, maps, form, EventHandler::new(|_| {}), None)
+            overview_tab(
+                heroes,
+                roles,
+                maps,
+                form,
+                EventHandler::new(|_| {}),
+                ChartFor::default(),
+            )
         }
 
         let mut dom = VirtualDom::new(view);
@@ -578,7 +595,14 @@ mod tests {
                 error: failed_error,
                 ..resource_of(None::<MatchPage>)
             };
-            overview_tab(heroes, roles, maps, form, EventHandler::new(|_| {}), None)
+            overview_tab(
+                heroes,
+                roles,
+                maps,
+                form,
+                EventHandler::new(|_| {}),
+                ChartFor::default(),
+            )
         }
         let html = render(failed);
         assert!(!html.contains("rank-block"), "{html}");
@@ -596,7 +620,14 @@ mod tests {
                 data: Vec::new(),
                 next_cursor: None,
             }));
-            overview_tab(heroes, roles, maps, form, EventHandler::new(|_| {}), None)
+            overview_tab(
+                heroes,
+                roles,
+                maps,
+                form,
+                EventHandler::new(|_| {}),
+                ChartFor::default(),
+            )
         }
 
         let mut dom = VirtualDom::new(view);
@@ -698,10 +729,13 @@ mod tests {
             );
             assert!(!row.contains("<button"), "no button inside the row: {row}");
         }
+        // The machine value is the instant, not a UTC day that could
+        // disagree with the viewer's local day in the text.
         assert!(
-            html.contains("<time datetime=\"2026-11-12\">12 Nov"),
+            html.contains("<time datetime=\"2026-11-12T19:00:00+00:00\">12 Nov"),
             "{html}"
         );
+        assert!(!html.contains("datetime=\"2026-11-12\""), "{html}");
         assert!(html.contains(" · Win as Ana"), "{html}");
         assert!(
             !html.contains(" as </p>"),

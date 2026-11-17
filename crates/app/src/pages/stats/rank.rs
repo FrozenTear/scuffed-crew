@@ -954,6 +954,15 @@ fn join_clauses(parts: &[String]) -> String {
     }
 }
 
+/// Whose chart it is, for the tabs that hold one: the player's name for the
+/// text alternative (`None` speaks to the viewer) and whether the season
+/// picker is pinned to a season that is not the current one.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct ChartFor {
+    pub player: Option<String>,
+    pub past_season: bool,
+}
+
 /// Which games the chart was given. The chart only sees the loaded games, so
 /// its copy names that window rather than claiming the whole season.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -968,6 +977,8 @@ impl RankWindow {
     /// "in your last 10 games", "on page 3 of your match history".
     fn period(self) -> String {
         match self {
+            // Nothing loaded yet or nothing in the window: no count to name.
+            RankWindow::Recent(0) => "in your recent games".to_string(),
             RankWindow::Recent(1) => "in your last game".to_string(),
             RankWindow::Recent(n) => format!("in your last {n} games"),
             RankWindow::Page(1) => "on the first page of your match history".to_string(),
@@ -975,11 +986,14 @@ impl RankWindow {
         }
     }
 
-    /// Kicker of the first card. Only the newest games hold the current rank.
-    fn now_kicker(self) -> &'static str {
+    /// Kicker of the first card. Only the newest games hold the current
+    /// rank, and only when the picker is not pinned to a season other than
+    /// the current one (`past_season`): a past season ends on its last game.
+    fn now_kicker(self, past_season: bool) -> &'static str {
         match self {
-            RankWindow::Recent(_) | RankWindow::Page(1) => "Current rank",
-            RankWindow::Page(_) => "Latest rank on this page",
+            RankWindow::Page(n) if n > 1 => "Latest rank on this page",
+            _ if past_season => "Latest rank in this season",
+            RankWindow::Recent(_) | RankWindow::Page(_) => "Current rank",
         }
     }
 
@@ -1111,6 +1125,10 @@ enum PointerEvent {
 struct Pointer {
     hovered: Option<String>,
     focused: Option<String>,
+    /// The last game focused. Blur keeps it, so the chart's one tab stop
+    /// stays where the viewer left it instead of going back to the oldest
+    /// game. Hover never moves it.
+    last_focused: Option<String>,
 }
 
 impl Pointer {
@@ -1119,6 +1137,9 @@ impl Pointer {
             PointerEvent::Enter | PointerEvent::Leave => &mut self.hovered,
             PointerEvent::Focus | PointerEvent::Blur => &mut self.focused,
         };
+        if event == PointerEvent::Focus {
+            self.last_focused = Some(id.to_string());
+        }
         match event {
             PointerEvent::Enter | PointerEvent::Focus => *slot = Some(id.to_string()),
             // Only the game that set it clears it: a late leave or blur from
@@ -1134,6 +1155,12 @@ impl Pointer {
     /// The game the readout and the highlight follow.
     fn active(&self) -> Option<String> {
         self.hovered.clone().or_else(|| self.focused.clone())
+    }
+
+    /// The game that holds the chart's one tab stop: the focused game, else
+    /// the last one focused. `None` before any focus (the caller picks).
+    fn tab_stop(&self) -> Option<&str> {
+        self.focused.as_deref().or(self.last_focused.as_deref())
     }
 }
 
@@ -1183,8 +1210,8 @@ fn status_text(series: &RankSeries, rows: &[ChartRow]) -> String {
     )
 }
 
-// Blizzard's official career-profile rank emblems, kept in the repo byte for
-// byte as Blizzard ships them (see `assets/rank-icons/LICENCE-NOTE.md`). They
+// Blizzard's official career-profile rank emblems, kept in the repo as
+// downloaded (see `assets/rank-icons/LICENCE-NOTE.md`). They
 // may be scaled in CSS and never recoloured, cropped or edited. A test pins
 // each file's length and hash. Wherever one shows, [`credit`] shows once.
 /// The emblem folder, hash-free like the fonts. Note: `dx build --release`
@@ -1743,7 +1770,7 @@ const TABLE_ID: &str = "rank-chart-table";
 
 /// The two cards above the plot: the latest rank and the range, both over
 /// the games in `window`.
-fn status_cards(rows: &[ChartRow], window: RankWindow) -> Element {
+fn status_cards(rows: &[ChartRow], window: RankWindow, past_season: bool) -> Element {
     let placed: Vec<&ChartRow> = rows.iter().filter(|r| r.placed.is_some()).collect();
     let tier = |row: &ChartRow| row.placed.map(|p| p.tier);
     let (Some(current), Some(low), Some(high)) = (
@@ -1762,7 +1789,7 @@ fn status_cards(rows: &[ChartRow], window: RankWindow) -> Element {
         return rsx! {
             div { class: "rank-status",
                 div { class: "rank-status-card",
-                    p { class: "rank-kicker", "{window.now_kicker()}" }
+                    p { class: "rank-kicker", "{window.now_kicker(past_season)}" }
                     p { class: "rank-now", "No rank read" }
                     p { class: "rank-sub", "No game {period} has a rank. Play a ranked match to see it here." }
                 }
@@ -1784,7 +1811,7 @@ fn status_cards(rows: &[ChartRow], window: RankWindow) -> Element {
     rsx! {
         div { class: "rank-status",
             div { class: "rank-status-card",
-                p { class: "rank-kicker", "{window.now_kicker()}" }
+                p { class: "rank-kicker", "{window.now_kicker(past_season)}" }
                 p { class: "rank-now rank-now-row",
                     {emblem(tier(current), true)}
                     "{current.rank}"
@@ -1961,6 +1988,9 @@ pub(super) fn RankChart(
     series: Vec<RankSeries>,
     window: RankWindow,
     #[props(default)] player: Option<String>,
+    /// The season picker holds one season by id that is not the current one.
+    #[props(default)]
+    past_season: bool,
 ) -> Element {
     let mut picked = use_signal(|| None::<String>);
     let mut pointer = use_signal(Pointer::default);
@@ -2013,7 +2043,12 @@ pub(super) fn RankChart(
     let active_at = placed
         .iter()
         .position(|(_, row, _)| Some(&row.match_id) == active_id.as_ref());
-    let tab_stop = active_at.unwrap_or(0);
+    // The tab stop follows focus only, and stays on the last focused game
+    // after blur. A game that left the series falls back to the oldest.
+    let tab_stop = pointer()
+        .tab_stop()
+        .and_then(|id| placed.iter().position(|(_, row, _)| row.match_id == id))
+        .unwrap_or(0);
     let single = placed.len() == 1;
     let readout = match active_at {
         Some(at) => Some(placed[at].1),
@@ -2134,7 +2169,7 @@ pub(super) fn RankChart(
                 }
             }
             p { class: "visually-hidden rank-chart-picker-status", role: "status", "{status}" }
-            {status_cards(&rows, window)}
+            {status_cards(&rows, window, past_season)}
             div { class: "rank-chart",
                 p { class: "visually-hidden", id: SUMMARY_ID, "{summary}" }
                 if placed.is_empty() {
@@ -2822,6 +2857,7 @@ mod tests {
                 series,
                 window,
                 player: player.map(str::to_string),
+                past_season: false,
             },
         );
         dom.rebuild_in_place();
@@ -3827,6 +3863,59 @@ mod tests {
         ]));
         assert_eq!(rows[1].change, "Up to Gold 2");
         assert!(rows[1].rank_changed && !rows[1].derank);
+    }
+
+    #[test]
+    fn the_tab_stop_stays_on_the_last_focused_game() {
+        let mut p = Pointer::default();
+        assert_eq!(p.tab_stop(), None, "before any focus the chart picks");
+        p.apply(PointerEvent::Focus, "b");
+        p.apply(PointerEvent::Blur, "b");
+        assert_eq!(p.active(), None, "the highlight clears");
+        assert_eq!(p.tab_stop(), Some("b"), "the tab stop does not");
+        p.apply(PointerEvent::Enter, "c");
+        assert_eq!(p.tab_stop(), Some("b"), "hover never moves it");
+        p.apply(PointerEvent::Focus, "d");
+        assert_eq!(p.tab_stop(), Some("d"));
+        // The render takes the stop from `tab_stop()`, not from the active
+        // (hover or focus) game, and only falls back to the oldest game.
+        let source = include_str!("rank.rs");
+        let body = &source[source.find("pub(super) fn RankChart(").unwrap()..];
+        let body = &body[..body.find("let single =").unwrap()];
+        assert!(body.contains(".tab_stop()"), "{body}");
+        assert!(!body.contains("active_at.unwrap_or(0)"), "{body}");
+    }
+
+    #[test]
+    fn a_pinned_past_season_has_no_current_rank_and_no_zero_count() {
+        let render = |window, past_season| {
+            let mut dom = VirtualDom::new_with_props(
+                RankChart,
+                RankChartProps {
+                    series: vec![series_of(&POPULATED)],
+                    window,
+                    player: None,
+                    past_season,
+                },
+            );
+            dom.rebuild_in_place();
+            dioxus_ssr::render(&dom)
+        };
+        for window in [RankWindow::Recent(13), RankWindow::Page(1)] {
+            let html = render(window, true);
+            assert!(!html.contains("Current rank"), "{html}");
+            assert!(html.contains("Latest rank in this season"), "{html}");
+            let html = render(window, false);
+            assert!(html.contains("Current rank"), "{html}");
+        }
+        let html = render(RankWindow::Page(2), true);
+        assert!(html.contains("Latest rank on this page"), "{html}");
+        // Nothing loaded never reads "last 0 games".
+        assert_eq!(RankWindow::Recent(0).period(), "in your recent games");
+        let mut series = series_of(&[(8, "Gold", Some(3), Some(50), None)]);
+        series.points[0].shown.tier = None;
+        let html = render_chart_in(vec![series], None, RankWindow::Recent(0));
+        assert!(!html.contains("last 0"), "{html}");
     }
 
     #[test]

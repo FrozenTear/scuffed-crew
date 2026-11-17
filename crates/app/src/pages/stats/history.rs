@@ -5,7 +5,9 @@ use chrono::{DateTime, Utc};
 use crate::components::ui::inline_confirm::focus_element_by_id_soon;
 use crate::components::ui::{ChipButton, ChipRow, EmptyCard, SkeletonBars, btn_class};
 use crate::hooks::ApiResource;
-use crate::pages::stats_member::{STATS_VIEWS_CSS, STATS_VIEWS_CSS_ID, stats_load_error};
+use crate::pages::stats_member::{
+    STATS_VIEWS_CSS, STATS_VIEWS_CSS_ID, stats_load_error, status_or_refusal,
+};
 
 use super::MatchPage;
 use super::bans_picks::{BANS_PICKS_CARD_CSS, bans_picks_line};
@@ -15,7 +17,8 @@ use super::history_filter::{
     outcome_kind, page_modes,
 };
 use super::rank::{
-    RANK_CSS, RankChart, RankWindow, chart_series, rank_badge_line, rank_series_with_outcomes,
+    ChartFor, RANK_CSS, RankChart, RankWindow, chart_series, rank_badge_line,
+    rank_series_with_outcomes,
 };
 use super::role::game_role_label;
 
@@ -389,7 +392,7 @@ pub(super) fn history_tab(
     mut outcome_filter: Signal<&'static str>,
     mut role_filter: Signal<&'static str>,
     mut mode_filter: Signal<String>,
-    player: Option<String>,
+    chart_for: ChartFor,
 ) -> Element {
     let failed = matches.error.read().is_some();
     let data = matches.data.read();
@@ -400,7 +403,12 @@ pub(super) fn history_tab(
     let rows = page
         .map(|page| filter_rows(&page.data, of, rf, &mf))
         .unwrap_or_default();
-    let status = history_status(page.map(|page| page.data.len()), failed, rows.len());
+    let history_err = matches.error.read().clone();
+    let status = status_or_refusal(
+        history_status(page.map(|page| page.data.len()), failed, rows.len()),
+        "match history",
+        history_err.as_deref().filter(|_| page.is_none()),
+    );
     // The cursor trail holds one entry per page opened, so its length is the
     // page number. The API returns no total, so there is no "of N".
     let page_no = cursor_history().len().max(1);
@@ -437,7 +445,12 @@ pub(super) fn history_tab(
 
             rsx! {
                 if !rank_chart.is_empty() {
-                    RankChart { series: rank_chart, window: RankWindow::Page(page_no), player }
+                    RankChart {
+                        series: rank_chart,
+                        window: RankWindow::Page(page_no),
+                        player: chart_for.player.clone(),
+                        past_season: chart_for.past_season,
+                    }
                 }
                 section { class: "ui-stack", aria_labelledby: "history-games-title",
                     h2 { id: "history-games-title", class: "ui-section-title", "Games" }
@@ -486,7 +499,7 @@ pub(super) fn history_tab(
                                     onclick: move |_| mode_filter.set(ALL.to_string()),
                                 }
                                 for mode in modes {
-                                    {
+                                    Fragment { key: "{mode}", {
                                         let active = mf.eq_ignore_ascii_case(&mode);
                                         let pick = mode.clone();
                                         rsx! {
@@ -498,7 +511,7 @@ pub(super) fn history_tab(
                                                 onclick: move |_| mode_filter.set(pick.clone()),
                                             }
                                         }
-                                    }
+                                    } }
                                 }
                             }
                         }
@@ -548,7 +561,7 @@ pub(super) fn history_tab(
                             }
                             ul { class: "match-cards",
                                 for m in rows.iter() {
-                                    {
+                                    Fragment { key: "{m.id}", {
                                         let date = game_date(&m.played_at);
                                         let abs = m.played_at.format("%Y-%m-%d %H:%M UTC").to_string();
                                         let machine_date = m.played_at.to_rfc3339();
@@ -658,7 +671,7 @@ pub(super) fn history_tab(
                                                 }
                                             }
                                         }
-                                    }
+                                    } }
                                 }
                             }
                         }
@@ -870,7 +883,7 @@ mod tests {
                 use_signal(|| "draw"),
                 use_signal(|| "all"),
                 use_signal(|| "all".to_string()),
-                None,
+                ChartFor::default(),
             )
         }
         let mut dom = VirtualDom::new(view);
@@ -940,7 +953,7 @@ mod tests {
                 outcome,
                 role,
                 mode,
-                None,
+                ChartFor::default(),
             )
         }
 

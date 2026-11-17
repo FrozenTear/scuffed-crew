@@ -1203,8 +1203,10 @@ mod tests {
         }
     }
 
-    /// The page chrome around the panel, without the two pickers: they need
-    /// the season fetch.
+    /// The board tabs and the panel in one state, with no page chrome: the
+    /// H1 and the shell come from the real page
+    /// (`the_real_page_has_one_h1_and_the_focus_targets`), so these cases
+    /// check only what each state adds.
     fn render_case(case: PanelCase) -> String {
         render_routed(move || {
             let case = case.clone();
@@ -1216,8 +1218,7 @@ mod tests {
                 BoardView::Rows(_) => "",
             };
             rsx! {
-                PageShell { width: PageWidth::Wide, class: "lb-page",
-                    PageHeader { title: "Leaderboards", lead: PAGE_LEAD }
+                div { class: "lb-case",
                     BoardTabs { selected: case.board.to_string(), on_pick: move |_| {} }
                     BoardPanel {
                         selected: case.board.to_string(),
@@ -1267,15 +1268,13 @@ mod tests {
     }
 
     #[test]
-    fn every_state_has_one_h1_no_main_and_its_live_regions() {
+    fn no_state_adds_a_heading_one_or_a_main_and_each_keeps_its_live_regions() {
+        // The real page has exactly one H1 and no main (tested on the real
+        // page below); no panel state may add either, so every state keeps
+        // that outline.
         for (name, html) in all_states() {
-            assert_eq!(html.matches("<h1").count(), 1, "{name}: {html}");
-            assert!(html.contains("<h1>Leaderboards</h1>"), "{name}: {html}");
+            assert_eq!(html.matches("<h1").count(), 0, "{name}: {html}");
             assert!(!html.contains("<main"), "{name}: {html}");
-            assert!(
-                html.contains("class=\"ui-shell ui-shell--wide lb-page\""),
-                "{name}: {html}"
-            );
             // The status line and both pager lines exist before their text does.
             assert_eq!(
                 html.matches("<p class=\"lb-status\" role=\"status\">")

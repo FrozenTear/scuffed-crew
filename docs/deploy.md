@@ -807,6 +807,10 @@ named volume `packs-data` (on the VPS: `scuffed-crew_packs-data`) read-only at
 `/app/data/packs` and sets `PACKS_DIR` to that path. The directory is outside
 SurrealDB and outside the web root.
 
+The one approved exception to the no-game-art rule is the nine rank emblems in
+`crates/app/assets/rank-icons` (see the `LICENCE-NOTE.md` there). They are
+built into the app, not served from `packs-data`.
+
 Fill the volume with `scripts/publish-packs.sh`, from the machine that built
 the packs. Do not copy files into the volume by hand:
 

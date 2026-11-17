@@ -194,6 +194,8 @@ pub fn Tournament(id: String) -> Element {
     let swiss = match standings.read().as_ref() {
         None => StandingsLoad::Loading,
         Some(Ok(rows)) => StandingsLoad::Ready(rows.clone()),
+        // A restart keeps the old error until the new answer lands.
+        Some(Err(_)) if standings.state()() == UseResourceState::Pending => StandingsLoad::Retrying,
         Some(Err(_)) => StandingsLoad::Failed,
     };
     let load = Load::of(bracket_data.read().as_ref());
