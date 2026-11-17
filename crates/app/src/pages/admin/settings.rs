@@ -1369,7 +1369,7 @@ mod tests {
             "{note}"
         );
         assert!(
-            note.contains("Ink on this accent does not reach 4.5:1 in the dark preview."),
+            note.contains("Ink on this accent does not reach 4.5:1 in the dark theme."),
             "{note}"
         );
 

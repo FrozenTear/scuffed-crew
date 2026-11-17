@@ -375,7 +375,7 @@ impl AccentCheck {
             }
             if !check.ink_passes() {
                 return Some(format!(
-                    "Ink on this accent does not reach 4.5:1 in the {theme} preview."
+                    "Ink on this accent does not reach 4.5:1 in the {theme} theme."
                 ));
             }
             if !check.fill_passes() {
@@ -781,7 +781,7 @@ mod tests {
         assert!(check.light.passes());
         assert_eq!(
             check.fail_reason().as_deref(),
-            Some("Ink on this accent does not reach 4.5:1 in the dark preview.")
+            Some("Ink on this accent does not reach 4.5:1 in the dark theme.")
         );
     }
 

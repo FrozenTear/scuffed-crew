@@ -40,7 +40,7 @@ Most members start with a server-managed key, and `/identity` offers **Link & Ve
 
 1. Install a NIP-07 browser extension (nos2x, Alby, or similar)
 2. Go to `/identity` on the clan site
-3. If the page shows a server-managed key, back it up first if you want to keep it (see below). Then open **Advanced**, click **Unlink key** and confirm. Chat and direct messages stop working until a key is linked again
+3. If **Key mode** shows **Server-managed**, back the key up first if you want to keep it (see below). Then open **Advanced**, click **Unlink key** and confirm. Chat and direct messages stop working until a key is linked again
 4. Under **Link a key**, click **Detect** to read your public key from the extension (or paste it)
 5. Click **Link & Verify** and approve the signing request in your extension
 6. Your Nostr pubkey is now linked, and you're the same identity everywhere

@@ -99,8 +99,15 @@ impl BrandDraft {
 
     /// True when this draft differs from what the server stored, so
     /// leaving the page would drop it.
+    /// Two spellings of one colour (`#46D8A4`, `46d8a4`, `#46d8a4`) are
+    /// the same accent, so retyping the stored value is not an edit.
     fn is_unsaved(&self, saved: &SavedBrand) -> bool {
-        *self != Self::from_saved(saved)
+        let stored = Self::from_saved(saved);
+        let same_accent = match (normalize_hex(&self.accent), normalize_hex(&stored.accent)) {
+            (Some(a), Some(b)) => a == b,
+            _ => self.accent.trim() == stored.accent.trim(),
+        };
+        !same_accent || self.font != stored.font
     }
 
     fn product_default() -> Self {
@@ -650,7 +657,7 @@ mod tests {
         // The id it points at is the visible reason.
         assert!(
             html.contains(
-                "id=\"site-brand-accent-reason\" role=\"status\">Ink on this accent does not reach 4.5:1 in the dark preview.</p>"
+                "id=\"site-brand-accent-reason\" role=\"status\">Ink on this accent does not reach 4.5:1 in the dark theme.</p>"
             ),
             "{html}"
         );
@@ -728,6 +735,11 @@ mod tests {
         assert!(!BrandDraft::from_saved(&stored).is_unsaved(&stored));
         assert!(draft(TEST_OTHER_ACCENT).is_unsaved(&stored));
         assert!(draft("").is_unsaved(&stored), "reset is an edit too");
+        // Vision 694 r3 nit 3: the same colour typed another way is no edit.
+        let upper = TEST_MINT_ACCENT.to_ascii_uppercase();
+        for same in [upper.as_str(), &TEST_MINT_ACCENT[1..], &upper[1..]] {
+            assert!(!draft(same).is_unsaved(&stored), "{same}");
+        }
         let mut font = BrandDraft::from_saved(&stored);
         font.font = DisplayFont::IbmPlexSans;
         assert!(font.is_unsaved(&stored));

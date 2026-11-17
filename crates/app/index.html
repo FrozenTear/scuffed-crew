@@ -72,17 +72,22 @@
         }
       }
       /* A saved theme (assets/boot-theme.js) wins over the OS preference,
-         so the splash already matches the theme the app paints. */
-      html[data-theme="dark"],
-      html[data-theme="dark"] body {
+         so the splash already matches the theme the app paints.
+         :where() keeps these page rules at the weight of a plain html or
+         body rule: they beat the media query above by coming later, and
+         the app's own html, body rule (theme/tokens.rs) still beats them
+         by coming later again, so a page background set in Admin Settings
+         shows. ThemeProvider keeps data-theme set for the whole visit. */
+      html:where([data-theme="dark"]),
+      :where(html[data-theme="dark"]) body {
         background: #17171d;
         color: #f4f4f8;
       }
       html[data-theme="dark"] #sc-boot .label {
         color: #9696a3;
       }
-      html[data-theme="light"],
-      html[data-theme="light"] body {
+      html:where([data-theme="light"]),
+      :where(html[data-theme="light"]) body {
         background: #f7f7f9;
         color: #16161c;
       }
