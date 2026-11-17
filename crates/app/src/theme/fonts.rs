@@ -122,6 +122,67 @@ const PLEX_LATIN2_RANGE: &str = "U+0100-0101, U+0104-0130, U+0132-0151, U+0154-0
 const PLEX_LATIN3_RANGE: &str = "U+0102-0103, U+01CD-01DC, U+1EA0-1EF9, U+20AB";
 const PLEX_PI_RANGE: &str = "U+0E3F, U+2000-200D, U+2015, U+2028-2029, U+202F, U+2032-2033, U+2070, U+2074-2079, U+2080-2089, U+2113, U+2116, U+2126, U+212E, U+2150-2151, U+2153-215E, U+2190-2199, U+21A9-21AA, U+21B0-21B3, U+21B6-21B7, U+21BA-21BB, U+21C4, U+21C6, U+2202, U+2206, U+220F, U+2211, U+2215, U+221A, U+221E, U+222B, U+2248, U+2260, U+2264-2265, U+25CA, U+2713, U+274C, U+2B0E-2B11, U+ECE0, U+EFCC, U+FEFF, U+FFFD";
 
+/// The display fonts an admin may pick. A fixed list of self-hosted
+/// families: never a free-text name or a URL. `--font-body` stays IBM Plex
+/// Sans whichever is chosen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DisplayFont {
+    #[default]
+    Urbanist,
+    IbmPlexSans,
+}
+
+impl DisplayFont {
+    /// Menu order. The first is the default.
+    pub const ALL: [DisplayFont; 2] = [DisplayFont::Urbanist, DisplayFont::IbmPlexSans];
+
+    /// The value stored in settings.
+    pub fn id(self) -> &'static str {
+        match self {
+            DisplayFont::Urbanist => "urbanist",
+            DisplayFont::IbmPlexSans => "ibm-plex-sans",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DisplayFont::Urbanist => "Urbanist",
+            DisplayFont::IbmPlexSans => "IBM Plex Sans",
+        }
+    }
+
+    /// The primitive family token (`css/primitives.css`).
+    pub fn family_var(self) -> &'static str {
+        match self {
+            DisplayFont::Urbanist => "var(--font-family-urbanist)",
+            DisplayFont::IbmPlexSans => "var(--font-family-ibm-plex-sans)",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|font| font.id() == id.trim())
+    }
+
+    /// A stored value. Empty, missing or unknown gives the default.
+    pub fn from_setting(value: Option<&str>) -> Self {
+        value.and_then(Self::from_id).unwrap_or_default()
+    }
+
+    /// `--brand-font-display` for one scope (a preview card).
+    pub fn css_decl(self) -> String {
+        format!("--brand-font-display: {};", self.family_var())
+    }
+
+    /// The site-wide override, placed after the token stylesheet. Empty for
+    /// the default, which `css/semantic.css` already sets.
+    pub fn root_css(self) -> String {
+        match self {
+            DisplayFont::Urbanist => String::new(),
+            other => format!(":root {{ {} }}", other.css_decl()),
+        }
+    }
+}
+
 /// Served font and licence URLs, as `dx` resolves them.
 struct FontUrls<'a> {
     urbanist: &'a str,
@@ -223,6 +284,55 @@ mod tests {
         mono: "/m.woff2",
         licences: ["/u-OFL.txt", "/p-OFL.txt", "/m-OFL.txt"],
     };
+
+    /// The picker offers only families this crate self-hosts.
+    #[test]
+    fn display_fonts_are_self_hosted_families() {
+        use super::DisplayFont;
+        let primitives = include_str!("css/primitives.css");
+        let faces = fonts_css_with(&URLS);
+        for font in DisplayFont::ALL {
+            let token = font
+                .family_var()
+                .trim_start_matches("var(")
+                .trim_end_matches(')');
+            assert!(primitives.contains(&format!("{token}:")), "{token}");
+            assert!(
+                faces.contains(&format!("font-family: \"{}\"", font.label())),
+                "no @font-face for {}",
+                font.label()
+            );
+            assert_eq!(DisplayFont::from_id(font.id()), Some(font));
+        }
+        assert_eq!(DisplayFont::default(), DisplayFont::ALL[0]);
+        assert_eq!(DisplayFont::default().root_css(), "");
+        assert_eq!(
+            DisplayFont::IbmPlexSans.root_css(),
+            ":root { --brand-font-display: var(--font-family-ibm-plex-sans); }"
+        );
+    }
+
+    /// A stored value is an id from the list. Names, stacks and URLs are
+    /// never read as a font.
+    #[test]
+    fn unknown_display_font_values_fall_back_to_the_default() {
+        use super::DisplayFont;
+        for raw in [
+            "",
+            "Comic Sans MS",
+            "IBM Plex Sans",
+            "https://fonts.example/x.woff2",
+            "url(x)",
+        ] {
+            assert_eq!(DisplayFont::from_id(raw), None, "{raw}");
+            assert_eq!(DisplayFont::from_setting(Some(raw)), DisplayFont::Urbanist);
+        }
+        assert_eq!(DisplayFont::from_setting(None), DisplayFont::Urbanist);
+        assert_eq!(
+            DisplayFont::from_setting(Some("ibm-plex-sans")),
+            DisplayFont::IbmPlexSans
+        );
+    }
 
     fn crate_path(rel: &str) -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel)

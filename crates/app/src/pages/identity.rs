@@ -15,6 +15,17 @@ pub const ACCOUNT_KEYS: &str = "Account keys";
 
 const INTRO: &str = "Your account key is your ID in chat and direct messages. \
     We can keep one for you, or you can bring your own.";
+/// The Key mode pill in plain words. The stored values are
+/// `server_managed` and `external` (`NostrKeyMode` in `crates/db`).
+fn key_mode_label(mode: Option<&str>) -> &str {
+    match mode {
+        Some("server_managed") => "Server-managed",
+        Some("external") => "External",
+        Some(other) => other,
+        None => "Unknown",
+    }
+}
+
 const HINT_PUBLIC_KEY: &str = "Your public key is safe to share. It is how others know it is you.";
 const HINT_NIP05: &str = "A NIP-05 name looks like an email address and points to your key.";
 const HINT_BACKUP: &str =
@@ -498,7 +509,7 @@ pub fn IdentitySettings() -> Element {
                             div { class: "identity-field",
                                 label { class: "identity-label", "Key mode" }
                                 span { class: "identity-pill",
-                                    {m.nostr_key_mode.as_deref().unwrap_or("unknown")}
+                                    {key_mode_label(m.nostr_key_mode.as_deref())}
                                 }
                             }
                             div { class: "identity-field",
@@ -862,5 +873,16 @@ mod tests {
         assert!(!HINT_UNLINK.contains("removes the key"), "{HINT_UNLINK}");
         assert!(!HINT_UNLINK.contains("Export a backup"), "{HINT_UNLINK}");
         assert!(!src.contains(&["Unlink", " Identity"].concat()));
+    }
+
+    /// Vision 694 r3 nit 7: the pill shows plain words, the same words
+    /// `docs/external-clients.md` quotes, not the stored value.
+    #[test]
+    fn key_mode_reads_in_plain_words() {
+        assert_eq!(key_mode_label(Some("server_managed")), "Server-managed");
+        assert_eq!(key_mode_label(Some("external")), "External");
+        assert_eq!(key_mode_label(None), "Unknown");
+        let docs = include_str!("../../../../docs/external-clients.md");
+        assert!(docs.contains("**Key mode** shows **Server-managed**"));
     }
 }

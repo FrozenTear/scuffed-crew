@@ -4,6 +4,8 @@
 // in-progress work; tighten once everything is wired up.
 #![allow(dead_code)]
 
+#[cfg(test)]
+mod boot_cascade_tests;
 mod canvas;
 mod client_error;
 mod components;
@@ -53,6 +55,13 @@ static SITE_FAVICON_ICO: manganis::Asset = asset!(
 #[used]
 static SITE_APPLE_TOUCH: manganis::Asset = asset!(
     "/assets/apple-touch-icon.png",
+    manganis::AssetOptions::builder().with_hash_suffix(false)
+);
+/// `index.html` loads this from a stable path in `<head>`, so the boot
+/// splash follows the saved theme before the app paints.
+#[used]
+static BOOT_THEME_JS: manganis::Asset = asset!(
+    "/assets/boot-theme.js",
     manganis::AssetOptions::builder().with_hash_suffix(false)
 );
 
@@ -165,16 +174,9 @@ fn App() -> Element {
     });
     // Unknown settings use a gray accent. Product purple is a real brand and
     // must not paint before the embedded block or `/api/settings` says so.
-    let brand_theme_css = {
-        use theme::brand::BrandConfig;
-        match loaded_settings.as_ref() {
-            Some(s) => theme::theme_css(&BrandConfig::from_settings(
-                &s.brand_accent_dark,
-                &s.brand_accent_light,
-            )),
-            None => theme::theme_css(&BrandConfig::pending()),
-        }
-    };
+    let brand_theme_css = theme::chrome_theme_css_for(loaded_settings);
+    // Admin display font, once the server stores one (see `state::brand_font`).
+    let display_font_css = state::provide_brand_font().font().root_css();
 
     // Desktop only. Native Rust cannot call web_sys, so the canvas module is
     // injected as script text. This is not in the web bundle. The site CSP
@@ -194,6 +196,7 @@ fn App() -> Element {
             href: asset!("/assets/tailwind.css")
         }
         style { "{brand_theme_css}" }
+        style { "{display_font_css}" }
         style { {styles::common::CSS} }
         style { {components::ui::ui_css()} }
         theme::ThemeProvider {
@@ -266,16 +269,38 @@ mod tests {
         assert_eq!(strip_html_comments("a<!-->b<!--->c<!--x-->d"), "abcd");
     }
 
-    /// The first paint follows a light system theme instead of flashing dark.
+    /// QA 694 nit 2: the splash followed the OS theme even when the member
+    /// had saved another one. `assets/boot-theme.js` sets `data-theme` from
+    /// `sc-theme`; it has to load in `<head>`, before the shell styles and
+    /// the splash, as an external file (the enforcing CSP hashes inline
+    /// scripts only), and ship at a stable path. Which rule then paints is
+    /// checked in `boot_cascade_tests`; what the script sets is checked in
+    /// the browser pass (no JS engine here).
     #[test]
-    fn boot_splash_has_a_light_variant() {
+    fn boot_theme_script_loads_before_first_paint() {
         let visible = strip_html_comments(include_str!("../index.html"));
-        let light = visible
-            .split("prefers-color-scheme: light")
-            .nth(1)
-            .expect("light media query in index.html");
-        assert!(light.contains("html, body"), "{light}");
-        assert!(light.contains("background:"), "{light}");
+        let tag = "<script src=\"/assets/boot-theme.js\"></script>";
+        assert_eq!(visible.matches(tag).count(), 1, "one boot theme script");
+        let at = visible.find(tag).expect("boot theme script");
+        assert!(at < visible.find("</head>").expect("head"), "loads in head");
+        assert!(
+            at < visible.find("<style>").expect("shell style"),
+            "the attribute is set before the shell styles apply"
+        );
+        assert_eq!(
+            visible.matches("<script>").count(),
+            1,
+            "only the mount watcher is inline"
+        );
+        let asset = crate::BOOT_THEME_JS.bundled();
+        assert!(
+            asset
+                .absolute_source_path()
+                .ends_with("/assets/boot-theme.js"),
+            "{}",
+            asset.absolute_source_path()
+        );
+        assert!(!asset.options().hash_suffix(), "shipped at a stable path");
     }
 
     /// dx still sees a closing body tag inside a comment, so that count stays
