@@ -148,11 +148,13 @@ pub struct GateState {
     /// so a stat never goes down unflagged from one stored row to the next.
     /// A later capture where the cell is still held or unread and the reader
     /// gives no fresh unsure read, or where the gate holds a sure read of
-    /// the cell (a lone jump), keeps this value in the stored row
+    /// the cell at or above this value that is not plausible from it (a
+    /// jump past the filter), keeps this value in the stored row
     /// (flagged), so a repeat read of the same board never drops the row
-    /// back to the older accepted value. A later refused digit at or above
-    /// the accepted value replaces it when the row before already showed an
-    /// unsure read and the digit also passes the jump and rate-cap filter
+    /// back to the older accepted value. A later refused digit (a held sure
+    /// read counts as one) at or above the accepted value replaces it when
+    /// the row before already showed an unsure read and the digit also
+    /// passes the jump and rate-cap filter
     /// measured from that shown value; otherwise the shown value is kept.
     /// Missing on an older save means the stored row showed `accepted`.
     #[serde(default)]
