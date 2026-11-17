@@ -397,6 +397,10 @@ pub const CSS: &str = r#"
     .settings-hint {
         font-size: 0.78rem; color: var(--text-subtle); margin: 0.3rem 0 0; line-height: 1.4;
     }
+    /* The live line under Apply pack stays in the tree when it has nothing
+       to say; empty, it takes no space. */
+    .pack-brand-status { margin-top: 0.65rem; }
+    .pack-brand-status:empty { margin: 0; }
 
     /* Settings page: use most of the content column; still fluid on small screens */
     .settings-page {

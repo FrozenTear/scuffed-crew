@@ -254,7 +254,7 @@ pub fn runtime_favicon_href(settled_org_name: Option<&str>) -> Option<String> {
 }
 
 /// Accept `#rgb` / `#rrggbb` / bare hex → lowercase `#rrggbb`.
-fn normalize_hex(raw: &str) -> Option<String> {
+pub fn normalize_hex(raw: &str) -> Option<String> {
     let s = raw.trim();
     if s.is_empty() {
         return None;
@@ -276,6 +276,124 @@ fn normalize_hex(raw: &str) -> Option<String> {
         _ => None,
     }
 }
+
+/// WCAG AA for text. The brand settings contrast lock uses the same floor
+/// the derivation aims for.
+pub const AA_TEXT: f64 = 4.5;
+
+/// The live contrast check for one theme scope: the two pairs the brand
+/// settings page shows, measured on the derived roles.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SchemeCheck {
+    pub scheme: Scheme,
+    pub roles: AccentRoles,
+    /// `--on-accent` on `--accent-solid` (a primary button).
+    pub ink_on_accent: f64,
+    /// `--accent-text` on the page background `--bg`.
+    pub accent_on_bg: f64,
+}
+
+impl SchemeCheck {
+    fn new(roles: AccentRoles, scheme: Scheme) -> Self {
+        let ink_on_accent = contrast_ratio(&roles.on_accent, &roles.solid);
+        let accent_on_bg = contrast_ratio(&roles.text, scheme.surfaces()[0]);
+        Self {
+            scheme,
+            roles,
+            ink_on_accent,
+            accent_on_bg,
+        }
+    }
+
+    pub fn ink_passes(&self) -> bool {
+        self.ink_on_accent >= AA_TEXT
+    }
+
+    pub fn text_passes(&self) -> bool {
+        self.accent_on_bg >= AA_TEXT
+    }
+
+    pub fn passes(&self) -> bool {
+        self.ink_passes() && self.text_passes()
+    }
+
+    fn theme_word(&self) -> &'static str {
+        match self.scheme {
+            Scheme::Dark => "dark",
+            Scheme::Light => "light",
+        }
+    }
+}
+
+/// Both theme scopes for one brand config. Save is blocked unless every
+/// pair reaches [`AA_TEXT`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct AccentCheck {
+    pub dark: SchemeCheck,
+    pub light: SchemeCheck,
+}
+
+impl AccentCheck {
+    pub fn for_brand(brand: &BrandConfig) -> Self {
+        Self {
+            dark: SchemeCheck::new(brand.dark.clone(), Scheme::Dark),
+            light: SchemeCheck::new(brand.light.clone(), Scheme::Light),
+        }
+    }
+
+    pub fn passes(&self) -> bool {
+        self.dark.passes() && self.light.passes()
+    }
+
+    /// One short sentence for the first failing pair, or `None` when every
+    /// pair passes.
+    pub fn fail_reason(&self) -> Option<String> {
+        for check in [&self.dark, &self.light] {
+            let theme = check.theme_word();
+            if !check.text_passes() {
+                return Some(format!(
+                    "This accent does not reach 4.5:1 on the {theme} page background."
+                ));
+            }
+            if !check.ink_passes() {
+                return Some(format!(
+                    "Ink on this accent does not reach 4.5:1 in the {theme} preview."
+                ));
+            }
+        }
+        None
+    }
+}
+
+/// A ratio as the contrast lines print it: one decimal, rounded. A pair
+/// just under the floor is rounded down instead, so a failing pair never
+/// reads as `4.5:1`.
+pub fn format_ratio(ratio: f64) -> String {
+    let rounded = (ratio * 10.0).round() / 10.0;
+    let shown = if ratio < AA_TEXT && rounded >= AA_TEXT {
+        (ratio * 10.0).floor() / 10.0
+    } else {
+        rounded
+    };
+    format!("{shown:.1}:1")
+}
+
+/// An accent the contrast lock blocks: in dark neither white nor the dark
+/// ink reaches 4.5:1 on it.
+#[cfg(test)]
+pub const TEST_BLOCKED_ACCENT: &str = "#d35400";
+/// Text that is not a hex colour the server accepts, for the hex field.
+#[cfg(test)]
+pub const TEST_INVALID_ACCENTS: [&str; 4] = ["mint", "#12", "#46d8a4ff", "url(x)"];
+/// A short hex in upper case with stray spaces: accepted and normalized.
+#[cfg(test)]
+pub const TEST_SHORT_ACCENT: &str = " #ABC ";
+/// The live mint brand, for tests that need a passing accent.
+#[cfg(test)]
+pub const TEST_MINT_ACCENT: &str = MINT_DARK;
+/// A second passing accent that is not the mint and not in any token file.
+#[cfg(test)]
+pub const TEST_OTHER_ACCENT: &str = "#ff5fa2";
 
 type Rgb = (u8, u8, u8);
 
@@ -603,6 +721,47 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The numbers on the brand settings frame for the live mint.
+    #[test]
+    fn contrast_check_matches_the_mint_frame() {
+        let check = AccentCheck::for_brand(&BrandConfig::from_settings(MINT_DARK, MINT_DARK));
+        assert!(check.passes());
+        assert!(check.fail_reason().is_none());
+        assert_eq!(format_ratio(check.dark.ink_on_accent), "9.9:1");
+        assert_eq!(format_ratio(check.dark.accent_on_bg), "9.9:1");
+        assert_eq!(format_ratio(check.light.ink_on_accent), "5.4:1");
+        assert_eq!(format_ratio(check.light.accent_on_bg), "5.0:1");
+    }
+
+    #[test]
+    fn contrast_check_blocks_an_accent_no_ink_clears() {
+        let brand = BrandConfig::from_settings(TEST_BLOCKED_ACCENT, TEST_BLOCKED_ACCENT);
+        let check = AccentCheck::for_brand(&brand);
+        assert!(!check.passes());
+        assert!(!check.dark.ink_passes());
+        assert!(check.dark.text_passes());
+        assert!(check.light.passes());
+        assert_eq!(
+            check.fail_reason().as_deref(),
+            Some("Ink on this accent does not reach 4.5:1 in the dark preview.")
+        );
+    }
+
+    #[test]
+    fn product_default_and_pending_pass_the_contrast_check() {
+        assert!(AccentCheck::for_brand(&BrandConfig::product_default()).passes());
+        assert!(AccentCheck::for_brand(&BrandConfig::pending()).passes());
+    }
+
+    #[test]
+    fn a_failing_ratio_never_prints_as_the_floor() {
+        assert_eq!(format_ratio(4.49), "4.4:1");
+        assert_eq!(format_ratio(4.28), "4.3:1");
+        assert_eq!(format_ratio(9.87), "9.9:1");
+        assert_eq!(format_ratio(4.5), "4.5:1");
+        assert_eq!(format_ratio(21.0), "21.0:1");
     }
 
     #[test]

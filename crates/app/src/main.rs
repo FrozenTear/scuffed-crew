@@ -165,16 +165,9 @@ fn App() -> Element {
     });
     // Unknown settings use a gray accent. Product purple is a real brand and
     // must not paint before the embedded block or `/api/settings` says so.
-    let brand_theme_css = {
-        use theme::brand::BrandConfig;
-        match loaded_settings.as_ref() {
-            Some(s) => theme::theme_css(&BrandConfig::from_settings(
-                &s.brand_accent_dark,
-                &s.brand_accent_light,
-            )),
-            None => theme::theme_css(&BrandConfig::pending()),
-        }
-    };
+    let brand_theme_css = theme::chrome_theme_css_for(loaded_settings);
+    // Admin display font, once the server stores one (see `state::brand_font`).
+    let display_font_css = state::provide_brand_font().font().root_css();
 
     // Desktop only. Native Rust cannot call web_sys, so the canvas module is
     // injected as script text. This is not in the web bundle. The site CSP
@@ -194,6 +187,7 @@ fn App() -> Element {
             href: asset!("/assets/tailwind.css")
         }
         style { "{brand_theme_css}" }
+        style { "{display_font_css}" }
         style { {styles::common::CSS} }
         style { {components::ui::ui_css()} }
         theme::ThemeProvider {
