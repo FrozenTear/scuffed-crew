@@ -1,8 +1,8 @@
 # What's changed: Site
 #
 # This file is the Site tab of the public "What's changed" page
-# (/changelog/site). The app embeds it at build time, so a change shows up
-# with the next deploy. No server or database change is needed.
+# (/changelog/site). The build checks it and compiles it in, so a change
+# shows up with the next deploy. No server or database change is needed.
 #
 # How to add an entry
 # 1. Copy the [[entry]] block below and paste it ABOVE the newest entry.
@@ -18,10 +18,11 @@
 # 4. Optional: link = "https://..." for public release notes or a public
 #    pull request. Leave it out when the page is private. Only https links
 #    are allowed.
-# 5. No em or en dashes, and no personal names. If the org must be named,
-#    write FrozenTear.
-# 6. Run `cargo test -p scuffed-app changelog` to check the file before the
-#    deploy. A broken file fails that test.
+# 5. No em or en dashes, and no personal names. Don't name the org; the
+#    page does that from Settings. If the owner must be named, write
+#    FrozenTear.
+# 6. The build checks this file: a broken file fails `cargo build`,
+#    `dx build` and `cargo test -p scuffed-app changelog`, with the reason.
 #
 # Example (as a comment, do not ship it):
 # [[entry]]

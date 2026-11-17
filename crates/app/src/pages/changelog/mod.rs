@@ -1,18 +1,21 @@
 //! Public "What's changed" page: `/changelog/site` and `/changelog/tracker`.
 //!
-//! The content is two static TOML files embedded at build time (see
-//! [`data`]), so the page needs no server route and no database. The Site /
+//! The content is two static TOML files that `build.rs` checks and compiles
+//! in (see [`data`]), so the page needs no server route and no database. The Site /
 //! Tracker switch is two real links, so each tab is its own URL.
 
 mod data;
+mod model;
+#[cfg(test)]
+mod parse;
 
 use std::cell::Cell;
 use std::rc::Rc;
 
 use dioxus::prelude::*;
 
-pub use data::Tab;
-use data::{Entry, ListState};
+use model::Entry;
+pub use model::Tab;
 
 use crate::layouts::focus_element;
 use crate::pages::{NotFoundLink, NotFoundPanel};
@@ -164,18 +167,21 @@ const CHANGELOG_CSS: &str = r#"
     }
     .changelog-page .ui-empty p { margin: 0; }
     .changelog-page .ui-empty .cl-empty-title { margin-bottom: var(--space-2); }
-    .cl-error {
-        display: flex;
-        flex-wrap: wrap;
-        align-items: center;
-        gap: var(--space-3);
-    }
-    .cl-error p {
-        margin: 0;
-        color: var(--text);
-        font-size: var(--text-md);
-    }
+    /* The polite status region. */
     .cl-live {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+    }
+    /* Screen reader only text, such as the link suffix. Its own class, so a
+       later change to the live region cannot un-hide it. */
+    .cl-sr {
         position: absolute;
         width: 1px;
         height: 1px;
@@ -255,28 +261,48 @@ fn entry_heading_id(tab: Tab, index: usize) -> String {
     format!("cl-{}-{index}", tab.slug())
 }
 
-/// Tracks toggle navigations. A cold load stays quiet; once the tab prop
-/// differs from the last render, the live region may speak.
-#[derive(Clone)]
-struct SwitchTracker {
-    last: Rc<Cell<Tab>>,
-    switched: Rc<Cell<bool>>,
+/// What the list remembers across renders of one page instance. The route
+/// component re-renders this page with a new `tab` prop on a toggle
+/// navigation, so the memory notices the switch itself.
+struct ListMemory {
+    last: Cell<Tab>,
+    /// Entries shown on the current tab. 0 means the first batch.
+    shown: Cell<usize>,
+    /// The live region names the tab after a switch, until "Show older".
+    announce: Cell<bool>,
 }
 
-impl SwitchTracker {
+impl ListMemory {
     fn new(tab: Tab) -> Self {
         Self {
-            last: Rc::new(Cell::new(tab)),
-            switched: Rc::new(Cell::new(false)),
+            last: Cell::new(tab),
+            shown: Cell::new(0),
+            announce: Cell::new(false),
         }
     }
 
-    /// Record this render's tab and say whether any switch has happened.
-    fn observe(&self, tab: Tab) -> bool {
+    /// Record this render's tab. A switch starts the list over at the first
+    /// batch and turns the announcement on.
+    fn observe(&self, tab: Tab) {
         if self.last.replace(tab) != tab {
-            self.switched.set(true);
+            self.shown.set(0);
+            self.announce.set(true);
         }
-        self.switched.get()
+    }
+
+    /// Entries to paint out of `total`.
+    fn shown(&self, total: usize) -> usize {
+        self.shown.get().max(data::first_batch(total)).min(total)
+    }
+
+    /// "Show older": remember the new count and go quiet, as on a fresh load.
+    fn show_older(&self, next: usize) {
+        self.shown.set(next);
+        self.announce.set(false);
+    }
+
+    fn announce(&self) -> bool {
+        self.announce.get()
     }
 }
 
@@ -287,12 +313,11 @@ fn ChangelogPage(tab: Tab) -> Element {
         crate::state::loaded_site_settings(site_settings.resolved.read().as_ref())
             .map(|settings| settings.org_name.as_str()),
     );
-    let tracker = use_hook(|| SwitchTracker::new(tab));
-    let after_switch = tracker.observe(tab);
-    // (tab, shown). A tab switch starts the list over at the first batch.
-    let mut shown = use_signal(|| (tab, 0usize));
-    // Retry re-reads the list only. With an embedded source it reparses.
-    let mut attempt = use_signal(|| 0u32);
+    let memory = use_hook(|| Rc::new(ListMemory::new(tab)));
+    memory.observe(tab);
+    // Bumped by "Show older" so the page re-renders; the count is in `memory`.
+    let mut redraw = use_signal(|| 0u32);
+    let _ = redraw();
     let mut pending_focus = use_signal(|| None::<String>);
 
     use_effect(move || {
@@ -302,74 +327,43 @@ fn ChangelogPage(tab: Tab) -> Element {
         }
     });
 
-    let _ = attempt();
-    let loaded = data::load(tab);
-    if let Err(err) = &loaded {
-        tracing::error!("changelog: {err}");
-    }
-
-    let (state, list) = match &loaded {
-        Ok(entries) => {
-            let (shown_tab, count) = shown();
-            let count = if shown_tab == tab {
-                count
-                    .max(data::first_batch(entries.len()))
-                    .min(entries.len())
-            } else {
-                data::first_batch(entries.len())
-            };
-            let state = ListState::Ready { shown: count };
-            let total = entries.len();
-            let list = if total == 0 {
-                rsx! {
-                    div { class: "ui-empty",
-                        p { class: "cl-empty-title", "No changes yet." }
-                        p { "{data::empty_text(tab)}" }
-                    }
-                }
-            } else {
-                rsx! {
-                    for (i, entry) in entries.iter().take(count).enumerate() {
-                        ChangelogEntry {
-                            key: "{tab.slug()}-{i}",
-                            heading_id: entry_heading_id(tab, i),
-                            entry: entry.clone(),
-                        }
-                    }
-                    if data::has_older(count, total) {
-                        div { class: "cl-more",
-                            button {
-                                r#type: "button",
-                                class: "ui-btn ui-btn--ghost ui-btn--md cl-btn",
-                                onclick: move |_| {
-                                    let next = data::next_batch(count, total);
-                                    shown.set((tab, next));
-                                    pending_focus.set(Some(entry_heading_id(tab, count)));
-                                },
-                                "Show older"
-                            }
-                        }
-                    }
-                }
-            };
-            (state, list)
+    let entries = data::load(tab);
+    let total = entries.len();
+    let count = memory.shown(total);
+    let live = data::live_text(tab, memory.announce(), data::first_batch(total));
+    let list = if total == 0 {
+        rsx! {
+            div { class: "ui-empty",
+                p { class: "cl-empty-title", "No changes yet." }
+                p { "{data::empty_text(tab)}" }
+            }
         }
-        Err(_) => (
-            ListState::Error,
-            rsx! {
-                div { class: "cl-error",
-                    p { "{data::error_text(tab)}" }
+    } else {
+        let memory = memory.clone();
+        rsx! {
+            for (i, entry) in entries.iter().take(count).enumerate() {
+                ChangelogEntry {
+                    key: "{tab.slug()}-{i}",
+                    heading_id: entry_heading_id(tab, i),
+                    entry: entry.clone(),
+                }
+            }
+            if data::has_older(count, total) {
+                div { class: "cl-more",
                     button {
                         r#type: "button",
                         class: "ui-btn ui-btn--ghost ui-btn--md cl-btn",
-                        onclick: move |_| attempt += 1,
-                        "Retry"
+                        onclick: move |_| {
+                            memory.show_older(data::next_batch(count, total));
+                            pending_focus.set(Some(entry_heading_id(tab, count)));
+                            redraw += 1;
+                        },
+                        "Show older"
                     }
                 }
-            },
-        ),
+            }
+        }
     };
-    let live = data::live_text(tab, state, after_switch);
 
     rsx! {
         crate::styles::StyleOnce { id: "scuffed-css-pages-changelog", css: CHANGELOG_CSS }
@@ -421,7 +415,7 @@ fn ChangelogEntry(heading_id: String, entry: Entry) -> Element {
                     href: "{link}",
                     rel: "noopener noreferrer",
                     "Public release notes"
-                    span { class: "cl-live", " for {link_context}" }
+                    span { class: "cl-sr", " for {link_context}" }
                 }
             }
             if !entry.changes.is_empty() {
@@ -530,6 +524,18 @@ mod tests {
         &html[start..]
     }
 
+    /// The page without the footer that follows it.
+    fn page_only(html: &str) -> &str {
+        let page = page_of(html);
+        &page[..page.find("<footer").unwrap_or(page.len())]
+    }
+
+    fn toggle_nav(page: &str) -> &str {
+        let start = page.find("<nav class=\"cl-toggle\"").expect("toggle nav");
+        let end = start + page[start..].find("</nav>").unwrap();
+        &page[start..end]
+    }
+
     fn fake_site(n: usize) -> String {
         let mut out = String::new();
         for i in 0..n {
@@ -555,8 +561,17 @@ mod tests {
         );
         let (html, url) = render_with("/changelog", None);
         assert_eq!(url, "/changelog/site");
-        assert!(html.contains("What&#39;s changed") || html.contains("What's changed"));
-        assert!(page_of(&html).contains("aria-current=\"page\""), "{html}");
+        // Scoped to the page, so the footer's "What's changed" link cannot
+        // satisfy either check.
+        let page = page_only(&html);
+        assert!(
+            page.contains("<h1>What&#39;s changed</h1>")
+                || page.contains("<h1>What's changed</h1>"),
+            "{page}"
+        );
+        let nav = toggle_nav(page);
+        assert_eq!(nav.matches("aria-current=\"page\"").count(), 1, "{nav}");
+        assert!(page.contains("aria-label=\"Site changes\""), "{page}");
     }
 
     #[test]
@@ -574,12 +589,14 @@ mod tests {
         ] {
             let (html, url) = render_with(path, None);
             assert_eq!(url, path, "an unknown tab is not redirected");
-            assert!(html.contains("nf-page"), "{path}: {html}");
             assert!(html.contains("d1-top"), "{path}: keeps the site chrome");
-            assert!(html.contains("href=\"/changelog/site\""), "{path}: {html}");
+            // Scoped to the not-found card: the footer also links Site.
+            let card = &html[html.find("nf-page").expect("not-found card")..];
+            let card = &card[..card.find("<footer").unwrap_or(card.len())];
+            assert!(card.contains("href=\"/changelog/site\""), "{path}: {card}");
             assert!(
-                html.contains("href=\"/changelog/tracker\""),
-                "{path}: {html}"
+                card.contains("href=\"/changelog/tracker\""),
+                "{path}: {card}"
             );
             assert!(!html.contains("changelog-page"), "{path}");
         }
@@ -690,7 +707,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_and_error_states_match_the_copy() {
+    fn empty_state_matches_the_copy_and_there_is_no_error_state() {
         let html = render("/changelog/tracker", Some(""));
         let page = page_of(&html);
         assert!(page.contains("class=\"ui-empty\""), "{page}");
@@ -700,29 +717,56 @@ mod tests {
             "{page}"
         );
         assert!(page.contains("class=\"cl-toggle\""), "toggle stays");
-
-        let html = render("/changelog/site", Some("[[entry]\n"));
-        let page = page_of(&html);
-        assert!(page.contains("Site changes could not be loaded."), "{page}");
-        assert!(page.contains(">Retry</button>"), "{page}");
-        assert!(
-            page.contains("href=\"/changelog/tracker\""),
-            "the other tab stays usable"
-        );
-        assert_eq!(html.matches("<h1").count(), 1);
-        assert!(
-            page.contains("aria-live=\"polite\">Site changes could not be loaded. Retry.</p>"),
-            "an error speaks even on a cold load: {page}"
-        );
+        // build.rs rejects a broken file, so the page has no error or Retry.
+        for path in ["/changelog/site", "/changelog/tracker"] {
+            let html = render(path, None);
+            assert!(!html.contains("Retry"), "{path}");
+            assert!(!html.contains("could not be loaded"), "{path}");
+        }
     }
 
     #[test]
-    fn switch_tracker_only_speaks_after_a_tab_change() {
-        let t = SwitchTracker::new(Tab::Site);
-        assert!(!t.observe(Tab::Site));
-        assert!(!t.observe(Tab::Site));
-        assert!(t.observe(Tab::Tracker));
-        assert!(t.observe(Tab::Site), "stays on after the first switch");
+    fn a_tab_switch_starts_the_list_over_and_show_older_goes_quiet() {
+        let m = ListMemory::new(Tab::Site);
+        m.observe(Tab::Site);
+        assert!(!m.announce(), "a cold load is quiet");
+        assert_eq!(m.shown(23), 10);
+        m.show_older(20);
+        m.observe(Tab::Site);
+        assert_eq!(m.shown(23), 20, "a re-render keeps Show older");
+
+        m.observe(Tab::Tracker);
+        assert!(m.announce(), "a switch speaks");
+        assert_eq!(m.shown(23), 10, "a switch starts over");
+        m.show_older(20);
+        assert!(
+            !m.announce(),
+            "Show older after a switch is quiet, as on a fresh load"
+        );
+
+        // Site, Show older, Tracker, back to Site: Site starts over too.
+        m.observe(Tab::Site);
+        assert_eq!(m.shown(23), 10);
+        assert!(m.announce());
+        assert_eq!(m.shown(4), 4);
+        assert_eq!(m.shown(0), 0);
+    }
+
+    #[test]
+    fn the_link_suffix_uses_its_own_screen_reader_class() {
+        let src = "[[entry]]\nversion = \"v1.0.0\"\ndate = \"2026-11-02\"\nchanges = [\"x\"]\nlink = \"https://example.com/notes\"\n";
+        let html = render("/changelog/tracker", Some(src));
+        let page = page_only(&html);
+        assert!(
+            page.contains("<span class=\"cl-sr\"> for v1.0.0</span>"),
+            "{page}"
+        );
+        assert_eq!(page.matches("class=\"cl-live\"").count(), 1, "{page}");
+        let sr = CHANGELOG_CSS
+            .split_once(".cl-sr {")
+            .map(|(_, rest)| rest.split_once('}').unwrap().0)
+            .expect("cl-sr rule");
+        assert!(sr.contains("clip: rect(0, 0, 0, 0);"), "{sr}");
     }
 
     #[test]
@@ -732,6 +776,17 @@ mod tests {
             let footer_start = html.find("<footer").unwrap();
             let footer = &html[footer_start..];
             let account = &footer[footer.find("<h2>Account</h2>").unwrap()..];
+            assert!(
+                account.contains("href=\"/changelog/site\""),
+                "{path}: {account}"
+            );
+            assert!(account.contains("What&#39;s changed") || account.contains("What's changed"));
+
+            // The phone drawer has its own link in the Account group.
+            let drawer_start = html.find("id=\"site-drawer\"").expect("drawer");
+            let drawer = &html[drawer_start..];
+            let drawer = &drawer[..drawer.find("<main").expect("main after drawer")];
+            let account = &drawer[drawer.find("<h2>Account</h2>").expect("drawer Account")..];
             assert!(
                 account.contains("href=\"/changelog/site\""),
                 "{path}: {account}"

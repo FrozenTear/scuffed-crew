@@ -1,15 +1,16 @@
 # What's changed: Tracker
 #
 # This file is the Tracker tab of the public "What's changed" page
-# (/changelog/tracker). One entry per stat tracker release. The app embeds
-# it at build time, so a change shows up with the next site deploy. No
-# server or database change is needed.
+# (/changelog/tracker). One entry per stat tracker release. The build
+# checks it and compiles it in, so a change shows up with the next site
+# deploy. No server or database change is needed.
 #
 # How to add an entry
 # 1. Copy the [[entry]] block below and paste it ABOVE the newest entry.
 #    Keep the file newest first. The page also sorts by date, newest first.
-# 2. Set version to the release tag, for example "v0.6.0-alpha.3.1", and
-#    date to the release day, written as "YYYY-MM-DD" (Europe/Oslo).
+# 2. Set version to the version from the release tag (the tag
+#    stat-tracker-v0.6.0-alpha.3.1 gives "v0.6.0-alpha.3.1"), and date to
+#    the release day, written as "YYYY-MM-DD" (Europe/Oslo).
 # 3. Write the changes for members in plain words, not commit titles.
 #    Use one list:
 #        changes = ["...", "..."]
@@ -19,10 +20,11 @@
 #        fixed   = ["..."]
 # 4. Optional: link = "https://..." for public release notes. Leave it out
 #    when the release is private. Only https links are allowed.
-# 5. No em or en dashes, and no personal names. If the org must be named,
-#    write FrozenTear.
-# 6. Run `cargo test -p scuffed-app changelog` to check the file before the
-#    deploy. A broken file fails that test.
+# 5. No em or en dashes, and no personal names. Don't name the org; the
+#    page does that from Settings. If the owner must be named, write
+#    FrozenTear.
+# 6. The build checks this file: a broken file fails `cargo build`,
+#    `dx build` and `cargo test -p scuffed-app changelog`, with the reason.
 #
 # Example (as a comment, do not ship it):
 # [[entry]]
