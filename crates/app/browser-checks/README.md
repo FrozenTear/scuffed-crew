@@ -5,9 +5,9 @@ run against a local stack with fake data only. They are not part of CI.
 
 | Script | Checks |
 | --- | --- |
-| `keys.mjs` | Shell keyboard (skip link, group panels, account menu, phone drawer), resize across the phone breakpoint, Apply for a trial recruit, editor shortcuts on focused buttons, links, sliders and selects and in the map canvas, Cmd chords, the canvas focus ring and key hint, Esc in the canvas, the map picker modal (Ctrl+S, focus for any stored map id), no shortcuts behind the phone drawer |
+| `keys.mjs` | Shell keyboard (skip link, group panels, account menu, phone drawer), resize across the phone breakpoint, Apply for a trial recruit, editor shortcuts on focused buttons, links, sliders and selects and in the map canvas, Cmd chords, the canvas focus ring and key hint, Esc in the canvas, Cmd+Y left to the browser, arrows on a select, Tab out of a group panel closes it, the map picker modal (Ctrl+S, Tab from outside, focus for any stored map id), no shortcuts behind the phone drawer and Ctrl/Cmd+S held back there |
 | `fix2.mjs` | Editor Tab rule: Tab moves focus normally, Tab toggles the team panel only inside the map canvas, Esc and Shift+Tab leave it |
-| `overflow.mjs` | No horizontal page overflow per role and width, `/admin/relay` tables scroll in their own wrappers |
+| `overflow.mjs` | No horizontal page overflow per role and width, measured after each page leaves its loading state (10 s cap, pages that do not are listed as a failure), `/admin/relay` tables (waited for) scroll in their own wrappers |
 
 Each script prints `PASS` and `FAIL` lines, writes `reports/<name>.json` and
 exits 1 on any failure.

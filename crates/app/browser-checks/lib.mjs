@@ -33,6 +33,22 @@ export async function ready(page) {
 }
 export async function open(page, p) { await page.goto(B + p, { waitUntil: 'load' }); await ready(page); }
 
+// Visible loading markers: skeleton lists, spinners, aria-busy, and any
+// element whose class names a loading state ("admin-loading", "loading-state",
+// "wiki-loading"...). An error that reuses such a class is not loading.
+const LOADING = '.ui-skel-list, .ui-spinner, [aria-busy="true"], [class*="loading"]';
+/** Wait until no loading marker is visible. Returns the ones left after `ms` (empty when settled). */
+export async function settled(page, ms = 10000) {
+  const left = () => page.evaluate(sel => [...document.querySelectorAll(sel)]
+    .filter(e => e.getBoundingClientRect().height > 0 && !/failed|error/i.test(e.textContent))
+    .map(e => e.className + ': ' + (e.textContent || '').trim().slice(0, 40)), LOADING);
+  try {
+    await page.waitForFunction(sel => ![...document.querySelectorAll(sel)]
+      .some(e => e.getBoundingClientRect().height > 0 && !/failed|error/i.test(e.textContent)), LOADING, { timeout: ms });
+    return [];
+  } catch { return left(); }
+}
+
 /** A browser context signed in as `role` (or a guest). Sessions are cached in STATE_DIR. */
 export async function makeContext(browser, role, width, theme = 'dark') {
   const statePath = path.join(STATE_DIR, 'session-' + role + '.json');

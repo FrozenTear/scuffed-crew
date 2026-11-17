@@ -10,6 +10,9 @@
 // 5. Vision r4 nits: 3 (ring after a key), 13 (drawer), 14 (Ctrl+S in the
 //    picker), 15 (Cmd chords), 16 (selects and sliders), 17 (stored map id
 //    not the picker's), 20 (no hint on mouse focus), 21 (aria-current).
+// 6. Vision r5 nits: 22 (Ctrl/Cmd+S behind the drawer), 23 (Tab from outside
+//    the picker), 24 (no Cmd+Y), 25 (arrows on a select), and Tab out of a
+//    group panel closes it.
 import { launch, makeContext, open, readState, reporter } from './lib.mjs';
 
 const { rec, finish } = reporter('keys');
@@ -66,6 +69,14 @@ for (const role of ['guest', 'member', 'admin']) {
     await page.click(sel); await page.waitForTimeout(150);
     await page.mouse.click(900, 28); await page.waitForTimeout(200);
     rec(`${role} ${id}: click on empty top bar closes`, (await page.getAttribute(sel, 'aria-expanded')) === 'false');
+    // Tab past the last item: focus leaves the panel and the panel closes.
+    await page.focus(sel); await page.keyboard.press('Enter'); await page.waitForTimeout(150);
+    const items = await page.evaluate(p => [...document.querySelectorAll(`#${p} a[href], #${p} button:not([disabled])`)].filter(e => e.getBoundingClientRect().width > 0).length, panel);
+    for (let i = 0; i < items; i++) await page.keyboard.press('Tab');
+    const lastIn = await page.evaluate(p => !!document.activeElement.closest('#' + p), panel);
+    await page.keyboard.press('Tab'); await page.waitForTimeout(200); a = await active(page);
+    const outside = await page.evaluate(p => !document.activeElement.closest('#' + p), panel);
+    rec(`${role} ${id}: Tab past the last of ${items} items leaves the panel and closes it, no dismiss layer`, items > 0 && lastIn && outside && (await page.getAttribute(sel, 'aria-expanded')) === 'false' && !(await shown()) && (await page.$('.nav-dismiss-layer')) === null, JSON.stringify(a));
   }
   // only one open at a time
   await page.click('#' + toggles[0]); await page.click('#' + toggles[1]); await page.waitForTimeout(150);
@@ -245,6 +256,13 @@ for (const role of ['guest', 'member']) {
     await page.keyboard.press('Meta+z'); await page.waitForTimeout(100); after = await state(page);
     await page.keyboard.press('Meta+Shift+z'); await page.waitForTimeout(100); let again = await state(page);
     rec(`${T}: nit 15, Cmd+Z and Cmd+Shift+Z work with a button focused`, after.elements === '0' && again.elements === '1', `${after.elements} ${again.elements}`);
+    // Nit 24: Cmd+Y is not bound (History on macOS): no redo, default kept.
+    await page.keyboard.press('Meta+z'); await page.waitForTimeout(100);
+    await page.evaluate(() => { window.__cmdY = []; window.addEventListener('keydown', e => { if (e.key.toLowerCase() === 'y' && e.metaKey) window.__cmdY.push(e.defaultPrevented); }); });
+    await page.keyboard.press('Meta+y'); await page.waitForTimeout(100); after = await state(page);
+    const cmdY = await page.evaluate(() => window.__cmdY);
+    await page.keyboard.press('Control+y'); await page.waitForTimeout(100); again = await state(page);
+    rec(`${T}: nit 24, Cmd+Y does not redo and is left to the browser; Ctrl+Y still redoes`, after.elements === '0' && same(cmdY, [false]) && again.elements === '1', `${after.elements} ${JSON.stringify(cmdY)} ${again.elements}`);
     // Nit 16: a slider and a select are controls, not text fields. Their own
     // keys stay with them; Ctrl+Z, Ctrl+Shift+Z and Ctrl+S reach the editor.
     await page.evaluate(() => { window.__saveBlocked = []; window.addEventListener('keydown', e => { if (e.key.toLowerCase() === 's' && (e.ctrlKey || e.metaKey)) window.__saveBlocked.push(e.defaultPrevented); }); });
@@ -263,6 +281,17 @@ for (const role of ['guest', 'member']) {
         await page.focus(sel); before = await state(page); const v0 = await page.$eval(sel, e => e.value);
         await page.keyboard.press(key); await page.waitForTimeout(100); after = await state(page); const v1 = await page.$eval(sel, e => e.value);
         rec(`${T}: nit 16, ArrowRight on the slider moves the slider (${v0} to ${v1}), not the phase`, v1 !== v0 && after.phase === before.phase, JSON.stringify({ before, after }));
+      } else {
+        // Nit 25: the select keeps its arrows too. ArrowRight and ArrowLeft
+        // (the phase keys) leave the phase alone; ArrowDown is the select's.
+        const moved = []; const values = [await page.$eval(sel, e => e.value)];
+        for (const k of ['ArrowRight', 'ArrowLeft', key]) {
+          await page.focus(sel); before = await state(page);
+          await page.keyboard.press(k); await page.waitForTimeout(100); after = await state(page);
+          values.push(await page.$eval(sel, e => e.value));
+          if (after.phase !== before.phase || !(await focusedIs(page, sel))) moved.push(k + ' ' + JSON.stringify({ before, after }));
+        }
+        rec(`${T}: nit 25, ArrowRight, ArrowLeft and ${key} on the select do not move the phase, focus stays, ${key} moves the select (${values.join(' > ')})`, moved.length === 0 && values[3] !== values[2], moved.join(' | ') + ' ' + values.join(' > '));
       }
     }
     // Saving moved the strategy off this tab's URL? Keep the same page either way.
@@ -358,14 +387,16 @@ for (const role of ['guest', 'member']) {
     await page.waitForTimeout(100);
     const afterKeys = await state(page);
     rec(`${T}: editor shortcuts do nothing behind the open picker`, same(before, afterKeys) && !!(await page.$('#map-picker')), JSON.stringify({ before, afterKeys }));
+    // Nit 23: start outside the picker (focus on the body), then Tab.
+    const startOutside = await page.evaluate(() => { document.activeElement.blur(); return !document.activeElement.closest('#map-picker'); });
+    await page.keyboard.press('Tab'); a = await page.evaluate(() => !!document.activeElement.closest('#map-picker'));
+    rec(`${T}: nit 23, Tab with focus outside the picker (on the body) pulls focus back in`, startOutside && a, `outside=${startOutside} in=${a}`);
     // Nit 14: Ctrl+S with the picker open does not reach the browser.
     await page.evaluate(() => { window.__saveBlocked = []; window.addEventListener('keydown', e => { if (e.key.toLowerCase() === 's' && (e.ctrlKey || e.metaKey)) window.__saveBlocked.push(e.defaultPrevented); }); });
     await page.focus('#map-picker-close');
     await page.keyboard.press('Control+s'); await page.keyboard.press('Meta+s'); await page.waitForTimeout(150);
     const blocked = await page.evaluate(() => window.__saveBlocked);
     rec(`${T}: nit 14, Ctrl+S and Cmd+S in the open picker are held back from the browser, picker stays open`, same(blocked, [true, true]) && !!(await page.$('#map-picker')), JSON.stringify(blocked));
-    await page.keyboard.press('Tab'); a = await page.evaluate(() => !!document.activeElement.closest('#map-picker'));
-    rec(`${T}: Tab from outside pulls focus back into the picker`, a);
     // Tab stays inside and visits every stop.
     const stops = await page.evaluate(() => [...document.querySelectorAll('#map-picker button:not([disabled])')].length);
     await page.focus('#map-picker-close'); const seen = new Set(); let leaked = null;
@@ -426,6 +457,13 @@ for (const role of ['guest', 'member']) {
   await page.waitForTimeout(150);
   const after = await state(page);
   rec(`${T}: nit 13, drawer open and focus on the page (${where}): no editor shortcut runs behind it`, !!blank && where !== null && mainInert && same(before, after), JSON.stringify({ blank, where, before, after }));
+  // Nit 22: Ctrl+S and Cmd+S behind the drawer still hold back the browser's
+  // Save Page dialog, and save nothing.
+  await page.evaluate(() => { window.__saveBlocked = []; window.addEventListener('keydown', e => { if (e.key.toLowerCase() === 's' && (e.ctrlKey || e.metaKey)) window.__saveBlocked.push(e.defaultPrevented); }); });
+  await page.keyboard.press('Control+s'); await page.keyboard.press('Meta+s'); await page.waitForTimeout(300);
+  const blocked = await page.evaluate(() => window.__saveBlocked);
+  const drawerStill = await page.evaluate(() => document.getElementById('site-drawer').classList.contains('is-open'));
+  rec(`${T}: nit 22, Ctrl+S and Cmd+S with the drawer open are held back from the browser, nothing saved, drawer stays open`, same(blocked, [true, true]) && drawerStill && same(await state(page), after) && new URL(page.url()).pathname === EDITOR, JSON.stringify({ blocked, drawerStill, url: page.url() }));
   await page.keyboard.press('Escape'); await page.waitForTimeout(300);
   const closed = !(await page.evaluate(() => document.getElementById('site-drawer').classList.contains('is-open')));
   // Once it is closed the page shortcuts work again.
