@@ -5,6 +5,7 @@ use crate::components::ui::{PageHeader, PageShell, PageWidth};
 use crate::components::{AdminDate, SummaryCard, admin_pending, load_error_text, loading_text};
 use crate::hooks::{ApiResource, use_api, use_api_list};
 use crate::routes::Route;
+use crate::state::use_auth;
 use crate::util::pluralize;
 
 /// The "Needs a look" rows (`d1-admin-dashboard`): the news-list card, with
@@ -249,13 +250,16 @@ fn relay_note(h: &RelayHealth) -> Option<RelayNote> {
 
 enum HealthView {
     Pending,
+    /// The health check failed: its reason and Retry show, and "Needs a
+    /// look" says it could not check the relay.
+    Failed,
     Note(RelayNote),
     Quiet,
 }
 
 fn health_view(resource: &ApiResource<RelayHealth>) -> HealthView {
     if resource.error.read().is_some() {
-        return HealthView::Pending;
+        return HealthView::Failed;
     }
     match resource.data.read().as_ref().and_then(|d| d.as_ref()) {
         None => HealthView::Pending,
@@ -306,12 +310,43 @@ fn pending_look(applications: &[Application]) -> Option<PendingLook> {
     })
 }
 
-/// The line under the section title while it has no rows. Empty when it has.
-fn needs_status(has_rows: bool, settled: bool) -> &'static str {
+/// Where one source of "Needs a look" stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Source {
+    Pending,
+    Failed,
+    Ready,
+}
+
+impl Source {
+    fn of<T>(error: bool, data: Option<&T>) -> Self {
+        if error {
+            Source::Failed
+        } else if data.is_some() {
+            Source::Ready
+        } else {
+            Source::Pending
+        }
+    }
+}
+
+/// The line under the section title. A source that failed is always said,
+/// rows or not: "Nothing needs a look" is never claimed over a check that
+/// did not run. Otherwise it is empty when there are rows.
+fn needs_status(has_rows: bool, applications: Source, relay: Source) -> String {
+    let failed: Vec<&str> = [(applications, "pending applications"), (relay, "the relay")]
+        .into_iter()
+        .filter(|(source, _)| *source == Source::Failed)
+        .map(|(_, what)| what)
+        .collect();
+    if !failed.is_empty() {
+        return format!("Could not check {}.", failed.join(" or "));
+    }
+    let settled = applications == Source::Ready && relay == Source::Ready;
     match (has_rows, settled) {
-        (true, _) => "",
-        (false, false) => "Checking what needs a look...",
-        (false, true) => "Nothing needs a look right now.",
+        (true, _) => String::new(),
+        (false, false) => "Checking what needs a look...".to_string(),
+        (false, true) => "Nothing needs a look right now.".to_string(),
     }
 }
 
@@ -363,6 +398,35 @@ fn PendingEntry(look: PendingLook) -> Element {
     }
 }
 
+/// The quiet relay line. `link` is false for officers: the relay page is
+/// admin only, so they get the words without a way in that ends at a wall.
+#[component]
+fn RelayNoteLine(text: &'static str, link: bool) -> Element {
+    rsx! {
+        p { class: "dash-note",
+            "{text}"
+            if link {
+                " "
+                Link { to: Route::AdminRelay {}, "Open relay status" }
+            }
+        }
+    }
+}
+
+/// Title of the "Relay is offline" row; a link for admins only.
+#[component]
+fn RelayOfflineTitle(link: bool) -> Element {
+    rsx! {
+        h3 {
+            if link {
+                Link { to: Route::AdminRelay {}, "Relay is offline" }
+            } else {
+                "Relay is offline"
+            }
+        }
+    }
+}
+
 #[component]
 pub fn AdminDashboard() -> Element {
     let members = use_api_list::<Member>("/api/members");
@@ -379,32 +443,32 @@ pub fn AdminDashboard() -> Element {
         .as_ref()
         .and_then(|d| d.as_ref())
         .and_then(|list| pending_look(list));
-    let applications_settled = applications.error.read().is_some()
-        || applications
-            .data
-            .read()
-            .as_ref()
-            .is_some_and(|d| d.is_some());
+    let applications_source = Source::of(
+        applications.error.read().is_some(),
+        applications.data.read().as_ref().and_then(|d| d.as_ref()),
+    );
+    let relay_source = match relay {
+        HealthView::Pending => Source::Pending,
+        HealthView::Failed => Source::Failed,
+        HealthView::Note(_) | HealthView::Quiet => Source::Ready,
+    };
     let relay_offline = matches!(relay, HealthView::Note(RelayNote::Offline));
     let has_rows = look.is_some() || relay_offline;
-    let settled = applications_settled && !matches!(relay, HealthView::Pending);
-    let status = needs_status(has_rows, settled);
+    let status = needs_status(has_rows, applications_source, relay_source);
+    // The relay page is admin only: officers get the words, not a link.
+    let relay_link = use_auth()().is_admin();
     let offline_text = RelayNote::Offline.text();
     // A failed relay check keeps its reason and Retry. A relay that is fine
     // or optional is one quiet line with the way to its page.
     let relay_block = match relay {
-        HealthView::Pending if health.error.read().is_some() => rsx! {
-            div { class: "dash-health", "data-kpi": "health",
+        HealthView::Failed => rsx! {
+            div { "data-kpi": "health",
                 {admin_pending(&health, "relay status")}
             }
         },
         HealthView::Note(note) if note != RelayNote::Offline => {
-            let text = note.text();
             rsx! {
-                p { class: "dash-note",
-                    "{text} "
-                    Link { to: Route::AdminRelay {}, "Open relay status" }
-                }
+                RelayNoteLine { text: note.text(), link: relay_link }
             }
         }
         _ => rsx! {},
@@ -443,9 +507,7 @@ pub fn AdminDashboard() -> Element {
                         }
                         if relay_offline {
                             li { class: "dash-entry",
-                                h3 {
-                                    Link { to: Route::AdminRelay {}, "Relay is offline" }
-                                }
+                                RelayOfflineTitle { link: relay_link }
                                 p { "{offline_text}" }
                             }
                         }
@@ -531,10 +593,85 @@ mod tests {
 
     #[test]
     fn needs_status_is_empty_only_when_there_are_rows() {
-        assert_eq!(needs_status(true, false), "");
-        assert_eq!(needs_status(true, true), "");
-        assert_eq!(needs_status(false, false), "Checking what needs a look...");
-        assert_eq!(needs_status(false, true), "Nothing needs a look right now.");
+        use Source::{Pending, Ready};
+        assert_eq!(needs_status(true, Pending, Pending), "");
+        assert_eq!(needs_status(true, Ready, Pending), "");
+        assert_eq!(needs_status(true, Ready, Ready), "");
+        assert_eq!(
+            needs_status(false, Pending, Pending),
+            "Checking what needs a look..."
+        );
+        assert_eq!(
+            needs_status(false, Ready, Pending),
+            "Checking what needs a look..."
+        );
+        assert_eq!(
+            needs_status(false, Pending, Ready),
+            "Checking what needs a look..."
+        );
+        assert_eq!(
+            needs_status(false, Ready, Ready),
+            "Nothing needs a look right now."
+        );
+    }
+
+    #[test]
+    fn a_failed_source_is_said_and_never_reads_as_nothing_to_do() {
+        // Vision blocking 12 on PR 706: a failed /api/applications said
+        // "Nothing needs a look right now.", and a failed relay check said
+        // "Checking..." forever.
+        use Source::{Failed, Pending, Ready};
+        assert_eq!(
+            needs_status(false, Failed, Ready),
+            "Could not check pending applications."
+        );
+        assert_eq!(
+            needs_status(false, Ready, Failed),
+            "Could not check the relay."
+        );
+        assert_eq!(
+            needs_status(false, Pending, Failed),
+            "Could not check the relay."
+        );
+        assert_eq!(
+            needs_status(false, Failed, Failed),
+            "Could not check pending applications or the relay."
+        );
+        // Rows from one source do not hide that the other failed.
+        assert_eq!(
+            needs_status(true, Ready, Failed),
+            "Could not check the relay."
+        );
+        assert_eq!(Source::of(true, None::<&u8>), Failed);
+        assert_eq!(Source::of(true, Some(&1u8)), Failed);
+        assert_eq!(Source::of(false, Some(&1u8)), Ready);
+        assert_eq!(Source::of(false, None::<&u8>), Pending);
+    }
+
+    #[test]
+    fn officers_get_relay_words_without_a_link_to_the_admin_only_page() {
+        // Vision nit 11 on PR 706.
+        use crate::components::ui::test_support::render_routed;
+        let admin = render_routed(|| {
+            rsx! {
+                RelayNoteLine { text: RelayNote::Online.text(), link: true }
+                RelayOfflineTitle { link: true }
+            }
+        });
+        assert_eq!(admin.matches("href=\"/admin/relay\"").count(), 2, "{admin}");
+        assert!(admin.contains(">Open relay status</a>"), "{admin}");
+        let officer = render_routed(|| {
+            rsx! {
+                RelayNoteLine { text: RelayNote::Online.text(), link: false }
+                RelayOfflineTitle { link: false }
+            }
+        });
+        assert!(!officer.contains("/admin/relay"), "{officer}");
+        assert!(
+            officer.contains("<p class=\"dash-note\">Relay online.</p>"),
+            "{officer}"
+        );
+        assert!(officer.contains("<h3>Relay is offline</h3>"), "{officer}");
     }
 
     #[test]

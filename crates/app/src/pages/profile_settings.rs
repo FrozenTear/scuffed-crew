@@ -129,6 +129,30 @@ fn account_field_id(game_id: &str, field: &str) -> String {
     format!("profile-account-{}-{field}", id_part(game_id))
 }
 
+/// The field ids of one game account card, from its game id.
+#[derive(Debug, Clone, PartialEq)]
+struct AccountIds {
+    title: String,
+    rank: String,
+    sr: String,
+    role: String,
+    save: String,
+    status: String,
+}
+
+impl AccountIds {
+    fn new(game_id: &str) -> Self {
+        Self {
+            title: account_field_id(game_id, "title"),
+            rank: account_field_id(game_id, "rank"),
+            sr: account_field_id(game_id, "sr"),
+            role: account_field_id(game_id, "role"),
+            save: account_field_id(game_id, "save"),
+            status: account_field_id(game_id, "status"),
+        }
+    }
+}
+
 /// The account card, field and save line shared by the account pages
 /// (`d1-profile-edit`, `d1-identity`): a card padded `--space-section`,
 /// labels `--space-2` above their controls, `--space-5` from one field to the
@@ -702,6 +726,25 @@ pub fn ProfileSettings() -> Element {
     let name_has_error = !name_err.is_empty();
     let visibility_busy = visibility_state() == SaveState::Saving;
 
+    // One keyed card per game account. Worked out here, so the `for` body is
+    // the keyed form itself (a key inside a `{ let ..; rsx! {} }` body does
+    // not key the loop).
+    let account_rows: Vec<(usize, AccountEdit, AccountIds, SaveState, bool)> = accounts
+        .read()
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(idx, acc)| {
+            let ids = AccountIds::new(&acc.game_id);
+            let row_state = account_state()
+                .filter(|(game, _)| *game == acc.game_id)
+                .map(|(_, state)| state)
+                .unwrap_or_default();
+            let sr_bad = sr_invalid().as_deref() == Some(acc.game_id.as_str());
+            (idx, acc, ids, row_state, sr_bad)
+        })
+        .collect();
+
     let header_actions = (view == AccountView::Ready).then(|| {
         rsx! {
             Link {
@@ -886,89 +929,72 @@ pub fn ProfileSettings() -> Element {
                 if !accounts.read().is_empty() {
                     section { class: "account-section", aria_labelledby: "profile-accounts-heading",
                         h2 { id: "profile-accounts-heading", class: "ui-section-title", "Game accounts" }
-                        for (idx, acc) in accounts.read().iter().enumerate() {
-                            {
-                                let rank_id = account_field_id(&acc.game_id, "rank");
-                                let sr_id = account_field_id(&acc.game_id, "sr");
-                                let role_id = account_field_id(&acc.game_id, "role");
-                                let save_id = account_field_id(&acc.game_id, "save");
-                                let status_id = account_field_id(&acc.game_id, "status");
-                                let title_id = account_field_id(&acc.game_id, "title");
-                                let row_state = account_state()
-                                    .filter(|(game, _)| *game == acc.game_id)
-                                    .map(|(_, state)| state)
-                                    .unwrap_or_default();
-                                let row_busy = row_state == SaveState::Saving;
-                                let sr_bad = sr_invalid().as_deref() == Some(acc.game_id.as_str());
-                                let row_role = acc.role.clone();
-                                rsx! {
-                                    form {
-                                        key: "{acc.game_id}",
-                                        class: "account-card profile-account",
-                                        aria_labelledby: "{title_id}",
-                                        onsubmit: move |evt: FormEvent| {
-                                            evt.prevent_default();
-                                            on_save_account(idx);
-                                        },
-                                        h3 { id: "{title_id}", class: "account-sub-title", "{acc.account_name}" }
-                                        div { class: "profile-account-grid",
-                                            div { class: "account-field",
-                                                label { class: "field-label", r#for: "{rank_id}", "Rank" }
-                                                input {
-                                                    id: "{rank_id}",
-                                                    class: "field-input",
-                                                    r#type: "text",
-                                                    value: "{acc.rank}",
-                                                    maxlength: 64,
-                                                    placeholder: "Diamond 2",
-                                                    oninput: move |e| accounts.with_mut(|a| {
-                                                        if let Some(row) = a.get_mut(idx) { row.rank = e.value(); }
-                                                    }),
-                                                }
-                                            }
-                                            div { class: "account-field",
-                                                label { class: "field-label", r#for: "{sr_id}", "SR" }
-                                                input {
-                                                    id: "{sr_id}",
-                                                    class: "field-input",
-                                                    r#type: "number",
-                                                    value: "{acc.sr}",
-                                                    min: 0,
-                                                    aria_invalid: if sr_bad { "true" },
-                                                    aria_describedby: if sr_bad { "{status_id}" },
-                                                    oninput: move |e| accounts.with_mut(|a| {
-                                                        if let Some(row) = a.get_mut(idx) { row.sr = e.value(); }
-                                                    }),
-                                                }
-                                            }
-                                            div { class: "account-field",
-                                                label { class: "field-label", r#for: "{role_id}", "Role" }
-                                                select {
-                                                    id: "{role_id}",
-                                                    class: "field-input",
-                                                    value: "{acc.role}",
-                                                    onchange: move |e| accounts.with_mut(|a| {
-                                                        if let Some(row) = a.get_mut(idx) { row.role = e.value(); }
-                                                    }),
-                                                    for (value, word) in ROLE_OPTIONS {
-                                                        option { key: "{word}", value: value, selected: row_role == value, "{word}" }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        div { class: "account-actions",
-                                            button {
-                                                id: "{save_id}",
-                                                r#type: "submit",
-                                                class: btn_class(true),
-                                                aria_disabled: if row_busy { "true" },
-                                                aria_describedby: "{status_id}",
-                                                aria_label: "Save account {acc.account_name}",
-                                                "Save account"
-                                            }
-                                            AccountStatus { id: status_id.clone(), state: row_state.clone() }
+                        for (idx, acc, ids, row_state, sr_bad) in account_rows {
+                            form {
+                                key: "{acc.game_id}",
+                                class: "account-card profile-account",
+                                aria_labelledby: "{ids.title}",
+                                onsubmit: move |evt: FormEvent| {
+                                    evt.prevent_default();
+                                    on_save_account(idx);
+                                },
+                                h3 { id: "{ids.title}", class: "account-sub-title", "{acc.account_name}" }
+                                div { class: "profile-account-grid",
+                                    div { class: "account-field",
+                                        label { class: "field-label", r#for: "{ids.rank}", "Rank" }
+                                        input {
+                                            id: "{ids.rank}",
+                                            class: "field-input",
+                                            r#type: "text",
+                                            value: "{acc.rank}",
+                                            maxlength: 64,
+                                            placeholder: "Diamond 2",
+                                            oninput: move |e| accounts.with_mut(|a| {
+                                                if let Some(row) = a.get_mut(idx) { row.rank = e.value(); }
+                                            }),
                                         }
                                     }
+                                    div { class: "account-field",
+                                        label { class: "field-label", r#for: "{ids.sr}", "SR" }
+                                        input {
+                                            id: "{ids.sr}",
+                                            class: "field-input",
+                                            r#type: "number",
+                                            value: "{acc.sr}",
+                                            min: 0,
+                                            aria_invalid: if sr_bad { "true" },
+                                            aria_describedby: if sr_bad { "{ids.status}" },
+                                            oninput: move |e| accounts.with_mut(|a| {
+                                                if let Some(row) = a.get_mut(idx) { row.sr = e.value(); }
+                                            }),
+                                        }
+                                    }
+                                    div { class: "account-field",
+                                        label { class: "field-label", r#for: "{ids.role}", "Role" }
+                                        select {
+                                            id: "{ids.role}",
+                                            class: "field-input",
+                                            value: "{acc.role}",
+                                            onchange: move |e| accounts.with_mut(|a| {
+                                                if let Some(row) = a.get_mut(idx) { row.role = e.value(); }
+                                            }),
+                                            for (value, word) in ROLE_OPTIONS {
+                                                option { key: "{word}", value: value, selected: acc.role == value, "{word}" }
+                                            }
+                                        }
+                                    }
+                                }
+                                div { class: "account-actions",
+                                    button {
+                                        id: "{ids.save}",
+                                        r#type: "submit",
+                                        class: btn_class(true),
+                                        aria_disabled: if row_state == SaveState::Saving { "true" },
+                                        aria_describedby: "{ids.status}",
+                                        aria_label: "Save account {acc.account_name}",
+                                        "Save account"
+                                    }
+                                    AccountStatus { id: ids.status.clone(), state: row_state.clone() }
                                 }
                             }
                         }
@@ -997,6 +1023,26 @@ mod tests {
             }),
             loading,
         }
+    }
+
+    #[test]
+    fn game_account_cards_are_keyed_by_the_loop_body() {
+        // Vision nit 6 on PR 706: the key sat inside a `{ let ..; rsx! {} }`
+        // body, which does not key the loop.
+        let src = include_str!("profile_settings.rs");
+        let prod = src.split("mod tests").next().expect("production half");
+        let start = prod
+            .find("for (idx, acc, ids, row_state, sr_bad) in account_rows {")
+            .expect("account loop");
+        let head = &prod[start..start + 200];
+        assert!(
+            head.contains("{\n                            form {\n                                key: \"{acc.game_id}\","),
+            "{head}"
+        );
+        assert_eq!(
+            AccountIds::new("game:ow").status,
+            account_field_id("game:ow", "status")
+        );
     }
 
     #[test]

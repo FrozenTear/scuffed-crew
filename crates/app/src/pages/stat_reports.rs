@@ -1131,7 +1131,13 @@ pub(crate) fn MyReportsBody(
                                 }
                                 tbody {
                                     for row in shown.iter() {
-                                        {member_row(row, busy, on_arm_delete, on_arm_withdraw)}
+                                        MemberReportRow {
+                                            key: "{row.id}",
+                                            row: row.clone(),
+                                            busy,
+                                            on_arm_delete,
+                                            on_arm_withdraw,
+                                        }
                                     }
                                 }
                             }
@@ -1164,8 +1170,11 @@ pub(crate) fn MyReportsBody(
     }
 }
 
-fn member_row(
-    row: &StatReportListItem,
+/// One of the member's own reports. A component, so the loop keys it by
+/// the report id (a key inside a returned `rsx!` does not key the loop).
+#[component]
+fn MemberReportRow(
+    row: StatReportListItem,
     busy: bool,
     on_arm_delete: EventHandler<String>,
     on_arm_withdraw: EventHandler<String>,
@@ -1186,7 +1195,7 @@ fn member_row(
     let withdraw_report_id = row.id.clone();
     let training = row.training_consent;
     rsx! {
-        tr { key: "{row.id}",
+        tr {
             td { class: "report-when",
                 span { class: "report-card-label", "Date" }
                 "{when}"
@@ -1709,6 +1718,18 @@ mod tests {
         assert!(html.contains(&format!("id=\"{id}\"")), "{html}");
         assert!(html.contains(&format!("name=\"{name}\"")), "{html}");
         assert!(html.contains(&format!("for=\"{id}\"")), "{html}");
+    }
+
+    #[test]
+    fn own_report_rows_are_keyed_by_the_loop() {
+        // Vision nit 6 on PR 706: `{member_row(..)}` in the loop body left
+        // the rows unkeyed.
+        let src = include_str!("stat_reports.rs");
+        let prod = src.split("mod tests").next().expect("production half");
+        assert!(prod.contains(
+            "MemberReportRow {\n                                            key: \"{row.id}\","
+        ));
+        assert!(!prod.contains("{member_row("));
     }
 
     #[test]

@@ -75,6 +75,13 @@ const CSS: &str = r#"
         white-space: nowrap;
         border: 0;
     }
+    /* The record id of an unnamed target: a muted line under the words. */
+    .admin-audit-page .audit-target-id {
+        display: block;
+        color: var(--text-3);
+        font-size: var(--text-sm);
+        overflow-wrap: anywhere;
+    }
     .admin-audit-page .admin-toolbar-search {
         display: flex;
         flex-direction: column;
@@ -157,6 +164,15 @@ fn target_text(entry: &AuditLogEntry) -> String {
     } else {
         format!("{kind} (no name recorded)")
     }
+}
+
+/// The record id of a target that has no name recorded, shown as a muted
+/// second line so two unnamed targets can still be told apart. `None` when
+/// the target has a name (the name is enough) or no id.
+fn target_id_line(entry: &AuditLogEntry) -> Option<String> {
+    let named = !entry.target_label.trim().is_empty() && entry.target_label != entry.target_id;
+    let id = entry.target_id.trim();
+    (!named && !id.is_empty()).then(|| format!("ID {id}"))
 }
 
 /// `member:abc` and `abc` are the same record.
@@ -418,21 +434,20 @@ fn AuditTable(rows: Vec<AuditLogEntry>, #[props(default)] members: Vec<NamedMemb
             cards: true,
             label: "Audit log",
             for entry in rows.iter() {
-                {
-                    let action = humanize(&entry.action);
-                    let target = target_text(entry);
-                    let details = details_text(entry.details.as_deref().unwrap_or_default(), &members);
-                    let time = time_text(&entry.created_at);
-                    rsx! {
-                        tr { key: "{entry.id}",
-                            td { class: "cell-who", "{entry.actor_name}" }
-                            td { class: "cell-meta", "{action}" }
-                            td { "data-label": "Target", "{target}" }
-                            td { "data-label": "Details", "{details}" }
-                            td { class: "cell-meta num",
-                                time { class: "date", datetime: "{entry.created_at}", "{time}" }
-                            }
+                tr { key: "{entry.id}",
+                    td { class: "cell-who", "{entry.actor_name}" }
+                    td { class: "cell-meta", {humanize(&entry.action)} }
+                    td { "data-label": "Target",
+                        {target_text(entry)}
+                        if let Some(id) = target_id_line(entry) {
+                            span { class: "audit-target-id", "{id}" }
                         }
+                    }
+                    td { "data-label": "Details",
+                        {details_text(entry.details.as_deref().unwrap_or_default(), &members)}
+                    }
+                    td { class: "cell-meta num",
+                        time { class: "date", datetime: "{entry.created_at}", {time_text(&entry.created_at)} }
                     }
                 }
             }
@@ -553,6 +568,14 @@ mod tests {
         assert_eq!(target_text(&e), "Team (no name recorded)");
         e.target_label = String::new();
         assert!(!target_text(&e).contains("t1"), "never the record id");
+        // The id is its own muted line instead (Vision blocking 8 on PR 706:
+        // two unnamed targets could not be told apart).
+        assert_eq!(target_id_line(&e).as_deref(), Some("ID team:t1"));
+        e.target_label = "Squad Alpha".into();
+        assert_eq!(target_id_line(&e), None);
+        e.target_label = String::new();
+        e.target_id = " ".into();
+        assert_eq!(target_id_line(&e), None);
         assert_eq!(time_text("2026-11-10T19:05:00Z"), "10 Nov 2026 19:05");
         assert_eq!(time_text("2026-11-10"), "10 Nov 2026");
         assert_eq!(time_text("soon"), "soon");
