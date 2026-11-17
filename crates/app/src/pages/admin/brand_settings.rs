@@ -188,6 +188,19 @@ fn save_body(draft: &BrandDraft, saved: &SavedBrand) -> Option<UpdateSettingsReq
     })
 }
 
+/// The request Save sends: [`save_body`] when it carries at least one key.
+/// `None` when the contrast lock blocks Save or nothing changed, so an
+/// empty Save sends no `PUT`, writes no audit entry and shows no toast.
+/// Emptiness is judged on the serialized body, which is what would be sent.
+fn save_request(draft: &BrandDraft, saved: &SavedBrand) -> Option<UpdateSettingsRequest> {
+    save_body(draft, saved).filter(|body| {
+        serde_json::to_value(body)
+            .ok()
+            .and_then(|value| value.as_object().map(|keys| !keys.is_empty()))
+            .unwrap_or(true)
+    })
+}
+
 /// An element id from the settings record id and a field name.
 fn field_id(record: &str, field: &str) -> String {
     let record: String = record
@@ -295,8 +308,9 @@ fn BrandSettingsForm(saved: SavedBrand) -> Element {
         if saving() {
             return;
         }
-        // The contrast lock: a blocked draft has no body, so nothing is sent.
-        let Some(body) = save_body(&draft.read(), &saved_now.read()) else {
+        // The contrast lock and an empty draft: a blocked draft, or one with
+        // nothing changed, has no request, so nothing is sent.
+        let Some(body) = save_request(&draft.read(), &saved_now.read()) else {
             return;
         };
         saving.set(true);
@@ -364,7 +378,10 @@ fn BrandFormBody(
         "The site uses {}. Save brand applies a new choice.",
         saved.font.label()
     );
-    let save_locked = blocked || saving;
+    // Save reads as disabled when it would send nothing: locked by the
+    // contrast check, or nothing changed (the leave guard is off then too).
+    let nothing_to_save = !blocked && save_request(&current, &saved).is_none();
+    let save_locked = blocked || saving || nothing_to_save;
     // Saving a new accent rewrites a separate light accent, so while the
     // accent is changed the note that says so is part of what Save is
     // described by, next to the block reason.
@@ -715,7 +732,7 @@ mod tests {
             .split("let on_save = move |_| {")
             .nth(1)
             .expect("save handler");
-        let guard = handler.find("save_body(").expect("lock check");
+        let guard = handler.find("save_request(").expect("lock check");
         let request = handler.find(".put_json").expect("request");
         assert!(guard < request, "the lock must run before the request");
     }
@@ -1313,6 +1330,56 @@ mod tests {
             !light_card.contains(&pair.light.css_decls()),
             "{light_card}"
         );
+    }
+
+    /// Site review 4, nit 2: Save with nothing changed sends no request.
+    /// It reads as disabled, in step with the leave guard, and its handler
+    /// only ever sends `save_request`, which is `None` for an empty body.
+    #[test]
+    fn an_empty_save_sends_nothing() {
+        let mut pack = saved(TEST_MINT_ACCENT);
+        pack.accent_light = TEST_OTHER_ACCENT.into();
+        for stored in [
+            saved(TEST_MINT_ACCENT),
+            pack,
+            saved(TEST_BLOCKED_ACCENT),
+            saved(TEST_FILL_ONLY_ACCENT),
+            saved(""),
+        ] {
+            let untouched = BrandDraft::from_saved(&stored);
+            assert!(!untouched.is_unsaved(&stored), "{stored:?}");
+            let body = save_body(&untouched, &stored).expect("not locked");
+            assert!(body_keys(&body).is_empty(), "{stored:?}");
+            assert!(save_request(&untouched, &stored).is_none(), "{stored:?}");
+
+            let html = render_with_draft(stored.clone(), untouched.clone());
+            let button = save_button(&html);
+            assert!(
+                button.contains("aria-disabled=\"true\""),
+                "{stored:?}: {button}"
+            );
+            assert!(!button.contains("is-primary"), "{stored:?}: {button}");
+            assert!(
+                !button.contains("brand-accent-reason"),
+                "{stored:?}: {button}"
+            );
+
+            // One change and there is a request again.
+            let mut font = untouched;
+            font.font = DisplayFont::IbmPlexSans;
+            let request = save_request(&font, &stored).expect("a font change is sent");
+            assert_eq!(body_keys(&request), ["brand_font_display"]);
+        }
+
+        // The handler sends only what save_request gives it.
+        let src = include_str!("brand_settings.rs");
+        let handler = src
+            .split("let on_save = move |_| {")
+            .nth(1)
+            .and_then(|rest| rest.split("rsx! {").next())
+            .expect("save handler");
+        assert!(handler.contains("save_request(&draft.read(), &saved_now.read())"));
+        assert!(!handler.contains("save_body("), "{handler}");
     }
 
     /// The leave guard (`is_unsaved`) and Save agree on "changed": a draft
