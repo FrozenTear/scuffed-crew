@@ -1405,25 +1405,52 @@ mod tests {
             "",
         ];
         for stored in &stores {
-            for accent in accents {
+            // Site review 4, nit 5: every store also drafts its own stored
+            // accent, as stored, in upper case and without the `#`. For the
+            // blocked, fill-only and pack stores that is the untouched case.
+            let own = stored.accent_dark.clone();
+            let own_upper = own.to_ascii_uppercase();
+            let own_bare = own.trim_start_matches('#').to_string();
+            let drafts =
+                accents
+                    .iter()
+                    .map(|a| a.to_string())
+                    .chain([own.clone(), own_upper, own_bare]);
+            let mut untouched_seen = false;
+            for accent in drafts {
                 for font in DisplayFont::ALL {
                     let d = BrandDraft {
-                        accent: accent.to_string(),
+                        accent: accent.clone(),
                         font,
                     };
-                    // Only drafts Save can send are compared; a blocked
-                    // draft has no body and is unsaved by definition.
-                    if let Some(body) = save_body(&d, stored) {
-                        assert_eq!(
-                            d.is_unsaved(stored),
-                            !body_keys(&body).is_empty(),
-                            "{stored:?} {d:?}"
-                        );
-                    } else {
-                        assert!(d.is_unsaved(stored), "{stored:?} {d:?}");
+                    if !accent_changed(&d, stored) && font == stored.font {
+                        untouched_seen = true;
+                    }
+                    match save_body(&d, stored) {
+                        // Not locked: unsaved exactly when the body has a
+                        // key, which is exactly when there is a request.
+                        Some(body) => {
+                            assert_eq!(
+                                d.is_unsaved(stored),
+                                !body_keys(&body).is_empty(),
+                                "{stored:?} {d:?}"
+                            );
+                            assert_eq!(
+                                d.is_unsaved(stored),
+                                save_request(&d, stored).is_some(),
+                                "{stored:?} {d:?}"
+                            );
+                        }
+                        // Locked (a changed accent that fails): unsaved, and
+                        // no request.
+                        None => {
+                            assert!(d.is_unsaved(stored), "{stored:?} {d:?}");
+                            assert!(save_request(&d, stored).is_none(), "{stored:?} {d:?}");
+                        }
                     }
                 }
             }
+            assert!(untouched_seen, "{stored:?} drafts its own stored brand");
         }
     }
 
