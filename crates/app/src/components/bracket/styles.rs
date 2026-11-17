@@ -8,7 +8,7 @@
 pub const BRACKET_STYLES: &str = r#"
 /* --- Hint line above a scroller ---
    Swiping is a narrow-screen gesture: wider screens show the whole bracket
-   or the fade, so the hint is hidden there. */
+   or the fade, so the swipe hint is hidden there. */
 .bracket-hint {
   display: none;
   align-items: center;
@@ -20,8 +20,20 @@ pub const BRACKET_STYLES: &str = r#"
   font-size: var(--text-sm);
   line-height: var(--leading-ui);
 }
+/* The round robin line also carries the column legend, which every width
+   needs: it shows everywhere and only its swipe part is narrow only. */
+.bracket-hint.is-legend {
+  display: flex;
+  flex-wrap: wrap;
+}
+.bracket-swipe {
+  display: none;
+  align-items: center;
+  gap: var(--space-2);
+}
 @media (max-width: 820px) {
   .bracket-hint { display: flex; }
+  .bracket-swipe { display: inline-flex; }
 }
 .swipe-arrow {
   flex: 0 0 var(--space-3);
@@ -337,6 +349,31 @@ mod tests {
             narrow.contains(".bracket-hint { display: flex; }"),
             "{narrow}"
         );
+    }
+
+    #[test]
+    fn the_round_robin_legend_shows_at_every_width() {
+        // Vision S4: the legend lived in the narrow-only hint, so above
+        // 820px the numbered columns had no key. The legend line shows at
+        // every width (outside any media block); only its swipe part waits
+        // for the narrow block.
+        let legend = css_rule(BRACKET_STYLES, ".bracket-hint.is-legend {");
+        assert!(has_decl(&legend, "display: flex"), "{legend}");
+        let swipe = css_rule(BRACKET_STYLES, ".bracket-swipe {");
+        assert!(has_decl(&swipe, "display: none"), "{swipe}");
+        let narrow = media_block(BRACKET_STYLES, "@media (max-width: 820px)");
+        assert!(
+            narrow.contains(".bracket-swipe { display: inline-flex; }"),
+            "{narrow}"
+        );
+        // Top level, so no media query gates it, and it comes after the
+        // plain hint rule so it wins over `display: none`.
+        let top = BRACKET_STYLES.find(".bracket-hint.is-legend {").unwrap();
+        let base = BRACKET_STYLES.find(".bracket-hint {").unwrap();
+        assert!(top > base);
+        let before = &BRACKET_STYLES[..top];
+        assert_eq!(before.matches('{').count(), before.matches('}').count());
+        assert!(!narrow.contains("is-legend"), "{narrow}");
     }
 
     #[test]

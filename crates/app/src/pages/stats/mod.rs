@@ -257,22 +257,23 @@ fn tracker_release_notice_text(server: Option<&str>) -> String {
     )
 }
 
-/// The calendar day of `at` for a viewer `offset_secs` east of UTC.
-fn day_at_offset(at: DateTime<Utc>, offset_secs: i32) -> chrono::NaiveDate {
-    chrono::FixedOffset::east_opt(offset_secs)
-        .map(|offset| at.with_timezone(&offset).date_naive())
-        .unwrap_or_else(|| at.date_naive())
+/// The calendar day of `at` in `zone`. The offset is the zone's offset at
+/// `at` itself, so a game played before a daylight saving change keeps the
+/// day it was played on.
+fn day_in<Tz: chrono::TimeZone>(at: DateTime<Utc>, zone: &Tz) -> chrono::NaiveDate {
+    at.with_timezone(zone).date_naive()
 }
 
 /// The calendar day a game is shown on, everywhere on the stats pages: the
 /// viewer's own day in the browser (as the match page's local time), the
-/// UTC day in native tests.
+/// UTC day in native tests. Each game converts with its own instant, never
+/// with today's offset.
 pub(super) fn local_day(at: DateTime<Utc>) -> chrono::NaiveDate {
     #[cfg(target_arch = "wasm32")]
-    let offset = chrono::Local::now().offset().local_minus_utc();
+    let day = day_in(at, &chrono::Local);
     #[cfg(not(target_arch = "wasm32"))]
-    let offset = 0;
-    day_at_offset(at, offset)
+    let day = day_in(at, &Utc);
+    day
 }
 
 /// Shared map → game mode (used by maps tab + overview mode chips).
@@ -2539,14 +2540,101 @@ mod local_day_tests {
     use super::*;
     use chrono::TimeZone;
 
+    fn fixed(secs: i32) -> chrono::FixedOffset {
+        chrono::FixedOffset::east_opt(secs).unwrap()
+    }
+
     #[test]
     fn the_day_follows_the_viewer_offset() {
         let late = Utc.with_ymd_and_hms(2026, 11, 12, 23, 30, 0).unwrap();
-        assert_eq!(day_at_offset(late, 0).to_string(), "2026-11-12");
-        assert_eq!(day_at_offset(late, 2 * 3600).to_string(), "2026-11-13");
-        assert_eq!(day_at_offset(late, -5 * 3600).to_string(), "2026-11-12");
+        assert_eq!(day_in(late, &Utc).to_string(), "2026-11-12");
+        assert_eq!(day_in(late, &fixed(2 * 3600)).to_string(), "2026-11-13");
+        assert_eq!(day_in(late, &fixed(-5 * 3600)).to_string(), "2026-11-12");
         let early = Utc.with_ymd_and_hms(2026, 11, 13, 0, 30, 0).unwrap();
-        assert_eq!(day_at_offset(early, -3600).to_string(), "2026-11-12");
+        assert_eq!(day_in(early, &fixed(-3600)).to_string(), "2026-11-12");
+    }
+
+    /// A London-like zone: UTC in winter, one hour east from 29 March 2026
+    /// 01:00 UTC to 25 October 2026 01:00 UTC.
+    #[derive(Clone, Copy, Debug)]
+    struct DstZone;
+
+    impl DstZone {
+        fn offset_at(at: chrono::NaiveDateTime) -> chrono::FixedOffset {
+            let start = Utc
+                .with_ymd_and_hms(2026, 3, 29, 1, 0, 0)
+                .unwrap()
+                .naive_utc();
+            let end = Utc
+                .with_ymd_and_hms(2026, 10, 25, 1, 0, 0)
+                .unwrap()
+                .naive_utc();
+            if at >= start && at < end {
+                fixed(3600)
+            } else {
+                fixed(0)
+            }
+        }
+    }
+
+    impl chrono::TimeZone for DstZone {
+        type Offset = chrono::FixedOffset;
+        fn from_offset(_: &chrono::FixedOffset) -> Self {
+            DstZone
+        }
+        fn offset_from_local_date(
+            &self,
+            local: &chrono::NaiveDate,
+        ) -> chrono::LocalResult<chrono::FixedOffset> {
+            chrono::LocalResult::Single(Self::offset_at(local.and_hms_opt(12, 0, 0).unwrap()))
+        }
+        fn offset_from_local_datetime(
+            &self,
+            local: &chrono::NaiveDateTime,
+        ) -> chrono::LocalResult<chrono::FixedOffset> {
+            chrono::LocalResult::Single(Self::offset_at(*local))
+        }
+        fn offset_from_utc_date(&self, utc: &chrono::NaiveDate) -> chrono::FixedOffset {
+            Self::offset_at(utc.and_hms_opt(0, 0, 0).unwrap())
+        }
+        fn offset_from_utc_datetime(&self, utc: &chrono::NaiveDateTime) -> chrono::FixedOffset {
+            Self::offset_at(*utc)
+        }
+    }
+
+    #[test]
+    fn each_game_keeps_its_own_day_across_a_dst_change() {
+        // Played 23:30 UTC in summer: 00:30 the next day on the viewer's
+        // summer clock. Viewed in November, today's offset is +0, which
+        // would put the game a day early.
+        let summer = Utc.with_ymd_and_hms(2026, 7, 1, 23, 30, 0).unwrap();
+        assert_eq!(day_in(summer, &DstZone).to_string(), "2026-07-02");
+        let today_offset = DstZone::offset_at(
+            Utc.with_ymd_and_hms(2026, 11, 17, 12, 0, 0)
+                .unwrap()
+                .naive_utc(),
+        );
+        assert_eq!(day_in(summer, &today_offset).to_string(), "2026-07-01");
+        // Either side of the autumn change, each game uses its own offset.
+        let before = Utc.with_ymd_and_hms(2026, 10, 24, 23, 30, 0).unwrap();
+        let after = Utc.with_ymd_and_hms(2026, 10, 25, 23, 30, 0).unwrap();
+        assert_eq!(day_in(before, &DstZone).to_string(), "2026-10-25");
+        assert_eq!(day_in(after, &DstZone).to_string(), "2026-10-25");
+        // And the spring change.
+        let spring = Utc.with_ymd_and_hms(2026, 3, 29, 23, 30, 0).unwrap();
+        assert_eq!(day_in(spring, &DstZone).to_string(), "2026-03-30");
+        let winter = Utc.with_ymd_and_hms(2026, 3, 28, 23, 30, 0).unwrap();
+        assert_eq!(day_in(winter, &DstZone).to_string(), "2026-03-28");
+    }
+
+    #[test]
+    fn local_day_converts_each_instant_not_todays_offset() {
+        let source = include_str!("mod.rs");
+        let body = &source[source.find("pub(super) fn local_day(").unwrap()..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        assert!(body.contains("day_in(at, &chrono::Local)"), "{body}");
+        assert!(!body.contains("Local::now()"), "{body}");
+        assert!(!body.contains("offset()"), "{body}");
     }
 
     #[test]

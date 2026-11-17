@@ -149,9 +149,14 @@ pub fn RoundRobinTable(
     };
 
     rsx! {
-        p { class: "bracket-hint",
-            span { class: "swipe-arrow", aria_hidden: "true" }
-            "Swipe for every opponent. Numbered columns are the teams by rank."
+        // The legend shows at every width; only the swipe part is narrow
+        // screen only (see `.bracket-swipe`).
+        p { class: "bracket-hint is-legend",
+            span { class: "bracket-swipe",
+                span { class: "swipe-arrow", aria_hidden: "true" }
+                "Swipe for every opponent."
+            }
+            span { "Numbered columns are the teams by rank." }
         }
         div {
             class: "bracket-table-scroll",
@@ -321,7 +326,14 @@ mod tests {
             ),
             "{html}"
         );
-        assert!(html.contains("<p class=\"bracket-hint\">"), "{html}");
+        assert!(
+            html.contains(
+                "<p class=\"bracket-hint is-legend\"><span class=\"bracket-swipe\">\
+                 <span class=\"swipe-arrow\" aria-hidden=\"true\"></span>Swipe for every opponent.</span>\
+                 <span>Numbered columns are the teams by rank.</span></p>"
+            ),
+            "{html}"
+        );
         assert!(
             html.contains("<th scope=\"row\">Squad Alpha</th>"),
             "{html}"
