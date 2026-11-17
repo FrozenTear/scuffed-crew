@@ -29,8 +29,9 @@ under our tier name.
 The terms the site relies on are the fansite answer in the Blizzard Legal
 FAQ: <https://www.blizzard.com/en-us/legal/c1ae32ac-7ff9-4ac3-a03b-fc04b8697010/blizzard-legal-faq>
 (question "What is Blizzard Entertainment's® copyright/trademark policy for
-the Internet, specifically for fansites?"). The grant, quoted verbatim as the
-page read on 2026-11-17:
+the Internet, specifically for fansites?"). The grant, quoted verbatim and
+in full (both paragraphs of the legal department's answer) as the page read
+on 2026-11-17:
 
 > Blizzard Entertainment® hereby grants you a personal, non-exclusive,
 > non-transferable and non- assignable license to use and display, for home,
@@ -47,7 +48,11 @@ page read on 2026-11-17:
 > or otherwise modify the Downloaded Content.
 >
 > Also, we reserve the right to revoke this limited use license at any time,
-> for any reason, and at the sole discretion of Blizzard Entertainment®.
+> for any reason, and at the sole discretion of Blizzard Entertainment®. You
+> may not use our materials on sites that feature defamatory pornographic, or
+> inflammatory content, including, but not limited to, hacks and cheats for
+> any of our games or any other content that Blizzard Entertainment® find
+> objectionable or unlawful.
 
 In plain words, that grant is:
 
@@ -57,7 +62,11 @@ In plain words, that grant is:
   neither can the files;
 - **no modification**: the files may not be altered or otherwise modified;
 - **notices kept**: copyright and other notices must stay with the files;
-- **revocable**: Blizzard can withdraw it at any time, for any reason.
+- **revocable**: Blizzard can withdraw it at any time, for any reason;
+- **content limits**: the materials may not be used on sites with
+  defamatory, pornographic or inflammatory content, including hacks and
+  cheats for Blizzard's games, or any other content Blizzard finds
+  objectionable or unlawful.
 
 ## What the grant covers here, and what it does not
 
