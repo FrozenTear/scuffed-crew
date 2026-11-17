@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use scuffed_api_client::ApiClient;
+use scuffed_api_client::{ApiClient, ClientError};
 
 use super::article_author::{AuthorNames, author_label, short_date, use_author_names};
 use crate::components::ui::inline_confirm::{focus_element_by_id_soon, focus_field_by_id};
@@ -83,7 +83,8 @@ const PAGE_CSS: &str = r#"
   min-width: 0;
 }
 .scrim-field.is-wide { grid-column: 1 / -1; }
-.scrim-form-error:not(:empty) { margin-top: var(--space-4); }
+/* The error line is always mounted; the gap shows only with a message. */
+.scrim-form-error:has(.field-error-icon) { margin-top: var(--space-4); }
 .scrim-form-actions {
   display: flex;
   flex-wrap: wrap;
@@ -151,7 +152,7 @@ const PAGE_CSS: &str = r#"
 }
 /* The dot trails each item, so a wrapped line never starts with one. */
 .scrim-card-meta > :not(:last-child)::after {
-  content: "·";
+  content: "·" / "";
   margin-inline-start: var(--space-2);
 }
 .scrim-card-actions {
@@ -169,7 +170,7 @@ const PAGE_CSS: &str = r#"
 /// A status change a member can make from a card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScrimAction {
-    Accept,
+    Confirm,
     Complete,
     Cancel,
 }
@@ -178,7 +179,7 @@ impl ScrimAction {
     /// The status the server stores for it.
     const fn status(self) -> &'static str {
         match self {
-            ScrimAction::Accept => "confirmed",
+            ScrimAction::Confirm => "confirmed",
             ScrimAction::Complete => "completed",
             ScrimAction::Cancel => "cancelled",
         }
@@ -186,7 +187,7 @@ impl ScrimAction {
 
     const fn label(self) -> &'static str {
         match self {
-            ScrimAction::Accept => "Accept",
+            ScrimAction::Confirm => "Confirm",
             ScrimAction::Complete => "Complete",
             ScrimAction::Cancel => "Cancel",
         }
@@ -195,7 +196,7 @@ impl ScrimAction {
     /// Toast after the change is saved.
     const fn done(self) -> &'static str {
         match self {
-            ScrimAction::Accept => "Scrim confirmed",
+            ScrimAction::Confirm => "Scrim confirmed",
             ScrimAction::Complete => "Scrim completed",
             ScrimAction::Cancel => "Scrim cancelled",
         }
@@ -205,7 +206,7 @@ impl ScrimAction {
 /// The actions a card offers for a scrim in `status`.
 fn actions_for(status: &str) -> &'static [ScrimAction] {
     match status {
-        "open" => &[ScrimAction::Accept, ScrimAction::Cancel],
+        "open" => &[ScrimAction::Confirm, ScrimAction::Cancel],
         "confirmed" => &[ScrimAction::Complete, ScrimAction::Cancel],
         _ => &[],
     }
@@ -241,12 +242,36 @@ fn scrim_card_id(scrim_id: &str) -> String {
     format!("scrim-card-{scrim_id}")
 }
 
-fn name_of<'a>(pairs: &'a [(String, String)], id: &str) -> &'a str {
+/// The name for `id`, or `None` while the list loads, after it failed, or
+/// when the id is not in it. Nothing reads "Unknown".
+fn name_of(pairs: &[(String, String)], id: &str) -> Option<String> {
     pairs
         .iter()
         .find(|(pair_id, _)| pair_id == id)
-        .map(|(_, name)| name.as_str())
-        .unwrap_or("Unknown")
+        .map(|(_, name)| name.clone())
+}
+
+/// Card title when the team's name is not known.
+const UNNAMED_SCRIM: &str = "Scrim request";
+
+/// Why a scrim request or status change failed, in words. The routes answer
+/// 403 to a member who is not on the team's roster and not an officer.
+fn scrim_error_copy(err: &ClientError) -> &'static str {
+    match err {
+        ClientError::Network(_) => {
+            "Couldn't reach the server. Check your connection and try again."
+        }
+        ClientError::Http { status: 401, .. } => "Your session ended. Log in again.",
+        ClientError::Http { status: 403, .. } => {
+            "Only the team's roster or an officer can do that for this team."
+        }
+        ClientError::Http { status: 404, .. } => "That scrim no longer exists.",
+        ClientError::Http { status: 400, .. } => "The server did not accept those details.",
+        ClientError::Http { status: 429, .. } => {
+            "Too many changes in a row. Wait a moment and try again."
+        }
+        _ => "Something went wrong. Try again in a moment.",
+    }
 }
 
 /// Open, upcoming and past scrims, in the order the server sent them. A
@@ -321,7 +346,10 @@ pub fn Scrims() -> Element {
                     moved.set(Some(scrim_id));
                     scrims.refresh += 1;
                 }
-                Err(e) => toast.show(Toast::error(format!("Error: {e}"))),
+                Err(e) => {
+                    crate::util::log_client_error("scrim status", &e);
+                    toast.show(Toast::error(scrim_error_copy(&e)));
+                }
             }
             busy.set(None);
         });
@@ -391,7 +419,7 @@ fn ScrimsLayout(children: Element) -> Element {
         PageShell { width: PageWidth::Default, class: "scrims-page",
             PageHeader {
                 title: "Scrims",
-                lead: "Post a request or pick up an open one. Times are UTC.",
+                lead: "Request, schedule and track practice matches. Times are UTC.",
             }
             {children}
         }
@@ -428,27 +456,27 @@ fn ScrimBoard(
 
     rsx! {
         for (id, title, list, with_actions) in sections {
-            if id == "scrims-open" || !list.is_empty() {
+            // With nothing open, the empty card is the section: its H2 says
+            // so, rather than a second H2 under "Open requests".
+            if id == "scrims-open" && list.is_empty() {
+                EmptyCard {
+                    title: "No open requests",
+                    message: empty_message.to_string(),
+                }
+            } else if !list.is_empty() {
                 section { class: "ui-stack", aria_labelledby: "{id}-title",
                     h2 { class: "ui-section-title", id: "{id}-title", "{title}" }
-                    if list.is_empty() {
-                        EmptyCard {
-                            title: "No open scrims",
-                            message: empty_message.to_string(),
-                        }
-                    } else {
-                        ul { class: "scrim-list",
-                            for scrim in list {
-                                ScrimCard {
-                                    key: "{scrim.id}",
-                                    team_name: name_of(&teams, &scrim.team_id).to_string(),
-                                    game_name: name_of(&games, &scrim.game_id).to_string(),
-                                    poster: author_label(Some(&names), &scrim.requested_by),
-                                    with_actions,
-                                    busy: busy.as_deref() == Some(scrim.id.as_str()),
-                                    scrim: scrim.clone(),
-                                    on_action,
-                                }
+                    ul { class: "scrim-list",
+                        for scrim in list {
+                            ScrimCard {
+                                key: "{scrim.id}",
+                                team_name: name_of(&teams, &scrim.team_id),
+                                game_name: name_of(&games, &scrim.game_id),
+                                poster: author_label(Some(&names), &scrim.requested_by),
+                                with_actions,
+                                busy: busy.as_deref() == Some(scrim.id.as_str()),
+                                scrim: scrim.clone(),
+                                on_action,
                             }
                         }
                     }
@@ -461,8 +489,9 @@ fn ScrimBoard(
 #[component]
 fn ScrimCard(
     scrim: Scrim,
-    team_name: String,
-    game_name: String,
+    /// `None` until `/api/teams` loads, or when it failed.
+    team_name: Option<String>,
+    game_name: Option<String>,
     /// Display name of the poster, once its lookup has finished.
     poster: Option<String>,
     with_actions: bool,
@@ -478,6 +507,7 @@ fn ScrimCard(
         &[]
     };
     let notes = scrim.notes.as_deref().filter(|n| !n.trim().is_empty());
+    let team_name = team_name.unwrap_or_else(|| UNNAMED_SCRIM.to_string());
 
     rsx! {
         li { class: "scrim-card", id: scrim_card_id(&scrim.id), tabindex: "-1",
@@ -500,7 +530,9 @@ fn ScrimCard(
                     } else {
                         span { "{when_text}" }
                     }
-                    span { "{game_name}" }
+                    if let Some(game_name) = game_name {
+                        span { "{game_name}" }
+                    }
                     span { "{scrim.duration_minutes} min" }
                     if let Some(ref opponent) = scrim.opponent_name {
                         span { "vs {opponent}" }
@@ -660,7 +692,11 @@ fn ScrimCreateForm(
                             toast.show(Toast::success("Scrim requested"));
                             on_created.call(());
                         }
-                        Err(e) => post_error.set(format!("The request was not posted. {e}")),
+                        Err(e) => {
+                            crate::util::log_client_error("scrim request", &e);
+                            post_error
+                                .set(format!("The request was not posted. {}", scrim_error_copy(&e)));
+                        }
                     }
                     submitting.set(false);
                 });
@@ -829,6 +865,46 @@ mod tests {
         dioxus_ssr::render(&dom)
     }
 
+    #[derive(Props, Clone, PartialEq)]
+    struct NamesProbeProps {
+        scrims: Vec<Scrim>,
+        teams: Vec<(String, String)>,
+        games: Vec<(String, String)>,
+    }
+
+    #[allow(non_snake_case)]
+    fn NamesProbe(props: NamesProbeProps) -> Element {
+        rsx! {
+            ScrimBoard {
+                scrims: props.scrims,
+                teams: props.teams,
+                games: props.games,
+                names: AuthorNames::new(),
+                can_act: true,
+                can_post: false,
+                busy: None,
+                on_action: move |_| {},
+            }
+        }
+    }
+
+    fn render_with_names(
+        scrims: Vec<Scrim>,
+        teams: Vec<(String, String)>,
+        games: Vec<(String, String)>,
+    ) -> String {
+        let mut dom = VirtualDom::new_with_props(
+            NamesProbe,
+            NamesProbeProps {
+                scrims,
+                teams,
+                games,
+            },
+        );
+        dom.rebuild_in_place();
+        dioxus_ssr::render(&dom)
+    }
+
     fn board(scrims: Vec<Scrim>, can_act: bool) -> String {
         render(ProbeProps {
             scrims,
@@ -883,7 +959,7 @@ mod tests {
         // Each action is a button with a name that says which scrim.
         assert!(
             html.contains(
-                "<button type=\"button\" class=\"btn is-ghost\" aria-label=\"Accept: Squad Alpha, 15 Nov 2026, 20:00 UTC\">Accept</button>"
+                "<button type=\"button\" class=\"btn is-ghost\" aria-label=\"Confirm: Squad Alpha, 15 Nov 2026, 20:00 UTC\">Confirm</button>"
             ),
             "{html}"
         );
@@ -924,8 +1000,9 @@ mod tests {
             html.contains("<span class=\"ui-pill ui-pill--danger\">Cancelled</span>"),
             "{html}"
         );
-        // Open: Accept and Cancel. Confirmed: Complete and Cancel. Past: none.
-        assert_eq!(html.matches(">Accept</button>").count(), 1, "{html}");
+        // Open: Confirm and Cancel. Confirmed: Complete and Cancel. Past: none.
+        assert_eq!(html.matches(">Confirm</button>").count(), 1, "{html}");
+        assert!(!html.contains(">Accept</button>"), "{html}");
         assert_eq!(html.matches(">Complete</button>").count(), 1, "{html}");
         assert_eq!(html.matches(">Cancel</button>").count(), 2, "{html}");
         // Ids come from the record, so they are unique.
@@ -937,6 +1014,69 @@ mod tests {
                 "{html}"
             );
         }
+    }
+
+    #[test]
+    fn copy_only_promises_what_the_api_allows() {
+        let html = board(vec![scrim(1, "open")], true);
+        assert!(
+            html.contains("Request, schedule and track practice matches. Times are UTC."),
+            "{html}"
+        );
+        assert!(!html.contains("pick up"), "no opponent flow exists: {html}");
+        assert_eq!(ScrimAction::Confirm.status(), "confirmed");
+        assert_eq!(ScrimAction::Confirm.label(), "Confirm");
+    }
+
+    #[test]
+    fn a_card_never_reads_unknown_while_names_load() {
+        let html = render_with_names(vec![scrim(1, "open")], Vec::new(), Vec::new());
+        assert!(!html.contains("Unknown"), "{html}");
+        assert!(
+            html.contains("<h3 class=\"scrim-card-title\"><span>Scrim request</span></h3>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("aria-label=\"Confirm: Scrim request, 15 Nov 2026, 20:00 UTC\""),
+            "{html}"
+        );
+        assert!(!html.contains("<span>Overwatch</span>"), "{html}");
+        assert_eq!(name_of(&[], "team:1"), None);
+    }
+
+    #[test]
+    fn a_refused_change_says_why_in_words() {
+        let http = |status| {
+            ClientError::http(
+                status,
+                r#"{"error":"Must be on the team roster or an officer"}"#,
+                None,
+            )
+        };
+        assert_eq!(
+            scrim_error_copy(&http(403)),
+            "Only the team's roster or an officer can do that for this team."
+        );
+        assert_eq!(scrim_error_copy(&http(404)), "That scrim no longer exists.");
+        assert_eq!(
+            scrim_error_copy(&http(401)),
+            "Your session ended. Log in again."
+        );
+        assert!(scrim_error_copy(&ClientError::Network("offline".into())).contains("connection"));
+        for status in [400, 401, 403, 404, 429, 500] {
+            let copy = scrim_error_copy(&http(status));
+            assert!(!copy.contains("HTTP"), "{copy}");
+            assert!(!copy.contains("connection"), "{status}: {copy}");
+        }
+        let prod = include_str!("scrims.rs").split("mod tests").next().unwrap();
+        assert!(
+            !prod.contains("Error: {e}"),
+            "a raw client error reaches a toast"
+        );
+        assert!(
+            !prod.contains("posted. {e}"),
+            "a raw client error reaches the form"
+        );
     }
 
     #[test]
@@ -966,8 +1106,12 @@ mod tests {
             busy: None,
             form: true,
         });
-        assert!(html.contains("<h2>No open scrims</h2>"), "{html}");
+        assert!(html.contains("<h2>No open requests</h2>"), "{html}");
         assert!(html.contains("<p>Post one above.</p>"), "{html}");
+        assert!(
+            !html.contains(">Open requests</h2>"),
+            "the empty card is the section, not an H2 under another H2: {html}"
+        );
         assert!(!html.contains("Upcoming"), "{html}");
         assert!(!html.contains(">Past<"), "{html}");
 
@@ -976,7 +1120,11 @@ mod tests {
 
         // Past rows alone still leave the open section with its empty card.
         let past_only = board(vec![scrim(1, "completed")], true);
-        assert!(past_only.contains("<h2>No open scrims</h2>"), "{past_only}");
+        assert!(
+            past_only.contains("<h2>No open requests</h2>"),
+            "{past_only}"
+        );
+        assert!(!past_only.contains(">Open requests</h2>"), "{past_only}");
         assert!(past_only.contains(">Past</h2>"), "{past_only}");
     }
 
@@ -1140,5 +1288,22 @@ mod tests {
             PAGE_CSS.contains(".scrim-card:focus-visible {\n  outline: var(--focus-ring-width) solid var(--focus-ring);"),
             "{PAGE_CSS}"
         );
+    }
+
+    #[test]
+    fn separator_dots_are_silent_and_the_error_gap_needs_a_message() {
+        let dot = css_rule(PAGE_CSS, ".scrim-card-meta > :not(:last-child)::after {");
+        assert!(
+            has_decl(&dot, "content: \"·\" / \"\""),
+            "the dot has empty alt text, so it is not read out: {dot}"
+        );
+        // The wrapper always holds the mounted error line, so :empty never
+        // matches it; the gap keys on the icon a message brings.
+        assert!(
+            !PAGE_CSS.contains(".scrim-form-error:not(:empty)"),
+            "{PAGE_CSS}"
+        );
+        let gap = css_rule(PAGE_CSS, ".scrim-form-error:has(.field-error-icon) {");
+        assert!(has_decl(&gap, "margin-top: var(--space-4)"), "{gap}");
     }
 }
