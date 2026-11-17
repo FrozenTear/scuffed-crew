@@ -251,10 +251,12 @@ fn page_lead(org_name: Option<&str>) -> String {
 }
 
 /// True when the name opens with the word "The" (any case), e.g. "The
-/// Scuffed Crew" or "THE OWLS", but not "Theta" or a bare "The".
+/// Scuffed Crew", "THE OWLS" or a bare "The", but not "Theta". Any
+/// whitespace may follow the word.
 fn starts_with_the(name: &str) -> bool {
-    name.get(..4)
-        .is_some_and(|head| head.eq_ignore_ascii_case("the "))
+    name.get(..3)
+        .is_some_and(|head| head.eq_ignore_ascii_case("the"))
+        && name[3..].chars().next().is_none_or(char::is_whitespace)
 }
 
 fn entry_heading_id(tab: Tab, index: usize) -> String {
@@ -811,6 +813,10 @@ mod tests {
             "the Scuffed Crew",
             "THE OWLS",
             " The Owls ",
+            "The\tOwls",
+            "The",
+            "the",
+            "  THE  ",
         ] {
             let lead = page_lead(Some(name));
             assert_eq!(
@@ -824,6 +830,10 @@ mod tests {
         assert_eq!(
             page_lead(Some("Theta Squad")),
             "Updates to the Theta Squad site and the Overwatch tracker."
+        );
+        assert_eq!(
+            page_lead(Some("Theta")),
+            "Updates to the Theta site and the Overwatch tracker."
         );
         for none in [None, Some(""), Some("   ")] {
             assert_eq!(
