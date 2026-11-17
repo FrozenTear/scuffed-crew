@@ -91,10 +91,11 @@ for (const role of ['guest', 'member', 'admin']) {
     a = await info(page);
     rec(`${T}: a click focuses the map canvas`, a.tag === 'CANVAS' && a.zone === 'canvas', JSON.stringify(a));
     let before = await panels(page);
+    rec(`${T}: Vision nit 20, a mouse focus shows no key hint`, !before.hint, JSON.stringify(before));
     await page.keyboard.press('Tab'); await page.waitForTimeout(150);
     let after = await panels(page); a = await info(page);
     rec(`${T}: Tab inside the canvas toggles the left panel, focus stays on the canvas`, after.left === !before.left && after.right === before.right && after.bottom === before.bottom && a.tag === 'CANVAS', JSON.stringify({ before, after, a }));
-    rec(`${T}: the key hint shows after the toggle`, after.hint && await page.evaluate(() => { const h = document.querySelector('.canvas-key-hint'); const r = h.getBoundingClientRect(); return r.width > 0 && r.left >= 0 && r.right <= innerWidth && h.textContent.includes('Esc or Shift+Tab leaves the map'); }));
+    rec(`${T}: the key hint shows after the toggle`, after.hint && await page.evaluate(() => { const h = document.querySelector('.canvas-key-hint'); const r = h.getBoundingClientRect(); return r.width > 0 && r.left >= 0 && r.right <= innerWidth && h.textContent.includes('Esc: cancel, then leave the map'); }));
     await page.keyboard.press('Tab'); await page.waitForTimeout(150);
     let again = await panels(page); a = await info(page);
     rec(`${T}: a second Tab toggles it back`, again.left === before.left && a.tag === 'CANVAS', JSON.stringify(again));

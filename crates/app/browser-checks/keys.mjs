@@ -7,10 +7,14 @@
 //    the same shortcuts work in the map canvas. Esc in the canvas cancels a
 //    drawing or selection first, then leaves (notes 5 and 10).
 // 4. Vision blocking 2: the map picker is a modal dialog.
+// 5. Vision r4 nits: 3 (ring after a key), 13 (drawer), 14 (Ctrl+S in the
+//    picker), 15 (Cmd chords), 16 (selects and sliders), 17 (stored map id
+//    not the picker's), 20 (no hint on mouse focus), 21 (aria-current).
 import { launch, makeContext, open, readState, reporter } from './lib.mjs';
 
 const { rec, finish } = reporter('keys');
-const EDITOR = '/strategy/editor/' + readState('strategy.json').id;
+const STRATEGIES = readState('strategy.json');
+const EDITOR = '/strategy/editor/' + STRATEGIES.id;
 const active = page => page.evaluate(() => { const a = document.activeElement; return a ? { id: a.id, tag: a.tagName, cls: a.className, text: (a.textContent || '').trim().slice(0, 30), inDrawer: !!a.closest('#site-drawer') } : null; });
 const browser = await launch();
 
@@ -215,6 +219,9 @@ for (const role of ['guest', 'member']) {
     for (const [what, sel] of [['button', '.tb-tool-btn[title="Zoom In"]'], ['link', link]]) {
       const fired = [];
       for (const key of SINGLE_KEYS) {
+        // v and 1 select the Select tool: start from Pan so a fired one shows.
+        const tool = key === 'v' || key === '1' ? 1 : 0;
+        await page.evaluate(i => document.querySelectorAll('.tb-tool-btn')[i].click(), tool); await page.waitForTimeout(30);
         await page.focus(sel); const before = await state(page);
         await press1(page, key); await page.waitForTimeout(60);
         const after = await state(page);
@@ -234,6 +241,32 @@ for (const role of ['guest', 'member']) {
     await page.keyboard.press('Control+z'); await page.waitForTimeout(100); after = await state(page);
     await page.keyboard.press('Control+Shift+z'); await page.waitForTimeout(100); const redone = await state(page);
     rec(`${T}: Ctrl+Z and Ctrl+Shift+Z still work with a button focused`, after.elements === '0' && redone.elements === '1', `${before.elements} ${after.elements} ${redone.elements}`);
+    // Nit 15: the same chords with Cmd (Meta), as on macOS.
+    await page.keyboard.press('Meta+z'); await page.waitForTimeout(100); after = await state(page);
+    await page.keyboard.press('Meta+Shift+z'); await page.waitForTimeout(100); let again = await state(page);
+    rec(`${T}: nit 15, Cmd+Z and Cmd+Shift+Z work with a button focused`, after.elements === '0' && again.elements === '1', `${after.elements} ${again.elements}`);
+    // Nit 16: a slider and a select are controls, not text fields. Their own
+    // keys stay with them; Ctrl+Z, Ctrl+Shift+Z and Ctrl+S reach the editor.
+    await page.evaluate(() => { window.__saveBlocked = []; window.addEventListener('keydown', e => { if (e.key.toLowerCase() === 's' && (e.ctrlKey || e.metaKey)) window.__saveBlocked.push(e.defaultPrevented); }); });
+    for (const [what, sel, key] of [['opacity slider', '.tb-opacity input[type=range]', 'ArrowRight'], ['visibility select', '.tb-visibility-select', 'ArrowDown']]) {
+      if (!(await page.$(sel))) { rec(`${T}: nit 16, ${what} is on the page`, false); continue; }
+      await page.focus(sel); before = await state(page);
+      await page.keyboard.press('Control+z'); await page.waitForTimeout(100); after = await state(page);
+      await page.keyboard.press('Control+Shift+z'); await page.waitForTimeout(100); again = await state(page);
+      rec(`${T}: nit 16, Ctrl+Z and Ctrl+Shift+Z work with the ${what} focused`, after.elements === '0' && again.elements === '1' && (await focusedIs(page, sel)), `${before.elements} ${after.elements} ${again.elements}`);
+      await page.evaluate(() => { window.__saveBlocked = []; });
+      await page.keyboard.press('Control+s'); await page.waitForTimeout(300);
+      const blocked = await page.evaluate(() => window.__saveBlocked);
+      rec(`${T}: nit 16, Ctrl+S with the ${what} focused is the editor's (browser Save Page held back)`, blocked.length === 1 && blocked[0] === true, JSON.stringify(blocked));
+      if (what === 'opacity slider') {
+        // The slider keeps its arrows: the value moves, the phase does not.
+        await page.focus(sel); before = await state(page); const v0 = await page.$eval(sel, e => e.value);
+        await page.keyboard.press(key); await page.waitForTimeout(100); after = await state(page); const v1 = await page.$eval(sel, e => e.value);
+        rec(`${T}: nit 16, ArrowRight on the slider moves the slider (${v0} to ${v1}), not the phase`, v1 !== v0 && after.phase === before.phase, JSON.stringify({ before, after }));
+      }
+    }
+    // Saving moved the strategy off this tab's URL? Keep the same page either way.
+    if (new URL(page.url()).pathname !== EDITOR) { await open(page, EDITOR); }
 
     // The same shortcuts are active in the canvas. Focus by clicking an empty spot.
     const empty = await page.evaluate(([x, y]) => {
@@ -247,8 +280,9 @@ for (const role of ['guest', 'member']) {
     const ring = await page.evaluate(() => { const s = getComputedStyle(document.querySelector('.map-canvas-overlay')); return [s.outlineStyle, s.outlineOffset, s.outlineWidth]; });
     rec(`${T}: nit 3, the focused canvas shows an inset ring`, ring[0] === 'solid' && ring[1] === '-2px' && ring[2] === '2px', ring.join(' '));
     // nit 9: the live hint node is mounted before focus and only its text changes.
-    const hint = await page.evaluate(() => { const h = document.querySelector('.canvas-key-hint'); return h && [h.getAttribute('role'), h.textContent]; });
-    rec(`${T}: nit 9, the status hint is mounted and says the keys while the map has focus`, !!hint && hint[0] === 'status' && hint[1].startsWith('Tab toggles the team panel.'), JSON.stringify(hint));
+    const hintNow = () => page.evaluate(() => { const h = document.querySelector('.canvas-key-hint'); return h && [h.getAttribute('role'), h.textContent, h.getBoundingClientRect().height]; });
+    let hint = await hintNow();
+    rec(`${T}: nits 9 and 20, the status hint is mounted and empty after a mouse focus`, !!hint && hint[0] === 'status' && hint[1] === '', JSON.stringify(hint));
     const inCanvas = [
       [']', s => s.right !== base.right], [']', s => s.right === base.right],
       ['[', s => s.bottom !== base.bottom], ['[', s => s.bottom === base.bottom],
@@ -265,6 +299,12 @@ for (const role of ['guest', 'member']) {
       if (!ok(s, b) || !(await focusedIs(page, '.map-canvas-overlay'))) missed.push(key + ' ' + JSON.stringify(s));
     }
     rec(`${T}: ${inCanvas.length} shortcut presses all act with the canvas focused`, missed.length === 0, missed.join(' | '));
+    hint = await hintNow();
+    rec(`${T}: nits 19 and 20, a key in the map shows the hint with the cancel step`, hint[1] === 'Tab: team panel. Esc: cancel, then leave the map.' && hint[2] > 0, JSON.stringify(hint));
+    // Nit 3: after a key press the canvas also matches :focus-visible, and
+    // the ring must still be the inset one.
+    const ringAfter = await page.evaluate(() => { const c = document.querySelector('.map-canvas-overlay'); const s = getComputedStyle(c); return [c.matches(':focus-visible'), s.outlineStyle, s.outlineOffset, s.outlineWidth]; });
+    rec(`${T}: nit 3, after a key the canvas is :focus-visible and the ring is still inset`, ringAfter[0] === true && ringAfter[1] === 'solid' && ringAfter[2] === '-2px' && ringAfter[3] === '2px', ringAfter.join(' '));
     await page.mouse.click(pt.x, pt.y); await page.waitForTimeout(100); before = await state(page);
     await page.keyboard.press('Delete'); await page.waitForTimeout(100); after = await state(page);
     rec(`${T}: Delete in the canvas deletes the selected element`, before.elements === '1' && after.elements === '0', `${before.elements} ${after.elements}`);
@@ -311,11 +351,19 @@ for (const role of ['guest', 'member']) {
     const hits = await page.evaluate(() => [[innerWidth / 2, 20], [innerWidth / 2, innerHeight - 20], [8, innerHeight / 2]].map(([x, y]) => !!document.elementFromPoint(x, y)?.closest('.map-picker-overlay')));
     rec(`${T}: the overlay is on top of the top bar and the tab bar (z-index 110)`, hits.every(Boolean), JSON.stringify(hits));
     // No editor shortcut runs behind the open picker, even from the body.
-    const before = await page.evaluate(() => [...document.querySelectorAll('.editor-sidebar, .element-list-wrapper')].map(e => e.className).join('|'));
+    // The whole editor state (panels, tool, phase, playback, zoom), not only the panels.
+    const before = await state(page);
     await page.evaluate(() => document.activeElement.blur());
-    for (const key of [']', '[', 'h', 'Space', 'ArrowRight']) await page.keyboard.press(key);
-    const afterKeys = await page.evaluate(() => [...document.querySelectorAll('.editor-sidebar, .element-list-wrapper')].map(e => e.className).join('|'));
-    rec(`${T}: editor shortcuts do nothing behind the open picker`, before === afterKeys && !!(await page.$('#map-picker')), afterKeys);
+    for (const key of [']', '[', 'h', 'Space', 'ArrowRight', 'End', '+', '\\', 'k']) await press1(page, key === 'Space' ? ' ' : key);
+    await page.waitForTimeout(100);
+    const afterKeys = await state(page);
+    rec(`${T}: editor shortcuts do nothing behind the open picker`, same(before, afterKeys) && !!(await page.$('#map-picker')), JSON.stringify({ before, afterKeys }));
+    // Nit 14: Ctrl+S with the picker open does not reach the browser.
+    await page.evaluate(() => { window.__saveBlocked = []; window.addEventListener('keydown', e => { if (e.key.toLowerCase() === 's' && (e.ctrlKey || e.metaKey)) window.__saveBlocked.push(e.defaultPrevented); }); });
+    await page.focus('#map-picker-close');
+    await page.keyboard.press('Control+s'); await page.keyboard.press('Meta+s'); await page.waitForTimeout(150);
+    const blocked = await page.evaluate(() => window.__saveBlocked);
+    rec(`${T}: nit 14, Ctrl+S and Cmd+S in the open picker are held back from the browser, picker stays open`, same(blocked, [true, true]) && !!(await page.$('#map-picker')), JSON.stringify(blocked));
     await page.keyboard.press('Tab'); a = await page.evaluate(() => !!document.activeElement.closest('#map-picker'));
     rec(`${T}: Tab from outside pulls focus back into the picker`, a);
     // Tab stays inside and visits every stop.
@@ -345,11 +393,65 @@ for (const role of ['guest', 'member']) {
     rec(`${T}: Space on a map in the picker picks it, closes the picker, toggles no playback`, !(await page.$('#map-picker')) && a.id === 'editor-map-button' && !/Map: None/.test(status) && !!(await page.$('.tl-ctrl-btn.playing')) === playingBefore, status);
     await page.keyboard.press('Enter'); await page.waitForTimeout(250); a = await active(page);
     const title = await page.evaluate(() => document.getElementById('map-picker-title')?.textContent.trim());
-    rec(`${T}: reopened with a map, focus lands on the current map`, a.id === 'map-picker-selected' && title === 'Change Map' && (await page.getAttribute('#map-picker-selected', 'aria-pressed')) === 'true', JSON.stringify(a));
+    const marks = await page.evaluate(() => ({ pressed: document.querySelectorAll('#map-picker [aria-pressed]').length, current: [...document.querySelectorAll('#map-picker [aria-current]')].map(e => e.id + '=' + e.getAttribute('aria-current')) }));
+    rec(`${T}: reopened with a map, focus lands on the current map`, a.id === 'map-picker-selected' && title === 'Change Map', JSON.stringify(a));
+    rec(`${T}: nit 21, only the current map has aria-current="true", no aria-pressed`, marks.pressed === 0 && same(marks.current, ['map-picker-selected=true']), JSON.stringify(marks));
     await page.keyboard.press('Escape'); await page.waitForTimeout(200);
     rec(`${T}: no page error`, errors.length === 0, errors.join(' | '));
     await ctx.close();
   }
 }
+// ----------------------------------------- 5. Vision r4: drawer (13), picker ids (17)
+// Nit 13: with the phone drawer open the editor behind it takes no shortcut,
+// even with focus on the body after a click on blank drawer space.
+for (const role of ['guest', 'member']) {
+  const T = `drawer ${role} 390`;
+  const ctx = await makeContext(browser, role, 390); const page = await ctx.newPage();
+  const errors = []; page.on('pageerror', e => errors.push(String(e).slice(0, 120)));
+  await open(page, EDITOR);
+  await page.click('#site-drawer-toggle'); await page.waitForTimeout(300);
+  const blank = await page.evaluate(() => {
+    const d = document.getElementById('site-drawer'); const r = d.getBoundingClientRect();
+    for (let y = r.bottom - 10; y > r.top; y -= 10) for (const x of [r.left + 6, r.right - 6, (r.left + r.right) / 2]) {
+      const e = document.elementFromPoint(x, y);
+      if (e && e.closest('#site-drawer') && !e.closest('a[href], button, input, select, textarea, [tabindex]')) return { x: Math.round(x), y: Math.round(y) };
+    }
+    return null;
+  });
+  if (blank) { await page.mouse.click(blank.x, blank.y); await page.waitForTimeout(100); }
+  const where = await page.evaluate(() => document.activeElement && document.activeElement.tagName);
+  const mainInert = await page.evaluate(() => document.getElementById('main').inert);
+  const before = await state(page);
+  for (const key of [' ', 'Delete', 'ArrowRight', 'End', ']', '[', 'h', '+', '\\']) await press1(page, key);
+  await page.waitForTimeout(150);
+  const after = await state(page);
+  rec(`${T}: nit 13, drawer open and focus on the page (${where}): no editor shortcut runs behind it`, !!blank && where !== null && mainInert && same(before, after), JSON.stringify({ blank, where, before, after }));
+  await page.keyboard.press('Escape'); await page.waitForTimeout(300);
+  const closed = !(await page.evaluate(() => document.getElementById('site-drawer').classList.contains('is-open')));
+  // Once it is closed the page shortcuts work again.
+  await page.evaluate(() => document.activeElement && document.activeElement.blur());
+  const b2 = await state(page); await press1(page, ']'); await page.waitForTimeout(120); const a2 = await state(page);
+  rec(`${T}: Esc closes the drawer and the editor shortcuts work again`, closed && a2.right !== b2.right, JSON.stringify({ b2, a2 }));
+  rec(`${T}: no page error`, errors.length === 0, errors.join(' | '));
+  await ctx.close();
+}
+
+// Nit 17: a stored map id that is not the picker's exact id. A display name
+// ("Dorado") still marks and focuses its map; an unknown id focuses Close.
+for (const width of [1440, 390]) {
+  const ctx = await makeContext(browser, 'member', width); const page = await ctx.newPage();
+  for (const [what, id, expect] of [['stored by display name', STRATEGIES.byName, 'map-picker-selected'], ['not in the picker', STRATEGIES.unknown, 'map-picker-close']]) {
+    const T = `picker ${width} map ${what}`;
+    await open(page, '/strategy/editor/' + id);
+    await page.click('#editor-map-button'); await page.waitForTimeout(300);
+    const a = await active(page);
+    const marks = await page.evaluate(() => [...document.querySelectorAll('#map-picker [aria-current]')].map(e => e.textContent.trim()));
+    rec(`${T}: nit 17, focus moves into the picker (${expect})`, a && a.id === expect, JSON.stringify(a));
+    rec(`${T}: nit 17, current map marked: ${expect === 'map-picker-selected' ? 'Dorado' : 'none'}`, same(marks, expect === 'map-picker-selected' ? ['Dorado'] : []), JSON.stringify(marks));
+    await page.keyboard.press('Escape'); await page.waitForTimeout(200);
+  }
+  await ctx.close();
+}
+
 await browser.close();
 finish();
