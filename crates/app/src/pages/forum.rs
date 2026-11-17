@@ -23,7 +23,7 @@ use crate::components::{Toast, use_toast};
 use crate::routes::Route;
 use crate::state::auth::use_auth;
 use crate::util::{encode_query, local_time_node};
-use scuffed_api_client::ApiClient;
+use scuffed_api_client::{ApiClient, ClientError};
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 struct ForumCategory {
@@ -111,6 +111,45 @@ fn thread_count_label(count: u64) -> String {
 }
 
 /// A description worth a line: trimmed, and `None` when blank.
+/// A forum fetch as a view state. A board or thread the viewer may not open
+/// (401, 403) reads like a missing one: the not-found panel already says
+/// "not open to you", and a Retry could never fix it.
+pub(crate) fn forum_load<T: Clone>(slot: Option<&Result<T, String>>) -> Load<T> {
+    match slot {
+        Some(Err(err))
+            if crate::components::is_http_status(err, 401)
+                || crate::components::is_http_status(err, 403) =>
+        {
+            Load::Missing
+        }
+        other => Load::of(other),
+    }
+}
+
+/// API path of one thread. The id is percent-encoded like the board slug.
+pub(crate) fn thread_api_path(thread_id: &str) -> String {
+    format!("/api/forum/threads/{}", encode_query(thread_id))
+}
+
+/// What a failed thread or reply post says, in words: `lead` names the
+/// action. The routes answer 403 for a locked board or thread and for a
+/// board the viewer may not post to.
+pub(crate) fn forum_post_error(lead: &str, err: &ClientError) -> String {
+    let why = match err {
+        ClientError::Network(_) => "Check your connection and try again.",
+        ClientError::Http { status: 401, .. } => "Your session ended. Log in again.",
+        ClientError::Http {
+            status: 403, body, ..
+        } if body.contains("locked") => "It is locked now. Reload the page.",
+        ClientError::Http { status: 403, .. } => "Your account can't post here.",
+        ClientError::Http { status: 404, .. } => "It no longer exists. Reload the page.",
+        ClientError::Http { status: 400, .. } => "The server did not accept the text.",
+        ClientError::Http { status: 429, .. } => "Too many posts in a row. Wait a moment.",
+        _ => "Something went wrong. Try again in a moment.",
+    };
+    format!("{lead} {why}")
+}
+
 fn shown_text(text: Option<&str>) -> Option<&str> {
     text.map(str::trim).filter(|text| !text.is_empty())
 }
@@ -291,13 +330,14 @@ pub fn Forum() -> Element {
                 .map_err(|e| e.to_string())
         }
     });
-    let load = Load::of(tree.read().as_ref());
+    let load = forum_load(tree.read().as_ref());
     let retrying = is_retrying(tree.state()(), &load);
 
     rsx! {
         ForumIndex {
             load,
             logged_in: auth().is_logged_in(),
+            checking_session: auth().loading,
             retrying,
             on_retry: move |_| refresh += 1,
         }
@@ -310,13 +350,16 @@ pub fn Forum() -> Element {
 fn ForumIndex(
     load: Load<Vec<ForumCategoryNode>>,
     logged_in: bool,
+    /// The session is still loading: say nothing about logging in yet.
+    #[props(default = false)]
+    checking_session: bool,
     /// A Retry is running.
     #[props(default = false)]
     retrying: bool,
     on_retry: EventHandler<()>,
 ) -> Element {
     let status = list_status(&load, retrying, false, "Loading boards", "boards");
-    let lead = if logged_in {
+    let lead = if logged_in || checking_session {
         "Boards for the crew, recruits, and guests."
     } else {
         "Boards for the crew, recruits, and guests. Log in to start a thread."
@@ -507,7 +550,7 @@ pub fn ForumBoardPage(slug: String) -> Element {
             .unwrap_or_default()
     });
 
-    let load = Load::of(list.read().as_ref());
+    let load = forum_load(list.read().as_ref());
     let pending = list.state()() == UseResourceState::Pending;
     let retrying = is_retrying(list.state()(), &load);
     // A page change or a refresh keeps the old rows until the new ones land.
@@ -566,7 +609,13 @@ pub fn ForumBoardPage(slug: String) -> Element {
                                 toast.show(Toast::success("Thread created"));
                                 focus_element_by_id_soon(NEW_THREAD_BUTTON_ID.to_string());
                             }
-                            Err(e) => toast.show(Toast::error(e.to_string())),
+                            Err(e) => {
+                                crate::util::log_client_error("forum thread", &e);
+                                toast.show(Toast::error(forum_post_error(
+                                    "The thread was not posted.",
+                                    &e,
+                                )));
+                            }
                         }
                         posting.set(false);
                     });
@@ -582,6 +631,7 @@ pub fn ForumBoardPage(slug: String) -> Element {
             names: Some(names()),
             page: page.get(),
             logged_in: auth().is_logged_in(),
+            checking_session: auth().loading,
             retrying,
             refreshing,
             composing: composing(),
@@ -626,6 +676,9 @@ fn BoardView(
     names: Option<AuthorNames>,
     page: usize,
     logged_in: bool,
+    /// The session is still loading: no log-in link and no compose button yet.
+    #[props(default = false)]
+    checking_session: bool,
     /// A Retry is running.
     #[props(default = false)]
     retrying: bool,
@@ -644,6 +697,7 @@ fn BoardView(
     on_compose: EventHandler<bool>,
 ) -> Element {
     let status = load_status(&load, retrying || refreshing, "Loading threads");
+    let viewer = Viewer::of(logged_in, checking_session);
     let board = match &load {
         Load::Ready(resp) => resp.board.as_ref(),
         _ => None,
@@ -682,7 +736,7 @@ fn BoardView(
                                 span { "No new threads can be started on this board." }
                             }
                         }),
-                        actions: board_action(locked, logged_in, composing, on_compose, true),
+                        actions: board_action(locked, viewer, composing, on_compose, true),
                     }
                 },
             }}
@@ -717,12 +771,12 @@ fn BoardView(
                         Load::Ready(resp) if resp.total == 0 => rsx! {
                             EmptyCard {
                                 title: "No threads yet",
-                                message: empty_board_message(locked, logged_in),
+                                message: empty_board_message(locked, viewer),
                                 // The open form is the action already.
                                 actions: if composing {
                                     None
                                 } else {
-                                    board_action(locked, logged_in, composing, on_compose, false)
+                                    board_action(locked, viewer, composing, on_compose, false)
                                 },
                             }
                         },
@@ -765,11 +819,31 @@ fn BoardView(
     }
 }
 
-fn empty_board_message(locked: bool, logged_in: bool) -> &'static str {
-    match (locked, logged_in) {
+/// Who is looking, as far as the board's one action cares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Viewer {
+    /// The session has not loaded yet.
+    Checking,
+    Guest,
+    SignedIn,
+}
+
+impl Viewer {
+    fn of(logged_in: bool, checking_session: bool) -> Self {
+        match (logged_in, checking_session) {
+            (true, _) => Viewer::SignedIn,
+            (false, true) => Viewer::Checking,
+            (false, false) => Viewer::Guest,
+        }
+    }
+}
+
+fn empty_board_message(locked: bool, viewer: Viewer) -> &'static str {
+    match (locked, viewer) {
         (true, _) => "This board is locked, so no threads can be started.",
-        (false, true) => "Start the first one.",
-        (false, false) => "Log in to start the first one.",
+        (false, Viewer::SignedIn) => "Start the first one.",
+        (false, Viewer::Guest) => "Log in to start the first one.",
+        (false, Viewer::Checking) => "Threads started here show up in this list.",
     }
 }
 
@@ -788,15 +862,15 @@ fn past_last_page_message(total: usize) -> String {
 /// to and says whether the form is open.
 fn board_action(
     locked: bool,
-    logged_in: bool,
+    viewer: Viewer,
     composing: bool,
     on_compose: EventHandler<bool>,
     in_header: bool,
 ) -> Option<Element> {
-    if locked {
+    if locked || viewer == Viewer::Checking {
         return None;
     }
-    if !logged_in {
+    if viewer == Viewer::Guest {
         return Some(rsx! {
             Link { to: Route::Login {}, class: btn_class(true), "Log in to start a thread" }
         });
@@ -1043,6 +1117,7 @@ mod tests {
         names: Option<AuthorNames>,
         page: usize,
         logged_in: bool,
+        checking: bool,
         retrying: bool,
         composing: bool,
     }
@@ -1054,6 +1129,7 @@ mod tests {
                 names: Some(names()),
                 page: 1,
                 logged_in: false,
+                checking: false,
                 retrying: false,
                 composing: false,
             }
@@ -1074,6 +1150,7 @@ mod tests {
                         names: case.names,
                         page: case.page,
                         logged_in: case.logged_in,
+                        checking_session: case.checking,
                         retrying: case.retrying,
                         composing: case.composing,
                         on_retry: move |_| {},
@@ -1412,6 +1489,101 @@ mod tests {
     }
 
     #[test]
+    fn a_board_or_thread_closed_to_the_viewer_is_not_a_connection_error() {
+        for status in [401, 403, 404] {
+            let slot: Result<u8, String> = Err(format!("HTTP error {status}: {{\"error\":\"x\"}}"));
+            assert_eq!(forum_load(Some(&slot)), Load::Missing, "{status}");
+        }
+        let server: Result<u8, String> = Err("HTTP error 500: oops".to_string());
+        assert_eq!(forum_load(Some(&server)), Load::Failed);
+        let network: Result<u8, String> = Err("Network error: offline".to_string());
+        assert_eq!(forum_load(Some(&network)), Load::Failed);
+        assert_eq!(forum_load(Some(&Ok::<u8, String>(3))), Load::Ready(3));
+        assert_eq!(forum_load::<u8>(None), Load::Loading);
+        let thread = include_str!("forum_thread.rs")
+            .split("mod tests")
+            .next()
+            .unwrap();
+        assert!(thread.contains("forum_load(detail.read().as_ref())"));
+        assert!(
+            !thread.contains("Load::of("),
+            "the thread page maps 401/403 too"
+        );
+        let board = include_str!("forum.rs").split("mod tests").next().unwrap();
+        assert!(!board.contains("Load::of(list") && !board.contains("Load::of(tree"));
+    }
+
+    #[test]
+    fn no_log_in_prompt_flashes_while_the_session_loads() {
+        let mut case = BoardCase::of(Load::Ready(listing(Vec::new(), 0, false)));
+        case.checking = true;
+        let html = case.render();
+        assert!(!html.contains("Log in"), "{html}");
+        assert!(!html.contains("Start a thread"), "{html}");
+        assert!(html.contains("<h2>No threads yet</h2>"), "{html}");
+
+        let guest = BoardCase::of(Load::Ready(listing(Vec::new(), 0, false))).render();
+        assert!(guest.contains(">Log in to start a thread</a>"), "{guest}");
+
+        let index = render_routed(|| {
+            rsx! {
+                ForumIndex {
+                    load: Load::Ready(Vec::new()),
+                    logged_in: false,
+                    checking_session: true,
+                    on_retry: move |_| {},
+                }
+            }
+        });
+        assert!(!index.contains("Log in"), "{index}");
+        assert_eq!(Viewer::of(false, true), Viewer::Checking);
+        assert_eq!(Viewer::of(true, true), Viewer::SignedIn);
+        assert_eq!(Viewer::of(false, false), Viewer::Guest);
+    }
+
+    #[test]
+    fn post_errors_say_why_and_thread_ids_are_encoded() {
+        let http = |status, body: &str| ClientError::http(status, body, None);
+        assert_eq!(
+            forum_post_error(
+                "The reply was not posted.",
+                &http(403, r#"{"error":"Thread is locked"}"#)
+            ),
+            "The reply was not posted. It is locked now. Reload the page."
+        );
+        assert_eq!(
+            forum_post_error(
+                "The thread was not posted.",
+                &http(403, r#"{"error":"No access"}"#)
+            ),
+            "The thread was not posted. Your account can't post here."
+        );
+        assert_eq!(
+            forum_post_error("x", &ClientError::Network("offline".into())),
+            "x Check your connection and try again."
+        );
+        for status in [400, 401, 403, 404, 429, 500] {
+            let copy = forum_post_error("x", &http(status, r#"{"error":"raw"}"#));
+            assert!(!copy.contains("raw") && !copy.contains("HTTP"), "{copy}");
+        }
+        assert_eq!(
+            thread_api_path("forum_thread:abc/../x?y"),
+            "/api/forum/threads/forum_thread%3Aabc%2F..%2Fx%3Fy"
+        );
+        let thread = include_str!("forum_thread.rs")
+            .split("mod tests")
+            .next()
+            .unwrap();
+        assert!(
+            !thread.contains("/api/forum/threads/{tid}"),
+            "unencoded id in a path"
+        );
+        assert!(!thread.contains("Failed: {e}"));
+        let board = include_str!("forum.rs").split("mod tests").next().unwrap();
+        assert!(!board.contains("Toast::error(e.to_string())"));
+    }
+
+    #[test]
     fn board_loading_failed_and_missing_states() {
         let loading = BoardCase::of(Load::Loading).render();
         assert!(loading.contains("<h1>Forum board</h1>"), "{loading}");
@@ -1510,7 +1682,13 @@ mod tests {
             let tag = &html[html[..start].rfind('<').unwrap()..];
             let tag = &tag[..tag.find('>').unwrap()];
             assert!(tag.contains("class=\"field-input\""), "{tag}");
-            assert!(tag.contains("required"), "{tag}");
+            // The native attribute itself, not the "required" inside
+            // aria-required.
+            assert!(
+                tag.split_whitespace()
+                    .any(|attr| attr == "required" || attr.starts_with("required=")),
+                "{tag}"
+            );
             assert!(tag.contains("aria-required=\"true\""), "{tag}");
             assert!(!tag.contains("aria-invalid"), "{tag}");
             assert!(!tag.contains("aria-describedby"), "{tag}");

@@ -2744,15 +2744,18 @@ mod tests {
         ));
 
         // The relay-off state must not overflow on phone either. The gate is
-        // a plain `PageShell` with no height of its own; if a viewport height
-        // comes back, it has to subtract the whole shell chrome (top bar plus
-        // tab bar), not only the top bar.
+        // a plain `PageShell` with no viewport height of its own. (A loop
+        // over its viewport-height lines checked nothing: there are none.)
+        // If one comes back, it has to subtract the whole shell chrome (top
+        // bar plus tab bar), and this test has to say so.
         let gate = include_str!("../pages/chat_gate.rs");
-        for line in gate
-            .lines()
-            .filter(|l| l.contains("100vh") || l.contains("100dvh"))
-        {
-            assert!(line.contains("var(--shell-chrome-height"), "{line}");
+        let gate = gate.split("mod tests").next().expect("production source");
+        assert!(gate.contains("PageShell {"), "the gate is a plain page");
+        for unit in ["100vh", "100dvh", "100svh", "100lvh"] {
+            assert!(
+                !gate.contains(unit),
+                "the gate sets a viewport height: {unit}"
+            );
         }
     }
 

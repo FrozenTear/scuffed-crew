@@ -9,7 +9,10 @@ use super::article_author::{
     ARTICLE_CSS, ARTICLE_CSS_ID, ArticleByline, AuthorNames, Load, author_label, is_retrying,
     load_status, use_author_names,
 };
-use super::forum::{FORUM_CSS, FORUM_CSS_ID, count_label, required_mark};
+use super::forum::{
+    FORUM_CSS, FORUM_CSS_ID, count_label, forum_load, forum_post_error, required_mark,
+    thread_api_path,
+};
 use super::not_found::{NotFoundLink, NotFoundPanel};
 use crate::components::ui::inline_confirm::focus_field_by_id;
 use crate::components::ui::{
@@ -103,7 +106,8 @@ pub fn ForumThread(id: String) -> Element {
             }
             ApiClient::web()
                 .fetch::<ThreadDetailResponse>(&format!(
-                    "/api/forum/threads/{tid}?limit={REPLY_PAGE_SIZE}&offset={offset}"
+                    "{}?limit={REPLY_PAGE_SIZE}&offset={offset}",
+                    thread_api_path(&tid)
                 ))
                 .await
                 .map_err(|e| e.to_string())
@@ -122,7 +126,7 @@ pub fn ForumThread(id: String) -> Element {
             })
             .unwrap_or_default()
     });
-    let load = Load::of(detail.read().as_ref());
+    let load = forum_load(detail.read().as_ref());
     let retrying = is_retrying(detail.state()(), &load);
     crate::head::use_page_title(tab_label(&load));
 
@@ -166,7 +170,7 @@ pub fn ForumThread(id: String) -> Element {
                 submitting.set(true);
                 spawn(async move {
                     let body = CreateReplyBody { content };
-                    let url = format!("/api/forum/threads/{tid}/replies");
+                    let url = format!("{}/replies", thread_api_path(&tid));
                     match ApiClient::web().post_json::<_, serde_json::Value>(&url, &body).await {
                         Ok(_) => {
                             toast.show(Toast::success("Reply posted"));
@@ -177,7 +181,8 @@ pub fn ForumThread(id: String) -> Element {
                             }
                         }
                         Err(e) => {
-                            toast.show(Toast::error(format!("Failed: {e}")));
+                            crate::util::log_client_error("forum reply", &e);
+                            toast.show(Toast::error(forum_post_error("The reply was not posted.", &e)));
                         }
                     }
                     submitting.set(false);
