@@ -290,8 +290,12 @@ pub(super) const TRACKER_ANCHOR: &str = "#stats-tracker";
 /// The zero-match card's message. All time has no season to name.
 fn no_logged_games_message(season: Option<&str>) -> &'static str {
     match season {
-        None => "Nothing is logged yet. Install the stat tracker below and play: your games land here on their own.",
-        Some(_) => "Nothing is logged for this season. Install the stat tracker below and play: your games land here on their own.",
+        None => {
+            "Nothing is logged yet. Install the stat tracker below and play: your games land here on their own."
+        }
+        Some(_) => {
+            "Nothing is logged for this season. Install the stat tracker below and play: your games land here on their own."
+        }
     }
 }
 
@@ -2497,6 +2501,40 @@ mod signed_out_tests {
 }
 
 #[cfg(test)]
+mod keyed_loop_tests {
+    /// Loop bodies that are a block or a helper call give Dioxus no key to
+    /// diff by. These pages key each item with a `Fragment` or the element.
+    #[test]
+    fn list_loops_key_their_items() {
+        for (name, src) in [
+            ("stats/overview.rs", include_str!("overview.rs")),
+            ("stats/rank.rs", include_str!("rank.rs")),
+            ("team_page.rs", include_str!("../team_page.rs")),
+            ("tournaments.rs", include_str!("../tournaments.rs")),
+        ] {
+            let body = src.split("#[cfg(test)]").next().unwrap();
+            let lines: Vec<&str> = body.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                let t = line.trim();
+                if !(t.starts_with("for ") && t.contains(" in ") && t.ends_with('{')) {
+                    continue;
+                }
+                let next = lines[i + 1..]
+                    .iter()
+                    .map(|l| l.trim())
+                    .find(|l| !l.is_empty() && !l.starts_with("//"))
+                    .unwrap_or_default();
+                assert!(
+                    !next.starts_with('{'),
+                    "{name}:{}: unkeyed loop body `{next}`",
+                    i + 1
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod local_day_tests {
     use super::*;
     use chrono::TimeZone;
@@ -2930,7 +2968,10 @@ mod shell_tests {
         // The root element carries the Settings density (`sc-density`), so
         // every density rule here hangs off an ancestor of the page, never
         // off the page wrapper, and the page keeps no density store.
-        assert!(!STATS_CSS.contains(".stats-page[data-density"), "{STATS_CSS}");
+        assert!(
+            !STATS_CSS.contains(".stats-page[data-density"),
+            "{STATS_CSS}"
+        );
         for density in ["compact", "comfortable"] {
             assert!(
                 STATS_CSS.contains(&format!("[data-density=\"{density}\"] .stats-page ")),
@@ -2939,7 +2980,10 @@ mod shell_tests {
         }
         let source = include_str!("mod.rs");
         let store_key = ["stats-ui", "-density"].concat();
-        assert!(!source.contains(&store_key), "the page keeps no density store");
+        assert!(
+            !source.contains(&store_key),
+            "the page keeps no density store"
+        );
     }
 
     #[test]
@@ -2995,7 +3039,10 @@ mod shell_tests {
         let rank = css_rule(super::rank::RANK_CHART_CSS, ".rank-block {");
         assert!(has_decl(&rank, "margin: 0"), "{rank}");
         assert!(!STATS_CSS.contains(".rank-block {"), "no override");
-        let body = css_rule(crate::pages::stats_member::STATS_VIEWS_CSS, ".stats-view-body {");
+        let body = css_rule(
+            crate::pages::stats_member::STATS_VIEWS_CSS,
+            ".stats-view-body {",
+        );
         assert!(has_decl(&body, "gap: var(--space-section)"), "{body}");
         // A failed or gate card in the tabpanel starts at the left edge.
         let wall = css_rule(STATS_CSS, ".my-stats .stats-panel > .wall {");

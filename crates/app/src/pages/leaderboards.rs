@@ -1317,7 +1317,10 @@ mod tests {
         assert_eq!(ranked_noun(BOARD_LIMIT - 1).0, "ranked players");
         assert_eq!(ranked_noun(BOARD_LIMIT).0, "ranked players shown");
         assert!(include_str!("leaderboards.rs").contains("&limit={BOARD_LIMIT}"));
-        let full = render_case(PanelCase::new("games", rows_view("games", &players(BOARD_LIMIT))));
+        let full = render_case(PanelCase::new(
+            "games",
+            rows_view("games", &players(BOARD_LIMIT)),
+        ));
         assert!(full.contains("of 50 ranked players shown"), "{full}");
         // The Too few games pager sits inside its own section.
         let mut rows = players(3);
@@ -1327,7 +1330,9 @@ mod tests {
             .find(&format!("id=\"{UNRANKED_TITLE_ID}\""))
             .expect("short list");
         let section = html[..title].rfind("<section").expect("section");
-        let pager = html.find("id=\"leaderboard-unranked-pager-meta\"").expect("pager");
+        let pager = html
+            .find("id=\"leaderboard-unranked-pager-meta\"")
+            .expect("pager");
         let close = section + html[section..].find("</section>").unwrap();
         assert!(section < pager && pager < close, "{html}");
         // The heading copy matches the page it opens.
@@ -1342,7 +1347,10 @@ mod tests {
         for button in ["\"Show all heroes\"", "\"See the Games board\""] {
             let end = page.find(button).expect(button);
             let handler = &page[page[..end].rfind("onclick:").expect(button)..end];
-            assert!(handler.contains("focus_element_by_id_soon("), "{button}: {handler}");
+            assert!(
+                handler.contains("focus_element_by_id_soon("),
+                "{button}: {handler}"
+            );
         }
         // The empty card follows the rows on screen, not the filter that is
         // still fetching.

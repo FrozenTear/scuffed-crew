@@ -2801,7 +2801,11 @@ mod tests {
         render_chart_in(series, player, RankWindow::Page(1))
     }
 
-    fn render_chart_in(series: Vec<RankSeries>, player: Option<&str>, window: RankWindow) -> String {
+    fn render_chart_in(
+        series: Vec<RankSeries>,
+        player: Option<&str>,
+        window: RankWindow,
+    ) -> String {
         let mut dom = VirtualDom::new_with_props(
             RankChart,
             RankChartProps {
@@ -3010,7 +3014,10 @@ mod tests {
         );
         let unread = step("Gold", 2, None, 1250, None);
         assert_eq!(
-            change_words(Some(&unread), &step("Platinum 5", 3, Some(5), 1510, Some(10))),
+            change_words(
+                Some(&unread),
+                &step("Platinum 5", 3, Some(5), 1510, Some(10))
+            ),
             "Up to Platinum 5, from Gold"
         );
         // Same tier with the division read on one game only: not a move.
@@ -3484,7 +3491,9 @@ mod tests {
             "{html}"
         );
         assert!(
-            html.contains("There are no ranked games in your last 10 games, so the chart is empty."),
+            html.contains(
+                "There are no ranked games in your last 10 games, so the chart is empty."
+            ),
             "{html}"
         );
         assert!(!html.contains("<table") && !html.contains("<img"), "{html}");
@@ -3719,7 +3728,11 @@ mod tests {
         assert_eq!(p.active(), None, "hover alone leaves nothing behind");
         p.apply(PointerEvent::Focus, "b");
         p.apply(PointerEvent::Enter, "c");
-        assert_eq!(p.active().as_deref(), Some("c"), "hover wins while it lasts");
+        assert_eq!(
+            p.active().as_deref(),
+            Some("c"),
+            "hover wins while it lasts"
+        );
         p.apply(PointerEvent::Leave, "c");
         assert_eq!(p.active().as_deref(), Some("b"), "back to the focused game");
         // A late blur from another game keeps the current one.
@@ -3732,7 +3745,9 @@ mod tests {
         assert!(!html.contains("is-active"), "{html}");
         let source = include_str!("rank.rs");
         let render = &source[source.find("for hit in hits {").expect("hit loop")..];
-        let render = &render[..render.find("div { class: \"rank-chart-x\"").expect("x axis")];
+        let render = &render[..render
+            .find("div { class: \"rank-chart-x\"")
+            .expect("x axis")];
         for handler in ["onmouseleave:", "onblur:"] {
             assert!(render.contains(handler), "{handler}");
         }
@@ -3777,7 +3792,11 @@ mod tests {
         assert!(contrast(&line, &card) >= 3.0, "{line} on {card}");
         // The soft band it replaces is under 3:1: the reason for the rule.
         let semantic = include_str!("../../theme/css/semantic.css");
-        let light_soft = &semantic[semantic.find("pre-composited on A --surface #ffffff").expect("light soft")..];
+        let light_soft = semantic
+            .match_indices("[data-theme=\"light\"] {")
+            .map(|(at, _)| &semantic[at..at + semantic[at..].find('}').unwrap()])
+            .find(|block| block.contains("--neutral-soft: #"))
+            .expect("light soft fills");
         let soft = hex_token(light_soft, "--neutral-soft");
         assert!(contrast(&line, &soft) < 3.0, "{line} on {soft}");
         // The table toggle stays as the text fallback whenever the plot shows.
@@ -3792,7 +3811,10 @@ mod tests {
         series.points[0].shown.tier = None;
         let html = render_chart_in(vec![series], None, RankWindow::Recent(10));
         assert!(!html.contains("No rank yet"), "{html}");
-        assert!(html.contains("No game in your last 10 games has a rank"), "{html}");
+        assert!(
+            html.contains("No game in your last 10 games has a rank"),
+            "{html}"
+        );
         assert!(html.contains("Recent range"), "{html}");
         // History page 3: its newest game is not the current rank.
         let html = render_chart_in(vec![series_of(&POPULATED)], None, RankWindow::Page(3));
@@ -3813,7 +3835,10 @@ mod tests {
     fn hit_targets_never_overlap_their_neighbours() {
         // A 25-game history page: each target is capped at its slot width.
         let slot = hit_slot_style(25);
-        assert_eq!(slot, format!("--rank-slot:{:.2}%", PLOT_W / 24.0 / VIEW_W * 100.0));
+        assert_eq!(
+            slot,
+            format!("--rank-slot:{:.2}%", PLOT_W / 24.0 / VIEW_W * 100.0)
+        );
         let hit = css_rule(RANK_CHART_CSS, ".rank-chart-hit {");
         assert!(
             has_decl(
@@ -3828,7 +3853,10 @@ mod tests {
         assert!((x_pct(1, 25) - x_pct(0, 25) - PLOT_W / 24.0 / VIEW_W * 100.0).abs() < 1e-9);
         let html = render_chart(vec![series_of(&POPULATED)]);
         assert!(
-            html.contains(&format!("class=\"rank-chart-hits\" style=\"{}\"", hit_slot_style(13))),
+            html.contains(&format!(
+                "class=\"rank-chart-hits\" style=\"{}\"",
+                hit_slot_style(13)
+            )),
             "{html}"
         );
     }

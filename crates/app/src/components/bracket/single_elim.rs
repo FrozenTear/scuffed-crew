@@ -445,8 +445,12 @@ mod tests {
         assert_eq!(html.matches("<section class=\"bracket-round\"").count(), 3);
         // Reading order: each heading comes right before its round's
         // matches, never all the headings first.
-        let semis = html.find("<h2 class=\"visually-hidden\">Semi-finals</h2>").unwrap();
-        let final_head = html.find("<h2 class=\"visually-hidden\">Final</h2>").unwrap();
+        let semis = html
+            .find("<h2 class=\"visually-hidden\">Semi-finals</h2>")
+            .unwrap();
+        let final_head = html
+            .find("<h2 class=\"visually-hidden\">Final</h2>")
+            .unwrap();
         let first_match = html.find("Won 2 to 0").unwrap();
         assert!(semis < first_match && first_match < final_head, "{html}");
         assert_eq!(html.matches("<h2").count(), 3, "{html}");

@@ -106,11 +106,15 @@ mod tests {
             "{html}"
         );
         assert!(
-            html.contains("<section class=\"bracket-round\"><h3 class=\"visually-hidden\">Round 1</h3>"),
+            html.contains(
+                "<section class=\"bracket-round\"><h3 class=\"visually-hidden\">Round 1</h3>"
+            ),
             "{html}"
         );
         assert!(
-            html.contains("<section class=\"bracket-round\"><h3 class=\"visually-hidden\">Round 2</h3>"),
+            html.contains(
+                "<section class=\"bracket-round\"><h3 class=\"visually-hidden\">Round 2</h3>"
+            ),
             "{html}"
         );
         for wrong in ["Final", "Semi-finals", "Champion"] {

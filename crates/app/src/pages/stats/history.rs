@@ -410,7 +410,11 @@ pub(super) fn history_tab(
     let no_games = page.is_some_and(|page| page.data.is_empty());
 
     let body = match page {
-        None if failed => stats_load_error("match history", matches.error.read().clone(), matches.refresh),
+        None if failed => stats_load_error(
+            "match history",
+            matches.error.read().clone(),
+            matches.refresh,
+        ),
         None => rsx! { SkeletonBars { rows: 5 } },
         Some(_) if no_games => rsx! { HistoryEmpty {} },
         Some(page) => {
@@ -848,7 +852,15 @@ mod tests {
         NEXT.with(|n| n.set(next));
         fn view() -> Element {
             let page = super::super::MatchPage {
-                data: vec![row("old", "ocr-v1", &[], "Reinhardt", "Havana", "control", 6)],
+                data: vec![row(
+                    "old",
+                    "ocr-v1",
+                    &[],
+                    "Reinhardt",
+                    "Havana",
+                    "control",
+                    6,
+                )],
                 next_cursor: NEXT.with(|n| n.get()).map(str::to_string),
             };
             history_tab(
@@ -874,14 +886,23 @@ mod tests {
         assert!(!last.contains("open the next page"), "{last}");
         assert!(last.contains("Clear them to see every game."), "{last}");
         let more = filtered_out(Some("c2"));
-        assert!(more.contains("Clear them, or open the next page."), "{more}");
+        assert!(
+            more.contains("Clear them, or open the next page."),
+            "{more}"
+        );
         // Clear filters removes itself; focus goes to the Outcome All chip.
-        assert!(last.contains(&format!("id=\"{}\"", outcome_chip_id(ALL))), "{last}");
+        assert!(
+            last.contains(&format!("id=\"{}\"", outcome_chip_id(ALL))),
+            "{last}"
+        );
         let src = include_str!("history.rs");
         let body = &src[..src.find("#[cfg(test)]").unwrap()];
         let clear = body.find("\"Clear filters\"").unwrap();
         let handler = &body[body[..clear].rfind("onclick:").unwrap()..clear];
-        assert!(handler.contains("focus_element_by_id_soon(outcome_chip_id(ALL))"), "{handler}");
+        assert!(
+            handler.contains("focus_element_by_id_soon(outcome_chip_id(ALL))"),
+            "{handler}"
+        );
     }
 
     #[test]

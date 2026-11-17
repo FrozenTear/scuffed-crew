@@ -119,11 +119,13 @@ fn team_lead(t: &TeamDetailData) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
-/// `Squad Alpha 3 to 1 Crew Beta`, or `Squad Alpha vs Crew Beta` before a
-/// score is in.
+/// `Win: Squad Alpha 3 to 1 Crew Beta`, or `Squad Alpha vs Crew Beta`
+/// before a score is in. The result is a word, as on every other result.
 fn match_title(team: &str, m: &TeamMatch) -> String {
     match Outcome::of(m.score_us, m.score_them) {
-        Some((_, us, them)) => format!("{team} {us} to {them} {}", m.opponent),
+        Some((outcome, us, them)) => {
+            format!("{}: {team} {us} to {them} {}", outcome.word(), m.opponent)
+        }
         None => format!("{team} vs {}", m.opponent),
     }
 }
@@ -342,7 +344,7 @@ fn TeamView(
                 Load::Missing => rsx! {
                     NotFoundPanel {
                         title: "Team not found",
-                        message: "We could not find that team. It may have been renamed or removed.",
+                        message: "We could not find that team. The link may be wrong, or the team was removed.",
                         links: vec![
                             NotFoundLink { label: "Return home", to: Route::Home {} },
                             NotFoundLink { label: "Browse members", to: Route::Members {} },
@@ -382,7 +384,7 @@ fn render_team(t: &TeamDetailData) -> Element {
             } else {
                 ul { class: "team-roster",
                     for m in roster_order(&t.roster) {
-                        {render_roster_card(m)}
+                        Fragment { key: "{m.member_id}", {render_roster_card(m)} }
                     }
                 }
             }
@@ -410,7 +412,7 @@ fn render_team(t: &TeamDetailData) -> Element {
                 h2 { class: "ui-section-title", "Earlier matches" }
                 ul { class: "entry-list",
                     for m in earlier.iter() {
-                        {render_match_row(&t.name, m)}
+                        Fragment { key: "{m.id}", {render_match_row(&t.name, m)} }
                     }
                 }
             }
@@ -434,7 +436,9 @@ fn render_team(t: &TeamDetailData) -> Element {
     }
 }
 
-/// Captain first, as the frame lists the roster; the rest keep the API order.
+/// Captain first, as the frame lists the roster, then players, subs and
+/// coaches. The sort is stable, so members with the same role keep the API
+/// order.
 fn roster_order(roster: &[RosterMember]) -> Vec<&RosterMember> {
     let rank = |role: &str| match role {
         "captain" => 0,
@@ -524,7 +528,11 @@ fn render_match_row(team: &str, m: &TeamMatch) -> Element {
             p { class: "entry-meta",
                 if let Some(when) = when {
                     {entry_date(when)}
-                    span { aria_hidden: "true", " · " }
+                    // The spaces stay outside the hidden dot, so a screen
+                    // reader does not run the date into the details.
+                    " "
+                    span { aria_hidden: "true", "·" }
+                    " "
                 }
                 "{details}"
             }
@@ -630,7 +638,10 @@ mod tests {
         // Recent match: the score as words, a link to the match, the date.
         assert!(html.contains("Recent match</h2>"), "{html}");
         assert!(html.contains("href=\"/matches/match_result:g1\""), "{html}");
-        assert!(html.contains(">Squad Alpha 3 to 1 Crew Beta</a>"), "{html}");
+        assert!(
+            html.contains(">Win: Squad Alpha 3 to 1 Crew Beta</a>"),
+            "{html}"
+        );
         assert!(
             html.contains("datetime=\"2026-11-12\">12 Nov 2026</time>"),
             "{html}"
@@ -678,7 +689,10 @@ mod tests {
             ..team()
         }));
         assert!(html.contains("Earlier matches</h2>"), "{html}");
-        assert!(html.contains(">Squad Alpha 1 to 2 Crew Beta</a>"), "{html}");
+        assert!(
+            html.contains(">Loss: Squad Alpha 1 to 2 Crew Beta</a>"),
+            "{html}"
+        );
         assert!(html.contains("href=\"/matches/match_result:g3\""), "{html}");
         assert_eq!(html.matches("class=\"entry-row\"").count(), 3, "{html}");
         assert!(html.contains("Schedule</h2>"), "{html}");
@@ -770,9 +784,12 @@ mod tests {
         assert!(p1 < p3 && p3 < p7, "{html}");
 
         // Date, a hidden dot and the details are one run of text, so a phone
-        // wraps between words, not after a lone date and dot.
+        // wraps between words, not after a lone date and dot. The spaces sit
+        // outside the hidden dot, so a screen reader keeps the gap.
         assert!(
-            html.contains("<span aria-hidden=\"true\"> · </span>Tournament match · Route 66</p>"),
+            html.contains(
+                "12 Nov 2026</time> <span aria-hidden=\"true\">·</span> Tournament match · Route 66</p>"
+            ),
             "{html}"
         );
         assert!(
@@ -801,7 +818,15 @@ mod tests {
         let mut m = game(1, 2, 2);
         assert_eq!(
             match_title("Squad Alpha", &m),
-            "Squad Alpha 2 to 2 Crew Beta"
+            "Draw: Squad Alpha 2 to 2 Crew Beta"
+        );
+        assert_eq!(
+            match_title("Squad Alpha", &game(2, 3, 1)),
+            "Win: Squad Alpha 3 to 1 Crew Beta"
+        );
+        assert_eq!(
+            match_title("Squad Alpha", &game(3, 0, 2)),
+            "Loss: Squad Alpha 0 to 2 Crew Beta"
         );
         m.score_them = None;
         assert_eq!(match_title("Squad Alpha", &m), "Squad Alpha vs Crew Beta");

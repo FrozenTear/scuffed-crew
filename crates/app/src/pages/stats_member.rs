@@ -562,7 +562,9 @@ fn member_view(summary_error: Option<&str>) -> MemberView {
 fn member_no_games_message(season: Option<&str>) -> &'static str {
     match season {
         None => "This member has not uploaded any games yet. See who has on the leaderboards.",
-        Some(_) => "This member has not uploaded any games for this season. Try another season, or see who has on the leaderboards.",
+        Some(_) => {
+            "This member has not uploaded any games for this season. Try another season, or see who has on the leaderboards."
+        }
     }
 }
 
@@ -1015,7 +1017,10 @@ mod tests {
         assert!(!text.contains("connection"), "{text}");
         assert!(!retry, "a retry gets the same 403");
         let (text, retry) = load_error_copy("map stats", Some("HTTP error 401: Unauthorized"));
-        assert!(!text.contains("connection") && text.contains("Log in again"), "{text}");
+        assert!(
+            !text.contains("connection") && text.contains("Log in again"),
+            "{text}"
+        );
         assert!(!retry);
         let (text, retry) = load_error_copy("map stats", Some("HTTP error 500: Internal error"));
         assert!(text.contains("Check your connection"), "{text}");

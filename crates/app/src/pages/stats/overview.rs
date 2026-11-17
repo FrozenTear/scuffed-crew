@@ -9,7 +9,9 @@ use crate::hooks::ApiResource;
 use super::game::{match_path, open_match};
 use super::history::outcome_word;
 use super::history_filter::{Outcome, outcome_kind};
-use super::rank::{RankChart, RankChartLoading, RankWindow, chart_series, rank_series_with_outcomes};
+use super::rank::{
+    RankChart, RankChartLoading, RankWindow, chart_series, rank_series_with_outcomes,
+};
 use super::role::{RolePanel, role_aggs_from_rows, role_panel, role_result, role_shares};
 use super::{HeroStats, MapStats, MatchPage, PersonalMatch, load_error_state, map_game_mode};
 use crate::sample::Tally;
@@ -251,7 +253,7 @@ pub(super) fn overview_tab(
                     p { class: "form-summary", "{summary}" }
                     div { class: "form-list",
                         for m in form_rows.iter().take(FORM_ROWS) {
-                            {form_row(m, &now)}
+                            Fragment { key: "{m.id}", {form_row(m, &now)} }
                         }
                     }
                     div { class: "form-more",
@@ -271,7 +273,7 @@ pub(super) fn overview_tab(
                         h2 { class: "ui-section-title", id: "stats-role-results-title", "Role results" }
                         div { class: "role-cards",
                             for r in aggs.iter().filter(|r| r.matches > 0) {
-                                {
+                                Fragment { key: "{r.name}", {
                                     let tally = r.tally();
                                     let result = role_result(tally);
                                     let wr_cls = wr_value_class(tally);
@@ -296,7 +298,7 @@ pub(super) fn overview_tab(
                                             div { class: "{wr_cls}", "{result}" }
                                         }
                                     }
-                                }
+                                } }
                             }
                         }
                     }

@@ -573,10 +573,7 @@ mod tests {
     #[test]
     fn bracket_shows_names_round_labels_and_the_named_scroller() {
         let html = render(Load::Ready(test_cup()));
-        assert!(
-            html.contains("aria-label=\"Test Cup bracket\""),
-            "{html}"
-        );
+        assert!(html.contains("aria-label=\"Test Cup bracket\""), "{html}");
         assert!(html.contains("tabindex=\"0\""), "{html}");
         for head in ["Semi-finals", "Final", "Champion"] {
             assert!(

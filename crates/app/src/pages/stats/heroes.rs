@@ -81,7 +81,9 @@ pub(super) fn heroes_tab(
     let status = heroes_status(list.map(Vec::len), failed, filtered.len());
 
     let body = match list {
-        None if failed => stats_load_error("hero stats", heroes.error.read().clone(), heroes.refresh),
+        None if failed => {
+            stats_load_error("hero stats", heroes.error.read().clone(), heroes.refresh)
+        }
         None => rsx! { SkeletonBars { rows: 4 } },
         Some(list) if list.is_empty() => rsx! { HeroesEmpty {} },
         Some(_) => {

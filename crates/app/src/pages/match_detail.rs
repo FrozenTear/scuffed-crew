@@ -70,7 +70,7 @@ impl Outcome {
     }
 
     /// The badge word. The fill never carries the result on its own.
-    const fn word(self) -> &'static str {
+    pub(super) const fn word(self) -> &'static str {
         match self {
             Outcome::Win => "Win",
             Outcome::Loss => "Loss",
@@ -154,6 +154,16 @@ fn board_phase(
 }
 
 impl BoardPhase {
+    /// The Result line before a score is in. It agrees with the board's
+    /// middle word: a played match is never "not played yet".
+    const fn unscored_line(self) -> &'static str {
+        match self {
+            BoardPhase::Scheduled => "Not played yet",
+            BoardPhase::InProgress => "In progress",
+            BoardPhase::AwaitingScore | BoardPhase::Final => "Played, score not recorded",
+        }
+    }
+
     const fn label(self) -> &'static str {
         match self {
             BoardPhase::Final => "to",
@@ -439,7 +449,7 @@ fn render_match(m: &MatchDetailData, scheduled_ms: Option<f64>, now_ms: Option<f
         .map(|view| (frame_stamp(&view.text), view.datetime.zip(view.title)));
     let score_line = match result {
         Some((outcome, us, them)) => outcome.sentence(us, them),
-        None => "Not played yet".to_string(),
+        None => phase.unscored_line().to_string(),
     };
     let map = filled(m.map_name.as_ref());
     let mode = filled(m.game_mode.as_ref());
@@ -699,6 +709,20 @@ mod tests {
         );
         assert!(drew.contains("Drew 2 to 2"), "{drew}");
         assert!(!drew.contains("is-win"), "{drew}");
+    }
+
+    #[test]
+    fn the_result_line_agrees_with_the_board() {
+        assert_eq!(BoardPhase::Scheduled.unscored_line(), "Not played yet");
+        assert_eq!(BoardPhase::InProgress.unscored_line(), "In progress");
+        assert_eq!(
+            BoardPhase::AwaitingScore.unscored_line(),
+            "Played, score not recorded"
+        );
+        // A played match with no score never says "Not played yet".
+        let played = board_phase(false, true, None, None);
+        assert_eq!(played.label(), "Score not recorded");
+        assert!(!played.unscored_line().contains("Not played"));
     }
 
     #[test]

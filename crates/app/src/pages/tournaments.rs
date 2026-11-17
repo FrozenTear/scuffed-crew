@@ -239,7 +239,7 @@ fn TournamentsView(
                     Load::Ready(list) => rsx! {
                         div { class: "entry-list",
                             for t in list.iter() {
-                                {render_tournament_card(t)}
+                                Fragment { key: "{t.id}", {render_tournament_card(t)} }
                             }
                         }
                     },

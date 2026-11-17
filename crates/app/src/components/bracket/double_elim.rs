@@ -152,7 +152,9 @@ mod tests {
         // Round headings sit under the stage title, one level down, each at
         // the start of its own round. The header row is decoration.
         assert!(
-            html.contains("<section class=\"bracket-round\"><h3 class=\"visually-hidden\">Round 1</h3>"),
+            html.contains(
+                "<section class=\"bracket-round\"><h3 class=\"visually-hidden\">Round 1</h3>"
+            ),
             "{html}"
         );
         assert!(

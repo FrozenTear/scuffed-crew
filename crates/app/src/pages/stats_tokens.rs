@@ -39,7 +39,15 @@ const TOKENS_CSS: &str = r#"
 }
 /* A new token is on show: a stronger border plus the words "Your new token". */
 .tokens-page .tracker-setup.has-token { border-color: var(--accent-solid); }
-.tokens-page .tracker-setup p {
+/* The new token: its caption reads like the card's other lines. */
+.tokens-page .tracker-new-token {
+  display: grid;
+  gap: var(--space-3);
+  margin: 0;
+  min-width: 0;
+}
+.tokens-page .tracker-setup p,
+.tokens-page .tracker-new-token figcaption {
   margin: 0;
   max-width: var(--content-max-narrow);
   color: var(--text-3);
@@ -204,8 +212,12 @@ fn TrackerSetupBox(
                 }
             }
             if let Some(raw) = shown {
-                p { id: "tracker-new-token-label", "Your new token. Copy it now: it is shown only once." }
-                code { aria_labelledby: "tracker-new-token-label", "{raw}" }
+                // `aria-labelledby` does not name a `code` element, so the
+                // label and the token are one figure with a caption.
+                figure { class: "tracker-new-token",
+                    figcaption { "Your new token. Copy it now: it is shown only once." }
+                    code { "{raw}" }
+                }
                 div { class: "tracker-setup-actions",
                     button {
                         r#type: "button",
@@ -484,6 +496,27 @@ mod tests {
         assert!(
             tag.contains("noopener"),
             "readme link missing rel noopener: {tag}"
+        );
+    }
+
+    #[test]
+    fn the_new_token_is_named_by_a_caption_not_by_aria_on_code() {
+        let src = include_str!("stats_tokens.rs");
+        let body = &src[..src.find("#[cfg(test)]").unwrap()];
+        let at = body.find("code { \"{raw}\" }").expect("token");
+        let figure = &body[body[..at].rfind("figure {").expect("figure")..at];
+        assert!(figure.contains("figcaption {"), "{figure}");
+        assert!(
+            !body.contains("code { aria_labelledby"),
+            "no aria name on code"
+        );
+        let rule = crate::components::ui::test_support::css_rule(
+            TOKENS_CSS,
+            ".tokens-page .tracker-new-token {",
+        );
+        assert!(
+            crate::components::ui::test_support::has_decl(&rule, "margin: 0"),
+            "{rule}"
         );
     }
 

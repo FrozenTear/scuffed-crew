@@ -772,8 +772,35 @@ mod tests {
 
     #[test]
     fn the_trail_is_the_shared_breadcrumb_not_a_local_copy() {
-        // `StatsMatch` renders `ArticleCrumb` (ARTICLE_CSS), as the match and
-        // tournament pages do, so the game page keeps no crumb rules of its own.
+        // The real page: `StatsMatch` renders `ArticleCrumb`, as the match and
+        // tournament pages do.
+        let html = crate::components::ui::test_support::render_routed(|| {
+            let auth = use_signal(|| crate::state::AuthState {
+                user: Some(scuffed_types::UserInfo {
+                    id: "u1".into(),
+                    username: "Player01".into(),
+                    avatar_url: None,
+                    role: Some(scuffed_types::OrgRole::Member),
+                }),
+                loading: false,
+            });
+            use_context_provider(|| auth);
+            crate::state::provide_site_settings();
+            rsx! { StatsMatch { id: "g1" } }
+        });
+        assert!(
+            html.contains(
+                "<nav class=\"article-crumb\" aria-label=\"Breadcrumb\"><a href=\"/stats\">Your stats</a>\
+                 <span aria-hidden=\"true\">/</span><span aria-current=\"page\">This game</span></nav>"
+            ),
+            "{html}"
+        );
+        assert_eq!(
+            html.matches("aria-label=\"Breadcrumb\"").count(),
+            1,
+            "{html}"
+        );
+        // So the game page keeps no crumb rules of its own.
         assert!(!GAME_CSS.contains("crumb"), "{GAME_CSS}");
         let meta = &GAME_CSS[GAME_CSS.find(".game-page .game-meta {").unwrap()..];
         let meta = &meta[..meta.find('}').unwrap()];

@@ -333,7 +333,10 @@ mod tests {
         let hint = css_rule(BRACKET_STYLES, ".bracket-hint {");
         assert!(has_decl(&hint, "display: none"), "{hint}");
         let narrow = media_block(BRACKET_STYLES, "@media (max-width: 820px)");
-        assert!(narrow.contains(".bracket-hint { display: flex; }"), "{narrow}");
+        assert!(
+            narrow.contains(".bracket-hint { display: flex; }"),
+            "{narrow}"
+        );
     }
 
     #[test]
