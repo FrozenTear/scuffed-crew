@@ -160,7 +160,10 @@ pub struct GateState {
     /// accepted value replaces it the same way (flagged, lower than the
     /// row before). A sure read the gate holds below the accepted value (so
     /// below the shown value too) drops the row to the accepted value and
-    /// moves the shown value to [`Self::unsure_base`].
+    /// moves the shown value to [`Self::unsure_base`]. So does a sure read
+    /// of a suspect own row the gate holds below the shown value, even at
+    /// or above the accepted value: a suspect row gives no refused digit,
+    /// so its read between the two is not stored.
     /// Missing on an older save means the stored row showed `accepted`.
     #[serde(default)]
     pub unsure_shown: [u32; GATE_COLS],
@@ -168,7 +171,8 @@ pub struct GateState {
     #[serde(default)]
     pub has_unsure_shown: [bool; GATE_COLS],
     /// The last unsure read a stored row showed, after a sure read the gate
-    /// held below the accepted value dropped the row to the accepted value. Not shown
+    /// held below the accepted value (or, from a suspect own row, below the
+    /// shown value) dropped the row to the accepted value. Not shown
     /// and never stored: it is only the base a later capture measures a
     /// refused digit from (the jump and rate-cap filter), so a real read
     /// that is a lone jump from the accepted value but plausible from the

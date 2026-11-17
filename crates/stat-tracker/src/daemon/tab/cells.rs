@@ -162,10 +162,13 @@ fn refused_read(
 /// filter, so it stores the same as an unvouched read of that digit; past
 /// the filter, a held read at or above the stored unsure read keeps that
 /// unsure read, flagged. A held sure read below the stored unsure read but
-/// at or above the accepted value stores that read, flagged. A held sure
-/// read below the accepted value drops the row to the accepted value,
-/// flagged (an unvouched one keeps the stored unsure read, as above),
-/// and the unsure read stays the base later captures' refused digits are
+/// at or above the accepted value stores that read, flagged, when the own
+/// row is trusted. A held sure read below the accepted value drops the row
+/// to the accepted value, flagged (an unvouched one keeps the stored
+/// unsure read, as above), and so does a held sure read of a suspect own
+/// row anywhere below the stored unsure read, even at or above the
+/// accepted value, since nothing of a suspect row is stored. Either way
+/// the unsure read stays the base later captures' refused digits are
 /// measured from ([`capture_gate::GateState::unsure_base`]), so a real
 /// read plausible from it is stored. The base is carried across every
 /// following misread of the cell (a held lower read, sure or not, a held
@@ -231,7 +234,8 @@ pub(crate) fn hold_new_reader_stats_with_guesses(
     };
     // The unsure read an earlier row showed, kept only as the base for this
     // capture's plausibility check after a held read below the accepted
-    // value dropped the row to the accepted value, with the seconds from
+    // value (or a suspect own row's held read below the shown value)
+    // dropped the row to the accepted value, with the seconds from
     // the capture that last showed it to the prior one. Never stored or
     // shown by itself. A capture that opens a game ignores it.
     let prior_base: [Option<(u32, u32)>; capture_gate::GATE_COLS] = match prior {
@@ -285,7 +289,8 @@ pub(crate) fn hold_new_reader_stats_with_guesses(
             // value. A jump or inject past the filter keeps the shown one.
             // A sure read the gate held is a refused digit too, so a
             // vouched read stores the same as an unvouched one. After a
-            // held read below the accepted value dropped a row to the
+            // held read below the accepted value (or a suspect own row's
+            // held read below the shown value) dropped a row to the
             // accepted value, the unsure value it no longer showed is the
             // base. The shown value is measured over the age of the
             // accepted value, as before; the base over the time since a
@@ -355,13 +360,16 @@ pub(crate) fn hold_new_reader_stats_with_guesses(
                 .iter()
                 .any(|hold| hold.col == col && hold.raw < shown)
         }) {
-            // The gate held a read below the accepted value (a read between
-            // the accepted and the shown value was stored by the refused
-            // branch above): the row drops to the accepted value the gate
-            // stores, flagged, and the shown value stays only as the base
-            // for later captures' checks, so a real read plausible from it
-            // is not held as a lone jump from the accepted value. It was
-            // last shown on the capture before this one.
+            // The gate held a read below the shown value that the branches
+            // above did not store: a read below the accepted value, or a
+            // suspect own row's read between the accepted and the shown
+            // value (`refused_read` gives none for a suspect row; a trusted
+            // read there was stored by the refused branch above). The row
+            // drops to the accepted value the gate stores, flagged, and the
+            // shown value stays only as the base for later captures'
+            // checks, so a real read plausible from it is not held as a
+            // lone jump from the accepted value. It was last shown on the
+            // capture before this one.
             held.state.unsure_base[col] = shown;
             held.state.has_unsure_base[col] = true;
             held.state.unsure_base_secs[col] = span_secs;
