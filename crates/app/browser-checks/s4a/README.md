@@ -63,11 +63,17 @@ Settings come from the environment:
 
 | Variable | Default |
 | --- | --- |
-| `BASE` | `http://127.0.0.1:3031` |
+| `BASE` | `http://127.0.0.1:3031` (loopback hosts only) |
+| `ALLOW_REMOTE=1` | accept a `BASE` that is not loopback |
 | `STATE_DIR` | `./.state` |
 | `REPORT_DIR` | `./reports` |
 | `SHOTS_DIR` | `./shots` |
 | `HEADED=1` | show the browser |
+
+The checks seed accounts, delete events and rewrite site settings, so every
+script refuses a `BASE` whose host is not `localhost`, `127.x.x.x` or `[::1]`.
+Set `ALLOW_REMOTE=1` only for a throwaway stack on another machine.
+`npm test` checks that guard (no browser or stack needed).
 
 Chromium only. Forced-colour shots in `fix1.mjs` are the viewport, not the
 full page: Playwright's stitched full-page capture does not paint forced

@@ -10,7 +10,8 @@
     "fix1": "node fix1.mjs",
     "keys": "node keys.mjs",
     "shots": "node shots.mjs",
-    "summary": "node summary.mjs"
+    "summary": "node summary.mjs",
+    "test": "node --test host-guard.test.mjs"
   },
   "dependencies": {
     "playwright": "1.65.1"

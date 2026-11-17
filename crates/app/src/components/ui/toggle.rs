@@ -65,6 +65,20 @@ pub const CHIP_CSS: &str = r#"
 @supports not (text-box-trim: trim-both) {
   .chip { padding-top: 0.08em; }
 }
+/* Forced colours drop the soft fill and paint every border in one system
+   colour, which would leave only the weight. The selected chip gets a thick
+   edge in the system highlight colour and an underline, so it differs from
+   the others in shape, not only ink (same cue as the pager's current page). */
+@media (forced-colors: active) {
+  .chip.active,
+  .chip[aria-pressed="true"],
+  .chip[aria-selected="true"] {
+    border: calc(var(--focus-ring-width) + 1px) solid Highlight;
+    text-decoration: underline;
+    text-decoration-thickness: var(--focus-ring-width);
+    text-underline-offset: 0.25em;
+  }
+}
 /* Phone: a row that would wrap scrolls sideways instead. The page does not
    scroll. The focus ring is drawn inside the chip, because a scroller clips
    an outer ring. */
@@ -188,7 +202,7 @@ pub fn ChipButton(
 mod tests {
     use super::*;
     use crate::components::ui::test_support::{
-        assert_ink_clears_aa, assert_sizes_from_tokens, css_rule, has_decl, render,
+        assert_ink_clears_aa, assert_sizes_from_tokens, css_rule, has_decl, media_block, render,
     };
 
     #[test]
@@ -416,5 +430,34 @@ mod tests {
         }
         let chip = css_rule(phone, ".chip-row.is-scroll .chip {");
         assert!(has_decl(&chip, "flex: 0 0 auto"), "{chip}");
+    }
+
+    /// Vision nit 3 on 696: forced colours remove the fill and repaint the
+    /// border, so the selected chip needs a cue that survives: a thicker edge
+    /// in a system colour plus an underline, for every selected selector.
+    #[test]
+    fn forced_colours_keep_the_selected_chip_apart() {
+        let forced = media_block(CHIP_CSS, "@media (forced-colors: active)");
+        let marker = ".chip[aria-selected=\"true\"] {";
+        let selected = css_rule(&forced, marker);
+        for decl in [
+            "border: calc(var(--focus-ring-width) + 1px) solid Highlight",
+            "text-decoration: underline",
+            "text-decoration-thickness: var(--focus-ring-width)",
+        ] {
+            assert!(has_decl(&selected, decl), "missing {decl}: {selected}");
+        }
+        assert!(!selected.contains("background"), "{selected}");
+        assert!(!selected.contains("box-shadow"), "{selected}");
+        let selectors = &forced[..forced.find(marker).expect("selected rule")];
+        for selector in [".chip.active,", ".chip[aria-pressed=\"true\"],"] {
+            assert!(selectors.contains(selector), "missing {selector}: {forced}");
+        }
+        // The edge is thicker than the 1px every chip has.
+        let chip = css_rule(CHIP_CSS, ".chip {");
+        assert!(
+            has_decl(&chip, "border: 1px solid var(--chip-border)"),
+            "{chip}"
+        );
     }
 }

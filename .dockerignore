@@ -11,7 +11,7 @@ target
 dist
 dist.old
 data
-node_modules
+**/node_modules
 maps
 docs
 **/*.md

@@ -424,14 +424,14 @@ pub fn season_url(path: &str, season: Option<&str>) -> String {
     }
 }
 
-/// Log a raw client error to the browser console. User-facing copy stays a
-/// plain sentence; the technical text goes here for whoever debugs it.
 /// A fetch the browser cancelled (`AbortError`): the page is being left, or
 /// the request was replaced. Not a failure, so it is never logged.
 pub fn is_aborted_fetch(err: &dyn std::fmt::Display) -> bool {
     err.to_string().contains("AbortError")
 }
 
+/// Log a raw client error to the browser console. User-facing copy stays a
+/// plain sentence; the technical text goes here for whoever debugs it.
 pub fn log_client_error(what: &str, err: &dyn std::fmt::Display) {
     if is_aborted_fetch(err) {
         return;

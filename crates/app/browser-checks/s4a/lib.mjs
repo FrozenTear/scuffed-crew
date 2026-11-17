@@ -1,7 +1,9 @@
 // Shared settings for the S4a browser checks. Everything points at a local
 // stack with fake data only (see README.md). Override with environment
 // variables:
-//   BASE       site URL                (default http://127.0.0.1:3031)
+//   BASE       site URL                (default http://127.0.0.1:3031;
+//              loopback hosts only, see host-guard.mjs)
+//   ALLOW_REMOTE=1 accept a BASE that is not loopback
 //   STATE_DIR  seed output, sessions   (default ./.state)
 //   REPORT_DIR JSON reports            (default ./reports)
 //   SHOTS_DIR  screenshots             (default ./shots)
@@ -10,9 +12,10 @@ import { chromium } from 'playwright';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { checkedBase } from './host-guard.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-export const B = (process.env.BASE || 'http://127.0.0.1:3031').replace(/\/$/, '');
+export const B = checkedBase(process.env.BASE, process.env.ALLOW_REMOTE);
 export const STATE_DIR = path.resolve(process.env.STATE_DIR || path.join(HERE, '.state'));
 export const REPORT_DIR = path.resolve(process.env.REPORT_DIR || path.join(HERE, 'reports'));
 export const SHOTS = path.resolve(process.env.SHOTS_DIR || path.join(HERE, 'shots'));

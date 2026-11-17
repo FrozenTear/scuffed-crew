@@ -664,6 +664,9 @@ const APPLY_CSS: &str = r#"
     .apply-page .inline-confirm__cancel:hover { border-color: var(--text); }
     .apply-status { margin: 0; color: var(--text-3); font-size: var(--text-sm); line-height: var(--leading-body); }
     .apply-status:not(:empty) { margin: 0 0 var(--space-3); }
+    /* The send line only ever holds a refusal, so it takes the error ink the
+       field errors use, not the muted status grey. */
+    .apply-send-status { color: var(--loss); }
 
     .apply-form { margin: 0; }
     .apply-summary { margin: 0 0 var(--space-5); padding: var(--space-4); border: 1px solid var(--loss); border-radius: var(--radius-card); background: var(--loss-soft); color: var(--text); }
@@ -2543,5 +2546,23 @@ mod tests {
         assert_ink_clears_aa("--text", "--loss-soft", 4.5);
         assert_ink_clears_aa("--on-loss", "--loss", 4.5);
         assert_ink_clears_aa("--text-3", "--surface", 4.5);
+    }
+
+    /// Vision nit 5 on 696: the send line only holds a refusal, so it uses the
+    /// field-error ink (`--loss`), not the muted `.apply-status` grey. The
+    /// other status lines stay muted.
+    #[test]
+    fn the_send_refusal_line_uses_the_error_ink() {
+        use crate::components::ui::test_support::{assert_ink_clears_aa, css_rule, has_decl};
+        let send = css_rule(APPLY_CSS, ".apply-send-status {");
+        assert!(has_decl(&send, "color: var(--loss)"), "{send}");
+        let status = css_rule(APPLY_CSS, ".apply-status {");
+        assert!(has_decl(&status, "color: var(--text-3)"), "{status}");
+        // Later in the sheet than the shared rule, same specificity, so it wins.
+        assert!(
+            APPLY_CSS.find(".apply-send-status {").unwrap()
+                > APPLY_CSS.find(".apply-status {").unwrap()
+        );
+        assert_ink_clears_aa("--loss", "--surface", 4.5);
     }
 }
