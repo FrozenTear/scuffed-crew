@@ -168,6 +168,12 @@ impl DisplayFont {
         value.and_then(Self::from_id).unwrap_or_default()
     }
 
+    /// The font the site uses: the typed `brand_font_display` of loaded
+    /// settings. Settings not loaded yet give the default.
+    pub fn for_settings(settings: Option<&scuffed_types::SiteSettings>) -> Self {
+        Self::from_setting(settings.map(|s| s.brand_font_display.as_str()))
+    }
+
     /// `--brand-font-display` for one scope (a preview card).
     pub fn css_decl(self) -> String {
         format!("--brand-font-display: {};", self.family_var())

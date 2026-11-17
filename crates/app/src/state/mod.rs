@@ -1,5 +1,4 @@
 pub mod auth;
-pub mod brand_font;
 #[cfg(feature = "web")]
 pub mod collab;
 pub mod editor;
@@ -11,7 +10,6 @@ pub mod site_settings;
 pub mod undo;
 
 pub use auth::*;
-pub use brand_font::provide_brand_font;
 #[cfg(test)]
 pub use relay::set_test_relay_availability;
 pub use relay::{RelayAvailability, provide_relay_availability, use_relay_availability_state};

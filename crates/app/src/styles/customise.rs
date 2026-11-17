@@ -137,12 +137,6 @@ pub const CUSTOMISE_CSS: &str = r#"
     .customise-choice:focus-within:not(:has(input:focus-visible)) {
         outline: none;
     }
-    .customise-choice.is-locked {
-        color: var(--text-disabled);
-        border-color: var(--border);
-        cursor: not-allowed;
-    }
-    .customise-choice.is-locked input { cursor: not-allowed; }
 
     .customise-accent-row {
         display: flex;
@@ -367,8 +361,7 @@ pub const CUSTOMISE_CSS: &str = r#"
     /* Forced colours replace author backgrounds and text colours. The ring
        and dot stay (they are borders). Every choice gets the same thick
        border, so nothing shifts when the selection moves; the selected one
-       takes the system selection colour. The locked rule comes last: a
-       locked choice is grey all through, its selected dot included. */
+       takes the system selection colour. */
     @media (forced-colors: active) {
         .customise-choice {
             border-color: ButtonText;
@@ -382,12 +375,6 @@ pub const CUSTOMISE_CSS: &str = r#"
         .customise-choice.is-selected .customise-choice-mark,
         .customise-choice.is-selected .customise-choice-mark::after {
             border-color: Highlight;
-        }
-        .customise-choice.is-locked,
-        .customise-choice.is-locked .customise-choice-mark,
-        .customise-choice.is-locked .customise-choice-mark::after {
-            border-color: GrayText;
-            color: GrayText;
         }
         .customise-choice:focus-within,
         .customise-swatch:focus-within {
@@ -489,31 +476,19 @@ mod tests {
         assert!(!forced.contains("padding"), "{forced}");
     }
 
-    /// The font picker is locked today, so its selected choice is locked and
-    /// selected at once. In forced colours it is grey all through: no
-    /// `Highlight` border, ring or dot on a control that cannot be used.
+    /// In forced colours only the selected choice and the focus outline take
+    /// `Highlight`.
     #[test]
-    fn a_locked_choice_gets_no_highlight_in_forced_colours() {
+    fn forced_colours_highlight_only_the_selection_and_focus() {
         let (_, forced) = CUSTOMISE_CSS
             .split_once("@media (forced-colors: active)")
             .expect("forced colours block");
-        let selectors = ".customise-choice.is-locked,\n        .customise-choice.is-locked .customise-choice-mark,\n        .customise-choice.is-locked .customise-choice-mark::after";
-        let locked = rule(forced, selectors);
-        assert!(locked.contains("border-color: GrayText;"), "{locked}");
-        assert!(locked.contains("color: GrayText;"), "{locked}");
-        assert!(!locked.contains("Highlight"), "{locked}");
-        // Same specificity as the selected rules, so it must come later to
-        // win on a choice that is both.
-        let selected_dot = forced
-            .find(".customise-choice.is-selected .customise-choice-mark::after")
-            .expect("selected dot rule");
-        let locked_at = forced.find(selectors).expect("locked rule");
-        assert!(selected_dot < locked_at, "the locked rule comes last");
         assert_eq!(
             forced.matches("Highlight").count(),
             3,
             "selected border, selected ring and dot, focus outline: {forced}"
         );
+        assert!(!forced.contains("is-locked"), "{forced}");
     }
 
     /// `:has()` is not everywhere. Without it the focus ring must still show.
