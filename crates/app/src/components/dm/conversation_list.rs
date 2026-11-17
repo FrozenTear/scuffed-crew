@@ -213,9 +213,11 @@ pub fn ConversationList(
             }
         }
         p { id: INBOX_STATUS_ID, class: "visually-hidden", role: "status", "{status}" }
-        if let Some(notice) = notice {
-            div { class: "dm-sync-notice",
-                p { role: "status", class: "dm-sync-notice-text", "{notice}" }
+        // The sync notice line is always in the tree (out of view while
+        // there is nothing to say), so a new failure is announced.
+        div { class: if notice.is_some() { "dm-sync-notice" } else { "dm-sync-notice visually-hidden" },
+            p { role: "status", class: "dm-sync-notice-text", {notice.clone().unwrap_or_default()} }
+            if notice.is_some() {
                 button {
                     class: "btn is-ghost",
                     r#type: "button",
@@ -455,9 +457,41 @@ mod tests {
                 }
             }
         });
-        assert!(html.contains("Could not reach the relay"), "{html}");
+        assert!(
+            html.contains(
+                "<div class=\"dm-sync-notice\"><p role=\"status\" class=\"dm-sync-notice-text\">Could not reach the relay. Showing saved messages.</p>"
+            ),
+            "{html}"
+        );
         assert!(html.contains(">Try again</button>"), "{html}");
-        assert!(!html.contains("aria-label=\"Conversations\""), "{html}");
+        // The saved list is still offered: a sync failure is not a load
+        // failure (Vision nit 7 on PR 706: this line used to check a label
+        // the component never renders).
+        assert!(html.contains("No conversations yet"), "{html}");
+        assert!(!html.contains("role=\"alert\""), "{html}");
+
+        // No notice: the live line is still in the tree, empty and out of
+        // view, so the next failure is announced.
+        let quiet = render_routed(|| {
+            rsx! {
+                ConversationList {
+                    conversations: vec![],
+                    load_state: ConversationListState::Ready,
+                    selected_peer: None,
+                    refreshing: false,
+                    notice: None,
+                    on_refresh: move |_| {},
+                    on_compose: move |_| {},
+                }
+            }
+        });
+        assert!(
+            quiet.contains(
+                "<div class=\"dm-sync-notice visually-hidden\"><p role=\"status\" class=\"dm-sync-notice-text\"></p></div>"
+            ),
+            "{quiet}"
+        );
+        assert!(!quiet.contains(">Try again</button>"), "{quiet}");
     }
 
     #[test]

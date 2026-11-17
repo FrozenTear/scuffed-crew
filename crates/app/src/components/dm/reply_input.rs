@@ -48,7 +48,6 @@ pub(crate) const REPLY_INPUT_CSS: &str = r#"
     color: var(--text-3);
     font-size: var(--text-xs);
 }
-.dm-reply-meta:empty { display: none; }
 .dm-reply-count { margin-inline-start: auto; }
 .dm-reply-count.is-over { color: var(--loss); font-weight: var(--font-label-weight); }
 .dm-reply-status {

@@ -163,10 +163,12 @@ pub fn MessageThread(
         }
     });
 
-    // Keep the newest message in view: after the first load and after a send.
-    let message_count = messages.read().len();
-    use_effect(use_reactive((&message_count,), move |(count,)| {
-        if count > 0 && !*loading_older.peek() {
+    // Keep the newest message in view: after the first load and after a send
+    // (the newest message changes). "Load older messages" only prepends, so
+    // the newest stays the same and the reader stays where they were.
+    let newest = newest_message_key(&messages.read());
+    use_effect(use_reactive((&newest,), move |(newest,)| {
+        if newest.is_some() {
             scroll_to_end(MESSAGE_LIST_ID);
         }
     }));
@@ -328,6 +330,12 @@ fn scroll_to_end(id: &str) {
     }
 }
 
+/// What the scroll-to-end effect follows: the newest message. It changes on
+/// the first load and on a send, never when older messages are prepended.
+fn newest_message_key(messages: &[DmMessage]) -> Option<String> {
+    messages.last().map(|m| m.gift_wrap_id.clone())
+}
+
 async fn fetch_thread(
     peer: &str,
     before_ts: Option<&str>,
@@ -458,5 +466,43 @@ mod tests {
         assert_ink_clears_aa("--text", "--accent-soft", 4.5);
         assert_ink_clears_aa("--text-3", "--bg", 4.5);
         assert_ink_clears_aa("--text-3", "--surface", 4.5);
+    }
+
+    #[test]
+    fn loading_older_messages_does_not_jump_to_the_newest() {
+        // Vision blocking 5 on PR 706: the scroll-to-end effect followed the
+        // message count, so a prepended older page jumped to the end.
+        let msg = |id: &str, at: &str| DmMessage {
+            id: id.into(),
+            gift_wrap_id: format!("g-{id}"),
+            sender_pubkey: "ab".repeat(32),
+            recipient_pubkey: "cd".repeat(32),
+            content: "hi".into(),
+            created_at: at.into(),
+            reply_to_event_id: None,
+        };
+        let first = vec![
+            msg("3", "2026-11-10T19:03:00Z"),
+            msg("4", "2026-11-10T19:04:00Z"),
+        ];
+        let key = newest_message_key(&first);
+        assert_eq!(key.as_deref(), Some("g-4"));
+        // Older page prepended: the key the effect follows is unchanged.
+        let mut older = vec![
+            msg("1", "2026-11-10T19:01:00Z"),
+            msg("2", "2026-11-10T19:02:00Z"),
+        ];
+        older.extend(first.clone());
+        assert_eq!(newest_message_key(&older), key);
+        // A send appends: the key changes and the list scrolls.
+        let mut sent = first;
+        sent.push(msg("5", "2026-11-10T19:05:00Z"));
+        assert_ne!(newest_message_key(&sent), key);
+        assert_eq!(newest_message_key(&[]), None);
+        // The effect follows that key, not the count.
+        let src = include_str!("message_thread.rs");
+        let prod = src.split("mod tests").next().expect("production half");
+        assert!(prod.contains("use_reactive((&newest,),"));
+        assert!(!prod.contains("use_reactive((&message_count,)"));
     }
 }

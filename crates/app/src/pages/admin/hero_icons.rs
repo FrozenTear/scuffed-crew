@@ -27,7 +27,19 @@ const CSS: &str = r#"
     .hero-icons-admin__cell-confirm .inline-confirm__title { overflow-wrap: anywhere; word-break: break-word; }
     .hero-icons-admin__off { display: inline-block; margin-inline-start: var(--space-2); }
     .hero-icons-admin__status { margin: 0; font-size: var(--text-sm); line-height: var(--leading-body); color: var(--text-3); }
-    .hero-icons-admin__status:empty { display: none; }
+    /* No text: out of the layout, still in the tree (a live line
+       that is display: none drops out of what screen readers track). */
+    .hero-icons-admin__status:empty {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+    }
     @media (max-width: 820px) {
         .is-cards .data-table td.cell-actions .hero-icons-admin__cell-confirm { order: 8; flex: 0 0 100%; margin-top: var(--space-3); }
     }
@@ -204,6 +216,15 @@ pub fn AdminHeroIcons() -> Element {
 mod tests {
     use super::CSS;
     use crate::components::ui::test_support::assert_sizes_from_tokens;
+
+    #[test]
+    fn empty_status_line_stays_in_the_tree() {
+        // Vision nit 5 on PR 706: `display: none` dropped the live line.
+        crate::styles::admin::assert_live_line_kept(
+            super::CSS,
+            ".hero-icons-admin__status:empty {",
+        );
+    }
 
     #[test]
     fn name_cell_wraps_long_unbroken_names() {

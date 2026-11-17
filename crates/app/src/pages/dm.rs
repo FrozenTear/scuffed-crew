@@ -1,6 +1,6 @@
 use dioxus::prelude::*;
 
-use scuffed_api_client::ApiClient;
+use scuffed_api_client::{ApiClient, ClientError};
 use scuffed_types::MeResponse;
 
 use crate::components::dm::{
@@ -159,9 +159,25 @@ fn synced_toast(stored: u64) -> Option<String> {
     }
 }
 
-/// Said under the inbox head when the background sync could not reach the
-/// relay: the list is what the server already has.
-const SYNC_FAILED: &str = "Could not reach the relay. Showing saved messages.";
+/// Said under the inbox head when the background sync failed: why, in plain
+/// words, then that the list is what the server already has. Only a network
+/// failure, 502 or 504 is "could not reach the relay"; a 412 is the account's
+/// key mode (DMs need a server-managed key), not the relay.
+fn sync_failed_notice(err: &ClientError) -> String {
+    let why = match err {
+        ClientError::Network(_)
+        | ClientError::Http {
+            status: 502 | 504, ..
+        } => "Could not reach the relay.",
+        ClientError::Http { status: 412, .. } => {
+            "New messages need a server-managed key. Check Account keys."
+        }
+        ClientError::Http { status: 503, .. } => "The relay is not set up on this site.",
+        ClientError::Http { status: 429, .. } => "Too many syncs. Try again in a minute.",
+        ClientError::Http { .. } | ClientError::Deserialize(_) => "Could not sync messages.",
+    };
+    format!("{why} Showing saved messages.")
+}
 
 /// The conversation to show on `/dm` without a click: the only one, on a
 /// wide screen. On phone the list comes first, so nothing opens (and nothing
@@ -171,6 +187,24 @@ fn auto_open_peer(conversations: &[ConversationSummary], wide: bool) -> Option<S
         [only] if wide => Some(only.peer_pubkey.clone()),
         _ => None,
     }
+}
+
+/// The thread shown on the page: the route's peer, else the one auto-opened
+/// once the list was ready. The auto-opened peer is kept (`kept`) while the
+/// list reloads (Refresh, Retry, a sync that brought new messages), so its
+/// thread and reply draft are not torn down.
+fn shown_peer(selected: Option<String>, kept: Option<String>) -> Option<String> {
+    selected.or(kept)
+}
+
+/// The auto-opened peer to keep after a list load: a new pick replaces it,
+/// and a list where nothing auto-opens keeps the one already open.
+fn keep_auto_peer(
+    kept: Option<String>,
+    conversations: &[ConversationSummary],
+    wide: bool,
+) -> Option<String> {
+    auto_open_peer(conversations, wide).or(kept)
 }
 
 /// True when the inbox and the thread sit side by side (above the shell's
@@ -243,6 +277,8 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
     let mut conversations = use_signal::<Vec<ConversationSummary>>(Vec::new);
     let mut compose_open = use_signal(|| false);
     let mut sync_notice = use_signal(|| None::<String>);
+    // The conversation auto-opened on a wide `/dm`, kept across list reloads.
+    let mut auto_peer = use_signal(|| None::<String>);
     let navigator = use_navigator();
 
     let me = use_resource(move || async move {
@@ -289,13 +325,15 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
                             .fetch::<Vec<ConversationSummary>>("/api/nostr/dm/conversations")
                             .await
                     {
+                        let keep = keep_auto_peer(auto_peer.peek().clone(), &list, wide_viewport());
+                        auto_peer.set(keep);
                         conversations.set(list);
                         load_state.set(LoadState::Ready);
                     }
                 }
                 Err(err) => {
                     crate::util::log_client_error("DM sync", &err);
-                    sync_notice.set(Some(SYNC_FAILED.to_string()));
+                    sync_notice.set(Some(sync_failed_notice(&err)));
                 }
             }
         });
@@ -305,6 +343,8 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
             .await
         {
             Ok(list) => {
+                let keep = keep_auto_peer(auto_peer.peek().clone(), &list, wide_viewport());
+                auto_peer.set(keep);
                 conversations.set(list);
                 load_state.set(LoadState::Ready);
             }
@@ -324,11 +364,10 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
         peer_label(pk, server_name.as_deref(), &member_list)
     };
     let route_peer_label = selected_peer.as_deref().map(&label_for);
-    use_page_title(
-        route_peer_label
-            .clone()
-            .map(|name| format!("Messages with {name}")),
-    );
+    // No label of its own: the route's title ("Messages", "Message") never
+    // names the peer. Titles land in browser history, and who someone
+    // messages is private (Vision nit 12 on PR 706).
+    use_page_title(None);
 
     if !availability.allows_connection() {
         return rsx! {
@@ -386,7 +425,7 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
                     }
                 }
                 Err(e) => {
-                    sync_notice.set(Some(SYNC_FAILED.to_string()));
+                    sync_notice.set(Some(sync_failed_notice(&e)));
                     toast.show(Toast::error(format!("Sync failed: {e}")));
                 }
             }
@@ -440,13 +479,7 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
         _ => None,
     };
     let on_thread_route = selected_peer.is_some();
-    let open_peer = selected_peer.clone().or_else(|| {
-        if state == LoadState::Ready {
-            auto_open_peer(&convs, wide_viewport())
-        } else {
-            None
-        }
-    });
+    let open_peer = shown_peer(selected_peer.clone(), auto_peer());
     let page_class = if on_thread_route {
         "dm-page is-thread"
     } else {
@@ -610,6 +643,75 @@ mod tests {
         let two = vec![convo(&"ab".repeat(32)), convo(&"cd".repeat(32))];
         assert_eq!(auto_open_peer(&two, true), None);
         assert_eq!(auto_open_peer(&[], true), None);
+    }
+
+    #[test]
+    fn the_tab_title_never_names_the_peer() {
+        let src = include_str!("dm.rs");
+        let prod = src.split("mod tests").next().expect("production half");
+        assert!(!prod.contains("Messages with"));
+        assert_eq!(prod.matches("use_page_title(").count(), 1);
+        assert!(prod.contains("use_page_title(None);"));
+    }
+
+    #[test]
+    fn sync_failures_say_why_and_only_network_is_the_relay() {
+        // Vision blocking 7 on PR 706: a 412 (no server-managed key) said
+        // "Could not reach the relay."
+        let relay = "Could not reach the relay. Showing saved messages.";
+        assert_eq!(
+            sync_failed_notice(&ClientError::Network("offline".into())),
+            relay
+        );
+        for status in [502, 504] {
+            assert_eq!(
+                sync_failed_notice(&ClientError::http(status, "", None)),
+                relay
+            );
+        }
+        let key = sync_failed_notice(&ClientError::http(
+            412,
+            r#"{"error":"Server-managed Nostr key required for DMs"}"#,
+            None,
+        ));
+        assert_eq!(
+            key,
+            "New messages need a server-managed key. Check Account keys. Showing saved messages."
+        );
+        for status in [400, 412, 429, 500, 503] {
+            let text = sync_failed_notice(&ClientError::http(status, "", None));
+            assert!(!text.contains("reach the relay"), "{status}: {text}");
+            assert!(text.ends_with(" Showing saved messages."), "{text}");
+        }
+        assert_eq!(
+            sync_failed_notice(&ClientError::Deserialize("x".into())),
+            "Could not sync messages. Showing saved messages."
+        );
+    }
+
+    #[test]
+    fn the_auto_opened_thread_survives_a_list_reload() {
+        // Vision blocking 6 on PR 706: Refresh and Retry set the list to
+        // Loading, which tore the auto-opened thread (and its draft) down.
+        let a = "ab".repeat(32);
+        let one = vec![convo(&a)];
+        let kept = keep_auto_peer(None, &one, true);
+        assert_eq!(kept.as_deref(), Some(a.as_str()));
+        // While the list loads, the kept peer is still shown.
+        assert_eq!(shown_peer(None, kept.clone()), kept);
+        // A reload that brings a second conversation keeps the open thread.
+        let two = vec![convo(&a), convo(&"cd".repeat(32))];
+        assert_eq!(keep_auto_peer(kept.clone(), &two, true), kept);
+        // The route's peer wins, and phone never auto-opens.
+        assert_eq!(
+            shown_peer(Some("ef".repeat(32)), kept).as_deref(),
+            Some("ef".repeat(32).as_str())
+        );
+        assert_eq!(keep_auto_peer(None, &one, false), None);
+        // The page reads the kept signal, not the list state.
+        let src = include_str!("dm.rs");
+        let prod = src.split("mod tests").next().expect("production half");
+        assert!(prod.contains("let open_peer = shown_peer(selected_peer.clone(), auto_peer());"));
     }
 
     #[test]

@@ -222,8 +222,11 @@ mod tests {
             assert!(body.contains(CHAT_OFF_LEAD), "{path} {body}");
             assert!(body.contains(">Return home</a>"), "{path} {body}");
             assert!(!body.contains("<button"), "{path} {body}");
+            // The DM login wall's own title (Vision nit 7 on PR 706: this
+            // checked copy that no longer exists anywhere, so it could not
+            // fail).
             assert!(
-                !html.contains("You must be signed in"),
+                !html.contains("Log in to read your messages"),
                 "{path} must not fall through to the DM login wall: {html}"
             );
         }

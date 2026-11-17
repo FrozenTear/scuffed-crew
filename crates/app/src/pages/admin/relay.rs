@@ -99,7 +99,19 @@ const CSS: &str = r#"
         font-size: var(--text-sm);
         line-height: var(--leading-body);
     }
-    .admin-relay-page .relay-status-line:empty { display: none; }
+    /* No text: out of the layout, still in the tree (a live line
+       that is display: none drops out of what screen readers track). */
+    .admin-relay-page .relay-status-line:empty {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+    }
     .admin-relay-page .relay-facts {
         display: grid;
         grid-template-columns: max-content minmax(0, 1fr);
@@ -331,6 +343,15 @@ mod tests {
             extra_relay_urls: vec!["wss://extra.example.test".into()],
             forum_backend: backend.into(),
         }
+    }
+
+    #[test]
+    fn empty_status_line_stays_in_the_tree() {
+        // Vision nit 5 on PR 706: `display: none` dropped the live line.
+        crate::styles::admin::assert_live_line_kept(
+            super::CSS,
+            ".admin-relay-page .relay-status-line:empty {",
+        );
     }
 
     #[test]

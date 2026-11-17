@@ -535,7 +535,19 @@ pub const CSS: &str = r#"
         text-align: start;
     }
     .form-modal-status.is-error { color: var(--loss); }
-    .form-modal-status:empty { display: none; }
+    /* No text: out of the layout, still in the tree (a live line
+       that is display: none drops out of what screen readers track). */
+    .form-modal-status:empty {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+    }
 
     .application-detail dl {
         display: grid;
@@ -719,7 +731,19 @@ pub const CSS: &str = r#"
         line-height: var(--leading-body);
     }
     .admin-form-status.is-error { color: var(--loss); }
-    .admin-form-status:empty { display: none; }
+    /* No text: out of the layout, still in the tree (a live line
+       that is display: none drops out of what screen readers track). */
+    .admin-form-status:empty {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+    }
 
     /* A titled block of a long form: H2, one line of lead, then the card. */
     .form-section {
@@ -1099,9 +1123,26 @@ pub const CSS: &str = r#"
     .color-field .field-input { font-family: var(--font-mono); }
 "#;
 
+/// A status line with no text is moved out of view but kept in the tree:
+/// `display: none` drops a live region from what screen readers track, and
+/// the next text would not be announced. Pages pin their own lines with it.
+#[cfg(test)]
+pub(crate) fn assert_live_line_kept(css: &str, selector: &str) {
+    use crate::components::ui::test_support::{css_rule, has_decl};
+    let rule = css_rule(css, selector);
+    assert!(!rule.contains("display: none"), "{selector}{rule}");
+    for decl in [
+        "position: absolute",
+        "clip: rect(0, 0, 0, 0)",
+        "overflow: hidden",
+    ] {
+        assert!(has_decl(&rule, decl), "{selector} {decl}: {rule}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::CSS;
+    use super::{CSS, assert_live_line_kept};
     use crate::components::ui::test_support::{
         assert_ink_clears_aa, assert_sizes_from_tokens, css_rule, has_decl,
     };
@@ -1179,8 +1220,12 @@ mod tests {
             ".form-stack > .admin-check-row + .admin-check-row,\n    .form-stack > .form-checkbox-row + .form-checkbox-row {",
         );
         assert!(has_decl(&rows, "margin-top: var(--space-3)"), "{rows}");
-        // The save line is out of the layout while it has nothing to say.
-        assert!(CSS.contains(".admin-form-status:empty { display: none; }"));
+        // The save line is out of the layout while it has nothing to say,
+        // but stays in the tree: `display: none` would drop the live line
+        // from what screen readers track (Vision nit 5 on PR 706).
+        for selector in [".admin-form-status:empty {", ".form-modal-status:empty {"] {
+            assert_live_line_kept(CSS, selector);
+        }
     }
 
     #[test]

@@ -331,6 +331,9 @@ pub fn DmComposeModal(
     let active_id = active_index
         .filter(|_| list_open)
         .map(|i| option_id(&filtered[i].id));
+    // Ids of the shown options, so the arrow keys can bring the highlighted
+    // one into view (the list shows five rows of up to eight).
+    let shown_option_ids: Vec<String> = filtered.iter().map(|m| option_id(&m.id)).collect();
     let picks: Vec<(String, String)> = filtered
         .iter()
         .map(|m| {
@@ -409,18 +412,18 @@ pub fn DmComposeModal(
                             },
                             onkeydown: {
                                 let picks = picks.clone();
+                                let ids = shown_option_ids.clone();
                                 move |evt: Event<KeyboardData>| {
                                     let len = picks.len();
                                     match evt.key() {
-                                        Key::ArrowDown if len > 0 => {
+                                        Key::ArrowDown | Key::ArrowUp if len > 0 => {
                                             evt.prevent_default();
                                             suggestions_open.set(true);
-                                            active.set(Some(step(active_index, len, true)));
-                                        }
-                                        Key::ArrowUp if len > 0 => {
-                                            evt.prevent_default();
-                                            suggestions_open.set(true);
-                                            active.set(Some(step(active_index, len, false)));
+                                            let next = step(active_index, len, evt.key() == Key::ArrowDown);
+                                            active.set(Some(next));
+                                            if let Some(id) = ids.get(next) {
+                                                scroll_option_into_view_soon(id.clone());
+                                            }
                                         }
                                         Key::Enter if list_open => {
                                             if let Some(i) = active_index {
@@ -560,6 +563,41 @@ fn FocusOnMount(id: &'static str) -> Element {
 }
 
 /// An option's id, from the member's record id.
+/// Bring the highlighted option into view inside the capped list, after the
+/// render that opens or moves it. `block: "nearest"` scrolls the list only as
+/// far as needed and leaves the page where it is.
+fn scroll_option_into_view_soon(id: String) {
+    dioxus::core::spawn_forever(async move {
+        #[cfg(feature = "web")]
+        {
+            gloo_timers::future::TimeoutFuture::new(0).await;
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            use wasm_bindgen::JsCast;
+            let Some(el) = web_sys::window()
+                .and_then(|w| w.document())
+                .and_then(|d| d.get_element_by_id(&id))
+            else {
+                return;
+            };
+            let options = js_sys::Object::new();
+            let _ = js_sys::Reflect::set(&options, &"block".into(), &"nearest".into());
+            let scroll = js_sys::Reflect::get(&el, &"scrollIntoView".into()).ok();
+            if let Some(scroll) = scroll
+                .as_ref()
+                .and_then(|f| f.dyn_ref::<js_sys::Function>())
+            {
+                let _ = scroll.call1(&el, &options);
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = id;
+        }
+    });
+}
+
 fn option_id(member_id: &str) -> String {
     let safe: String = member_id
         .chars()
@@ -842,6 +880,28 @@ mod tests {
     #[test]
     fn option_ids_come_from_the_record_id() {
         assert_eq!(option_id("member:abc"), "dm-compose-to-list-member-abc");
+    }
+
+    #[test]
+    fn arrow_keys_bring_the_highlighted_option_into_view() {
+        // Vision blocking 11 on PR 706: the list shows five rows of up to
+        // eight, and the highlight could move out of sight.
+        let src = include_str!("compose.rs");
+        let prod = src.split("mod tests").next().expect("production half");
+        let keys = &prod[prod
+            .find("Key::ArrowDown | Key::ArrowUp if len > 0")
+            .expect("arrow keys")..];
+        let keys = &keys[..keys.find("Key::Enter").expect("enter")];
+        assert!(keys.contains("active.set(Some(next));"), "{keys}");
+        assert!(
+            keys.contains("scroll_option_into_view_soon(id.clone());"),
+            "{keys}"
+        );
+        assert!(prod.contains("let shown_option_ids: Vec<String> = filtered.iter().map(|m| option_id(&m.id)).collect();"));
+        assert!(prod.contains("&\"block\".into(), &\"nearest\".into()"));
+        // The cap is still five rows: scrolling is what keeps it usable.
+        let list = &COMPOSE_CSS[COMPOSE_CSS.find(".dm-compose-options {").unwrap()..];
+        assert!(list.contains("max-height: calc(var(--hit-target-min) * 5);"));
     }
 
     #[test]
