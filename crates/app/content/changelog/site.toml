@@ -1,0 +1,36 @@
+# What's changed: Site
+#
+# This file is the Site tab of the public "What's changed" page
+# (/changelog/site). The app embeds it at build time, so a change shows up
+# with the next deploy. No server or database change is needed.
+#
+# How to add an entry
+# 1. Copy the [[entry]] block below and paste it ABOVE the newest entry.
+#    Keep the file newest first. The page also sorts by date, newest first.
+# 2. Set date to the deploy day, written as "YYYY-MM-DD" (Europe/Oslo).
+# 3. Write the changes for members in plain words, not commit titles.
+#    Use one list:
+#        changes = ["...", "..."]
+#    or split them into groups. Only the groups you write are shown:
+#        added   = ["..."]
+#        changed = ["..."]
+#        fixed   = ["..."]
+# 4. Optional: link = "https://..." for public release notes or a public
+#    pull request. Leave it out when the page is private. Only https links
+#    are allowed.
+# 5. No em or en dashes, and no personal names. If the org must be named,
+#    write FrozenTear.
+# 6. Run `cargo test -p scuffed-app changelog` to check the file before the
+#    deploy. A broken file fails that test.
+#
+# Example (as a comment, do not ship it):
+# [[entry]]
+# date = "2026-11-15"
+# added = ["A What's changed page, linked from the footer."]
+# fixed = ["The phone menu closes after you pick a page."]
+# link = "https://github.com/example/example/pull/1"
+
+# PLACEHOLDER: Chief of Staff replaces this entry with the first real one.
+[[entry]]
+date = "2026-11-17"
+changes = ["Placeholder entry. The first real Site changes go here."]

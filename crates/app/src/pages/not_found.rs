@@ -36,7 +36,7 @@ const NOT_FOUND_CSS: &str = r#"
     }
     .nf-path {
         font-family: var(--font-mono);
-        font-size: 0.72rem;
+        font-size: var(--text-xs);
         color: var(--text-subtle);
         letter-spacing: 0.04em;
         margin-bottom: 1.5rem;
@@ -45,11 +45,13 @@ const NOT_FOUND_CSS: &str = r#"
     .nf-link {
         display: inline-flex;
         align-items: center;
-        padding: 0.55rem 1.1rem;
+        justify-content: center;
+        min-height: var(--hit-target-min);
+        padding: 0 1.1rem;
         background: var(--accent-solid);
         color: var(--on-accent);
         font-family: var(--font-mono);
-        font-size: 0.72rem;
+        font-size: var(--text-xs);
         letter-spacing: 0.1em;
         text-transform: uppercase;
         text-decoration: none;
@@ -117,6 +119,11 @@ pub fn NotFound(segments: Vec<String>) -> Element {
     } else {
         format!("/{}", segments.join("/"))
     };
+
+    // Anything deeper under /changelog offers both changelogs.
+    if segments.first().map(String::as_str) == Some("changelog") {
+        return rsx! { crate::pages::changelog::ChangelogNotFound { path } };
+    }
 
     rsx! {
         NotFoundPanel {

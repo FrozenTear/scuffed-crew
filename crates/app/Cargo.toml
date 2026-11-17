@@ -30,6 +30,8 @@ js-sys = "0.3"
 # Same version iced already pulls in for the tracker UI. Raw HTML is escaped in
 # crate::markdown, so no sanitiser crate is needed.
 pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
+# Parses the embedded "What's changed" files (content/changelog/*.toml).
+toml = { version = "1", default-features = false, features = ["parse", "serde", "std"] }
 
 # Web-only deps
 gloo-timers = { version = "0.3", features = ["futures"], optional = true }

@@ -1,0 +1,38 @@
+# What's changed: Tracker
+#
+# This file is the Tracker tab of the public "What's changed" page
+# (/changelog/tracker). One entry per stat tracker release. The app embeds
+# it at build time, so a change shows up with the next site deploy. No
+# server or database change is needed.
+#
+# How to add an entry
+# 1. Copy the [[entry]] block below and paste it ABOVE the newest entry.
+#    Keep the file newest first. The page also sorts by date, newest first.
+# 2. Set version to the release tag, for example "v0.6.0-alpha.3.1", and
+#    date to the release day, written as "YYYY-MM-DD" (Europe/Oslo).
+# 3. Write the changes for members in plain words, not commit titles.
+#    Use one list:
+#        changes = ["...", "..."]
+#    or split them into groups. Only the groups you write are shown:
+#        added   = ["..."]
+#        changed = ["..."]
+#        fixed   = ["..."]
+# 4. Optional: link = "https://..." for public release notes. Leave it out
+#    when the release is private. Only https links are allowed.
+# 5. No em or en dashes, and no personal names. If the org must be named,
+#    write FrozenTear.
+# 6. Run `cargo test -p scuffed-app changelog` to check the file before the
+#    deploy. A broken file fails that test.
+#
+# Example (as a comment, do not ship it):
+# [[entry]]
+# version = "v0.6.0-alpha.3.1"
+# date = "2026-11-15"
+# fixed = ["Wins on the magenta scoreboard count again."]
+# link = "https://github.com/example/example/releases/tag/v0.6.0-alpha.3.1"
+
+# PLACEHOLDER: Chief of Staff replaces this entry with the first real one.
+[[entry]]
+version = "v0.0.0-placeholder"
+date = "2026-11-17"
+changes = ["Placeholder entry. The first real Tracker release notes go here."]

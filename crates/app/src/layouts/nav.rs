@@ -189,6 +189,18 @@ pub(crate) fn guest_entries() -> Vec<NavEntry> {
     ]
 }
 
+/// "What's changed". Public, so it sits in the Account column of the footer
+/// and the Account group of the phone drawer for guests and members alike.
+pub(crate) fn changelog_entry() -> NavEntry {
+    entry(
+        "changelog",
+        "What's changed",
+        Route::Changelog {
+            tab: "site".to_string(),
+        },
+    )
+}
+
 /// The Admin entry is for people the admin section lets in, and nobody else.
 pub(crate) fn shows_admin_entry(ctx: NavContext) -> bool {
     ctx.signed_in && ctx.admin_access
@@ -321,7 +333,8 @@ pub(crate) fn section_of(route: &Route) -> Section {
         | Route::AppearanceSettings {}
         | Route::MyReports {}
         | Route::DmInbox {}
-        | Route::DmThread { .. } => Section::Account,
+        | Route::DmThread { .. }
+        | Route::Changelog { .. } => Section::Account,
         Route::AdminDashboard {}
         | Route::AdminMembers {}
         | Route::AdminMemberMatches { .. }
@@ -375,6 +388,7 @@ pub(crate) fn is_current(entry: &Route, current: &Route) -> bool {
             // The new-strategy editor has its own entry (members only).
             | (Route::StrategyBrowse {}, Route::StrategyEditor { .. })
             | (Route::DmInbox {}, Route::DmThread { .. })
+            | (Route::Changelog { .. }, Route::Changelog { .. })
     )
 }
 

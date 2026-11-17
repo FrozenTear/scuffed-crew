@@ -9,9 +9,9 @@ use scuffed_api_client::ApiClient;
 use scuffed_types::SiteSettings;
 
 use super::nav::{
-    NavContext, NavEntry, NavGroupId, Section, account_entries, aria_current, drawer_admin_entries,
-    guest_entries, is_current, is_tool_route, nav_groups, section_aria_current, section_of,
-    shows_admin_entry,
+    NavContext, NavEntry, NavGroupId, Section, account_entries, aria_current, changelog_entry,
+    drawer_admin_entries, guest_entries, is_current, is_tool_route, nav_groups,
+    section_aria_current, section_of, shows_admin_entry,
 };
 #[cfg(target_arch = "wasm32")]
 use super::use_dom_listener;
@@ -1165,6 +1165,7 @@ pub(crate) fn SiteShell(subnav: Option<Element>, children: Element) -> Element {
     let groups = nav_groups(ctx);
     let account = account_entries(ctx);
     let guest = guest_entries();
+    let changelog = changelog_entry();
     let drawer_admin = drawer_admin_entries(ctx);
     let show_admin = shows_admin_entry(ctx);
     let section = section_of(&route);
@@ -1468,6 +1469,13 @@ pub(crate) fn SiteShell(subnav: Option<Element>, children: Element) -> Element {
                             }
                         }
                     }
+                    Link {
+                        to: changelog.route.clone(),
+                        class: entry_class(&changelog, &route),
+                        "aria-current": aria_current(&changelog.route, &route),
+                        onclick: move |_| state.close(false),
+                        "{changelog.label}"
+                    }
                 }
                 div { class: "drawer-theme",
                     ThemeToggle {}
@@ -1535,6 +1543,12 @@ pub(crate) fn SiteShell(subnav: Option<Element>, children: Element) -> Element {
                                         "{entry.label}"
                                     }
                                 }
+                            }
+                            Link {
+                                to: changelog.route.clone(),
+                                class: entry_class(&changelog, &route),
+                                "aria-current": aria_current(&changelog.route, &route),
+                                "{changelog.label}"
                             }
                             Link { to: Route::Home {}, "Home" }
                         }
