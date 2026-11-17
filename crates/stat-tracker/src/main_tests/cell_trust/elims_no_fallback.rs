@@ -1,8 +1,9 @@
 //! Daemon tests: a stored stat never falls back below a value the same game
 //! already stored when the capture gate holds a jump on that cell (weekly
 //! review 2026-11-16, Wrecking Ball games with 30+ elims). A held read
-//! below the stored value drops the row to the accepted value, flagged,
-//! and the stored unsure value stays the base for the next check. A child of
+//! below the accepted value (so below the stored unsure value too) drops
+//! the row to the accepted value, flagged, and the stored unsure value
+//! stays the base for later checks (`elims_unsure_base.rs`). A child of
 //! `cell_trust.rs`, kept apart so both files stay under the size limit.
 //!
 //! `Some((v, true))` is a cell the digit reader does not vouch for (held);
@@ -178,6 +179,13 @@ async fn control_a_suspect_own_row_never_replaces_the_stored_unsure_read() {
     assert!(
         !elims.contains(&36),
         "a suspect row's digit was stored: {elims:?}"
+    );
+    assert_eq!(elims.len(), 4, "the suspect Tab is stored: {elims:?}");
+    assert_eq!(elims[3], 33, "the suspect Tab keeps the stored unsure 33");
+    assert!(
+        rows[3].suspect_fields.iter().any(|f| f == "e"),
+        "the kept 33 is flagged: {:?}",
+        rows[3].suspect_fields
     );
 }
 

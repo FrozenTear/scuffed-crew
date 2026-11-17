@@ -24,7 +24,7 @@ At 1440p, most hero icon training crops were dropped because their PNG was over 
 ### Highlights
 
 - If a hero icon crop still cannot be kept, a later Tab of the same game can try again.
-- A final Overwatch scoreboard with a big jump in eliminations no longer falls back to an older count. A new count that is plausible from the unsure count already saved is saved, marked as unsure, the same whether the reader was sure of it or not; otherwise the unsure count already saved is kept, marked as unsure. A held read below that unsure count saves the older accepted count, marked as unsure, and the unsure count stays the one the next read is checked against, so a later real count is still saved.
+- A final Overwatch scoreboard with a big jump in eliminations no longer falls back to an older count. A new count that is plausible from the unsure count already saved is saved, marked as unsure, the same whether the reader was sure of it or not; otherwise the unsure count already saved is kept, marked as unsure. A sure read below the older accepted count saves that accepted count, marked as unsure, and the unsure count stays the one later reads are checked against, through any further misreads, until a read is saved from it or the scoreboard confirms a new count, so a later real count is still saved.
 
 ## 0.6.0-alpha.3.1
 
