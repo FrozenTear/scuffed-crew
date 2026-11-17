@@ -159,7 +159,10 @@ pub(crate) fn account_entries(ctx: NavContext) -> Vec<NavEntry> {
     if !ctx.signed_in {
         return Vec::new();
     }
-    let mut entries = vec![entry("profile", "Profile", Route::ProfileSettings {})];
+    let mut entries = vec![
+        entry("profile", "Profile", Route::ProfileSettings {}),
+        entry("appearance", "Appearance", Route::AppearanceSettings {}),
+    ];
     if ctx.relay_on {
         entries.push(entry("dm", "Direct messages", Route::DmInbox {}));
     }
@@ -240,6 +243,7 @@ pub(crate) fn admin_entries(ctx: NavContext) -> Vec<NavEntry> {
             Route::AdminAuditLog {},
         ));
         entries.push(entry("admin_settings", "Settings", Route::AdminSettings {}));
+        entries.push(entry("admin_brand", "Brand", Route::AdminBrandSettings {}));
     }
     entries
 }
@@ -314,6 +318,7 @@ pub(crate) fn section_of(route: &Route) -> Section {
         | Route::Apply {}
         | Route::IdentitySettings {}
         | Route::ProfileSettings {}
+        | Route::AppearanceSettings {}
         | Route::MyReports {}
         | Route::DmInbox {}
         | Route::DmThread { .. } => Section::Account,
@@ -336,7 +341,8 @@ pub(crate) fn section_of(route: &Route) -> Section {
         | Route::AdminReports {}
         | Route::AdminHeroIcons {}
         | Route::AdminRelay {}
-        | Route::AdminSettings {} => Section::Admin,
+        | Route::AdminSettings {}
+        | Route::AdminBrandSettings {} => Section::Admin,
         Route::Setup {} | Route::NotFound { .. } => Section::None,
     }
 }
@@ -694,6 +700,7 @@ mod tests {
             "admin_relay",
             "admin_audit_log",
             "admin_settings",
+            "admin_brand",
         ] {
             assert!(!officer.contains(&id), "{id}");
             assert!(ids(&admin_entries(ADMIN)).contains(&id), "{id}");
