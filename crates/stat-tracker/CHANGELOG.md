@@ -15,7 +15,7 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
-## Unreleased
+## 0.6.0-alpha.4
 
 On the see-through 5v5 Tab board in Overwatch, names of other players behind the board could show in the stat columns of the report's scoreboard picture. The picture now keeps only the digits of each row (the white numbers and the grey zeros) on one flat colour. Hero portraits, perk icons, the edge of the board and anything drawn over a row outside its numbers, such as a perk tooltip, are filled. The nameplates behind the board are dark through it, so they are not kept. Light text drawn right over the numbers can still show. Report kits saved before this fix are no longer sent.
 
