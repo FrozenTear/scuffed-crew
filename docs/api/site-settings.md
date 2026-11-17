@@ -51,6 +51,7 @@ A settings row written before the field existed reads as `""`.
 |-----------------------------------------|------------------------------------------------------------------------------------------|
 | Signed out                              | 401 `{"error":"Authentication required"}`                                                |
 | Unknown or expired session              | 401 `{"error":"Session expired or invalid"}`                                             |
+| Signed in, no member row                | 403 `{"error":"Not an org member"}`                                                      |
 | Member or recruit                       | 403 `{"error":"Officer access required"}`                                                |
 | Officer, any string for this key        | 403 `{"error":"Admin access required"}`                                                  |
 | Officer or admin, `null` for this key   | 200, stored font kept (`null` means keep, like an absent key)                            |

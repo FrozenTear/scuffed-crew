@@ -2170,6 +2170,16 @@ async fn officer_cannot_set_brand_font_display() {
 async fn member_recruit_and_signed_out_cannot_set_brand_font_display() {
     let state = test_state().await;
     seed_all_roles(&state.db).await;
+    // A signed-in user with no member row (an applicant), as in
+    // docs/api/site-settings.md.
+    let nomember_token = "test-nomember-settings-token";
+    seed_applicant(
+        &state.db,
+        "nomembersettings",
+        "NoMemberSettings",
+        nomember_token,
+    )
+    .await;
 
     for font in ["ibm-plex-sans", "", "comic-sans"] {
         for token in [MEMBER_TOKEN, RECRUIT_TOKEN] {
@@ -2178,6 +2188,15 @@ async fn member_recruit_and_signed_out_cannot_set_brand_font_display() {
             assert_eq!(status, StatusCode::FORBIDDEN, "{token} {font:?}");
             assert_eq!(json, json!({ "error": "Officer access required" }));
         }
+
+        let (status, json) = put_settings(
+            &state,
+            nomember_token,
+            json!({ "brand_font_display": font }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "no member row {font:?}");
+        assert_eq!(json, json!({ "error": "Not an org member" }));
 
         let (status, json) = put_settings(
             &state,
