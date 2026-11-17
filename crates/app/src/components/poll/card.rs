@@ -4,7 +4,9 @@ use scuffed_api_client::ApiClient;
 use crate::components::ui::{Pill, PillTone};
 use crate::components::{Toast, use_toast};
 
-use super::{PollCloseDate, PollResultsData, is_closed, now_iso, percent, votes_text};
+use super::{
+    PollCloseDate, PollResultsData, is_closed, now_iso, percent, poll_error_copy, votes_text,
+};
 
 pub(crate) const CARD_CSS: &str = r#"
 .poll-card {
@@ -51,7 +53,7 @@ pub(crate) const CARD_CSS: &str = r#"
 }
 /* The dot trails each item, so a wrapped line never starts with one. */
 .poll-card-meta > :not(:last-child)::after {
-  content: "·";
+  content: "·" / "";
   margin-inline-start: var(--space-2);
 }
 .poll-options {
@@ -281,7 +283,8 @@ pub fn PollCard(
                                                     }
                                                     Err(e) => {
                                                         status.set(String::new());
-                                                        toasts.show(Toast::error(format!("Vote failed: {e}")));
+                                                        let lead = if voted { "Couldn't remove the vote." } else { "Vote failed." };
+                                                        toasts.show(Toast::error(poll_error_copy(lead, &e)));
                                                     }
                                                 }
                                                 busy.set(false);
@@ -314,7 +317,7 @@ pub fn PollCard(
                                             match ApiClient::web().delete(&format!("/api/polls/{poll_id}")).await {
                                                 Ok(()) => on_removed.call(()),
                                                 Err(e) => {
-                                                    toasts.show(Toast::error(format!("Delete failed: {e}")));
+                                                    toasts.show(Toast::error(poll_error_copy("Couldn't remove the poll.", &e)));
                                                 }
                                             }
                                             busy.set(false);
@@ -542,6 +545,11 @@ mod tests {
     #[test]
     fn css_is_on_tokens() {
         assert_sizes_from_tokens(CARD_CSS);
+        let dot = css_rule(CARD_CSS, ".poll-card-meta > :not(:last-child)::after {");
+        assert!(
+            has_decl(&dot, "content: \"·\" / \"\""),
+            "the separator has empty alt text, so it is not read out: {dot}"
+        );
         let card = css_rule(CARD_CSS, ".poll-card {");
         for decl in [
             "padding: var(--space-section)",

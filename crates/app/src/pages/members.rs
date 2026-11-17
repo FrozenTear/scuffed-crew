@@ -2,6 +2,7 @@ use dioxus::prelude::*;
 use serde::Deserialize;
 
 use super::article_author::{ARTICLE_CSS, ARTICLE_CSS_ID, Load, initials, is_retrying};
+use crate::components::ui::inline_confirm::focus_element_by_id_soon;
 use crate::components::ui::{
     ChipButton, ChipRow, EmptyCard, HeroSelect, LoadError, PageHeader, PageShell, PageWidth, Pager,
     Pill, btn_class, page_slice, show_list_top, use_url_page,
@@ -66,6 +67,10 @@ const MEMBERS_PAGE_SIZE: usize = 8;
 
 /// The list section. It takes focus after a page change.
 const LIST_ID: &str = "members-list";
+
+/// Where focus goes after "Clear filters", which removes itself: the role
+/// chip that is now pressed.
+const CLEAR_FOCUS_ID: &str = RoleFilter::All.chip_id();
 
 /// One roster fetch. `hero` is the filter it was fetched with, so a roster
 /// that belongs to the previous selection is never drawn under the new one.
@@ -523,7 +528,10 @@ fn MembersIndex(
                                     r#type: "button",
                                     id: "members-clear-filters",
                                     class: btn_class(false),
-                                    onclick: move |_| on_clear.call(()),
+                                    onclick: move |_| {
+                                        on_clear.call(());
+                                        focus_element_by_id_soon(CLEAR_FOCUS_ID.to_string());
+                                    },
                                     "Clear filters"
                                 }
                             },
@@ -956,6 +964,32 @@ mod tests {
         );
         assert!(filtered.contains(">Clear filters</button>"), "{filtered}");
         assert!(!filtered.contains("class=\"member-card\""), "{filtered}");
+    }
+
+    #[test]
+    fn clear_filters_hands_focus_to_the_all_roles_chip() {
+        // The button removes itself; focus goes to a control that stays.
+        let mut v = view(Load::Ready(roster(vec![member(1, Some("tank"))])));
+        v.role = RoleFilter::Support;
+        let filtered = render(v);
+        assert!(
+            filtered.contains(&format!("id=\"{CLEAR_FOCUS_ID}\"")),
+            "the focus target is on the page: {filtered}"
+        );
+        assert_eq!(CLEAR_FOCUS_ID, "members-role-all");
+        let prod = include_str!("members.rs")
+            .split("mod tests")
+            .next()
+            .unwrap();
+        let button = prod
+            .split("id: \"members-clear-filters\"")
+            .nth(1)
+            .expect("clear button");
+        let click = &button[..button.find("\"Clear filters\"").expect("label")];
+        assert!(
+            click.contains("focus_element_by_id_soon(CLEAR_FOCUS_ID.to_string())"),
+            "{click}"
+        );
     }
 
     #[test]

@@ -75,6 +75,25 @@ pub fn is_closed(poll: &PollData, now: Option<&str>) -> bool {
     }
 }
 
+/// What a poll card says when a vote, a vote removal or a poll removal
+/// fails: `lead` names the action, the rest says why in words. The vote
+/// route answers 409 for a closed poll or a vote that is already in.
+pub fn poll_error_copy(lead: &str, err: &scuffed_api_client::ClientError) -> String {
+    use scuffed_api_client::ClientError;
+    let why = match err {
+        ClientError::Network(_) => "Check your connection and try again.",
+        ClientError::Http { status: 401, .. } => "Your session ended. Log in again.",
+        ClientError::Http { status: 403, .. } => "Your account can't do that.",
+        ClientError::Http { status: 404, .. } => "That poll no longer exists.",
+        ClientError::Http { status: 409, .. } => {
+            "The poll may have closed, or that vote is already in. Reload to see it."
+        }
+        ClientError::Http { status: 429, .. } => "Too many tries. Wait a moment.",
+        _ => "Something went wrong. Try again in a moment.",
+    };
+    format!("{lead} {why}")
+}
+
 /// The browser clock as an ISO-8601 UTC timestamp. `None` outside the
 /// browser (native tests have no clock to trust).
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
@@ -90,6 +109,35 @@ pub fn now_iso() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn poll_errors_say_why_without_the_raw_client_error() {
+        use scuffed_api_client::ClientError;
+        let http = |status| ClientError::http(status, r#"{"error":"Poll is closed"}"#, None);
+        assert_eq!(
+            poll_error_copy("Vote failed.", &http(409)),
+            "Vote failed. The poll may have closed, or that vote is already in. Reload to see it."
+        );
+        assert_eq!(
+            poll_error_copy("Couldn't remove the poll.", &http(404)),
+            "Couldn't remove the poll. That poll no longer exists."
+        );
+        assert_eq!(
+            poll_error_copy("Vote failed.", &ClientError::Network("offline".into())),
+            "Vote failed. Check your connection and try again."
+        );
+        for status in [400, 401, 403, 404, 409, 429, 500] {
+            let copy = poll_error_copy("Vote failed.", &http(status));
+            assert!(!copy.contains("Poll is closed"), "{copy}");
+            assert!(!copy.contains(&status.to_string()), "{copy}");
+            assert!(!copy.contains("connection"), "{copy}");
+        }
+        let card = include_str!("card.rs").split("mod tests").next().unwrap();
+        assert!(
+            !card.contains("failed: {e}"),
+            "a raw client error reaches a toast"
+        );
+    }
 
     fn poll(is_active: bool, close_at: Option<&str>) -> PollData {
         PollData {

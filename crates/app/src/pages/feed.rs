@@ -2,8 +2,12 @@ use dioxus::prelude::*;
 
 use super::article_author::{ARTICLE_CSS, ARTICLE_CSS_ID, Load, is_retrying};
 use crate::components::post::{FeedPost, PostCard, PostCompose};
+use crate::components::ui::inline_confirm::focus_element_by_id_soon;
 use crate::components::ui::{EmptyCard, LoadError, PageHeader, PageShell, PageWidth, SkeletonBars};
 use crate::util::{log_client_error, pluralize};
+
+/// The post list. "Clear tag filter" removes itself, so focus moves here.
+const FEED_LIST_ID: &str = "feed-list";
 use scuffed_api_client::ApiClient;
 
 const PAGE_CSS: &str = r#"
@@ -153,13 +157,16 @@ fn FeedView(
                 }
             }
 
-            section { id: "feed-list", class: "ui-stack", aria_label: "Posts",
+            section { id: FEED_LIST_ID, class: "ui-stack", tabindex: "-1", aria_label: "Posts",
                 p { class: "entry-status", role: "status", "{status}" }
                 if tag.is_some() {
                     button {
                         r#type: "button",
                         class: "btn is-ghost feed-clear",
-                        onclick: move |_| on_clear.call(()),
+                        onclick: move |_| {
+                            on_clear.call(());
+                            focus_element_by_id_soon(FEED_LIST_ID.to_string());
+                        },
                         "Clear tag filter"
                     }
                 }
@@ -407,7 +414,9 @@ mod tests {
                 "{html}"
             );
             assert!(
-                html.contains("<section id=\"feed-list\" class=\"ui-stack\" aria-label=\"Posts\">"),
+                html.contains(
+                    "<section id=\"feed-list\" class=\"ui-stack\" tabindex=\"-1\" aria-label=\"Posts\">"
+                ),
                 "{html}"
             );
         }
@@ -452,5 +461,28 @@ mod tests {
         assert!(html.contains("<h2>No posts with that tag</h2>"), "{html}");
         assert!(html.contains(">Clear tag filter</button>"), "{html}");
         assert!(html.contains(">0 posts tagged #scrims</p>"), "{html}");
+    }
+
+    #[test]
+    fn clear_tag_filter_hands_focus_to_the_post_list() {
+        let mut props = state(Load::Ready(vec![post(1, &["lfg"])]), false);
+        props.tag = Some("lfg".to_string());
+        let html = render(props);
+        assert!(
+            html.contains(
+                "<section id=\"feed-list\" class=\"ui-stack\" tabindex=\"-1\" aria-label=\"Posts\">"
+            ),
+            "the list stays and can take focus: {html}"
+        );
+        let prod = include_str!("feed.rs").split("mod tests").next().unwrap();
+        let button = prod
+            .split("class: \"btn is-ghost feed-clear\"")
+            .nth(1)
+            .expect("clear button");
+        let click = &button[..button.find("\"Clear tag filter\"").expect("label")];
+        assert!(
+            click.contains("focus_element_by_id_soon(FEED_LIST_ID.to_string())"),
+            "{click}"
+        );
     }
 }

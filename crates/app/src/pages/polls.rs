@@ -103,7 +103,7 @@ fn PollsLayout(children: Element) -> Element {
         PageShell { width: PageWidth::Default, class: "polls-page",
             PageHeader {
                 title: "Polls",
-                lead: "Vote on crew decisions. Counts update as votes come in.",
+                lead: "Vote on crew decisions.",
             }
             {children}
         }
@@ -256,6 +256,12 @@ mod tests {
         assert!(!html.contains("Create a poll"), "{html}");
         assert!(!html.contains("Remove poll"), "{html}");
         assert!(!html.contains("<a "), "{html}");
+        // Nothing polls the counts, so the lead does not say they update.
+        assert!(
+            html.contains("<p class=\"page-lead\">Vote on crew decisions.</p>"),
+            "{html}"
+        );
+        assert!(!html.contains("as votes come in"), "{html}");
     }
 
     #[test]
