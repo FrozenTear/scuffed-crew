@@ -89,6 +89,61 @@ fn background_inert(current: Option<Disclosure>) -> Option<&'static str> {
     (current == Some(Disclosure::Drawer)).then_some("true")
 }
 
+/// Set by a page while it shows a modal of its own (the strategy editor's
+/// map picker). The modal lives inside `main`, so `main` stays live and the
+/// page marks its own content inert; the shell makes its chrome inert (skip
+/// link, top bar, sub-nav, footer, tab bar), so Tab, clicks and screen
+/// readers stay in the modal. See [`use_page_modal`].
+#[derive(Clone, Copy)]
+pub(crate) struct PageModal(Signal<bool>);
+
+/// The main landmark's mounted handle. Focus through it works on web and in
+/// the desktop webview alike (`focus_element` is `web_sys`, wasm only).
+#[derive(Clone, Copy)]
+struct MainHandle(Signal<Option<std::rc::Rc<MountedData>>>);
+
+/// A callback that moves focus to `main#main` (the editor's Esc out of the
+/// map canvas). Call it from an event handler: it spawns the focus call.
+pub(crate) fn use_focus_main() -> impl FnMut() + Copy {
+    let handle = try_use_context::<MainHandle>();
+    move || {
+        let Some(MainHandle(mounted)) = handle else {
+            return;
+        };
+        if let Some(main) = mounted.peek().clone() {
+            spawn(async move {
+                let _ = main.set_focus(true).await;
+            });
+        }
+    }
+}
+
+/// `inert` for the shell chrome: behind the drawer, or behind a page modal.
+/// Same `Option<&str>` rule as [`background_inert`].
+fn chrome_inert(current: Option<Disclosure>, page_modal: bool) -> Option<&'static str> {
+    (current == Some(Disclosure::Drawer) || page_modal).then_some("true")
+}
+
+/// Tell the shell whether this page's modal is open. Cleared when the page
+/// unmounts, so a modal never leaves the chrome inert after navigation.
+pub(crate) fn use_page_modal(open: bool) {
+    let modal = try_use_context::<PageModal>();
+    use_effect(use_reactive((&open,), move |(open,)| {
+        if let Some(PageModal(mut flag)) = modal
+            && *flag.peek() != open
+        {
+            flag.set(open);
+        }
+    }));
+    use_drop(move || {
+        if let Some(PageModal(mut flag)) = modal
+            && let Ok(mut flag) = flag.try_write()
+        {
+            *flag = false;
+        }
+    });
+}
+
 /// Where Tab goes when it would leave the drawer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TrapEdge {
@@ -105,14 +160,22 @@ fn tab_trap_target(shift: bool, inside: bool, at_first: bool, at_last: bool) -> 
     }
 }
 
-#[cfg(target_arch = "wasm32")]
 fn trap_tab_in_drawer(evt: &web_sys::KeyboardEvent) {
+    trap_tab_within(DRAWER_ID, evt);
+}
+
+/// Keep Tab and Shift+Tab inside the element `container_id` (a modal): from
+/// the last stop Tab wraps to the first, from the first Shift+Tab wraps to
+/// the last, and from anywhere outside focus is pulled back in. The drawer
+/// and the editor's map picker share it.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn trap_tab_within(container_id: &str, evt: &web_sys::KeyboardEvent) {
     use wasm_bindgen::JsCast;
 
     let Some(document) = web_sys::window().and_then(|window| window.document()) else {
         return;
     };
-    let Some(drawer) = document.get_element_by_id(DRAWER_ID) else {
+    let Some(drawer) = document.get_element_by_id(container_id) else {
         return;
     };
     let Ok(stops) = drawer.query_selector_all("a[href], button:not([disabled])") else {
@@ -149,19 +212,26 @@ fn trap_tab_in_drawer(evt: &web_sys::KeyboardEvent) {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn trap_tab_in_drawer(_evt: &web_sys::KeyboardEvent) {}
+pub(crate) fn trap_tab_within(_container_id: &str, _evt: &web_sys::KeyboardEvent) {}
 
 /// The phone layout's media query, the same one `SHELL_CSS` uses. The drawer
 /// exists only while it matches.
 #[cfg(any(test, target_arch = "wasm32"))]
 const PHONE_QUERY: &str = "(max-width: 820px)";
 
-/// The drawer is a phone control. When the viewport grows past the phone
-/// breakpoint (a rotated tablet, a resized window) it closes, so it never
-/// sits over the desktop layout with the page inert and its toggle hidden.
+/// Each disclosure belongs to one layout. The drawer is a phone control:
+/// when the viewport grows past the phone breakpoint (a rotated tablet, a
+/// resized window) it closes, so it never sits over the desktop layout with
+/// the page inert and its toggle hidden. A group panel or the account menu
+/// is a desktop control: entering the phone layout closes it, so its
+/// full-screen dismiss layer does not stay behind a hidden button.
 #[cfg(any(test, target_arch = "wasm32"))]
 fn closes_on_resize(current: Option<Disclosure>, phone_layout: bool) -> bool {
-    current == Some(Disclosure::Drawer) && !phone_layout
+    match current {
+        Some(Disclosure::Drawer) => !phone_layout,
+        Some(Disclosure::Group(_) | Disclosure::Account) => phone_layout,
+        None => false,
+    }
 }
 
 /// A group panel or the account menu closes when focus moves to something
@@ -254,6 +324,20 @@ impl ShellState {
     }
 }
 
+impl ShellState {
+    /// Close whatever is open and, after the next render (once nothing is
+    /// inert), focus `id`.
+    #[cfg(any(test, target_arch = "wasm32"))]
+    fn close_to(self, id: &'static str) {
+        let mut refocus = self.refocus;
+        if self.open.peek().is_none() {
+            return;
+        }
+        self.close(false);
+        refocus.set(Some(id));
+    }
+}
+
 fn use_shell_state() -> ShellState {
     let open = use_signal(initial_disclosure);
     let mut refocus = use_signal(|| Option::<&'static str>::None);
@@ -285,8 +369,9 @@ fn use_shell_state() -> ShellState {
                 .is_none_or(|query| query.matches());
             let current = *state.open.peek();
             if closes_on_resize(current, phone_layout) {
-                // The Menu tab is hidden now, so there is no toggle to refocus.
-                state.close(false);
+                // The toggle is hidden in the new layout, so focus goes to
+                // the main landmark instead of falling to the body.
+                state.close_to(MAIN_ID);
             }
         });
         use_dom_listener(document_target, "focusin", move |evt| {
@@ -336,11 +421,12 @@ fn safe_avatar_url(url: Option<&str>) -> Option<String> {
     (url.starts_with('/') || url.starts_with("https://")).then(|| url.to_string())
 }
 
-/// `aria-current` for a link that stands for a section (a phone tab, the
-/// Admin entry): `page` on its own page, `true` elsewhere in the section.
+/// The extra `aria-current` for a `Link` that stands for a section (a phone
+/// tab, the Admin entry): `true` elsewhere in the section. On its own page
+/// `Link` already writes `page`, so nothing is added there.
 fn section_link_current(to: &Route, current: &Route, in_section: bool) -> Option<&'static str> {
     if to == current {
-        Some("page")
+        None
     } else {
         section_aria_current(in_section)
     }
@@ -1030,6 +1116,8 @@ const SHELL_CSS: &str = r#"
 #[component]
 pub(crate) fn SiteShell(subnav: Option<Element>, children: Element) -> Element {
     let state = use_shell_state();
+    let page_modal = use_context_provider(|| PageModal(Signal::new(false)));
+    let MainHandle(mut main_mounted) = use_context_provider(|| MainHandle(Signal::new(None)));
     let auth = use_auth();
     let route = use_route::<Route>();
 
@@ -1067,6 +1155,7 @@ pub(crate) fn SiteShell(subnav: Option<Element>, children: Element) -> Element {
     let ctx = NavContext {
         signed_in: session.is_logged_in(),
         is_member: session.is_org_member(),
+        is_recruit: session.is_recruit(),
         admin_access: session.is_officer_or_above(),
         is_admin: session.is_admin(),
         strategies_enabled: strategies_enabled_or_default(loaded_settings),
@@ -1114,7 +1203,9 @@ pub(crate) fn SiteShell(subnav: Option<Element>, children: Element) -> Element {
     };
 
     let open = (state.open)();
+    // `main` holds a page modal, so it only goes inert behind the drawer.
     let inert = background_inert(open);
+    let chrome = chrome_inert(open, (page_modal.0)());
     let drawer_open = open == Some(Disclosure::Drawer);
     let drawer_class = if drawer_open {
         "site-drawer is-open"
@@ -1151,6 +1242,7 @@ pub(crate) fn SiteShell(subnav: Option<Element>, children: Element) -> Element {
         a {
             class: "skip-link",
             href: "#{MAIN_ID}",
+            inert: chrome,
             onclick: move |evt| {
                 evt.prevent_default();
                 focus_element(MAIN_ID);
@@ -1160,7 +1252,7 @@ pub(crate) fn SiteShell(subnav: Option<Element>, children: Element) -> Element {
         div { class: "site-app",
             header {
                 class: "d1-top",
-                inert,
+                inert: chrome,
                 // A click on the bar itself closes an open panel. The group
                 // and account wrappers stop their own clicks from getting here.
                 onclick: move |_| state.close(false),
@@ -1383,7 +1475,7 @@ pub(crate) fn SiteShell(subnav: Option<Element>, children: Element) -> Element {
             }
 
             if let Some(subnav) = subnav {
-                div { class: "site-subnav", inert, {subnav} }
+                div { class: "site-subnav", inert: chrome, {subnav} }
             }
 
             main {
@@ -1391,11 +1483,12 @@ pub(crate) fn SiteShell(subnav: Option<Element>, children: Element) -> Element {
                 id: MAIN_ID,
                 tabindex: "-1",
                 inert,
+                onmounted: move |evt| main_mounted.set(Some(evt.data())),
                 {children}
             }
 
             if show_footer {
-                footer { class: "site-footer", inert,
+                footer { class: "site-footer", inert: chrome,
                     nav { class: "footer-inner", aria_label: "Footer",
                         for group in groups.iter() {
                             div {
@@ -1455,7 +1548,7 @@ pub(crate) fn SiteShell(subnav: Option<Element>, children: Element) -> Element {
                 }
             }
 
-            nav { class: "site-tab-bar", aria_label: "Primary", inert,
+            nav { class: "site-tab-bar", aria_label: "Primary", inert: chrome,
                 Link {
                     to: Route::Home {},
                     class: home_tab_class,
@@ -1584,9 +1677,11 @@ mod tests {
         crate::state::provide_site_settings();
         rsx! {
             crate::theme::ThemeProvider {
-                dioxus::router::components::HistoryProvider {
-                    history: move |_| history.clone() as std::rc::Rc<dyn dioxus::history::History>,
-                    Router::<crate::routes::Route> {}
+                crate::components::ToastProvider {
+                    dioxus::router::components::HistoryProvider {
+                        history: move |_| history.clone() as std::rc::Rc<dyn dioxus::history::History>,
+                        Router::<crate::routes::Route> {}
+                    }
                 }
             }
         }
@@ -2046,6 +2141,17 @@ mod tests {
         assert_eq!(background_inert(Some(Disclosure::Drawer)), Some("true"));
     }
 
+    /// Vision blocking 2: behind the editor's map picker the shell chrome is
+    /// inert, but `main` (which holds the picker) is not.
+    #[test]
+    fn a_page_modal_makes_the_chrome_inert_but_not_main() {
+        assert_eq!(chrome_inert(None, false), None);
+        assert_eq!(chrome_inert(Some(COMMUNITY), false), None);
+        assert_eq!(chrome_inert(None, true), Some("true"));
+        assert_eq!(chrome_inert(Some(Disclosure::Drawer), false), Some("true"));
+        assert_eq!(background_inert(None), None, "main stays live");
+    }
+
     #[test]
     fn focus_is_trapped_at_both_ends_of_the_drawer() {
         // Tab on the last stop wraps to the first, Shift+Tab on the first to the last.
@@ -2234,21 +2340,35 @@ mod tests {
         let tab = section(bar, "href=\"/tournaments\"", "</a>");
         assert!(tab.contains("aria-current=\"true\""), "{tab}");
 
-        // The page itself is `page`, once per link, never doubled or mixed.
+        // Vision nit 8: the page itself is `page`, written once by `Link`.
+        // No tag anywhere in the shell carries two `aria-current`s.
+        for (who, path) in [
+            (Who::Guest, "/members"),
+            (Who::Guest, "/"),
+            (Who::Admin, "/admin"),
+            (Who::Admin, "/admin/members"),
+            (Who::Member, "/forum"),
+        ] {
+            let html = render(who, path, None);
+            for tag in html.split('<').skip(1) {
+                let tag = tag.split('>').next().unwrap_or_default();
+                assert!(
+                    tag.matches("aria-current").count() <= 1,
+                    "{path}: doubled aria-current in <{tag}>"
+                );
+            }
+        }
         let html = render(Who::Guest, "/members", None);
         let members = section(top_bar(&html), "href=\"/members\"", "</a>");
-        assert!(members.contains("aria-current=\"page\""), "{members}");
-        assert!(
-            !html.contains("aria-current=\"true\" aria-current"),
-            "{html}"
-        );
-        assert!(
-            !html.contains("aria-current=\"page\" aria-current=\"true\""),
-            "{html}"
+        assert_eq!(
+            members.matches("aria-current=\"page\"").count(),
+            1,
+            "{members}"
         );
         assert_eq!(
             section_link_current(&Route::Home {}, &Route::Home {}, true),
-            Some("page")
+            None,
+            "Link writes page itself"
         );
         assert_eq!(
             section_link_current(&Route::Members {}, &Route::Forum {}, true),
@@ -2268,6 +2388,10 @@ mod tests {
         assert!(!closes_on_resize(Some(COMMUNITY), false));
         assert!(!closes_on_resize(Some(Disclosure::Account), false));
         assert!(!closes_on_resize(None, false));
+        // Vision nit 6: desktop panels close on entering the phone layout.
+        assert!(closes_on_resize(Some(COMMUNITY), true));
+        assert!(closes_on_resize(Some(Disclosure::Account), true));
+        assert!(!closes_on_resize(None, true));
         // The listener and the stylesheet agree on where phone ends.
         assert_eq!(PHONE_QUERY, "(max-width: 820px)");
         assert!(SHELL_CSS.contains(&format!("@media {PHONE_QUERY} {{")));
@@ -2355,6 +2479,109 @@ mod tests {
         assert!(has_decl(&rule, "padding-right: 0"), "{rule}");
     }
 
+    /// Vision blocking 2 on PR 693: the map picker that opens on a new
+    /// strategy is a named modal dialog, and the editor behind it is inert.
+    /// `main` holds the picker, so it stays live. The shell chrome goes inert
+    /// through an effect (`use_page_modal`), which SSR does not run: see
+    /// `a_page_modal_turns_the_chrome_inert_after_its_effect_runs`.
+    #[test]
+    fn the_editor_map_picker_is_a_modal_over_an_inert_page() {
+        let html = render(Who::Member, "/strategy/editor", None);
+
+        let dialog = tag_with_id(&html, "map-picker");
+        assert!(dialog.contains("role=\"dialog\""), "{dialog}");
+        assert!(dialog.contains("aria-modal=\"true\""), "{dialog}");
+        assert!(
+            dialog.contains("aria-labelledby=\"map-picker-title\""),
+            "{dialog}"
+        );
+        assert!(!dialog.contains("inert"), "{dialog}");
+        let title = section(&html, "id=\"map-picker-title\"", "</h3>");
+        assert!(title.contains("Select a Map"), "{title}");
+        let close = tag_with_id(&html, "map-picker-close");
+        assert!(close.contains("aria-label=\"Close map picker\""), "{close}");
+
+        assert!(!tag_with_id(&html, MAIN_ID).contains("inert"));
+        for background in [
+            tag_with_class(&html, "editor-container"),
+            tag_with_class(&html, "editor-statusbar"),
+        ] {
+            assert!(background.contains("inert=\"true\""), "{background}");
+        }
+        // The Map button that reopens it, where focus returns on close.
+        let map_button = tag_with_id(&html, "editor-map-button");
+        assert!(map_button.contains("status-map-link"), "{map_button}");
+    }
+
+    thread_local! {
+        /// The stand-in host's `open` and `mounted` signals.
+        static MODAL_HOST: std::cell::Cell<Option<(Signal<bool>, Signal<bool>)>> = const { std::cell::Cell::new(None) };
+    }
+
+    #[component]
+    fn ModalPage(open: bool) -> Element {
+        use_page_modal(open);
+        rsx! {}
+    }
+
+    /// A stand-in for the shell: provides the flag and renders its chrome
+    /// with `chrome_inert`, as `SiteShell` does, around a page with a modal.
+    fn modal_host() -> Element {
+        let flag = use_context_provider(|| PageModal(Signal::new(false)));
+        let chrome = chrome_inert(None, (flag.0)());
+        let open = use_signal(|| true);
+        let mounted = use_signal(|| true);
+        MODAL_HOST.with(|slot| slot.set(Some((open, mounted))));
+        rsx! {
+            header { class: "d1-top", inert: chrome }
+            if mounted() {
+                ModalPage { open: open() }
+            }
+        }
+    }
+
+    /// `use_page_modal` reaches the shell: after the page's effect runs the
+    /// chrome is inert; closing the modal, or leaving the page with it
+    /// open, makes the chrome live again.
+    #[test]
+    fn a_page_modal_turns_the_chrome_inert_after_its_effect_runs() {
+        use dioxus::dioxus_core::NoOpMutations;
+
+        fn settle(dom: &mut VirtualDom) -> String {
+            for _ in 0..4 {
+                dom.render_immediate(&mut NoOpMutations);
+            }
+            dioxus_ssr::render(dom)
+        }
+        fn chrome_is_inert(html: &str) -> bool {
+            tag_with_class(html, "d1-top").contains("inert=\"true\"")
+        }
+        fn host() -> (Signal<bool>, Signal<bool>) {
+            MODAL_HOST
+                .with(std::cell::Cell::get)
+                .expect("host rendered")
+        }
+
+        let mut dom = VirtualDom::new(modal_host);
+        dom.rebuild_in_place();
+        assert!(
+            !chrome_is_inert(&dioxus_ssr::render(&dom)),
+            "before the effect"
+        );
+        assert!(chrome_is_inert(&settle(&mut dom)), "modal open");
+
+        let (mut open, mut mounted) = host();
+        dom.in_runtime(|| open.set(false));
+        assert!(!chrome_is_inert(&settle(&mut dom)), "modal closed");
+        dom.in_runtime(|| open.set(true));
+        assert!(chrome_is_inert(&settle(&mut dom)), "modal open again");
+
+        // Navigating away with the modal open must not leave the chrome inert.
+        dom.in_runtime(|| mounted.set(false));
+        assert!(!chrome_is_inert(&settle(&mut dom)), "page unmounted");
+        MODAL_HOST.with(|slot| slot.set(None));
+    }
+
     /// QA nit 12: the map picker and the tab bar were both at 100, and the
     /// tab bar comes later in the document, so it painted over the picker.
     #[test]
@@ -2420,13 +2647,27 @@ mod tests {
             has_decl(&toc, "top: calc(var(--nav-height-used) + 5.5rem)"),
             "{toc}"
         );
+        // Vision nit 11: between 721 and 820px the phone tab bar is on
+        // screen too, so the height subtracts the whole shell chrome (top
+        // bar plus tab bar on phone, the top bar alone on desktop).
         assert!(
             has_decl(
                 &toc,
-                "max-height: calc(100vh - var(--nav-height-used) - 5.5rem)"
+                "max-height: calc(100vh - var(--shell-chrome-height, var(--nav-height-used)) - 5.5rem)"
             ),
             "{toc}"
         );
+        assert!(!has_decl(
+            &toc,
+            "max-height: calc(100vh - var(--nav-height-used) - 5.5rem)"
+        ));
+        let phone = SHELL_CSS
+            .split("@media (max-width: 820px) {")
+            .nth(1)
+            .expect("phone rules");
+        assert!(phone.contains(
+            "--shell-chrome-height: calc(var(--nav-height-used) + var(--tab-bar-height))"
+        ));
         let old = ["100vh - 8.5", "rem"].concat();
         assert!(!notes.contains(&old), "the old fixed offset is gone");
     }

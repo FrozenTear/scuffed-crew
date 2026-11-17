@@ -81,6 +81,9 @@ pub(crate) struct NavContext {
     /// Has an org role (recruit and up). A signed-in account without a
     /// member row is not a member: it can still apply.
     pub is_member: bool,
+    /// The org role is `Recruit`: a trial applicant. They are members, but
+    /// `/apply` is still where they follow or withdraw their application.
+    pub is_recruit: bool,
     /// Officer or admin: the tier `AdminLayout` lets in.
     pub admin_access: bool,
     /// Full admin: sees the admin-only pages inside the admin section.
@@ -167,9 +170,9 @@ pub(crate) fn account_entries(ctx: NavContext) -> Vec<NavEntry> {
     ));
     entries.push(entry("reports", "My reports", Route::MyReports {}));
     entries.push(entry("link", "Link a device", Route::LinkDevice {}));
-    // Signed in without a membership: the application page is where they
-    // apply, check on an application or withdraw it.
-    if !ctx.is_member {
+    // Signed in without a membership, or a trial recruit: the application
+    // page is where they apply, check on an application or withdraw it.
+    if !ctx.is_member || ctx.is_recruit {
         entries.push(entry("apply", "Apply", Route::Apply {}));
     }
     entries
@@ -369,11 +372,13 @@ pub(crate) fn is_current(entry: &Route, current: &Route) -> bool {
     )
 }
 
-/// `aria-current` for a nav link: `page` on the page itself, `true` on the
-/// list page a nested or detail page hangs under.
+/// The extra `aria-current` for a nav `Link`: `true` on the list page a
+/// nested or detail page hangs under. On the page itself this is `None`:
+/// the router's `Link` already writes `aria-current="page"` there, and a
+/// second attribute would double it.
 pub(crate) fn aria_current(entry: &Route, current: &Route) -> Option<&'static str> {
     if entry == current {
-        Some("page")
+        None
     } else if is_current(entry, current) {
         Some("true")
     } else {
@@ -410,6 +415,7 @@ mod tests {
     const GUEST: NavContext = NavContext {
         signed_in: false,
         is_member: false,
+        is_recruit: false,
         admin_access: false,
         is_admin: false,
         strategies_enabled: true,
@@ -423,6 +429,11 @@ mod tests {
     const MEMBER: NavContext = NavContext {
         is_member: true,
         ..APPLICANT
+    };
+    /// A trial applicant: the server gives them an `OrgRole::Recruit` row.
+    const RECRUIT: NavContext = NavContext {
+        is_recruit: true,
+        ..MEMBER
     };
     const OFFICER: NavContext = NavContext {
         admin_access: true,
@@ -535,6 +546,18 @@ mod tests {
             assert!(!ids(&account_entries(ctx)).contains(&"apply"));
         }
         assert!(account_entries(GUEST).is_empty());
+    }
+
+    /// Vision nit 7 on PR 693: a trial recruit has a membership, but their
+    /// Withdraw action lives on `/apply`, so the account menu keeps Apply.
+    #[test]
+    fn a_trial_recruit_keeps_apply_in_the_account_menu() {
+        let recruit = account_entries(RECRUIT);
+        let apply = recruit.last().expect("entries");
+        assert_eq!((apply.id, apply.route.clone()), ("apply", Route::Apply {}));
+        assert_eq!(ids(&recruit).iter().filter(|id| **id == "apply").count(), 1);
+        // Still a member everywhere else (New strategy and so on).
+        assert!(group(RECRUIT, NavGroupId::Strategy).contains(&"strategy_new"));
     }
 
     #[test]
@@ -801,11 +824,9 @@ mod tests {
     }
 
     #[test]
-    fn aria_current_is_page_on_the_page_and_true_on_its_parent() {
-        assert_eq!(
-            aria_current(&Route::Members {}, &Route::Members {}),
-            Some("page")
-        );
+    fn aria_current_is_true_on_the_parent_and_left_to_link_on_the_page() {
+        // `Link` writes `page` itself; the shell adds nothing there.
+        assert_eq!(aria_current(&Route::Members {}, &Route::Members {}), None);
         for (parent, child) in [
             (
                 Route::AdminMembers {},

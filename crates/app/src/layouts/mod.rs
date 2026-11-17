@@ -6,7 +6,7 @@ mod strategy;
 
 pub use admin::AdminLayout;
 pub use public::PublicLayout;
-pub(crate) use shell::MAIN_ID;
+pub(crate) use shell::{trap_tab_within, use_focus_main, use_page_modal};
 pub use strategy::StrategyLayout;
 
 #[cfg(target_arch = "wasm32")]
@@ -189,7 +189,8 @@ pub(crate) fn focus_element(id: &str) {
     #[cfg(not(target_arch = "wasm32"))]
     {
         // Desktop still has a window. This build skips `HtmlElement::focus`
-        // because that call lives in the wasm branch above.
+        // because that call lives in the wasm branch above. The editor's Esc
+        // focuses `main` through `use_focus_main`, which works there too.
         let _ = id;
     }
 }

@@ -65,6 +65,8 @@ pub fn DesktopMapCanvas(
     on_element_drag_end: EventHandler<(Uuid, Position, Position)>,
     // Tab, Esc or Shift+Tab while the canvas holds focus
     on_canvas_key: EventHandler<CanvasKey>,
+    // The canvas took keyboard focus (the editor shows its key hint)
+    on_canvas_focus: EventHandler<()>,
 ) -> Element {
     let mut is_panning = use_signal(|| false);
     let mut is_dragging = use_signal(|| false);
@@ -297,8 +299,11 @@ pub fn DesktopMapCanvas(
                 height: "1080",
                 class: "map-canvas map-canvas-overlay",
                 style: "cursor: {cursor_style()};",
-                tabindex: 0,
-                aria_label: "Strategy map. Tab toggles the team panel. Esc or Shift+Tab leaves the map.",
+                // Focus by click only, as on web: as a Tab stop the canvas
+                // would swallow the next Tab (the panel toggle).
+                tabindex: "-1",
+                aria_label: "Strategy map. Tab toggles the team panel. Esc cancels a drawing or selection. Esc or Shift+Tab leaves the map.",
+                onfocus: move |_| on_canvas_focus.call(()),
                 onmounted: move |evt| {
                     let data = evt.data();
                     spawn(async move {
@@ -494,25 +499,25 @@ pub fn DesktopMapCanvas(
                     // Keys that belong to the canvas while it holds focus.
                     // This is the only place in the editor that takes Tab.
                     let binding = Keybinding::from_key(&evt.key(), evt.modifiers());
-                    if let Some(canvas_key) = keybindings::canvas_key(&binding) {
+                    // A half-drawn shape or a selection: Esc drops it first.
+                    let in_progress = arrow_start.read().is_some()
+                        || is_drawing
+                        || selected_element.is_some();
+                    if let Some(canvas_key) = keybindings::canvas_key(&binding, in_progress) {
                         if canvas_key.prevents_default() {
                             evt.prevent_default();
                         }
-                        on_canvas_key.call(canvas_key);
-                    }
-                    let key = evt.data().key();
-                    match key {
-                        Key::Delete | Key::Backspace => {
-                            if selected_element.is_some() {
-                                on_element_select.call(None);
-                            }
-                        }
-                        Key::Escape => {
+                        if canvas_key == CanvasKey::CancelInProgress {
                             on_element_select.call(None);
                             arrow_start.set(None);
                             arrow_end.set(None);
                         }
-                        _ => {}
+                        on_canvas_key.call(canvas_key);
+                    }
+                    if matches!(evt.data().key(), Key::Delete | Key::Backspace)
+                        && selected_element.is_some()
+                    {
+                        on_element_select.call(None);
                     }
                 },
             }

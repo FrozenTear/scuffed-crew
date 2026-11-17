@@ -26,7 +26,6 @@
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use wasm_bindgen::JsCast;
 
 use super::load_error::{is_retrying, strategy_load_error};
 use crate::components::retry_label;
@@ -41,7 +40,7 @@ use crate::components::strategy::{
     HeroPicker, HeroWinRate, MapCanvas, PropertiesPanel, TeamPanel, Timeline, Toolbar,
 };
 use crate::components::{Toast, use_toast};
-use crate::keybindings::{self, CanvasKey, EditorAction};
+use crate::keybindings::{self, CanvasHint, CanvasKey, EditorAction};
 use crate::state::editor::{CanvasState, DrawingState, StrategyState};
 use crate::state::maps::{
     PICKER_MODE_ORDER, display_map_name, game_mode_api_str, game_mode_for_map, map_id_for_create,
@@ -206,8 +205,9 @@ const EDITOR_CSS: &str = r#"
         position: relative;
         overflow: hidden;
     }
-    /* Shown after Tab toggled the panel from inside the map, until focus
-       leaves the map: Tab does not move focus there, so say what does. */
+    /* The map's live hint. Always mounted (a status node inserted together
+       with its text is often not announced); it shows only while it has
+       text, that is while the map holds focus. */
     .canvas-key-hint {
         position: absolute;
         left: 50%;
@@ -223,6 +223,10 @@ const EDITOR_CSS: &str = r#"
         font-size: 0.75rem;
         text-align: center;
         pointer-events: none;
+    }
+    .canvas-key-hint:empty {
+        padding: 0;
+        border: 0;
     }
 
     /* Bottom panel (element list) */
@@ -445,6 +449,58 @@ const EDITOR_CSS: &str = r#"
     }
 "#;
 
+/// The map picker dialog, its heading, its Close button and the selected map.
+const MAP_PICKER_ID: &str = "map-picker";
+const MAP_PICKER_TITLE_ID: &str = "map-picker-title";
+const MAP_PICKER_CLOSE_ID: &str = "map-picker-close";
+const MAP_PICKER_SELECTED_ID: &str = "map-picker-selected";
+/// The status bar's "Map:" button: it opens the picker, so focus returns to
+/// it when the picker closes.
+const EDITOR_MAP_BUTTON_ID: &str = "editor-map-button";
+
+/// Where focus goes when the map picker opens: the current map, or Close
+/// when no map is chosen yet.
+fn picker_initial_focus(has_map: bool) -> &'static str {
+    if has_map {
+        MAP_PICKER_SELECTED_ID
+    } else {
+        MAP_PICKER_CLOSE_ID
+    }
+}
+
+/// What a key does while the map picker is open. Every other key goes to
+/// the focused control in the picker; no editor shortcut runs behind it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PickerKey {
+    /// Esc: close the picker, focus back on the Map button.
+    Close,
+    /// Tab or Shift+Tab: wrap inside the picker.
+    KeepFocusInside,
+}
+
+fn picker_key(key: &str) -> Option<PickerKey> {
+    match key {
+        "Escape" => Some(PickerKey::Close),
+        "Tab" => Some(PickerKey::KeepFocusInside),
+        _ => None,
+    }
+}
+
+/// Accessible name for a side panel's collapse button.
+fn panel_button_label(panel: &'static str, open: bool) -> String {
+    if open {
+        format!("Hide {panel} panel")
+    } else {
+        format!("Show {panel} panel")
+    }
+}
+
+/// `inert` for the editor behind the open map picker. Text or removed,
+/// never a bool (see `layouts::shell::background_inert`).
+fn behind_picker(open: bool) -> Option<&'static str> {
+    open.then_some("true")
+}
+
 // =============================================================================
 // Entry points
 // =============================================================================
@@ -551,6 +607,29 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
             .unwrap_or(true)
     });
     let mut map_picker_error = use_signal(|| None::<String>);
+    // Set when the picker closes: focus goes back to the status bar's Map
+    // button after the render that removed the picker and `inert`.
+    let mut picker_refocus = use_signal(|| false);
+    let picker_open = *show_map_picker.read();
+    // The picker is a modal: the shell chrome goes inert while it is open.
+    crate::layouts::use_page_modal(picker_open);
+    // Focus moves into the picker when it opens (the current map, or Close).
+    use_effect(move || {
+        if show_map_picker() {
+            let has_map = canvas_state.peek().current_map.is_some();
+            crate::layouts::focus_element(picker_initial_focus(has_map));
+        }
+    });
+    use_effect(move || {
+        if picker_refocus() {
+            picker_refocus.set(false);
+            crate::layouts::focus_element(EDITOR_MAP_BUTTON_ID);
+        }
+    });
+    let mut close_picker = move || {
+        show_map_picker.set(false);
+        picker_refocus.set(true);
+    };
 
     // Save status
     let save_in_progress = use_signal(|| false);
@@ -588,9 +667,12 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
         opened_as_new: initial_strategy.is_none(),
     };
 
-    // The map's key hint: on after Tab toggled the panel from inside the
-    // canvas, off when focus leaves the canvas.
-    let mut canvas_key_hint = use_signal(|| false);
+    // The map's key hint: set while the canvas holds focus, cleared when
+    // focus leaves it. The status node stays mounted; only its text changes.
+    let mut canvas_hint = use_signal(CanvasHint::default);
+    // Esc out of the canvas lands on `main#main`. Through the mounted handle,
+    // so it works in the desktop webview as well as on web.
+    let mut focus_main = crate::layouts::use_focus_main();
 
     // Track previous tool for space-to-pan behavior
     let _prev_tool = use_hook(|| std::cell::Cell::new(Tool::Select));
@@ -622,21 +704,36 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
     // resolves it, so outside the map canvas Tab moves focus as on any page.
     // The Tab panel toggle lives on the map canvas element's own `onkeydown`
     // and reaches the editor through `on_canvas_key`.
+    //
+    // Where the key landed decides whether a shortcut fires
+    // (`keybindings::KeyTarget`): every shortcut in the map canvas and on
+    // the non-interactive page, none in a text field, and on a button, link
+    // or other control only the Ctrl/Cmd chords. Space on a focused button
+    // only presses the button.
     // =========================================================================
     crate::layouts::use_document_keydown_capture(move |event: web_sys::KeyboardEvent| {
-        // Don't handle shortcuts when typing in an input
-        if let Some(target) = event.target()
-            && let Ok(element) = target.dyn_into::<web_sys::HtmlElement>()
-        {
-            let tag = element.tag_name().to_lowercase();
-            if tag == "input" || tag == "textarea" || tag == "select" {
-                return;
+        // The map picker is a modal: while it is open the editor behind it
+        // takes no shortcut. Esc closes it and Tab stays inside it.
+        if *show_map_picker.peek() {
+            match picker_key(&event.key()) {
+                Some(PickerKey::Close) => {
+                    event.prevent_default();
+                    close_picker();
+                }
+                Some(PickerKey::KeepFocusInside) => {
+                    crate::layouts::trap_tab_within(MAP_PICKER_ID, &event);
+                }
+                None => {}
             }
+            return;
         }
 
         let Some(action) = keybindings::from_keyboard_event(&event) else {
             return;
         };
+        // A shortcut that fires owns the key: no page scroll on Space or the
+        // arrows, no browser Back on Backspace.
+        event.prevent_default();
 
         match action {
             // Tool selection
@@ -668,19 +765,15 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
             // Panel toggles. No default key resolves to the left panel
             // here (it is Tab inside the canvas); a custom binding could.
             EditorAction::ToggleLeftPanel => {
-                event.prevent_default();
                 left_open.with_mut(|v| *v = !*v);
             }
             EditorAction::ToggleRightPanel => {
-                event.prevent_default();
                 right_open.with_mut(|v| *v = !*v);
             }
             EditorAction::ToggleBottomPanel => {
-                event.prevent_default();
                 bottom_open.with_mut(|v| *v = !*v);
             }
             EditorAction::ToggleHealthPacks => {
-                event.prevent_default();
                 canvas_state.with_mut(|c| c.show_health_packs = !c.show_health_packs);
             }
 
@@ -702,19 +795,16 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
 
             // Zoom
             EditorAction::ZoomIn => {
-                event.prevent_default();
                 canvas_state.with_mut(|c| {
                     c.zoom = (c.zoom * 1.2).clamp(0.03, 4.0);
                 });
             }
             EditorAction::ZoomOut => {
-                event.prevent_default();
                 canvas_state.with_mut(|c| {
                     c.zoom = (c.zoom / 1.2).clamp(0.03, 4.0);
                 });
             }
             EditorAction::ZoomReset => {
-                event.prevent_default();
                 canvas_state.with_mut(|c| {
                     c.zoom = 1.0;
                     c.pan_offset = Position::new(0.0, 0.0);
@@ -753,14 +843,12 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
 
             // Undo/Redo
             EditorAction::Undo => {
-                event.prevent_default();
                 let action = undo_manager.with_mut(|u| u.undo());
                 if let Some(action) = action {
                     apply_undo(&mut strategy_state, action);
                 }
             }
             EditorAction::Redo => {
-                event.prevent_default();
                 let action = undo_manager.with_mut(|u| u.redo());
                 if let Some(action) = action {
                     apply_redo(&mut strategy_state, action);
@@ -769,7 +857,6 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
 
             // Save
             EditorAction::Save => {
-                event.prevent_default();
                 save_strategy(save_ctx);
             }
         }
@@ -846,6 +933,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
     drop(ds);
     drop(ss);
 
+    let hint_text = canvas_hint.read().text();
     let can_undo = undo_manager.read().can_undo();
     let can_redo = undo_manager.read().can_redo();
     let saving_val = *save_in_progress.read();
@@ -859,7 +947,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
             // ===========================================================
             // Editor container (sidebars + main area)
             // ===========================================================
-            div { class: "editor-container",
+            div { class: "editor-container", inert: behind_picker(picker_open),
 
                 // ---- Left sidebar ----
                 aside {
@@ -869,7 +957,10 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                         span { class: "sidebar-title", "Team & Heroes" }
                         button {
                             class: "sidebar-collapse-btn",
+                            r#type: "button",
                             title: "Toggle panel (Tab while the map has focus)",
+                            aria_label: panel_button_label("team", !left_collapsed),
+                            aria_expanded: if left_collapsed { "false" } else { "true" },
                             onclick: move |_| left_open.with_mut(|v| *v = !*v),
                             if left_collapsed { ">" } else { "<" }
                         }
@@ -1024,12 +1115,8 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                     }
 
                     div { class: "canvas-container",
-                        onfocusout: move |_| canvas_key_hint.set(false),
-                        if canvas_key_hint() {
-                            p { class: "canvas-key-hint", role: "status",
-                                "Tab toggles the team panel. Esc or Shift+Tab leaves the map."
-                            }
-                        }
+                        onfocusout: move |_| canvas_hint.set(CanvasHint::Off),
+                        p { class: "canvas-key-hint", role: "status", "{hint_text}" }
                         MapCanvas {
                             zoom: zoom_val,
                             pan_offset: pan_val,
@@ -1039,19 +1126,30 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                             current_map_id: map_id_val,
                             // Keys the canvas element itself resolved while it
                             // held focus (`keybindings::canvas_key`). Tab
-                            // toggles the left panel and focus stays. Esc sends
-                            // focus to the main landmark. Shift+Tab is left to
-                            // the browser, which moves to the previous stop.
+                            // toggles the left panel and focus stays. Esc first
+                            // drops a drawing or selection in progress (the
+                            // canvas clears its own arrow and the selection);
+                            // with nothing in progress Esc sends focus to the
+                            // main landmark. Shift+Tab is left to the browser,
+                            // which moves to the previous stop.
                             on_canvas_key: move |key: CanvasKey| match key {
                                 CanvasKey::ToggleLeftPanel => {
-                                    left_open.with_mut(|v| *v = !*v);
-                                    canvas_key_hint.set(true);
+                                    let now_open = left_open.with_mut(|v| {
+                                        *v = !*v;
+                                        *v
+                                    });
+                                    canvas_hint.set(CanvasHint::PanelToggled(now_open));
                                 }
-                                CanvasKey::LeaveToShell => {
-                                    crate::layouts::focus_element(crate::layouts::MAIN_ID);
+                                CanvasKey::CancelInProgress => {
+                                    drawing_state.with_mut(|d| {
+                                        d.is_drawing = false;
+                                        d.drawing_points.clear();
+                                    });
                                 }
+                                CanvasKey::LeaveToShell => focus_main(),
                                 CanvasKey::LeaveBackwards => {}
                             },
+                            on_canvas_focus: move |_| canvas_hint.set(CanvasHint::Focused),
                             active_tool: tool_val,
                             draw_color: color_val,
                             fill_opacity: opacity_val,
@@ -1202,7 +1300,10 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
 
                         button {
                             class: "panel-collapse-btn panel-collapse-bottom",
+                            r#type: "button",
                             title: "Toggle elements panel ([)",
+                            aria_label: panel_button_label("elements", !bottom_collapsed),
+                            aria_expanded: if bottom_collapsed { "false" } else { "true" },
                             onclick: move |_| bottom_open.with_mut(|v| *v = !*v),
                             if bottom_collapsed { "^" } else { "v" }
                         }
@@ -1254,7 +1355,10 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                     div { class: "sidebar-header",
                         button {
                             class: "sidebar-collapse-btn",
+                            r#type: "button",
                             title: "Toggle panel (])",
+                            aria_label: panel_button_label("properties", !right_collapsed),
+                            aria_expanded: if right_collapsed { "false" } else { "true" },
                             onclick: move |_| right_open.with_mut(|v| *v = !*v),
                             if right_collapsed { "<" } else { ">" }
                         }
@@ -1381,9 +1485,11 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
             // ===========================================================
             // Status bar
             // ===========================================================
-            div { class: "editor-statusbar",
+            div { class: "editor-statusbar", inert: behind_picker(picker_open),
                 button {
+                    id: EDITOR_MAP_BUTTON_ID,
                     class: "status-item status-map-link",
+                    r#type: "button",
                     title: "Change map",
                     onclick: move |_| show_map_picker.set(true),
                     "Map: {map_display}"
@@ -1407,17 +1513,25 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
             // ===========================================================
             // Map picker modal
             // ===========================================================
-            if *show_map_picker.read() {
+            // A modal dialog: named by its heading, focus moves in on open
+            // and stays in (the keydown listener above), Esc or Close or a
+            // click outside closes it and focus returns to the Map button.
+            // The editor behind it and the shell chrome are inert.
+            if picker_open {
                 div {
                     class: "map-picker-overlay",
-                    onclick: move |_| show_map_picker.set(false),
+                    onclick: move |_| close_picker(),
 
                     div {
+                        id: MAP_PICKER_ID,
                         class: "map-picker-dialog",
+                        role: "dialog",
+                        aria_modal: "true",
+                        aria_labelledby: MAP_PICKER_TITLE_ID,
                         onclick: move |evt| evt.stop_propagation(),
 
                         div { class: "map-picker-header",
-                            h3 {
+                            h3 { id: MAP_PICKER_TITLE_ID,
                                 if canvas_state.read().current_map.is_some() {
                                     "Change Map"
                                 } else {
@@ -1425,8 +1539,11 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                                 }
                             }
                             button {
+                                id: MAP_PICKER_CLOSE_ID,
                                 class: "map-picker-close",
-                                onclick: move |_| show_map_picker.set(false),
+                                r#type: "button",
+                                aria_label: "Close map picker",
+                                onclick: move |_| close_picker(),
                                 "X"
                             }
                         }
@@ -1458,8 +1575,10 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                                                             };
                                                             rsx! {
                                                                 button {
+                                                                    id: if selected { Some(MAP_PICKER_SELECTED_ID) } else { None },
                                                                     class: "{item_class}",
                                                                     r#type: "button",
+                                                                    aria_pressed: if selected { "true" } else { "false" },
                                                                     onclick: move |_| {
                                                                         canvas_state.with_mut(|c| {
                                                                             c.select_map(map_id.to_string(), None);
@@ -1468,7 +1587,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                                                                             s.has_unsaved_changes = true;
                                                                         });
                                                                         map_picker_error.set(None);
-                                                                        show_map_picker.set(false);
+                                                                        close_picker();
                                                                     },
                                                                     "{map.name}"
                                                                 }
@@ -1799,5 +1918,41 @@ fn apply_redo(strategy_state: &mut Signal<StrategyState>, action: UndoableAction
                 s.has_unsaved_changes = true;
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Vision blocking 2: Esc closes the picker, Tab stays inside it, and
+    /// no other key (Space, Delete, a tool letter) reaches the editor.
+    #[test]
+    fn picker_keys_close_on_escape_and_trap_tab() {
+        assert_eq!(picker_key("Escape"), Some(PickerKey::Close));
+        assert_eq!(picker_key("Tab"), Some(PickerKey::KeepFocusInside));
+        for key in [" ", "Enter", "Delete", "v", "ArrowLeft", "]"] {
+            assert_eq!(picker_key(key), None, "{key:?}");
+        }
+    }
+
+    /// Focus moves into the picker on open: the current map, else Close.
+    #[test]
+    fn picker_focuses_the_current_map_or_close() {
+        assert_eq!(picker_initial_focus(true), MAP_PICKER_SELECTED_ID);
+        assert_eq!(picker_initial_focus(false), MAP_PICKER_CLOSE_ID);
+    }
+
+    /// Vision nit 4: the panel buttons are named by what they do, not "<".
+    #[test]
+    fn panel_buttons_have_real_names() {
+        assert_eq!(panel_button_label("team", true), "Hide team panel");
+        assert_eq!(panel_button_label("team", false), "Show team panel");
+        assert_eq!(
+            panel_button_label("properties", false),
+            "Show properties panel"
+        );
+        assert_eq!(behind_picker(true), Some("true"));
+        assert_eq!(behind_picker(false), None);
     }
 }

@@ -9,7 +9,14 @@
 //!   document keydown listener. Tab is never one of them, so Tab moves focus
 //!   as on every other page (skip link, site nav, the editor's own buttons).
 //! - [`canvas_key`]: keys that only act while focus is inside the map canvas.
-//!   Tab toggles the left panel there. Esc and Shift+Tab leave the canvas.
+//!   Tab toggles the left panel there. Esc cancels a drawing or selection in
+//!   progress, and with nothing in progress Esc (or Shift+Tab) leaves.
+//!
+//! Where a key lands decides whether a shortcut fires ([`KeyTarget`],
+//! [`KeybindingManager::action_for_target`]): every shortcut works in the
+//! map canvas and on non-interactive parts of the page, none works in a text
+//! field, and on a button, link or other control only the Ctrl/Cmd chords
+//! (undo, redo, save) work. Space on a focused button only presses it.
 
 use std::collections::HashMap;
 
@@ -167,13 +174,76 @@ impl Keybinding {
     }
 }
 
+/// Where a keydown event's target sits, for shortcut routing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyTarget {
+    /// The map canvas (the overlay canvas element) holds focus.
+    MapCanvas,
+    /// A text field: `input`, `textarea`, `select` or contenteditable.
+    TextEntry,
+    /// A button, link or other control with keys of its own (see
+    /// [`CONTROL_SELECTOR`]).
+    Control,
+    /// Anything else: the body, `main`, a panel's static content.
+    Page,
+}
+
+/// Elements whose own keys (Space, Enter, arrows, Home, End, Delete) must
+/// reach them: a single-key shortcut never fires on one of these.
+pub const CONTROL_SELECTOR: &str = "a[href], button, summary, details, label, \
+    audio[controls], video[controls], [role=button], [role=link], [role=tab], \
+    [role=menuitem], [role=menuitemcheckbox], [role=menuitemradio], \
+    [role=checkbox], [role=radio], [role=switch], [role=option], [role=slider], \
+    [role=spinbutton], [role=combobox], [role=listbox], [role=gridcell], \
+    [role=treeitem], [role=scrollbar]";
+
+/// Text fields: every key belongs to them.
+pub const TEXT_ENTRY_SELECTOR: &str = "input, textarea, select, [contenteditable]:not([contenteditable=false]), \
+    [role=textbox], [role=searchbox]";
+
+/// The element that takes the canvas keys.
+pub const MAP_CANVAS_SELECTOR: &str = ".map-canvas-overlay";
+
+/// Classify a keydown target. Text fields win over everything (a field
+/// inside a control is still a field); then the canvas; then controls.
+pub fn key_target(target: Option<&web_sys::Element>) -> KeyTarget {
+    let Some(target) = target else {
+        return KeyTarget::Page;
+    };
+    let within = |selector: &str| target.closest(selector).ok().flatten().is_some();
+    if within(TEXT_ENTRY_SELECTOR) {
+        KeyTarget::TextEntry
+    } else if within(MAP_CANVAS_SELECTOR) {
+        KeyTarget::MapCanvas
+    } else if within(CONTROL_SELECTOR) {
+        KeyTarget::Control
+    } else {
+        KeyTarget::Page
+    }
+}
+
+/// Whether an editor shortcut may fire on this target. Ctrl/Cmd chords
+/// (undo, redo, save) do nothing on a control, so they stay available after
+/// a toolbar click; a single key belongs to the focused control.
+pub fn shortcut_allowed(target: KeyTarget, binding: &Keybinding) -> bool {
+    match target {
+        KeyTarget::MapCanvas | KeyTarget::Page => true,
+        KeyTarget::TextEntry => false,
+        KeyTarget::Control => binding.modifiers.ctrl || binding.modifiers.meta,
+    }
+}
+
 /// What a key does while keyboard focus is inside the map canvas. Nothing
 /// else in the editor may take Tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CanvasKey {
     /// Tab: toggle the left panel. Focus stays on the canvas.
     ToggleLeftPanel,
-    /// Esc: the editor moves focus out of the canvas, to the main landmark.
+    /// Esc with a drawing or selection in progress: drop it. Focus stays,
+    /// so a second Esc leaves.
+    CancelInProgress,
+    /// Esc with nothing in progress: the editor moves focus out of the
+    /// canvas, to the main landmark.
     LeaveToShell,
     /// Shift+Tab: the browser moves focus to the previous stop.
     LeaveBackwards,
@@ -189,13 +259,39 @@ impl CanvasKey {
 
 /// Resolve a key pressed while focus is inside the map canvas. `None` means
 /// the canvas has no say (Ctrl+Tab, Alt+Tab and every non-Tab key but Esc).
-pub fn canvas_key(binding: &Keybinding) -> Option<CanvasKey> {
+/// `in_progress`: a half-drawn shape or a selected element. Esc drops that
+/// first; only an Esc with nothing to cancel leaves the canvas.
+pub fn canvas_key(binding: &Keybinding, in_progress: bool) -> Option<CanvasKey> {
     let held = binding.modifiers;
     match binding.key.as_str() {
         "tab" if held == Modifiers::none() => Some(CanvasKey::ToggleLeftPanel),
         "tab" if held == Modifiers::shift() => Some(CanvasKey::LeaveBackwards),
+        "escape" if held == Modifiers::none() && in_progress => Some(CanvasKey::CancelInProgress),
         "escape" if held == Modifiers::none() => Some(CanvasKey::LeaveToShell),
         _ => None,
+    }
+}
+
+/// The map's live hint, kept mounted so a screen reader hears each change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CanvasHint {
+    /// Focus is outside the map: no text.
+    #[default]
+    Off,
+    /// The map took focus.
+    Focused,
+    /// Tab toggled the team panel; `true` when it is now shown.
+    PanelToggled(bool),
+}
+
+impl CanvasHint {
+    pub fn text(self) -> &'static str {
+        match self {
+            Self::Off => "",
+            Self::Focused => "Tab toggles the team panel. Esc or Shift+Tab leaves the map.",
+            Self::PanelToggled(true) => "Team panel shown. Esc or Shift+Tab leaves the map.",
+            Self::PanelToggled(false) => "Team panel hidden. Esc or Shift+Tab leaves the map.",
+        }
     }
 }
 
@@ -299,9 +395,17 @@ impl KeybindingManager {
         }
     }
 
-    /// Look up the action for a raw keyboard event.
-    pub fn action_for(&self, event: &web_sys::KeyboardEvent) -> Option<EditorAction> {
-        self.action_for_binding(&Keybinding::from_keyboard_event(event))
+    /// The editor-wide action for a key that landed on `target`, or `None`
+    /// when the target keeps the key (see [`shortcut_allowed`]).
+    pub fn action_for_target(
+        &self,
+        binding: &Keybinding,
+        target: KeyTarget,
+    ) -> Option<EditorAction> {
+        if !shortcut_allowed(target, binding) {
+            return None;
+        }
+        self.action_for_binding(binding)
     }
 
     /// Look up the editor-wide action for a key. Tab never has one, whatever
@@ -390,9 +494,15 @@ where
     MANAGER.with(|m| f(&mut m.borrow_mut()))
 }
 
-/// Convenience: resolve a keyboard event to an action.
+/// Resolve a document keydown to an editor action, honouring where it
+/// landed: nothing on a text field, only Ctrl/Cmd chords on a control.
 pub fn from_keyboard_event(event: &web_sys::KeyboardEvent) -> Option<EditorAction> {
-    with_keybindings(|kb| kb.action_for(event))
+    use wasm_bindgen::JsCast;
+    let target = event
+        .target()
+        .and_then(|target| target.dyn_into::<web_sys::Element>().ok());
+    let binding = Keybinding::from_keyboard_event(event);
+    with_keybindings(|kb| kb.action_for_target(&binding, key_target(target.as_ref())))
 }
 
 #[cfg(test)]
@@ -454,21 +564,24 @@ mod tests {
 
     #[test]
     fn tab_inside_the_canvas_toggles_the_left_panel() {
-        let key = canvas_key(&Keybinding::from_key(&Key::Tab, Held::empty()));
-        assert_eq!(key, Some(CanvasKey::ToggleLeftPanel));
+        for in_progress in [false, true] {
+            let key = canvas_key(&Keybinding::from_key(&Key::Tab, Held::empty()), in_progress);
+            assert_eq!(key, Some(CanvasKey::ToggleLeftPanel));
+        }
         // Focus stays on the canvas, so the key is swallowed.
         assert!(CanvasKey::ToggleLeftPanel.prevents_default());
     }
 
     #[test]
     fn escape_inside_the_canvas_exits() {
-        let key = canvas_key(&Keybinding::from_key(&Key::Escape, Held::empty()));
+        let key = canvas_key(&Keybinding::from_key(&Key::Escape, Held::empty()), false);
         assert_eq!(key, Some(CanvasKey::LeaveToShell));
+        assert!(!CanvasKey::CancelInProgress.prevents_default());
     }
 
     #[test]
     fn shift_tab_inside_the_canvas_exits() {
-        let key = canvas_key(&Keybinding::from_key(&Key::Tab, Held::SHIFT));
+        let key = canvas_key(&Keybinding::from_key(&Key::Tab, Held::SHIFT), true);
         assert_eq!(key, Some(CanvasKey::LeaveBackwards));
         // The browser does the move, so the key must reach it.
         assert!(!CanvasKey::LeaveBackwards.prevents_default());
@@ -489,17 +602,28 @@ mod tests {
             } else {
                 None
             };
-            assert_eq!(canvas_key(&tab), expected, "{tab:?}");
+            assert_eq!(canvas_key(&tab, false), expected, "{tab:?}");
+            assert_eq!(canvas_key(&tab, true), expected, "{tab:?}");
 
             let escape = Keybinding {
                 key: "escape".to_string(),
                 modifiers,
             };
-            let expected = (modifiers == Modifiers::none()).then_some(CanvasKey::LeaveToShell);
-            assert_eq!(canvas_key(&escape), expected, "{escape:?}");
+            let plain = modifiers == Modifiers::none();
+            assert_eq!(
+                canvas_key(&escape, false),
+                plain.then_some(CanvasKey::LeaveToShell),
+                "{escape:?}"
+            );
+            assert_eq!(
+                canvas_key(&escape, true),
+                plain.then_some(CanvasKey::CancelInProgress),
+                "{escape:?}"
+            );
         }
         for key in ["v", " ", "[", "]", "delete", "arrowleft", "s"] {
-            assert_eq!(canvas_key(&Keybinding::new(key)), None, "{key}");
+            assert_eq!(canvas_key(&Keybinding::new(key), false), None, "{key}");
+            assert_eq!(canvas_key(&Keybinding::new(key), true), None, "{key}");
         }
     }
 
@@ -546,7 +670,7 @@ mod tests {
             let element = &canvas[at..];
             let handler = element.find("onkeydown:").expect("canvas keydown");
             let resolve = element
-                .find("keybindings::canvas_key(&binding)")
+                .find("keybindings::canvas_key(&binding, in_progress)")
                 .expect("canvas key routing");
             let closes = element
                 .find("\n            }\n")
@@ -559,18 +683,206 @@ mod tests {
         assert!(!editor.contains("(Shift+Tab)"));
         assert!(!editor.contains("title: \"Toggle panel (Tab)\""));
         assert!(
-            editor.contains("\"Tab toggles the team panel. Esc or Shift+Tab leaves the map.\"")
+            editor.contains("p { class: \"canvas-key-hint\", role: \"status\", \"{hint_text}\" }")
         );
+        assert_eq!(
+            CanvasHint::Focused.text(),
+            "Tab toggles the team panel. Esc or Shift+Tab leaves the map."
+        );
+    }
+
+    /// Every default binding as (binding, action), so the routing tests walk
+    /// all 38 of them.
+    fn all_defaults() -> Vec<(Keybinding, EditorAction)> {
+        let manager = KeybindingManager::new();
+        let mut all: Vec<_> = manager
+            .bindings
+            .iter()
+            .map(|(binding, action)| (binding.clone(), *action))
+            .collect();
+        all.sort_by(|a, b| format!("{:?}", a.0).cmp(&format!("{:?}", b.0)));
+        assert_eq!(all.len(), 38);
+        all
+    }
+
+    fn is_chord(binding: &Keybinding) -> bool {
+        binding.modifiers.ctrl || binding.modifiers.meta
+    }
+
+    /// Vision blocking 1 on PR 693: a single-key shortcut never fires on a
+    /// focused button or link (or any other control). Space only presses the
+    /// button; Delete, arrows, Home and End stay with the control.
+    #[test]
+    fn single_key_shortcuts_are_ignored_on_a_focused_button_or_link() {
+        let manager = KeybindingManager::new();
+        let mut single = 0;
+        for (binding, action) in all_defaults() {
+            if is_chord(&binding) {
+                continue;
+            }
+            single += 1;
+            assert_eq!(
+                manager.action_for_target(&binding, KeyTarget::Control),
+                None,
+                "{binding:?} ({action:?}) fired on a control"
+            );
+        }
+        assert_eq!(single, 34, "every single-key binding was checked");
+        for key in [
+            " ",
+            "delete",
+            "backspace",
+            "arrowleft",
+            "arrowright",
+            "home",
+            "end",
+            "k",
+        ] {
+            assert_eq!(
+                manager.action_for_target(&Keybinding::new(key), KeyTarget::Control),
+                None,
+                "{key:?}"
+            );
+        }
+    }
+
+    /// The same shortcuts all work while the map canvas holds focus, and on
+    /// the non-interactive page (body, main, panel text).
+    #[test]
+    fn every_shortcut_is_active_in_the_canvas_and_on_the_page() {
+        let manager = KeybindingManager::new();
+        for (binding, action) in all_defaults() {
+            for target in [KeyTarget::MapCanvas, KeyTarget::Page] {
+                assert_eq!(
+                    manager.action_for_target(&binding, target),
+                    Some(action),
+                    "{binding:?} on {target:?}"
+                );
+            }
+        }
+    }
+
+    /// Ctrl/Cmd chords (undo, redo, save) mean nothing to a button or link,
+    /// so they keep working after a toolbar click. A text field keeps every
+    /// key, chords too (its own undo).
+    #[test]
+    fn chords_work_on_controls_and_nothing_works_in_a_text_field() {
+        let manager = KeybindingManager::new();
+        let mut chords = 0;
+        for (binding, action) in all_defaults() {
+            assert_eq!(
+                manager.action_for_target(&binding, KeyTarget::TextEntry),
+                None,
+                "{binding:?} in a text field"
+            );
+            if is_chord(&binding) {
+                chords += 1;
+                assert_eq!(
+                    manager.action_for_target(&binding, KeyTarget::Control),
+                    Some(action),
+                    "{binding:?} on a control"
+                );
+            }
+        }
+        assert_eq!(chords, 4);
+        let save_cmd = Keybinding::new("s").with_meta();
+        assert!(shortcut_allowed(KeyTarget::Control, &save_cmd));
+        // Tab is never an editor shortcut, wherever it lands.
+        for target in [KeyTarget::MapCanvas, KeyTarget::Page, KeyTarget::Control] {
+            assert_eq!(
+                manager.action_for_target(&Keybinding::new("tab"), target),
+                None
+            );
+        }
+    }
+
+    /// The selectors name the controls Vision listed, and the classifier
+    /// checks text fields first, then the canvas, then controls.
+    #[test]
+    fn the_target_selectors_cover_buttons_links_and_fields() {
+        for part in [
+            "a[href]",
+            "button",
+            "summary",
+            "[role=button]",
+            "[role=link]",
+            "[role=tab]",
+            "[role=menuitem]",
+            "[role=checkbox]",
+            "[role=option]",
+        ] {
+            assert!(CONTROL_SELECTOR.contains(part), "{part}");
+        }
+        for part in ["input", "textarea", "select", "[contenteditable]"] {
+            assert!(TEXT_ENTRY_SELECTOR.contains(part), "{part}");
+        }
+        assert!(!CONTROL_SELECTOR.contains(MAP_CANVAS_SELECTOR));
+        let src = include_str!("keybindings.rs");
+        let body = &src[src.find("pub fn key_target(").expect("classifier")..];
+        let text = body.find("within(TEXT_ENTRY_SELECTOR)").expect("text");
+        let canvas = body.find("within(MAP_CANVAS_SELECTOR)").expect("canvas");
+        let control = body.find("within(CONTROL_SELECTOR)").expect("control");
+        assert!(text < canvas && canvas < control);
+        // The document listener resolves through the target-aware lookup.
+        let resolve = &src[src.find("pub fn from_keyboard_event(").expect("resolver")..];
+        assert!(resolve.contains("kb.action_for_target(&binding, key_target(target.as_ref()))"));
+    }
+
+    /// Vision notes 5 and 10: Esc in the canvas cancels first, then leaves.
+    #[test]
+    fn escape_cancels_what_is_in_progress_before_leaving() {
+        let esc = Keybinding::from_key(&Key::Escape, Held::empty());
+        assert_eq!(canvas_key(&esc, true), Some(CanvasKey::CancelInProgress));
+        // After the cancel nothing is in progress: the second Esc leaves.
+        assert_eq!(canvas_key(&esc, false), Some(CanvasKey::LeaveToShell));
+        // Shift+Tab leaves at once, even mid-drawing.
+        let back = Keybinding::from_key(&Key::Tab, Held::SHIFT);
+        assert_eq!(canvas_key(&back, true), Some(CanvasKey::LeaveBackwards));
+    }
+
+    #[test]
+    fn the_hint_text_follows_the_panel() {
+        assert_eq!(CanvasHint::default(), CanvasHint::Off);
+        assert_eq!(CanvasHint::Off.text(), "");
+        assert!(
+            CanvasHint::PanelToggled(true)
+                .text()
+                .starts_with("Team panel shown.")
+        );
+        assert!(
+            CanvasHint::PanelToggled(false)
+                .text()
+                .starts_with("Team panel hidden.")
+        );
+        for hint in [
+            CanvasHint::Focused,
+            CanvasHint::PanelToggled(true),
+            CanvasHint::PanelToggled(false),
+        ] {
+            assert!(
+                hint.text().ends_with("Esc or Shift+Tab leaves the map."),
+                "{hint:?}"
+            );
+        }
     }
 
     /// The web canvas takes focus by click, not by Tab. As a Tab stop it
     /// would swallow every further Tab and cut off the controls after it.
     #[test]
     fn the_map_canvas_is_not_a_tab_stop() {
-        let canvas = include_str!("components/strategy/map_canvas.rs");
-        let production = canvas.split("mod tests").next().expect("production half");
-        assert_eq!(production.matches("tabindex:").count(), 1);
-        assert!(production.contains("tabindex: \"-1\","));
+        // Vision nit 5: the desktop canvas follows the same rule as web.
+        for canvas in [
+            include_str!("components/strategy/map_canvas.rs"),
+            include_str!("components/strategy/desktop_map_canvas.rs"),
+        ] {
+            let production = canvas.split("mod tests").next().expect("production half");
+            assert_eq!(production.matches("tabindex:").count(), 1);
+            assert!(production.contains("tabindex: \"-1\","));
+            // Its Esc goes through the editor's `focus_element`, which works
+            // in the desktop webview too (`layouts::focus_script`).
+            assert!(production.contains("on_canvas_key.call(canvas_key);"));
+            assert!(production.contains("Esc or Shift+Tab leaves the map."));
+        }
     }
 
     /// The other editor shortcuts are where they were. The right panel moved

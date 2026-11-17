@@ -822,7 +822,9 @@ const PAGE_CSS: &str = r#"
         display: flex;
         flex-direction: column;
         gap: 0.28rem;
-        max-height: calc(100vh - var(--nav-height-used) - 5.5rem);
+        /* The bottom tab bar shows up to 820px, so subtract the whole
+           shell chrome (top bar plus tab bar), not just the top bar. */
+        max-height: calc(100vh - var(--shell-chrome-height, var(--nav-height-used)) - 5.5rem);
         overflow-y: auto;
         padding-right: 0.15rem;
     }

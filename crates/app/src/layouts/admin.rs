@@ -84,6 +84,7 @@ pub fn AdminLayout() -> Element {
         admin_access: allowed,
         is_admin: session.is_admin(),
         is_member: session.is_org_member(),
+        is_recruit: session.is_recruit(),
         strategies_enabled: true,
         relay_on: true,
     });
