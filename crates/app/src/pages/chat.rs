@@ -19,6 +19,12 @@ use crate::state::{use_auth, use_relay_availability_state};
 
 #[cfg(feature = "web")]
 use crate::components::chat::ChatWidget;
+#[cfg(feature = "web")]
+use crate::components::chat::chat_widget::RoomLink;
+#[cfg(feature = "web")]
+use crate::components::chat::relay_status::RelayStatus;
+#[cfg(feature = "web")]
+use crate::state::nostr::RelayConnectionState;
 
 /// The page body is not a `PageShell`: a tool has no page gutters and no
 /// content column (`--content-max-full`). The second `height` is for
@@ -57,6 +63,44 @@ fn room_title(teams: Option<&[Team]>, selected: Option<&str>) -> String {
         .unwrap_or_else(|| PAGE_TITLE.to_string())
 }
 
+/// The picker. Each option carries `selected`, so a re-render never shows
+/// the first team while the room is another's (the `value` attribute alone
+/// is set before the options exist).
+fn team_picker(list: &[Team], selected: Option<&str>, on_pick: EventHandler<String>) -> Element {
+    rsx! {
+        div { class: "chat-thread__team",
+            label { class: "field-label", r#for: TEAM_SELECT_ID, "Team" }
+            select {
+                id: TEAM_SELECT_ID,
+                class: "field-input",
+                value: selected.unwrap_or_default(),
+                onchange: move |evt| on_pick.call(evt.value()),
+                for team in list.iter() {
+                    option {
+                        key: "{team.id}",
+                        value: "{team.id}",
+                        selected: selected == Some(team.id.as_str()),
+                        "{team.name}"
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The thread: one region and one head bar for every state of the page.
+/// Only `body` changes between states and teams, so the head bar and its
+/// picker stay mounted (and keep focus) when the room is swapped.
+fn thread(title: String, status: Option<Element>, toolbar: Element, body: Element) -> Element {
+    let label = thread_label(&title);
+    rsx! {
+        section { class: "chat-thread", aria_label: "{label}",
+            ThreadHead { title, status, toolbar }
+            {body}
+        }
+    }
+}
+
 #[component]
 pub fn TeamChat() -> Element {
     let relay = use_relay_availability_state();
@@ -71,6 +115,13 @@ pub fn TeamChat() -> Element {
         }
     });
     let mut selected_team = use_signal(|| Option::<String>::None);
+    #[cfg(feature = "web")]
+    let room = RoomLink {
+        state: use_signal(|| RelayConnectionState::Connecting),
+        retry: use_signal(|| 0u32),
+    };
+    #[cfg(not(feature = "web"))]
+    let room: RoomArg = ();
 
     let channels = use_api_with::<Vec<TeamChannel>>(move || {
         if !relay.current().allows_connection() {
@@ -110,125 +161,133 @@ pub fn TeamChat() -> Element {
     // region, so it is in the bar in every state.
     let toolbar = rsx! {
         if let Some(list) = team_list.filter(|list| !list.is_empty()) {
-            div { class: "chat-thread__team",
-                label { class: "field-label", r#for: TEAM_SELECT_ID, "Team" }
-                select {
-                    id: TEAM_SELECT_ID,
-                    class: "field-input",
-                    value: selected.clone().unwrap_or_default(),
-                    onchange: move |evt| selected_team.set(Some(evt.value())),
-                    for team in list.iter() {
-                        option { value: "{team.id}", "{team.name}" }
-                    }
+            {team_picker(list, selected.as_deref(), EventHandler::new(move |id: String| {
+                if selected_team.peek().as_deref() == Some(id.as_str()) {
+                    return;
                 }
-            }
+                // The next room has not dialled yet.
+                #[cfg(feature = "web")]
+                {
+                    let mut state = room.state;
+                    state.set(RelayConnectionState::Connecting);
+                }
+                selected_team.set(Some(id));
+            }))}
         }
         {list_cap_notice(&teams, "teams")}
+    };
+
+    let (body, live) = match team_list {
+        None => (state_body(member_pending(&auth(), &teams, "teams")), false),
+        Some(list) if list.is_empty() => (
+            state_body(rsx! {
+                EmptyCard {
+                    title: "No teams yet",
+                    message: "No teams exist yet, so there are no chat channels to open.",
+                }
+            }),
+            false,
+        ),
+        Some(_) => room_body(&auth(), selected, &channels, room),
+    };
+    #[cfg(feature = "web")]
+    let status = live.then(|| {
+        let mut retry = room.retry;
+        rsx! {
+            RelayStatus {
+                state: (room.state)(),
+                on_retry: move |_| retry += 1,
+            }
+        }
+    });
+    #[cfg(not(feature = "web"))]
+    let status: Option<Element> = {
+        let _ = live;
+        None
     };
 
     rsx! {
         crate::styles::StyleOnce { id: "scuffed-css-pages-chat-page-css", css: PAGE_CSS }
         div { class: "team-chat",
-            {match team_list {
-                None => state_thread(title, toolbar, member_pending(&auth(), &teams, "teams")),
-                Some(list) if list.is_empty() => state_thread(
-                    title,
-                    toolbar,
-                    rsx! {
-                        EmptyCard {
-                            title: "No teams yet",
-                            message: "No teams exist yet, so there are no chat channels to open.",
-                        }
-                    },
-                ),
-                Some(_) => room(&auth(), title, toolbar, selected, &channels),
-            }}
+            {thread(title, status, toolbar, body)}
         }
     }
 }
 
-/// The thread in a state with no live room: the head bar, then a wall, an
-/// empty card or a status line where the messages will be.
-fn state_thread(title: String, toolbar: Element, body: Element) -> Element {
-    let label = thread_label(&title);
+/// A state with no live room: a wall, an empty card or a status line where
+/// the messages will be.
+fn state_body(body: Element) -> Element {
     rsx! {
-        section { class: "chat-thread", aria_label: "{label}",
-            ThreadHead { title, toolbar }
-            div { class: "chat-thread__body", {body} }
-        }
+        div { class: "chat-thread__body", {body} }
     }
 }
 
-fn room(
+#[cfg(feature = "web")]
+type RoomArg = RoomLink;
+#[cfg(not(feature = "web"))]
+type RoomArg = ();
+
+/// The body under the head bar, and whether it is a live room (whose
+/// connection the head bar then shows).
+fn room_body(
     auth: &AuthState,
-    title: String,
-    toolbar: Element,
     selected: Option<String>,
     channels: &ApiResource<Vec<TeamChannel>>,
-) -> Element {
+    room: RoomArg,
+) -> (Element, bool) {
     let Some(team_key) = selected else {
-        return state_thread(
-            title,
-            toolbar,
-            rsx! {
+        return (
+            state_body(rsx! {
                 p { class: "chat-thread__note", "Select a team to load channels." }
-            },
+            }),
+            false,
         );
     };
     match channels.data.read().as_ref().and_then(|d| d.as_ref()) {
-        None => state_thread(
-            title,
-            toolbar,
-            member_pending(auth, channels, "team channels"),
+        None => (
+            state_body(member_pending(auth, channels, "team channels")),
+            false,
         ),
         Some(ch) => {
             let active: Vec<TeamChannel> = ch.iter().filter(|c| c.is_active).cloned().collect();
             if active.is_empty() {
-                state_thread(
-                    title,
-                    toolbar,
-                    rsx! {
+                (
+                    state_body(rsx! {
                         EmptyCard {
                             title: "No chat channels",
                             message: "No active chat channels for this team. \
                                 An admin can provision them from team settings.",
                         }
-                    },
+                    }),
+                    false,
                 )
             } else {
-                team_chat_panel(team_key, active, title, toolbar)
+                team_chat_panel(team_key, active, room)
             }
         }
     }
 }
 
-fn team_chat_panel(
-    team_key: String,
-    channels: Vec<TeamChannel>,
-    title: String,
-    toolbar: Element,
-) -> Element {
+/// The room is keyed by team: another team is another socket and another
+/// message list. Only this body remounts; the head bar above it does not.
+fn team_chat_panel(team_key: String, channels: Vec<TeamChannel>, room: RoomArg) -> (Element, bool) {
     #[cfg(feature = "web")]
     {
-        rsx! {
-            ChatWidget {
-                key: "{team_key}",
-                channels: channels,
-                embedded: true,
-                title: title,
-                toolbar: toolbar,
-            }
-        }
+        (
+            rsx! {
+                ChatWidget { key: "{team_key}", channels, room }
+            },
+            true,
+        )
     }
     #[cfg(not(feature = "web"))]
     {
-        let _ = (team_key, channels);
-        state_thread(
-            title,
-            toolbar,
-            rsx! {
+        let _ = (team_key, channels, room);
+        (
+            state_body(rsx! {
                 p { class: "chat-thread__note", "Team chat is available in the web app." }
-            },
+            }),
+            false,
         )
     }
 }
@@ -273,23 +332,125 @@ mod tests {
     }
 
     fn empty_state() -> Element {
-        state_thread(
+        let teams = vec![team("team:a", "Squad Alpha")];
+        thread(
             "Squad Alpha".to_string(),
-            rsx! {
-                div { class: "chat-thread__team",
-                    label { class: "field-label", r#for: TEAM_SELECT_ID, "Team" }
-                    select { id: TEAM_SELECT_ID, class: "field-input",
-                        option { value: "team:a", "Squad Alpha" }
-                    }
-                }
-            },
-            rsx! {
+            None,
+            team_picker(&teams, Some("team:a"), EventHandler::new(|_| {})),
+            state_body(rsx! {
                 EmptyCard {
                     title: "No chat channels",
                     message: "No active chat channels for this team.",
                 }
+            }),
+        )
+    }
+
+    #[test]
+    fn the_picked_team_is_the_selected_option() {
+        fn probe() -> Element {
+            let teams = vec![team("team:a", "Squad Alpha"), team("team:b", "Squad Bravo")];
+            team_picker(&teams, Some("team:b"), EventHandler::new(|_| {}))
+        }
+        let mut dom = VirtualDom::new(probe);
+        dom.rebuild_in_place();
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("<option value=\"team:b\" selected=true>Squad Bravo</option>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<option value=\"team:a\">Squad Alpha</option>"),
+            "only the picked team is selected: {html}"
+        );
+    }
+
+    thread_local! {
+        static PICKED: std::cell::Cell<&'static str> = const { std::cell::Cell::new("team:a") };
+    }
+
+    /// The page's shape: one thread, the picker in its head bar, and a body
+    /// keyed by team the way `team_chat_panel` keys the room.
+    fn switching_probe() -> Element {
+        let picked = PICKED.with(|p| p.get());
+        let teams = vec![team("team:a", "Squad Alpha"), team("team:b", "Squad Bravo")];
+        let title = room_title(Some(teams.as_slice()), Some(picked));
+        thread(
+            title,
+            None,
+            team_picker(&teams, Some(picked), EventHandler::new(|_| {})),
+            rsx! {
+                ProbeRoom { key: "{picked}", picked }
             },
         )
+    }
+
+    /// Stands in for the keyed `ChatWidget`.
+    #[component]
+    fn ProbeRoom(picked: String) -> Element {
+        rsx! {
+            div { class: "probe-room", "{picked}" }
+        }
+    }
+
+    #[test]
+    fn switching_team_remounts_the_room_but_not_the_picker() {
+        use dioxus::dioxus_core::{Mutation, Mutations};
+        PICKED.with(|p| p.set("team:a"));
+        let mut dom = VirtualDom::new(switching_probe);
+        let mut first = Mutations::default();
+        dom.rebuild(&mut first);
+        let select = first
+            .edits
+            .iter()
+            .find_map(|m| match m {
+                Mutation::NewEventListener { name, id } if name == "change" => Some(*id),
+                _ => None,
+            })
+            .expect("the picker listens for change");
+
+        PICKED.with(|p| p.set("team:b"));
+        dom.mark_dirty(ScopeId::APP);
+        let next = dom.render_immediate_to_vec();
+        assert!(
+            next.edits
+                .iter()
+                .any(|m| matches!(m, Mutation::ReplaceWith { .. })),
+            "the keyed room is replaced: {:?}",
+            next.edits
+        );
+        assert!(
+            !next.edits.iter().any(|m| matches!(
+                m,
+                Mutation::NewEventListener { name, .. } if name == "change"
+            )),
+            "a new picker was mounted, so focus would drop: {:?}",
+            next.edits
+        );
+        for edit in &next.edits {
+            match edit {
+                Mutation::ReplaceWith { id, .. } | Mutation::Remove { id } => {
+                    assert_ne!(*id, select, "the picker was remounted: {:?}", next.edits)
+                }
+                Mutation::RemoveEventListener { id, .. } => {
+                    assert_ne!(
+                        *id, select,
+                        "the picker lost its listener: {:?}",
+                        next.edits
+                    )
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            next.edits.iter().any(|m| matches!(
+                m,
+                Mutation::SetAttribute { name: "selected", id, .. } if *id != select
+            )),
+            "the options follow the pick: {:?}",
+            next.edits
+        );
+        PICKED.with(|p| p.set("team:a"));
     }
 
     #[test]
@@ -309,7 +470,7 @@ mod tests {
             "the picker has a visible label: {html}"
         );
         assert!(
-            html.contains("<select id=\"team-chat-team\" class=\"field-input\">"),
+            html.contains("<select id=\"team-chat-team\" class=\"field-input\""),
             "{html}"
         );
         assert!(html.contains("<h2>No chat channels</h2>"), "{html}");
@@ -350,7 +511,18 @@ mod tests {
             "the shell owns <main id=\"main\">"
         );
         assert!(!prod.contains("h1 {"), "the H1 comes from ThreadHead");
-        assert!(prod.contains("embedded: true"));
-        assert!(prod.contains("key: \"{team_key}\""));
+        assert!(prod.contains("ChatWidget { key: \"{team_key}\", channels, room }"));
+        assert_eq!(
+            prod.matches("ThreadHead {").count(),
+            1,
+            "one head bar, outside the keyed room"
+        );
+        let widget = include_str!("../components/chat/chat_widget.rs");
+        let widget = widget.split("mod tests").next().expect("production source");
+        assert!(!widget.contains("ThreadHead"), "the room draws no head bar");
+        assert!(
+            !widget.contains("toolbar"),
+            "the picker is not inside the room"
+        );
     }
 }

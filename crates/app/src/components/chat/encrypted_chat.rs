@@ -56,6 +56,9 @@ pub enum KeyMode {
     External,
     /// No key available: cannot participate in encrypted channels.
     None,
+    /// The account has not loaded yet, so it is not known whether there is
+    /// a key. Says so instead of flashing the no-key card.
+    Checking,
 }
 
 /// Encrypted chat wrapper that handles NIP-44 channel display.
@@ -83,6 +86,11 @@ pub fn EncryptedChat(
                 "Encrypted"
             }
             match key_mode {
+                KeyMode::Checking => rsx! {
+                    div { class: "encrypted-chat__no-key",
+                        p { class: "chat-thread__note", "Checking your chat key." }
+                    }
+                },
                 KeyMode::None => rsx! {
                     div { class: "encrypted-chat__no-key",
                         EmptyCard {
@@ -142,6 +150,15 @@ mod tests {
         assert!(!html.contains("<main"), "{html}");
         assert!(!html.contains("<input"), "{html}");
         assert!(!html.contains("role=\"log\""), "{html}");
+    }
+
+    #[test]
+    fn a_loading_account_does_not_flash_the_no_key_card() {
+        let html = render(KeyMode::Checking);
+        assert!(html.contains("Checking your chat key."), "{html}");
+        assert!(!html.contains("Nostr keypair"), "{html}");
+        assert!(!html.contains("empty-card"), "{html}");
+        assert!(!html.contains("<input"), "{html}");
     }
 
     #[test]
