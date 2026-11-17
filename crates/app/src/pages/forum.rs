@@ -155,6 +155,14 @@ pub(crate) const FORUM_CSS: &str = r#"
   outline: var(--focus-ring-width) solid var(--focus-ring);
   outline-offset: var(--focus-ring-offset);
 }
+/* A category name and its description read as one heading group, a stack
+   step above its boards. */
+.forum-cat-head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
 .forum-cat-desc {
   margin: 0;
   color: var(--text-3);
@@ -173,6 +181,15 @@ pub(crate) const FORUM_CSS: &str = r#"
   align-items: start;
 }
 .forum-thread-main { min-width: 0; }
+/* The frame trims the row title to its cap height and sets the starter line
+   right under it, so a row is one compact block. */
+.forum-thread-row h2 {
+  text-box-trim: trim-both;
+  text-box-edge: cap alphabetic;
+}
+.forum-thread-row .entry-meta { margin-top: 0; }
+/* The pager sits a page block under the list, as on the frame. */
+.forum-thread-list { gap: var(--space-section); }
 .forum-thread-row .forum-thread-stats { white-space: nowrap; }
 
 /* A line of plain words under a title or a list ("This board is locked"). */
@@ -191,7 +208,7 @@ pub(crate) const FORUM_CSS: &str = r#"
 
 /* A long trail (Forum / parent board / board / thread) wraps on a phone
    instead of pushing the page sideways. */
-.forum-page .article-crumb { flex-wrap: wrap; }
+.forum-page .article-crumb { flex-wrap: wrap; row-gap: 0; }
 
 /* The new thread form and the reply form: one card, fields a group apart. */
 .forum-form {
@@ -346,9 +363,11 @@ fn render_category(cat: &ForumCategoryNode) -> Element {
             key: "{cat.category.id}",
             class: "ui-stack",
             aria_labelledby: "{heading_id}",
-            h2 { id: "{heading_id}", class: "ui-section-title", "{cat.category.name}" }
-            if let Some(desc) = shown_text(cat.category.description.as_deref()) {
-                p { class: "forum-cat-desc", "{desc}" }
+            div { class: "forum-cat-head",
+                h2 { id: "{heading_id}", class: "ui-section-title", "{cat.category.name}" }
+                if let Some(desc) = shown_text(cat.category.description.as_deref()) {
+                    p { class: "forum-cat-desc", "{desc}" }
+                }
             }
             if cat.boards.is_empty() {
                 p { class: "forum-cat-desc", "No boards in this category yet." }
@@ -683,7 +702,7 @@ fn BoardView(
             } else {
                 section {
                     id: THREAD_LIST_ID,
-                    class: "ui-stack pager-target",
+                    class: "ui-stack forum-thread-list pager-target",
                     tabindex: "-1",
                     aria_label: "Threads",
                     {match &load {
@@ -1100,7 +1119,7 @@ mod tests {
         assert!(!html.contains("<main"), "{html}");
         assert!(
             html.contains(
-                "<section class=\"ui-stack\" aria-labelledby=\"forum-cat-community\"><h2 id=\"forum-cat-community\" class=\"ui-section-title\">Community</h2><p class=\"forum-cat-desc\">Open boards.</p>"
+                "<section class=\"ui-stack\" aria-labelledby=\"forum-cat-community\"><div class=\"forum-cat-head\"><h2 id=\"forum-cat-community\" class=\"ui-section-title\">Community</h2><p class=\"forum-cat-desc\">Open boards.</p></div>"
             ),
             "{html}"
         );
@@ -1429,7 +1448,7 @@ mod tests {
             assert!(html.contains("id=\"forum-thread-pager-meta\""), "{html}");
             assert!(
                 html.contains(
-                    "<section id=\"forum-thread-list\" class=\"ui-stack pager-target\" tabindex=\"-1\" aria-label=\"Threads\">"
+                    "<section id=\"forum-thread-list\" class=\"ui-stack forum-thread-list pager-target\" tabindex=\"-1\" aria-label=\"Threads\">"
                 ),
                 "{html}"
             );

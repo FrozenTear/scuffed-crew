@@ -50,7 +50,7 @@ const CARD_CSS: &str = r#"
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2);
-  margin: 0 0 var(--space-3);
+  margin: 0 0 var(--space-4);
   color: var(--text-3);
   font-family: var(--font-body);
   font-size: var(--text-sm);
@@ -144,9 +144,13 @@ pub fn PostCard(
         article { class: "post-card", aria_label: "Post by {author}",
             p { class: "post-author-line",
                 span { class: "post-avatar", aria_hidden: "true", "{avatar}" }
-                span { class: "post-author", "{author}" }
+                span { class: "post-author",
+                    "{author}"
+                    if stamp.is_some() {
+                        span { aria_hidden: "true", " ·" }
+                    }
+                }
                 if let Some(stamp) = stamp {
-                    span { aria_hidden: "true", "·" }
                     time { class: "post-time", datetime: "{stamp.datetime}", "{stamp.text}" }
                 }
             }

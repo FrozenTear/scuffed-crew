@@ -241,11 +241,27 @@ const PAGE_CSS: &str = r#"
   gap: var(--space-2);
   min-width: 0;
 }
+/* The frame's hero label is plain body text beside the select. */
+.members-hero .field-label {
+  font-family: var(--font-body);
+  font-size: var(--text-md);
+  font-weight: var(--font-body-weight);
+}
+/* The frame's select: strong edge on the surface, body text. */
 .members-hero .ui-field {
   box-sizing: border-box;
   width: auto;
   max-width: 100%;
   min-height: var(--hit-target-min);
+  background: var(--surface);
+  border-color: var(--border-strong);
+  font-size: var(--text-md);
+  font-weight: var(--font-body-weight);
+}
+.members-hero .ui-field:focus { border-color: var(--accent-solid); }
+/* The frame puts a section gap between the grid and the pager. */
+.members-page .pager-target > .pager {
+  margin-top: calc(var(--space-section) - var(--space-stack));
 }
 .members-note {
   margin: 0;
@@ -1036,6 +1052,21 @@ mod tests {
         assert!(
             has_decl(&select, "min-height: var(--hit-target-min)"),
             "{select}"
+        );
+        assert!(
+            has_decl(&select, "border-color: var(--border-strong)"),
+            "{select}"
+        );
+        assert!(has_decl(&select, "background: var(--surface)"), "{select}");
+        let label = css_rule(PAGE_CSS, ".members-hero .field-label {");
+        assert!(has_decl(&label, "font-size: var(--text-md)"), "{label}");
+        let pager = css_rule(PAGE_CSS, ".members-page .pager-target > .pager {");
+        assert!(
+            has_decl(
+                &pager,
+                "margin-top: calc(var(--space-section) - var(--space-stack))"
+            ),
+            "{pager}"
         );
         // The role line keeps the frame's paragraph margin.
         assert!(

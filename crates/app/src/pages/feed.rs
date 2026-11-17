@@ -9,7 +9,7 @@ use scuffed_api_client::ApiClient;
 const PAGE_CSS: &str = r#"
 .feed-page .feed-list {
   display: grid;
-  gap: var(--space-3);
+  gap: var(--space-section);
   min-width: 0;
 }
 .feed-page .feed-clear { align-self: flex-start; }

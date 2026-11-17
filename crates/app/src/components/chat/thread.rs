@@ -66,7 +66,9 @@ pub const THREAD_CSS: &str = r#"
   min-width: 0;
   max-width: 100%;
 }
-/* Page states with no room yet: a wall, an empty card or a status line. */
+/* Page states with no room yet: a wall, an empty card or a status line.
+   Same side gutter as the head and the message list, so the card's edge
+   lines up with the H1. */
 .chat-thread__body {
   box-sizing: border-box;
   flex: 1 1 auto;
@@ -75,7 +77,7 @@ pub const THREAD_CSS: &str = r#"
   display: flex;
   flex-direction: column;
   gap: var(--space-stack);
-  padding: var(--space-section) var(--space-page);
+  padding: var(--space-section) var(--space-card-pad);
   background: var(--bg);
 }
 .chat-thread__note {
@@ -197,7 +199,7 @@ mod tests {
         let body = css_rule(THREAD_CSS, ".chat-thread__body {");
         assert!(has_decl(&body, "overflow-y: auto"), "{body}");
         assert!(
-            has_decl(&body, "padding: var(--space-section) var(--space-page)"),
+            has_decl(&body, "padding: var(--space-section) var(--space-card-pad)"),
             "{body}"
         );
     }

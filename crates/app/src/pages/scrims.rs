@@ -71,7 +71,6 @@ const PAGE_CSS: &str = r#"
   border-radius: var(--card-radius);
   box-shadow: var(--card-shadow);
 }
-.scrim-form-title { margin-bottom: var(--space-4); }
 .scrim-form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -123,7 +122,7 @@ const PAGE_CSS: &str = r#"
 }
 .scrim-card-body { min-width: 0; }
 .scrim-card-title {
-  margin: 0 0 var(--space-2);
+  margin: 0 0 var(--space-1);
   font-family: var(--font-head);
   font-size: var(--text-lg);
   font-weight: var(--font-label-weight);
@@ -149,11 +148,11 @@ const PAGE_CSS: &str = r#"
   display: flex;
   flex-wrap: wrap;
   gap: 0 var(--space-2);
-  margin-top: var(--space-1);
 }
-.scrim-card-meta > * + *::before {
+/* The dot trails each item, so a wrapped line never starts with one. */
+.scrim-card-meta > :not(:last-child)::after {
   content: "·";
-  margin-inline-end: var(--space-2);
+  margin-inline-start: var(--space-2);
 }
 .scrim-card-actions {
   display: flex;

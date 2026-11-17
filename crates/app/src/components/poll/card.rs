@@ -43,15 +43,16 @@ pub(crate) const CARD_CSS: &str = r#"
   display: flex;
   flex-wrap: wrap;
   gap: 0 var(--space-2);
-  margin: var(--space-3) 0 var(--space-4);
+  margin: var(--space-4) 0;
   color: var(--text-3);
   font-family: var(--font-body);
   font-size: var(--text-sm);
   line-height: var(--leading-body);
 }
-.poll-card-meta > * + *::before {
+/* The dot trails each item, so a wrapped line never starts with one. */
+.poll-card-meta > :not(:last-child)::after {
   content: "·";
-  margin-inline-end: var(--space-2);
+  margin-inline-start: var(--space-2);
 }
 .poll-options {
   list-style: none;

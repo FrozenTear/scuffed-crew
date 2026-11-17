@@ -170,6 +170,8 @@ const PAGE_CSS: &str = r#"
   letter-spacing: var(--font-head-tracking);
   line-height: var(--leading-ui);
   font-variant-numeric: tabular-nums;
+  text-box-trim: trim-both;
+  text-box-edge: cap alphabetic;
 }
 /* Words in place of a number: body size, muted ink. */
 .community-stat dd.is-missing {
@@ -190,6 +192,7 @@ const PAGE_CSS: &str = r#"
 .community-officer .btn { align-self: flex-start; }
 @media (max-width: 820px) {
   .community-stats { grid-template-columns: minmax(0, 1fr); }
+  .community-stat { padding: var(--space-2); }
 }
 "#;
 

@@ -42,7 +42,7 @@ const ENCRYPTED_CHAT_CSS: &str = r#"
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
-  padding: var(--space-section) var(--space-page);
+  padding: var(--space-section) var(--space-card-pad);
   background: var(--bg);
 }
 "#;

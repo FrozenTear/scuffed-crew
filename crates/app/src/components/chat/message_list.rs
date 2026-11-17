@@ -10,10 +10,11 @@ use dioxus::prelude::*;
 use crate::util::truncate_chars;
 use scuffed_types::nostr::ChatMessage;
 
-/// The scroller is a reversed column around one inner column. That keeps the
-/// newest message at the bottom edge and short rooms bottom aligned, while the
-/// oldest message stays reachable (a `justify-content: flex-end` scroller
-/// cuts the top off). The DOM order stays oldest to newest.
+/// The scroller is a plain top-down column around one inner column, the same
+/// scroll behaviour as before the redesign: oldest first, no scroll pinning.
+/// A short room sits at the bottom edge (as in the frame) through the inner
+/// column's auto top margin, which, unlike `justify-content: flex-end`, never
+/// cuts off the top of a long room. The DOM order stays oldest to newest.
 const MESSAGE_LIST_CSS: &str = r#"
 .chat-messages {
   box-sizing: border-box;
@@ -22,7 +23,7 @@ const MESSAGE_LIST_CSS: &str = r#"
   min-height: 0;
   overflow-y: auto;
   display: flex;
-  flex-direction: column-reverse;
+  flex-direction: column;
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-body);
@@ -34,6 +35,7 @@ const MESSAGE_LIST_CSS: &str = r#"
 .chat-messages__inner {
   box-sizing: border-box;
   flex: 0 0 auto;
+  margin-top: auto;
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -415,7 +417,7 @@ mod tests {
             "flex: 1 1 auto",
             "min-height: 0",
             "overflow-y: auto",
-            "flex-direction: column-reverse",
+            "flex-direction: column",
             "background: var(--bg)",
         ] {
             assert!(has_decl(&list, decl), "missing {decl}: {list}");
