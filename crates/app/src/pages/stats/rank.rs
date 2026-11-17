@@ -1184,9 +1184,9 @@ fn status_text(series: &RankSeries, rows: &[ChartRow]) -> String {
 }
 
 // Blizzard's official career-profile rank emblems, kept in the repo byte for
-// byte as the design sources ship them (`ux-spec/gen/rank-icons/`). They may
-// be scaled in CSS and never recoloured, cropped or edited. A test holds each
-// source file to its byte length.
+// byte as Blizzard ships them (see `assets/rank-icons/LICENCE-NOTE.md`). They
+// may be scaled in CSS and never recoloured, cropped or edited. A test pins
+// each file's length and hash. Wherever one shows, [`credit`] shows once.
 /// The emblem folder, hash-free like the fonts. Note: `dx build --release`
 /// repacks every PNG losslessly (file bytes change, decoded pixels do not),
 /// for folder and image assets alike, as it does for the favicons.
@@ -1233,10 +1233,16 @@ fn emblem(tier: Option<usize>, large: bool) -> Element {
     }
 }
 
-/// The 12px credit Blizzard's terms ask for, at the end of the section.
+/// The notice Blizzard's fansite terms ask for, in the small muted footnote
+/// style. The emblems only render inside [`RankChart`], which is on a page at
+/// most once, so the chart renders this once, and only when an emblem shows.
+pub(super) const EMBLEM_CREDIT: &str = "Overwatch rank emblems \u{a9} Blizzard Entertainment, Inc. \
+     Overwatch and Blizzard are trademarks of Blizzard Entertainment, Inc.";
+
+/// The credit line, at the end of the section.
 fn credit() -> Element {
     rsx! {
-        p { class: "rank-chart-credit", "Rank emblems \u{a9} Blizzard Entertainment, Inc." }
+        p { class: "rank-chart-credit", "{EMBLEM_CREDIT}" }
     }
 }
 
@@ -2275,7 +2281,11 @@ pub(super) fn RankChart(
                     {data_table(&rows, &caption, table_open)}
                 }
             }
-            {credit()}
+            // Any placed game puts emblems on the y axis (and in the cards,
+            // readout and table); with none, every slot is empty.
+            if !placed.is_empty() {
+                {credit()}
+            }
         }
     }
 }
@@ -3224,7 +3234,9 @@ mod tests {
         // Legend and credit.
         assert!(html.contains("Rank change"), "{html}");
         assert!(
-            html.contains("<p class=\"rank-chart-credit\">Rank emblems \u{a9} Blizzard Entertainment, Inc.</p>"),
+            html.contains(&format!(
+                "<p class=\"rank-chart-credit\">{EMBLEM_CREDIT}</p>"
+            )),
             "{html}"
         );
         let credit_at = html.find("rank-chart-credit").unwrap();
@@ -3591,6 +3603,104 @@ mod tests {
                 "{}",
                 &size[..30]
             );
+        }
+    }
+
+    /// FrozenTear's decision on Vision 705 B2: the emblems stay, and every
+    /// page that shows one carries Blizzard's notice once, as a muted
+    /// footnote. The wording is pinned here.
+    #[test]
+    fn the_emblem_credit_is_blizzards_notice() {
+        assert_eq!(
+            EMBLEM_CREDIT,
+            "Overwatch rank emblems \u{a9} Blizzard Entertainment, Inc. Overwatch and Blizzard are trademarks of Blizzard Entertainment, Inc."
+        );
+        let credit = css_rule(RANK_CHART_CSS, ".rank-chart-credit {");
+        assert!(has_decl(&credit, "font-size: var(--text-xs)"), "{credit}");
+        assert!(has_decl(&credit, "color: var(--text-3)"), "{credit}");
+    }
+
+    /// The credit shows once when an emblem shows, and not at all when no
+    /// emblem does: no games, only unplaced games, or still loading.
+    #[test]
+    fn the_credit_shows_once_exactly_when_emblems_show() {
+        let credit_tag = format!("<p class=\"rank-chart-credit\">{EMBLEM_CREDIT}</p>");
+        // Placed games: emblems on the axis and the cards, one credit.
+        for html in [
+            render_chart(vec![series_of(&POPULATED)]),
+            render_chart(vec![series_of(&POPULATED[..1])]),
+            render_chart(vec![series_of(&unplaced_games())]),
+            render_chart(vec![
+                series_of(&POPULATED),
+                RankSeries {
+                    role: Some(RankRole::Tank),
+                    ..series_of(&POPULATED[..3])
+                },
+            ]),
+        ] {
+            assert!(html.contains("rank-icons/rank-"), "{html}");
+            assert_eq!(html.matches(&credit_tag).count(), 1, "{html}");
+            assert_eq!(html.matches("Blizzard").count(), 3, "{html}");
+        }
+        // No emblem anywhere: no credit.
+        let none: [Game; 2] = [
+            (2, "Emerlad", Some(3), Some(40), None),
+            (3, "Platnum", Some(3), Some(62), Some("win")),
+        ];
+        for html in [
+            render_chart(vec![]),
+            render_chart(vec![series_of(&[])]),
+            render_chart(vec![series_of(&none)]),
+        ] {
+            assert!(!html.contains("rank-icons/"), "{html}");
+            assert!(!html.contains("rank-chart-credit"), "{html}");
+            assert!(!html.contains("Blizzard"), "{html}");
+        }
+        let mut dom = VirtualDom::new(RankChartLoading);
+        dom.rebuild_in_place();
+        let loading = dioxus_ssr::render(&dom);
+        assert!(!loading.contains("rank-icons/"), "{loading}");
+        assert!(!loading.contains("Blizzard"), "{loading}");
+    }
+
+    /// The emblems render only from this file, inside [`RankChart`], and a
+    /// page holds at most one chart, so the credit is once per page and no
+    /// other page shows an emblem without it.
+    #[test]
+    fn emblems_render_only_in_the_rank_chart() {
+        fn walk(dir: &std::path::Path, hits: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).expect("src dir").flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, hits);
+                } else if path.extension().is_some_and(|e| e == "rs")
+                    && !path.ends_with("pages/stats/rank.rs")
+                {
+                    let text = std::fs::read_to_string(&path).unwrap_or_default();
+                    if text.contains("rank-icons") || text.contains("EMBLEM_DIR") {
+                        hits.push(path.display().to_string());
+                    }
+                }
+            }
+        }
+        let mut hits = Vec::new();
+        walk(
+            std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src")),
+            &mut hits,
+        );
+        assert!(hits.is_empty(), "emblems used outside rank.rs: {hits:?}");
+
+        let prod = include_str!("rank.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap();
+        assert_eq!(prod.matches("{credit()}").count(), 1);
+        for (name, page) in [
+            ("overview", include_str!("overview.rs")),
+            ("history", include_str!("history.rs")),
+        ] {
+            let page = page.split("#[cfg(test)]").next().unwrap();
+            assert_eq!(page.matches("RankChart {").count(), 1, "{name}");
         }
     }
 
