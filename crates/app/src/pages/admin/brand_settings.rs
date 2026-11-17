@@ -70,15 +70,14 @@ impl BrandDraft {
 
     /// True when this draft differs from what the server stored, so
     /// leaving the page would drop it.
-    /// Two spellings of one colour (`#46D8A4`, `46d8a4`, `#46d8a4`) are
-    /// the same accent, so retyping the stored value is not an edit.
+    /// Two spellings of one colour (another letter case, no `#`, the short
+    /// form) are the same accent, so retyping the stored value is not an edit.
+    ///
+    /// The same "changed" rules as [`save_body`]: the accent through
+    /// [`accent_changed`], the font by value. A draft is unsaved exactly when
+    /// Save would send at least one key.
     fn is_unsaved(&self, saved: &SavedBrand) -> bool {
-        let stored = Self::from_saved(saved);
-        let same_accent = match (normalize_hex(&self.accent), normalize_hex(&stored.accent)) {
-            (Some(a), Some(b)) => a == b,
-            _ => self.accent.trim() == stored.accent.trim(),
-        };
-        !same_accent || self.font != stored.font
+        accent_changed(self, saved) || self.font != saved.font
     }
 
     fn product_default() -> Self {
@@ -542,8 +541,8 @@ mod tests {
     use crate::components::ToastProvider;
     use crate::state::AuthState;
     use crate::theme::brand::{
-        TEST_BLOCKED_ACCENT, TEST_EDGELESS_ACCENT, TEST_INVALID_ACCENTS, TEST_MINT_ACCENT,
-        TEST_OTHER_ACCENT, TEST_SHORT_ACCENT,
+        TEST_BLOCKED_ACCENT, TEST_EDGELESS_ACCENT, TEST_FILL_ONLY_ACCENT, TEST_INVALID_ACCENTS,
+        TEST_MINT_ACCENT, TEST_OTHER_ACCENT, TEST_SHORT_ACCENT,
     };
     use scuffed_types::{OrgRole, UserInfo};
 
@@ -1176,6 +1175,33 @@ mod tests {
         assert!(button.contains("aria-disabled=\"false\""), "{button}");
         assert!(!button.contains("brand-accent-reason"), "{button}");
 
+        // A stored accent that fails only the 3:1 button fill floor (the
+        // historical purple; its text and ink pairs pass) does not lock a
+        // font-only Save either.
+        let purple = saved(TEST_FILL_ONLY_ACCENT);
+        let purple_check = Verdict::of(&BrandDraft::from_saved(&purple), &purple).check;
+        assert!(purple_check.dark.text_passes() && purple_check.dark.ink_passes());
+        assert!(purple_check.light.text_passes() && purple_check.light.ink_passes());
+        assert!(
+            !purple_check.dark.fill_passes() || !purple_check.light.fill_passes(),
+            "only the fill floor fails"
+        );
+        let reason = purple_check
+            .fail_reason()
+            .expect("blocked by the fill floor");
+        assert!(reason.contains("3:1"), "{reason}");
+        let mut purple_font = BrandDraft::from_saved(&purple);
+        purple_font.font = DisplayFont::IbmPlexSans;
+        let body = save_body(&purple_font, &purple).expect("a font-only Save is not locked");
+        assert_eq!(body_keys(&body), ["brand_font_display"]);
+        let html = render_with_draft(purple.clone(), purple_font);
+        assert!(
+            save_button(&html).contains("aria-disabled=\"false\""),
+            "{html}"
+        );
+        // Typing that purple as a new accent is still locked by the fill floor.
+        assert!(save_body(&draft(TEST_FILL_ONLY_ACCENT), &stored).is_none());
+
         // Changing the accent to another failing one still locks Save.
         let mut other = BrandDraft::from_saved(&stored);
         other.accent = TEST_BLOCKED_ACCENT.to_uppercase();
@@ -1217,6 +1243,51 @@ mod tests {
             same.accent = typed.clone();
             let body = save_body(&same, &pack).expect("passing");
             assert_eq!(body_keys(&body), ["brand_font_display"], "{typed}");
+        }
+    }
+
+    /// The leave guard (`is_unsaved`) and Save agree on "changed": a draft
+    /// is unsaved exactly when its Save body would carry a key.
+    #[test]
+    fn the_leave_guard_and_save_agree_on_what_changed() {
+        let mut pack = saved(TEST_MINT_ACCENT);
+        pack.accent_light = TEST_OTHER_ACCENT.into();
+        let upper = TEST_MINT_ACCENT.to_ascii_uppercase();
+        let stores = [
+            saved(TEST_MINT_ACCENT),
+            pack,
+            saved(TEST_BLOCKED_ACCENT),
+            saved(TEST_FILL_ONLY_ACCENT),
+            saved(""),
+        ];
+        let accents = [
+            TEST_MINT_ACCENT,
+            upper.as_str(),
+            &TEST_MINT_ACCENT[1..],
+            TEST_OTHER_ACCENT,
+            TEST_SHORT_ACCENT,
+            "",
+        ];
+        for stored in &stores {
+            for accent in accents {
+                for font in DisplayFont::ALL {
+                    let d = BrandDraft {
+                        accent: accent.to_string(),
+                        font,
+                    };
+                    // Only drafts Save can send are compared; a blocked
+                    // draft has no body and is unsaved by definition.
+                    if let Some(body) = save_body(&d, stored) {
+                        assert_eq!(
+                            d.is_unsaved(stored),
+                            !body_keys(&body).is_empty(),
+                            "{stored:?} {d:?}"
+                        );
+                    } else {
+                        assert!(d.is_unsaved(stored), "{stored:?} {d:?}");
+                    }
+                }
+            }
         }
     }
 

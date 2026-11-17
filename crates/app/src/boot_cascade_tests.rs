@@ -386,7 +386,7 @@ fn the_boot_splash_paints_the_saved_theme_then_the_os() {
 fn the_test_cascade_follows_css_rules() {
     let mut rules = Vec::new();
     parse_rules(
-        "html[data-theme=\"dark\"] body { background: #111; }
+        "html[data-theme=\"dark\"] body { background: navy; }
          html, body { background-color: red; background-image: url(x.png); }",
         None,
         &mut rules,
@@ -394,13 +394,13 @@ fn the_test_cascade_follows_css_rules() {
     let [_, body] = page(Some("dark"));
     assert_eq!(
         background(&rules, &body, false),
-        ("#111".into(), "none".into())
+        ("navy".into(), "none".into())
     );
 
     let mut rules = Vec::new();
     parse_rules(
-        ":where(html[data-theme=\"dark\"]) body { background: #111; }
-         @media (prefers-color-scheme: light) { body { background: #eee; } }
+        ":where(html[data-theme=\"dark\"]) body { background: navy; }
+         @media (prefers-color-scheme: light) { body { background: ivory; } }
          html, body { background-color: red; background-image: url(x.png); }",
         None,
         &mut rules,
