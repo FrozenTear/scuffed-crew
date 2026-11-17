@@ -179,47 +179,113 @@ impl Keybinding {
 pub enum KeyTarget {
     /// The map canvas (the overlay canvas element) holds focus.
     MapCanvas,
-    /// A text field: `input`, `textarea`, `select` or contenteditable.
+    /// A text field: a typed-into `input`, `textarea`, contenteditable or
+    /// `role=textbox` (see [`element_kind`]).
     TextEntry,
-    /// A button, link or other control with keys of its own (see
-    /// [`CONTROL_SELECTOR`]).
+    /// A button, link, select, slider, checkbox or other control with keys
+    /// of its own (see [`element_kind`]).
     Control,
     /// Anything else: the body, `main`, a panel's static content.
     Page,
 }
 
-/// Elements whose own keys (Space, Enter, arrows, Home, End, Delete) must
-/// reach them: a single-key shortcut never fires on one of these.
-pub const CONTROL_SELECTOR: &str = "a[href], button, summary, details, label, \
-    audio[controls], video[controls], [role=button], [role=link], [role=tab], \
-    [role=menuitem], [role=menuitemcheckbox], [role=menuitemradio], \
-    [role=checkbox], [role=radio], [role=switch], [role=option], [role=slider], \
-    [role=spinbutton], [role=combobox], [role=listbox], [role=gridcell], \
-    [role=treeitem], [role=scrollbar]";
+/// `input` types that are not typed into (a slider, a box, a picker
+/// button). They are controls: a single key belongs to them, the Ctrl/Cmd
+/// chords to the editor. Every other `input` (text, number, date, an
+/// unknown type) is a text field.
+const NON_TEXT_INPUT_TYPES: &[&str] = &[
+    "button", "checkbox", "color", "file", "hidden", "image", "radio", "range", "reset", "submit",
+];
 
-/// Text fields: every key belongs to them.
-pub const TEXT_ENTRY_SELECTOR: &str = "input, textarea, select, [contenteditable]:not([contenteditable=false]), \
-    [role=textbox], [role=searchbox]";
+/// ARIA roles that make an element a control with keys of its own.
+const CONTROL_ROLES: &[&str] = &[
+    "button",
+    "link",
+    "tab",
+    "menuitem",
+    "menuitemcheckbox",
+    "menuitemradio",
+    "checkbox",
+    "radio",
+    "switch",
+    "option",
+    "slider",
+    "spinbutton",
+    "combobox",
+    "listbox",
+    "gridcell",
+    "treeitem",
+    "scrollbar",
+];
 
-/// The element that takes the canvas keys.
-pub const MAP_CANVAS_SELECTOR: &str = ".map-canvas-overlay";
+/// ARIA roles that make an element a text field.
+const TEXT_ROLES: &[&str] = &["textbox", "searchbox"];
 
-/// Classify a keydown target. Text fields win over everything (a field
-/// inside a control is still a field); then the canvas; then controls.
-pub fn key_target(target: Option<&web_sys::Element>) -> KeyTarget {
-    let Some(target) = target else {
-        return KeyTarget::Page;
-    };
-    let within = |selector: &str| target.closest(selector).ok().flatten().is_some();
-    if within(TEXT_ENTRY_SELECTOR) {
-        KeyTarget::TextEntry
-    } else if within(MAP_CANVAS_SELECTOR) {
-        KeyTarget::MapCanvas
-    } else if within(CONTROL_SELECTOR) {
-        KeyTarget::Control
-    } else {
-        KeyTarget::Page
+/// The class of the element that takes the canvas keys.
+pub const MAP_CANVAS_CLASS: &str = "map-canvas-overlay";
+
+/// What one element is, for key routing: a text field, the map canvas, a
+/// control, or `None` (nothing with keys of its own). `tag` is the tag name
+/// in any case; `attr` reads an attribute.
+pub fn element_kind(tag: &str, attr: impl Fn(&str) -> Option<String>) -> Option<KeyTarget> {
+    let tag = tag.to_ascii_lowercase();
+    let lower = |name: &str| attr(name).map(|v| v.trim().to_ascii_lowercase());
+    let role = lower("role");
+    let has_role = |roles: &[&str]| role.as_deref().is_some_and(|r| roles.contains(&r));
+    match tag.as_str() {
+        "textarea" => return Some(KeyTarget::TextEntry),
+        "input" => {
+            let kind = lower("type").unwrap_or_default();
+            return Some(if NON_TEXT_INPUT_TYPES.contains(&kind.as_str()) {
+                KeyTarget::Control
+            } else {
+                KeyTarget::TextEntry
+            });
+        }
+        _ => {}
     }
+    if lower("contenteditable").is_some_and(|v| v != "false") || has_role(TEXT_ROLES) {
+        return Some(KeyTarget::TextEntry);
+    }
+    if attr("class").is_some_and(|c| c.split_whitespace().any(|c| c == MAP_CANVAS_CLASS)) {
+        return Some(KeyTarget::MapCanvas);
+    }
+    let control_tag = match tag.as_str() {
+        "button" | "select" | "summary" | "details" | "label" => true,
+        "a" => attr("href").is_some(),
+        "audio" | "video" => attr("controls").is_some(),
+        _ => false,
+    };
+    (control_tag || has_role(CONTROL_ROLES)).then_some(KeyTarget::Control)
+}
+
+/// Classify a key from the kinds of its target and every ancestor. A text
+/// field anywhere on the path wins (a field inside a control is still a
+/// field), then the canvas, then a control; with none of them it is the
+/// page.
+pub fn classify_path(kinds: impl IntoIterator<Item = Option<KeyTarget>>) -> KeyTarget {
+    let rank = |target: KeyTarget| match target {
+        KeyTarget::TextEntry => 3,
+        KeyTarget::MapCanvas => 2,
+        KeyTarget::Control => 1,
+        KeyTarget::Page => 0,
+    };
+    kinds
+        .into_iter()
+        .flatten()
+        .fold(KeyTarget::Page, |found, kind| {
+            if rank(kind) > rank(found) {
+                kind
+            } else {
+                found
+            }
+        })
+}
+
+/// Classify a keydown target by walking from it up to the document root.
+pub fn key_target(target: Option<&web_sys::Element>) -> KeyTarget {
+    let path = std::iter::successors(target.cloned(), |el| el.parent_element());
+    classify_path(path.map(|el| element_kind(&el.tag_name(), |name| el.get_attribute(name))))
 }
 
 /// Whether an editor shortcut may fire on this target. Ctrl/Cmd chords
@@ -273,13 +339,15 @@ pub fn canvas_key(binding: &Keybinding, in_progress: bool) -> Option<CanvasKey> 
 }
 
 /// The map's live hint, kept mounted so a screen reader hears each change.
+/// It shows once a key is pressed in the map, not on a mouse click, so it
+/// does not cover the map while drawing with the mouse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CanvasHint {
-    /// Focus is outside the map: no text.
+    /// Focus is outside the map, or it came by mouse with no key yet: no text.
     #[default]
     Off,
-    /// The map took focus.
-    Focused,
+    /// A key was pressed while the map held focus.
+    Keys,
     /// Tab toggled the team panel; `true` when it is now shown.
     PanelToggled(bool),
 }
@@ -288,9 +356,18 @@ impl CanvasHint {
     pub fn text(self) -> &'static str {
         match self {
             Self::Off => "",
-            Self::Focused => "Tab toggles the team panel. Esc or Shift+Tab leaves the map.",
-            Self::PanelToggled(true) => "Team panel shown. Esc or Shift+Tab leaves the map.",
-            Self::PanelToggled(false) => "Team panel hidden. Esc or Shift+Tab leaves the map.",
+            Self::Keys => "Tab: team panel. Esc: cancel, then leave the map.",
+            Self::PanelToggled(true) => "Team panel shown. Esc: cancel, then leave the map.",
+            Self::PanelToggled(false) => "Team panel hidden. Esc: cancel, then leave the map.",
+        }
+    }
+
+    /// The hint after a key press in the map: shown if it was off, kept if
+    /// it already says something.
+    pub fn after_key(self) -> Self {
+        match self {
+            Self::Off => Self::Keys,
+            shown => shown,
         }
     }
 }
@@ -373,6 +450,14 @@ impl KeybindingManager {
             (Keybinding::new("y").with_ctrl(), EditorAction::Redo),
             // ---- File ----
             (Keybinding::new("s").with_ctrl(), EditorAction::Save),
+            // ---- The same chords with Cmd (macOS) ----
+            (Keybinding::new("z").with_meta(), EditorAction::Undo),
+            (
+                Keybinding::new("z").with_meta().with_shift(),
+                EditorAction::Redo,
+            ),
+            (Keybinding::new("y").with_meta(), EditorAction::Redo),
+            (Keybinding::new("s").with_meta(), EditorAction::Save),
         ];
 
         for (binding, action) in defaults {
@@ -647,8 +732,14 @@ mod tests {
         );
     }
 
-    /// The Tab handler sits on the canvas element, not on the document, and
-    /// the on-screen help says so.
+    /// The Tab handler sits on the canvas element, not on the document.
+    ///
+    /// A source check on purpose: neither SSR nor a VirtualDom shows which
+    /// element an event listener is on, and the routing itself (`canvas_key`)
+    /// is tested above. The behaviour (Tab moves focus on the page, toggles
+    /// the panel in the map) is checked in a browser by `keys.mjs`. The
+    /// titles and the hint node are checked in the rendered editor
+    /// (`layouts::shell` tests).
     #[test]
     fn the_editor_scopes_tab_to_the_canvas_element() {
         let editor = include_str!("pages/strategy/editor.rs");
@@ -677,22 +768,10 @@ mod tests {
                 .expect("end of the canvas");
             assert!(handler < resolve && resolve < closes);
         }
-
-        assert!(editor.contains("title: \"Toggle panel (Tab while the map has focus)\""));
-        assert!(editor.contains("title: \"Toggle panel (])\""));
-        assert!(!editor.contains("(Shift+Tab)"));
-        assert!(!editor.contains("title: \"Toggle panel (Tab)\""));
-        assert!(
-            editor.contains("p { class: \"canvas-key-hint\", role: \"status\", \"{hint_text}\" }")
-        );
-        assert_eq!(
-            CanvasHint::Focused.text(),
-            "Tab toggles the team panel. Esc or Shift+Tab leaves the map."
-        );
     }
 
     /// Every default binding as (binding, action), so the routing tests walk
-    /// all 38 of them.
+    /// all 42 of them.
     fn all_defaults() -> Vec<(Keybinding, EditorAction)> {
         let manager = KeybindingManager::new();
         let mut all: Vec<_> = manager
@@ -701,7 +780,7 @@ mod tests {
             .map(|(binding, action)| (binding.clone(), *action))
             .collect();
         all.sort_by(|a, b| format!("{:?}", a.0).cmp(&format!("{:?}", b.0)));
-        assert_eq!(all.len(), 38);
+        assert_eq!(all.len(), 42);
         all
     }
 
@@ -784,9 +863,10 @@ mod tests {
                 );
             }
         }
-        assert_eq!(chords, 4);
-        let save_cmd = Keybinding::new("s").with_meta();
-        assert!(shortcut_allowed(KeyTarget::Control, &save_cmd));
+        assert_eq!(
+            chords, 8,
+            "undo, redo (two ways) and save, with Ctrl and with Cmd"
+        );
         // Tab is never an editor shortcut, wherever it lands.
         for target in [KeyTarget::MapCanvas, KeyTarget::Page, KeyTarget::Control] {
             assert_eq!(
@@ -796,36 +876,139 @@ mod tests {
         }
     }
 
-    /// The selectors name the controls Vision listed, and the classifier
-    /// checks text fields first, then the canvas, then controls.
+    /// An element as `element_kind` sees it: a tag and its attributes.
+    fn kind(tag: &str, attrs: &[(&str, &str)]) -> Option<KeyTarget> {
+        element_kind(tag, |name| {
+            attrs
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.to_string())
+        })
+    }
+
+    /// Vision blocking 1: buttons, links and every other control keep their
+    /// own keys. Vision nit 16: a select, a slider, a checkbox, a radio or a
+    /// color input is a control too, so Ctrl+Z, Ctrl+Shift+Z and Ctrl+S still
+    /// reach the editor after a mouse change on the toolbar.
     #[test]
-    fn the_target_selectors_cover_buttons_links_and_fields() {
-        for part in [
-            "a[href]",
-            "button",
-            "summary",
-            "[role=button]",
-            "[role=link]",
-            "[role=tab]",
-            "[role=menuitem]",
-            "[role=checkbox]",
-            "[role=option]",
-        ] {
-            assert!(CONTROL_SELECTOR.contains(part), "{part}");
+    fn controls_keep_single_keys_and_pass_on_chords() {
+        let controls: &[(&str, &[(&str, &str)])] = &[
+            ("BUTTON", &[]),
+            ("a", &[("href", "/strategy")]),
+            ("summary", &[]),
+            ("details", &[]),
+            ("label", &[]),
+            ("select", &[]),
+            ("SELECT", &[("class", "toolbar-select")]),
+            ("input", &[("type", "range")]),
+            ("input", &[("type", "RANGE")]),
+            ("input", &[("type", "checkbox")]),
+            ("input", &[("type", "radio")]),
+            ("input", &[("type", "color")]),
+            ("input", &[("type", "button")]),
+            ("input", &[("type", "submit")]),
+            ("input", &[("type", "file")]),
+            ("video", &[("controls", "")]),
+            ("div", &[("role", "button")]),
+            ("span", &[("role", "link")]),
+            ("div", &[("role", "tab")]),
+            ("li", &[("role", "menuitem")]),
+            ("div", &[("role", "checkbox")]),
+            ("div", &[("role", "option")]),
+            ("div", &[("role", "slider")]),
+            ("div", &[("role", "combobox")]),
+        ];
+        let manager = KeybindingManager::new();
+        for (tag, attrs) in controls {
+            let target = kind(tag, attrs);
+            assert_eq!(target, Some(KeyTarget::Control), "{tag} {attrs:?}");
+            let target = KeyTarget::Control;
+            for key in [" ", "arrowup", "arrowright", "home", "delete", "v", "1"] {
+                assert_eq!(
+                    manager.action_for_target(&Keybinding::new(key), target),
+                    None,
+                    "{key:?} on {tag} {attrs:?}"
+                );
+            }
+            for (chord, action) in [
+                (Keybinding::new("z").with_ctrl(), EditorAction::Undo),
+                (
+                    Keybinding::new("z").with_ctrl().with_shift(),
+                    EditorAction::Redo,
+                ),
+                (Keybinding::new("s").with_ctrl(), EditorAction::Save),
+                (Keybinding::new("s").with_meta(), EditorAction::Save),
+            ] {
+                assert_eq!(manager.action_for_target(&chord, target), Some(action));
+            }
         }
-        for part in ["input", "textarea", "select", "[contenteditable]"] {
-            assert!(TEXT_ENTRY_SELECTOR.contains(part), "{part}");
+    }
+
+    /// Text fields keep every key, chords too (their own undo). Only typed
+    /// inputs count: a missing or unknown type is a text box in HTML.
+    #[test]
+    fn text_fields_are_only_the_typed_into_ones() {
+        let fields: &[(&str, &[(&str, &str)])] = &[
+            ("input", &[]),
+            ("INPUT", &[("type", "text")]),
+            ("input", &[("type", "search")]),
+            ("input", &[("type", "number")]),
+            ("input", &[("type", "email")]),
+            ("input", &[("type", "password")]),
+            ("input", &[("type", "date")]),
+            ("input", &[("type", "something-new")]),
+            ("textarea", &[]),
+            ("div", &[("contenteditable", "")]),
+            ("div", &[("contenteditable", "true")]),
+            ("div", &[("contenteditable", "plaintext-only")]),
+            ("div", &[("role", "textbox")]),
+            ("div", &[("role", "searchbox")]),
+        ];
+        for (tag, attrs) in fields {
+            assert_eq!(
+                kind(tag, attrs),
+                Some(KeyTarget::TextEntry),
+                "{tag} {attrs:?}"
+            );
         }
-        assert!(!CONTROL_SELECTOR.contains(MAP_CANVAS_SELECTOR));
-        let src = include_str!("keybindings.rs");
-        let body = &src[src.find("pub fn key_target(").expect("classifier")..];
-        let text = body.find("within(TEXT_ENTRY_SELECTOR)").expect("text");
-        let canvas = body.find("within(MAP_CANVAS_SELECTOR)").expect("canvas");
-        let control = body.find("within(CONTROL_SELECTOR)").expect("control");
-        assert!(text < canvas && canvas < control);
-        // The document listener resolves through the target-aware lookup.
-        let resolve = &src[src.find("pub fn from_keyboard_event(").expect("resolver")..];
-        assert!(resolve.contains("kb.action_for_target(&binding, key_target(target.as_ref()))"));
+        let plain: &[(&str, &[(&str, &str)])] = &[
+            ("div", &[]),
+            ("main", &[("id", "main")]),
+            ("body", &[]),
+            ("a", &[("name", "anchor")]),
+            ("video", &[]),
+            ("div", &[("contenteditable", "false")]),
+            ("div", &[("role", "region")]),
+            ("canvas", &[("class", "map-canvas map-canvas-elements")]),
+        ];
+        for (tag, attrs) in plain {
+            assert_eq!(kind(tag, attrs), None, "{tag} {attrs:?}");
+        }
+        assert_eq!(
+            kind("canvas", &[("class", "map-canvas map-canvas-overlay")]),
+            Some(KeyTarget::MapCanvas)
+        );
+    }
+
+    /// The path from the target up decides: a field anywhere wins, then the
+    /// canvas, then a control, and with none of them it is the page.
+    #[test]
+    fn the_path_picks_field_then_canvas_then_control() {
+        use KeyTarget::*;
+        assert_eq!(classify_path([]), Page);
+        assert_eq!(classify_path([None, None]), Page);
+        // A label's text, inside the label: the label is the control.
+        assert_eq!(classify_path([None, Some(Control), None]), Control);
+        // A text input inside a button or a label is still a field.
+        assert_eq!(classify_path([Some(TextEntry), Some(Control)]), TextEntry);
+        assert_eq!(
+            classify_path([None, Some(Control), Some(TextEntry)]),
+            TextEntry
+        );
+        // The canvas inside a `role=application` wrapper or a label.
+        assert_eq!(classify_path([Some(MapCanvas), Some(Control)]), MapCanvas);
+        assert_eq!(classify_path([Some(Control), Some(MapCanvas)]), MapCanvas);
+        assert_eq!(classify_path([Some(MapCanvas), Some(TextEntry)]), TextEntry);
     }
 
     /// Vision notes 5 and 10: Esc in the canvas cancels first, then leaves.
@@ -854,35 +1037,51 @@ mod tests {
                 .text()
                 .starts_with("Team panel hidden.")
         );
+        assert_eq!(
+            CanvasHint::Keys.text(),
+            "Tab: team panel. Esc: cancel, then leave the map."
+        );
+        // Vision nit 19: every hint names the cancel step before leaving.
         for hint in [
-            CanvasHint::Focused,
+            CanvasHint::Keys,
             CanvasHint::PanelToggled(true),
             CanvasHint::PanelToggled(false),
         ] {
             assert!(
-                hint.text().ends_with("Esc or Shift+Tab leaves the map."),
+                hint.text().ends_with("Esc: cancel, then leave the map."),
                 "{hint:?}"
             );
         }
     }
 
-    /// The web canvas takes focus by click, not by Tab. As a Tab stop it
-    /// would swallow every further Tab and cut off the controls after it.
+    /// Vision nit 20: a mouse focus shows nothing; the first key in the map
+    /// shows the hint, and a later key keeps what it says.
     #[test]
-    fn the_map_canvas_is_not_a_tab_stop() {
-        // Vision nit 5: the desktop canvas follows the same rule as web.
-        for canvas in [
-            include_str!("components/strategy/map_canvas.rs"),
-            include_str!("components/strategy/desktop_map_canvas.rs"),
-        ] {
-            let production = canvas.split("mod tests").next().expect("production half");
-            assert_eq!(production.matches("tabindex:").count(), 1);
-            assert!(production.contains("tabindex: \"-1\","));
-            // Its Esc goes through the editor's `focus_element`, which works
-            // in the desktop webview too (`layouts::focus_script`).
-            assert!(production.contains("on_canvas_key.call(canvas_key);"));
-            assert!(production.contains("Esc or Shift+Tab leaves the map."));
+    fn the_hint_shows_after_a_key_not_on_focus() {
+        assert_eq!(CanvasHint::Off.after_key(), CanvasHint::Keys);
+        assert_eq!(CanvasHint::Keys.after_key(), CanvasHint::Keys);
+        for shown in [true, false] {
+            assert_eq!(
+                CanvasHint::PanelToggled(shown).after_key(),
+                CanvasHint::PanelToggled(shown)
+            );
         }
+    }
+
+    /// Vision nit 5: the desktop canvas takes focus by click, not by Tab,
+    /// as the web canvas does (that one is checked in the rendered editor,
+    /// `layouts::shell` tests). A source check because the desktop canvas
+    /// only builds with the `desktop` feature, which `cargo test` does not
+    /// enable. Its Esc leaves through the editor's `on_canvas_key`, which
+    /// focuses `main` with `use_focus_main` (works in the desktop webview).
+    #[test]
+    fn the_desktop_map_canvas_is_not_a_tab_stop() {
+        let canvas = include_str!("components/strategy/desktop_map_canvas.rs");
+        let production = canvas.split("mod tests").next().expect("production half");
+        assert_eq!(production.matches("tabindex:").count(), 1);
+        assert!(production.contains("tabindex: \"-1\","));
+        assert!(production.contains("on_canvas_key.call(canvas_key);"));
+        assert!(production.contains("Esc or Shift+Tab leaves the map."));
     }
 
     /// The other editor shortcuts are where they were. The right panel moved
@@ -946,7 +1145,28 @@ mod tests {
             chord(Keybinding::new("s").with_ctrl()),
             Some(EditorAction::Save)
         );
-        assert_eq!(manager.bindings.len(), 38, "no binding added or dropped");
+        // Vision nit 15: the same four chords with Cmd, for macOS.
+        for (binding, action) in [
+            (Keybinding::new("z").with_meta(), EditorAction::Undo),
+            (
+                Keybinding::new("z").with_meta().with_shift(),
+                EditorAction::Redo,
+            ),
+            (Keybinding::new("y").with_meta(), EditorAction::Redo),
+            (Keybinding::new("s").with_meta(), EditorAction::Save),
+        ] {
+            assert_eq!(chord(binding.clone()), Some(action), "{binding:?}");
+        }
+        // The Ctrl form is still the one shown in help (keys print lowercase).
+        assert_eq!(
+            manager.display_for(EditorAction::Save).as_deref(),
+            Some("Ctrl+s")
+        );
+        assert_eq!(
+            manager.bindings.len(),
+            42,
+            "only the four Cmd chords were added"
+        );
         assert_eq!(
             manager
                 .display_for(EditorAction::ToggleRightPanel)

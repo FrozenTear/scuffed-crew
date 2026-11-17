@@ -458,14 +458,14 @@ const MAP_PICKER_SELECTED_ID: &str = "map-picker-selected";
 /// it when the picker closes.
 const EDITOR_MAP_BUTTON_ID: &str = "editor-map-button";
 
-/// Where focus goes when the map picker opens: the current map, or Close
-/// when no map is chosen yet.
-fn picker_initial_focus(has_map: bool) -> &'static str {
-    if has_map {
-        MAP_PICKER_SELECTED_ID
-    } else {
-        MAP_PICKER_CLOSE_ID
-    }
+/// The picker id of the stored map, through the same lookup the rest of the
+/// app uses (a slug or a display name, any surrounding spaces), so the
+/// current map is marked and focused however it was stored. `None` for no
+/// map or one the picker does not list.
+fn picker_current_id(current_map: Option<&str>) -> Option<&'static str> {
+    current_map
+        .and_then(crate::state::maps::pickable_map_by_id)
+        .map(|map| map.id)
 }
 
 /// What a key does while the map picker is open. Every other key goes to
@@ -476,12 +476,17 @@ enum PickerKey {
     Close,
     /// Tab or Shift+Tab: wrap inside the picker.
     KeepFocusInside,
+    /// Ctrl+S or Cmd+S: the editor does not save behind the modal, and the
+    /// browser's Save Page dialog must not open either.
+    BlockBrowserSave,
 }
 
-fn picker_key(key: &str) -> Option<PickerKey> {
-    match key {
-        "Escape" => Some(PickerKey::Close),
-        "Tab" => Some(PickerKey::KeepFocusInside),
+fn picker_key(binding: &keybindings::Keybinding) -> Option<PickerKey> {
+    let held = binding.modifiers;
+    match binding.key.as_str() {
+        "escape" => Some(PickerKey::Close),
+        "tab" => Some(PickerKey::KeepFocusInside),
+        "s" if held.ctrl || held.meta => Some(PickerKey::BlockBrowserSave),
         _ => None,
     }
 }
@@ -613,11 +618,11 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
     let picker_open = *show_map_picker.read();
     // The picker is a modal: the shell chrome goes inert while it is open.
     crate::layouts::use_page_modal(picker_open);
-    // Focus moves into the picker when it opens (the current map, or Close).
+    // Focus moves into the picker when it opens: the current map, or Close
+    // when there is none or it is not in the picker.
     use_effect(move || {
-        if show_map_picker() {
-            let has_map = canvas_state.peek().current_map.is_some();
-            crate::layouts::focus_element(picker_initial_focus(has_map));
+        if show_map_picker() && !crate::layouts::focus_element(MAP_PICKER_SELECTED_ID) {
+            crate::layouts::focus_element(MAP_PICKER_CLOSE_ID);
         }
     });
     use_effect(move || {
@@ -667,8 +672,10 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
         opened_as_new: initial_strategy.is_none(),
     };
 
-    // The map's key hint: set while the canvas holds focus, cleared when
-    // focus leaves it. The status node stays mounted; only its text changes.
+    // The map's key hint: shown on the first key pressed in the canvas (not
+    // on a mouse focus, so it does not cover the map while drawing), cleared
+    // when focus leaves it. The status node stays mounted; only its text
+    // changes.
     let mut canvas_hint = use_signal(CanvasHint::default);
     // Esc out of the canvas lands on `main#main`. Through the mounted handle,
     // so it works in the desktop webview as well as on web.
@@ -712,10 +719,16 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
     // only presses the button.
     // =========================================================================
     crate::layouts::use_document_keydown_capture(move |event: web_sys::KeyboardEvent| {
+        // The site drawer (phone layout) covers the page and makes `main`
+        // inert: the editor behind it takes no shortcut, even with focus
+        // on the body after a click on blank drawer space.
+        if crate::layouts::main_is_inert() {
+            return;
+        }
         // The map picker is a modal: while it is open the editor behind it
         // takes no shortcut. Esc closes it and Tab stays inside it.
         if *show_map_picker.peek() {
-            match picker_key(&event.key()) {
+            match picker_key(&keybindings::Keybinding::from_keyboard_event(&event)) {
                 Some(PickerKey::Close) => {
                     event.prevent_default();
                     close_picker();
@@ -723,6 +736,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                 Some(PickerKey::KeepFocusInside) => {
                     crate::layouts::trap_tab_within(MAP_PICKER_ID, &event);
                 }
+                Some(PickerKey::BlockBrowserSave) => event.prevent_default(),
                 None => {}
             }
             return;
@@ -882,6 +896,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
         (Some(map), None) => display_map_name(map),
         (None, _) => "None".to_string(),
     };
+    let current_pick = picker_current_id(cs.current_map.as_deref());
     let element_count = ss.elements.len();
     let tool_display = format!("{}", ds.active_tool);
     let phase_display = {
@@ -1149,7 +1164,12 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                                 CanvasKey::LeaveToShell => focus_main(),
                                 CanvasKey::LeaveBackwards => {}
                             },
-                            on_canvas_focus: move |_| canvas_hint.set(CanvasHint::Focused),
+                            on_canvas_keydown: move |_| {
+                                let next = canvas_hint.peek().after_key();
+                                if next != *canvas_hint.peek() {
+                                    canvas_hint.set(next);
+                                }
+                            },
                             active_tool: tool_val,
                             draw_color: color_val,
                             fill_opacity: opacity_val,
@@ -1563,11 +1583,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                                                     for map in maps {
                                                         {
                                                             let map_id = map.id;
-                                                            let selected = canvas_state
-                                                                .read()
-                                                                .current_map
-                                                                .as_deref()
-                                                                == Some(map_id);
+                                                            let selected = current_pick == Some(map_id);
                                                             let item_class = if selected {
                                                                 "map-picker-item selected"
                                                             } else {
@@ -1578,7 +1594,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                                                                     id: if selected { Some(MAP_PICKER_SELECTED_ID) } else { None },
                                                                     class: "{item_class}",
                                                                     r#type: "button",
-                                                                    aria_pressed: if selected { "true" } else { "false" },
+                                                                    aria_current: if selected { Some("true") } else { None },
                                                                     onclick: move |_| {
                                                                         canvas_state.with_mut(|c| {
                                                                             c.select_map(map_id.to_string(), None);
@@ -1927,20 +1943,56 @@ mod tests {
 
     /// Vision blocking 2: Esc closes the picker, Tab stays inside it, and
     /// no other key (Space, Delete, a tool letter) reaches the editor.
+    /// Vision nit 14: Ctrl+S and Cmd+S are held back from the browser.
     #[test]
-    fn picker_keys_close_on_escape_and_trap_tab() {
-        assert_eq!(picker_key("Escape"), Some(PickerKey::Close));
-        assert_eq!(picker_key("Tab"), Some(PickerKey::KeepFocusInside));
-        for key in [" ", "Enter", "Delete", "v", "ArrowLeft", "]"] {
-            assert_eq!(picker_key(key), None, "{key:?}");
+    fn picker_keys_close_on_escape_trap_tab_and_block_save() {
+        use keybindings::Keybinding;
+        assert_eq!(
+            picker_key(&Keybinding::new("Escape")),
+            Some(PickerKey::Close)
+        );
+        assert_eq!(
+            picker_key(&Keybinding::new("Tab")),
+            Some(PickerKey::KeepFocusInside)
+        );
+        assert_eq!(
+            picker_key(&Keybinding::new("Tab").with_shift()),
+            Some(PickerKey::KeepFocusInside)
+        );
+        for save in [
+            Keybinding::new("s").with_ctrl(),
+            Keybinding::new("S").with_ctrl().with_shift(),
+            Keybinding::new("s").with_meta(),
+        ] {
+            assert_eq!(
+                picker_key(&save),
+                Some(PickerKey::BlockBrowserSave),
+                "{save:?}"
+            );
+        }
+        for key in [" ", "Enter", "Delete", "v", "s", "ArrowLeft", "]"] {
+            assert_eq!(picker_key(&Keybinding::new(key)), None, "{key:?}");
         }
     }
 
-    /// Focus moves into the picker on open: the current map, else Close.
+    /// Vision nit 17: the current map is found however it was stored (slug,
+    /// display name, extra spaces), so it is marked and takes focus; an
+    /// unknown id marks nothing and focus falls back to Close.
     #[test]
-    fn picker_focuses_the_current_map_or_close() {
-        assert_eq!(picker_initial_focus(true), MAP_PICKER_SELECTED_ID);
-        assert_eq!(picker_initial_focus(false), MAP_PICKER_CLOSE_ID);
+    fn the_picker_finds_the_current_map_however_it_was_stored() {
+        let first = &crate::state::maps::PICKABLE_MAPS[0];
+        assert_eq!(picker_current_id(Some(first.id)), Some(first.id));
+        assert_eq!(
+            picker_current_id(Some(&format!("  {}  ", first.id))),
+            Some(first.id)
+        );
+        let by_name = crate::state::maps::PICKABLE_MAPS
+            .iter()
+            .find(|map| picker_current_id(Some(map.name)) == Some(map.id));
+        assert!(by_name.is_some(), "a display name finds its map");
+        assert_eq!(picker_current_id(Some("not-a-map")), None);
+        assert_eq!(picker_current_id(Some("")), None);
+        assert_eq!(picker_current_id(None), None);
     }
 
     /// Vision nit 4: the panel buttons are named by what they do, not "<".

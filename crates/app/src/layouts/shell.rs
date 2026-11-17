@@ -2511,6 +2511,40 @@ mod tests {
         // The Map button that reopens it, where focus returns on close.
         let map_button = tag_with_id(&html, "editor-map-button");
         assert!(map_button.contains("status-map-link"), "{map_button}");
+        // Vision nit 21: map buttons are a one-of-many choice, not ~30
+        // toggles. No map is chosen yet, so none is current and the old
+        // toggle attribute is gone.
+        let picker = section(&html, "id=\"map-picker\"", "</main>");
+        assert!(picker.contains("map-picker-item"), "{picker}");
+        assert!(!picker.contains("aria-pressed"), "{picker}");
+        assert!(!picker.contains("aria-current"), "{picker}");
+        assert!(!picker.contains("map-picker-selected"), "{picker}");
+    }
+
+    /// The rendered editor: the web map canvas is not a Tab stop (focus by
+    /// click; as a Tab stop it would swallow every further Tab), the panel
+    /// help names the real keys, and the key hint is a live region that is
+    /// always mounted and empty until a key is pressed in the map.
+    #[test]
+    fn the_editor_canvas_help_and_hint_render() {
+        let html = render(Who::Member, "/strategy/editor", None);
+
+        let canvas = tag_with_class(&html, "map-canvas map-canvas-overlay");
+        assert!(canvas.contains("tabindex=\"-1\""), "{canvas}");
+        assert!(
+            canvas.contains("Esc cancels a drawing or selection. Esc or Shift+Tab leaves the map."),
+            "{canvas}"
+        );
+        assert_eq!(html.matches("map-canvas-overlay").count(), 1);
+
+        assert!(html.contains("title=\"Toggle panel (Tab while the map has focus)\""));
+        assert!(html.contains("title=\"Toggle panel (])\""));
+        assert!(!html.contains("(Shift+Tab)"));
+        assert!(!html.contains("title=\"Toggle panel (Tab)\""));
+
+        let hint = section(&html, "class=\"canvas-key-hint\"", "</p>");
+        assert!(hint.contains("role=\"status\""), "{hint}");
+        assert!(hint.ends_with('>'), "empty until a key: {hint}");
     }
 
     thread_local! {

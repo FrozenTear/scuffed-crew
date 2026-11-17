@@ -65,8 +65,9 @@ pub fn DesktopMapCanvas(
     on_element_drag_end: EventHandler<(Uuid, Position, Position)>,
     // Tab, Esc or Shift+Tab while the canvas holds focus
     on_canvas_key: EventHandler<CanvasKey>,
-    // The canvas took keyboard focus (the editor shows its key hint)
-    on_canvas_focus: EventHandler<()>,
+    // A key was pressed while the canvas held focus (the editor shows its
+    // key hint then, not on a mouse focus)
+    on_canvas_keydown: EventHandler<()>,
 ) -> Element {
     let mut is_panning = use_signal(|| false);
     let mut is_dragging = use_signal(|| false);
@@ -303,7 +304,6 @@ pub fn DesktopMapCanvas(
                 // would swallow the next Tab (the panel toggle).
                 tabindex: "-1",
                 aria_label: "Strategy map. Tab toggles the team panel. Esc cancels a drawing or selection. Esc or Shift+Tab leaves the map.",
-                onfocus: move |_| on_canvas_focus.call(()),
                 onmounted: move |evt| {
                     let data = evt.data();
                     spawn(async move {
@@ -498,6 +498,7 @@ pub fn DesktopMapCanvas(
                 onkeydown: move |evt: Event<KeyboardData>| {
                     // Keys that belong to the canvas while it holds focus.
                     // This is the only place in the editor that takes Tab.
+                    on_canvas_keydown.call(());
                     let binding = Keybinding::from_key(&evt.key(), evt.modifiers());
                     // A half-drawn shape or a selection: Esc drops it first.
                     let in_progress = arrow_start.read().is_some()

@@ -172,18 +172,22 @@ pub(crate) fn in_current_scope<E>(mut f: impl FnMut(E) + 'static) -> impl FnMut(
     move |arg: E| runtime.in_scope(scope, || f(arg))
 }
 
-pub(crate) fn focus_element(id: &str) {
+/// Focus the element with this id. `true` when it exists and is an HTML
+/// element (so a caller can fall back to another target), always `false`
+/// off wasm.
+pub(crate) fn focus_element(id: &str) -> bool {
     #[cfg(target_arch = "wasm32")]
     {
         use wasm_bindgen::JsCast;
         let Some(document) = web_sys::window().and_then(|window| window.document()) else {
-            return;
+            return false;
         };
         let Some(el) = document.get_element_by_id(id) else {
-            return;
+            return false;
         };
-        if let Ok(el) = el.dyn_into::<web_sys::HtmlElement>() {
-            let _ = el.focus();
+        match el.dyn_into::<web_sys::HtmlElement>() {
+            Ok(el) => el.focus().is_ok(),
+            Err(_) => false,
         }
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -192,6 +196,24 @@ pub(crate) fn focus_element(id: &str) {
         // because that call lives in the wasm branch above. The editor's Esc
         // focuses `main` through `use_focus_main`, which works there too.
         let _ = id;
+        false
+    }
+}
+
+/// Whether `main#main` is inert: the site drawer covers the page. A page's
+/// own document key handler bails then, since the page is out of reach.
+/// Always `false` off wasm.
+pub(crate) fn main_is_inert() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.get_element_by_id(shell::MAIN_ID))
+            .is_some_and(|main| main.has_attribute("inert"))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        false
     }
 }
 
