@@ -49,6 +49,24 @@ pub fn theme_css(brand: &BrandConfig) -> String {
     theme_css_for(&MINT_REFINED, brand)
 }
 
+/// The stylesheet the site chrome paints with: the saved `(dark, light)`
+/// accents, or the pending gray while settings are still unknown. A draft
+/// on the brand settings page never reaches this; only saved settings do.
+pub fn chrome_theme_css(saved_accents: Option<(&str, &str)>) -> String {
+    match saved_accents {
+        Some((dark, light)) => theme_css(&BrandConfig::from_settings(dark, light)),
+        None => theme_css(&BrandConfig::pending()),
+    }
+}
+
+/// [`chrome_theme_css`] for the shared settings as the app root holds them:
+/// `None` while they are pending or failed.
+pub fn chrome_theme_css_for(settings: Option<&scuffed_types::SiteSettings>) -> String {
+    chrome_theme_css(
+        settings.map(|s| (s.brand_accent_dark.as_str(), s.brand_accent_light.as_str())),
+    )
+}
+
 /// Load order: primitives, semantic, components, the look, then the derived
 /// brand accent roles (they win over the look's mint defaults), then the
 /// page base. The strategy scope gets the same derivation from its orange.
@@ -76,6 +94,12 @@ html, body {{
   background-repeat: no-repeat;
   color: var(--text);
   font-family: var(--font-body); font-size: var(--text-md);
+}}
+
+/* Tabular figures only where numbers line up in columns or tick in place.
+   On the page root they also reach headings, and the display font's tabular
+   "1" has no flag. Stat values opt in with their own rule or .tabular-nums. */
+table, time, input[type="number"], .tabular-nums {{
   font-variant-numeric: tabular-nums;
 }}
 "#,

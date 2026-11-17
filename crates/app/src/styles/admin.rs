@@ -305,13 +305,16 @@ pub const CSS: &str = r#"
         font-family: var(--font-head); font-weight: 700; font-size: 0.9rem;
         letter-spacing: 0.02em;
     }
+    /* The selected card tints its sunken fill with the accent, which takes
+       --text-subtle under 4.5:1 for some accents. --text-3 keeps AA on every
+       surface and on that tint, for any accent. */
     .pack-card-desc {
-        font-size: 0.75rem; color: var(--text-subtle); line-height: 1.4;
+        font-size: var(--text-xs); color: var(--text-3); line-height: 1.4;
         display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
         overflow: hidden;
     }
     .pack-card-meta {
-        font-family: var(--font-mono); font-size: 0.65rem; color: var(--text-subtle);
+        font-family: var(--font-mono); font-size: var(--text-xs); color: var(--text-3);
         letter-spacing: 0.04em; margin-top: 0.15rem;
     }
     .pack-actions {
@@ -397,6 +400,10 @@ pub const CSS: &str = r#"
     .settings-hint {
         font-size: 0.78rem; color: var(--text-subtle); margin: 0.3rem 0 0; line-height: 1.4;
     }
+    /* The live line under Apply pack stays in the tree when it has nothing
+       to say; empty, it takes no space. */
+    .pack-brand-status { margin-top: 0.65rem; }
+    .pack-brand-status:empty { margin: 0; }
 
     /* Settings page: use most of the content column; still fluid on small screens */
     .settings-page {
@@ -466,3 +473,59 @@ pub const CSS: &str = r#"
     }
     .nav-row .row-btn { padding: 0.22rem 0.45rem; min-width: 1.75rem; }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::CSS as ADMIN_CSS;
+    use crate::theme::brand::{BrandConfig, TEST_SWEEP_ACCENTS, composite, contrast_ratio};
+    use crate::theme::tokens::{resolved_tokens, theme_css};
+
+    fn rule<'a>(css: &'a str, selector: &str) -> &'a str {
+        let open = format!("{selector} {{");
+        let start = css
+            .find(&open)
+            .unwrap_or_else(|| panic!("no rule for {selector}"))
+            + open.len();
+        &css[start..start + css[start..].find('}').expect("end of rule")]
+    }
+
+    /// QA 694 nit 3: the selected pack card mixes 8% of the accent into its
+    /// sunken fill, which took `--text-subtle` under 4.5:1 (4.05 with
+    /// the pale yellow accent in dark, 4.30 with the default in light). The
+    /// description and meta use `--text-3` at the 12px floor, which clears
+    /// 4.5:1 on that tint for any accent, in both themes.
+    #[test]
+    fn selected_pack_card_text_keeps_aa_for_any_accent() {
+        let selected = rule(ADMIN_CSS, ".pack-card.is-selected");
+        assert!(
+            selected.contains(
+                "background: color-mix(in srgb, var(--accent) 8%, var(--surface-sunken));"
+            ),
+            "{selected}"
+        );
+        for selector in [".pack-card-desc", ".pack-card-meta"] {
+            let body = rule(ADMIN_CSS, selector);
+            assert!(body.contains("color: var(--text-3);"), "{selector}: {body}");
+            assert!(
+                body.contains("font-size: var(--text-xs);"),
+                "{selector}: {body}"
+            );
+        }
+
+        for accent in TEST_SWEEP_ACCENTS {
+            let css = theme_css(&BrandConfig::from_settings(accent, accent));
+            for theme in ["dark", "light"] {
+                let tokens = resolved_tokens(&css, theme);
+                let text = &tokens["--text-3"];
+                let raw = &tokens["--accent"];
+                let fill = composite(raw, 0.08, &tokens["--surface-sunken"]);
+                let ratio = contrast_ratio(text, &fill);
+                assert!(
+                    ratio >= 4.5,
+                    "{theme} {accent}: {text} on {fill} = {ratio:.2}"
+                );
+                assert_eq!(tokens["--text-xs"], "12px");
+            }
+        }
+    }
+}

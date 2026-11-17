@@ -13,8 +13,8 @@ use scuffed_types::{MeResponse, OrgRole, UserInfo};
 
 const CSS: &str = r#"
 .login-page {
-    /* The site main already pads 48px for the fixed nav. */
-    min-height: calc(100vh - 48px);
+    /* The sticky site top bar takes its own height above the page. */
+    min-height: calc(100vh - var(--nav-height-used));
     box-sizing: border-box;
     display: flex;
     align-items: center;
@@ -1017,7 +1017,10 @@ mod tests {
     #[test]
     fn login_page_fits_under_the_fixed_nav() {
         let page = css_rule_body(".login-page {");
-        assert!(page.contains("min-height: calc(100vh - 48px)"), "{page}");
+        assert!(
+            page.contains("min-height: calc(100vh - var(--nav-height-used))"),
+            "{page}"
+        );
         assert!(page.contains("box-sizing: border-box"), "{page}");
         assert!(
             !page.contains("min-height: 100vh"),

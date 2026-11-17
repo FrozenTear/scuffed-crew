@@ -1,9 +1,12 @@
 mod admin;
+mod nav;
 mod public;
+mod shell;
 mod strategy;
 
 pub use admin::AdminLayout;
 pub use public::PublicLayout;
+pub(crate) use shell::{trap_tab_within, use_focus_main, use_page_modal};
 pub use strategy::StrategyLayout;
 
 #[cfg(target_arch = "wasm32")]
@@ -101,6 +104,50 @@ fn keydown_target(capture: bool) -> Option<web_sys::EventTarget> {
     }
 }
 
+/// A DOM event listener for the lifetime of the calling component.
+///
+/// `target` runs once, on the first render, and the listener is removed from
+/// that same object on unmount (`matchMedia` returns a new object per call,
+/// so the target is kept, not looked up again). The handler captured on the
+/// first render stays registered, so it must read signals when the event
+/// fires. Wasm only: `Closure::wrap` aborts off `wasm32`.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn use_dom_listener(
+    target: impl FnOnce() -> Option<web_sys::EventTarget>,
+    event: &'static str,
+    on_event: impl FnMut(web_sys::Event) + 'static,
+) {
+    use std::rc::Rc;
+
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+
+    type Handler = Closure<dyn FnMut(web_sys::Event)>;
+
+    fn listener_fn(closure: &Handler) -> &js_sys::Function {
+        closure.as_ref().unchecked_ref()
+    }
+
+    let bound = use_hook(move || {
+        // Called between renders, so run in this component's scope
+        // (see `in_current_scope`).
+        let mut on_event = in_current_scope(on_event);
+        let closure: Handler =
+            Closure::wrap(Box::new(move |evt: web_sys::Event| on_event(evt))
+                as Box<dyn FnMut(web_sys::Event)>);
+        let target = target();
+        if let Some(target) = &target {
+            let _ = target.add_event_listener_with_callback(event, listener_fn(&closure));
+        }
+        Rc::new((target, closure))
+    });
+    use_drop(move || {
+        if let Some(target) = &bound.0 {
+            let _ = target.remove_event_listener_with_callback(event, listener_fn(&bound.1));
+        }
+    });
+}
+
 /// `Closure::wrap` aborts off wasm32, so the listener is not installed.
 /// Desktop still has a window; this stub is the non-wasm build, not a missing window.
 /// Escape handlers in the public and admin layouts therefore do not run here.
@@ -125,25 +172,55 @@ pub(crate) fn in_current_scope<E>(mut f: impl FnMut(E) + 'static) -> impl FnMut(
     move |arg: E| runtime.in_scope(scope, || f(arg))
 }
 
-pub(crate) fn focus_element(id: &str) {
+/// Focus the element with this id. `true` only when focus actually moved
+/// there (it exists, is an HTML element and took focus: not hidden, not
+/// inert, not disabled), so a caller can fall back to another target.
+/// Always `false` off wasm.
+pub(crate) fn focus_element(id: &str) -> bool {
     #[cfg(target_arch = "wasm32")]
     {
         use wasm_bindgen::JsCast;
         let Some(document) = web_sys::window().and_then(|window| window.document()) else {
-            return;
+            return false;
         };
         let Some(el) = document.get_element_by_id(id) else {
-            return;
+            return false;
         };
-        if let Ok(el) = el.dyn_into::<web_sys::HtmlElement>() {
-            let _ = el.focus();
+        let Ok(el) = el.dyn_into::<web_sys::HtmlElement>() else {
+            return false;
+        };
+        if el.focus().is_err() {
+            return false;
         }
+        let node: &web_sys::Node = &el;
+        document
+            .active_element()
+            .is_some_and(|active| active.is_same_node(Some(node)))
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
         // Desktop still has a window. This build skips `HtmlElement::focus`
-        // because that call lives in the wasm branch above.
+        // because that call lives in the wasm branch above. The editor's Esc
+        // focuses `main` through `use_focus_main`, which works there too.
         let _ = id;
+        false
+    }
+}
+
+/// Whether `main#main` is inert: the site drawer covers the page. A page's
+/// own document key handler bails then, since the page is out of reach.
+/// Always `false` off wasm.
+pub(crate) fn main_is_inert() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.get_element_by_id(shell::MAIN_ID))
+            .is_some_and(|main| main.has_attribute("inert"))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        false
     }
 }
 
