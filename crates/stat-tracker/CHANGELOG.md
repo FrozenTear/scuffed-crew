@@ -17,6 +17,8 @@ summary, then the highlights, and tucks the remaining text under Details.
 
 ## Unreleased
 
+On the see-through 5v5 Tab board in Overwatch, names of other players behind the board could show in the stat columns of the report's scoreboard picture. The picture now keeps only the digits and icons of each row on a flat colour, so nothing behind the board shows. Report kits saved before this fix are no longer sent.
+
 At 1440p, most hero icon training crops were dropped because their PNG was over the size cap. They are now kept at 171 px, the same size as a 1080p card. A 4K portrait is still skipped.
 
 ### Highlights

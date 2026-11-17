@@ -345,7 +345,9 @@ Known limits:
 - Text drawn exactly like the game's digits (same font, size, baseline, and spacing) is read as a number.
 - 5v5, Stadium, FFA, custom and spectator boards, non-English thousands separators, other HUD scales, and resolutions other than 1440p and 1080p keep nothing until a real board is measured.
 
-A kit stores the blank table version it was blanked with (`BLANK_TABLE_VERSION`, 12 for this revision), and a kit from another version is never reported.
+Name-column fallback: when a measured board keeps no digit row and no portrait (every 5v5 board, and a 6v6 board whose digit gates reject every row), each verified row that no chat can reach is kept from `L` to `R` with its name column filled. Of the rest of the row only light grey pixels (every channel at least 150, spread at most 40) are copied: the white and grey digits and icons. Every other pixel of the row is one flat colour, the row's median. The 5v5 board is see-through, and in-world nameplates behind it showed in the stat columns while the fallback copied whole rows (blank table 12, 2026-11-14 kits). Through the board they are tinted and dark (no channel above about 70), so none of them is copied. A board whose geometry fails keeps no picture, and the kit saves the reads only.
+
+A kit stores the blank table version it was blanked with (`BLANK_TABLE_VERSION`, 13 for this revision), and a kit from another version is never reported.
 
 ### Other name regions
 

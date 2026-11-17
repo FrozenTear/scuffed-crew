@@ -12,6 +12,10 @@
 //!   well-formed numbers and every glyph gate accepts, on one flat colour per
 //!   cell that equals no source pixel ([`cells`]).
 //!
+//! When neither kind is kept, the name-column fallback keeps each verified
+//! row with its name column filled, copying only the row's light grey
+//! pixels (digits, icons) on one flat colour ([`name_column_fallback`]).
+//!
 //! Names, titles, badges, the header, the hero card, notices, nameplates and
 //! the world all stay fill. A measurement that fails keeps nothing of the
 //! board, the row, or the portrait it belongs to. Every kept row is read back
@@ -59,7 +63,10 @@ pub const FILL: Rgb<u8> = Rgb([32, 32, 32]);
 /// * 11: no portrait is copied ([`COPY_PORTRAITS`] off).
 /// * 12: 5v5 boards are measured and blanked (header at x 0 on one of the
 ///   four measured 5v5 layouts); 6v6 output unchanged.
-pub const BLANK_TABLE_VERSION: u32 = 12;
+/// * 13: the name-column fallback keeps only light grey pixels of a row on
+///   one flat colour, so nameplates behind the see-through 5v5 board stay
+///   out (2026-11-17).
+pub const BLANK_TABLE_VERSION: u32 = 13;
 
 /// An earlier capture is a reference for the portrait check only when it is
 /// at least this old: an overlay that shows on both captures has to stay
@@ -839,11 +846,16 @@ fn blank_crop_inner(
 pub(crate) const NAME_COL: (f64, f64) = (101.0, 380.0);
 
 /// Fallback when the allowlist kept nothing on a measured board (strict
-/// digit gates reject the row, portraits are off): copy each verified row
-/// of the table between `L` and `R`, then fill its name column. Everything
-/// else (outside the table, unverified rows, the header) stays fill.
-/// A row the chat box may cover is not copied (chat text carries names),
-/// and with chat unknown nothing is.
+/// digit gates reject the row, portraits are off): keep each verified row
+/// of the table between `L` and `R` with its name column filled. Of the
+/// rest of the row only light grey pixels ([`board::header_light`]: the
+/// white and grey digits and icons) are copied; every other pixel of the
+/// row is one flat colour, the row's median. The 5v5 board is see-through:
+/// in-world nameplates behind it show in the stat columns, tinted by the
+/// board and far too dark to pass as light, so they never reach the output.
+/// Everything else (outside the table, unverified rows, the header) stays
+/// fill. A row the chat box may cover is not copied (chat text carries
+/// names), and with chat unknown nothing is.
 fn name_column_fallback(src: &RgbImage, b: &board::Board, chat: Chat, out: &mut BlankedBoard) {
     if chat == Chat::Unknown {
         return;
@@ -858,15 +870,33 @@ fn name_column_fallback(src: &RgbImage, b: &board::Board, chat: Chat, out: &mut 
         .iter()
         .filter(|r| r.verified && !chat.covers(r.bot, h))
     {
-        for y in r.top..r.bot.min(h) {
-            for x in x0..x1 {
-                let px = if (n0..n1).contains(&x) {
-                    FILL
-                } else {
-                    *src.get_pixel(x, y)
-                };
-                out.image.put_pixel(x, y, px);
+        let span = || {
+            (r.top..r.bot.min(h))
+                .flat_map(move |y| (x0..x1).map(move |x| (x, y)))
+                .filter(|(x, _)| !(n0..n1).contains(x))
+        };
+        let mut chans: [Vec<u8>; 3] = Default::default();
+        for (x, y) in span() {
+            let p = src.get_pixel(x, y).0;
+            if !board::header_light(p) {
+                for (c, v) in chans.iter_mut().zip(p) {
+                    c.push(v);
+                }
             }
+        }
+        let flat = Rgb(chans.map(|mut c| {
+            c.sort_unstable();
+            c.get(c.len() / 2).copied().unwrap_or(FILL.0[0])
+        }));
+        for y in r.top..r.bot.min(h) {
+            for x in n0.max(x0)..n1.min(x1) {
+                out.image.put_pixel(x, y, FILL);
+            }
+        }
+        for (x, y) in span() {
+            let p = *src.get_pixel(x, y);
+            let px = if board::header_light(p.0) { p } else { flat };
+            out.image.put_pixel(x, y, px);
         }
         kept += 1;
     }
@@ -904,10 +934,11 @@ mod tests {
                 }
             }
         }
-        // the fill starts right after the portrait art (x 30 to 100)
+        // the fill starts right after the portrait art (x 30 to 100), which
+        // keeps the row's flat colour
         let r0 = b.rows.iter().find(|r| r.verified).unwrap();
         let y = r0.top + 20;
-        assert_eq!(out.image.get_pixel(100, y), crop.get_pixel(100, y));
+        assert_ne!(*out.image.get_pixel(100, y), FILL);
         assert_eq!(*out.image.get_pixel(101, y), FILL);
         // the cut-off bottom enemy row (from y 566 + 5 * 74) is filled
         // down to the frame edge
@@ -920,10 +951,16 @@ mod tests {
         for y in (0..1007).step_by(50) {
             assert_eq!(*out.image.get_pixel(1300, y), FILL);
         }
-        // a stat cell of a verified row is copied
+        // the digits of a verified row are copied
         let r = b.rows.iter().find(|r| r.verified).unwrap();
-        let (x, y) = (b.r - 100, r.top + 36);
-        assert_eq!(out.image.get_pixel(x, y), crop.get_pixel(x, y));
+        let light: Vec<(u32, u32)> = (r.top..r.bot)
+            .flat_map(|y| (b.r - 600..b.r).map(move |x| (x, y)))
+            .filter(|&(x, y)| super::board::header_light(crop.get_pixel(x, y).0))
+            .collect();
+        assert!(light.len() > 100, "{} digit px", light.len());
+        for (x, y) in light {
+            assert_eq!(out.image.get_pixel(x, y), crop.get_pixel(x, y));
+        }
 
         // with chat possibly on screen, nothing is kept
         let mut unsure = BlankedBoard {
@@ -984,7 +1021,8 @@ mod tests {
         let doc = include_str!("../../../docs/report-bundle.md");
         for line in [
             "RGB 32, 32, 32",
-            "(`BLANK_TABLE_VERSION`, 12 for this revision)",
+            "(`BLANK_TABLE_VERSION`, 13 for this revision)",
+            "only light grey pixels (every channel at least 150, spread at most 40)",
             "a channel more than 30 from its 5x5 median",
             "at most 0.45 of the text height in ink",
             "x 60 to 448, y 1250 to 1340",
@@ -994,7 +1032,7 @@ mod tests {
         ] {
             assert!(doc.contains(line), "spec line missing: {line}");
         }
-        assert_eq!(BLANK_TABLE_VERSION, 12);
+        assert_eq!(BLANK_TABLE_VERSION, 13);
         assert_eq!(FILL, Rgb([32, 32, 32]));
     }
 

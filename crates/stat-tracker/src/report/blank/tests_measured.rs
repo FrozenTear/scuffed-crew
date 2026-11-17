@@ -833,15 +833,25 @@ fn a_5v5_frame_gets_a_picture_with_every_name_filled() {
             }
         }
         if width == 2560 {
-            // the stats are kept as captured: E to MIT of every row
+            // the digits of E to MIT of every row are kept as captured, on
+            // one flat colour per row
             let src = synth::board_5v5(5);
             for i in 0..10 {
                 let (top, bot) = synth::row_span_5(i);
+                let flat = *out.image.get_pixel(560, top + 3);
+                let mut digits = 0;
                 for y in top + 3..bot - 3 {
                     for x in 560..1040 {
-                        assert_eq!(out.image.get_pixel(x, y), src.get_pixel(x, y), "({x}, {y})");
+                        let (o, s) = (*out.image.get_pixel(x, y), *src.get_pixel(x, y));
+                        if board::header_light(s.0) {
+                            assert_eq!(o, s, "({x}, {y})");
+                            digits += 1;
+                        } else {
+                            assert_eq!(o, flat, "({x}, {y})");
+                        }
                     }
                 }
+                assert!(digits > 100, "row {i}: {digits} digit px");
             }
         }
     }
@@ -917,6 +927,92 @@ fn write_synthetic_baseline_boards() {
     ] {
         img.save(baseline_path(name)).unwrap();
     }
+}
+
+/// A synthetic 5v5 board that is see-through like the real one: the world
+/// behind its rows (busy, with in-world nameplate text) shows through at
+/// 20% over the stats. Returns the crop and the nameplate boxes, which lie
+/// under the digits as on the real boards (2026-11-14 kits).
+fn see_through_5v5() -> (RgbImage, Vec<(u32, u32, u32, u32)>) {
+    let mut img = synth::board_5v5(5);
+    let mut plates = Vec::new();
+    for i in 0..10 {
+        let (top, bot) = synth::row_span_5(i);
+        // one nameplate across the E, A and D digits, one by H and MIT
+        let row_plates = [
+            (560, top + 30, 760, top + 50),
+            (840 + 10 * i as u32, top + 52, 1040, top + 70),
+        ];
+        for y in top + 2..bot - 2 {
+            for x in 400..1050 {
+                let on_plate = row_plates.iter().any(|&(x0, y0, x1, y1)| {
+                    (x0..x1).contains(&x) && (y0..y1).contains(&y) && (x - x0) % 14 < 4
+                });
+                let world = if on_plate {
+                    [255, 255, 255]
+                } else {
+                    let v = ((x * 37 + y * 91) % 97) as u8;
+                    [60 + v, 90 + v / 2, 40 + v]
+                };
+                let p = img.get_pixel_mut(x, y);
+                for (c, wv) in p.0.iter_mut().zip(world) {
+                    *c = ((u32::from(*c) * 8 + u32::from(wv) * 2) / 10) as u8;
+                }
+            }
+        }
+        plates.extend(row_plates);
+    }
+    (img, plates)
+}
+
+/// The 5v5 Tab board is see-through, and in-world nameplates behind it
+/// showed in the stat columns of `scoreboard.png` (2026-11-14 kits): the
+/// name-column fallback copied each row whole outside the name column. Now
+/// no pixel of a nameplate behind the board reaches the output, and the
+/// digits on top of it are still kept.
+#[test]
+fn nameplates_behind_a_see_through_5v5_board_are_not_kept() {
+    let (src, plates) = see_through_5v5();
+    let out = super::blank_crop(&src, Some(5), super::Chat::None);
+    assert_eq!(out.board, Ok(()));
+    assert!(out.has_picture());
+    assert_eq!(out.name_fill_rows, 10);
+    let mut digits = 0;
+    for (i, &(x0, y0, x1, y1)) in plates.iter().enumerate() {
+        let (top, _) = synth::row_span_5(i / 2);
+        let flat = *out.image.get_pixel(1045, top + 4);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let (o, s) = (*out.image.get_pixel(x, y), *src.get_pixel(x, y));
+                if board::header_light(s.0) {
+                    // a digit pixel drawn over the nameplate
+                    assert_eq!(o, s, "plate {i} ({x}, {y})");
+                    digits += 1;
+                } else {
+                    assert_eq!(o, flat, "plate {i} ({x}, {y}): nameplate pixel kept");
+                }
+            }
+        }
+    }
+    assert!(digits > 500, "{digits} digit px over the plates");
+}
+
+/// Fail safe: a see-through 5v5 board whose geometry cannot be measured
+/// (here the world behind breaks up its header strip) keeps no picture at
+/// all, so the kit saves the reads and no `scoreboard.png`.
+#[test]
+fn a_see_through_5v5_board_that_cannot_be_measured_keeps_no_picture() {
+    let (mut src, _) = see_through_5v5();
+    for y in 0..synth::T1_5 {
+        for x in (0..synth::R5).filter(|x| x % 9 < 4) {
+            let v = ((x * 37 + y * 91) % 97) as u8;
+            src.put_pixel(x, y, image::Rgb([60 + v, 90 + v / 2, 40 + v]));
+        }
+    }
+    let out = super::blank_crop(&src, Some(5), super::Chat::None);
+    assert!(out.board.is_err());
+    assert!(!out.has_picture());
+    assert!(out.image.pixels().all(|p| *p == super::FILL));
 }
 
 /// A half-drawn 5v5 board never shows a name, whatever it keeps.
