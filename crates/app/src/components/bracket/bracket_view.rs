@@ -3,11 +3,17 @@ use std::collections::HashMap;
 
 use super::double_elim::BracketDoubleElim;
 use super::round_robin::RoundRobinTable;
-use super::single_elim::{BracketMatch, BracketRound, BracketSingleElim};
+use super::single_elim::{
+    BracketColumns, BracketMatch, BracketRound, BracketSingleElim, HeadLevel, numbered_labels,
+    stage_rounds,
+};
 use super::swiss::{SwissStanding, SwissStandings};
 
+/// The bracket of one tournament, by format. `name` is the tournament name:
+/// it names the scrollers for assistive tech.
 #[component]
 pub fn BracketView(
+    name: String,
     format: String,
     rounds: Vec<BracketRound>,
     matches: Vec<BracketMatch>,
@@ -17,41 +23,116 @@ pub fn BracketView(
 ) -> Element {
     match format.as_str() {
         "single_elim" => rsx! {
-            BracketSingleElim {
-                rounds: rounds,
-                matches: matches,
-                participant_names: participant_names,
-            }
+            BracketSingleElim { name, rounds, matches, participant_names }
         },
 
         "double_elim" => rsx! {
-            BracketDoubleElim {
-                rounds: rounds,
-                matches: matches,
-                participant_names: participant_names,
-            }
+            BracketDoubleElim { name, rounds, matches, participant_names }
         },
 
         "round_robin" => rsx! {
-            RoundRobinTable {
-                matches: matches,
-                participant_names: participant_names,
-                participant_ids: participant_ids,
+            section { class: "ui-stack",
+                h2 { class: "ui-section-title", "Results" }
+                RoundRobinTable { name, matches, participant_names, participant_ids }
             }
         },
 
-        "swiss" => rsx! {
-            SwissStandings { standings: swiss_standings }
-            div { class: "tournament-section-title", "Round Pairings" }
-            BracketSingleElim {
-                rounds: rounds,
-                matches: matches,
-                participant_names: participant_names,
+        "swiss" => {
+            // Swiss rounds are numbered: the last one is not a final.
+            let swiss_rounds = stage_rounds(&rounds, &["main", "winners"]);
+            let labels = numbered_labels(swiss_rounds.len());
+            rsx! {
+                section { class: "ui-stack",
+                    h2 { class: "ui-section-title", "Standings" }
+                    SwissStandings { name: name.clone(), standings: swiss_standings }
+                }
+                section { class: "ui-stack",
+                    h2 { class: "ui-section-title", "Round pairings" }
+                    BracketColumns {
+                        name: "{name} round pairings",
+                        labels,
+                        rounds: swiss_rounds,
+                        matches,
+                        participant_names,
+                        head: HeadLevel::H3,
+                    }
+                }
             }
-        },
+        }
 
         _ => rsx! {
-            p { style: "color: var(--text-subtle);", "Unknown tournament format." }
+            p { class: "bracket-note", "This tournament uses a format this page cannot draw yet." }
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::single_elim::test_data::*;
+    use super::*;
+    use crate::components::ui::test_support::render;
+
+    fn swiss() -> Element {
+        let (rounds, matches) = test_cup();
+        rsx! {
+            BracketView {
+                name: "Test Cup",
+                format: "swiss",
+                rounds,
+                matches,
+                participant_names: names(),
+                participant_ids: Vec::new(),
+                swiss_standings: Vec::new(),
+            }
+        }
+    }
+
+    #[test]
+    fn swiss_rounds_are_numbered_and_have_no_champion() {
+        let html = render(swiss);
+        assert!(
+            html.contains("<h2 class=\"ui-section-title\">Standings</h2>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<h2 class=\"ui-section-title\">Round pairings</h2>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<h3 class=\"bracket-head\">Round 1</h3>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<h3 class=\"bracket-head\">Round 2</h3>"),
+            "{html}"
+        );
+        for wrong in ["Final", "Semi-finals", "Champion"] {
+            assert!(!html.contains(wrong), "{wrong}: {html}");
+        }
+        assert!(
+            html.contains("aria-label=\"Test Cup round pairings\""),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn unknown_format_says_so_in_plain_words() {
+        fn app() -> Element {
+            rsx! {
+                BracketView {
+                    name: "Test Cup",
+                    format: "ladder",
+                    rounds: Vec::new(),
+                    matches: Vec::new(),
+                    participant_names: HashMap::new(),
+                    participant_ids: Vec::new(),
+                    swiss_standings: Vec::new(),
+                }
+            }
+        }
+        assert_eq!(
+            render(app),
+            "<p class=\"bracket-note\">This tournament uses a format this page cannot draw yet.</p>"
+        );
     }
 }

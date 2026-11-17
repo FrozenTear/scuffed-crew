@@ -14,36 +14,125 @@ pub struct SwissStanding {
     pub rank: u32,
 }
 
+/// A short column head with its full name for assistive tech.
 #[component]
-pub fn SwissStandings(standings: Vec<SwissStanding>) -> Element {
+pub(super) fn ShortHead(short: String, full: String) -> Element {
     rsx! {
-        table { class: "swiss-standings",
-            thead {
-                tr {
-                    th { "#" }
-                    th { "Team" }
-                    th { "W" }
-                    th { "L" }
-                    th { "D" }
-                    th { "GW" }
-                    th { "GL" }
-                    th { "Buch." }
-                }
-            }
-            tbody {
-                for s in standings.iter() {
+        th { scope: "col", class: "is-num",
+            span { aria_hidden: "true", "{short}" }
+            span { class: "visually-hidden", "{full}" }
+        }
+    }
+}
+
+/// Swiss standings. Eight columns do not fit a phone, so the table sits in a
+/// scroller of its own: focusable, named, and labelled by the title above it.
+#[component]
+pub fn SwissStandings(
+    /// Tournament name, for the scroller's accessible name.
+    name: String,
+    standings: Vec<SwissStanding>,
+) -> Element {
+    if standings.is_empty() {
+        return rsx! {
+            p { class: "bracket-note", "Standings show up here once the first round is played." }
+        };
+    }
+
+    rsx! {
+        p { class: "bracket-hint",
+            span { class: "swipe-arrow", aria_hidden: "true" }
+            "Swipe for game wins and Buchholz"
+        }
+        div {
+            class: "bracket-table-scroll",
+            role: "region",
+            tabindex: "0",
+            aria_label: "{name} standings",
+            table { class: "bracket-table",
+                thead {
                     tr {
-                        td { class: "rank-col", "{s.rank}" }
-                        td { "{s.participant_name}" }
-                        td { class: "record-col", "{s.wins}" }
-                        td { class: "record-col", "{s.losses}" }
-                        td { class: "record-col", "{s.draws}" }
-                        td { "{s.game_wins}" }
-                        td { "{s.game_losses}" }
-                        td { "{s.buchholz:.1}" }
+                        th { scope: "col", class: "is-num",
+                            span { aria_hidden: "true", "#" }
+                            span { class: "visually-hidden", "Rank" }
+                        }
+                        th { scope: "col", "Team" }
+                        ShortHead { short: "W", full: "Wins" }
+                        ShortHead { short: "L", full: "Losses" }
+                        ShortHead { short: "D", full: "Draws" }
+                        ShortHead { short: "GW", full: "Game wins" }
+                        ShortHead { short: "GL", full: "Game losses" }
+                        ShortHead { short: "Buch.", full: "Buchholz score" }
+                    }
+                }
+                tbody {
+                    for s in standings.iter() {
+                        tr { key: "{s.participant_id}",
+                            td { class: "is-num is-muted", "{s.rank}" }
+                            th { scope: "row", "{s.participant_name}" }
+                            td { class: "is-num", "{s.wins}" }
+                            td { class: "is-num", "{s.losses}" }
+                            td { class: "is-num", "{s.draws}" }
+                            td { class: "is-num", "{s.game_wins}" }
+                            td { class: "is-num", "{s.game_losses}" }
+                            td { class: "is-num", "{s.buchholz:.1}" }
+                        }
                     }
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::components::ui::test_support::render;
+
+    fn standing(n: u32) -> SwissStanding {
+        SwissStanding {
+            participant_id: format!("p:{n}"),
+            participant_name: format!("Squad {n:02}"),
+            wins: 3 - n,
+            losses: n,
+            draws: 0,
+            game_wins: 6 - n,
+            game_losses: n + 1,
+            buchholz: 4.5,
+            rank: n,
+        }
+    }
+
+    #[test]
+    fn standings_sit_in_a_named_focusable_scroller() {
+        fn app() -> Element {
+            rsx! { SwissStandings { name: "Test Cup", standings: vec![standing(1), standing(2)] } }
+        }
+        let html = render(app);
+        assert!(
+            html.contains(
+                "<div class=\"bracket-table-scroll\" role=\"region\" tabindex=\"0\" \
+                 aria-label=\"Test Cup standings\">"
+            ),
+            "{html}"
+        );
+        assert!(html.contains("<th scope=\"row\">Squad 01</th>"), "{html}");
+        assert!(
+            html.contains("<span aria-hidden=\"true\">GW</span><span class=\"visually-hidden\">Game wins</span>"),
+            "{html}"
+        );
+        assert_eq!(html.matches("scope=\"col\"").count(), 8, "{html}");
+        assert!(html.contains(">4.5</td>"), "{html}");
+        assert!(!html.contains("p:1"), "raw id leaked: {html}");
+    }
+
+    #[test]
+    fn no_standings_is_a_note_not_an_empty_table() {
+        fn app() -> Element {
+            rsx! { SwissStandings { name: "Test Cup", standings: Vec::new() } }
+        }
+        let html = render(app);
+        assert!(html.contains("once the first round is played"), "{html}");
+        assert!(!html.contains("<table"), "{html}");
     }
 }

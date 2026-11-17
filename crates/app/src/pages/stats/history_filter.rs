@@ -6,6 +6,7 @@
 
 use dioxus::prelude::*;
 
+use crate::pages::stats_member::{Col, StatsTable, rate_cell};
 use crate::sample::{MAP_RULE_NOTE, RECORD_MIN_GAMES, Tally};
 
 use super::role::history_row_matches_role;
@@ -198,34 +199,22 @@ pub(super) fn map_table(rows: &[MapRow]) -> Element {
     }
     let note = map_table_note();
     rsx! {
-        section { class: "history-maps",
-            h3 { class: "section-title", "Map results" }
-            p { class: "stats-gate-note", "{note}" }
-            div { class: "data-table-scroll",
-                table { class: "data-table history-map-table",
-                    thead {
-                        tr {
-                            th { "Map" }
-                            th { "Mode" }
-                            th { "Games" }
-                            th { "Result" }
-                        }
-                    }
-                    tbody {
-                        for r in rows.iter() {
-                            {
-                                let res = map_result(r.tally);
-                                let row_class = if res.row_muted { "stats-row-muted" } else { "" };
-                                rsx! {
-                                    tr { key: "{r.map}", class: "{row_class}",
-                                        td { "{r.map}" }
-                                        td { "{r.mode}" }
-                                        td { "{r.tally.games}" }
-                                        td {
-                                            span { class: "{res.text_class}", "{res.text}" }
-                                        }
-                                    }
-                                }
+        section { class: "ui-stack history-maps", aria_labelledby: "history-maps-title",
+            h2 { id: "history-maps-title", class: "ui-section-title", "Map results" }
+            p { class: "stats-view-note", "{note}" }
+            StatsTable {
+                labelled_by: "history-maps-title",
+                cols: vec![Col::Text("Map"), Col::Text("Mode"), Col::Num("Games"), Col::Rate("Result")],
+                for r in rows.iter() {
+                    {
+                        let res = map_result(r.tally);
+                        let row_class = if res.row_muted { "stats-row-muted" } else { "" };
+                        rsx! {
+                            tr { key: "{r.map}", class: "{row_class}",
+                                th { scope: "row", "{r.map}" }
+                                td { "{r.mode}" }
+                                td { class: "num", "{r.tally.games}" }
+                                {rate_cell(r.tally, &res.text, res.text_class)}
                             }
                         }
                     }
@@ -235,29 +224,92 @@ pub(super) fn map_table(rows: &[MapRow]) -> Element {
     }
 }
 
-/// Styles for the compact history rows and the per-map table.
+/// Styles for the history rows. The grid of a row and the unsure marks are in
+/// `STATS_CSS`; this holds what the redesign adds on top, on tokens only, so
+/// `data-density` and the theme apply. The selectors carry one more class than
+/// the base rules, so they win whatever order the two sheets load in.
 pub(super) const HISTORY_CSS: &str = r#"
-    .match-card .match-identity.match-identity-compact {
-        display: flex;
-        flex-wrap: wrap;
-        align-items: baseline;
-        column-gap: 0.6rem;
-        row-gap: 0.1rem;
-    }
-    .match-identity-compact .match-hero-line { flex: 0 1 auto; }
-    .match-identity-compact .match-map { flex: 1 1 10rem; }
-    .match-mode {
-        flex: 0 0 auto;
-        white-space: nowrap;
-    }
-    .stats-page[data-density="compact"] .match-card.match-row-compact {
-        padding-top: 0.3rem;
-        padding-bottom: 0.3rem;
-    }
-    .history-maps { margin-top: 1.75rem; }
-    .history-maps .data-table { min-width: 0; }
-    .history-maps .data-table td,
-    .history-maps .data-table th { padding: 0.4rem 0.6rem; }
+.match-list ul.match-cards {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  gap: var(--space-2);
+}
+.match-list .match-card {
+  min-height: var(--density-row);
+  padding-top: var(--space-2);
+  padding-bottom: var(--space-2);
+  background: var(--card-bg);
+  border-color: var(--card-border);
+  border-radius: var(--card-radius);
+  box-shadow: var(--card-shadow);
+  font-family: var(--font-body);
+  font-size: var(--text-md);
+}
+.match-list .match-card:hover { background: var(--surface-sunken); }
+.match-list .match-card-overlay:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+/* The result is the shared pill. The cell only places it. */
+.match-list .match-card .match-outcome {
+  align-items: center;
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  text-transform: none;
+}
+.match-card .match-outcome .ui-pill,
+.game-outcome .ui-pill {
+  flex: 0 0 auto;
+  overflow: visible;
+}
+.match-list .match-card .match-hero {
+  font-family: var(--font-head);
+  font-size: var(--text-md);
+  font-weight: var(--font-label-weight);
+  color: var(--text);
+}
+.match-list .match-card .match-map {
+  column-gap: var(--space-1);
+  color: var(--text-3);
+  font-size: var(--text-sm);
+}
+.match-list .match-card .match-stat {
+  color: var(--text-3);
+  font-size: var(--text-sm);
+}
+.match-list .match-card .match-date {
+  color: var(--text-3);
+  font-size: var(--text-xs);
+}
+.match-list .match-list-head {
+  font-family: var(--font-head);
+  font-size: var(--text-xs);
+  font-weight: var(--font-label-weight);
+  letter-spacing: var(--font-head-tracking);
+  color: var(--text-subtle);
+}
+.match-card .match-identity.match-identity-compact {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: var(--space-2);
+  row-gap: 0;
+}
+.match-identity-compact .match-hero-line { flex: 0 1 auto; }
+.match-identity-compact .match-map { flex: 1 1 calc(var(--space-10) * 4); }
+.match-mode {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+/* The reader badge is the shared pill. It may shrink before the hero does. */
+.match-hero-line .reader-badge { flex-shrink: 1; }
+.history-no-match {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
 "#;
 
 #[cfg(test)]
@@ -433,6 +485,24 @@ mod tests {
         assert_eq!(html.matches("stats-row-muted").count(), 1, "{html}");
         assert!(html.contains("Map results"), "{html}");
         assert!(!render(empty).contains("history-maps"));
+        // The table sits in a named, focusable scroll region, each map is a
+        // row header, and a rate is a number with a hidden neutral bar.
+        assert!(
+            html.contains("role=\"region\" aria-labelledby=\"history-maps-title\" tabindex=\"0\""),
+            "{html}"
+        );
+        assert!(html.contains("<h2 id=\"history-maps-title\""), "{html}");
+        assert!(html.contains("<th scope=\"row\">Ilios</th>"), "{html}");
+        assert!(
+            html.contains("<span class=\"stats-wr\">100.0%</span>"),
+            "{html}"
+        );
+        assert_eq!(
+            html.matches("stats-rate-bar\" aria-hidden=\"true\"")
+                .count(),
+            1,
+            "{html}"
+        );
     }
 
     #[test]

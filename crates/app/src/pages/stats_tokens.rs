@@ -6,7 +6,9 @@ use serde::Deserialize;
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::{CreateDaemonTokenRequest, CreateDaemonTokenResponse};
 
-use crate::components::{DataTable, FormModal, Toast, member_pending, use_toast};
+use super::stats_member::{Col, STATS_VIEWS_CSS, STATS_VIEWS_CSS_ID, StatsTable};
+use crate::components::ui::{EmptyCard, PageHeader, PageShell, PageWidth};
+use crate::components::{FormModal, Toast, member_pending, use_toast};
 use crate::hooks::{ModalController, use_api};
 use crate::state::use_auth;
 
@@ -22,65 +24,66 @@ struct DaemonToken {
 }
 
 const TOKENS_CSS: &str = r#"
-    .tokens-page {
-        max-width: 900px;
-        margin: 0 auto;
-        padding: 2rem 1.5rem;
-    }
-    .tokens-page h1 {
-        font-family: var(--font-head);
-        font-size: 1.8rem;
-        color: var(--text);
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-    }
-    .tracker-setup {
-        background: var(--surface);
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        padding: 1rem;
-        margin-bottom: 1.5rem;
-    }
-    .tracker-setup.has-token {
-        border-color: var(--accent-solid);
-    }
-    .tracker-setup h2 {
-        font-family: var(--font-head);
-        font-size: 1rem;
-        color: var(--text);
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-        margin: 0 0 0.5rem;
-    }
-    .tracker-setup p {
-        color: var(--text-3);
-        font-size: 0.85rem;
-        margin: 0 0 0.5rem;
-    }
-    .tracker-setup a {
-        color: var(--accent-text);
-        font-size: 0.85rem;
-    }
-    .tracker-setup code {
-        display: block;
-        background: var(--bg);
-        border: 1px solid var(--border);
-        border-radius: 4px;
-        padding: 0.6rem 0.75rem;
-        font-family: var(--font-mono);
-        font-size: 0.8rem;
-        color: var(--accent-text);
-        word-break: break-all;
-        margin: 0.5rem 0;
-        user-select: all;
-    }
-    .tracker-setup-actions {
-        display: flex;
-        gap: 0.5rem;
-        flex-wrap: wrap;
-        align-items: center;
-        margin-top: 0.75rem;
-    }
+.tokens-page .tracker-setup {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+  padding: var(--card-padding);
+  background: var(--card-bg);
+  color: var(--card-fg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--card-radius);
+  box-shadow: var(--card-shadow);
+}
+/* A new token is on show: a stronger border plus the words "Your new token". */
+.tokens-page .tracker-setup.has-token { border-color: var(--accent-solid); }
+.tokens-page .tracker-setup p {
+  margin: 0;
+  max-width: var(--content-max-narrow);
+  color: var(--text-3);
+  font-family: var(--font-body);
+  font-size: var(--text-md);
+  line-height: var(--leading-body);
+}
+.tokens-page .tracker-setup a {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--hit-target-min);
+  color: var(--accent-text);
+  text-decoration: underline;
+}
+.tokens-page .tracker-setup a:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+.tokens-page .tracker-setup code {
+  display: block;
+  padding: var(--space-3);
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text);
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+.tokens-page .tracker-setup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+.tokens-page .token-date { white-space: nowrap; color: var(--table-row-muted); }
+/* The dialog may render outside the page container. */
+.token-form-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
 "#;
 
 /// First-run sync setup is documented in the stat-tracker readme (Running).
@@ -119,8 +122,24 @@ fn dispatch_copy(token: &str, on_copy: EventHandler<String>) {
     on_copy.call(token_clipboard_text(token));
 }
 
+/// "12 Nov 2026, 20:00 UTC", the date style of the frames.
 fn format_date(dt: &DateTime<Utc>) -> String {
-    dt.format("%b %d, %Y %H:%M").to_string()
+    dt.format("%-d %b %Y, %H:%M UTC").to_string()
+}
+
+/// Id of a row's Revoke button: the token id plus the action, never a counter.
+fn revoke_button_id(token_id: &str) -> String {
+    let safe: String = token_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("token-{safe}-revoke")
 }
 
 async fn copy_daemon_token(text: &str) -> Result<(), &'static str> {
@@ -170,8 +189,8 @@ fn TrackerSetupBox(
         .map(|_| tracker_setup_body(&tracker_site_address()));
     let shown = token.clone();
     rsx! {
-        div { class: "{class}",
-            h2 { "{TRACKER_SETUP_TITLE}" }
+        section { class: "{class}", aria_labelledby: "tracker-setup-title",
+            h2 { id: "tracker-setup-title", class: "ui-section-title", "{TRACKER_SETUP_TITLE}" }
             if let Some(body) = setup_body {
                 p { "{body}" }
             }
@@ -181,19 +200,22 @@ fn TrackerSetupBox(
                     target: "_blank",
                     rel: "noopener noreferrer",
                     "Stat tracker setup"
+                    span { class: "visually-hidden", " (opens in a new tab)" }
                 }
             }
             if let Some(raw) = shown {
-                p { "Your new token:" }
-                code { "{raw}" }
+                p { id: "tracker-new-token-label", "Your new token. Copy it now: it is shown only once." }
+                code { aria_labelledby: "tracker-new-token-label", "{raw}" }
                 div { class: "tracker-setup-actions",
                     button {
-                        class: "btn-add",
+                        r#type: "button",
+                        class: "btn is-primary",
                         onclick: move |_| dispatch_copy(&raw, on_copy),
                         "Copy token"
                     }
                     button {
-                        class: "btn-cancel",
+                        r#type: "button",
+                        class: "btn is-ghost",
                         onclick: move |evt| on_dismiss.call(evt),
                         "Dismiss"
                     }
@@ -282,14 +304,40 @@ pub fn StatsTokens() -> Element {
         });
     };
 
+    let on_revoke = EventHandler::new(on_revoke);
+
+    // Read once here, so no read guard is held while the children render.
+    let token_count = tokens
+        .data
+        .read()
+        .as_ref()
+        .and_then(|d| d.as_ref())
+        .map(Vec::len);
+    let status = match token_count {
+        None => String::new(),
+        Some(0) => "No tracker tokens yet.".to_string(),
+        Some(1) => "1 tracker token.".to_string(),
+        Some(n) => format!("{n} tracker tokens."),
+    };
+
     rsx! {
+        crate::styles::StyleOnce { id: STATS_VIEWS_CSS_ID, css: STATS_VIEWS_CSS }
         crate::styles::StyleOnce { id: "scuffed-css-pages-stats_tokens-tokens-css", css: TOKENS_CSS }
         crate::styles::StyleOnce { id: "scuffed-css-admin-shared", css: crate::styles::admin::CSS }
 
-        div { class: "tokens-page",
-            div { class: "admin-toolbar",
-                h1 { "Tracker tokens" }
-                button { class: "btn-add", onclick: open_create, "+ New Token" }
+        PageShell { width: PageWidth::Default, class: "tokens-page",
+            PageHeader {
+                title: "Tracker tokens",
+                lead: "A token lets the stat tracker upload your games to this site. Revoke one and the tracker using it stops uploading.",
+                actions: rsx! {
+                    button {
+                        r#type: "button",
+                        id: "tokens-new",
+                        class: "btn is-primary",
+                        onclick: open_create,
+                        "New token"
+                    }
+                },
             }
 
             TrackerSetupBox {
@@ -298,46 +346,46 @@ pub fn StatsTokens() -> Element {
                 on_dismiss: on_dismiss,
             }
 
-            {
-                let data = tokens.data.read();
-                let data = data.as_ref().and_then(|d| d.as_ref());
-                match data {
-                    None => member_pending(&auth(), &tokens, "tracker tokens"),
-                    Some(list) if list.is_empty() => rsx! {
-                        p { class: "empty-state", "No tracker tokens yet. Create one to start uploading stats." }
-                    },
-                    Some(list) => rsx! {
-                        DataTable { headers: vec!["Label", "Status", "Created", "Last Used", "Actions"],
-                            for token in list.iter() {
-                                {
-                                    let tid = token.id.clone();
-                                    let status = if token.is_active { "Active" } else { "Revoked" };
-                                    let status_class = if token.is_active { "status-pill active" } else { "status-pill inactive" };
-                                    let created = format_date(&token.created_at);
-                                    let used = token.last_used_at.as_ref().map(format_date).unwrap_or_else(|| "Never".into());
-                                    rsx! {
-                                        tr { key: "{token.id}",
-                                            td { "{token.label}" }
-                                            td { span { class: "{status_class}", "{status}" } }
-                                            td { "{created}" }
-                                            td { "{used}" }
-                                            td {
-                                                if token.is_active {
-                                                    div { class: "row-actions",
-                                                        button {
-                                                            class: "row-btn danger",
-                                                            onclick: move |_| on_revoke(tid.clone()),
-                                                            "Revoke"
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
+            section { class: "ui-stack", aria_labelledby: "tokens-list-title",
+                h2 { id: "tokens-list-title", class: "ui-section-title", "Your tokens" }
+                p { class: "visually-hidden", role: "status", "{status}" }
+                {
+                    let data = tokens.data.read();
+                    let data = data.as_ref().and_then(|d| d.as_ref());
+                    match data {
+                        None => member_pending(&auth(), &tokens, "tracker tokens"),
+                        Some(list) if list.is_empty() => rsx! {
+                            EmptyCard {
+                                title: "No tracker tokens yet",
+                                message: "Create a token, then paste it into the tracker to start uploading your games.",
+                                actions: rsx! {
+                                    button {
+                                        r#type: "button",
+                                        id: "tokens-new-empty",
+                                        class: "btn is-primary",
+                                        onclick: open_create,
+                                        "Create a token"
                                     }
+                                },
+                            }
+                        },
+                        Some(list) => rsx! {
+                            StatsTable {
+                                labelled_by: "tokens-list-title",
+                                wide: true,
+                                cols: vec![
+                                    Col::Text("Label"),
+                                    Col::Text("Status"),
+                                    Col::Text("Created"),
+                                    Col::Text("Last used"),
+                                    Col::Text("Actions"),
+                                ],
+                                for token in list.iter() {
+                                    {token_row(token, on_revoke)}
                                 }
                             }
-                        }
-                    },
+                        },
+                    }
                 }
             }
 
@@ -348,17 +396,61 @@ pub fn StatsTokens() -> Element {
                 on_close: on_close,
                 on_submit: on_submit,
 
-                div { class: "form-field",
-                    label { class: "form-label", r#for: "daemon-token-label", "Label" }
+                div { class: "token-form-field",
+                    label { class: "field-label", r#for: "daemon-token-label", "Label" }
                     input {
                         id: "daemon-token-label",
                         name: "daemon-token-label",
-                        class: "form-input",
+                        class: "field-input",
                         r#type: "text",
-                        placeholder: "e.g. my-desktop",
+                        placeholder: "For example my-desktop",
                         value: "{form_label}",
                         oninput: move |e| form_label.set(e.value()),
                     }
+                }
+            }
+        }
+    }
+}
+
+/// One token row. The status is a word on a soft fill, and the Revoke button
+/// names the token it acts on.
+fn token_row(token: &DaemonToken, on_revoke: EventHandler<String>) -> Element {
+    let tid = token.id.clone();
+    let (status, status_class) = if token.is_active {
+        ("Active", "status-pill active")
+    } else {
+        ("Revoked", "status-pill inactive")
+    };
+    let created = format_date(&token.created_at);
+    let created_at = token.created_at.to_rfc3339();
+    let used = token.last_used_at.as_ref().map(format_date);
+    let used_at = token.last_used_at.as_ref().map(DateTime::to_rfc3339);
+    let revoke_id = revoke_button_id(&token.id);
+    rsx! {
+        tr { key: "{token.id}",
+            th { scope: "row", "{token.label}" }
+            td { span { class: "{status_class}", "{status}" } }
+            td { class: "token-date", time { datetime: "{created_at}", "{created}" } }
+            td { class: "token-date",
+                if let (Some(used), Some(used_at)) = (used, used_at) {
+                    time { datetime: "{used_at}", "{used}" }
+                } else {
+                    "Never"
+                }
+            }
+            td { class: "stats-table-actions",
+                if token.is_active {
+                    button {
+                        r#type: "button",
+                        id: "{revoke_id}",
+                        class: "btn is-ghost",
+                        aria_label: "Revoke token {token.label}",
+                        onclick: move |_| on_revoke.call(tid.clone()),
+                        "Revoke"
+                    }
+                } else {
+                    span { class: "visually-hidden", "No actions" }
                 }
             }
         }
@@ -485,6 +577,86 @@ mod tests {
         dom.rebuild_in_place();
         let copied = COPIED_TOKEN.with(|slot| slot.borrow().clone());
         assert_eq!(copied.as_deref(), Some(token));
+    }
+
+    fn token(id: &str, active: bool, used: bool) -> DaemonToken {
+        use chrono::TimeZone;
+        let at = Utc.with_ymd_and_hms(2026, 11, 2, 20, 5, 0).unwrap();
+        DaemonToken {
+            id: id.to_string(),
+            member_id: "member:1".to_string(),
+            label: format!("pc-{id}"),
+            is_active: active,
+            created_at: at,
+            last_used_at: used.then_some(at),
+        }
+    }
+
+    #[test]
+    fn dates_read_like_the_frames() {
+        use chrono::TimeZone;
+        let at = Utc.with_ymd_and_hms(2026, 11, 2, 20, 5, 0).unwrap();
+        assert_eq!(format_date(&at), "2 Nov 2026, 20:05 UTC");
+    }
+
+    #[test]
+    fn rows_say_the_status_in_words_and_name_the_revoke_button() {
+        fn view() -> Element {
+            rsx! {
+                h2 { id: "tokens-list-title", "Your tokens" }
+                StatsTable {
+                    labelled_by: "tokens-list-title",
+                    wide: true,
+                    cols: vec![Col::Text("Label"), Col::Text("Status"), Col::Text("Created"), Col::Text("Last used"), Col::Text("Actions")],
+                    {token_row(&token("a:1", true, true), EventHandler::new(|_: String| {}))}
+                    {token_row(&token("b2", false, false), EventHandler::new(|_: String| {}))}
+                }
+            }
+        }
+        let html = render(view);
+        assert!(
+            html.contains("<span class=\"status-pill active\">Active</span>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<span class=\"status-pill inactive\">Revoked</span>"),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                "<time datetime=\"2026-11-02T20:05:00+00:00\">2 Nov 2026, 20:05 UTC</time>"
+            ),
+            "{html}"
+        );
+        assert!(html.contains("Never"), "{html}");
+        // Only the active token can be revoked. Its button id comes from the
+        // token id, and its name says which token it revokes.
+        assert_eq!(html.matches("<button").count(), 1, "{html}");
+        assert!(html.contains("id=\"token-a_1-revoke\""), "{html}");
+        assert!(
+            html.contains("aria-label=\"Revoke token pc-a:1\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("role=\"region\" aria-labelledby=\"tokens-list-title\" tabindex=\"0\""),
+            "{html}"
+        );
+        assert!(!html.contains("<a "), "no link wraps a button: {html}");
+        assert_plain_copy(&html);
+    }
+
+    #[test]
+    fn page_css_uses_tokens_only() {
+        for line in TOKENS_CSS.lines() {
+            let decl = line.trim();
+            if decl.starts_with("/*") || !decl.contains(':') {
+                continue;
+            }
+            assert!(!decl.contains("rem") && !decl.contains('#'), "{decl}");
+            assert!(!decl.contains("px") || decl.contains("1px solid"), "{decl}");
+        }
+        let src = include_str!("stats_tokens.rs");
+        assert!(!src.contains(&["<", "main"].concat()) && !src.contains(&["main", " {"].concat()));
     }
 
     #[test]

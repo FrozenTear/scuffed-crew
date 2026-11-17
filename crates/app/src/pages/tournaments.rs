@@ -1,12 +1,22 @@
+//! Tournaments list (`d1-tournaments` frames): one card per tournament with a
+//! linked title, the description, and a meta line that starts with the status
+//! as a word in a badge.
+
 use dioxus::prelude::*;
 use serde::Deserialize;
 
-use crate::components::bracket::BRACKET_STYLES;
+use super::article_author::{
+    ARTICLE_CSS, ARTICLE_CSS_ID, Load, entry_date, is_retrying, list_status,
+};
+use crate::components::ui::{
+    EmptyCard, LoadError, PageHeader, PageShell, PageWidth, Pill, PillTone, SkeletonBars, btn_class,
+};
+use crate::hooks::CursorPage;
 use crate::routes::Route;
 use crate::state::use_auth;
 use scuffed_api_client::ApiClient;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 struct Tournament {
     id: String,
     name: String,
@@ -14,7 +24,6 @@ struct Tournament {
     game_id: Option<String>,
     format: String,
     status: String,
-    #[allow(dead_code)]
     max_teams: Option<u32>,
     is_external: bool,
     #[allow(dead_code)]
@@ -25,16 +34,45 @@ struct Tournament {
     created_at: String,
 }
 
-use crate::hooks::CursorPage;
-
-fn format_label(f: &str) -> &str {
+/// Format in sentence case, as the frames write it ("Single elimination").
+pub(super) fn format_label(f: &str) -> &str {
     match f {
-        "single_elim" => "Single Elimination",
-        "double_elim" => "Double Elimination",
-        "round_robin" => "Round Robin",
+        "single_elim" => "Single elimination",
+        "double_elim" => "Double elimination",
+        "round_robin" => "Round robin",
         "swiss" => "Swiss",
         _ => f,
     }
+}
+
+/// The word in the status badge. A tournament that takes registrations has
+/// not started, so it reads "Upcoming" as in the frames; the meta line adds
+/// that registration is open.
+pub(super) fn status_label(s: &str) -> &str {
+    match s {
+        "draft" => "Draft",
+        "registration" => "Upcoming",
+        "in_progress" => "In progress",
+        "completed" => "Completed",
+        "archived" => "Archived",
+        _ => s,
+    }
+}
+
+/// "Started" once play has begun, "Starts" before. The API has no clock
+/// field for this, so it follows the status.
+pub(super) fn start_word(status: &str) -> &'static str {
+    match status {
+        "in_progress" | "completed" | "archived" => "Started",
+        _ => "Starts",
+    }
+}
+
+/// "8 team cap", or nothing when the tournament has no cap.
+pub(super) fn team_cap(max_teams: Option<u32>) -> Option<String> {
+    max_teams
+        .filter(|n| *n > 0)
+        .map(|n| format!("{n} team cap"))
 }
 
 /// The staff sentence is only for officers and admins. Visitors get the public line.
@@ -46,197 +84,221 @@ fn tournaments_empty_copy(show_staff_hint: bool) -> &'static str {
     }
 }
 
-fn status_label(s: &str) -> &str {
-    match s {
-        "draft" => "Draft",
-        "registration" => "Registration Open",
-        "in_progress" => "In Progress",
-        "completed" => "Completed",
-        "archived" => "Archived",
-        _ => s,
+/// Characters of a description shown on a card.
+const DESC_PREVIEW_CHARS: usize = 120;
+
+/// The card's description: trimmed, cut at [`DESC_PREVIEW_CHARS`] with "..."
+/// when longer. `None` for a missing or blank description.
+fn desc_preview(description: Option<&str>) -> Option<String> {
+    let text = description?.trim();
+    if text.is_empty() {
+        return None;
     }
+    if text.chars().count() <= DESC_PREVIEW_CHARS {
+        return Some(text.to_string());
+    }
+    let cut: String = text.chars().take(DESC_PREVIEW_CHARS).collect();
+    Some(format!("{}...", cut.trim_end()))
 }
 
 const PAGE_CSS: &str = r#"
-    .tournaments-page {
-        padding: 3rem 2rem;
-        max-width: 1000px;
-        margin: 0 auto;
-    }
-    .tournaments-page h1 {
-        font-family: var(--font-head);
-        font-size: 2.5rem;
-        color: var(--text);
-        letter-spacing: 3px;
-        margin: 0 0 2rem;
-    }
-    .tournament-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-        gap: 1.25rem;
-    }
-    .tournament-card {
-        background: var(--surface);
-        border: 1px solid var(--border);
-        border-radius: 10px;
-        padding: 1.25rem;
-        text-decoration: none;
-        display: flex;
-        flex-direction: column;
-        gap: 0.5rem;
-        transition: border-color 0.2s, transform 0.2s;
-    }
-    .tournament-card:hover {
-        border-color: var(--accent-soft);
-        transform: translateY(-2px);
-    }
-    .tournament-card-name {
-        font-family: var(--font-head);
-        font-weight: 700;
-        font-size: 1.15rem;
-        color: var(--text);
-    }
-    .tournament-card-meta {
-        display: flex;
-        gap: 0.75rem;
-        flex-wrap: wrap;
-        font-size: 0.75rem;
-        color: var(--text-subtle);
-    }
-    .tournament-card-desc {
-        color: var(--text-3);
-        font-size: 0.8rem;
-        line-height: 1.5;
-        margin: 0;
-    }
-    .tournament-card-status {
-        display: inline-block;
-        font-size: 0.65rem;
-        padding: 0.15rem 0.6rem;
-        border-radius: var(--radius-pill);
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-        width: fit-content;
-    }
-    .tournament-card-status.registration {
-        background: color-mix(in srgb, var(--accent) 20%, transparent);
-        color: var(--accent-text);
-    }
-    .tournament-card-status.in_progress {
-        background: color-mix(in srgb, var(--win) 20%, transparent);
-        color: var(--win);
-    }
-    .tournament-card-status.completed {
-        background: color-mix(in srgb, var(--text-3) 15%, transparent);
-        color: var(--text-3);
-    }
-    .tournament-card-status.archived {
-        background: color-mix(in srgb, var(--text-subtle) 15%, transparent);
-        color: var(--text-subtle);
-    }
-    .tournament-card-status.draft {
-        background: color-mix(in srgb, var(--warn) 20%, transparent);
-        color: var(--warn);
-    }
-    .tournaments-loading, .tournaments-empty {
-        color: var(--text-subtle);
-        text-align: center;
-        padding: 3rem 0;
-    }
+/* The badge leads the meta line; the facts follow it. */
+.tournaments-page .entry-row .entry-meta { margin-top: var(--space-2); }
 "#;
+
+/// The rows and whether the server has more than this first page.
+type ListSlot = (Vec<Tournament>, bool);
 
 #[component]
 pub fn Tournaments() -> Element {
     let auth = use_auth();
-    let tournaments = use_resource(|| async {
-        ApiClient::web()
-            .fetch::<CursorPage<Tournament>>("/api/tournaments")
-            .await
-            .ok()
-            .map(|r| r.data)
+    let mut refresh = use_signal(|| 0u32);
+    let tournaments = use_resource(move || {
+        let _ = refresh();
+        async move {
+            ApiClient::web()
+                .fetch::<CursorPage<Tournament>>("/api/tournaments")
+                .await
+                .map(|page| (page.data, page.next_cursor.is_some()))
+                .map_err(|e| e.to_string())
+        }
     });
 
+    let slot: Load<ListSlot> = Load::of(tournaments.read().as_ref());
+    let (load, capped) = match slot {
+        Load::Loading => (Load::Loading, false),
+        Load::Failed => (Load::Failed, false),
+        Load::Missing => (Load::Missing, false),
+        Load::Ready((list, capped)) => (Load::Ready(visible(list)), capped),
+    };
+    let retrying = is_retrying(tournaments.state()(), &load);
+
     rsx! {
+        TournamentsView {
+            load,
+            capped,
+            retrying,
+            show_staff: auth().is_officer_or_above(),
+            on_retry: move |_| refresh += 1,
+        }
+    }
+}
+
+/// Drafts are not listed here, for staff either: they live under Admin.
+fn visible(list: Vec<Tournament>) -> Vec<Tournament> {
+    list.into_iter().filter(|t| t.status != "draft").collect()
+}
+
+/// The page for one fetch state. The status line is always in the tree; only
+/// its text changes.
+#[component]
+fn TournamentsView(
+    load: Load<Vec<Tournament>>,
+    /// The server has more tournaments than the page it returned.
+    #[props(default = false)]
+    capped: bool,
+    #[props(default = false)] retrying: bool,
+    #[props(default = false)] show_staff: bool,
+    on_retry: EventHandler<()>,
+) -> Element {
+    let status = list_status(
+        &load,
+        retrying,
+        capped,
+        "Loading tournaments",
+        "tournaments",
+    );
+
+    rsx! {
+        crate::styles::StyleOnce { id: ARTICLE_CSS_ID, css: ARTICLE_CSS }
         crate::styles::StyleOnce { id: "scuffed-css-pages-tournaments-page-css", css: PAGE_CSS }
-        crate::styles::StyleOnce { id: "scuffed-css-pages-tournaments-bracket-styles", css: BRACKET_STYLES }
 
-        main { class: "tournaments-page",
-            h1 { "Tournaments" }
-
-            {
-                let data = tournaments.read();
-                let data = data.as_ref().and_then(|d| d.as_ref());
-                match data {
-                    None => rsx! { p { class: "tournaments-loading", "Loading..." } },
-                    Some(list) => {
-                        let visible: Vec<&Tournament> = list.iter()
-                            .filter(|t| t.status != "draft")
-                            .collect();
-                        if visible.is_empty() {
-                            let show_staff = auth().is_officer_or_above();
-                            let detail = tournaments_empty_copy(show_staff);
-                            rsx! {
-                                div { class: "tournaments-empty",
-                                    p { "No tournaments yet." }
-                                    p { style: "margin-top:0.5rem; font-size:0.85rem; color: var(--text-subtle);",
-                                        "{detail}"
+        PageShell { width: PageWidth::Wide, class: "tournaments-page",
+            PageHeader {
+                title: "Tournaments",
+                lead: "Open cups and in-house brackets for the crew.",
+            }
+            section { class: "ui-stack", aria_label: "All tournaments",
+                p { class: "entry-status", role: "status", "{status}" }
+                {match &load {
+                    Load::Loading => rsx! { SkeletonBars { rows: 3 } },
+                    Load::Failed | Load::Missing => rsx! {
+                        LoadError {
+                            message: "Couldn't load the tournaments. Check your connection and try again.",
+                            on_retry: move |_| on_retry.call(()),
+                            retrying,
+                        }
+                    },
+                    Load::Ready(list) if list.is_empty() => rsx! {
+                        EmptyCard {
+                            title: "No tournaments yet",
+                            message: tournaments_empty_copy(show_staff),
+                            actions: rsx! {
+                                Link { to: Route::Events {}, class: btn_class(true),
+                                    "See upcoming events"
+                                }
+                                if show_staff {
+                                    Link { to: Route::AdminTournaments {}, class: btn_class(false),
+                                        "Open tournament admin"
                                     }
                                 }
-                            }
-                        } else {
-                            rsx! {
-                                div { class: "tournament-grid",
-                                    for t in visible.iter() {
-                                        {render_tournament_card(t)}
-                                    }
-                                }
+                            },
+                        }
+                    },
+                    Load::Ready(list) => rsx! {
+                        div { class: "entry-list",
+                            for t in list.iter() {
+                                {render_tournament_card(t)}
                             }
                         }
-                    }
-                }
+                    },
+                }}
             }
         }
     }
 }
 
 fn render_tournament_card(t: &Tournament) -> Element {
-    let format_text = format_label(&t.format);
-    let status_text = status_label(&t.status);
-    let status_class = format!("tournament-card-status {}", t.status);
-    let date: String = t
-        .starts_at
-        .as_ref()
-        .map(|d| d.chars().take(10).collect())
-        .unwrap_or_default();
-    let desc_preview: Option<String> = t
-        .description
-        .as_ref()
-        .map(|d| d.chars().take(120).collect());
+    let desc = desc_preview(t.description.as_deref());
+    let registering = t.status == "registration";
+    let cap = team_cap(t.max_teams);
+    let start = start_word(&t.status);
 
     rsx! {
-        Link { to: Route::Tournament { id: t.id.clone() }, class: "tournament-card",
-            div { class: "tournament-card-name", "{t.name}" }
-            div { class: "tournament-card-meta",
-                span { "{format_text}" }
-                if !date.is_empty() {
-                    span { "{date}" }
+        article { key: "{t.id}", class: "entry-row",
+            h2 {
+                Link { to: Route::Tournament { id: t.id.clone() }, "{t.name}" }
+            }
+            if let Some(desc) = desc {
+                p { "{desc}" }
+            }
+            p { class: "entry-meta",
+                Pill { tone: PillTone::Neutral, "{status_label(&t.status)}" }
+                span { "{format_label(&t.format)}" }
+                if registering {
+                    span { class: "entry-sep", aria_hidden: "true", "·" }
+                    span { "Registration open" }
+                }
+                if let Some(cap) = cap {
+                    span { class: "entry-sep", aria_hidden: "true", "·" }
+                    span { "{cap}" }
+                }
+                if let Some(date) = t.starts_at.as_deref() {
+                    span { class: "entry-sep", aria_hidden: "true", "·" }
+                    span { "{start} " {entry_date(date)} }
                 }
                 if t.is_external {
+                    span { class: "entry-sep", aria_hidden: "true", "·" }
                     span { "External" }
                 }
             }
-            if let Some(desc) = &desc_preview {
-                p { class: "tournament-card-desc", "{desc}" }
-            }
-            span { class: "{status_class}", "{status_text}" }
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::tournaments_empty_copy;
+    use super::super::article_author::test_support::render_routed;
+    use super::*;
+
+    fn cup(n: usize, status: &str) -> Tournament {
+        Tournament {
+            id: format!("cup{n}"),
+            name: format!("Test Cup {n}"),
+            game_id: None,
+            format: "single_elim".to_string(),
+            status: status.to_string(),
+            max_teams: Some(8),
+            is_external: false,
+            external_url: None,
+            description: Some("Four teams. Winner stays on for the final.".to_string()),
+            starts_at: Some("2026-11-12T18:00:00Z".to_string()),
+            created_at: "2026-11-01T10:00:00Z".to_string(),
+        }
+    }
+
+    fn render_state(
+        load: Load<Vec<Tournament>>,
+        show_staff: bool,
+        capped: bool,
+        retrying: bool,
+    ) -> String {
+        render_routed(move || {
+            rsx! {
+                TournamentsView {
+                    load: load.clone(),
+                    capped,
+                    retrying,
+                    show_staff,
+                    on_retry: move |_| {},
+                }
+            }
+        })
+    }
+
+    fn render(load: Load<Vec<Tournament>>) -> String {
+        render_state(load, false, false, false)
+    }
 
     #[test]
     fn visitors_do_not_see_the_staff_tournaments_hint() {
@@ -247,5 +309,192 @@ mod tests {
         let staff = tournaments_empty_copy(true);
         assert!(staff.contains("Officers add them under Admin"));
         assert!(staff.starts_with(visitor));
+    }
+
+    #[test]
+    fn page_is_wide_with_one_h1_and_no_main() {
+        let html = render(Load::Ready(vec![cup(1, "in_progress")]));
+        assert!(
+            html.contains("class=\"ui-shell ui-shell--wide tournaments-page\""),
+            "{html}"
+        );
+        assert_eq!(html.matches("<h1").count(), 1, "{html}");
+        assert!(html.contains("<h1>Tournaments</h1>"), "{html}");
+        assert!(
+            html.contains(
+                "<p class=\"page-lead\">Open cups and in-house brackets for the crew.</p>"
+            ),
+            "{html}"
+        );
+        assert!(!html.contains("<main"), "{html}");
+    }
+
+    #[test]
+    fn card_has_linked_title_description_and_a_status_word() {
+        let html = render(Load::Ready(vec![cup(1, "in_progress")]));
+        assert!(
+            html.contains("<h2><a href=\"/tournaments/cup1\">Test Cup 1</a></h2>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<p>Four teams. Winner stays on for the final.</p>"),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                "<p class=\"entry-meta\"><span class=\"ui-pill ui-pill--neutral\">In progress</span>\
+                 <span>Single elimination</span>"
+            ),
+            "{html}"
+        );
+        assert!(html.contains("<span>8 team cap</span>"), "{html}");
+        assert!(
+            html.contains(
+                "Started <time class=\"entry-date\" datetime=\"2026-11-12\">12 Nov 2026</time>"
+            ),
+            "{html}"
+        );
+        // One link per card and no button inside it.
+        assert_eq!(html.matches("<a ").count(), 1, "{html}");
+        assert!(!html.contains("<button"), "{html}");
+    }
+
+    #[test]
+    fn every_status_the_data_has_is_a_word() {
+        for (status, word) in [
+            ("registration", "Upcoming"),
+            ("in_progress", "In progress"),
+            ("completed", "Completed"),
+            ("archived", "Archived"),
+            ("draft", "Draft"),
+        ] {
+            assert_eq!(status_label(status), word);
+            let html = render(Load::Ready(vec![cup(1, status)]));
+            assert!(
+                html.contains(&format!("ui-pill--neutral\">{word}</span>")),
+                "{html}"
+            );
+        }
+        // An unknown status still shows its text, never an empty badge.
+        assert_eq!(status_label("paused"), "paused");
+
+        let upcoming = render(Load::Ready(vec![cup(1, "registration")]));
+        assert!(
+            upcoming.contains("<span>Registration open</span>"),
+            "{upcoming}"
+        );
+        assert!(upcoming.contains("Starts <time"), "{upcoming}");
+    }
+
+    #[test]
+    fn optional_facts_drop_out_cleanly() {
+        let mut bare = cup(1, "completed");
+        bare.description = Some("   ".to_string());
+        bare.max_teams = None;
+        bare.starts_at = None;
+        bare.is_external = true;
+        let html = render(Load::Ready(vec![bare]));
+        assert!(!html.contains("<p></p>"), "{html}");
+        assert!(!html.contains("team cap"), "{html}");
+        assert!(!html.contains("<time"), "{html}");
+        assert!(html.contains("<span>External</span>"), "{html}");
+        assert_eq!(html.matches("entry-sep").count(), 1, "{html}");
+    }
+
+    #[test]
+    fn long_description_is_cut_with_three_dots() {
+        let long = "word ".repeat(40);
+        let cut = desc_preview(Some(&long)).expect("has text");
+        assert!(cut.ends_with("..."), "{cut}");
+        assert!(cut.chars().count() <= DESC_PREVIEW_CHARS + 3, "{cut}");
+        assert_eq!(
+            desc_preview(Some("Short one.")).as_deref(),
+            Some("Short one.")
+        );
+        assert_eq!(desc_preview(Some("  ")), None);
+        assert_eq!(desc_preview(None), None);
+    }
+
+    #[test]
+    fn drafts_are_not_listed() {
+        let list = visible(vec![cup(1, "draft"), cup(2, "registration")]);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, "cup2");
+    }
+
+    #[test]
+    fn empty_state_says_what_is_missing_and_offers_a_next_step() {
+        let guest = render(Load::Ready(Vec::new()));
+        assert!(guest.contains("<h2>No tournaments yet</h2>"), "{guest}");
+        assert!(guest.contains("href=\"/events\""), "{guest}");
+        assert!(guest.contains(">See upcoming events</a>"), "{guest}");
+        assert!(!guest.contains("Officers"), "{guest}");
+        assert!(!guest.contains("/admin"), "{guest}");
+        assert!(!guest.contains("entry-list"), "{guest}");
+
+        let staff = render_state(Load::Ready(Vec::new()), true, false, false);
+        assert!(staff.contains("Officers add them under Admin"), "{staff}");
+        assert!(staff.contains(">Open tournament admin</a>"), "{staff}");
+    }
+
+    #[test]
+    fn loading_and_failed_states_keep_the_chrome() {
+        let loading = render(Load::Loading);
+        assert!(
+            loading.contains("<p class=\"entry-status\" role=\"status\">Loading tournaments</p>"),
+            "{loading}"
+        );
+        assert!(loading.contains("ui-skel-row"), "{loading}");
+        assert!(!loading.contains("No tournaments yet"), "{loading}");
+
+        let failed = render(Load::Failed);
+        assert!(failed.contains("role=\"alert\""), "{failed}");
+        assert!(failed.contains("load the tournaments."), "{failed}");
+        assert!(failed.contains(">Retry</button>"), "{failed}");
+
+        let retrying = render_state(Load::Failed, false, false, true);
+        assert!(retrying.contains(">Retrying...</button>"), "{retrying}");
+        assert!(retrying.contains("aria-disabled=\"true\""), "{retrying}");
+        assert!(!retrying.contains(" disabled"), "{retrying}");
+
+        // The live region and the H1 exist in every state.
+        let empty = render(Load::Ready(Vec::new()));
+        for html in [&loading, &failed, &retrying, &empty] {
+            assert_eq!(
+                html.matches("class=\"entry-status\" role=\"status\"")
+                    .count(),
+                1,
+                "{html}"
+            );
+            assert_eq!(html.matches("<h1").count(), 1, "{html}");
+            assert!(!html.contains("<main"), "{html}");
+        }
+        assert!(
+            empty.contains("<p class=\"entry-status\" role=\"status\"></p>"),
+            "{empty}"
+        );
+    }
+
+    #[test]
+    fn a_cut_list_says_how_many_it_shows() {
+        let html = render_state(
+            Load::Ready(vec![cup(1, "completed"), cup(2, "completed")]),
+            false,
+            true,
+            false,
+        );
+        assert!(
+            html.contains(
+                "<p class=\"entry-status\" role=\"status\">Showing the newest 2 tournaments.</p>"
+            ),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn page_css_uses_tokens() {
+        for unit in ["px", "rem", "em;"] {
+            assert!(!PAGE_CSS.contains(unit), "{unit} in the page css");
+        }
     }
 }

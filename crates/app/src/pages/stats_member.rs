@@ -2,14 +2,19 @@ use dioxus::prelude::*;
 
 use serde::Deserialize;
 
-use super::stats::load_error_state;
 use super::stats::role::{
     RolePanel, hide_member_role_error, member_roles_path, role_aggs_from_rows, role_panel,
     role_result,
 };
-use crate::components::ui::{SeasonSelect, TabButton, use_stats_season};
-use crate::components::{DataTable, member_pending};
+use super::{NotFoundLink, NotFoundPanel};
+use crate::components::member_gate::Wall;
+use crate::components::ui::{
+    EmptyCard, LoadError, PageHeader, PageShell, PageWidth, SeasonSelect, SkeletonBars, TabButton,
+    btn_class, use_stats_season,
+};
+use crate::components::{is_http_status, member_pending};
 use crate::hooks::use_api_with;
+use crate::routes::Route;
 use crate::sample::{
     HERO_RULE_NOTE, MAP_RULE_NOTE, OTHER_HEROES, OTHER_RESULT_CLASS, Tally, fold_small, other_label,
 };
@@ -61,7 +66,7 @@ impl MapStats {
 }
 
 /// Text class for a hero or map result: muted until it has a win rate.
-fn result_class(tally: Tally) -> &'static str {
+pub(crate) fn result_class(tally: Tally) -> &'static str {
     if tally.has_win_rate() {
         "stats-wr"
     } else {
@@ -88,108 +93,430 @@ fn member_tab_id(tab: MemberStatsTab) -> &'static str {
     }
 }
 
-const MEMBER_STATS_CSS: &str = r#"
-    .member-stats.stats-page {
-        max-width: 1100px;
-        margin: 0 auto;
-        padding: 2rem 1.5rem;
-    }
-    .member-stats.stats-page h1 {
-        font-family: var(--font-head);
-        font-size: 1.8rem;
-        color: var(--text);
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-        margin-bottom: 1.5rem;
-    }
-    .member-stats .stats-tabs {
-        display: flex;
-        gap: 0.25rem;
-        margin-bottom: 1.5rem;
-        border-bottom: 1px solid var(--border);
-        overflow-x: auto;
-    }
-    .member-stats .stats-tab {
-        padding: 0.6rem 1.2rem;
-        border: none;
-        background: none;
-        color: var(--text-3);
-        font-family: var(--font-head);
-        font-size: 0.9rem;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.03em;
-        cursor: pointer;
-        border-bottom: 2px solid transparent;
-        margin-bottom: -1px;
-        transition: color 0.15s, border-color 0.15s;
-        white-space: nowrap;
-    }
-    .member-stats .stats-tab:hover { color: var(--text); }
-    .member-stats .stats-tab.active {
-        color: var(--accent-text);
-        border-bottom-color: var(--accent-solid);
-    }
-    .member-stats .stats-summary {
-        display: grid;
-        grid-template-columns: minmax(220px, 2fr) minmax(140px, 1fr);
-        gap: 1rem;
-        margin-bottom: 2rem;
-    }
-    .member-stats .stat-tile {
-        background: var(--surface);
-        border: 1px solid var(--border);
-        border-radius: 10px;
-        padding: 1.25rem;
-        text-align: center;
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-    }
-    .member-stats .stat-tile-value {
-        font-family: var(--font-head);
-        font-size: 1.9rem;
-        color: var(--text);
-        letter-spacing: 2px;
-        line-height: 1;
-    }
-    .member-stats .stat-tile-hero .stat-tile-value {
-        font-size: 2.8rem;
-        color: var(--accent-text);
-    }
-    .member-stats .stat-tile-label {
-        font-size: 0.75rem;
-        color: var(--text-subtle);
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-        margin-top: 0.35rem;
-    }
-    .member-stats .stat-tile-record {
-        font-size: 0.9rem;
-        color: var(--text-3);
-        margin-top: 0.4rem;
-        white-space: nowrap;
-    }
-    .member-stats .stats-wr { font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
-    .member-stats .stats-wr.muted { color: var(--text-subtle); font-weight: 400; }
-    .member-stats .stats-row-muted { opacity: 0.55; }
-    .member-stats .stats-gate-note { font-size: 0.75rem; color: var(--text-subtle); margin: 0 0 0.75rem; }
-    .member-stats.stats-page .data-table th:not(:first-child),
-    .member-stats.stats-page .data-table td:not(:first-child) {
-        text-align: right;
-        font-variant-numeric: tabular-nums;
-    }
-    .member-stats.stats-page .data-table-scroll {
-        overflow-x: auto;
-        -webkit-overflow-scrolling: touch;
-        max-width: 100%;
-    }
-    .member-stats .stats-season-row { max-width: 280px; margin-bottom: 1.25rem; }
-    @media (max-width: 720px) {
-        .member-stats.stats-page { padding: 1.25rem 1rem; }
-        .member-stats .stats-summary { grid-template-columns: 1fr; }
-    }
+/// Style id of [`STATS_VIEWS_CSS`].
+pub(crate) const STATS_VIEWS_CSS_ID: &str = "scuffed-css-pages-stats-views-css";
+
+/// Pieces the stats detail views share: the Heroes, Maps and History tabs of
+/// `/stats`, `/stats/member/:id`, `/stats/match/:id` and `/stats/tokens`.
+/// It lives here because this module is the one all of them can reach.
+/// Tokens only, so `data-density` and the theme apply.
+pub(crate) const STATS_VIEWS_CSS: &str = r#"
+.stats-view-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-section);
+  min-width: 0;
+}
+.stats-view-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--space-3) var(--space-5);
+  min-width: 0;
+}
+.stats-view-filter {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+  max-width: 100%;
+}
+.stats-view-filter-label {
+  font-family: var(--font-head);
+  font-size: var(--text-xs);
+  font-weight: var(--font-label-weight);
+  letter-spacing: var(--font-head-tracking);
+  text-transform: uppercase;
+  color: var(--text-subtle);
+}
+.stats-view-note {
+  margin: 0;
+  max-width: var(--content-max-narrow);
+  color: var(--text-3);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+}
+.stats-view-card {
+  box-sizing: border-box;
+  min-width: 0;
+  padding: var(--card-padding);
+  background: var(--card-bg);
+  color: var(--card-fg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--card-radius);
+  box-shadow: var(--card-shadow);
+}
+.stats-view-section-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-1) var(--space-4);
+  min-width: 0;
+}
+.stats-view-section-head .stats-view-note { max-width: none; }
+
+/* Tiles: the value over its label, centred, as on the stats frame. */
+.stats-view-tiles {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  gap: var(--space-3);
+  margin: 0;
+  min-width: 0;
+}
+.stats-view-tile {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
+  min-width: 0;
+  margin: 0;
+  padding: var(--card-padding);
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--card-radius);
+  box-shadow: var(--card-shadow);
+  text-align: center;
+}
+.stats-view-tile-value {
+  max-width: 100%;
+  margin: 0;
+  font-family: var(--font-head);
+  font-weight: var(--font-head-weight);
+  font-size: var(--text-2xl);
+  letter-spacing: var(--font-head-tracking);
+  line-height: var(--leading-display);
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.stats-view-tile-label {
+  margin: 0;
+  color: var(--text-3);
+  font-size: var(--text-sm);
+  line-height: var(--leading-ui);
+}
+
+/* Tables: the leaderboards recipe on the --table-* tokens. The wrap is the
+   scroll container: a named, focusable region, so a wide table scrolls inside
+   it at phone width and the page never scrolls sideways. */
+.stats-table-block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.stats-table-hint {
+  display: none;
+  margin: 0;
+  color: var(--text-3);
+  font-size: var(--text-xs);
+  line-height: var(--leading-ui);
+}
+.stats-table-wrap {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+  background: var(--table-row-bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--table-radius);
+  box-shadow: var(--card-shadow);
+}
+.stats-table-wrap:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+.stats-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--table-font);
+  font-size: var(--table-font-size);
+  color: var(--table-row-fg);
+}
+.stats-table thead th {
+  box-sizing: border-box;
+  height: var(--table-row-height);
+  padding: 0 var(--table-pad-x);
+  border-bottom: 1px solid var(--table-row-border);
+  background: var(--table-row-bg);
+  color: var(--table-header-fg);
+  font-family: var(--font-head);
+  font-size: var(--text-xs);
+  font-weight: var(--table-header-weight);
+  letter-spacing: var(--font-head-tracking);
+  text-transform: uppercase;
+  text-align: left;
+  white-space: nowrap;
+}
+.stats-table tbody th,
+.stats-table tbody td {
+  box-sizing: border-box;
+  height: var(--table-row-height);
+  padding: var(--space-1) var(--table-pad-x);
+  border-bottom: 1px solid var(--table-row-border);
+  background: var(--table-row-bg);
+  color: var(--table-row-fg);
+  text-align: left;
+}
+.stats-table tbody tr:last-child th,
+.stats-table tbody tr:last-child td { border-bottom: 0; }
+.stats-table tbody th {
+  font-weight: var(--font-label-weight);
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.stats-table thead th.num,
+.stats-table thead th.rate,
+.stats-table tbody td.num,
+.stats-table tbody td.rate {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.stats-table tbody td.num { color: var(--table-row-muted); }
+.stats-table .rate { width: calc(var(--space-8) * 5); }
+.stats-rate {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: center;
+  gap: var(--space-1);
+}
+/* The bar repeats the number next to it. Its fill is neutral ink, so a rate
+   is never read from a colour. */
+.stats-rate-bar {
+  display: block;
+  width: 100%;
+  height: var(--space-1);
+  background: var(--border);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+}
+.stats-rate-fill {
+  display: block;
+  height: 100%;
+  background: var(--text-3);
+  border-radius: var(--radius-pill);
+}
+.stats-table td .stats-wr {
+  display: inline;
+  font-size: inherit;
+  font-weight: var(--font-label-weight);
+  color: var(--table-row-fg);
+  font-variant-numeric: tabular-nums;
+}
+.stats-table td .stats-wr.muted {
+  font-weight: 400;
+  color: var(--text-subtle);
+}
+/* A small sample is quieter through its ink, never through opacity, so the
+   text keeps its contrast. */
+.stats-table tr.stats-row-muted { opacity: 1; }
+.stats-table tr.stats-row-muted th,
+.stats-table tr.stats-row-muted td {
+  color: var(--text-subtle);
+  font-weight: 400;
+}
+.stats-table .stats-table-actions { text-align: right; white-space: nowrap; }
+
+@media (max-width: 720px) {
+  .stats-table-block.is-wide .stats-table-hint { display: block; }
+  .stats-table-block.is-wide .stats-table tbody th { white-space: nowrap; }
+}
+/* Phone: the question mark of an unsure value gets a full 44px target. The
+   glyph stays small; only its hit box grows. */
+@media (max-width: 820px) {
+  :is(.match-card, .game-page) .stat-unsure { --unsure-hit: var(--hit-target-min); }
+}
 "#;
+
+/// One column of a [`StatsTable`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Col {
+    /// Left-aligned text.
+    Text(&'static str),
+    /// Right-aligned figure.
+    Num(&'static str),
+    /// Right-aligned win rate with its bar.
+    Rate(&'static str),
+}
+
+impl Col {
+    const fn label(self) -> &'static str {
+        match self {
+            Col::Text(label) | Col::Num(label) | Col::Rate(label) => label,
+        }
+    }
+
+    const fn class(self) -> &'static str {
+        match self {
+            Col::Text(_) => "",
+            Col::Num(_) => "num",
+            Col::Rate(_) => "rate",
+        }
+    }
+}
+
+/// The stats table. Its scroll container is a region named by `labelled_by`
+/// (the id of the visible heading over the table) and takes keyboard focus, so
+/// a table wider than the screen scrolls inside it with the arrow keys.
+/// `wide` shows the "scroll sideways" hint at phone width.
+///
+/// Rows are the children: a `th { scope: "row" }` for the name, then `td`
+/// cells with the class of their column ([`rate_cell`] for a win rate).
+#[component]
+pub(crate) fn StatsTable(
+    labelled_by: String,
+    cols: Vec<Col>,
+    #[props(default = false)] wide: bool,
+    children: Element,
+) -> Element {
+    rsx! {
+        crate::styles::StyleOnce { id: STATS_VIEWS_CSS_ID, css: STATS_VIEWS_CSS }
+        div { class: if wide { "stats-table-block is-wide" } else { "stats-table-block" },
+            if wide {
+                p { class: "stats-table-hint", "Scroll sideways to see every column." }
+            }
+            div {
+                class: "stats-table-wrap",
+                role: "region",
+                aria_labelledby: "{labelled_by}",
+                tabindex: "0",
+                table { class: "stats-table",
+                    thead {
+                        tr {
+                            for col in cols.iter() {
+                                th { key: "{col.label()}", scope: "col", class: col.class(), "{col.label()}" }
+                            }
+                        }
+                    }
+                    tbody { {children} }
+                }
+            }
+        }
+    }
+}
+
+/// The win-rate cell of a [`StatsTable`] row: the result as text (a rate from
+/// 10 decided games, the record below that), plus a neutral bar under a rate.
+/// The bar is hidden from assistive tech because the number says the same.
+pub(crate) fn rate_cell(tally: Tally, text: &str, class: &str) -> Element {
+    let text = text.to_string();
+    let class = class.to_string();
+    let rate = tally.win_rate_pct();
+    rsx! {
+        td { class: "rate",
+            div { class: "stats-rate",
+                span { class: "{class}", "{text}" }
+                if let Some(pct) = rate {
+                    span { class: "stats-rate-bar", aria_hidden: "true",
+                        span { class: "stats-rate-fill", style: "width:{pct:.1}%;" }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Failed load of one stats block: plain words plus Retry.
+pub(crate) fn stats_load_error(what: &'static str, mut refresh: Signal<u64>) -> Element {
+    rsx! {
+        LoadError {
+            message: "Couldn't load {what}. Check your connection and try again.",
+            on_retry: move |_| refresh += 1,
+        }
+    }
+}
+
+const MEMBER_STATS_CSS: &str = r#"
+.member-stats .member-stats-season { max-width: calc(var(--space-12) * 6); min-width: 0; }
+.member-stats .stats-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+  min-width: 0;
+}
+.member-stats .stat-tile {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: var(--card-padding);
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--card-radius);
+  box-shadow: var(--card-shadow);
+  text-align: center;
+}
+.member-stats .stat-tile-value {
+  font-family: var(--font-head);
+  font-weight: var(--font-head-weight);
+  font-size: var(--text-2xl);
+  letter-spacing: var(--font-head-tracking);
+  line-height: var(--leading-display);
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+.member-stats .stat-tile-label {
+  color: var(--text-3);
+  font-size: var(--text-sm);
+  line-height: var(--leading-ui);
+}
+.member-stats .stat-tile-record {
+  color: var(--text-3);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.member-stats .member-stats-panel:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+"#;
+
+/// What the whole page answers before any tab matters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemberView {
+    /// Private or members only: the copy to show.
+    Denied(&'static str),
+    /// 404: no such member.
+    Missing,
+    /// The summary decides (loading, sign in, data).
+    Open,
+}
+
+fn member_view(summary_error: Option<&str>) -> MemberView {
+    match summary_error {
+        Some(err) if is_http_status(err, 404) => MemberView::Missing,
+        Some(err) => match stats_privacy::member_stats_denied(err) {
+            Some(copy) => MemberView::Denied(copy),
+            None => MemberView::Open,
+        },
+        None => MemberView::Open,
+    }
+}
+
+/// The line screen readers hear for the open tab. Always rendered, only its
+/// text changes.
+fn panel_status(what: &str, loading: bool, failed: bool, empty: bool) -> String {
+    if failed {
+        format!("Couldn't load {what}.")
+    } else if loading {
+        format!("Loading {what}.")
+    } else if empty {
+        format!("No {what} yet.")
+    } else {
+        String::new()
+    }
+}
 
 #[component]
 pub fn StatsMember(id: String) -> Element {
@@ -221,32 +548,53 @@ pub fn StatsMember(id: String) -> Element {
 
     let mut tab = use_signal(|| MemberStatsTab::Overview);
 
-    // A refused summary (private, members only, bad id) is the whole page's
-    // answer. Say so instead of showing tabs that never load.
-    let denied = stats
-        .error
-        .read()
-        .as_deref()
-        .and_then(stats_privacy::member_stats_denied);
-    if let Some(copy) = denied {
-        return rsx! {
-            crate::styles::StyleOnce { id: "scuffed-css-pages-stats_member-member-stats-css", css: MEMBER_STATS_CSS }
-            crate::styles::StyleOnce { id: "scuffed-css-admin-shared", css: crate::styles::admin::CSS }
-
-            div { class: "stats-page member-stats",
-                h1 { "Member Stats" }
-                p { class: "empty-state", role: "status", "{copy}" }
-            }
-        };
+    // A refused summary (private, members only, bad id) or a missing member
+    // is the whole page's answer. Say so instead of showing tabs that never
+    // load.
+    let view = member_view(stats.error.read().as_deref());
+    match view {
+        MemberView::Missing => {
+            return rsx! {
+                PageShell { width: PageWidth::Wide, class: "member-stats",
+                    NotFoundPanel {
+                        title: "Member not found",
+                        message: "There is no stats page for this member. The link may be wrong, or the member has left.",
+                        links: vec![
+                            NotFoundLink { label: "See the leaderboards", to: Route::Leaderboards {} },
+                            NotFoundLink { label: "Back to your stats", to: Route::Stats {} },
+                        ],
+                    }
+                }
+            };
+        }
+        MemberView::Denied(copy) => {
+            return rsx! {
+                PageShell { width: PageWidth::Wide, class: "member-stats",
+                    Wall {
+                        title: "Stats not shown",
+                        lead: copy,
+                        page_title: true,
+                        actions: rsx! {
+                            Link { to: Route::Leaderboards {}, class: btn_class(true), "See the leaderboards" }
+                            Link { to: Route::Stats {}, class: btn_class(false), "Back to your stats" }
+                        },
+                    }
+                }
+            };
+        }
+        MemberView::Open => {}
     }
 
     rsx! {
+        crate::styles::StyleOnce { id: STATS_VIEWS_CSS_ID, css: STATS_VIEWS_CSS }
         crate::styles::StyleOnce { id: "scuffed-css-pages-stats_member-member-stats-css", css: MEMBER_STATS_CSS }
-        crate::styles::StyleOnce { id: "scuffed-css-admin-shared", css: crate::styles::admin::CSS }
 
-        div { class: "stats-page member-stats",
-            h1 { "Member Stats" }
-            div { class: "stats-season-row",
+        PageShell { width: PageWidth::Wide, class: "member-stats",
+            PageHeader {
+                title: "Member stats",
+                lead: "Results from this member's uploaded games. A rate needs 10 decided games.",
+            }
+            div { class: "member-stats-season",
                 SeasonSelect {
                     id: "member-stats-season".to_string(),
                     name: "member-stats-season".to_string(),
@@ -264,7 +612,13 @@ pub fn StatsMember(id: String) -> Element {
                 match s {
                     None => member_pending(&auth(), &stats, "member stats"),
                     Some(s) if s.total_matches == 0 => rsx! {
-                        p { class: "empty-state", "No matches tracked for this member yet." }
+                        EmptyCard {
+                            title: "No games tracked yet",
+                            message: "This member has not uploaded any games for this season. Try another season, or see who has on the leaderboards.",
+                            actions: rsx! {
+                                Link { to: Route::Leaderboards {}, class: btn_class(true), "See the leaderboards" }
+                            },
+                        }
                     },
                     Some(s) => {
                         let season = Tally::new(s.total_matches, s.wins, s.losses, s.draws);
@@ -281,9 +635,9 @@ pub fn StatsMember(id: String) -> Element {
                 }
             }
 
-            div { class: "stats-tabs", role: "tablist", aria_label: "Stats sections",
+            div { class: "chip-row is-scroll", role: "tablist", aria_label: "Stats sections",
                 TabButton {
-                    class: "stats-tab".to_string(),
+                    class: "chip".to_string(),
                     label: "Overview".to_string(),
                     id: member_tab_id(MemberStatsTab::Overview).to_string(),
                     controls: MEMBER_STATS_PANEL.to_string(),
@@ -291,7 +645,7 @@ pub fn StatsMember(id: String) -> Element {
                     onclick: move |_| tab.set(MemberStatsTab::Overview),
                 }
                 TabButton {
-                    class: "stats-tab".to_string(),
+                    class: "chip".to_string(),
                     label: "Heroes".to_string(),
                     id: member_tab_id(MemberStatsTab::Heroes).to_string(),
                     controls: MEMBER_STATS_PANEL.to_string(),
@@ -299,7 +653,7 @@ pub fn StatsMember(id: String) -> Element {
                     onclick: move |_| tab.set(MemberStatsTab::Heroes),
                 }
                 TabButton {
-                    class: "stats-tab".to_string(),
+                    class: "chip".to_string(),
                     label: "Maps".to_string(),
                     id: member_tab_id(MemberStatsTab::Maps).to_string(),
                     controls: MEMBER_STATS_PANEL.to_string(),
@@ -310,6 +664,7 @@ pub fn StatsMember(id: String) -> Element {
 
             div {
                 id: MEMBER_STATS_PANEL,
+                class: "member-stats-panel ui-stack",
                 role: "tabpanel",
                 aria_labelledby: member_tab_id(tab()),
                 tabindex: "0",
@@ -320,45 +675,52 @@ pub fn StatsMember(id: String) -> Element {
                             let data = roles.data.read();
                             let rows = data.as_ref().and_then(|d| d.as_ref());
                             if err.as_deref().is_some_and(hide_member_role_error) {
-                                rsx! {}
+                                rsx! { p { class: "visually-hidden", role: "status" } }
                             } else {
-                                match role_panel(err.as_deref(), rows.map(|rows| rows.as_slice())) {
-                                    RolePanel::Pending => rsx! {
-                                        p { class: "loading-state", "Loading role breakdown..." }
-                                    },
-                                    RolePanel::Failed => load_error_state("role breakdown", roles.refresh),
-                                    RolePanel::Ready(rows) => {
-                                        let aggs = role_aggs_from_rows(rows);
-                                        let shown: Vec<_> = aggs.iter().filter(|r| r.matches > 0).collect();
-                                        if shown.is_empty() {
-                                            rsx! {
-                                                p { class: "empty-state",
-                                                    style: "padding: 1rem 0; text-align: left;",
-                                                    "No role stats yet."
-                                                }
-                                            }
-                                        } else {
-                                            rsx! {
-                                                DataTable { headers: vec!["Role", "Matches", "Win rate"],
-                                                    for agg in shown.iter() {
-                                                        {
-                                                            let tally = agg.tally();
-                                                            let result = role_result(tally);
-                                                            let wr_cls = result_class(tally);
-                                                            let name = agg.name;
-                                                            let matches = agg.matches;
-                                                            rsx! {
-                                                                tr { key: "{name}",
-                                                                    td { "{name}" }
-                                                                    td { "{matches}" }
-                                                                    td { span { class: "{wr_cls}", "{result}" } }
-                                                                }
+                                let panel = role_panel(err.as_deref(), rows.map(|rows| rows.as_slice()));
+                                let shown: Vec<_> = match &panel {
+                                    RolePanel::Ready(rows) => role_aggs_from_rows(rows)
+                                        .into_iter()
+                                        .filter(|r| r.matches > 0)
+                                        .collect(),
+                                    _ => Vec::new(),
+                                };
+                                let status = panel_status(
+                                    "role stats",
+                                    matches!(panel, RolePanel::Pending),
+                                    matches!(panel, RolePanel::Failed),
+                                    shown.is_empty(),
+                                );
+                                rsx! {
+                                    h2 { id: "member-stats-roles-title", class: "ui-section-title", "Roles" }
+                                    p { class: "visually-hidden", role: "status", "{status}" }
+                                    match panel {
+                                        RolePanel::Pending => rsx! { SkeletonBars { rows: 3 } },
+                                        RolePanel::Failed => stats_load_error("the role breakdown", roles.refresh),
+                                        RolePanel::Ready(_) if shown.is_empty() => rsx! {
+                                            p { class: "stats-view-note", "No role stats yet. They show up once this member has tracked games on a role." }
+                                        },
+                                        RolePanel::Ready(_) => rsx! {
+                                            StatsTable {
+                                                labelled_by: "member-stats-roles-title",
+                                                cols: vec![Col::Text("Role"), Col::Num("Matches"), Col::Rate("Win rate")],
+                                                for agg in shown.iter() {
+                                                    {
+                                                        let tally = agg.tally();
+                                                        let result = role_result(tally);
+                                                        let name = agg.name;
+                                                        let matches = agg.matches;
+                                                        rsx! {
+                                                            tr { key: "{name}",
+                                                                th { scope: "row", "{name}" }
+                                                                td { class: "num", "{matches}" }
+                                                                {rate_cell(tally, &result, result_class(tally))}
                                                             }
                                                         }
                                                     }
                                                 }
                                             }
-                                        }
+                                        },
                                     }
                                 }
                             }
@@ -366,100 +728,143 @@ pub fn StatsMember(id: String) -> Element {
                     },
                     MemberStatsTab::Heroes => rsx! {
                         {
+                            let failed = heroes.error.read().is_some();
                             let data = heroes.data.read();
                             let list = data.as_ref().and_then(|d| d.as_ref());
-                            match list {
-                                None => rsx! { p { class: "loading-state", "Loading hero stats..." } },
-                                Some(list) if list.is_empty() => rsx! {
-                                    p { class: "empty-state", "No hero stats recorded." }
-                                },
-                                Some(list) => {
-                                    let all: Vec<&HeroStats> = list.iter().collect();
-                                    // Under 3 games a hero folds into one "Other heroes" row.
-                                    let (mut sorted, folded) = fold_small(&all, |h| h.tally());
-                                    sorted.sort_by_key(|b| std::cmp::Reverse(b.matches));
-                                    let other = Tally::sum(folded.iter().map(|h| h.tally()));
-                                    let other_count = folded.len();
-                                    let other_names = folded
-                                        .iter()
-                                        .map(|h| h.hero.as_str())
-                                        .collect::<Vec<_>>()
-                                        .join(", ");
-                                    // The pool mixes heroes, so it always shows the record, muted.
-                                    let other_result = other_label(other);
-                                    rsx! {
-                                        p { class: "stats-gate-note", {HERO_RULE_NOTE} }
-                                        DataTable { headers: vec!["Hero", "Matches", "Win %", "Avg Elims", "Avg Deaths", "Avg Dmg", "Avg Heal"],
-                                            for hero in sorted.iter() {
-                                                {
-                                                    let tally = hero.tally();
-                                                    let result = tally.label();
-                                                    let wr_cls = result_class(tally);
-                                                    rsx! {
-                                                        tr { key: "{hero.hero}",
-                                                            td { "{hero.hero}" }
-                                                            td { "{hero.matches}" }
-                                                            td { span { class: "{wr_cls}", "{result}" } }
-                                                            td { "{hero.avg_elims:.1}" }
-                                                            td { "{hero.avg_deaths:.1}" }
-                                                            td { "{hero.avg_damage:.0}" }
-                                                            td { "{hero.avg_healing:.0}" }
+                            let status = panel_status(
+                                "hero stats",
+                                list.is_none(),
+                                list.is_none() && failed,
+                                list.is_some_and(|l| l.is_empty()),
+                            );
+                            rsx! {
+                                h2 { id: "member-stats-heroes-title", class: "ui-section-title", "Heroes" }
+                                p { class: "visually-hidden", role: "status", "{status}" }
+                                match list {
+                                    None if failed => stats_load_error("hero stats", heroes.refresh),
+                                    None => rsx! { SkeletonBars { rows: 4 } },
+                                    Some(list) if list.is_empty() => rsx! {
+                                        p { class: "stats-view-note", "No hero stats yet. They show up once this member has tracked games." }
+                                    },
+                                    Some(list) => {
+                                        let all: Vec<&HeroStats> = list.iter().collect();
+                                        // Under 3 games a hero folds into one "Other heroes" row.
+                                        let (mut sorted, folded) = fold_small(&all, |h| h.tally());
+                                        sorted.sort_by_key(|b| std::cmp::Reverse(b.matches));
+                                        let other = Tally::sum(folded.iter().map(|h| h.tally()));
+                                        let other_count = folded.len();
+                                        let other_names = folded
+                                            .iter()
+                                            .map(|h| h.hero.as_str())
+                                            .collect::<Vec<_>>()
+                                            .join(", ");
+                                        // The pool mixes heroes, so it always shows the record, muted.
+                                        let other_result = other_label(other);
+                                        rsx! {
+                                            p { class: "stats-view-note", {HERO_RULE_NOTE} }
+                                            StatsTable {
+                                                labelled_by: "member-stats-heroes-title",
+                                                wide: true,
+                                                cols: vec![
+                                                    Col::Text("Hero"),
+                                                    Col::Num("Matches"),
+                                                    Col::Rate("Win rate"),
+                                                    Col::Num("Avg elims"),
+                                                    Col::Num("Avg deaths"),
+                                                    Col::Num("Avg damage"),
+                                                    Col::Num("Avg healing"),
+                                                ],
+                                                for hero in sorted.iter() {
+                                                    {
+                                                        let tally = hero.tally();
+                                                        let result = tally.label();
+                                                        rsx! {
+                                                            tr { key: "{hero.hero}",
+                                                                th { scope: "row", "{hero.hero}" }
+                                                                td { class: "num", "{hero.matches}" }
+                                                                {rate_cell(tally, &result, result_class(tally))}
+                                                                td { class: "num", "{hero.avg_elims:.1}" }
+                                                                td { class: "num", "{hero.avg_deaths:.1}" }
+                                                                td { class: "num", "{hero.avg_damage:.0}" }
+                                                                td { class: "num", "{hero.avg_healing:.0}" }
+                                                            }
                                                         }
                                                     }
                                                 }
-                                            }
-                                            if other_count > 0 {
-                                                tr { key: "{OTHER_HEROES}", class: "stats-row-muted", title: "{other_names}",
-                                                    td { "{OTHER_HEROES} ({other_count})" }
-                                                    td { "{other.games}" }
-                                                    td { span { class: "{OTHER_RESULT_CLASS}", "{other_result}" } }
-                                                    td { "-" }
-                                                    td { "-" }
-                                                    td { "-" }
-                                                    td { "-" }
+                                                if other_count > 0 {
+                                                    tr { key: "{OTHER_HEROES}", class: "stats-row-muted", title: "{other_names}",
+                                                        th { scope: "row", "{OTHER_HEROES} ({other_count})" }
+                                                        td { class: "num", "{other.games}" }
+                                                        td { class: "rate", span { class: "{OTHER_RESULT_CLASS}", "{other_result}" } }
+                                                        td { class: "num", "-" }
+                                                        td { class: "num", "-" }
+                                                        td { class: "num", "-" }
+                                                        td { class: "num", "-" }
+                                                    }
                                                 }
                                             }
                                         }
-                                    }
-                                },
+                                    },
+                                }
                             }
                         }
                     },
                     MemberStatsTab::Maps => rsx! {
                         {
+                            let failed = maps.error.read().is_some();
                             let data = maps.data.read();
                             let list = data.as_ref().and_then(|d| d.as_ref());
-                            match list {
-                                None => rsx! { p { class: "loading-state", "Loading map stats..." } },
-                                Some(list) if list.is_empty() => rsx! {
-                                    p { class: "empty-state", "No map stats recorded." }
-                                },
-                                Some(list) => {
-                                    let mut sorted: Vec<_> = list.iter().collect();
-                                    sorted.sort_by_key(|b| std::cmp::Reverse(b.matches));
-                                    rsx! {
-                                        p { class: "stats-gate-note", {MAP_RULE_NOTE} }
-                                        DataTable { headers: vec!["Map", "Matches", "Win %", "Wins", "Losses", "Draws"],
-                                            for map in sorted.iter() {
-                                                {
-                                                    let tally = map.tally();
-                                                    let result = tally.label();
-                                                    let wr_cls = result_class(tally);
-                                                    rsx! {
-                                                        tr { key: "{map.map_name}",
-                                                            td { "{map.map_name}" }
-                                                            td { "{map.matches}" }
-                                                            td { span { class: "{wr_cls}", "{result}" } }
-                                                            td { "{map.wins}" }
-                                                            td { "{map.losses}" }
-                                                            td { "{map.draws}" }
+                            let status = panel_status(
+                                "map stats",
+                                list.is_none(),
+                                list.is_none() && failed,
+                                list.is_some_and(|l| l.is_empty()),
+                            );
+                            rsx! {
+                                h2 { id: "member-stats-maps-title", class: "ui-section-title", "Maps" }
+                                p { class: "visually-hidden", role: "status", "{status}" }
+                                match list {
+                                    None if failed => stats_load_error("map stats", maps.refresh),
+                                    None => rsx! { SkeletonBars { rows: 4 } },
+                                    Some(list) if list.is_empty() => rsx! {
+                                        p { class: "stats-view-note", "No map stats yet. They show up once this member has tracked games." }
+                                    },
+                                    Some(list) => {
+                                        let mut sorted: Vec<_> = list.iter().collect();
+                                        sorted.sort_by_key(|b| std::cmp::Reverse(b.matches));
+                                        rsx! {
+                                            p { class: "stats-view-note", {MAP_RULE_NOTE} }
+                                            StatsTable {
+                                                labelled_by: "member-stats-maps-title",
+                                                wide: true,
+                                                cols: vec![
+                                                    Col::Text("Map"),
+                                                    Col::Num("Matches"),
+                                                    Col::Rate("Win rate"),
+                                                    Col::Num("Wins"),
+                                                    Col::Num("Losses"),
+                                                    Col::Num("Draws"),
+                                                ],
+                                                for map in sorted.iter() {
+                                                    {
+                                                        let tally = map.tally();
+                                                        let result = tally.label();
+                                                        rsx! {
+                                                            tr { key: "{map.map_name}",
+                                                                th { scope: "row", "{map.map_name}" }
+                                                                td { class: "num", "{map.matches}" }
+                                                                {rate_cell(tally, &result, result_class(tally))}
+                                                                td { class: "num", "{map.wins}" }
+                                                                td { class: "num", "{map.losses}" }
+                                                                td { class: "num", "{map.draws}" }
+                                                            }
                                                         }
                                                     }
                                                 }
                                             }
                                         }
-                                    }
-                                },
+                                    },
+                                }
                             }
                         }
                     },
@@ -485,5 +890,131 @@ mod tests {
             assert!(!ids[i + 1..].contains(id), "{id}");
             assert_ne!(*id, MEMBER_STATS_PANEL);
         }
+    }
+
+    #[test]
+    fn a_missing_member_is_not_found_and_a_refusal_is_a_wall() {
+        assert_eq!(
+            member_view(Some("HTTP error 404: Member not found")),
+            MemberView::Missing
+        );
+        assert_eq!(
+            member_view(Some("HTTP error 403: stats_private")),
+            MemberView::Denied("This member keeps their stats private.")
+        );
+        assert!(matches!(
+            member_view(Some("HTTP error 400: bad id")),
+            MemberView::Denied(_)
+        ));
+        // Sign in, inactive and server errors stay with the member gate.
+        for err in [
+            "HTTP error 401: Unauthorized",
+            "HTTP error 500: Internal error",
+            "Network error: offline",
+        ] {
+            assert_eq!(member_view(Some(err)), MemberView::Open, "{err}");
+        }
+        assert_eq!(member_view(None), MemberView::Open);
+    }
+
+    #[test]
+    fn panel_status_names_the_state_and_is_empty_when_rows_show() {
+        assert_eq!(
+            panel_status("hero stats", true, false, false),
+            "Loading hero stats."
+        );
+        assert_eq!(
+            panel_status("hero stats", true, true, false),
+            "Couldn't load hero stats."
+        );
+        assert_eq!(
+            panel_status("hero stats", false, false, true),
+            "No hero stats yet."
+        );
+        assert_eq!(panel_status("hero stats", false, false, false), "");
+    }
+
+    fn render(app: fn() -> Element) -> String {
+        let mut dom = VirtualDom::new(app);
+        dom.rebuild_in_place();
+        dom.render_immediate(&mut dioxus::dioxus_core::NoOpMutations);
+        dioxus_ssr::render(&dom)
+    }
+
+    #[test]
+    fn table_scrolls_inside_a_named_focusable_region() {
+        fn view() -> Element {
+            let ten = Tally::new(10, 7, 3, 0);
+            let two = Tally::new(2, 1, 1, 0);
+            rsx! {
+                h2 { id: "t-title", "Heroes" }
+                StatsTable {
+                    labelled_by: "t-title",
+                    wide: true,
+                    cols: vec![Col::Text("Hero"), Col::Num("Matches"), Col::Rate("Win rate")],
+                    tr {
+                        th { scope: "row", "Ana" }
+                        td { class: "num", "10" }
+                        {rate_cell(ten, &ten.label(), result_class(ten))}
+                    }
+                    tr {
+                        th { scope: "row", "Kiriko" }
+                        td { class: "num", "2" }
+                        {rate_cell(two, &two.label(), result_class(two))}
+                    }
+                }
+            }
+        }
+        let html = render(view);
+        assert!(
+            html.contains(
+                "<div class=\"stats-table-wrap\" role=\"region\" aria-labelledby=\"t-title\" tabindex=\"0\">"
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains("Scroll sideways to see every column."),
+            "{html}"
+        );
+        assert_eq!(html.matches("scope=\"col\"").count(), 3, "{html}");
+        assert_eq!(html.matches("<th scope=\"row\">").count(), 2, "{html}");
+        // A rate is a number first. Its bar is decoration for assistive tech.
+        assert!(
+            html.contains("<span class=\"stats-wr\">70.0%</span>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<span class=\"stats-rate-bar\" aria-hidden=\"true\"><span class=\"stats-rate-fill\" style=\"width:70.0%;\">"),
+            "{html}"
+        );
+        // Below the gate the record shows, muted, with no bar.
+        assert!(
+            html.contains("<span class=\"stats-wr muted\">1W-1L</span>"),
+            "{html}"
+        );
+        assert_eq!(html.matches("stats-rate-bar").count(), 1, "{html}");
+    }
+
+    #[test]
+    fn shared_css_uses_tokens_only_and_never_dims_text_with_opacity() {
+        for css in [STATS_VIEWS_CSS, MEMBER_STATS_CSS] {
+            for line in css.lines() {
+                let decl = line.trim();
+                if decl.starts_with("/*") || decl.starts_with("@media") || !decl.contains(':') {
+                    continue;
+                }
+                assert!(
+                    !decl.contains("rem") && !decl.contains("#"),
+                    "size or colour literal: {decl}"
+                );
+                let px = decl.contains("px")
+                    && !decl.starts_with("border")
+                    && !decl.contains("1px solid");
+                assert!(!px, "pixel literal: {decl}");
+            }
+            assert!(!css.contains('\u{2014}') && !css.contains('\u{2013}'));
+        }
+        assert!(STATS_VIEWS_CSS.contains(".stats-table tr.stats-row-muted { opacity: 1; }"));
+        assert!(STATS_VIEWS_CSS.contains(".stats-table-wrap:focus-visible {"));
     }
 }

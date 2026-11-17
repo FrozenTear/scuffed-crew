@@ -11,18 +11,20 @@ use dioxus::html::input_data::MouseButton;
 use dioxus::prelude::*;
 use serde::Deserialize;
 
+use crate::components::ui::{PageHeader, PageShell, PageWidth};
 use crate::components::{is_http_status, member_pending};
 use crate::hooks::use_api_with;
+use crate::pages::stats_member::{STATS_VIEWS_CSS, STATS_VIEWS_CSS_ID};
 use crate::pages::{NotFoundLink, NotFoundPanel};
 use crate::routes::Route;
 use crate::state::use_auth;
 use crate::util::encode_query;
 
 use super::bans_picks::{BANS_PICKS_CSS, bans_picks_section, lenient};
-use super::history::{cell_is_unsure, marked_value, outcome_class, show_new_reader_badge};
+use super::history::{cell_is_unsure, marked_value, outcome_badge, show_new_reader_badge};
 use super::rank::{RANK_CSS, rank_detail};
 use super::role::game_role_label;
-use super::{format_date, map_game_mode, member_stats_url};
+use super::{map_game_mode, member_stats_url};
 use scuffed_types::BansPicks;
 
 /// Base path for the member's own games. `game_path` appends the id to it as
@@ -35,92 +37,130 @@ const NEW_READER_BADGE: &str = "New reader";
 const NEW_READER_TITLE: &str = "Read by the new stat reader";
 const MISSING_TEXT: &str = "This game is not in your match history. It may have been deleted.";
 
+/// Styles of the game page, on tokens only. The page column is the shared
+/// `PageShell` (wide), the title block is the shared page header, and the
+/// tiles and cards follow the stats and match frames.
 const GAME_CSS: &str = r#"
-    .game-page.stats-page {
-        max-width: 760px;
-        margin: 0 auto;
-        padding: 2rem 1.5rem;
-    }
-    .game-back {
-        display: inline-block;
-        margin-bottom: 1rem;
-        font-size: 0.85rem;
-        color: var(--text-3);
-        text-decoration: none;
-    }
-    .game-back:hover { color: var(--text); }
-    .game-head {
-        display: flex;
-        flex-direction: column;
-        gap: 0.35rem;
-        padding: 1.1rem 1.25rem;
-        background: var(--surface);
-        border: 1px solid var(--border);
-        border-radius: 10px;
-    }
-    .game-outcome {
-        font-family: var(--font-head);
-        font-size: 1rem;
-        font-weight: 700;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-    }
-    .game-page .game-title {
-        font-family: var(--font-head);
-        font-size: 1.6rem;
-        margin: 0;
-        color: var(--text);
-    }
-    .game-meta {
-        display: flex;
-        flex-wrap: wrap;
-        align-items: center;
-        gap: 0.35rem 0.6rem;
-        margin: 0;
-        font-size: 0.9rem;
-        color: var(--text-3);
-    }
-    .game-badges {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.4rem;
-        margin-top: 0.25rem;
-    }
-    .game-stats {
-        display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 0.6rem;
-        margin: 1rem 0 0;
-    }
-    .game-stat {
-        padding: 0.75rem 0.9rem;
-        background: var(--surface);
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        min-width: 0;
-    }
-    .game-stat dt {
-        font-size: 0.75rem;
-        font-weight: 600;
-        letter-spacing: 0.04em;
-        text-transform: uppercase;
-        color: var(--text-subtle);
-    }
-    .game-stat dd {
-        margin: 0.2rem 0 0;
-        font-size: 1.35rem;
-        font-weight: 700;
-        font-variant-numeric: tabular-nums;
-        color: var(--text);
-    }
-    .game-unsure-note {
-        margin: 0.9rem 0 0;
-        font-size: 0.85rem;
-        color: var(--text-3);
-    }
-    @media (max-width: 520px) {
-        .game-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    }
+/* The trail of the match frame. Each link is a 44px target. */
+.game-crumb {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  min-width: 0;
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  line-height: var(--leading-ui);
+  color: var(--text-3);
+}
+.game-crumb a {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--hit-target-min);
+  min-width: var(--hit-target-min);
+  color: var(--accent-text);
+  text-decoration: underline;
+}
+.game-crumb a:hover { text-decoration: none; }
+.game-crumb a:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+.game-crumb [aria-current="page"] { color: var(--text); }
+/* A long map name wraps in the title instead of being cut. */
+.game-page .page-header h1 .stat-value-text {
+  overflow: visible;
+  white-space: normal;
+}
+.game-page .game-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+}
+.game-result {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3) var(--space-5);
+}
+.game-result-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+}
+.game-result-label {
+  font-family: var(--font-head);
+  font-size: var(--text-xs);
+  font-weight: var(--font-label-weight);
+  letter-spacing: var(--font-head-tracking);
+  text-transform: uppercase;
+  color: var(--text-subtle);
+}
+.game-outcome {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.game-page .game-rank { margin: 0; }
+.game-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.game-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-3);
+  margin: 0;
+}
+/* A tile reads value over label, as on the stats frame. The markup keeps the
+   label first (dt before dd), so the tile is drawn in reverse. */
+.game-stat {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column-reverse;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: var(--card-padding);
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--card-radius);
+  box-shadow: var(--card-shadow);
+  text-align: center;
+}
+.game-stat dt {
+  margin: 0;
+  color: var(--text-3);
+  font-size: var(--text-sm);
+  line-height: var(--leading-ui);
+}
+.game-stat dd {
+  max-width: 100%;
+  margin: 0;
+  font-family: var(--font-head);
+  font-weight: var(--font-head-weight);
+  font-size: var(--text-2xl);
+  letter-spacing: var(--font-head-tracking);
+  line-height: var(--leading-display);
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+.game-unsure-note {
+  margin: 0;
+  color: var(--text-3);
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+}
+@media (max-width: 520px) {
+  .game-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 "#;
 
 /// The bare `PersonalMatch` from `GET /api/stats/me/matches/{id}` (the same
@@ -229,7 +269,8 @@ fn game_view<'a>(id: &str, row: Option<&'a GameRow>, error: Option<&str>) -> Gam
     }
 }
 
-/// The top "Back to My Stats" link. The not found panel already offers it.
+/// The breadcrumb back to the stats page. The not found panel already offers
+/// that link.
 fn shows_top_back_link(view: &GameView) -> bool {
     !matches!(view, GameView::Missing)
 }
@@ -300,66 +341,73 @@ fn mode_label(game_mode: &str, map_name: &str) -> String {
     }
 }
 
+/// "15 Mar 2026, 12:00 UTC": the date style of the frames, with the time.
+fn game_time(played_at: &DateTime<Utc>) -> String {
+    played_at.format("%-d %b %Y, %H:%M UTC").to_string()
+}
+
 /// The game body. No Link inside, so tests can render it without a router.
+/// The map is the page's one H1 (the shared page header markup, written out
+/// because the title can carry an unsure mark). The result is the word Win,
+/// Loss or Draw on the shared pill.
 fn game_detail(row: &GameRow) -> Element {
     let fields = row.fields();
-    let oc = outcome_class(&row.outcome);
     let map = map_label(&row.map_name);
     let mode = mode_label(&row.game_mode, &row.map_name);
     let role = game_role_label(&row.role, &row.hero);
-    let date = format_date(&row.played_at);
-    let abs = row.played_at.format("%Y-%m-%d %H:%M UTC").to_string();
+    let date = game_time(&row.played_at);
     let machine_date = row.played_at.to_rfc3339();
     let new_reader = show_new_reader_badge(row.recognizer.as_deref().unwrap_or(""));
     let edited = row.edited;
     let stats = stat_lines(row);
     let summary = unsure_summary(unsure_count(fields)).unwrap_or_default();
     rsx! {
-        header { class: "game-head",
-            {marked_value(
-                &row.id,
-                &format!("game-outcome {oc}"),
-                &row.outcome,
-                "Result",
-                false,
-                cell_is_unsure(fields, "result"),
-            )}
-            h1 { class: "game-title",
+        header { class: "page-header game-head",
+            h1 {
                 {marked_value(&row.id, "", &map, "Map", false, cell_is_unsure(fields, "map"))}
             }
-            p { class: "game-meta",
+            p { class: "page-lead game-meta",
                 {marked_value(&row.id, "game-mode", &mode, "Mode", false, cell_is_unsure(fields, "mode"))}
                 span { aria_hidden: "true", "·" }
                 {marked_value(&row.id, "game-hero", &row.hero, "Hero", false, cell_is_unsure(fields, "hero"))}
                 span { aria_hidden: "true", "·" }
                 span { class: "game-role", "{role}" }
                 span { aria_hidden: "true", "·" }
-                time { class: "game-date", datetime: "{machine_date}", title: "{abs}", "{date}" }
+                time { class: "game-date", datetime: "{machine_date}", "{date}" }
+            }
+        }
+        div { class: "stats-view-card game-result",
+            p { class: "game-result-line",
+                span { class: "game-result-label", "Result" }
+                {outcome_badge(&row.id, "game-outcome", &row.outcome, cell_is_unsure(fields, "result"))}
             }
             {rank_detail(&row.id, row.rank.as_ref())}
             if new_reader || edited {
                 div { class: "game-badges",
                     if new_reader {
-                        span { class: "tracker-badge reader-badge", title: NEW_READER_TITLE, "{NEW_READER_BADGE}" }
+                        span { class: "ui-pill ui-pill--info reader-badge", title: NEW_READER_TITLE, "{NEW_READER_BADGE}" }
                     }
                     if edited {
-                        span { class: "tracker-badge game-edited-badge", title: EDITED_TITLE, "{EDITED_BADGE}" }
+                        span { class: "ui-pill ui-pill--warn game-edited-badge", title: EDITED_TITLE, "{EDITED_BADGE}" }
                     }
                 }
             }
         }
-        dl { class: "game-stats",
-            for stat in stats {
-                div { class: "game-stat", key: "{stat.label}",
-                    dt { "{stat.label}" }
-                    dd {
-                        {marked_value(&row.id, "game-stat-value", &stat.value.to_string(), stat.label, false, stat.unsure)}
+        section { class: "ui-stack", aria_labelledby: "game-stats-title",
+            h2 { id: "game-stats-title", class: "ui-section-title", "Scoreboard" }
+            dl { class: "game-stats",
+                for stat in stats {
+                    div { class: "game-stat", key: "{stat.label}",
+                        dt { "{stat.label}" }
+                        dd {
+                            {marked_value(&row.id, "game-stat-value", &stat.value.to_string(), stat.label, false, stat.unsure)}
+                        }
                     }
                 }
             }
-        }
-        if !summary.is_empty() {
-            p { class: "game-unsure-note", "{summary}" }
+            if !summary.is_empty() {
+                p { class: "game-unsure-note", "{summary}" }
+            }
         }
         {bans_picks_section(&row.id, row.bans_picks.as_ref())}
     }
@@ -389,7 +437,7 @@ pub fn StatsMatch(id: String) -> Element {
                 title: "Game not found",
                 message: MISSING_TEXT,
                 links: vec![
-                    NotFoundLink { label: "Back to My Stats", to: Route::Stats {} },
+                    NotFoundLink { label: "Back to your stats", to: Route::Stats {} },
                     NotFoundLink { label: "Back home", to: Route::Home {} },
                 ],
             }
@@ -397,19 +445,24 @@ pub fn StatsMatch(id: String) -> Element {
         // The gate's card is an H2. The game is not known yet, so the page's
         // one H1 names the page by its kind.
         GameView::Pending => rsx! {
-            h1 { class: "game-title", "Game" }
+            PageHeader { title: "Game" }
             {member_pending(&auth(), &game, "this game")}
         },
     };
 
     rsx! {
         crate::styles::StyleOnce { id: "scuffed-css-pages-stats-mod-stats-css", css: super::STATS_CSS }
+        crate::styles::StyleOnce { id: STATS_VIEWS_CSS_ID, css: STATS_VIEWS_CSS }
         crate::styles::StyleOnce { id: "scuffed-css-pages-stats-game-game-css", css: GAME_CSS }
         crate::styles::StyleOnce { id: "scuffed-css-pages-stats-bans-picks-css", css: BANS_PICKS_CSS }
         crate::styles::StyleOnce { id: "scuffed-css-pages-stats-rank-css", css: RANK_CSS }
-        div { class: "stats-page my-stats game-page",
+        PageShell { width: PageWidth::Wide, class: "game-page",
             if show_back {
-                Link { class: "game-back", to: Route::Stats {}, "Back to My Stats" }
+                nav { class: "game-crumb", aria_label: "Breadcrumb",
+                    Link { to: Route::Stats {}, "Your stats" }
+                    span { aria_hidden: "true", "/" }
+                    span { aria_current: "page", "This game" }
+                }
             }
             {body}
         }
@@ -606,11 +659,26 @@ mod tests {
     fn page_shows_every_stat_and_marks_only_unsure_ones() {
         let html = render(row("a", &["hero", "dmg", "nope"]));
         for text in [
-            "victory", "Ilios", "control", "Ana", "Support", "11", "33", "22", "4444", "5555",
-            "666",
+            "Win", "Ilios", "control", "Ana", "Support", "11", "33", "22", "4444", "5555", "666",
         ] {
             assert!(html.contains(text), "{text} missing: {html}");
         }
+        // One H1 (the map), no landmark of its own, and the result as a word
+        // on the shared pill.
+        assert_eq!(html.matches("<h1").count(), 1, "{html}");
+        assert!(!html.contains("<main"), "{html}");
+        assert!(
+            html.contains("<span class=\"game-outcome outcome-win\"><span class=\"stat-value-text ui-pill ui-pill--ok\">Win</span></span>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<time class=\"game-date\" datetime=\"2026-03-15T12:00:00+00:00\">15 Mar 2026, 12:00 UTC</time>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<h2 id=\"game-stats-title\" class=\"ui-section-title\">Scoreboard</h2>"),
+            "{html}"
+        );
         assert_eq!(html.matches("stat-unsure-mark").count(), 2, "{html}");
         assert!(
             html.contains("title=\"Hero: might be misread. Check it in the tracker.\""),
@@ -635,7 +703,7 @@ mod tests {
         assert_eq!(html.matches("type=\"button\"").count(), 2, "{html}");
         for text in ["Hero might be misread", "Damage might be misread"] {
             assert_eq!(
-                html.matches(&format!("<span class=\"sr-only\">{text}</span>"))
+                html.matches(&format!("<span class=\"visually-hidden\">{text}</span>"))
                     .count(),
                 1,
                 "{text}: {html}"
@@ -677,6 +745,18 @@ mod tests {
         assert!(html.contains(NEW_READER_BADGE), "{html}");
         assert!(html.contains(EDITED_BADGE), "{html}");
         assert!(html.contains("outcome-loss"), "{html}");
+        assert!(
+            html.contains("class=\"stat-value-text ui-pill ui-pill--danger\">Loss<"),
+            "a loss is the word Loss on the soft fill: {html}"
+        );
+        assert!(
+            html.contains("<span class=\"ui-pill ui-pill--info reader-badge\""),
+            "the reader badge is the shared pill: {html}"
+        );
+        assert!(
+            html.contains("<span class=\"ui-pill ui-pill--warn game-edited-badge\""),
+            "{html}"
+        );
         assert!(!html.contains("stat-unsure-mark"), "{html}");
         assert!(!html.contains("misread"), "{html}");
         assert!(!html.contains("<button"), "{html}");
@@ -690,6 +770,27 @@ mod tests {
         assert!(!html.contains("<button"), "{html}");
         assert_eq!(unsure_count(&["r3.dmg".to_string()]), 0);
         assert_eq!(unsure_summary(unsure_count(&["nope".to_string()])), None);
+    }
+
+    #[test]
+    fn page_css_uses_tokens_only_and_the_page_has_no_main() {
+        for line in GAME_CSS.lines() {
+            let decl = line.trim();
+            if decl.starts_with("/*") || decl.starts_with('@') || !decl.contains(':') {
+                continue;
+            }
+            assert!(!decl.contains("rem") && !decl.contains('#'), "{decl}");
+            assert!(!decl.contains("px") || decl.contains("1px solid"), "{decl}");
+        }
+        let src = include_str!("game.rs");
+        assert!(
+            !src.contains(&["main", " {"].concat()),
+            "the shell owns main"
+        );
+        assert_eq!(
+            game_time(&row("a", &[]).played_at),
+            "15 Mar 2026, 12:00 UTC"
+        );
     }
 
     #[test]
