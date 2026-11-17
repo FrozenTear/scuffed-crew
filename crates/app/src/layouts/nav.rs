@@ -372,13 +372,17 @@ pub(crate) fn is_current(entry: &Route, current: &Route) -> bool {
     )
 }
 
-/// The extra `aria-current` for a nav `Link`: `true` on the list page a
-/// nested or detail page hangs under. On the page itself this is `None`:
-/// the router's `Link` already writes `aria-current="page"` there, and a
-/// second attribute would double it.
+/// `aria-current` for a nav `Link`: `page` on the page itself, `true` on the
+/// list page a nested or detail page hangs under, `None` elsewhere.
+///
+/// The shell always passes this, `page` included. On web the attribute a
+/// caller passes is applied after the router `Link`'s own, so a `None` here
+/// removes the `aria-current="page"` that `Link` wrote (QA nit 1 on
+/// 8ec68607). The DOM keeps one attribute. SSR prints both, with the same
+/// value.
 pub(crate) fn aria_current(entry: &Route, current: &Route) -> Option<&'static str> {
     if entry == current {
-        None
+        Some("page")
     } else if is_current(entry, current) {
         Some("true")
     } else {
@@ -824,9 +828,16 @@ mod tests {
     }
 
     #[test]
-    fn aria_current_is_true_on_the_parent_and_left_to_link_on_the_page() {
-        // `Link` writes `page` itself; the shell adds nothing there.
-        assert_eq!(aria_current(&Route::Members {}, &Route::Members {}), None);
+    fn aria_current_is_page_on_the_page_and_true_on_the_parent() {
+        // The shell writes `page` itself: a `None` would remove `Link`'s.
+        assert_eq!(
+            aria_current(&Route::Members {}, &Route::Members {}),
+            Some("page")
+        );
+        assert_eq!(
+            aria_current(&Route::AdminDashboard {}, &Route::AdminDashboard {}),
+            Some("page")
+        );
         for (parent, child) in [
             (
                 Route::AdminMembers {},

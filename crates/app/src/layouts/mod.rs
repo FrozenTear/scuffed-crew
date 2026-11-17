@@ -172,9 +172,10 @@ pub(crate) fn in_current_scope<E>(mut f: impl FnMut(E) + 'static) -> impl FnMut(
     move |arg: E| runtime.in_scope(scope, || f(arg))
 }
 
-/// Focus the element with this id. `true` when it exists and is an HTML
-/// element (so a caller can fall back to another target), always `false`
-/// off wasm.
+/// Focus the element with this id. `true` only when focus actually moved
+/// there (it exists, is an HTML element and took focus: not hidden, not
+/// inert, not disabled), so a caller can fall back to another target.
+/// Always `false` off wasm.
 pub(crate) fn focus_element(id: &str) -> bool {
     #[cfg(target_arch = "wasm32")]
     {
@@ -185,10 +186,16 @@ pub(crate) fn focus_element(id: &str) -> bool {
         let Some(el) = document.get_element_by_id(id) else {
             return false;
         };
-        match el.dyn_into::<web_sys::HtmlElement>() {
-            Ok(el) => el.focus().is_ok(),
-            Err(_) => false,
+        let Ok(el) = el.dyn_into::<web_sys::HtmlElement>() else {
+            return false;
+        };
+        if el.focus().is_err() {
+            return false;
         }
+        let node: &web_sys::Node = &el;
+        document
+            .active_element()
+            .is_some_and(|active| active.is_same_node(Some(node)))
     }
     #[cfg(not(target_arch = "wasm32"))]
     {

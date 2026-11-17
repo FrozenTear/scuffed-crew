@@ -14,21 +14,24 @@ const ADMIN = ['/admin', '/admin/members', `/admin/members/${m0}/matches`, '/adm
 const browser = await launch();
 for (const [role, widths, paths] of [['admin', [1440, 390, 360], [...PUBLIC, ...SIGNED, ...ADMIN]], ['guest', [390, 360], PUBLIC], ['member', [390], [...PUBLIC, ...SIGNED]]]) {
   for (const width of widths) {
-    const ctx = await makeContext(browser, role, width); const page = await ctx.newPage(); const bad = []; const stuck = [];
+    const ctx = await makeContext(browser, role, width); const page = await ctx.newPage(); const bad = []; const stuck = []; const errored = [];
     for (const p of paths) {
       try { await open(page, p); } catch (e) { bad.push(p + ' LOAD ' + e.message.slice(0, 60)); continue; }
       // Measure the loaded page, not its loading state (Vision nit 26).
       const left = await settled(page);
-      if (left.length) stuck.push(`${p} [${left.join('; ')}]`);
+      if (left.pending.length) stuck.push(`${p} [${left.pending.join('; ')}]`);
+      if (left.errored.length) errored.push(`${p} [${left.errored.join('; ')}]`);
       const m = await page.evaluate(() => ({ sw: document.documentElement.scrollWidth, bw: document.body.scrollWidth, iw: innerWidth }));
       if (m.sw > m.iw || m.bw > m.iw) bad.push(`${p} ${m.sw}/${m.bw} > ${m.iw}`);
     }
     rec(`${role} ${width}: no horizontal overflow on ${paths.length} pages`, bad.length === 0, bad.join(' | '));
     rec(`${role} ${width}: every page leaves its loading state within 10 s before it is measured`, stuck.length === 0, stuck.join(' | '));
+    rec(`${role} ${width}: no page is left on a loading marker that reports an error`, errored.length === 0, errored.join(' | '));
     if (role === 'admin') {
       await open(page, '/admin/relay');
       // The tables arrive with /api/nostr/health: wait for them, do not count once.
-      await page.waitForFunction(() => document.querySelectorAll('table.data-table').length >= 2, null, { timeout: 10000 }).catch(() => {});
+      const arrived = await page.waitForFunction(() => document.querySelectorAll('table.data-table').length >= 2, null, { timeout: 10000 }).then(() => true, () => false);
+      rec(`admin ${width}: /admin/relay shows its 2 tables within 10 s`, arrived);
       const r = await page.evaluate(() => ({ tables: document.querySelectorAll('table.data-table').length, wrapped: [...document.querySelectorAll('table.data-table')].every(t => t.parentElement.classList.contains('data-table-scroll')), sw: document.documentElement.scrollWidth, iw: innerWidth, main: getComputedStyle(document.querySelector('.admin-main')).overflowX }));
       rec(`admin ${width}: /admin/relay has its 2 tables, each in its own scroller, page ${r.sw} <= ${r.iw}`, r.tables === 2 && r.wrapped && r.sw <= r.iw && r.main === 'auto', JSON.stringify(r));
     }

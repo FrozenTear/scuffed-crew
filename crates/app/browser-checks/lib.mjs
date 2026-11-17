@@ -4,7 +4,8 @@
 //   STATE_DIR  seed output, sessions  (default ./.state)
 //   REPORT_DIR JSON reports           (default ./reports)
 //   HEADED=1   show the browser
-import { chromium } from 'playwright';
+//   BROWSER    chromium (default) or firefox
+import { chromium, firefox } from 'playwright';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,7 +25,10 @@ export const VIEW = { 1440: { width: 1440, height: 900 }, 390: { width: 390, hei
 export function readState(name) { return JSON.parse(fs.readFileSync(path.join(STATE_DIR, name), 'utf8')); }
 export function writeState(name, value) { fs.writeFileSync(path.join(STATE_DIR, name), JSON.stringify(value, null, 1)); }
 
-export async function launch() { return chromium.launch({ headless: process.env.HEADED !== '1' }); }
+const ENGINES = { chromium, firefox };
+export const BROWSER = process.env.BROWSER || 'chromium';
+if (!ENGINES[BROWSER]) throw new Error('BROWSER must be chromium or firefox, not ' + BROWSER);
+export async function launch() { return ENGINES[BROWSER].launch({ headless: process.env.HEADED !== '1' }); }
 export async function ready(page) {
   await page.waitForSelector('.d1-top', { timeout: 30000 });
   await page.waitForFunction(() => !document.querySelector('.d1-session-pending'), null, { timeout: 15000 });
@@ -34,19 +38,32 @@ export async function ready(page) {
 export async function open(page, p) { await page.goto(B + p, { waitUntil: 'load' }); await ready(page); }
 
 // Visible loading markers: skeleton lists, spinners, aria-busy, and any
-// element whose class names a loading state ("admin-loading", "loading-state",
-// "wiki-loading"...). An error that reuses such a class is not loading.
+// element with a loading class token: `loading`, `is-loading`,
+// `loading-state` or one that ends in `-loading` ("admin-loading",
+// "wiki-loading", "chat-msg--loading"). A class that only contains the word
+// somewhere else does not count.
 const LOADING = '.ui-skel-list, .ui-spinner, [aria-busy="true"], [class*="loading"]';
-/** Wait until no loading marker is visible. Returns the ones left after `ms` (empty when settled). */
+const LOADING_CLASS = /^(loading|is-loading|loading-state)$|-loading$/;
+/**
+ * Wait until no loading marker is visible, for up to `ms`.
+ * Returns `{ pending, errored }`, both empty when the page settled:
+ * `pending` lists markers still loading, `errored` lists markers whose text
+ * says "failed" or "error" (a page stuck on an error, reported, not settled).
+ */
 export async function settled(page, ms = 10000) {
-  const left = () => page.evaluate(sel => [...document.querySelectorAll(sel)]
-    .filter(e => e.getBoundingClientRect().height > 0 && !/failed|error/i.test(e.textContent))
-    .map(e => e.className + ': ' + (e.textContent || '').trim().slice(0, 40)), LOADING);
-  try {
-    await page.waitForFunction(sel => ![...document.querySelectorAll(sel)]
-      .some(e => e.getBoundingClientRect().height > 0 && !/failed|error/i.test(e.textContent)), LOADING, { timeout: ms });
-    return [];
-  } catch { return left(); }
+  const scan = () => page.evaluate(([sel, re]) => {
+    const rx = new RegExp(re);
+    const marker = e => !e.matches('[class*="loading"]') || e.matches('.ui-skel-list, .ui-spinner, [aria-busy="true"]')
+      || [...e.classList].some(c => rx.test(c));
+    const shown = [...document.querySelectorAll(sel)].filter(e => marker(e) && e.getBoundingClientRect().height > 0);
+    const label = e => e.className + ': ' + (e.textContent || '').trim().slice(0, 40);
+    const bad = e => /failed|error/i.test(e.textContent);
+    return { pending: shown.filter(e => !bad(e)).map(label), errored: shown.filter(bad).map(label) };
+  }, [LOADING, LOADING_CLASS.source]);
+  const end = Date.now() + ms;
+  let last = await scan();
+  while (last.pending.length && Date.now() < end) { await page.waitForTimeout(200); last = await scan(); }
+  return last;
 }
 
 /** A browser context signed in as `role` (or a guest). Sessions are cached in STATE_DIR. */
@@ -91,6 +108,17 @@ export class Jar {
     console.log(method, p, r.status, typeof j === 'string' ? j.slice(0, 160) : JSON.stringify(j).slice(0, 200));
     return { status: r.status, j };
   }
-  async login(user) { const r = await this.req('POST', '/api/auth/local/login', { username: user, password: PW }); if (r.status !== 200) throw new Error('login ' + user + ' ' + r.status); return this; }
+  // A fresh stack rate-limits logins: on a 429, wait the server's
+  // `retry_after` (capped at 10 s) and try again, at most 3 times.
+  async login(user) {
+    for (let attempt = 0; ; attempt++) {
+      const r = await this.req('POST', '/api/auth/local/login', { username: user, password: PW });
+      if (r.status === 200) return this;
+      if (r.status !== 429 || attempt >= 3) throw new Error('login ' + user + ' ' + r.status);
+      const wait = Math.min(Math.max(Number(r.j && r.j.retry_after) || 1, 1), 10);
+      console.log(`login ${user}: 429, retrying in ${wait} s`);
+      await sleep(wait * 1000);
+    }
+  }
 }
 export const sleep = ms => new Promise(r => setTimeout(r, ms));

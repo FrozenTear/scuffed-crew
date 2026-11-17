@@ -421,12 +421,13 @@ fn safe_avatar_url(url: Option<&str>) -> Option<String> {
     (url.starts_with('/') || url.starts_with("https://")).then(|| url.to_string())
 }
 
-/// The extra `aria-current` for a `Link` that stands for a section (a phone
-/// tab, the Admin entry): `true` elsewhere in the section. On its own page
-/// `Link` already writes `page`, so nothing is added there.
+/// `aria-current` for a `Link` that stands for a section (a phone tab, the
+/// Admin entry): `page` on its own page, `true` elsewhere in the section.
+/// Always passed, `page` included: see [`aria_current`] for why `None`
+/// there would remove `Link`'s own value in the browser.
 fn section_link_current(to: &Route, current: &Route, in_section: bool) -> Option<&'static str> {
     if to == current {
-        None
+        Some("page")
     } else {
         section_aria_current(in_section)
     }
@@ -2340,8 +2341,10 @@ mod tests {
         let tab = section(bar, "href=\"/tournaments\"", "</a>");
         assert!(tab.contains("aria-current=\"true\""), "{tab}");
 
-        // Vision nit 8: the page itself is `page`, written once by `Link`.
-        // No tag anywhere in the shell carries two `aria-current`s.
+        // QA nit 1 on 8ec68607: the shell writes `page` itself, because on
+        // web a `None` after `Link`'s own value removes it. SSR prints both
+        // attributes; a tag may repeat `aria-current` only with one value
+        // (the browser keeps one), never `page` and `true` together.
         for (who, path) in [
             (Who::Guest, "/members"),
             (Who::Guest, "/"),
@@ -2352,23 +2355,44 @@ mod tests {
             let html = render(who, path, None);
             for tag in html.split('<').skip(1) {
                 let tag = tag.split('>').next().unwrap_or_default();
+                let values: Vec<&str> = tag
+                    .split("aria-current=\"")
+                    .skip(1)
+                    .filter_map(|rest| rest.split('"').next())
+                    .collect();
                 assert!(
-                    tag.matches("aria-current").count() <= 1,
-                    "{path}: doubled aria-current in <{tag}>"
+                    values.windows(2).all(|pair| pair[0] == pair[1]),
+                    "{path}: conflicting aria-current in <{tag}>"
                 );
             }
         }
-        let html = render(Who::Guest, "/members", None);
-        let members = section(top_bar(&html), "href=\"/members\"", "</a>");
-        assert_eq!(
-            members.matches("aria-current=\"page\"").count(),
-            1,
-            "{members}"
-        );
+        // Every shell link to the page carries `page` from the shell, so it
+        // survives on web whatever `Link` does.
+        for (who, path, places) in [
+            (Who::Guest, "/members", 3),
+            (Who::Admin, "/admin", 3),
+            (Who::Admin, "/admin/members", 2),
+        ] {
+            let html = render(who, path, None);
+            let href = format!("href=\"{path}\"");
+            let mut links = 0;
+            for tag in html.split("<a ").skip(1) {
+                let tag = tag.split('>').next().unwrap_or_default();
+                if tag.contains(&href) {
+                    links += 1;
+                    assert!(tag.contains("aria-current=\"page\""), "{path}: <a {tag}>");
+                    assert!(!tag.contains("aria-current=\"true\""), "{path}: <a {tag}>");
+                }
+            }
+            assert!(links >= places, "{path}: {links} links");
+        }
         assert_eq!(
             section_link_current(&Route::Home {}, &Route::Home {}, true),
-            None,
-            "Link writes page itself"
+            Some("page"),
+        );
+        assert_eq!(
+            section_link_current(&Route::AdminDashboard {}, &Route::AdminDashboard {}, true),
+            Some("page"),
         );
         assert_eq!(
             section_link_current(&Route::Members {}, &Route::Forum {}, true),
@@ -2538,7 +2562,8 @@ mod tests {
         assert_eq!(html.matches("map-canvas-overlay").count(), 1);
 
         assert!(html.contains("title=\"Toggle panel (Tab while the map has focus)\""));
-        assert!(html.contains("title=\"Toggle panel (])\""));
+        assert!(html.contains("title=\"Toggle panel (] while the map has focus)\""));
+        assert!(html.contains("title=\"Toggle elements panel ([ while the map has focus)\""));
         assert!(!html.contains("(Shift+Tab)"));
         assert!(!html.contains("title=\"Toggle panel (Tab)\""));
 

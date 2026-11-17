@@ -13,6 +13,12 @@
 // 6. Vision r5 nits: 22 (Ctrl/Cmd+S behind the drawer), 23 (Tab from outside
 //    the picker), 24 (no Cmd+Y), 25 (arrows on a select), and Tab out of a
 //    group panel closes it.
+// 7. FrozenTear's rule (2026-11-17): on /strategy/editor every shortcut,
+//    Ctrl/Cmd chords included, acts only with focus in the map canvas. Not on
+//    buttons, links, the slider, the select, the page body or main.
+// 8. QA nit 1 on 8ec68607: the current page's own nav link has
+//    aria-current="page" in the live DOM, and a nested page marks its parent
+//    "true".
 import { launch, makeContext, open, readState, reporter } from './lib.mjs';
 
 const { rec, finish } = reporter('keys');
@@ -242,40 +248,54 @@ for (const role of ['guest', 'member']) {
     }
     // Space on a focused button only presses that button.
     await page.focus('.tb-tool-btn[title="Zoom In"]'); let before = await state(page);
-    await page.keyboard.press('Space'); await page.waitForTimeout(100); let after = await state(page);
+    await page.keyboard.press('Space'); await page.waitForTimeout(100); let after = await state(page); let again;
     rec(`${T}: Space on a focused button presses it (zoom ${before.zoom} to ${after.zoom}) and does not toggle playback`, after.zoom !== before.zoom && same({ ...after, zoom: 0 }, { ...before, zoom: 0 }), JSON.stringify({ before, after }));
     await page.focus(link); before = await state(page);
     await page.keyboard.press('Space'); await page.waitForTimeout(100); after = await state(page);
     rec(`${T}: Space on a focused link does not toggle playback or navigate`, same(before, after), JSON.stringify({ before, after }));
-    // Ctrl/Cmd chords still work on a control (undo, redo).
-    await page.focus('.tb-tool-btn[title="Zoom In"]'); before = await state(page);
-    await page.keyboard.press('Control+z'); await page.waitForTimeout(100); after = await state(page);
-    await page.keyboard.press('Control+Shift+z'); await page.waitForTimeout(100); const redone = await state(page);
-    rec(`${T}: Ctrl+Z and Ctrl+Shift+Z still work with a button focused`, after.elements === '0' && redone.elements === '1', `${before.elements} ${after.elements} ${redone.elements}`);
-    // Nit 15: the same chords with Cmd (Meta), as on macOS.
-    await page.keyboard.press('Meta+z'); await page.waitForTimeout(100); after = await state(page);
-    await page.keyboard.press('Meta+Shift+z'); await page.waitForTimeout(100); let again = await state(page);
-    rec(`${T}: nit 15, Cmd+Z and Cmd+Shift+Z work with a button focused`, after.elements === '0' && again.elements === '1', `${after.elements} ${again.elements}`);
-    // Nit 24: Cmd+Y is not bound (History on macOS): no redo, default kept.
-    await page.keyboard.press('Meta+z'); await page.waitForTimeout(100);
-    await page.evaluate(() => { window.__cmdY = []; window.addEventListener('keydown', e => { if (e.key.toLowerCase() === 'y' && e.metaKey) window.__cmdY.push(e.defaultPrevented); }); });
-    await page.keyboard.press('Meta+y'); await page.waitForTimeout(100); after = await state(page);
-    const cmdY = await page.evaluate(() => window.__cmdY);
-    await page.keyboard.press('Control+y'); await page.waitForTimeout(100); again = await state(page);
-    rec(`${T}: nit 24, Cmd+Y does not redo and is left to the browser; Ctrl+Y still redoes`, after.elements === '0' && same(cmdY, [false]) && again.elements === '1', `${after.elements} ${JSON.stringify(cmdY)} ${again.elements}`);
-    // Nit 16: a slider and a select are controls, not text fields. Their own
-    // keys stay with them; Ctrl+Z, Ctrl+Shift+Z and Ctrl+S reach the editor.
-    await page.evaluate(() => { window.__saveBlocked = []; window.addEventListener('keydown', e => { if (e.key.toLowerCase() === 's' && (e.ctrlKey || e.metaKey)) window.__saveBlocked.push(e.defaultPrevented); }); });
+    // FrozenTear's rule: the Ctrl/Cmd chords do nothing on a control either.
+    // Undo has something to undo here (the marker), so a fired one shows.
+    // Ctrl/Cmd+S is left to the browser (not prevented) and saves nothing.
+    const CHORDS = ['Control+z', 'Control+Shift+z', 'Control+y', 'Meta+z', 'Meta+Shift+z', 'Control+s', 'Meta+s'];
+    await page.evaluate(() => { window.__saveSeen = []; window.addEventListener('keydown', e => { if (e.key.toLowerCase() === 's' && (e.ctrlKey || e.metaKey)) window.__saveSeen.push(e.defaultPrevented); }); });
+    const chordsDoNothing = async (what, focus, isFocused) => {
+      await page.evaluate(() => { window.__saveSeen = []; });
+      await focus(); before = await state(page); const url0 = page.url();
+      for (const c of CHORDS) await page.keyboard.press(c);
+      await page.waitForTimeout(300); after = await state(page);
+      const seen = await page.evaluate(() => window.__saveSeen);
+      // Focus stays put, or the browser's own Ctrl+Z (its editing history:
+      // the phase name typed above) moved it to that text field. That is the
+      // browser acting, not the editor.
+      const kept = await isFocused() || await page.evaluate(() => document.activeElement.matches('input:not([type]), input[type=text], textarea'));
+      const focusNow = await active(page);
+      rec(`${T}: none of the ${CHORDS.length} editor chords (undo, redo, save, Ctrl and Cmd) acts with focus on the ${what}; Ctrl/Cmd+S left to the browser`, same(before, after) && page.url() === url0 && same(seen, [false, false]) && kept, JSON.stringify({ before, after, seen, kept, focusNow }));
+    };
+    for (const [what, sel] of [['button', '.tb-tool-btn[title="Zoom In"]'], ['link', link], ['opacity slider', '.tb-opacity input[type=range]'], ['visibility select', '.tb-visibility-select']]) {
+      if (!(await page.$(sel))) { rec(`${T}: ${what} is on the page`, false); continue; }
+      await chordsDoNothing(what, () => page.focus(sel), () => focusedIs(page, sel));
+    }
+    // The page body and main: no single key and no chord acts.
+    const blurAll = () => page.evaluate(() => document.activeElement && document.activeElement.blur());
+    for (const [what, focus, isFocused] of [
+      ['page body', blurAll, () => page.evaluate(() => document.activeElement === document.body)],
+      ['main landmark', () => page.focus('#main'), () => focusedIs(page, '#main')],
+    ]) {
+      const fired = [];
+      for (const key of [...SINGLE_KEYS, ' ']) {
+        const tool = key === 'v' || key === '1' ? 1 : 0;
+        await page.evaluate(i => document.querySelectorAll('.tb-tool-btn')[i].click(), tool); await page.waitForTimeout(30);
+        await focus(); const b = await state(page);
+        await press1(page, key); await page.waitForTimeout(60);
+        const s = await state(page);
+        if (!same(b, s) || !(await isFocused())) fired.push(JSON.stringify(key) + ' ' + JSON.stringify(s));
+      }
+      rec(`${T}: none of the ${SINGLE_KEYS.length + 1} single-key shortcuts (Space included) acts with focus on the ${what}`, fired.length === 0, fired.join(' | '));
+      await chordsDoNothing(what, focus, isFocused);
+    }
+    // Nit 16 and 25: a slider and a select keep their own keys.
     for (const [what, sel, key] of [['opacity slider', '.tb-opacity input[type=range]', 'ArrowRight'], ['visibility select', '.tb-visibility-select', 'ArrowDown']]) {
-      if (!(await page.$(sel))) { rec(`${T}: nit 16, ${what} is on the page`, false); continue; }
-      await page.focus(sel); before = await state(page);
-      await page.keyboard.press('Control+z'); await page.waitForTimeout(100); after = await state(page);
-      await page.keyboard.press('Control+Shift+z'); await page.waitForTimeout(100); again = await state(page);
-      rec(`${T}: nit 16, Ctrl+Z and Ctrl+Shift+Z work with the ${what} focused`, after.elements === '0' && again.elements === '1' && (await focusedIs(page, sel)), `${before.elements} ${after.elements} ${again.elements}`);
-      await page.evaluate(() => { window.__saveBlocked = []; });
-      await page.keyboard.press('Control+s'); await page.waitForTimeout(300);
-      const blocked = await page.evaluate(() => window.__saveBlocked);
-      rec(`${T}: nit 16, Ctrl+S with the ${what} focused is the editor's (browser Save Page held back)`, blocked.length === 1 && blocked[0] === true, JSON.stringify(blocked));
+      if (!(await page.$(sel))) continue;
       if (what === 'opacity slider') {
         // The slider keeps its arrows: the value moves, the phase does not.
         await page.focus(sel); before = await state(page); const v0 = await page.$eval(sel, e => e.value);
@@ -358,6 +378,24 @@ for (const role of ['guest', 'member']) {
       await page.keyboard.press('Escape'); await page.waitForTimeout(150); a = await active(page);
       rec(`${T}: then Esc leaves the canvas (${tool})`, a.id === 'main', JSON.stringify(a));
     }
+    // The chords act with the canvas focused (nit 15: Cmd as on macOS).
+    // Markers are on the map with undo history behind them: count from here.
+    await page.focus('.map-canvas-overlay'); await page.keyboard.press('v'); await page.waitForTimeout(60);
+    const n0 = Number((await state(page)).elements); const less = String(n0 - 1), more = String(n0);
+    const steps = [];
+    for (const c of ['Control+z', 'Control+Shift+z', 'Meta+z', 'Meta+Shift+z', 'Meta+z']) { await page.keyboard.press(c); await page.waitForTimeout(100); steps.push((await state(page)).elements); }
+    rec(`${T}: Ctrl+Z, Ctrl+Shift+Z, Cmd+Z and Cmd+Shift+Z undo and redo with the canvas focused`, n0 >= 1 && same(steps, [less, more, less, more, less]) && (await focusedIs(page, '.map-canvas-overlay')), `${n0}: ` + JSON.stringify(steps));
+    // Nit 24: Cmd+Y is not bound (History on macOS): no redo, default kept.
+    await page.evaluate(() => { window.__cmdY = []; window.addEventListener('keydown', e => { if (e.key.toLowerCase() === 'y' && e.metaKey) window.__cmdY.push(e.defaultPrevented); }); });
+    await page.keyboard.press('Meta+y'); await page.waitForTimeout(100); after = await state(page);
+    const cmdY = await page.evaluate(() => window.__cmdY);
+    await page.keyboard.press('Control+y'); await page.waitForTimeout(100); again = await state(page);
+    rec(`${T}: nit 24, in the canvas Cmd+Y does not redo and is left to the browser; Ctrl+Y redoes`, after.elements === less && same(cmdY, [false]) && again.elements === more, `${after.elements} ${JSON.stringify(cmdY)} ${again.elements}`);
+    await page.evaluate(() => { window.__saveSeen = []; });
+    await page.focus('.map-canvas-overlay'); await page.keyboard.press('Control+s'); await page.waitForTimeout(300);
+    if (await page.$('.map-canvas-overlay')) { await page.focus('.map-canvas-overlay'); await page.keyboard.press('Meta+s'); await page.waitForTimeout(300); }
+    const saved = await page.evaluate(() => window.__saveSeen);
+    rec(`${T}: Ctrl+S and Cmd+S with the canvas focused are the editor's (browser Save Page held back)`, same(saved, [true, true]), JSON.stringify(saved));
     rec(`${T}: no page error`, errors.length === 0, errors.join(' | '));
     await ctx.close();
   }
@@ -387,10 +425,13 @@ for (const role of ['guest', 'member']) {
     await page.waitForTimeout(100);
     const afterKeys = await state(page);
     rec(`${T}: editor shortcuts do nothing behind the open picker`, same(before, afterKeys) && !!(await page.$('#map-picker')), JSON.stringify({ before, afterKeys }));
-    // Nit 23: start outside the picker (focus on the body), then Tab.
-    const startOutside = await page.evaluate(() => { document.activeElement.blur(); return !document.activeElement.closest('#map-picker'); });
+    // Nit 23 (QA nit 3 on 8ec68607): start on a real element outside the
+    // picker. `main` is the one focusable element outside it that is not
+    // inert while it is open; a blur would leave the browser's Tab start
+    // inside the picker, so that version could not fail.
+    const startOutside = await page.evaluate(() => { const m = document.getElementById('main'); m.focus(); return document.activeElement === m && !m.closest('#map-picker'); });
     await page.keyboard.press('Tab'); a = await page.evaluate(() => !!document.activeElement.closest('#map-picker'));
-    rec(`${T}: nit 23, Tab with focus outside the picker (on the body) pulls focus back in`, startOutside && a, `outside=${startOutside} in=${a}`);
+    rec(`${T}: nit 23, Tab with focus on #main (outside the picker) moves focus into the picker`, startOutside && a, `outside=${startOutside} in=${a}`);
     // Nit 14: Ctrl+S with the picker open does not reach the browser.
     await page.evaluate(() => { window.__saveBlocked = []; window.addEventListener('keydown', e => { if (e.key.toLowerCase() === 's' && (e.ctrlKey || e.metaKey)) window.__saveBlocked.push(e.defaultPrevented); }); });
     await page.focus('#map-picker-close');
@@ -466,10 +507,12 @@ for (const role of ['guest', 'member']) {
   rec(`${T}: nit 22, Ctrl+S and Cmd+S with the drawer open are held back from the browser, nothing saved, drawer stays open`, same(blocked, [true, true]) && drawerStill && same(await state(page), after) && new URL(page.url()).pathname === EDITOR, JSON.stringify({ blocked, drawerStill, url: page.url() }));
   await page.keyboard.press('Escape'); await page.waitForTimeout(300);
   const closed = !(await page.evaluate(() => document.getElementById('site-drawer').classList.contains('is-open')));
-  // Once it is closed the page shortcuts work again.
+  // Once it is closed the shortcuts work again, in the map canvas only.
   await page.evaluate(() => document.activeElement && document.activeElement.blur());
+  const b1 = await state(page); await press1(page, ']'); await page.waitForTimeout(120); const a1 = await state(page);
+  await page.focus('.map-canvas-overlay');
   const b2 = await state(page); await press1(page, ']'); await page.waitForTimeout(120); const a2 = await state(page);
-  rec(`${T}: Esc closes the drawer and the editor shortcuts work again`, closed && a2.right !== b2.right, JSON.stringify({ b2, a2 }));
+  rec(`${T}: Esc closes the drawer; then ] does nothing from the body and acts in the map canvas`, closed && same(a1, b1) && a2.right !== b2.right, JSON.stringify({ b1, a1, b2, a2 }));
   rec(`${T}: no page error`, errors.length === 0, errors.join(' | '));
   await ctx.close();
 }
@@ -488,6 +531,56 @@ for (const width of [1440, 390]) {
     rec(`${T}: nit 17, current map marked: ${expect === 'map-picker-selected' ? 'Dorado' : 'none'}`, same(marks, expect === 'map-picker-selected' ? ['Dorado'] : []), JSON.stringify(marks));
     await page.keyboard.press('Escape'); await page.waitForTimeout(200);
   }
+  await ctx.close();
+}
+
+// ------------------------------------------- 8. aria-current (QA nit 1 on 8ec68607)
+// Direct loads: every shell nav link to the current page says
+// aria-current="page", no other link does. A nested page marks the link to
+// its parent "true". Then one client-side move, so the router's update is
+// checked too, not only the first render.
+const NAV_LINKS = '.d1-top a[href], #site-drawer a[href], .site-subnav a[href], .admin-subnav a[href], .site-tab-bar a[href]';
+const navMarks = page => page.evaluate(sel => [...document.querySelectorAll(sel)].map(a => ({
+  path: new URL(a.href).pathname, cur: a.getAttribute('aria-current'),
+  where: a.closest('#site-drawer') ? 'drawer' : a.closest('.site-tab-bar') ? 'tabbar' : a.closest('.admin-subnav') ? 'admin-subnav' : a.closest('.site-subnav') ? 'subnav' : 'top',
+})), NAV_LINKS);
+const pageMarked = (marks, path) => {
+  const own = marks.filter(m => m.path === path);
+  const wrong = marks.filter(m => m.path !== path && m.cur === 'page');
+  return { ok: own.length > 0 && own.every(m => m.cur === 'page') && wrong.length === 0, detail: JSON.stringify({ own, wrong }) };
+};
+const SEED = readState('seed.json');
+const M0 = readState('members.json').data[0].id;
+for (const width of [1440, 390]) {
+  for (const [role, paths, nested] of [
+    ['guest', ['/', '/members', '/tournaments', '/strategy', '/patch-notes', '/strategy/heroes'], [['/forum/b/' + SEED.board.slug, '/forum']]],
+    ['admin', ['/admin', '/admin/members'], [[`/admin/members/${M0}/matches`, '/admin/members']]],
+  ]) {
+    const ctx = await makeContext(browser, role, width); const page = await ctx.newPage();
+    for (const p of paths) {
+      await open(page, p);
+      const r = pageMarked(await navMarks(page), p);
+      const places = [...new Set((await navMarks(page)).filter(m => m.path === p).map(m => m.where))].join(', ');
+      rec(`aria-current ${role} ${width} ${p}: every nav link to it (${places}) has aria-current="page", no other link does`, r.ok, r.detail);
+    }
+    for (const [p, parent] of nested) {
+      await open(page, p);
+      const marks = await navMarks(page);
+      const own = marks.filter(m => m.path === parent);
+      rec(`aria-current ${role} ${width} ${p}: the links to ${parent} have aria-current="true", none has "page"`, own.length > 0 && own.every(m => m.cur === 'true') && !marks.some(m => m.cur === 'page'), JSON.stringify(own));
+    }
+    await ctx.close();
+  }
+  // Client-side move: /members, then follow the Tournaments nav link.
+  const ctx = await makeContext(browser, 'guest', width); const page = await ctx.newPage();
+  await open(page, '/members');
+  await page.evaluate(() => document.querySelector('.d1-top a[href="/tournaments"], .site-tab-bar a[href="/tournaments"]').click());
+  await page.waitForFunction(() => location.pathname === '/tournaments', null, { timeout: 5000 }).catch(() => {});
+  await page.waitForTimeout(600);
+  const marks = await navMarks(page);
+  const r = pageMarked(marks, '/tournaments');
+  const stale = marks.filter(m => m.path === '/members' && m.cur);
+  rec(`aria-current guest ${width}: after a client-side move from /members to /tournaments, "page" moves with it`, new URL(page.url()).pathname === '/tournaments' && r.ok && stale.length === 0, r.detail + ' stale=' + JSON.stringify(stale));
   await ctx.close();
 }
 

@@ -13,10 +13,11 @@
 //!   progress, and with nothing in progress Esc (or Shift+Tab) leaves.
 //!
 //! Where a key lands decides whether a shortcut fires ([`KeyTarget`],
-//! [`KeybindingManager::action_for_target`]): every shortcut works in the
-//! map canvas and on non-interactive parts of the page, none works in a text
-//! field, and on a button, link or other control only the Ctrl/Cmd chords
-//! (undo, redo, save) work. Space on a focused button only presses it.
+//! [`shortcut_allowed`]): every shortcut, the Ctrl/Cmd chords (undo, redo,
+//! save) included, works only with focus inside the map canvas
+//! (FrozenTear, 2026-11-17). On a button, link or other control, in a text
+//! field, and on the page body or `main` the key belongs to the browser and
+//! the focused element. Space on a focused button only presses it.
 
 use std::collections::HashMap;
 
@@ -288,15 +289,11 @@ pub fn key_target(target: Option<&web_sys::Element>) -> KeyTarget {
     classify_path(path.map(|el| element_kind(&el.tag_name(), |name| el.get_attribute(name))))
 }
 
-/// Whether an editor shortcut may fire on this target. Ctrl/Cmd chords
-/// (undo, redo, save) do nothing on a control, so they stay available after
-/// a toolbar click; a single key belongs to the focused control.
-pub fn shortcut_allowed(target: KeyTarget, binding: &Keybinding) -> bool {
-    match target {
-        KeyTarget::MapCanvas | KeyTarget::Page => true,
-        KeyTarget::TextEntry => false,
-        KeyTarget::Control => binding.modifiers.ctrl || binding.modifiers.meta,
-    }
+/// Whether an editor shortcut may fire on this target: only inside the map
+/// canvas. This is the one focus-scope check for every editor shortcut,
+/// single keys and Ctrl/Cmd chords alike.
+pub fn shortcut_allowed(target: KeyTarget) -> bool {
+    target == KeyTarget::MapCanvas
 }
 
 /// What a key does while keyboard focus is inside the map canvas. Nothing
@@ -488,7 +485,7 @@ impl KeybindingManager {
         binding: &Keybinding,
         target: KeyTarget,
     ) -> Option<EditorAction> {
-        if !shortcut_allowed(target, binding) {
+        if !shortcut_allowed(target) {
             return None;
         }
         self.action_for_binding(binding)
@@ -581,7 +578,7 @@ where
 }
 
 /// Resolve a document keydown to an editor action, honouring where it
-/// landed: nothing on a text field, only Ctrl/Cmd chords on a control.
+/// landed: only a key with focus inside the map canvas has one.
 pub fn from_keyboard_event(event: &web_sys::KeyboardEvent) -> Option<EditorAction> {
     use wasm_bindgen::JsCast;
     let target = event
@@ -826,41 +823,55 @@ mod tests {
         }
     }
 
-    /// The same shortcuts all work while the map canvas holds focus, and on
-    /// the non-interactive page (body, main, panel text).
+    /// FrozenTear's rule (2026-11-17): every shortcut, single keys and
+    /// Ctrl/Cmd chords alike, works while the map canvas holds focus, and
+    /// none works anywhere else: not on a control, not in a text field, not
+    /// on the page body or `main`.
     #[test]
-    fn every_shortcut_is_active_in_the_canvas_and_on_the_page() {
+    fn every_shortcut_works_in_the_canvas_and_nowhere_else() {
         let manager = KeybindingManager::new();
         for (binding, action) in all_defaults() {
-            for target in [KeyTarget::MapCanvas, KeyTarget::Page] {
+            assert_eq!(
+                manager.action_for_target(&binding, KeyTarget::MapCanvas),
+                Some(action),
+                "{binding:?} in the canvas"
+            );
+            for target in [KeyTarget::Page, KeyTarget::Control, KeyTarget::TextEntry] {
                 assert_eq!(
                     manager.action_for_target(&binding, target),
-                    Some(action),
-                    "{binding:?} on {target:?}"
+                    None,
+                    "{binding:?} ({action:?}) fired on {target:?}"
                 );
             }
         }
+        assert!(shortcut_allowed(KeyTarget::MapCanvas));
+        for target in [KeyTarget::Page, KeyTarget::Control, KeyTarget::TextEntry] {
+            assert!(!shortcut_allowed(target), "{target:?}");
+        }
     }
 
-    /// Ctrl/Cmd chords (undo, redo, save) mean nothing to a button or link,
-    /// so they keep working after a toolbar click. A text field keeps every
-    /// key, chords too (its own undo).
+    /// The chords (undo, redo, save, with Ctrl and with Cmd) follow the same
+    /// rule: they act in the canvas and nowhere else, so a toolbar click
+    /// followed by Ctrl+Z does nothing until focus is back in the map.
     #[test]
-    fn chords_work_on_controls_and_nothing_works_in_a_text_field() {
+    fn chords_work_only_in_the_canvas() {
         let manager = KeybindingManager::new();
         let mut chords = 0;
         for (binding, action) in all_defaults() {
+            if !is_chord(&binding) {
+                continue;
+            }
+            chords += 1;
             assert_eq!(
-                manager.action_for_target(&binding, KeyTarget::TextEntry),
-                None,
-                "{binding:?} in a text field"
+                manager.action_for_target(&binding, KeyTarget::MapCanvas),
+                Some(action),
+                "{binding:?} in the canvas"
             );
-            if is_chord(&binding) {
-                chords += 1;
+            for target in [KeyTarget::Control, KeyTarget::Page, KeyTarget::TextEntry] {
                 assert_eq!(
-                    manager.action_for_target(&binding, KeyTarget::Control),
-                    Some(action),
-                    "{binding:?} on a control"
+                    manager.action_for_target(&binding, target),
+                    None,
+                    "{binding:?} on {target:?}"
                 );
             }
         }
@@ -889,10 +900,10 @@ mod tests {
 
     /// Vision blocking 1: buttons, links and every other control keep their
     /// own keys. Vision nit 16: a select, a slider, a checkbox, a radio or a
-    /// color input is a control too, so Ctrl+Z, Ctrl+Shift+Z and Ctrl+S still
-    /// reach the editor after a mouse change on the toolbar.
+    /// color input is a control too. FrozenTear's rule (2026-11-17): the
+    /// Ctrl/Cmd chords do nothing there either.
     #[test]
-    fn controls_keep_single_keys_and_pass_on_chords() {
+    fn controls_keep_every_key_chords_included() {
         let controls: &[(&str, &[(&str, &str)])] = &[
             ("BUTTON", &[]),
             ("a", &[("href", "/strategy")]),
@@ -940,7 +951,12 @@ mod tests {
                 (Keybinding::new("s").with_ctrl(), EditorAction::Save),
                 (Keybinding::new("s").with_meta(), EditorAction::Save),
             ] {
-                assert_eq!(manager.action_for_target(&chord, target), Some(action));
+                assert_eq!(manager.action_for_binding(&chord), Some(action));
+                assert_eq!(
+                    manager.action_for_target(&chord, target),
+                    None,
+                    "{chord:?} on {tag} {attrs:?}"
+                );
             }
         }
     }

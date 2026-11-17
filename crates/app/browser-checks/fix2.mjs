@@ -82,8 +82,8 @@ for (const role of ['guest', 'member', 'admin']) {
     if (width === 390) {
       // Known gap from S2: with both side panels open the phone canvas is 0px wide. Close them.
       await page.click('.editor-sidebar-left .sidebar-collapse-btn');
-      // `]` from the page body: on the focused button it would stay with the button.
-      await page.evaluate(() => document.activeElement.blur()); await page.keyboard.press(']'); await page.waitForTimeout(200);
+      // Shortcuts act only in the map canvas, so close the right one by its button too.
+      await page.click('.editor-sidebar-right .sidebar-collapse-btn'); await page.waitForTimeout(200);
     }
     let pt = await canvasPoint(page);
     if (!pt) { rec(`${T}: canvas has a clickable point`, false); await ctx.close(); continue; }
@@ -125,23 +125,28 @@ for (const role of ['guest', 'member', 'admin']) {
     await page.keyboard.press('Shift+Tab'); const f2 = await info(page); after = await panels(page);
     rec(`${T}: Tab on a toolbar button moves focus, Shift+Tab moves back, panels untouched`, f1.n !== f0.n && f2.n === f0.n && same(before, after), JSON.stringify({ f0, f1, f2 }));
 
-    // ---- 5. The other shortcuts still work, on the page body and with the canvas focused.
-    await page.evaluate(() => document.activeElement.blur());
-    for (const where of ['page', 'canvas']) {
+    // ---- 5. FrozenTear's rule (2026-11-17): the other shortcuts act with the
+    // canvas focused and do nothing from the page body or main.
+    for (const where of ['page body', 'main', 'canvas']) {
+      if (where === 'page body') await page.evaluate(() => document.activeElement && document.activeElement.blur());
+      if (where === 'main') await page.focus('#main');
       if (where === 'canvas') { pt = await canvasPoint(page); await page.mouse.click(pt.x, pt.y); await page.waitForTimeout(100); }
+      const acts = where === 'canvas';
+      const verb = acts ? 'toggles' : 'does not toggle';
       before = await panels(page);
       await page.keyboard.press(']'); await page.waitForTimeout(120); let s1 = await panels(page);
       await page.keyboard.press(']'); await page.waitForTimeout(120); let s2 = await panels(page);
-      rec(`${T}: ] toggles the right panel (focus on ${where})`, s1.right === !before.right && s2.right === before.right && s1.left === before.left, JSON.stringify({ before, s1 }));
+      rec(`${T}: ] ${verb} the right panel (focus on ${where})`, acts ? s1.right === !before.right && s2.right === before.right && s1.left === before.left : same(s1, before) && same(s2, before), JSON.stringify({ before, s1 }));
       await page.keyboard.press('['); await page.waitForTimeout(120); s1 = await panels(page);
       await page.keyboard.press('['); await page.waitForTimeout(120); s2 = await panels(page);
-      rec(`${T}: [ toggles the bottom panel (focus on ${where})`, s1.bottom === !before.bottom && s2.bottom === before.bottom, JSON.stringify({ before, s1 }));
+      rec(`${T}: [ ${verb} the bottom panel (focus on ${where})`, acts ? s1.bottom === !before.bottom && s2.bottom === before.bottom : same(s1, before) && same(s2, before), JSON.stringify({ before, s1 }));
+      await page.click('.tb-tool-btn >> nth=0'); if (where === 'page body') await page.evaluate(() => document.activeElement.blur()); if (where === 'main') await page.focus('#main'); if (acts) await page.focus('.map-canvas-overlay');
       await page.keyboard.press('h'); await page.waitForTimeout(120); s1 = await panels(page);
       await page.keyboard.press('v'); await page.waitForTimeout(120); s2 = await panels(page);
-      rec(`${T}: h and v still pick the pan and select tools (focus on ${where})`, s1.tool === 1 && s2.tool === 0, `${s1.tool} ${s2.tool}`);
+      rec(`${T}: h and v ${acts ? 'pick' : 'do not pick'} the pan and select tools (focus on ${where})`, acts ? s1.tool === 1 && s2.tool === 0 : s1.tool === 0 && s2.tool === 0, `${s1.tool} ${s2.tool}`);
     }
     const titles = await page.evaluate(() => [...document.querySelectorAll('.sidebar-collapse-btn')].map(b => b.title));
-    rec(`${T}: panel button help text matches the keys`, same(titles, ['Toggle panel (Tab while the map has focus)', 'Toggle panel (])']), JSON.stringify(titles));
+    rec(`${T}: panel button help text matches the keys`, same(titles, ['Toggle panel (Tab while the map has focus)', 'Toggle panel (] while the map has focus)']), JSON.stringify(titles));
     const label = await page.getAttribute('.map-canvas-overlay', 'aria-label');
     rec(`${T}: the canvas names its keys`, !!label && label.includes('Esc or Shift+Tab leaves the map') && (await page.getAttribute('.map-canvas-overlay', 'tabindex')) === '-1', String(label));
     rec(`${T}: no page error`, errors.length === 0, errors.join(' | '));

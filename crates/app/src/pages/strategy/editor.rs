@@ -713,16 +713,18 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
     // and reaches the editor through `on_canvas_key`.
     //
     // Where the key landed decides whether a shortcut fires
-    // (`keybindings::KeyTarget`): every shortcut in the map canvas and on
-    // the non-interactive page, none in a text field, and on a button, link
-    // or other control only the Ctrl/Cmd chords. Space on a focused button
-    // only presses the button.
+    // (`keybindings::shortcut_allowed`, FrozenTear 2026-11-17): every
+    // shortcut, Ctrl/Cmd chords included, fires only with focus inside the
+    // map canvas. On a button, link, slider, select, text field, the page
+    // body or `main` the key stays with the browser and the focused element.
+    // Space on a focused button only presses the button.
     // =========================================================================
     crate::layouts::use_document_keydown_capture(move |event: web_sys::KeyboardEvent| {
         // The site drawer (phone layout) covers the page and makes `main`
         // inert: the editor behind it takes no shortcut, even with focus
         // on the body after a click on blank drawer space. Ctrl/Cmd+S still
-        // stops the browser's Save Page dialog, as in the picker.
+        // stops the browser's Save Page dialog, as in the picker (prevent
+        // default only, nothing is saved).
         if crate::layouts::main_is_inert() {
             let binding = keybindings::Keybinding::from_keyboard_event(&event);
             if picker_key(&binding) == Some(PickerKey::BlockBrowserSave) {
@@ -1326,7 +1328,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                         button {
                             class: "panel-collapse-btn panel-collapse-bottom",
                             r#type: "button",
-                            title: "Toggle elements panel ([)",
+                            title: "Toggle elements panel ([ while the map has focus)",
                             aria_label: panel_button_label("elements", !bottom_collapsed),
                             aria_expanded: if bottom_collapsed { "false" } else { "true" },
                             onclick: move |_| bottom_open.with_mut(|v| *v = !*v),
@@ -1381,7 +1383,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                         button {
                             class: "sidebar-collapse-btn",
                             r#type: "button",
-                            title: "Toggle panel (])",
+                            title: "Toggle panel (] while the map has focus)",
                             aria_label: panel_button_label("properties", !right_collapsed),
                             aria_expanded: if right_collapsed { "false" } else { "true" },
                             onclick: move |_| right_open.with_mut(|v| *v = !*v),
