@@ -396,15 +396,22 @@ impl SaveState {
 
 /// The save line of a form: one `role="status"` paragraph that is always
 /// rendered, so a change of its text is announced. Put it beside the Save
-/// button, inside `.admin-form-actions`.
+/// button, inside `.admin-form-actions`. Set `focusable` when a flow moves
+/// focus to the line (a bulk result after its dialog closes): it then takes
+/// `tabindex="-1"`, so focus lands on it and not on the body.
 #[component]
-pub fn FormStatus(state: SaveState, #[props(default)] id: Option<String>) -> Element {
+pub fn FormStatus(
+    state: SaveState,
+    #[props(default)] id: Option<String>,
+    #[props(default = false)] focusable: bool,
+) -> Element {
     let text = state.text();
     rsx! {
         p {
             id,
             class: if state.is_error() { "admin-form-status is-error" } else { "admin-form-status" },
             role: "status",
+            tabindex: if focusable { "-1" },
             "{text}"
         }
     }

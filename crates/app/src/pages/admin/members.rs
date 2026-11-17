@@ -178,16 +178,138 @@ fn member_lock_note_id(member_id: &str) -> String {
 }
 
 /// "Deactivated 2 members." or, when some failed, the count that went
-/// through plus each failure with the server's reason.
-fn bulk_result(verb: &str, done: usize, attempted: usize, failures: &[String]) -> SaveState {
+/// through plus each failure with the server's reason. `skipped` are the
+/// sentences for rows the action left out on purpose, by name.
+fn bulk_result(
+    verb: &str,
+    done: usize,
+    attempted: usize,
+    failures: &[String],
+    skipped: &[String],
+) -> SaveState {
     let noun = if attempted == 1 { "member" } else { "members" };
-    if failures.is_empty() {
-        SaveState::Saved(format!("{verb} {done} {noun}."))
+    let mut text = if failures.is_empty() {
+        format!("{verb} {done} {noun}.")
     } else {
-        SaveState::Failed(format!(
+        format!(
             "{verb} {done} of {attempted} {noun}. {}",
             failures.join(" ")
-        ))
+        )
+    };
+    for line in skipped {
+        text.push(' ');
+        text.push_str(line);
+    }
+    if failures.is_empty() {
+        SaveState::Saved(text)
+    } else {
+        SaveState::Failed(text)
+    }
+}
+
+/// The rows a bulk action sends, and a sentence for each row it leaves out
+/// on purpose (by name), so nothing is skipped silently.
+#[derive(Debug, Default, PartialEq)]
+struct BulkTargets {
+    targets: Vec<Member>,
+    skipped: Vec<String>,
+}
+
+/// True when `member` is the signed-in account's own row.
+fn is_own_row(user: Option<&UserInfo>, member: &Member) -> bool {
+    user.is_some_and(|user| user.id == member.user_id)
+}
+
+/// Targets of the bulk role change. Rows that already have `role` are left
+/// out quietly. The caller's own row is always left out and named: the server
+/// lets an admin demote themselves while another admin exists, and the rest
+/// of the batch would then fail with 403 while the page still shows admin
+/// controls.
+fn bulk_role_targets(selected: Vec<Member>, role: &str, user: Option<&UserInfo>) -> BulkTargets {
+    let mut out = BulkTargets::default();
+    for member in selected {
+        if member.org_role == role {
+            continue;
+        }
+        if is_own_row(user, &member) {
+            out.skipped.push(format!(
+                "Left out {} (your own account): change your own role from its row.",
+                member.display_name
+            ));
+            continue;
+        }
+        out.targets.push(member);
+    }
+    out
+}
+
+/// Targets of the bulk deactivate. Inactive rows are left out quietly. The
+/// caller's own row (the server never lets anyone change their own active
+/// status) and, for an officer, admin and officer rows are left out and named.
+fn bulk_deactivate_targets(selected: Vec<Member>, user: Option<&UserInfo>) -> BulkTargets {
+    let mut out = BulkTargets::default();
+    for member in selected {
+        if !member.is_active {
+            continue;
+        }
+        if is_own_row(user, &member) {
+            out.skipped.push(format!(
+                "Left out {} (your own account): you cannot deactivate yourself.",
+                member.display_name
+            ));
+            continue;
+        }
+        if officer_locked_out(user, &member) {
+            out.skipped.push(format!(
+                "Left out {}: officers cannot deactivate admins or other officers.",
+                member.display_name
+            ));
+            continue;
+        }
+        out.targets.push(member);
+    }
+    out
+}
+
+/// Question of the bulk deactivate dialog: the count that will be sent, then
+/// each row left out by name, so the admin confirms what will happen.
+fn bulk_deactivate_message(plan: &BulkTargets) -> String {
+    let n = plan.targets.len();
+    let mut text = match n {
+        0 => "None of the selected members can be deactivated.".to_string(),
+        1 => {
+            "Deactivate 1 member? They lose access until someone activates them again.".to_string()
+        }
+        n => {
+            format!("Deactivate {n} members? They lose access until someone activates them again.")
+        }
+    };
+    for line in &plan.skipped {
+        text.push(' ');
+        text.push_str(line);
+    }
+    text
+}
+
+/// Note in the bulk role dialog when the caller's own row is selected.
+fn bulk_role_own_note(selected: &[Member], user: Option<&UserInfo>) -> Option<String> {
+    selected.iter().find(|m| is_own_row(user, m)).map(|m| {
+        format!(
+            "Your own account, {}, is left out. Change your own role from its row.",
+            m.display_name
+        )
+    })
+}
+
+/// One failure sentence of a bulk action: always starts with the member's
+/// name, then the plain reason (the officer rank refusal) or the server text.
+fn bulk_failure(member: &Member, err: &ClientError) -> String {
+    let reason = profile_edit_failure(&member.display_name, err);
+    let reason = reason.trim_end_matches('.');
+    if reason.starts_with(&member.display_name) {
+        format!("{reason}.")
+    } else {
+        format!("{}: {reason}.", member.display_name)
     }
 }
 
@@ -692,7 +814,60 @@ fn BulkBar(
                     }
                 }
             }
-            FormStatus { state, id: Some(BULK_STATUS_ID.to_string()) }
+            FormStatus { state, id: Some(BULK_STATUS_ID.to_string()), focusable: true }
+        }
+    }
+}
+
+/// Columns of the linked game accounts table, in cell order. The first cell
+/// is the account name (`cell-who`, the card title on a phone), then the game.
+const GAME_ACCOUNT_HEADERS: [&str; 4] = ["Account name", "Game", "Account ID", "Actions"];
+
+/// The member's linked game accounts. One keyed row per account; the game
+/// cell shows the game's name, or its id when the game is gone.
+#[component]
+fn GameAccountsTable(
+    accounts: Vec<GameAccount>,
+    games: Vec<Game>,
+    on_remove: EventHandler<GameAccount>,
+) -> Element {
+    rsx! {
+        DataTable {
+            headers: GAME_ACCOUNT_HEADERS.to_vec(),
+            cards: true,
+            label: "Linked game accounts",
+            for acct in accounts {
+                tr { key: "{acct.id}",
+                    td { class: "cell-who", "{acct.account_name}" }
+                    td { class: "cell-meta",
+                        {
+                            games
+                                .iter()
+                                .find(|g| g.id == acct.game_id)
+                                .map(|g| g.name.clone())
+                                .unwrap_or_else(|| acct.game_id.clone())
+                        }
+                    }
+                    td { "data-label": "Account ID",
+                        {acct.account_id.clone().unwrap_or_else(|| "None".into())}
+                    }
+                    td { class: "cell-actions",
+                        RowActions {
+                            button {
+                                r#type: "button",
+                                id: "member-account-remove-{acct.id}",
+                                class: "btn is-danger",
+                                aria_label: "Remove {acct.account_name}",
+                                onclick: {
+                                    let acct = acct.clone();
+                                    move |_| on_remove.call(acct.clone())
+                                },
+                                "Remove"
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -1269,14 +1444,15 @@ pub fn AdminMembers() -> Element {
 
     let on_bulk_deactivate = move |_| {
         bulk_deactivate_open.set(false);
-        let targets: Vec<Member> = selected_members()
-            .into_iter()
-            .filter(|m| m.is_active)
-            .collect();
+        let BulkTargets { targets, skipped } =
+            bulk_deactivate_targets(selected_members(), auth().user.as_ref());
         if targets.is_empty() {
-            bulk_state.set(SaveState::Saved(
-                "The selected members are already inactive.".to_string(),
-            ));
+            let text = if skipped.is_empty() {
+                "The selected members are already inactive.".to_string()
+            } else {
+                format!("No member was deactivated. {}", skipped.join(" "))
+            };
+            bulk_state.set(SaveState::Saved(text));
             focus_element_by_id_soon(BULK_STATUS_ID.to_string());
             return;
         }
@@ -1286,6 +1462,7 @@ pub fn AdminMembers() -> Element {
             let attempted = targets.len();
             let mut done = 0;
             let mut failures = Vec::new();
+            let mut failed_ids = Vec::new();
             for member in targets {
                 let body = ToggleActiveRequest {
                     is_active: Some(false),
@@ -1301,13 +1478,13 @@ pub fn AdminMembers() -> Element {
                         recently_inactive.write().retain(|m| m.id != member.id);
                         recently_inactive.write().push(row);
                     }
-                    Err(e) => failures.push(format!(
-                        "{}.",
-                        profile_edit_failure(&member.display_name, &e).trim_end_matches('.')
-                    )),
+                    Err(e) => {
+                        failures.push(bulk_failure(&member, &e));
+                        failed_ids.push(member.id.clone());
+                    }
                 }
             }
-            let result = bulk_result("Deactivated", done, attempted, &failures);
+            let result = bulk_result("Deactivated", done, attempted, &failures, &skipped);
             if result.is_error() {
                 toast.show(Toast::error(result.text()));
             } else {
@@ -1315,7 +1492,8 @@ pub fn AdminMembers() -> Element {
             }
             bulk_state.set(result);
             bulk_busy.set(false);
-            selected.set(Vec::new());
+            // Failed rows stay selected, so the admin can retry them.
+            selected.set(failed_ids);
             members.refresh += 1;
             games.refresh += 1;
             focus_element_by_id_soon(BULK_STATUS_ID.to_string());
@@ -1324,16 +1502,19 @@ pub fn AdminMembers() -> Element {
 
     let on_bulk_role_submit = move |_| {
         let role = bulk_role_value();
-        let targets: Vec<Member> = selected_members()
-            .into_iter()
-            .filter(|m| m.org_role != role)
-            .collect();
+        let BulkTargets { targets, skipped } =
+            bulk_role_targets(selected_members(), &role, auth().user.as_ref());
         bulk_role_open.set(false);
         if targets.is_empty() {
-            bulk_state.set(SaveState::Saved(format!(
-                "The selected members already have the {} role.",
-                status_label(&role)
-            )));
+            let text = if skipped.is_empty() {
+                format!(
+                    "The selected members already have the {} role.",
+                    status_label(&role)
+                )
+            } else {
+                format!("No role was changed. {}", skipped.join(" "))
+            };
+            bulk_state.set(SaveState::Saved(text));
             focus_element_by_id_soon(BULK_STATUS_ID.to_string());
             return;
         }
@@ -1343,6 +1524,7 @@ pub fn AdminMembers() -> Element {
             let attempted = targets.len();
             let mut done = 0;
             let mut failures = Vec::new();
+            let mut failed_ids = Vec::new();
             for member in targets {
                 let body = ChangeRoleRequest { role: role.clone() };
                 match ApiClient::web()
@@ -1350,10 +1532,13 @@ pub fn AdminMembers() -> Element {
                     .await
                 {
                     Ok(_) => done += 1,
-                    Err(e) => failures.push(format!("{}: {e}.", member.display_name)),
+                    Err(e) => {
+                        failures.push(format!("{}: {e}.", member.display_name));
+                        failed_ids.push(member.id.clone());
+                    }
                 }
             }
-            let result = bulk_result("Changed the role of", done, attempted, &failures);
+            let result = bulk_result("Changed the role of", done, attempted, &failures, &skipped);
             if result.is_error() {
                 toast.show(Toast::error(result.text()));
             } else {
@@ -1361,7 +1546,7 @@ pub fn AdminMembers() -> Element {
             }
             bulk_state.set(result);
             bulk_busy.set(false);
-            selected.set(Vec::new());
+            selected.set(failed_ids);
             members.refresh += 1;
             games.refresh += 1;
             focus_element_by_id_soon(BULK_STATUS_ID.to_string());
@@ -1402,14 +1587,6 @@ pub fn AdminMembers() -> Element {
         .as_ref()
         .and_then(|d| d.clone())
         .unwrap_or_default();
-    let games_for_names = games_list.clone();
-    let game_name = move |game_id: &str| -> String {
-        games_for_names
-            .iter()
-            .find(|g| g.id == game_id)
-            .map(|g| g.name.clone())
-            .unwrap_or_else(|| game_id.to_string())
-    };
 
     let list = match all.as_ref() {
         None => admin_list_pending(&members, "members"),
@@ -1646,18 +1823,16 @@ pub fn AdminMembers() -> Element {
                 value: bulk_role_value(),
                 on_change: move |v| bulk_role_value.set(v),
             }
+            if let Some(note) = bulk_role_own_note(&selected_members(), me.as_ref()) {
+                p { class: "field-hint", "{note}" }
+            }
         }
 
         // Bulk deactivate
         ConfirmDialog {
             title: "Deactivate members".to_string(),
-            message: format!(
-                "Deactivate {}? They lose access until someone activates them again.",
-                if selected_now.len() == 1 {
-                    "1 member".to_string()
-                } else {
-                    format!("{} members", selected_now.len())
-                }
+            message: bulk_deactivate_message(
+                &bulk_deactivate_targets(selected_members(), me.as_ref()),
             ),
             open: bulk_deactivate_open(),
             danger: true,
@@ -1829,36 +2004,10 @@ pub fn AdminMembers() -> Element {
                     } else if accts_data.read().is_empty() {
                         p { class: "member-dialog-empty", "No game accounts linked yet. Add one below." }
                     } else {
-                        DataTable {
-                            headers: vec!["Game", "Account name", "Account ID", "Actions"],
-                            cards: true,
-                            label: "Linked game accounts",
-                            for acct in accts_data.read().iter() {
-                                {
-                                    let a_del = acct.clone();
-                                    let acct_id_display = acct.account_id.clone().unwrap_or_else(|| "None".into());
-                                    let game = game_name(&acct.game_id);
-                                    rsx! {
-                                        tr { key: "{acct.id}",
-                                            td { class: "cell-who", "{acct.account_name}" }
-                                            td { class: "cell-meta", "{game}" }
-                                            td { "data-label": "Account ID", "{acct_id_display}" }
-                                            td { class: "cell-actions",
-                                                RowActions {
-                                                    button {
-                                                        r#type: "button",
-                                                        id: "member-account-remove-{acct.id}",
-                                                        class: "btn is-danger",
-                                                        aria_label: "Remove {acct.account_name}",
-                                                        onclick: move |_| open_del_acct(a_del.clone()),
-                                                        "Remove"
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                        GameAccountsTable {
+                            accounts: accts_data.read().clone(),
+                            games: games_list.clone(),
+                            on_remove: move |acct: GameAccount| open_del_acct(acct),
                         }
                     }
                     div { class: "member-accounts-add",
@@ -2312,7 +2461,7 @@ mod tests {
         );
         assert!(
             html.contains(
-                "<p id=\"members-bulk-status\" class=\"admin-form-status\" role=\"status\"></p>"
+                "<p id=\"members-bulk-status\" class=\"admin-form-status\" role=\"status\" tabindex=\"-1\"></p>"
             ),
             "{html}"
         );
@@ -2547,6 +2696,14 @@ mod tests {
             "{idle}"
         );
         assert!(idle.contains("id=\"members-bulk-status\""), "{idle}");
+        // Focus moves to the result line after a bulk action, so it must be
+        // focusable or focus falls to the body.
+        assert!(
+            idle.contains(
+                "<p id=\"members-bulk-status\" class=\"admin-form-status\" role=\"status\" tabindex=\"-1\">"
+            ),
+            "{idle}"
+        );
         assert!(!idle.contains(">Deactivate</button>"), "{idle}");
         assert_labels_tied(&idle, 1);
         assert!(idle.contains(">Select all on this page</label>"), "{idle}");
@@ -2574,14 +2731,151 @@ mod tests {
         assert!(busy.contains("HTTP error 409: last admin."), "{busy}");
     }
 
+    fn bulk_row(id: &str, role: &str, active: bool) -> Member {
+        Member {
+            org_role: role.into(),
+            display_name: format!("Player{id}"),
+            ..member(id, active)
+        }
+    }
+
+    #[test]
+    fn bulk_role_change_leaves_out_and_names_the_callers_own_row() {
+        let me = user("user-01", OrgRole::Admin);
+        let selected = vec![
+            bulk_row("01", "admin", true),
+            bulk_row("02", "member", true),
+            bulk_row("03", "officer", true),
+        ];
+        let plan = bulk_role_targets(selected.clone(), "officer", Some(&me));
+        let ids: Vec<&str> = plan.targets.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["02"]);
+        assert_eq!(
+            plan.skipped,
+            ["Left out Player01 (your own account): change your own role from its row."]
+        );
+        assert_eq!(
+            bulk_role_own_note(&selected, Some(&me)).as_deref(),
+            Some("Your own account, Player01, is left out. Change your own role from its row.")
+        );
+        assert_eq!(bulk_role_own_note(&selected[1..], Some(&me)), None);
+        // The skipped line reaches the result.
+        assert_eq!(
+            bulk_result("Changed the role of", 1, 1, &[], &plan.skipped).text(),
+            "Changed the role of 1 member. Left out Player01 (your own account): change your own role from its row."
+        );
+    }
+
+    #[test]
+    fn bulk_deactivate_skips_own_and_locked_rows_by_name() {
+        let officer = user("user-01", OrgRole::Officer);
+        let selected = vec![
+            bulk_row("01", "officer", true),
+            bulk_row("02", "member", true),
+            bulk_row("03", "admin", true),
+            bulk_row("04", "recruit", false),
+            bulk_row("05", "recruit", true),
+        ];
+        let plan = bulk_deactivate_targets(selected.clone(), Some(&officer));
+        let ids: Vec<&str> = plan.targets.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["02", "05"]);
+        assert_eq!(
+            plan.skipped,
+            [
+                "Left out Player01 (your own account): you cannot deactivate yourself.",
+                "Left out Player03: officers cannot deactivate admins or other officers.",
+            ]
+        );
+        assert_eq!(
+            bulk_deactivate_message(&plan),
+            "Deactivate 2 members? They lose access until someone activates them again. Left out Player01 (your own account): you cannot deactivate yourself. Left out Player03: officers cannot deactivate admins or other officers."
+        );
+        // An admin may deactivate the admin row; only their own is left out.
+        let admin = user("user-01", OrgRole::Admin);
+        let plan = bulk_deactivate_targets(selected, Some(&admin));
+        let ids: Vec<&str> = plan.targets.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["02", "03", "05"]);
+        assert_eq!(plan.skipped.len(), 1);
+        assert_eq!(
+            bulk_deactivate_message(&BulkTargets::default()),
+            "None of the selected members can be deactivated."
+        );
+    }
+
+    #[test]
+    fn bulk_failures_always_name_the_member() {
+        let target = bulk_row("03", "admin", true);
+        let rank = ClientError::http(403, format!(r#"{{"error":"{OFFICER_RANK_ERROR}"}}"#), None);
+        assert_eq!(
+            bulk_failure(&target, &rank),
+            format!("Player03: {OFFICER_RANK_COPY}")
+        );
+        let other = ClientError::http(409, r#"{"error":"last admin"}"#, None);
+        let text = bulk_failure(&target, &other);
+        assert!(text.starts_with("Player03: "), "{text}");
+        assert!(text.ends_with('.'), "{text}");
+        assert!(!text.contains(".."), "{text}");
+    }
+
+    #[test]
+    fn game_accounts_headers_match_the_cells_and_rows_are_keyed() {
+        fn view() -> Element {
+            rsx! {
+                GameAccountsTable {
+                    accounts: vec![
+                        GameAccount {
+                            id: "acct-1".into(),
+                            game_id: "game-ow".into(),
+                            account_name: "Player01#1234".into(),
+                            account_id: None,
+                        },
+                        GameAccount {
+                            id: "acct-2".into(),
+                            game_id: "game-gone".into(),
+                            account_name: "Player02#5678".into(),
+                            account_id: Some("42".into()),
+                        },
+                    ],
+                    games: vec![Game { id: "game-ow".into(), name: "Overwatch".into() }],
+                    on_remove: |_| {},
+                }
+            }
+        }
+        let html = render(view);
+        // Header order is the cell order: account name, then game.
+        let head = html.split("<tbody>").next().unwrap();
+        let name_at = head.find(">Account name</th>").expect(&html);
+        let game_at = head.find(">Game</th>").expect(&html);
+        assert!(name_at < game_at, "{html}");
+        assert!(
+            html.contains(
+                "<td class=\"cell-who\">Player01#1234</td><td class=\"cell-meta\">Overwatch</td>"
+            ),
+            "{html}"
+        );
+        // A game that is gone shows its id.
+        assert!(
+            html.contains("<td class=\"cell-meta\">game-gone</td>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<td data-label=\"Account ID\">42</td>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("id=\"member-account-remove-acct-2\""),
+            "{html}"
+        );
+    }
+
     #[test]
     fn bulk_result_counts_and_keeps_the_server_reason() {
         assert_eq!(
-            bulk_result("Deactivated", 2, 2, &[]),
+            bulk_result("Deactivated", 2, 2, &[], &[]),
             SaveState::Saved("Deactivated 2 members.".to_string())
         );
         assert_eq!(
-            bulk_result("Deactivated", 1, 1, &[]),
+            bulk_result("Deactivated", 1, 1, &[], &[]),
             SaveState::Saved("Deactivated 1 member.".to_string())
         );
         let failed = bulk_result(
@@ -2589,6 +2883,7 @@ mod tests {
             1,
             2,
             &["Player03: HTTP error 409: last admin.".to_string()],
+            &[],
         );
         assert!(failed.is_error());
         assert_eq!(
