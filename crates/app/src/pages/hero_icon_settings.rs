@@ -70,6 +70,18 @@ const CSS: &str = r#"
         height: calc(var(--space-12) + var(--space-4)); object-fit: contain; image-rendering: pixelated; }
     .hero-icons__tile span { font-size: var(--text-xs); color: var(--text-3); max-width: 100%;
         overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    /* Forced colours drop the fills, so the knob would vanish. It keeps
+       system colours, and On also fills the track edge with Highlight, so
+       the state shows by position and by colour. */
+    @media (forced-colors: active) {
+        .hero-icons__track { border-color: ButtonText; }
+        .hero-icons__thumb { forced-color-adjust: none; background: ButtonText; }
+        .hero-icons__switch[aria-checked="true"] .hero-icons__track {
+            border-color: Highlight;
+            border-width: var(--focus-ring-width);
+        }
+        .hero-icons__switch[aria-checked="true"] .hero-icons__thumb { background: Highlight; }
+    }
 "#;
 
 #[component]
@@ -535,6 +547,25 @@ mod tests {
 
     fn section() -> Element {
         rsx! { TrainingCropSettings { member_id: "m1".to_string() } }
+    }
+
+    #[test]
+    fn switch_state_survives_forced_colours() {
+        // Vision nit 15 on PR 706: state was fill and knob only, and the
+        // knob is a fill.
+        use crate::components::ui::test_support::media_block;
+        let forced = media_block(CSS, "@media (forced-colors: active)");
+        assert!(
+            forced.contains(
+                ".hero-icons__thumb { forced-color-adjust: none; background: ButtonText; }"
+            ),
+            "{forced}"
+        );
+        assert!(
+            forced.contains(".hero-icons__switch[aria-checked=\"true\"] .hero-icons__thumb { background: Highlight; }"),
+            "{forced}"
+        );
+        assert!(forced.contains("border-color: Highlight;"), "{forced}");
     }
 
     #[test]

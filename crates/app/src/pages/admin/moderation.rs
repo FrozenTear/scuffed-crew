@@ -120,29 +120,27 @@ fn action_tone(action_type: &str) -> PillTone {
 }
 
 /// Whether an action still applies, as a word: active, lifted by someone, or
-/// ended on its own. The API sends no `lifted_at`, so an inactive action
-/// that had no end date, or whose end date is still ahead, was lifted; one
-/// whose end date has passed ended on its own. Active is info, so it never
-/// reads as the warn tone of the Warning and Suspension type pills.
+/// ended on its own. The server clears `is_active` only on Lift; an action
+/// whose end date has passed stays `is_active` and simply stops counting
+/// (its checks add `expires_at > time::now()`). So an inactive action was
+/// lifted, and an active one past its end date has ended. Active is info, so
+/// it never reads as the warn tone of the Warning and Suspension type pills.
 fn action_state(
     action: &ModerationAction,
     now: chrono::DateTime<chrono::Utc>,
 ) -> (&'static str, PillTone) {
-    if action.is_active {
-        return ("Active", PillTone::Info);
-    }
-    if action.lifted_at.is_some() {
+    if !action.is_active || action.lifted_at.is_some() {
         return ("Lifted", PillTone::Neutral);
     }
-    let ended_on_its_own = action
+    let ended = action
         .expires_at
         .as_deref()
         .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
         .is_some_and(|end| end.with_timezone(&chrono::Utc) <= now);
-    if ended_on_its_own {
+    if ended {
         ("Ended", PillTone::Neutral)
     } else {
-        ("Lifted", PillTone::Neutral)
+        ("Active", PillTone::Info)
     }
 }
 
@@ -176,7 +174,8 @@ fn ModerationTable(
                     let member = action.member_label(&names);
                     let issuer = action.issuer_label();
                     let (state_word, state_tone) = action_state(action, now);
-                    let liftable = can_lift && action.is_active;
+                    // Only an action that still applies can be lifted.
+                    let liftable = can_lift && state_word == "Active";
                     rsx! {
                         tr { key: "{id}",
                             td { class: "cell-who", "{member}" }
@@ -634,6 +633,21 @@ mod tests {
     }
 
     #[test]
+    fn an_active_action_past_its_end_reads_ended_with_no_lift() {
+        fn view() -> Element {
+            let mut ended = action("a3", "suspension", true, false);
+            ended.expires_at = Some("2020-01-01T00:00:00Z".into());
+            rsx! {
+                ModerationTable { rows: vec![ended], can_lift: true, on_lift: |_| {} }
+            }
+        }
+        let html = render(view);
+        assert!(html.contains(">Ended</span>"), "{html}");
+        assert!(!html.contains(">Active</span>"), "{html}");
+        assert!(!html.contains(">Lift</button>"), "{html}");
+    }
+
+    #[test]
     fn state_comes_from_what_the_api_sends() {
         let now = chrono::DateTime::parse_from_rfc3339("2026-11-17T00:00:00Z")
             .unwrap()
@@ -643,9 +657,18 @@ mod tests {
         assert_eq!(action_state(&lifted, now).0, "Lifted");
         lifted.expires_at = Some("2026-12-01T00:00:00Z".into());
         assert_eq!(action_state(&lifted, now).0, "Lifted");
-        let mut ended = action("b", "suspension", false, false);
+        // Inactive is always a Lift: the server clears `is_active` only
+        // there (Vision nit 9 on PR 706), even when the end date has passed.
+        let mut lifted_late = action("b", "suspension", false, false);
+        lifted_late.expires_at = Some("2026-11-10T00:00:00Z".into());
+        assert_eq!(action_state(&lifted_late, now).0, "Lifted");
+        // An active action past its end date has ended on its own.
+        let mut ended = action("b", "suspension", true, false);
         ended.expires_at = Some("2026-11-10T00:00:00Z".into());
-        assert_eq!(action_state(&ended, now).0, "Ended");
+        assert_eq!(action_state(&ended, now), ("Ended", PillTone::Neutral));
+        let mut running = action("b", "suspension", true, false);
+        running.expires_at = Some("2026-12-01T00:00:00Z".into());
+        assert_eq!(action_state(&running, now), ("Active", PillTone::Info));
         assert_eq!(
             action_state(&action("c", "ban", true, false), now),
             ("Active", PillTone::Info)

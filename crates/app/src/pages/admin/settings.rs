@@ -149,7 +149,7 @@ fn PackBrandStatus(note: String) -> Element {
 fn BrandSettingsLink() -> Element {
     rsx! {
         Link {
-            class: "btn-ghost",
+            class: "btn is-ghost",
             to: Route::AdminBrandSettings {},
             "aria-describedby": "admin-settings-brand-link-warning",
             "Open brand settings"
@@ -662,13 +662,13 @@ pub fn AdminSettings() -> Element {
                     "Page background. The brand accent and the display font have their own page."
                 }
                 div { class: "form-section-card",
-                    div { class: "settings-subhead", "Brand" }
+                    h3 { class: "settings-subhead", "Brand" }
                     p { class: "settings-hint",
                         "One accent for both themes, with a live preview and a contrast check."
                     }
                     BrandSettingsLink {}
                     div { class: "settings-divider" }
-                    div { class: "settings-subhead", "Page background" }
+                    h3 { class: "settings-subhead", "Page background" }
                     div { class: "color-row",
                         div { class: "color-field",
                             label { class: "field-label", r#for: "settings-bg-color", "Background color" }
@@ -1131,6 +1131,17 @@ mod tests {
     /// APP3: without this the public nav, accent, org name and the strategies
     /// gate keep the old values until a reload.
     #[test]
+    fn appearance_subheads_are_headings_like_their_siblings() {
+        // Vision nit 13 on PR 706: "Brand" and "Page background" were plain
+        // divs while the sibling subheads are h3.
+        let src = include_str!("settings.rs");
+        let prod = src.split("mod tests").next().expect("production half");
+        assert!(prod.contains("h3 { class: \"settings-subhead\", \"Brand\" }"));
+        assert!(prod.contains("h3 { class: \"settings-subhead\", \"Page background\" }"));
+        assert!(!prod.contains("div { class: \"settings-subhead\""));
+    }
+
+    #[test]
     fn a_successful_save_updates_the_shared_settings() {
         let src = include_str!("settings.rs");
         let save = src
@@ -1506,6 +1517,9 @@ mod tests {
             "{tag}"
         );
         assert!(rest.starts_with("Open brand settings</a>"), "{rest}");
+        // The shared button recipe, not the legacy `btn-ghost` (Vision nit 3
+        // on PR 706).
+        assert!(tag.contains("class=\"btn is-ghost\""), "{tag}");
         // The id the link points at is the visible warning, once.
         assert_eq!(
             html.matches("id=\"admin-settings-brand-link-warning\"")

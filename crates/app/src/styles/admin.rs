@@ -779,12 +779,6 @@ pub const CSS: &str = r#"
         border-radius: var(--card-radius);
         box-shadow: var(--card-shadow);
     }
-    .form-inline {
-        display: flex;
-        flex-direction: column;
-        gap: var(--space-5);
-        max-width: var(--container-sm);
-    }
 
     @media (max-width: 820px) {
         .form-grid { grid-template-columns: minmax(0, 1fr); }
@@ -987,10 +981,28 @@ pub const CSS: &str = r#"
         font-size: var(--text-sm);
         line-height: var(--leading-body);
     }
+    /* A long pack description stops at three lines (as in 694). */
+    .pack-card-desc {
+        display: -webkit-box;
+        -webkit-line-clamp: 3;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+    }
     .pack-card-meta {
         color: var(--text-3);
         font-family: var(--font-mono);
         font-size: var(--text-xs);
+    }
+    /* Forced colours drop the fill and the inset edge: selected keeps a
+       thick Highlight border, so it is not the title weight alone. */
+    @media (forced-colors: active) {
+        .pack-card,
+        .option-tile { border-color: ButtonText; }
+        .pack-card.is-selected,
+        .option-tile.is-selected {
+            border-color: Highlight;
+            border-width: var(--focus-ring-width);
+        }
     }
     .pack-actions {
         display: flex;
@@ -1007,11 +1019,6 @@ pub const CSS: &str = r#"
     }
 
     /* A checkbox with its label in a row of other controls. */
-    .section-chips {
-        display: flex;
-        flex-direction: column;
-        gap: var(--space-3);
-    }
     .section-chip {
         display: inline-flex;
         align-items: center;
@@ -1155,6 +1162,33 @@ mod tests {
     /// the selected card and option tile with `--accent-soft` instead of an
     /// 8% mix on `--surface-sunken`, so the sweep now runs on that fill, for
     /// the title ink and the muted description and meta ink.
+    #[test]
+    fn selected_pack_and_tile_survive_forced_colours_and_descs_clamp() {
+        // Vision nit 4 on PR 706.
+        use crate::components::ui::test_support::media_block;
+        let start = CSS
+            .find("/* Forced colours drop the fill and the inset edge")
+            .expect("block");
+        let forced = media_block(&CSS[start..], "@media (forced-colors: active)");
+        assert!(forced.contains(".option-tile.is-selected {"), "{forced}");
+        assert!(forced.contains("border-color: Highlight;"), "{forced}");
+        assert!(
+            forced.contains("border-width: var(--focus-ring-width);"),
+            "{forced}"
+        );
+        let desc = css_rule(CSS, "\n    .pack-card-desc {");
+        assert!(has_decl(&desc, "-webkit-line-clamp: 3"), "{desc}");
+        assert!(has_decl(&desc, "overflow: hidden"), "{desc}");
+    }
+
+    #[test]
+    fn no_rules_for_classes_nothing_renders() {
+        // Vision nit 8 on PR 706: dead rules.
+        for dead in [".section-chips", ".form-inline"] {
+            assert!(!CSS.contains(dead), "{dead}");
+        }
+    }
+
     #[test]
     fn selected_pack_card_text_keeps_aa_for_any_accent() {
         let selected = css_rule(

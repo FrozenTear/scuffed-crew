@@ -169,6 +169,12 @@ const CSS: &str = r#"
         border: 1px solid currentColor;
         border-radius: var(--radius-full);
     }
+    /* Forced colours drop background fills: the filled shapes keep a
+       system colour, so Online (dot) and Offline (triangle) still show. */
+    @media (forced-colors: active) {
+        .relay-shape { forced-color-adjust: none; background: CanvasText; }
+        .relay-shape.is-unset { background: transparent; border-color: CanvasText; }
+    }
     @media (max-width: 820px) {
         .admin-relay-page .relay-facts {
             grid-template-columns: minmax(0, 1fr);
@@ -343,6 +349,23 @@ mod tests {
             extra_relay_urls: vec!["wss://extra.example.test".into()],
             forum_backend: backend.into(),
         }
+    }
+
+    #[test]
+    fn relay_shapes_survive_forced_colours() {
+        // Vision nit 10 on PR 706.
+        use crate::components::ui::test_support::media_block;
+        let forced = media_block(CSS, "@media (forced-colors: active)");
+        assert!(
+            forced.contains(".relay-shape { forced-color-adjust: none; background: CanvasText; }"),
+            "{forced}"
+        );
+        assert!(
+            forced.contains(
+                ".relay-shape.is-unset { background: transparent; border-color: CanvasText; }"
+            ),
+            "{forced}"
+        );
     }
 
     #[test]

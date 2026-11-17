@@ -859,6 +859,28 @@ mod tests {
     }
 
     #[test]
+    fn the_external_clients_guide_uses_the_button_words() {
+        // Vision nit 1 on PR 706: the guide still said "Link & Verify",
+        // "Detect" and "Export Backup".
+        let guide = include_str!("../../../../docs/external-clients.md");
+        let src = include_str!("identity.rs");
+        let prod = src.split("mod tests").next().expect("production half");
+        for label in ["Link and verify", "Detect from extension", "Export backup"] {
+            assert!(
+                prod.contains(&format!("\"{label}\"")),
+                "{label} in identity.rs"
+            );
+            assert!(
+                guide.contains(&format!("**{label}**")),
+                "{label} in the guide"
+            );
+        }
+        for old in ["Link & Verify", "**Detect**", "Export Backup"] {
+            assert!(!guide.contains(old), "{old}");
+        }
+    }
+
+    #[test]
     fn page_is_called_account_keys_everywhere() {
         assert_eq!(ACCOUNT_KEYS, "Account keys");
         assert!(!ACCOUNT_KEYS.contains("Nostr"));

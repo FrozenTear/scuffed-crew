@@ -127,6 +127,15 @@ fn event_edit_button_id(event_id: &str) -> String {
     format!("event-edit-{event_id}")
 }
 
+/// The occurrence the server stores attendance under: the picked day at
+/// midnight UTC, as an RFC 3339 timestamp (the server reads a `DateTime`, and
+/// a bare `2026-11-17` never parsed). `None` for anything that is not a
+/// `YYYY-MM-DD` day.
+fn occurrence_timestamp(day: &str) -> Option<String> {
+    let day = chrono::NaiveDate::parse_from_str(day.trim(), "%Y-%m-%d").ok()?;
+    Some(format!("{}T00:00:00Z", day.format("%Y-%m-%d")))
+}
+
 /// Id of an attendance row's select, from the member id.
 fn attendance_select_id(member_id: &str) -> String {
     format!("attendance-{member_id}")
@@ -309,8 +318,12 @@ pub fn AdminSchedule() -> Element {
 
     let on_att_submit = move |_| {
         if let Some(evt) = att_modal.get_target() {
+            let Some(occurrence_date) = occurrence_timestamp(&att_date()) else {
+                att_error.set(Some("Pick the date of the event.".to_string()));
+                return;
+            };
             let payload = BatchAttendanceRequest {
-                occurrence_date: att_date(),
+                occurrence_date,
                 entries: att_entries(),
             };
             let event_id = evt.id.clone();
@@ -671,7 +684,9 @@ pub fn AdminSchedule() -> Element {
                                                         }
                                                     },
                                                     option { value: "attended", "Attended" }
-                                                    option { value: "absent", "Absent" }
+                                                    // The server's word is `no_show`; "absent"
+                                                    // was rejected, so nothing saved.
+                                                    option { value: "no_show", "Absent" }
                                                     option { value: "excused", "Excused" }
                                                 }
                                             }
@@ -710,6 +725,31 @@ mod tests {
     }
     use crate::components::admin_shared::test_page::render_admin_route;
     use scuffed_types::OrgRole;
+
+    #[test]
+    fn attendance_sends_a_timestamp_and_the_servers_status_words() {
+        // Vision nit 14 on PR 706: a bare date and "absent" were both
+        // rejected, so attendance could never save.
+        assert_eq!(
+            occurrence_timestamp("2026-11-17").as_deref(),
+            Some("2026-11-17T00:00:00Z")
+        );
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(&occurrence_timestamp("2026-11-17").unwrap())
+                .is_ok()
+        );
+        assert_eq!(occurrence_timestamp(""), None);
+        assert_eq!(occurrence_timestamp("17/11/2026"), None);
+        let src = include_str!("schedule.rs");
+        let prod = src.split("mod tests").next().expect("production half");
+        assert!(prod.contains("option { value: \"no_show\", \"Absent\" }"));
+        assert!(!prod.contains("value: \"absent\""));
+        for word in ["\"attended\"", "\"no_show\"", "\"excused\""] {
+            let status: scuffed_types::AttendanceStatus = serde_json::from_str(word).expect(word);
+            let _ = status;
+        }
+        assert!(serde_json::from_str::<scuffed_types::AttendanceStatus>("\"absent\"").is_err());
+    }
 
     #[test]
     fn page_has_one_h1_and_a_labelled_wait_in_the_wide_shell() {
