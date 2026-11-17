@@ -2495,8 +2495,9 @@ mod tests {
     }
 
     /// QA blocking 1: `/admin/relay` was 518px wide at 390. Wide admin
-    /// content scrolls inside the admin area, and the relay tables sit in
-    /// the shared table scroller.
+    /// content scrolls inside the admin area. The redesigned relay page has
+    /// no tables: its facts are a two-column list whose values may shrink
+    /// and break long URLs, so nothing on it is wider than the column.
     #[test]
     fn wide_admin_content_scrolls_inside_the_admin_area() {
         let admin = include_str!("admin.rs");
@@ -2509,22 +2510,17 @@ mod tests {
         let scroller = css_rule(crate::styles::admin::CSS, ".data-table-scroll {");
         assert!(has_decl(&scroller, "overflow-x: auto"), "{scroller}");
         let relay = include_str!("../pages/admin/relay.rs");
-        let tables = relay.matches("table { class: \"data-table\",").count();
-        assert_eq!(tables, 2, "relay tables");
-        assert_eq!(
-            relay
-                .matches("div { class: \"data-table-scroll\",\n")
-                .count(),
-            tables,
-            "every relay table sits in its own scroller"
+        assert!(!relay.contains("table {"), "no relay table to overflow");
+        let facts = css_rule(relay, ".admin-relay-page .relay-facts {");
+        assert!(
+            has_decl(&facts, "grid-template-columns: max-content minmax(0, 1fr)"),
+            "{facts}"
         );
-        for (at, _) in relay.match_indices("table { class: \"data-table\",") {
-            let before = relay[..at].trim_end();
-            assert!(
-                before.ends_with("div { class: \"data-table-scroll\","),
-                "a relay table is outside the scroller"
-            );
-        }
+        let value = css_rule(relay, ".admin-relay-page .relay-facts dd {");
+        assert!(has_decl(&value, "min-width: 0"), "{value}");
+        assert!(has_decl(&value, "overflow-wrap: anywhere"), "{value}");
+        let urls = css_rule(relay, ".admin-relay-page .relay-facts code {");
+        assert!(has_decl(&urls, "overflow-wrap: anywhere"), "{urls}");
     }
 
     /// QA nit 8: Firefox made the scrolling sub-nav a Tab stop of its own.
