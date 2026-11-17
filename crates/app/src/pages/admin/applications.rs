@@ -135,7 +135,6 @@ fn status_filter_id(status: &str) -> String {
     format!("application-filter-{name}")
 }
 
-/// The applications a status chip keeps. The empty filter keeps all.
 /// Id of a row's Accept button. It leaves the page once the application is
 /// reviewed, which is how the focus move knows the list has refreshed.
 fn application_accept_id(app_id: &str) -> String {
@@ -144,14 +143,18 @@ fn application_accept_id(app_id: &str) -> String {
 
 /// Where focus goes once an accepted or declined application's list has
 /// refreshed: its own View if the row stays (no status filter), else the next
-/// row's View, else the previous row's. `keys` is the filtered list in order.
-fn after_review_focus_ids(keys: &[String], reviewed: &str) -> Vec<String> {
+/// row's View, else the previous row's, else the active status chip (`status`),
+/// which stays on the page when the filtered list empties. `keys` is the
+/// filtered list in order.
+fn after_review_focus_ids(keys: &[String], reviewed: &str, status: &str) -> Vec<String> {
     let view = |k: &str| vec![application_view_trigger_id(k)];
+    let chip = status_filter_id(status);
     let mut ids = view(reviewed);
-    ids.extend(after_delete_focus_ids(keys, reviewed, view, &[]));
+    ids.extend(after_delete_focus_ids(keys, reviewed, view, &[&chip]));
     ids
 }
 
+/// The applications a status chip keeps. The empty filter keeps all.
 fn filter_applications(list: &[Application], status: &str) -> Vec<Application> {
     list.iter()
         .filter(|app| status.is_empty() || app.status == status)
@@ -514,7 +517,7 @@ pub fn AdminApplications() -> Element {
     };
 
     let accept = move |id: String| {
-        let focus_next = after_review_focus_ids(&review_keys(), &id);
+        let focus_next = after_review_focus_ids(&review_keys(), &id, *status_filter.peek());
         spawn(async move {
             accept_name_error.set(None);
             let body = PatchApplicationRequest {
@@ -547,7 +550,7 @@ pub fn AdminApplications() -> Element {
 
     let confirm_reject = move |_| {
         let id = reject_modal.get_target().unwrap_or_default();
-        let focus_next = after_review_focus_ids(&review_keys(), &id);
+        let focus_next = after_review_focus_ids(&review_keys(), &id, *status_filter.peek());
         let notes = reject_notes().clone();
         reject_modal.close();
         reject_notes.set(String::new());
@@ -754,9 +757,24 @@ mod tests {
         // actions, so focus fell to the body.
         let keys: Vec<String> = ["a", "b", "c"].iter().map(|k| k.to_string()).collect();
         let v = application_view_trigger_id;
-        // Own View first (the row stays without a filter), then next, previous.
-        assert_eq!(after_review_focus_ids(&keys, "b"), [v("b"), v("c"), v("a")]);
-        assert_eq!(after_review_focus_ids(&keys, "c"), [v("c"), v("b")]);
+        let all = status_filter_id("");
+        // Own View first (the row stays without a filter), then next,
+        // previous, then the active chip.
+        assert_eq!(
+            after_review_focus_ids(&keys, "b", ""),
+            [v("b"), v("c"), v("a"), all.clone()]
+        );
+        assert_eq!(
+            after_review_focus_ids(&keys, "c", ""),
+            [v("c"), v("b"), all]
+        );
+        assert_eq!(
+            prod_src()
+                .matches("after_review_focus_ids(&review_keys(), &id, *status_filter.peek());")
+                .count(),
+            2,
+            "Accept and Decline pass the active chip"
+        );
         let src = include_str!("applications.rs");
         let prod = src.split("#[cfg(test)]").next().unwrap();
         assert_eq!(
@@ -767,6 +785,40 @@ mod tests {
         );
         assert!(prod.contains("id: application_accept_id(&id),"));
         assert!(prod.contains("Fragment { key: \"{app.id}\","));
+    }
+
+    fn prod_src() -> &'static str {
+        include_str!("applications.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap()
+    }
+
+    #[test]
+    fn reviewing_the_last_filtered_row_focuses_the_active_chip() {
+        // Vision blocker 1 on PR 706 round 4: under the Pending chip, the
+        // last Accept or Decline swapped the table for the empty card, which
+        // has no id, so focus fell to the body. The chips stay on the page.
+        let keys = vec!["only".to_string()];
+        assert_eq!(
+            after_review_focus_ids(&keys, "only", "pending"),
+            [
+                application_view_trigger_id("only"),
+                "application-filter-pending".to_string()
+            ]
+        );
+        // The chip is the last resort, after the neighbours' View buttons.
+        let keys: Vec<String> = ["a", "b"].iter().map(|k| k.to_string()).collect();
+        assert_eq!(
+            after_review_focus_ids(&keys, "b", "trial").last().unwrap(),
+            "application-filter-trial"
+        );
+        // The chips render whenever the list loaded, empty or not.
+        let chips = prod_src()
+            .split("if !list_failed {")
+            .nth(1)
+            .expect("chip row guard");
+        assert!(chips.contains("id: status_filter_id(status),"));
     }
 
     fn sample_application() -> Application {

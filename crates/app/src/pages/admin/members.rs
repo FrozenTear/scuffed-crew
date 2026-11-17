@@ -177,6 +177,32 @@ fn member_actions_toggle_id(member_id: &str) -> String {
     row_menu_toggle_id(&member_actions_id(member_id))
 }
 
+/// After a role change: when the active role chip no longer keeps the row,
+/// wait for its "Actions" button to leave the page, then focus the next
+/// row's, else the previous row's, else the chip. `None` when the row stays
+/// (no chip, or the chip is the new role): the dialog's own focus return to
+/// the row's "Actions" holds. `keys` is the filtered list in order.
+fn after_role_change_focus(
+    keys: &[String],
+    member_id: &str,
+    filter: &str,
+    new_role: &str,
+) -> Option<(String, Vec<String>)> {
+    if filter.is_empty() || filter == new_role {
+        return None;
+    }
+    let chip = role_filter_id(filter);
+    Some((
+        member_actions_toggle_id(member_id),
+        after_delete_focus_ids(
+            keys,
+            member_id,
+            |k| vec![member_actions_toggle_id(k)],
+            &[&chip],
+        ),
+    ))
+}
+
 /// Id of the hidden note that says why a row action is locked.
 fn member_lock_note_id(member_id: &str) -> String {
     format!("member-lock-{member_id}")
@@ -295,13 +321,6 @@ fn moderation_state(
     } else {
         ("Active", PillTone::Info)
     }
-}
-
-/// True when the bulk deactivate dialog has at least one member to send.
-fn bulk_deactivate_sends_any(selected: &[Member], user: Option<&UserInfo>) -> bool {
-    !bulk_deactivate_targets(selected.to_vec(), user)
-        .targets
-        .is_empty()
 }
 
 /// Question of the bulk deactivate dialog: the count that will be sent, then
@@ -1190,6 +1209,20 @@ pub fn AdminMembers() -> Element {
             }
             let id = member.id.clone();
             let body = ChangeRoleRequest { role: role_value() };
+            // A role chip may drop the row once the list refreshes.
+            let keys: Vec<String> = members
+                .data
+                .peek()
+                .as_ref()
+                .and_then(|d| d.as_ref())
+                .map(|all| {
+                    filter_members(all, *role_filter.peek(), &search.peek())
+                        .into_iter()
+                        .map(|m| m.id)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let leaves = after_role_change_focus(&keys, &id, *role_filter.peek(), &body.role);
             role_error.set(None);
             role_modal.start_submit();
             spawn(async move {
@@ -1202,6 +1235,9 @@ pub fn AdminMembers() -> Element {
                         toast.show(Toast::success("Role updated."));
                         role_modal.close();
                         members.refresh += 1;
+                        if let Some((gone, ids)) = leaves {
+                            focus_after_delete_soon(gone, ids);
+                        }
                         games.refresh += 1;
                     }
                     Err(e) => {
@@ -1895,24 +1931,24 @@ pub fn AdminMembers() -> Element {
             }
         }
 
-        // Bulk deactivate
-        ConfirmDialog {
-            title: "Deactivate members".to_string(),
-            message: bulk_deactivate_message(
-                &bulk_deactivate_targets(selected_members(), me.as_ref()),
-            ),
-            open: bulk_deactivate_open(),
-            // Nothing to send: no danger button, just OK (it writes the
-            // status line naming what was left out).
-            danger: bulk_deactivate_sends_any(&selected_members(), me.as_ref()),
-            confirm_label: if bulk_deactivate_sends_any(&selected_members(), me.as_ref()) {
-                "Deactivate".to_string()
-            } else {
-                "OK".to_string()
-            },
-            restore_focus_id: Some(BULK_DEACTIVATE_OPEN_ID.to_string()),
-            on_confirm: on_bulk_deactivate,
-            on_cancel: move |_| bulk_deactivate_open.set(false),
+        // Bulk deactivate. The plan is built once per render.
+        {
+            let plan = bulk_deactivate_targets(selected_members(), me.as_ref());
+            let sends_any = !plan.targets.is_empty();
+            rsx! {
+                ConfirmDialog {
+                    title: "Deactivate members".to_string(),
+                    message: bulk_deactivate_message(&plan),
+                    open: bulk_deactivate_open(),
+                    // Nothing to send: no danger button, just OK (it writes the
+                    // status line naming what was left out).
+                    danger: sends_any,
+                    confirm_label: if sends_any { "Deactivate".to_string() } else { "OK".to_string() },
+                    restore_focus_id: Some(BULK_DEACTIVATE_OPEN_ID.to_string()),
+                    on_confirm: on_bulk_deactivate,
+                    on_cancel: move |_| bulk_deactivate_open.set(false),
+                }
+            }
         }
 
         // Local password reset modal
@@ -2205,7 +2241,7 @@ mod tests {
     }
 
     #[test]
-    fn removing_a_game_account_focuses_the_next_account() {
+    fn removing_a_game_account_waits_for_the_row_before_moving_focus() {
         // B9: focus used to jump to the dialog title before the request ran.
         let src = include_str!("members.rs");
         let prod = src.split("#[cfg(test)]").next().unwrap();
@@ -2900,6 +2936,14 @@ mod tests {
         );
     }
 
+    /// True when the bulk deactivate plan has at least one member to send,
+    /// as the page reads it off the plan it builds once.
+    fn bulk_deactivate_sends_any(selected: &[Member], user: Option<&UserInfo>) -> bool {
+        !bulk_deactivate_targets(selected.to_vec(), user)
+            .targets
+            .is_empty()
+    }
+
     #[test]
     fn a_bulk_deactivate_with_nothing_to_send_has_no_danger_button() {
         let officer = user("user-01", OrgRole::Officer);
@@ -2918,12 +2962,19 @@ mod tests {
         ));
         let src = include_str!("members.rs");
         let prod = src.split("#[cfg(test)]").next().unwrap();
-        let dialog = &prod[prod.find("title: \"Deactivate members\"").unwrap()..];
+        let dialog = &prod[prod.find("// Bulk deactivate.").unwrap()..];
         let dialog = &dialog[..dialog.find("on_confirm").unwrap()];
-        assert!(
-            dialog.contains("danger: bulk_deactivate_sends_any(&selected_members(), me.as_ref()),"),
+        // Vision nit 4 on PR 706 round 4: the plan is built once per render.
+        assert_eq!(
+            dialog.matches("bulk_deactivate_targets(").count(),
+            1,
             "{dialog}"
         );
+        assert!(
+            dialog.contains("let sends_any = !plan.targets.is_empty();"),
+            "{dialog}"
+        );
+        assert!(dialog.contains("danger: sends_any,"), "{dialog}");
         assert!(dialog.contains("\"OK\".to_string()"), "{dialog}");
     }
 
@@ -3137,5 +3188,36 @@ mod tests {
         let prod = src.split("#[cfg(test)]").next().unwrap();
         assert!(!prod.contains("style: \""), "no inline styles");
         assert!(!prod.contains('\u{2014}'), "no em dashes");
+    }
+
+    #[test]
+    fn a_role_change_under_a_role_chip_hands_focus_on() {
+        // Vision nit 3 on PR 706 round 4: under a role chip, Change role
+        // moved the row out of view and focus fell to the body.
+        let keys: Vec<String> = ["a", "b", "c"].iter().map(|k| k.to_string()).collect();
+        let t = member_actions_toggle_id;
+        // No chip, or the chip is the new role: the row stays.
+        assert_eq!(after_role_change_focus(&keys, "b", "", "officer"), None);
+        assert_eq!(
+            after_role_change_focus(&keys, "b", "officer", "officer"),
+            None
+        );
+        // The row leaves: next, previous, then the chip.
+        assert_eq!(
+            after_role_change_focus(&keys, "b", "member", "officer"),
+            Some((t("b"), vec![t("c"), t("a"), role_filter_id("member")]))
+        );
+        assert_eq!(
+            after_role_change_focus(&["only".to_string()], "only", "member", "officer"),
+            Some((t("only"), vec![role_filter_id("member")]))
+        );
+        let src = include_str!("members.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let submit = &prod[prod.find("let on_role_submit = move |_| {").unwrap()..];
+        let submit = &submit[..submit.find("// --- Toggle active handlers ---").unwrap()];
+        assert!(
+            submit.contains("if let Some((gone, ids)) = leaves {\n                            focus_after_delete_soon(gone, ids);"),
+            "{submit}"
+        );
     }
 }

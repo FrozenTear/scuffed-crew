@@ -65,6 +65,10 @@ const BACKUP_RESULT_HINT_ID: &str = "identity-backup-result-hint";
 const IMPORT_NCRYPTSEC_ID: &str = "identity-import-ncryptsec";
 const IMPORT_PASSWORD_ID: &str = "identity-import-password";
 const IMPORT_STATUS_ID: &str = "identity-import-status";
+/// Import key, and the Cancel of its confirm strip (`InlineConfirm` id
+/// `import-key`).
+const IMPORT_TRIGGER_ID: &str = "import-key-trigger";
+const IMPORT_CANCEL_ID: &str = "import-key-cancel";
 const UNLINK_STATUS_ID: &str = "identity-unlink-status";
 const UNLINK_TRIGGER_ID: &str = "unlink-identity-trigger";
 
@@ -386,6 +390,12 @@ pub fn IdentitySettings() -> Element {
 
     let do_import_key = move |_| {
         confirm_import.set(false);
+        // The confirm strip closes with focus in it, on success and failure
+        // alike: Import key takes it back once the strip is gone.
+        focus_after_delete_soon(
+            IMPORT_CANCEL_ID.to_string(),
+            vec![IMPORT_TRIGGER_ID.to_string()],
+        );
         let ncryptsec = import_ncryptsec().trim().to_string();
         let password = import_password().trim().to_string();
         working.set(true);
@@ -704,7 +714,7 @@ pub fn IdentitySettings() -> Element {
                             } else {
                                 div { class: "account-actions",
                                     button {
-                                        id: "import-key-trigger",
+                                        id: IMPORT_TRIGGER_ID,
                                         r#type: "submit",
                                         class: btn_class(true),
                                         aria_disabled: if import_blocked { "true" },
@@ -1030,5 +1040,29 @@ mod tests {
         assert_eq!(key_mode_label(None), "Unknown");
         let docs = include_str!("../../../../docs/external-clients.md");
         assert!(docs.contains("**Key mode** shows **Server-managed**"));
+    }
+
+    #[test]
+    fn a_confirmed_import_hands_focus_back_to_import_key() {
+        // Vision nit 2 on PR 706 round 4: confirming closed the strip that
+        // held focus, and nothing moved it after, on success or failure.
+        let src = include_str!("identity.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let import = prod
+            .split("let do_import_key = move |_| {")
+            .nth(1)
+            .and_then(|rest| rest.split("spawn(async move {").next())
+            .expect("do_import_key before its request");
+        assert!(
+            import.contains(
+                "focus_after_delete_soon(\n            IMPORT_CANCEL_ID.to_string(),\n            vec![IMPORT_TRIGGER_ID.to_string()],\n        );"
+            ),
+            "{import}"
+        );
+        // The ids are the ones InlineConfirm `import-key` and the trigger use.
+        assert!(prod.contains("id: \"import-key\".to_string(),"));
+        assert_eq!(IMPORT_CANCEL_ID, "import-key-cancel");
+        assert!(prod.contains("id: IMPORT_TRIGGER_ID,"));
+        assert_eq!(IMPORT_TRIGGER_ID, "import-key-trigger");
     }
 }

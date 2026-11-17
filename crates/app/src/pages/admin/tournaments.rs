@@ -1,6 +1,8 @@
 use dioxus::prelude::*;
 
-use crate::components::admin_shared::{after_delete_focus_ids, focus_after_delete_soon};
+use crate::components::admin_shared::{
+    after_delete_focus_ids, focus_after_delete_soon, focus_after_refresh_soon,
+};
 use serde::Deserialize;
 use std::collections::HashMap;
 
@@ -233,6 +235,29 @@ fn next_status(status: &str) -> Option<(&'static str, &'static str)> {
     }
 }
 
+/// Id of a row's status cell. A status change from the list waits for it to
+/// show the new status, or to leave with its row, before moving focus.
+fn status_cell_id(tournament_id: &str) -> String {
+    format!("tournament-status-{tournament_id}")
+}
+
+/// Id of a status chip, from its filter value.
+fn tournament_filter_id(filter: &str) -> String {
+    format!("tournament-filter-{filter}")
+}
+
+/// Where focus goes after a status change from the list, once the list has
+/// refreshed: the row's own View if the row stays (Complete removes its own
+/// button on desktop), else the next row's View, else the previous row's
+/// (a status filter moves the row out), else the active status chip.
+fn after_status_focus_ids(keys: &[String], changed: &str, filter: &str) -> Vec<String> {
+    let view = |k: &str| vec![view_button_id(k)];
+    let chip = tournament_filter_id(filter);
+    let mut ids = view(changed);
+    ids.extend(after_delete_focus_ids(keys, changed, view, &[&chip]));
+    ids
+}
+
 /// Id of a row's View button, from the tournament id. Dialogs opened from
 /// the row return focus here, because it is on screen at every width.
 fn view_button_id(tournament_id: &str) -> String {
@@ -455,6 +480,22 @@ pub fn AdminTournaments() -> Element {
         delete_modal.show(t);
     };
 
+    // The shown list's ids in order, for where focus goes after a row moves.
+    let list_keys = move || -> Vec<String> {
+        tournaments
+            .data
+            .peek()
+            .as_ref()
+            .and_then(|d| d.as_ref())
+            .map(|all| {
+                filter_tournaments(all, &status_filter.peek())
+                    .iter()
+                    .map(|t| t.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
     // Server has no DELETE route; archive via status transition.
     let on_delete_confirm = move |_| {
         if let Some(t) = delete_modal.get_target() {
@@ -462,18 +503,7 @@ pub fn AdminTournaments() -> Element {
             // B9: an archived row leaves a filtered list. Once it is gone,
             // focus the next row's View, else the previous row's, else New
             // tournament.
-            let keys: Vec<String> = tournaments
-                .data
-                .peek()
-                .as_ref()
-                .and_then(|d| d.as_ref())
-                .map(|all| {
-                    filter_tournaments(all, &status_filter.peek())
-                        .iter()
-                        .map(|t| t.id.clone())
-                        .collect()
-                })
-                .unwrap_or_default();
+            let keys = list_keys();
             let focus_next = after_delete_focus_ids(
                 &keys,
                 &id,
@@ -508,6 +538,7 @@ pub fn AdminTournaments() -> Element {
     };
 
     let change_status = move |(id, new_status): (String, String)| {
+        let focus_next = after_status_focus_ids(&list_keys(), &id, &status_filter.peek());
         let body = StatusChangeRequest {
             status: new_status.clone(),
         };
@@ -522,6 +553,14 @@ pub fn AdminTournaments() -> Element {
                         status_label(&new_status)
                     )));
                     tournaments.refresh += 1;
+                    // From the list: focus lost with a removed button or row
+                    // goes to the row's View once the row shows the new
+                    // status, or to a neighbour once the row is gone.
+                    focus_after_refresh_soon(
+                        status_cell_id(&id),
+                        status_label(&new_status),
+                        focus_next,
+                    );
                     games.refresh += 1;
                     members.refresh += 1;
                     detail_refresh += 1;
@@ -848,7 +887,7 @@ pub fn AdminTournaments() -> Element {
                                     rsx! {
                                         tr { key: "{t.id}",
                                             td { class: "cell-who", "{t.name}" }
-                                            td { class: "cell-badge", StatusPill { status: t.status.clone() } }
+                                            td { class: "cell-badge", id: status_cell_id(&t.id), StatusPill { status: t.status.clone() } }
                                             td { class: "cell-meta", "{format}" }
                                             td { class: "cell-meta", "{game_display}" }
                                             td { class: "cell-meta num", "{max_display}" }
@@ -1188,7 +1227,7 @@ pub fn AdminTournaments() -> Element {
                         ChipButton {
                             key: "{s}",
                             class: "chip",
-                            id: format!("tournament-filter-{s}"),
+                            id: tournament_filter_id(s),
                             label: filter_label(s),
                             pressed: status_filter() == s,
                             onclick: move |_| {
@@ -1619,5 +1658,30 @@ mod tests {
             !prod.contains('\u{2192}'),
             "no arrow glyphs in button words"
         );
+    }
+
+    #[test]
+    fn a_status_change_from_the_list_hands_focus_on() {
+        // Vision nit 3 on PR 706 round 4: Complete on desktop removed its
+        // own button, and a status chip can move the row out.
+        let keys: Vec<String> = ["a", "b", "c"].iter().map(|k| k.to_string()).collect();
+        let v = view_button_id;
+        assert_eq!(
+            after_status_focus_ids(&keys, "b", "all"),
+            [v("b"), v("c"), v("a"), tournament_filter_id("all")]
+        );
+        assert_eq!(
+            after_status_focus_ids(&["only".to_string()], "only", "in_progress"),
+            [v("only"), "tournament-filter-in_progress".to_string()]
+        );
+        let src = include_str!("tournaments.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        // The wait ends when the row's status cell reads the new status or
+        // the row is gone.
+        assert!(prod.contains("td { class: \"cell-badge\", id: status_cell_id(&t.id),"));
+        assert!(prod.contains(
+            "focus_after_refresh_soon(\n                        status_cell_id(&id),\n                        status_label(&new_status),\n                        focus_next,\n                    );"
+        ));
+        assert!(prod.contains("id: tournament_filter_id(s),"));
     }
 }

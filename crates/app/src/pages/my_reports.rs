@@ -3,7 +3,9 @@
 use chrono::Utc;
 use dioxus::prelude::*;
 
-use crate::components::admin_shared::{after_delete_focus_ids, focus_after_delete_soon};
+use crate::components::admin_shared::{
+    after_delete_focus_ids, focus_after_delete_soon, restore_focus_if_lost_soon,
+};
 
 use scuffed_api_client::{ApiClient, ClientError};
 
@@ -255,7 +257,7 @@ pub fn MyReports() -> Element {
             .map(|action| action.return_focus_id.clone());
         gate.write().cancel();
         if let Some(id) = return_id {
-            focus_element(&id);
+            restore_focus_if_lost_soon(dismiss_focus_ids(&id));
         }
     });
 
@@ -281,7 +283,7 @@ pub fn MyReports() -> Element {
             .map(|action| action.return_focus_id.clone());
         gate.write().cancel();
         if let Some(id) = return_id {
-            focus_element(&id);
+            restore_focus_if_lost_soon(dismiss_focus_ids(&id));
         }
     };
     let on_confirm = move |_| {
@@ -312,6 +314,11 @@ pub fn MyReports() -> Element {
                 ),
             )
         });
+        // A kept (withdrawn) report loses its Withdraw button on the refresh.
+        let after_kept = removed_id
+            .as_deref()
+            .zip(return_id.as_deref())
+            .map(|(report, opener)| kept_withdraw_focus(report, opener));
         let Some(mutation) = gate.write().confirm() else {
             return;
         };
@@ -348,14 +355,16 @@ pub fn MyReports() -> Element {
                                 focus_element(MY_REPORTS_HEADING_ID);
                             }
                         }
-                    } else if let Some(id) = &return_id {
-                        focus_element(id);
+                    } else if let Some((gone, ids)) = after_kept {
+                        focus_after_delete_soon(gone, ids);
                     }
                     refresh += 1;
                 }
                 Err(err) => {
+                    // The table is inert until the dialog closes, so focus
+                    // moves after the re-render, not now.
                     if let Some(id) = &return_id {
-                        focus_element(id);
+                        restore_focus_if_lost_soon(dismiss_focus_ids(id));
                     }
                     let body = err.http_body().unwrap_or("");
                     if is_reports_disabled(err.http_status(), body) {
@@ -398,6 +407,28 @@ pub fn MyReports() -> Element {
             on_cancel,
         }
     }
+}
+
+/// Where focus goes after the confirm dialog closes without a removal
+/// (Cancel, Escape, a refused request): the button that opened it, else the
+/// page heading. The table is `inert` while the dialog is up, so this runs
+/// after the re-render through `restore_focus_if_lost_soon`.
+fn dismiss_focus_ids(opener: &str) -> Vec<String> {
+    vec![opener.to_string(), MY_REPORTS_HEADING_ID.to_string()]
+}
+
+/// After a Withdraw that kept the report: wait for its Withdraw button
+/// (`opener`) to leave the page, then focus the same row's Delete, else the
+/// page heading. The Withdraw button leads in case it stayed after all.
+fn kept_withdraw_focus(report: &str, opener: &str) -> (String, Vec<String>) {
+    (
+        opener.to_string(),
+        vec![
+            opener.to_string(),
+            opener_focus_id(ReportIntent::Delete, report),
+            MY_REPORTS_HEADING_ID.to_string(),
+        ],
+    )
 }
 
 #[cfg(test)]
@@ -450,5 +481,57 @@ mod tests {
         );
         let date = css_rule(MY_REPORTS_CSS, ".my-reports-table .report-when {");
         assert!(has_decl(&date, "white-space: nowrap"), "{date}");
+    }
+
+    fn prod_src() -> &'static str {
+        include_str!("my_reports.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_kept_withdraw_focuses_the_rows_delete_after_the_refresh() {
+        // Vision blocker 2 on PR 706 round 4: focus_element ran while the
+        // table was still inert, and the refresh removed Withdraw itself.
+        let withdraw = opener_focus_id(ReportIntent::Withdraw, "r1");
+        let (gone, ids) = kept_withdraw_focus("r1", &withdraw);
+        assert_eq!(gone, withdraw);
+        assert_eq!(
+            ids,
+            [
+                withdraw.clone(),
+                opener_focus_id(ReportIntent::Delete, "r1"),
+                MY_REPORTS_HEADING_ID.to_string()
+            ]
+        );
+        assert!(
+            prod_src().contains("} else if let Some((gone, ids)) = after_kept {\n                        focus_after_delete_soon(gone, ids);"),
+            "kept Withdraw waits for the refresh"
+        );
+    }
+
+    #[test]
+    fn a_closed_dialog_restores_focus_after_the_re_render() {
+        // Vision blocker 2 on PR 706 round 4: a refused request (and Cancel,
+        // Escape) focused the opener while the table was still inert.
+        let delete = opener_focus_id(ReportIntent::Delete, "r1");
+        assert_eq!(
+            dismiss_focus_ids(&delete),
+            [delete.clone(), MY_REPORTS_HEADING_ID.to_string()]
+        );
+        let prod = prod_src();
+        // Refused, Cancel and Escape.
+        assert_eq!(
+            prod.matches("restore_focus_if_lost_soon(dismiss_focus_ids(")
+                .count(),
+            3,
+            "{prod}"
+        );
+        // The only synchronous focus calls left: the dialog's own Cancel
+        // (outside the inert table) and the heading (outside it too).
+        assert_eq!(prod.matches("focus_element(").count(), 2);
+        assert!(prod.contains("focus_element(CONFIRM_CANCEL_ID);"));
+        assert!(prod.contains("focus_element(MY_REPORTS_HEADING_ID);"));
     }
 }
