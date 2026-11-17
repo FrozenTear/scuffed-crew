@@ -106,6 +106,36 @@ const PAGE_CSS: &str = r#"
 .tournaments-page .entry-row .entry-meta { margin-top: var(--space-2); }
 "#;
 
+/// `StyleOnce` id for [`FACTS_CSS`].
+pub(super) const FACTS_CSS_ID: &str = "scuffed-css-pages-tournament-facts";
+
+/// A fact and the dot after it are one flex item, so when the meta line
+/// wraps on a phone the dot stays with its fact: no line starts with a dot
+/// and no dot is left on a line of its own.
+pub(super) const FACTS_CSS: &str = r#"
+.meta-fact {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+"#;
+
+/// The facts after the status badge, each followed by a dot except the last.
+pub(super) fn meta_facts(facts: Vec<Element>) -> Element {
+    let last = facts.len().saturating_sub(1);
+    rsx! {
+        for (i, fact) in facts.into_iter().enumerate() {
+            span { class: "meta-fact",
+                {fact}
+                if i < last {
+                    span { class: "entry-sep", aria_hidden: "true", "·" }
+                }
+            }
+        }
+    }
+}
+
 /// The rows and whether the server has more than this first page.
 type ListSlot = (Vec<Tournament>, bool);
 
@@ -172,6 +202,7 @@ fn TournamentsView(
     rsx! {
         crate::styles::StyleOnce { id: ARTICLE_CSS_ID, css: ARTICLE_CSS }
         crate::styles::StyleOnce { id: "scuffed-css-pages-tournaments-page-css", css: PAGE_CSS }
+        crate::styles::StyleOnce { id: FACTS_CSS_ID, css: FACTS_CSS }
 
         PageShell { width: PageWidth::Wide, class: "tournaments-page",
             PageHeader {
@@ -224,6 +255,20 @@ fn render_tournament_card(t: &Tournament) -> Element {
     let cap = team_cap(t.max_teams);
     let start = start_word(&t.status);
 
+    let mut facts: Vec<Element> = vec![rsx! { span { "{format_label(&t.format)}" } }];
+    if registering {
+        facts.push(rsx! { span { "Registration open" } });
+    }
+    if let Some(cap) = cap {
+        facts.push(rsx! { span { "{cap}" } });
+    }
+    if let Some(date) = t.starts_at.as_deref() {
+        facts.push(rsx! { span { "{start} " {entry_date(date)} } });
+    }
+    if t.is_external {
+        facts.push(rsx! { span { "External" } });
+    }
+
     rsx! {
         article { key: "{t.id}", class: "entry-row",
             h2 {
@@ -234,23 +279,7 @@ fn render_tournament_card(t: &Tournament) -> Element {
             }
             p { class: "entry-meta",
                 Pill { tone: PillTone::Neutral, "{status_label(&t.status)}" }
-                span { "{format_label(&t.format)}" }
-                if registering {
-                    span { class: "entry-sep", aria_hidden: "true", "·" }
-                    span { "Registration open" }
-                }
-                if let Some(cap) = cap {
-                    span { class: "entry-sep", aria_hidden: "true", "·" }
-                    span { "{cap}" }
-                }
-                if let Some(date) = t.starts_at.as_deref() {
-                    span { class: "entry-sep", aria_hidden: "true", "·" }
-                    span { "{start} " {entry_date(date)} }
-                }
-                if t.is_external {
-                    span { class: "entry-sep", aria_hidden: "true", "·" }
-                    span { "External" }
-                }
+                {meta_facts(facts)}
             }
         }
     }
@@ -343,7 +372,7 @@ mod tests {
         assert!(
             html.contains(
                 "<p class=\"entry-meta\"><span class=\"ui-pill ui-pill--neutral\">In progress</span>\
-                 <span>Single elimination</span>"
+                 <span class=\"meta-fact\"><span>Single elimination</span>"
             ),
             "{html}"
         );
@@ -495,6 +524,42 @@ mod tests {
     fn page_css_uses_tokens() {
         for unit in ["px", "rem", "em;"] {
             assert!(!PAGE_CSS.contains(unit), "{unit} in the page css");
+            assert!(!FACTS_CSS.contains(unit), "{unit} in the facts css");
         }
+    }
+
+    /// Browser pass at 390: the dots were flex items of their own, so a
+    /// wrapped meta line started with a dot or left one at a line end alone.
+    /// Each dot now trails its fact inside one group.
+    #[test]
+    fn each_dot_trails_its_fact_so_a_wrapped_line_never_starts_with_one() {
+        let html = render(Load::Ready(vec![cup(1, "registration")]));
+        let sep = "<span class=\"entry-sep\" aria-hidden=\"true\">·</span>";
+        for fact in [
+            "<span>Single elimination</span>",
+            "<span>Registration open</span>",
+            "<span>8 team cap</span>",
+        ] {
+            assert!(
+                html.contains(&format!("<span class=\"meta-fact\">{fact}{sep}</span>")),
+                "{fact}: {html}"
+            );
+        }
+        // The last fact has no dot after it, and no group starts with one.
+        assert!(
+            html.contains("12 Nov 2026</time></span></span></p>"),
+            "{html}"
+        );
+        assert!(
+            !html.contains("<span class=\"meta-fact\"><span class=\"entry-sep\""),
+            "{html}"
+        );
+        assert_eq!(html.matches("entry-sep").count(), 3, "{html}");
+        assert!(
+            html.contains("ui-pill--neutral\">Upcoming</span><span class=\"meta-fact\">"),
+            "{html}"
+        );
+        let group = crate::components::ui::test_support::css_rule(FACTS_CSS, ".meta-fact {");
+        assert!(group.contains("display: inline-flex"), "{group}");
     }
 }

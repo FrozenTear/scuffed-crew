@@ -201,6 +201,43 @@ pub(crate) const STATS_VIEWS_CSS: &str = r#"
   line-height: var(--leading-ui);
 }
 
+/* The win-rate bar charts of Heroes and Maps, drawn as the role bars of the
+   stats frame: the name, a slim pill track, then the figure. The shared chart
+   (components/charts.rs) sets its text at 0.8rem, which is 11.2px on the 14px
+   root and under the 12px floor; inside these cards the text is on the type
+   scale instead. A small sample stays quieter through the chart's own muted
+   ink, never through a smaller size. */
+.stats-view-card .hbar-list { gap: var(--space-3); }
+.stats-view-card .hbar-row {
+  display: grid;
+  grid-template-columns: calc(var(--space-8) * 4) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  min-width: 0;
+}
+.stats-view-card .hbar-label {
+  min-width: 0;
+  text-align: left;
+  font-size: var(--text-md);
+  color: var(--text);
+}
+.stats-view-card .hbar-track {
+  height: var(--space-3);
+  background: var(--surface-sunken);
+  border-radius: var(--radius-pill);
+}
+.stats-view-card .hbar-fill { border-radius: var(--radius-pill); }
+.stats-view-card .hbar-val {
+  min-width: 0;
+  text-align: right;
+  font-size: var(--text-sm);
+  color: var(--text);
+}
+@media (max-width: 720px) {
+  .stats-view-card .hbar-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .stats-view-card .hbar-label { grid-column: 1 / -1; }
+}
+
 /* Tables: the leaderboards recipe on the --table-* tokens. The wrap is the
    scroll container: a named, focusable region, so a wide table scrolls inside
    it at phone width and the page never scrolls sideways. */
@@ -344,12 +381,14 @@ pub(crate) enum Col {
     Num(&'static str),
     /// Right-aligned win rate with its bar.
     Rate(&'static str),
+    /// Right-aligned row buttons, so the header sits over them.
+    Actions(&'static str),
 }
 
 impl Col {
     const fn label(self) -> &'static str {
         match self {
-            Col::Text(label) | Col::Num(label) | Col::Rate(label) => label,
+            Col::Text(label) | Col::Num(label) | Col::Rate(label) | Col::Actions(label) => label,
         }
     }
 
@@ -358,6 +397,7 @@ impl Col {
             Col::Text(_) => "",
             Col::Num(_) => "num",
             Col::Rate(_) => "rate",
+            Col::Actions(_) => "stats-table-actions",
         }
     }
 }
@@ -434,51 +474,39 @@ pub(crate) fn stats_load_error(what: &'static str, mut refresh: Signal<u64>) -> 
 }
 
 const MEMBER_STATS_CSS: &str = r#"
-.member-stats .member-stats-season { max-width: calc(var(--space-12) * 6); min-width: 0; }
-.member-stats .stats-summary {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-3);
+/* One row under the page header, as on Your stats: the tabs, then the season. */
+.member-stats .member-stats-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3) var(--space-4);
   min-width: 0;
 }
-.member-stats .stat-tile {
-  box-sizing: border-box;
+.member-stats .member-stats-tabs { flex: 0 1 auto; }
+.member-stats .member-stats-season { flex: 0 1 auto; min-width: 0; max-width: 100%; }
+/* The season select is a 44px control, as on Your stats and leaderboards. */
+.member-stats .member-stats-season select { min-height: var(--hit-target-min); }
+/* The tiles sit in the panel stack. A section gap, not a stack step, parts
+   them from the section title under them. */
+.member-stats .member-stats-summary {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-1);
+  gap: var(--space-2);
   min-width: 0;
-  padding: var(--card-padding);
-  background: var(--card-bg);
-  border: 1px solid var(--card-border);
-  border-radius: var(--card-radius);
-  box-shadow: var(--card-shadow);
-  text-align: center;
-}
-.member-stats .stat-tile-value {
-  font-family: var(--font-head);
-  font-weight: var(--font-head-weight);
-  font-size: var(--text-2xl);
-  letter-spacing: var(--font-head-tracking);
-  line-height: var(--leading-display);
-  font-variant-numeric: tabular-nums;
-  color: var(--text);
-}
-.member-stats .stat-tile-label {
-  color: var(--text-3);
-  font-size: var(--text-sm);
-  line-height: var(--leading-ui);
-}
-.member-stats .stat-tile-record {
-  color: var(--text-3);
-  font-size: var(--text-xs);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
+  margin-bottom: calc(var(--space-section) - var(--space-stack));
 }
 .member-stats .member-stats-panel:focus-visible {
   outline: var(--focus-ring-width) solid var(--focus-ring);
   outline-offset: var(--focus-ring-offset);
+}
+@media (max-width: 720px) {
+  .member-stats .member-stats-season,
+  .member-stats .member-stats-season .season-select,
+  .member-stats .member-stats-season select {
+    flex: 1 1 100%;
+    width: 100%;
+  }
 }
 "#;
 
@@ -515,6 +543,36 @@ fn panel_status(what: &str, loading: bool, failed: bool, empty: bool) -> String 
         format!("No {what} yet.")
     } else {
         String::new()
+    }
+}
+
+/// The summary tiles of the frame: win rate and matches, value over label.
+/// The win rate follows the small-sample rule in [`crate::sample`]: under 10
+/// decided games the tile shows the record and reads "Too few games". From 10
+/// on, the record sits in a line under the row, as on Your stats.
+fn member_summary(season: Tally) -> Element {
+    let rate = season.label();
+    let (rate_label, record) = if season.has_win_rate() {
+        ("Win rate", Some(season.record()))
+    } else {
+        (crate::sample::TOO_FEW_GAMES, None)
+    };
+    rsx! {
+        div { class: "member-stats-summary",
+            div { class: "stats-view-tiles",
+                div { class: "stats-view-tile",
+                    div { class: "stats-view-tile-value", "{rate}" }
+                    div { class: "stats-view-tile-label", "{rate_label}" }
+                }
+                div { class: "stats-view-tile",
+                    div { class: "stats-view-tile-value", "{season.games}" }
+                    div { class: "stats-view-tile-label", "Matches" }
+                }
+            }
+            if let Some(record) = record {
+                p { class: "stats-view-note", "Record {record}." }
+            }
+        }
     }
 }
 
@@ -594,71 +652,43 @@ pub fn StatsMember(id: String) -> Element {
                 title: "Member stats",
                 lead: "Results from this member's uploaded games. A rate needs 10 decided games.",
             }
-            div { class: "member-stats-season",
-                SeasonSelect {
-                    id: "member-stats-season".to_string(),
-                    name: "member-stats-season".to_string(),
-                    seasons: season.season_list(),
-                    seasons_error: season.seasons_error(),
-                    on_retry: move |_| season.retry(),
-                    value: season.selected_id(),
-                    onchange: move |s| season.choose(s),
-                }
-            }
-
-            {
-                let data = stats.data.read();
-                let s = data.as_ref().and_then(|d| d.as_ref());
-                match s {
-                    None => member_pending(&auth(), &stats, "member stats"),
-                    Some(s) if s.total_matches == 0 => rsx! {
-                        EmptyCard {
-                            title: "No games tracked yet",
-                            message: "This member has not uploaded any games for this season. Try another season, or see who has on the leaderboards.",
-                            actions: rsx! {
-                                Link { to: Route::Leaderboards {}, class: btn_class(true), "See the leaderboards" }
-                            },
-                        }
-                    },
-                    Some(s) => {
-                        let season = Tally::new(s.total_matches, s.wins, s.losses, s.draws);
-                        rsx! {
-                            div { class: "stats-summary",
-                                {crate::sample::season_tile(season)}
-                                div { class: "stat-tile",
-                                    div { class: "stat-tile-value", "{s.total_matches}" }
-                                    div { class: "stat-tile-label", "Matches" }
-                                }
-                            }
-                        }
+            div { class: "member-stats-head",
+                div { class: "chip-row is-scroll member-stats-tabs", role: "tablist", aria_label: "Stats sections",
+                    TabButton {
+                        class: "chip".to_string(),
+                        label: "Overview".to_string(),
+                        id: member_tab_id(MemberStatsTab::Overview).to_string(),
+                        controls: MEMBER_STATS_PANEL.to_string(),
+                        selected: tab() == MemberStatsTab::Overview,
+                        onclick: move |_| tab.set(MemberStatsTab::Overview),
+                    }
+                    TabButton {
+                        class: "chip".to_string(),
+                        label: "Heroes".to_string(),
+                        id: member_tab_id(MemberStatsTab::Heroes).to_string(),
+                        controls: MEMBER_STATS_PANEL.to_string(),
+                        selected: tab() == MemberStatsTab::Heroes,
+                        onclick: move |_| tab.set(MemberStatsTab::Heroes),
+                    }
+                    TabButton {
+                        class: "chip".to_string(),
+                        label: "Maps".to_string(),
+                        id: member_tab_id(MemberStatsTab::Maps).to_string(),
+                        controls: MEMBER_STATS_PANEL.to_string(),
+                        selected: tab() == MemberStatsTab::Maps,
+                        onclick: move |_| tab.set(MemberStatsTab::Maps),
                     }
                 }
-            }
-
-            div { class: "chip-row is-scroll", role: "tablist", aria_label: "Stats sections",
-                TabButton {
-                    class: "chip".to_string(),
-                    label: "Overview".to_string(),
-                    id: member_tab_id(MemberStatsTab::Overview).to_string(),
-                    controls: MEMBER_STATS_PANEL.to_string(),
-                    selected: tab() == MemberStatsTab::Overview,
-                    onclick: move |_| tab.set(MemberStatsTab::Overview),
-                }
-                TabButton {
-                    class: "chip".to_string(),
-                    label: "Heroes".to_string(),
-                    id: member_tab_id(MemberStatsTab::Heroes).to_string(),
-                    controls: MEMBER_STATS_PANEL.to_string(),
-                    selected: tab() == MemberStatsTab::Heroes,
-                    onclick: move |_| tab.set(MemberStatsTab::Heroes),
-                }
-                TabButton {
-                    class: "chip".to_string(),
-                    label: "Maps".to_string(),
-                    id: member_tab_id(MemberStatsTab::Maps).to_string(),
-                    controls: MEMBER_STATS_PANEL.to_string(),
-                    selected: tab() == MemberStatsTab::Maps,
-                    onclick: move |_| tab.set(MemberStatsTab::Maps),
+                div { class: "member-stats-season",
+                    SeasonSelect {
+                        id: "member-stats-season".to_string(),
+                        name: "member-stats-season".to_string(),
+                        seasons: season.season_list(),
+                        seasons_error: season.seasons_error(),
+                        on_retry: move |_| season.retry(),
+                        value: season.selected_id(),
+                        onchange: move |s| season.choose(s),
+                    }
                 }
             }
 
@@ -668,6 +698,27 @@ pub fn StatsMember(id: String) -> Element {
                 role: "tabpanel",
                 aria_labelledby: member_tab_id(tab()),
                 tabindex: "0",
+                {
+                    let data = stats.data.read();
+                    let s = data.as_ref().and_then(|d| d.as_ref());
+                    match s {
+                        None => member_pending(&auth(), &stats, "member stats"),
+                        Some(s) if s.total_matches == 0 => rsx! {
+                            EmptyCard {
+                                title: "No games tracked yet",
+                                message: "This member has not uploaded any games for this season. Try another season, or see who has on the leaderboards.",
+                                actions: rsx! {
+                                    Link { to: Route::Leaderboards {}, class: btn_class(true), "See the leaderboards" }
+                                },
+                            }
+                        },
+                        Some(s) => {
+                            let season = Tally::new(s.total_matches, s.wins, s.losses, s.draws);
+                            member_summary(season)
+                        }
+                    }
+                }
+
                 match tab() {
                     MemberStatsTab::Overview => rsx! {
                         {
@@ -993,6 +1044,86 @@ mod tests {
             "{html}"
         );
         assert_eq!(html.matches("stats-rate-bar").count(), 1, "{html}");
+    }
+
+    /// Text of the first rule that starts with `selector`, up to its `}`.
+    fn rule<'a>(css: &'a str, selector: &str) -> &'a str {
+        let start = css
+            .find(selector)
+            .unwrap_or_else(|| panic!("missing rule {selector}"));
+        let rest = &css[start..];
+        &rest[..rest.find('}').unwrap()]
+    }
+
+    #[test]
+    fn bar_chart_text_is_on_the_type_scale_inside_stats_cards() {
+        // The shared chart sets 0.8rem (11.2px, under the 12px floor). Inside
+        // a stats card the label and figure take type tokens, muted rows too.
+        let label = rule(STATS_VIEWS_CSS, ".stats-view-card .hbar-label {");
+        assert!(label.contains("font-size: var(--text-md)"), "{label}");
+        let val = rule(STATS_VIEWS_CSS, ".stats-view-card .hbar-val {");
+        assert!(val.contains("font-size: var(--text-sm)"), "{val}");
+        assert!(
+            !STATS_VIEWS_CSS.contains(".hbar-row.muted .hbar-label {")
+                && !STATS_VIEWS_CSS.contains(".hbar-row.muted .hbar-val {"),
+            "muted rows keep the size and change only their ink"
+        );
+        // The track is the slim pill of the frame's role bars.
+        let track = rule(STATS_VIEWS_CSS, ".stats-view-card .hbar-track {");
+        assert!(track.contains("height: var(--space-3)"), "{track}");
+        assert!(
+            track.contains("border-radius: var(--radius-pill)"),
+            "{track}"
+        );
+    }
+
+    #[test]
+    fn member_summary_is_two_tiles_with_the_record_under_them() {
+        fn rated() -> Element {
+            member_summary(Tally::new(12, 10, 2, 0))
+        }
+        fn small() -> Element {
+            member_summary(Tally::new(4, 3, 1, 0))
+        }
+        let html = render(rated);
+        assert_eq!(
+            html.matches("class=\"stats-view-tile\"").count(),
+            2,
+            "{html}"
+        );
+        assert!(html.contains(">83.3%</div>"), "{html}");
+        // Sentence case, as on Your stats.
+        assert!(
+            html.contains(">Win rate</div>") && !html.contains("Win Rate"),
+            "{html}"
+        );
+        assert!(html.contains(">Matches</div>"), "{html}");
+        assert!(
+            html.contains("<p class=\"stats-view-note\">Record 10W-2L.</p>"),
+            "{html}"
+        );
+        let html = render(small);
+        assert!(html.contains("Too few games"), "{html}");
+        assert!(!html.contains("Record "), "{html}");
+    }
+
+    #[test]
+    fn member_season_select_is_a_44px_control_and_fills_a_phone_row() {
+        let select = rule(
+            MEMBER_STATS_CSS,
+            ".member-stats .member-stats-season select {",
+        );
+        assert!(
+            select.contains("min-height: var(--hit-target-min)"),
+            "{select}"
+        );
+        let phone =
+            &MEMBER_STATS_CSS[MEMBER_STATS_CSS.find("@media (max-width: 720px)").unwrap()..];
+        assert!(
+            phone.contains(".member-stats .member-stats-season select"),
+            "{phone}"
+        );
+        assert!(phone.contains("width: 100%"), "{phone}");
     }
 
     #[test]

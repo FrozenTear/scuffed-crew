@@ -378,7 +378,7 @@ pub fn StatsTokens() -> Element {
                                     Col::Text("Status"),
                                     Col::Text("Created"),
                                     Col::Text("Last used"),
-                                    Col::Text("Actions"),
+                                    Col::Actions("Actions"),
                                 ],
                                 for token in list.iter() {
                                     {token_row(token, on_revoke)}
@@ -607,7 +607,7 @@ mod tests {
                 StatsTable {
                     labelled_by: "tokens-list-title",
                     wide: true,
-                    cols: vec![Col::Text("Label"), Col::Text("Status"), Col::Text("Created"), Col::Text("Last used"), Col::Text("Actions")],
+                    cols: vec![Col::Text("Label"), Col::Text("Status"), Col::Text("Created"), Col::Text("Last used"), Col::Actions("Actions")],
                     {token_row(&token("a:1", true, true), EventHandler::new(|_: String| {}))}
                     {token_row(&token("b2", false, false), EventHandler::new(|_: String| {}))}
                 }
@@ -642,6 +642,11 @@ mod tests {
             "{html}"
         );
         assert!(!html.contains("<a "), "no link wraps a button: {html}");
+        // The Actions header is right-aligned over the Revoke buttons.
+        assert!(
+            html.contains("class=\"stats-table-actions\">Actions</th>"),
+            "{html}"
+        );
         assert_plain_copy(&html);
     }
 

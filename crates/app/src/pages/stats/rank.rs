@@ -1055,63 +1055,36 @@ fn status_text(series: &RankSeries, rows: &[ChartRow]) -> String {
     )
 }
 
-// Blizzard's official career-profile rank emblems, byte for byte as the
-// design sources ship them (`ux-spec/gen/rank-icons/`). They may be scaled
-// in CSS and never recoloured, cropped or edited. Hash-free names, like the
-// fonts. A test holds each file to its byte length.
-static EMBLEM_BRONZE: manganis::Asset = asset!(
-    "/assets/rank-icons/rank-bronze.png",
-    manganis::AssetOptions::builder().with_hash_suffix(false)
+// Blizzard's official career-profile rank emblems, kept in the repo byte for
+// byte as the design sources ship them (`ux-spec/gen/rank-icons/`). They may
+// be scaled in CSS and never recoloured, cropped or edited. A test holds each
+// source file to its byte length.
+/// The emblem folder, hash-free like the fonts. Note: `dx build --release`
+/// repacks every PNG losslessly (file bytes change, decoded pixels do not),
+/// for folder and image assets alike, as it does for the favicons.
+static EMBLEM_DIR: manganis::Asset = asset!(
+    "/assets/rank-icons",
+    manganis::AssetOptions::folder().with_hash_suffix(false)
 );
-static EMBLEM_SILVER: manganis::Asset = asset!(
-    "/assets/rank-icons/rank-silver.png",
-    manganis::AssetOptions::builder().with_hash_suffix(false)
-);
-static EMBLEM_GOLD: manganis::Asset = asset!(
-    "/assets/rank-icons/rank-gold.png",
-    manganis::AssetOptions::builder().with_hash_suffix(false)
-);
-static EMBLEM_PLATINUM: manganis::Asset = asset!(
-    "/assets/rank-icons/rank-platinum.png",
-    manganis::AssetOptions::builder().with_hash_suffix(false)
-);
-static EMBLEM_EMERALD: manganis::Asset = asset!(
-    "/assets/rank-icons/rank-emerald.png",
-    manganis::AssetOptions::builder().with_hash_suffix(false)
-);
-static EMBLEM_DIAMOND: manganis::Asset = asset!(
-    "/assets/rank-icons/rank-diamond.png",
-    manganis::AssetOptions::builder().with_hash_suffix(false)
-);
-static EMBLEM_MASTER: manganis::Asset = asset!(
-    "/assets/rank-icons/rank-master.png",
-    manganis::AssetOptions::builder().with_hash_suffix(false)
-);
-static EMBLEM_GRANDMASTER: manganis::Asset = asset!(
-    "/assets/rank-icons/rank-grandmaster.png",
-    manganis::AssetOptions::builder().with_hash_suffix(false)
-);
-/// The official `Rank_UltimateTier` file.
-static EMBLEM_CHAMPION: manganis::Asset = asset!(
-    "/assets/rank-icons/rank-champion.png",
-    manganis::AssetOptions::builder().with_hash_suffix(false)
-);
+
+/// Emblem file stems, by ladder index.
+const EMBLEM_FILES: [&str; 9] = [
+    "bronze",
+    "silver",
+    "gold",
+    "platinum",
+    "emerald",
+    "diamond",
+    "master",
+    "grandmaster",
+    // The official `Rank_UltimateTier` file.
+    "champion",
+];
 
 /// Served URL of a tier's emblem, by ladder index.
 fn emblem_url(tier: usize) -> Option<String> {
-    let asset = match tier {
-        0 => &EMBLEM_BRONZE,
-        1 => &EMBLEM_SILVER,
-        2 => &EMBLEM_GOLD,
-        3 => &EMBLEM_PLATINUM,
-        4 => &EMBLEM_EMERALD,
-        5 => &EMBLEM_DIAMOND,
-        6 => &EMBLEM_MASTER,
-        7 => &EMBLEM_GRANDMASTER,
-        8 => &EMBLEM_CHAMPION,
-        _ => return None,
-    };
-    Some(asset.to_string())
+    let stem = EMBLEM_FILES.get(tier)?;
+    Some(format!("{EMBLEM_DIR}/rank-{stem}.png"))
 }
 
 /// The emblem slot: decorative, next to a typographic tier name. Without a
@@ -1427,7 +1400,10 @@ pub(super) const RANK_CHART_CSS: &str = r#"
   border-radius: var(--card-radius);
 }
 /* One game: the readout is open by default on phone only. */
-.rank-chart-readout.is-phone-default > * { display: none; }
+/* `> .readout-rank` outranks `.rank-chart-readout .readout-rank` (flex),
+   so no line leaks onto desktop. */
+.rank-chart-readout.is-phone-default > *,
+.rank-chart-readout.is-phone-default > .readout-rank { display: none; }
 .rank-chart-readout p { margin: 0; }
 .rank-chart-readout .readout-date {
   color: var(--text-3);
@@ -1452,7 +1428,7 @@ pub(super) const RANK_CHART_CSS: &str = r#"
   gap: var(--space-2);
 }
 .rank-chart-picker-status { margin: 0; }
-.rank-chart-table-toggle { margin-top: var(--space-3); }
+.rank-chart .rank-chart-table-toggle { margin-top: var(--space-3); }
 .rank-chart-table-wrap {
   margin-top: var(--space-3);
   min-width: 0;
@@ -1587,7 +1563,16 @@ pub(super) const RANK_CHART_CSS: &str = r#"
     gap: var(--space-2);
     vertical-align: middle;
   }
+  .rank-chart-table td:nth-child(3) { vertical-align: middle; }
   .rank-chart-table td:nth-child(3)::before { content: " \00b7  "; }
+  /* One game: the point is shown active next to its open readout. */
+  .rank-chart-guide.is-phone-default { display: block; }
+  .rank-chart-marks .is-phone-default.rank-chart-mark-dot { width: 14px; height: 14px; }
+  .rank-chart-marks .is-phone-default.rank-chart-mark-change { width: 16px; height: 16px; }
+  .rank-chart-hit.is-phone-default {
+    outline: var(--focus-ring-width) solid var(--focus-ring);
+    outline-offset: var(--focus-ring-offset);
+  }
 }
 "#;
 
@@ -1900,7 +1885,20 @@ pub(super) fn RankChart(
             )
         })
         .collect();
-    let guide_style = active_at.map(|at| format!("left:{:.2}%", x_pct(placed[at].0, n)));
+    // One game, nothing picked: phone shows that point as active (CSS only).
+    let phone_default = active_at.is_none() && single;
+    let guide_style = active_at
+        .or(phone_default.then_some(0))
+        .map(|at| format!("left:{:.2}%", x_pct(placed[at].0, n)));
+    let on_class = |at: usize| {
+        if Some(at) == active_at {
+            " is-active"
+        } else if phone_default {
+            " is-phone-default"
+        } else {
+            ""
+        }
+    };
     let x_labels: Vec<(usize, &'static str)> = match n {
         0 => Vec::new(),
         1 => vec![(0, "rank-chart-x-label is-only")],
@@ -1981,7 +1979,11 @@ pub(super) fn RankChart(
                         div { class: "rank-chart-canvas",
                             {plot_svg(&rows, ymin, ymax)}
                             div {
-                                class: if active_at.is_some() { "rank-chart-guide is-on" } else { "rank-chart-guide" },
+                                class: match (active_at.is_some(), phone_default) {
+                                    (true, _) => "rank-chart-guide is-on",
+                                    (false, true) => "rank-chart-guide is-phone-default",
+                                    (false, false) => "rank-chart-guide",
+                                },
                                 aria_hidden: "true",
                                 style: guide_style,
                             }
@@ -1989,12 +1991,11 @@ pub(super) fn RankChart(
                                 for (at, (_, row, _)) in placed.iter().enumerate() {
                                     span {
                                         key: "{row.match_id}",
-                                        class: match (row.rank_changed, Some(at) == active_at) {
-                                            (true, true) => "rank-chart-mark-change is-active",
-                                            (true, false) => "rank-chart-mark-change",
-                                            (false, true) => "rank-chart-mark-dot is-active",
-                                            (false, false) => "rank-chart-mark-dot",
-                                        },
+                                        class: format!(
+                                            "{}{}",
+                                            if row.rank_changed { "rank-chart-mark-change" } else { "rank-chart-mark-dot" },
+                                            on_class(at),
+                                        ),
                                         style: "{spots[at]}",
                                     }
                                 }
@@ -2013,7 +2014,7 @@ pub(super) fn RankChart(
                                         rsx! {
                                             button {
                                                 key: "{row.match_id}",
-                                                class: if Some(at) == active_at { "rank-chart-hit is-active" } else { "rank-chart-hit" },
+                                                class: format!("rank-chart-hit{}", on_class(at)),
                                                 r#type: "button",
                                                 id: "{id}",
                                                 style: "{spots[at]}",
@@ -3203,6 +3204,70 @@ mod tests {
     }
 
     #[test]
+    fn one_game_default_readout_stays_phone_only_and_lights_its_point() {
+        use crate::components::ui::test_support::{css_rule, has_decl};
+        let html = render_chart(vec![series_of(&[(
+            8,
+            "Gold",
+            Some(3),
+            Some(50),
+            Some("win"),
+        )])]);
+        // Phone: the point looks active beside its open readout (frame
+        // d1-stats-rank-one-game-phone), with a placed guide.
+        assert!(
+            html.contains(r#"class="rank-chart-guide is-phone-default" aria-hidden="true" style="left:50.00%""#),
+            "{html}"
+        );
+        assert!(
+            html.contains("rank-chart-mark-dot is-phone-default"),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"class="rank-chart-hit is-phone-default""#),
+            "{html}"
+        );
+        let (desktop, phone) = RANK_CHART_CSS
+            .split_once("@media (max-width: 820px)")
+            .expect("phone block");
+        // Desktop: the whole default readout is hidden. The rank line's own
+        // flex rule must not win over the hide (it leaked "Gold 3 · 50%").
+        let hide = css_rule(
+            desktop,
+            ".rank-chart-readout.is-phone-default > .readout-rank {",
+        );
+        assert!(has_decl(&hide, "display: none"), "{hide}");
+        let show = css_rule(
+            phone,
+            ".rank-chart-readout.is-phone-default > .readout-rank {",
+        );
+        assert!(has_decl(&show, "display: flex"), "{show}");
+        for marker in [
+            ".rank-chart-guide.is-phone-default {",
+            ".rank-chart-hit.is-phone-default {",
+        ] {
+            assert!(!desktop.contains(marker), "{marker} is phone only");
+            assert!(phone.contains(marker), "{marker}");
+        }
+        // Two games: nothing is lit until a point is picked.
+        let two = render_chart(vec![series_of(&[
+            (8, "Gold", Some(3), Some(50), None),
+            (9, "Gold", Some(3), Some(60), None),
+        ])]);
+        assert!(!two.contains("is-phone-default"), "{two}");
+    }
+
+    #[test]
+    fn table_toggle_keeps_its_gap_over_the_shared_button_margin() {
+        use crate::components::ui::test_support::{css_rule, has_decl};
+        // `.btn` sets `margin: 0`; a lone class selector loses to it when the
+        // button sheet loads later, so the toggle sat flush on the legend.
+        let rule = css_rule(RANK_CHART_CSS, ".rank-chart .rank-chart-table-toggle {");
+        assert!(has_decl(&rule, "margin-top: var(--space-3)"), "{rule}");
+        assert!(!RANK_CHART_CSS.contains("\n.rank-chart-table-toggle {"));
+    }
+
+    #[test]
     fn empty_and_loading_states_say_so_in_words() {
         let html = render_chart_for(Vec::new(), Some("Player01"));
         assert!(html.contains("No rank yet"), "{html}");
@@ -3309,7 +3374,7 @@ mod tests {
         }
     }
 
-    /// The emblems ship byte for byte as the design sources hold them.
+    /// The emblem sources stay byte for byte as the design sources hold them.
     #[test]
     fn emblem_files_are_unchanged() {
         let pins: [(&str, &[u8], usize); 9] = [

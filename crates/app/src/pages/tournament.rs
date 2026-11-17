@@ -9,7 +9,9 @@ use super::article_author::{
     ARTICLE_CSS, ARTICLE_CSS_ID, ArticleCrumb, Load, entry_date, is_retrying, load_status,
 };
 use super::not_found::{NotFoundLink, NotFoundPanel};
-use super::tournaments::{format_label, start_word, status_label, team_cap};
+use super::tournaments::{
+    FACTS_CSS, FACTS_CSS_ID, format_label, meta_facts, start_word, status_label, team_cap,
+};
 use crate::components::bracket::{
     BRACKET_STYLES, BracketMatch, BracketRound, BracketView, SwissStanding,
 };
@@ -236,6 +238,7 @@ fn TournamentView(
     rsx! {
         crate::styles::StyleOnce { id: ARTICLE_CSS_ID, css: ARTICLE_CSS }
         crate::styles::StyleOnce { id: "scuffed-css-pages-tournament-page-css", css: PAGE_CSS }
+        crate::styles::StyleOnce { id: FACTS_CSS_ID, css: FACTS_CSS }
         crate::styles::StyleOnce { id: "scuffed-css-pages-tournament-bracket-styles", css: BRACKET_STYLES }
 
         PageShell { width, class: "tournament-page",
@@ -308,7 +311,7 @@ fn TournamentHeader(data: BracketData) -> Element {
     let href = crate::util::http_href(url).map(str::to_string);
     let url_text = (href.is_none() && !url.is_empty()).then(|| url.to_string());
 
-    // The facts after the badge, with a dot between each two.
+    // The facts after the badge; each but the last carries the dot after it.
     let mut facts: Vec<Element> = Vec::new();
     if registering {
         facts.push(rsx! { span { "Registration open" } });
@@ -333,12 +336,7 @@ fn TournamentHeader(data: BracketData) -> Element {
             meta: rsx! {
                 p { class: "tournament-meta",
                     Pill { tone: PillTone::Neutral, "{status_word}" }
-                    for (i, fact) in facts.into_iter().enumerate() {
-                        if i > 0 {
-                            span { class: "entry-sep", aria_hidden: "true", "·" }
-                        }
-                        {fact}
-                    }
+                    {meta_facts(facts)}
                 }
                 if let Some(about) = about {
                     p { class: "tournament-about", "{about}" }
@@ -556,8 +554,8 @@ mod tests {
         assert!(
             html.contains(
                 "<p class=\"tournament-meta\"><span class=\"ui-pill ui-pill--neutral\">In progress</span>\
-                 <span>4 team cap</span><span class=\"entry-sep\" aria-hidden=\"true\">·</span>\
-                 <span>Started <time class=\"entry-date\" datetime=\"2026-11-12\">12 Nov 2026</time></span></p>"
+                 <span class=\"meta-fact\"><span>4 team cap</span><span class=\"entry-sep\" aria-hidden=\"true\">·</span></span>\
+                 <span class=\"meta-fact\"><span>Started <time class=\"entry-date\" datetime=\"2026-11-12\">12 Nov 2026</time></span></span></p>"
             ),
             "{html}"
         );
@@ -642,7 +640,10 @@ mod tests {
             "{html}"
         );
         assert!(
-            html.contains("ui-pill--neutral\">Upcoming</span><span>Registration open</span>"),
+            html.contains(
+                "ui-pill--neutral\">Upcoming</span><span class=\"meta-fact\"><span>Registration open</span>\
+                 <span class=\"entry-sep\" aria-hidden=\"true\">·</span></span>"
+            ),
             "{html}"
         );
         assert!(html.contains("Starts <time"), "{html}");

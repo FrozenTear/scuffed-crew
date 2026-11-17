@@ -194,7 +194,8 @@ fn frame_stamp(stamp: &str) -> String {
 }
 
 const PAGE_CSS: &str = r#"
-.match-lead time { white-space: nowrap; }
+/* The separator wraps with the date, so no line ends on a dangling dot. */
+.match-lead .match-when { white-space: nowrap; }
 .match-board {
   box-sizing: border-box;
   display: flex;
@@ -213,7 +214,7 @@ const PAGE_CSS: &str = r#"
 }
 .match-side { min-width: 0; }
 .match-side h2 {
-  margin: 0;
+  margin: 0 0 var(--space-2);
   font-family: var(--font-head);
   font-weight: var(--font-head-weight);
   letter-spacing: var(--font-head-tracking);
@@ -222,14 +223,29 @@ const PAGE_CSS: &str = r#"
   color: var(--text);
   overflow-wrap: anywhere;
 }
-.match-side h2 a { color: inherit; text-decoration: none; }
+/* A 44px target. The negative block margins give the extra height back, so
+   the name sits on the same line box as the plain opponent name. */
+.match-side h2 a {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  max-width: 100%;
+  min-width: var(--hit-target-min);
+  min-height: var(--hit-target-min);
+  margin-block: calc((1em * var(--leading-display) - var(--hit-target-min)) / 2);
+  color: inherit;
+  text-decoration: none;
+}
 .match-side h2 a:hover { text-decoration: underline; }
 .match-side h2 a:focus-visible {
   outline: var(--focus-ring-width) solid var(--focus-ring);
   outline-offset: var(--focus-ring-offset);
 }
+/* The frame's number sits a text-2xl step under the name and keeps the
+   same step below it. */
 .match-num {
-  margin: var(--space-4) 0 0;
+  margin: var(--space-6) 0;
   font-family: var(--font-head);
   font-size: var(--text-2xl);
   font-weight: var(--font-label-weight);
@@ -442,11 +458,14 @@ fn render_match(m: &MatchDetailData, scheduled_ms: Option<f64>, now_ms: Option<f
                 p { class: "page-lead match-lead",
                     "{kind}"
                     if let Some((stamp, machine)) = when {
-                        " · "
-                        if let Some((datetime, utc)) = machine {
-                            time { datetime: "{datetime}", title: "{utc}", "{stamp}" }
-                        } else {
-                            span { "{stamp}" }
+                        " "
+                        span { class: "match-when",
+                            "· "
+                            if let Some((datetime, utc)) = machine {
+                                time { datetime: "{datetime}", title: "{utc}", "{stamp}" }
+                            } else {
+                                "{stamp}"
+                            }
                         }
                     }
                 }
@@ -628,6 +647,11 @@ mod tests {
             "{html}"
         );
         assert!(html.contains("12 Nov 2026, 19:00 UTC</time>"), "{html}");
+        // The dot travels with the date: no line ends on a separator.
+        assert!(
+            html.contains("Tournament match <span class=\"match-when\">· <time"),
+            "{html}"
+        );
         // Board: both sides, the winning number marked, "to" between.
         assert!(
             html.contains("<p class=\"match-num is-win\">3</p>"),
@@ -848,6 +872,24 @@ mod tests {
         ] {
             assert!(has_decl(&board, decl), "missing {decl}: {board}");
         }
+        // The team name link on the board is a 44px target that gives the
+        // extra height back, so the board keeps the frame's line box.
+        let link = css_rule(PAGE_CSS, ".match-side h2 a {");
+        for decl in [
+            "display: inline-flex",
+            "min-width: var(--hit-target-min)",
+            "min-height: var(--hit-target-min)",
+            "margin-block: calc((1em * var(--leading-display) - var(--hit-target-min)) / 2)",
+        ] {
+            assert!(has_decl(&link, decl), "missing {decl}: {link}");
+        }
+        assert!(
+            has_decl(
+                &css_rule(PAGE_CSS, ".match-lead .match-when {"),
+                "white-space: nowrap"
+            ),
+            "{PAGE_CSS}"
+        );
         let (_, phone) = PAGE_CSS
             .split_once("@media (max-width: 820px) {")
             .expect("phone block");

@@ -134,7 +134,7 @@ const PAGE_CSS: &str = r#"
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-3);
-  margin: var(--space-4) 0 0;
+  margin: var(--space-3) 0 0;
   min-width: 0;
 }
 .team-logo {
@@ -147,16 +147,19 @@ const PAGE_CSS: &str = r#"
   background: var(--tile-bg);
   object-fit: cover;
 }
-.team-lore {
+/* Game, division and record, under the blurb lead. */
+.team-facts {
   margin: 0;
   min-width: 0;
   color: var(--text-3);
   font-family: var(--font-body);
-  font-size: var(--text-md);
-  font-style: italic;
+  font-size: var(--text-sm);
   line-height: var(--leading-body);
   overflow-wrap: anywhere;
 }
+/* Date and details as one line of text, so a phone wraps between words and
+   never leaves the date and a dot alone on the first line. */
+.team-page .entry-row .entry-meta { display: block; }
 .team-roster {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -378,7 +381,7 @@ fn render_team(t: &TeamDetailData) -> Element {
                 }
             } else {
                 ul { class: "team-roster",
-                    for m in t.roster.iter() {
+                    for m in roster_order(&t.roster) {
                         {render_roster_card(m)}
                     }
                 }
@@ -431,14 +434,35 @@ fn render_team(t: &TeamDetailData) -> Element {
     }
 }
 
+/// Captain first, as the frame lists the roster; the rest keep the API order.
+fn roster_order(roster: &[RosterMember]) -> Vec<&RosterMember> {
+    let rank = |role: &str| match role {
+        "captain" => 0,
+        "player" => 1,
+        "sub" => 2,
+        "coach" => 3,
+        _ => 4,
+    };
+    let mut ordered: Vec<&RosterMember> = roster.iter().collect();
+    ordered.sort_by_key(|m| rank(&m.team_role));
+    ordered
+}
+
 fn render_header(t: &TeamDetailData) -> Element {
-    let lore = filled(t.lore_quote.as_ref());
+    // The team's blurb is the lead, as in the frame; the facts line moves
+    // under it. With no blurb the facts are the lead.
+    let lore = filled(t.lore_quote.as_ref()).map(str::to_string);
+    let facts = team_lead(t);
+    let (lead, facts) = match lore {
+        Some(lore) => (Some(lore), facts),
+        None => (facts, None),
+    };
     let logo = filled(t.logo_url.as_ref());
     // The team's own colour, set by an admin, rings its logo.
     let logo_style = filled(t.color.as_ref())
         .map(|c| format!("border-color: {c};"))
         .unwrap_or_default();
-    let meta = (lore.is_some() || logo.is_some()).then(|| {
+    let meta = (facts.is_some() || logo.is_some()).then(|| {
         rsx! {
             div { class: "team-meta",
                 if let Some(url) = logo {
@@ -449,15 +473,15 @@ fn render_header(t: &TeamDetailData) -> Element {
                         alt: "{t.name} logo",
                     }
                 }
-                if let Some(lore) = lore {
-                    p { class: "team-lore", "“{lore}”" }
+                if let Some(facts) = facts {
+                    p { class: "team-facts", "{facts}" }
                 }
             }
         }
     });
 
     rsx! {
-        PageHeader { title: t.name.clone(), lead: team_lead(t), meta }
+        PageHeader { title: t.name.clone(), lead, meta }
     }
 }
 
@@ -500,9 +524,9 @@ fn render_match_row(team: &str, m: &TeamMatch) -> Element {
             p { class: "entry-meta",
                 if let Some(when) = when {
                     {entry_date(when)}
-                    span { aria_hidden: "true", "·" }
+                    span { aria_hidden: "true", " · " }
                 }
-                span { "{details}" }
+                "{details}"
             }
         }
     }
@@ -685,8 +709,17 @@ mod tests {
             "{html}"
         );
         assert!(html.contains("alt=\"Squad Alpha logo\""), "{html}");
+        // The blurb is the lead, as in the frame; the facts line follows it.
         assert!(
-            html.contains("<p class=\"team-lore\">“Push the cart”</p>"),
+            html.contains("<p class=\"page-lead\">Push the cart</p>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<p class=\"team-facts\">Overwatch · Division 2 · Record 1W-0L</p>"),
+            "{html}"
+        );
+        assert!(
+            html.find("page-lead").unwrap() < html.find("team-facts").unwrap(),
             "{html}"
         );
         assert_eq!(html.matches("<h1").count(), 1, "{html}");
@@ -723,6 +756,32 @@ mod tests {
         for html in [&loading, &failed, &missing] {
             assert!(!html.contains("<main"), "{html}");
         }
+    }
+
+    #[test]
+    fn captain_leads_the_roster_and_meta_wraps_as_text() {
+        let html = render(Load::Ready(TeamDetailData {
+            roster: vec![member(3, "player"), member(7, "sub"), member(1, "captain")],
+            ..team()
+        }));
+        let p1 = html.find(">Player01</a>").expect("captain");
+        let p3 = html.find(">Player03</a>").expect("player");
+        let p7 = html.find(">Player07</a>").expect("sub");
+        assert!(p1 < p3 && p3 < p7, "{html}");
+
+        // Date, a hidden dot and the details are one run of text, so a phone
+        // wraps between words, not after a lone date and dot.
+        assert!(
+            html.contains("<span aria-hidden=\"true\"> · </span>Tournament match · Route 66</p>"),
+            "{html}"
+        );
+        assert!(
+            has_decl(
+                &css_rule(PAGE_CSS, ".team-page .entry-row .entry-meta {"),
+                "display: block"
+            ),
+            "{PAGE_CSS}"
+        );
     }
 
     #[test]

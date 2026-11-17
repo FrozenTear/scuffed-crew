@@ -304,6 +304,13 @@ pub(super) const HISTORY_CSS: &str = r#"
 }
 /* The reader badge is the shared pill. It may shrink before the hero does. */
 .match-hero-line .reader-badge { flex-shrink: 1; }
+/* Wider than a phone, the rank and bans lines start under the hero, in the
+   identity column, so each row reads as one block of text beside its result
+   pill. On a phone they keep the full row under the stat strip. */
+@media (min-width: 721px) {
+  .match-list .match-card .match-rank,
+  .match-list .match-card .match-bp { grid-column: 2 / -1; }
+}
 .history-no-match {
   display: flex;
   flex-direction: column;
@@ -316,6 +323,18 @@ pub(super) const HISTORY_CSS: &str = r#"
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
+
+    #[test]
+    fn rank_and_bans_lines_sit_in_the_identity_column_above_phone_width() {
+        let wide = &HISTORY_CSS[HISTORY_CSS.find("@media (min-width: 721px)").unwrap()..];
+        let body = &wide[..wide.find('}').unwrap()];
+        assert!(
+            body.contains(".match-list .match-card .match-rank"),
+            "{body}"
+        );
+        assert!(body.contains(".match-list .match-card .match-bp"), "{body}");
+        assert!(body.contains("grid-column: 2 / -1"), "{body}");
+    }
 
     fn row(map: &str, mode: &str, role: &str, hero: &str, outcome: &str) -> PersonalMatch {
         PersonalMatch {

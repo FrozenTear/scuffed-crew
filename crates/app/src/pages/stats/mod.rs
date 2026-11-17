@@ -404,6 +404,9 @@ const STATS_CSS: &str = r#"
     /* The page column is the shared PageShell (wide). The sign-in wall starts
        at its left edge, under the title, as the frame draws it. */
     .my-stats.stats-page .stats-shell > .wall { margin: 0; }
+    /* The failed and gate cards in the tabpanel start at the same left edge
+       as the tiles, the tabs and the sections under them. */
+    .my-stats .stats-panel > .wall { margin: 0; }
     .my-stats .stats-visibility-note {
         margin: var(--space-2) 0 0;
         color: var(--text-3);
@@ -837,6 +840,9 @@ const STATS_CSS: &str = r#"
         gap: var(--space-section);
         min-width: 0;
     }
+    /* The overview's flex gap already spaces the rank section. Its own
+       bottom margin (for History, which has no gap) would double it. */
+    .stats-overview > .rank-block { margin-bottom: 0; }
     /* Time on role: label, bar and percent on one line. */
     .role-split { display: grid; gap: var(--space-3); }
     .role-row {
@@ -929,13 +935,16 @@ const STATS_CSS: &str = r#"
         align-items: start;
     }
     .role-cards { display: flex; flex-direction: column; gap: var(--space-3); }
+    /* A long result ("Too few games, 3W-3L") drops under the stat line
+       instead of squeezing it to three lines; a short rate stays beside it. */
     .role-card {
         display: flex;
+        flex-wrap: wrap;
         align-items: center;
-        gap: var(--space-3);
+        gap: var(--space-2) var(--space-3);
         border-inline-start: var(--space-1) solid transparent;
     }
-    .role-card-info { flex: 1; min-width: 0; }
+    .role-card-info { flex: 1 1 calc(var(--space-12) * 5); min-width: 0; }
     .role-card-name {
         font-weight: var(--font-label-weight);
         font-size: var(--text-md);
@@ -1066,6 +1075,8 @@ const STATS_CSS: &str = r#"
 
     /* Daemon settings panel */
     .daemon-settings summary {
+        box-sizing: border-box;
+        min-height: var(--hit-target-min);
         padding: var(--space-3) 0;
         color: var(--text);
         font-family: var(--font-head);
@@ -1638,12 +1649,13 @@ pub fn Stats() -> Element {
                             // Tracker download / install. The slim row already shows the
                             // notice, so this copy is only for members who have no matches.
                             div { class: "tracker-download",
-                                if !slim_tracker {
-                                    {tracker_release_notice(&tracker_notice)}
-                                }
                                 div { class: "tracker-download-head",
                                     h3 { "Get the Stat Tracker" }
                                     Pill { tone: PillTone::Info, "Linux only" }
+                                }
+                                // The heading first, then the note about it.
+                                if !slim_tracker {
+                                    {tracker_release_notice(&tracker_notice)}
                                 }
                                 p {
                                     "The tracker auto-captures your Overwatch scoreboards via OCR and uploads your stats here. "
@@ -2908,6 +2920,41 @@ mod shell_tests {
         assert!(html.contains("load role breakdown.</p>"), "{html}");
         assert!(html.contains("class=\"fetch-error__retry\""), "{html}");
         assert!(html.contains(">Retry</button>"), "{html}");
+    }
+
+    #[test]
+    fn design_pass_spacing_and_target_fixes_hold() {
+        // The daemon settings toggle is a full touch target (it measured
+        // 43px at 390).
+        let summary = css_rule(STATS_CSS, ".daemon-settings summary {");
+        assert!(
+            has_decl(&summary, "min-height: var(--hit-target-min)"),
+            "{summary}"
+        );
+        assert!(has_decl(&summary, "box-sizing: border-box"), "{summary}");
+        // The overview gap spaces the rank section once, not twice.
+        let rank = css_rule(STATS_CSS, ".stats-overview > .rank-block {");
+        assert!(has_decl(&rank, "margin-bottom: 0"), "{rank}");
+        // A failed or gate card in the tabpanel starts at the left edge.
+        let wall = css_rule(STATS_CSS, ".my-stats .stats-panel > .wall {");
+        assert!(has_decl(&wall, "margin: 0"), "{wall}");
+        // A long role result wraps under the stat line.
+        let card = css_rule(STATS_CSS, ".role-card {");
+        assert!(has_decl(&card, "flex-wrap: wrap"), "{card}");
+        let info = css_rule(STATS_CSS, ".role-card-info {");
+        assert!(
+            has_decl(&info, "flex: 1 1 calc(var(--space-12) * 5)"),
+            "{info}"
+        );
+        // The install block reads heading first, then the release note.
+        let src = include_str!("mod.rs");
+        let prod = src.split("mod match_row_tests").next().unwrap();
+        let block = &prod[prod.find("class: \"tracker-download\",").expect("block")..];
+        let head = block.find("h3 { \"Get the Stat Tracker\" }").expect("head");
+        let note = block
+            .find("{tracker_release_notice(&tracker_notice)}")
+            .expect("note");
+        assert!(head < note, "heading before the note");
     }
 
     #[test]

@@ -14,6 +14,7 @@ use serde::Deserialize;
 use crate::components::ui::{PageHeader, PageShell, PageWidth};
 use crate::components::{is_http_status, member_pending};
 use crate::hooks::use_api_with;
+use crate::pages::article_author::{ARTICLE_CSS, ARTICLE_CSS_ID, ArticleCrumb};
 use crate::pages::stats_member::{STATS_VIEWS_CSS, STATS_VIEWS_CSS_ID};
 use crate::pages::{NotFoundLink, NotFoundPanel};
 use crate::routes::Route;
@@ -41,44 +42,18 @@ const MISSING_TEXT: &str = "This game is not in your match history. It may have 
 /// `PageShell` (wide), the title block is the shared page header, and the
 /// tiles and cards follow the stats and match frames.
 const GAME_CSS: &str = r#"
-/* The trail of the match frame. Each link is a 44px target. */
-.game-crumb {
-  display: flex;
-  flex-wrap: nowrap;
-  align-items: center;
-  gap: var(--space-2);
-  margin: 0;
-  min-width: 0;
-  font-family: var(--font-body);
-  font-size: var(--text-sm);
-  line-height: var(--leading-ui);
-  color: var(--text-3);
-}
-.game-crumb a {
-  flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  min-height: var(--hit-target-min);
-  min-width: var(--hit-target-min);
-  color: var(--accent-text);
-  text-decoration: underline;
-}
-.game-crumb a:hover { text-decoration: none; }
-.game-crumb a:focus-visible {
-  outline: var(--focus-ring-width) solid var(--focus-ring);
-  outline-offset: var(--focus-ring-offset);
-}
-.game-crumb [aria-current="page"] { color: var(--text); }
 /* A long map name wraps in the title instead of being cut. */
 .game-page .page-header h1 .stat-value-text {
   overflow: visible;
   white-space: normal;
 }
+/* "Hybrid · Ana · Support · date": the dot sits one small space from each
+   word, as the lead line of the match frame reads. */
 .game-page .game-meta {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-1) var(--space-2);
+  gap: 0 var(--space-1);
 }
 .game-result {
   display: flex;
@@ -452,16 +427,18 @@ pub fn StatsMatch(id: String) -> Element {
 
     rsx! {
         crate::styles::StyleOnce { id: "scuffed-css-pages-stats-mod-stats-css", css: super::STATS_CSS }
+        crate::styles::StyleOnce { id: ARTICLE_CSS_ID, css: ARTICLE_CSS }
         crate::styles::StyleOnce { id: STATS_VIEWS_CSS_ID, css: STATS_VIEWS_CSS }
         crate::styles::StyleOnce { id: "scuffed-css-pages-stats-game-game-css", css: GAME_CSS }
         crate::styles::StyleOnce { id: "scuffed-css-pages-stats-bans-picks-css", css: BANS_PICKS_CSS }
         crate::styles::StyleOnce { id: "scuffed-css-pages-stats-rank-css", css: RANK_CSS }
         PageShell { width: PageWidth::Wide, class: "game-page",
             if show_back {
-                nav { class: "game-crumb", aria_label: "Breadcrumb",
-                    Link { to: Route::Stats {}, "Your stats" }
-                    span { aria_hidden: "true", "/" }
-                    span { aria_current: "page", "This game" }
+                // The shared trail of the match frame (44px links).
+                ArticleCrumb {
+                    to: Route::Stats {},
+                    section: "Your stats".to_string(),
+                    current: "This game".to_string(),
                 }
             }
             {body}
@@ -791,6 +768,16 @@ mod tests {
             game_time(&row("a", &[]).played_at),
             "15 Mar 2026, 12:00 UTC"
         );
+    }
+
+    #[test]
+    fn the_trail_is_the_shared_breadcrumb_not_a_local_copy() {
+        // `StatsMatch` renders `ArticleCrumb` (ARTICLE_CSS), as the match and
+        // tournament pages do, so the game page keeps no crumb rules of its own.
+        assert!(!GAME_CSS.contains("crumb"), "{GAME_CSS}");
+        let meta = &GAME_CSS[GAME_CSS.find(".game-page .game-meta {").unwrap()..];
+        let meta = &meta[..meta.find('}').unwrap()];
+        assert!(meta.contains("gap: 0 var(--space-1)"), "{meta}");
     }
 
     #[test]

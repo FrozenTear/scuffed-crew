@@ -11,7 +11,7 @@ pub const BRACKET_STYLES: &str = r#"
   display: flex;
   align-items: center;
   gap: var(--space-2);
-  margin: 0;
+  margin: 0 0 var(--space-3);
   min-width: 0;
   color: var(--text-3);
   font-family: var(--font-body);
@@ -118,9 +118,10 @@ pub const BRACKET_STYLES: &str = r#"
 }
 .bracket-slot p + p { margin-top: var(--space-1); }
 /* The winner is the heavier name, the mark points at it and the result line
-   says "Won": never colour alone. */
+   says "Won": never colour alone. An open slot ("To be decided") keeps the
+   team ink, as the frames draw the champion slot; only the result line under
+   it is muted. */
 .slot-team.is-winner { font-weight: var(--font-label-weight); }
-.slot-team.is-open { color: var(--text-3); }
 .bracket-slot .slot-meta {
   display: flex;
   align-items: center;
@@ -264,6 +265,23 @@ mod tests {
             has_decl(&bracket, "padding-inline-end: var(--space-8)"),
             "{bracket}"
         );
+    }
+
+    #[test]
+    fn hint_keeps_the_frame_gap_above_the_scroller() {
+        // Browser pass: the frame puts `--space-3` under the hint on top of
+        // the page gap; the app had none, so the round labels sat 12px high.
+        let hint = css_rule(BRACKET_STYLES, ".bracket-hint {");
+        assert!(has_decl(&hint, "margin: 0 0 var(--space-3)"), "{hint}");
+    }
+
+    #[test]
+    fn open_slot_is_not_muted_like_the_result_line() {
+        // The frames draw "To be decided" in the champion slot in the team
+        // ink; only the line under it is muted.
+        assert!(!BRACKET_STYLES.contains(".slot-team.is-open"));
+        let meta = css_rule(BRACKET_STYLES, ".bracket-slot .slot-meta {");
+        assert!(has_decl(&meta, "color: var(--text-3)"), "{meta}");
     }
 
     #[test]

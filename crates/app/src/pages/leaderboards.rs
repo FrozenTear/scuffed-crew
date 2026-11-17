@@ -129,7 +129,10 @@ const PAGE_CSS: &str = r#"
 /* The table itself is the shared stats table (`STATS_VIEWS_CSS`); only the
    columns this page adds are styled here. */
 .lb-page .stats-table .lb-rank { font-variant-numeric: tabular-nums; }
-.lb-page .stats-table thead th.rate { color: var(--table-row-fg); }
+/* The sorted column carries body ink, header and cells, as the frame's
+   Win rate column does. The other numbers stay muted. */
+.lb-page .stats-table thead th[aria-sort],
+.lb-page .stats-table tbody td.num.is-sorted { color: var(--table-row-fg); }
 .lb-record.is-muted { color: var(--table-row-muted); }
 .lb-page .stats-table .lb-player {
   color: var(--text);
@@ -152,6 +155,18 @@ const PAGE_CSS: &str = r#"
     align-items: stretch;
   }
   .lb-page .stats-table .rate { width: calc(var(--space-8) * 3); }
+  /* Hero and Season share one row, as in the phone frame. Each column is
+     as wide as its picker needs and both shrink to fit; the select gives
+     way, never the label. */
+  .lb-filters {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, max-content));
+    justify-content: start;
+  }
+  .lb-filters .hero-select:has(> select),
+  .lb-filters .season-select:has(> select) { flex-wrap: nowrap; }
+  .lb-filters .ui-label { flex: none; }
+  .lb-filters select.ui-field { flex: 0 1 auto; }
 }
 "#;
 
@@ -659,7 +674,12 @@ fn BoardPanel(
                             }
                             tbody {
                                 for (i , r) in page_slice(ranked, current, BOARD_PAGE_SIZE).iter().enumerate() {
-                                    BoardRow { key: "{r.member_id}", row: r.clone(), rank: first_rank + i }
+                                    BoardRow {
+                                        key: "{r.member_id}",
+                                        row: r.clone(),
+                                        rank: first_rank + i,
+                                        sorted: board.clone(),
+                                    }
                                 }
                             }
                         }
@@ -724,9 +744,23 @@ fn BoardPanel(
 /// One player. With a `rank` it is a row of the ranked table; without one it
 /// is a row of the unranked list, which has no rank column.
 #[component]
-fn BoardRow(row: LeaderboardRow, #[props(default)] rank: Option<usize>) -> Element {
+fn BoardRow(
+    row: LeaderboardRow,
+    #[props(default)] rank: Option<usize>,
+    /// The board this ranked row is sorted by. Its number cell takes body
+    /// ink. Empty in the unranked list, which is not a ranking.
+    #[props(default)]
+    sorted: String,
+) -> Element {
     let wr = wr_cell(&row);
     let kd = format!("{:.2}", row.kd);
+    let num_class = |metric: &str| {
+        if sorted == metric {
+            "num is-sorted"
+        } else {
+            "num"
+        }
+    };
     rsx! {
         tr {
             if let Some(rank) = rank {
@@ -738,7 +772,7 @@ fn BoardRow(row: LeaderboardRow, #[props(default)] rank: Option<usize>) -> Eleme
                     "{row.display_name}"
                 }
             }
-            td { class: "num", "{row.games}" }
+            td { class: num_class("games"), "{row.games}" }
             td { class: "rate",
                 if let Some(pct) = rate_bar_pct(&wr) {
                     div { class: "stats-rate",
@@ -751,7 +785,7 @@ fn BoardRow(row: LeaderboardRow, #[props(default)] rank: Option<usize>) -> Eleme
                     span { class: if wr.muted { "lb-record is-muted" } else { "lb-record" }, "{wr.text}" }
                 }
             }
-            td { class: "num", "{kd}" }
+            td { class: num_class("kd"), "{kd}" }
         }
     }
 }
@@ -1247,6 +1281,57 @@ mod tests {
             "{html}"
         );
         assert_eq!(html.matches("aria-sort").count(), 1, "{html}");
+    }
+
+    /// Design pass bug: the Win rate header kept body ink on the K/D and
+    /// Games boards. The ink now follows the sorted column, header and cells.
+    #[test]
+    fn sorted_column_ink_follows_the_board() {
+        let rule = css_rule(PAGE_CSS, ".lb-page .stats-table tbody td.num.is-sorted {");
+        assert!(has_decl(&rule, "color: var(--table-row-fg)"), "{rule}");
+        assert!(PAGE_CSS.contains(".lb-page .stats-table thead th[aria-sort],"));
+        assert!(!PAGE_CSS.contains("th.rate"), "no fixed Win rate highlight");
+
+        let kd = render_case(PanelCase::new("kd", rows_view("kd", &players(3))));
+        assert_eq!(
+            kd.matches("<td class=\"num is-sorted\">").count(),
+            3,
+            "{kd}"
+        );
+        assert!(kd.contains("<td class=\"num is-sorted\">1.00</td>"), "{kd}");
+        assert!(kd.contains("<td class=\"num\">20</td>"), "{kd}");
+
+        let games = render_case(PanelCase::new("games", rows_view("games", &players(3))));
+        assert!(
+            games.contains("<td class=\"num is-sorted\">20</td>"),
+            "{games}"
+        );
+        assert!(games.contains("<td class=\"num\">1.00</td>"), "{games}");
+
+        // Win rate board: the rate column is the sorted one, so both
+        // number columns stay muted, as in the frame.
+        let wr = render_case(PanelCase::new("winrate", rows_view("winrate", &players(3))));
+        assert!(!wr.contains("is-sorted"), "{wr}");
+    }
+
+    /// Design pass bug: at 390 the Hero and Season pickers each took a row.
+    /// The phone frame has both on one row.
+    #[test]
+    fn phone_pickers_share_one_row() {
+        let phone = &PAGE_CSS[PAGE_CSS.find("@media (max-width: 820px)").unwrap()..];
+        let filters = css_rule(phone, ".lb-filters {");
+        assert!(has_decl(&filters, "display: grid"), "{filters}");
+        assert!(
+            has_decl(
+                &filters,
+                "grid-template-columns: repeat(2, minmax(0, max-content))"
+            ),
+            "{filters}"
+        );
+        let select = css_rule(phone, ".lb-filters select.ui-field {");
+        assert!(has_decl(&select, "flex: 0 1 auto"), "{select}");
+        let label = css_rule(phone, ".lb-filters .ui-label {");
+        assert!(has_decl(&label, "flex: none"), "{label}");
     }
 
     #[test]
