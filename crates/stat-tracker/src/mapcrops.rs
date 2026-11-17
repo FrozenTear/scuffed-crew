@@ -13,15 +13,16 @@
 //! report builder yet.
 //!
 //! Training crops (opt-in): while the member's `map_name` consent on the
-//! site is on, the daemon copies a crop it just wrote into the training
-//! crop outbox (`sync::keep_map_name_crop`), which sends it to the site,
-//! but only from a Tab the tracker keeps for its game (`prepare_capture_row`
-//! returns Store) of a tracked mode. A crop from a rejected capture, from a
-//! Tab `prepare_capture_row` drops (an untracked map with no open game, a
-//! PvE Adlersbrunn board), or from a game of an untracked mode (Practice,
-//! Workshop, Deathmatch and the like, which never upload), is kept here and
-//! never copied. With
-//! that consent off nothing is copied and nothing here leaves the machine.
+//! site is on, the daemon copies a slot 1 crop it just wrote into the
+//! training crop outbox (`sync::keep_map_name_crop`), which sends it to
+//! the site, but only from a Tab the tracker keeps for its game
+//! (`prepare_capture_row` returns Store) of a tracked mode. A crop from a
+//! rejected capture, from a Tab `prepare_capture_row` drops (an untracked
+//! map with no open game, a PvE Adlersbrunn board), or from a game of an
+//! untracked mode (Practice, Workshop, Deathmatch and the like, which never
+//! upload), is kept here and never copied. Slot 2 is never copied: it is a
+//! near duplicate of slot 1. With that consent off nothing is copied and
+//! nothing here leaves the machine.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -42,6 +43,7 @@ const SECOND_CROP_AFTER: Duration = Duration::from_secs(60);
 pub struct MapcropJob {
     dir: PathBuf,
     file_name: String,
+    slot: u8,
     image: DynamicImage,
 }
 
@@ -72,6 +74,7 @@ pub fn prepare_mapcrop(
     Some(MapcropJob {
         dir,
         file_name,
+        slot,
         image,
     })
 }
@@ -80,6 +83,12 @@ impl MapcropJob {
     /// Where [`commit_mapcrop`] writes this crop.
     pub fn path(&self) -> PathBuf {
         self.dir.join(&self.file_name)
+    }
+
+    /// The game's crop slot: 1 for the first Tab whose label has text, 2
+    /// for the later one at least 60 seconds after it.
+    pub fn slot(&self) -> u8 {
+        self.slot
     }
 }
 

@@ -958,9 +958,10 @@ pub(crate) async fn handle_capture(
             outcome_label = staged.outcome_label.clone();
             parsed.outcome = outcome_label.clone();
             let target_session = staged.target_session.clone();
-            // This board's session, including a split's new game. The first
-            // Tab that still has the map label wins; later Tabs no-op. It is
-            // written once the row is decided, below.
+            // This board's session, including a split's new game. Slot 1 and
+            // slot 2 (60 s or more later) both write to the local debug
+            // folder once the row is decided, below; only slot 1 is offered
+            // for training.
             let map_label_crop = prepare_map_label_crop(data_dir, &target_session, &frame_img);
             if split {
                 tracing::info!(
@@ -1307,6 +1308,9 @@ pub(crate) async fn handle_capture(
                 own_row,
                 team_size,
                 hero: source.is_authority().then_some(parsed.hero.as_str()),
+                damage: Some(parsed.damage),
+                healing: Some(parsed.healing),
+                mitigation: Some(parsed.mitigation),
             };
             archive_tab_training_crops(data_dir, &target_session, &frame_img, crop_source);
 

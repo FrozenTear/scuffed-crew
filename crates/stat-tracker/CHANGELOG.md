@@ -15,6 +15,16 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## Unreleased
+
+Digit training crops now wait for a Tab where your damage, healing or mitigation in Overwatch has reached 1000, instead of saving the first spawn board, which is mostly zeros. Training now keeps only the first map banner of a game.
+
+### Highlights
+
+- A short game that never reaches 1000 in damage, healing or mitigation still records as before. It just sends no digit set.
+- A Tab under 1000 does not use up the game's digit set, so a later Tab of the same game can still send one. Each game still sends at most one set.
+- The second map banner of a game, a nearly identical crop taken a minute after the first, is kept only in the local debug folder and is no longer sent for training.
+
 ## 0.6.0-alpha.4
 
 On the see-through 5v5 Tab board in Overwatch, names of other players behind the board could show in the stat columns of the report's scoreboard picture. The picture now keeps only the digits of each row (the white numbers and the grey zeros) on one flat colour. Hero portraits, perk icons, the edge of the board and anything drawn over a row outside its numbers, such as a perk tooltip, are filled. The nameplates behind the board are dark through it, so they are not kept. Light text drawn right over the numbers can still show. Report kits saved before this fix are no longer sent.

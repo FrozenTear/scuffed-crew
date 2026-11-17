@@ -325,10 +325,10 @@ pub(crate) fn prepare_map_label_crop(
 /// Write a Tab's map-label crop on a blocking thread, once
 /// [`prepare_capture_row`] decided its `row`. The handle is for tests.
 ///
-/// The crop is kept either way. It is also offered to the training crop
-/// outbox (`sync::keep_map_name_crop`), which keeps a copy only while the
-/// site's last answer has `map_name` consent on, only when
-/// [`offers_map_crop_for_training`] says so.
+/// The crop is kept either way. Slot 1 is also offered to the training
+/// crop outbox (`sync::keep_map_name_crop`), which keeps a copy only while
+/// the site's last answer has `map_name` consent on, only when
+/// [`offers_map_crop_for_training`] says so. Slot 2 never is.
 pub(crate) fn commit_tab_map_label_crop(
     crop: Option<MapLabelCrop>,
     row: PreparedRow,
@@ -353,8 +353,9 @@ pub(crate) fn offers_map_crop_for_training(
 }
 
 /// Write `crop` on a blocking thread, and offer it for training only with
-/// `for_training`. A rejected capture never is: it may show the kill feed
-/// there.
+/// `for_training` and only for slot 1: slot 2 is a near duplicate of it a
+/// minute later, kept for local debug only. A rejected capture is never
+/// offered: it may show the kill feed there.
 fn write_map_label_crop(
     crop: Option<MapLabelCrop>,
     for_training: bool,
@@ -362,6 +363,7 @@ fn write_map_label_crop(
     let crop = crop?;
     Some(tokio::task::spawn_blocking(move || {
         let path = crop.job.path();
+        let for_training = for_training && crop.job.slot() == 1;
         if mapcrops::commit_mapcrop(crop.job) && for_training {
             let (width, height) = crop.size;
             sync::keep_map_name_crop(&crop.data_dir, &crop.session_id, &path, width, height);

@@ -512,3 +512,61 @@ async fn the_tick_leaves_the_files_to_its_task() {
         "the task dropped the crops kept for the other website"
     );
 }
+
+/// Age a game's slot 1 map crop past the 60 s wait, so the next Tab writes
+/// slot 2.
+fn age_first_map_crop(dir: &std::path::Path, session: &str) {
+    let path = dir
+        .join("debug")
+        .join("mapcrops")
+        .join(format!("{session}-1920x1080-1.png"));
+    let file = std::fs::File::options().write(true).open(&path).unwrap();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
+    file.set_modified(old).unwrap();
+}
+
+/// Training keeps one map banner per game: slot 1. Slot 2, a near
+/// duplicate a minute later, is still written to `debug/mapcrops` but
+/// never copied to the training outbox.
+#[tokio::test]
+async fn training_keeps_only_the_first_map_banner_and_debug_keeps_both_slots() {
+    let dir = tempfile::tempdir().unwrap();
+    map_name_consent_on(dir.path());
+    let queued = || sync::queued_crops(dir.path(), sync::UploadKind::MapName).len();
+    let crops = dir.path().join("debug").join("mapcrops");
+
+    archive_map_label_crop(dir.path(), "sess-banner", &labelled_frame())
+        .expect("slot 1 to write")
+        .await
+        .unwrap();
+    assert!(crops.join("sess-banner-1920x1080-1.png").is_file());
+    assert_eq!(queued(), 1, "slot 1 is offered for training");
+
+    age_first_map_crop(dir.path(), "sess-banner");
+    archive_map_label_crop(dir.path(), "sess-banner", &labelled_frame())
+        .expect("slot 2 to write")
+        .await
+        .unwrap();
+    assert!(crops.join("sess-banner-1920x1080-2.png").is_file());
+    assert_eq!(debug_crops_of(dir.path(), "sess-banner"), 2);
+    assert_eq!(queued(), 1, "slot 2 is not offered for training");
+
+    // Debug only (a rejected capture with debug on): both slots on disk,
+    // nothing offered.
+    for _ in 0..2 {
+        archive_rejected_map_label_crop(
+            true,
+            dir.path(),
+            "sess-dbg",
+            &labelled_frame(),
+            "unreadable",
+        )
+        .expect("debug on saves the crop")
+        .await
+        .unwrap();
+        age_first_map_crop(dir.path(), "sess-dbg");
+    }
+    assert!(crops.join("sess-dbg-1920x1080-1.png").is_file());
+    assert!(crops.join("sess-dbg-1920x1080-2.png").is_file());
+    assert_eq!(queued(), 1);
+}

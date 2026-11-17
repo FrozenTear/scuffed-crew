@@ -26,6 +26,10 @@
 //!   row verdict names the Tab's row and is confirmed ([`Trust::Sure`]: two
 //!   voices agree on it, such as the seed and the highlight), and only when the
 //!   chat stack walk and the reach rule show no chat line can reach the row.
+//!   Only from a Tab whose own damage, healing or mitigation has reached
+//!   [`STAT_DIGITS_MIN_BIG_STAT`], so the set is not the spawn board of
+//!   zeros. A Tab under it is not marked offered: a later Tab of the same
+//!   game retries, and a game that never reaches it keeps no set.
 //!   ocr-v1 has no own row verdict (its row is a name match or the brightest
 //!   row, which a hover or a party tint can light on another player's row),
 //!   so it offers none.
@@ -70,6 +74,12 @@ pub(crate) struct TabCropSource<'a> {
     /// `None` when this Tab's hero authority abstained: the stored hero is
     /// then a held one, which a split can carry over from the last game.
     pub(crate) hero: Option<&'a str>,
+    /// The stored row's damage, healing and mitigation (after the capture
+    /// gate), for the [`STAT_DIGITS_MIN_BIG_STAT`] gate. `None` for a value
+    /// not read, which does not meet the gate; `Some(0)` is a read of zero.
+    pub(crate) damage: Option<u32>,
+    pub(crate) healing: Option<u32>,
+    pub(crate) mitigation: Option<u32>,
 }
 
 /// A `hero_icon` crop's box in the frame and the panel read behind it.
@@ -126,7 +136,10 @@ pub(crate) fn archive_tab_training_crops(
     let hero = sync::training_kind_on(data_dir, HeroIcon)
         .then(|| hero_icon_crop(frame, session_id, source.panel, source.pack_hero))
         .flatten();
+    // A Tab under the big stat gate is not marked offered, so a later Tab
+    // of this game retries.
     let digit_row = (sync::training_kind_on(data_dir, StatDigits)
+        && stat_digits_qualify(source.damage, source.healing, source.mitigation)
         && !offered(&offer_key(session_id, StatDigits, "")))
     .then(|| stat_digit_row(source.row, source.own_row))
     .flatten();
@@ -166,6 +179,26 @@ pub(crate) fn stat_digit_row(row: Option<usize>, own_row: Option<OwnRow>) -> Opt
     own_row
         .is_some_and(|own| own.row == Some(row) && own.trust == Trust::Sure)
         .then_some(row)
+}
+
+/// Least own damage, healing or mitigation a Tab needs before its
+/// `stat_digits` set is cut, so the set has multi-digit cells and is not
+/// the spawn board of zeros. Scuffed Vision tunes this from the
+/// benchmark. A Tab below it is not marked offered, so a later Tab of the
+/// same game can retry; a game that never reaches it saves no set.
+pub(crate) const STAT_DIGITS_MIN_BIG_STAT: u32 = 1000;
+
+/// Whether a Tab's own `damage`, `healing` or `mitigation` reaches
+/// [`STAT_DIGITS_MIN_BIG_STAT`]. A value not read (`None`) does not.
+pub(crate) fn stat_digits_qualify(
+    damage: Option<u32>,
+    healing: Option<u32>,
+    mitigation: Option<u32>,
+) -> bool {
+    [damage, healing, mitigation]
+        .into_iter()
+        .flatten()
+        .any(|n| n >= STAT_DIGITS_MIN_BIG_STAT)
 }
 
 /// The career panel's portrait card in `frame`: only when the panel read

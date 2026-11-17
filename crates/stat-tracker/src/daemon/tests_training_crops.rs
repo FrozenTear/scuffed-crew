@@ -170,8 +170,8 @@ fn own(row: usize, trust: Trust) -> OwnRow {
     }
 }
 
-/// A new reader Tab: its own row verdict names row 1 and is sure, and its
-/// hero authority named Ana.
+/// A new reader Tab: its own row verdict names row 1 and is sure, its
+/// hero authority named Ana, and its damage meets the digit gate.
 fn source<'a>(panel: Option<&'a PanelRead>, pack_hero: Option<&'a str>) -> TabCropSource<'a> {
     TabCropSource {
         panel,
@@ -180,6 +180,9 @@ fn source<'a>(panel: Option<&'a PanelRead>, pack_hero: Option<&'a str>) -> TabCr
         own_row: Some(own(1, Trust::Sure)),
         team_size: 5,
         hero: Some("Ana"),
+        damage: Some(STAT_DIGITS_MIN_BIG_STAT),
+        healing: Some(0),
+        mitigation: Some(0),
     }
 }
 
@@ -1465,6 +1468,8 @@ async fn a_crop_that_cannot_be_written_warns_and_the_tab_still_records() {
 
 #[path = "tests_training_crops_bytecap.rs"]
 mod bytecap;
+#[path = "tests_training_crops_digit_timing.rs"]
+mod digit_timing;
 #[path = "tests_training_crops_miss.rs"]
 mod miss;
 #[path = "tests_training_crops_top_band.rs"]
