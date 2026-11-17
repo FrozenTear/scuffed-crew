@@ -1000,8 +1000,10 @@ mod tests {
             assert_eq!(*out.image.get_pixel(1300, y), FILL);
         }
         // the digits of every verified row are copied: the output reads
-        // back the non-zero numbers the source reads (the synthetic grey
-        // zeros lose their ring, see tests_measured::assert_numbers_read)
+        // back the non-zero numbers the source reads (this 6v6 board draws
+        // its grey zeros as soft template glyphs, which lose their ring;
+        // the 5v5 board draws them like real ones, see
+        // tests_measured::assert_numbers_read)
         let (n_src, n_out) = (cells::output_ink(&crop), cells::output_ink(&out.image));
         let mut numbers = 0;
         for r in b.rows.iter().filter(|r| r.verified) {

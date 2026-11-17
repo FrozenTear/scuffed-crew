@@ -1200,19 +1200,17 @@ fn the_fallback_output_reads_back_like_its_source() {
     }
 }
 
-/// Every non-zero number of [`synth::board_5v5`] reads back from `img`.
-/// The synthetic grey zeros (anti-aliased template glyphs at grey 172) lose
-/// their ring under the light test and can read as 3: the 5v5 row of zeros
-/// does. Real grey zeros keep it, see
+/// Every number of [`synth::board_5v5`], grey zeros included, reads back
+/// from `img`. The board draws its zeros like real dim zeros (a flat stroke
+/// at the real grey, see `synth::Ink::Flat`), so they keep their ring under
+/// the light test as the real crops do in
 /// `real_grey_zeros_read_back_from_the_fallback`.
 fn assert_numbers_read(img: &RgbImage, b: &board::Board, what: &str) {
     let got = read_rows(img, b);
     let want = values_5v5();
     assert_eq!(got.len(), want.len(), "{what}");
     for (i, (g, w)) in got.iter().zip(&want).enumerate() {
-        for k in (0..6).filter(|&k| w[k] != Some(0)) {
-            assert_eq!(g[k], w[k], "{what} row {i} col {k}");
-        }
+        assert_eq!(g, w, "{what} row {i}");
     }
 }
 
@@ -1271,4 +1269,45 @@ fn real_grey_zeros_read_back_from_the_fallback() {
     let read = |img: &RgbImage| cells::read_row(&cells::output_ink(img), &b, &row);
     assert_eq!(read(&src), [Some(0); 6], "source");
     assert_eq!(read(&out.image), [Some(0); 6], "output");
+}
+
+/// Fail safe: a see-through 5v5 board whose geometry cannot be measured
+/// (here the world behind breaks up its header strip) keeps no picture at
+/// all, so the kit saves the reads and no `scoreboard.png`.
+#[test]
+fn a_see_through_5v5_board_that_cannot_be_measured_keeps_no_picture() {
+    let (mut src, _) = see_through_5v5();
+    for y in 0..synth::T1_5 {
+        for x in (0..synth::R5).filter(|x| x % 9 < 4) {
+            let v = ((x * 37 + y * 91) % 97) as u8;
+            src.put_pixel(x, y, image::Rgb([60 + v, 90 + v / 2, 40 + v]));
+        }
+    }
+    let out = super::blank_crop(&src, Some(5), super::Chat::None);
+    assert!(out.board.is_err());
+    assert!(!out.has_picture());
+    assert!(out.image.pixels().all(|p| *p == super::FILL));
+}
+
+/// A half-drawn 5v5 board never shows a name, whatever it keeps.
+#[test]
+fn a_half_drawn_5v5_board_shows_no_name() {
+    for drawn in 0..5 {
+        let frame = synth::tab_frame(synth::Teams::Five, 2560, drawn);
+        let out = super::blanked_scoreboard(&frame, Some(5));
+        for (row, (x0, y0, x1, y1)) in synth::name_boxes_5v5().into_iter().enumerate() {
+            if row % 5 >= drawn {
+                continue;
+            }
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    assert_eq!(
+                        *out.image.get_pixel(x, y),
+                        super::FILL,
+                        "{drawn} ({x}, {y})"
+                    );
+                }
+            }
+        }
+    }
 }
