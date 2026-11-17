@@ -99,8 +99,9 @@ impl BrandDraft {
 
     /// True when this draft differs from what the server stored, so
     /// leaving the page would drop it.
-    /// Two spellings of one colour (`#46D8A4`, `46d8a4`, `#46d8a4`) are
-    /// the same accent, so retyping the stored value is not an edit.
+    /// Two spellings of one colour (upper or lower case, with or without the
+    /// leading `#`, short or long form) are the same accent, so retyping the
+    /// stored value is not an edit.
     fn is_unsaved(&self, saved: &SavedBrand) -> bool {
         let stored = Self::from_saved(saved);
         let same_accent = match (normalize_hex(&self.accent), normalize_hex(&stored.accent)) {

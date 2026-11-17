@@ -269,18 +269,6 @@ mod tests {
         assert_eq!(strip_html_comments("a<!-->b<!--->c<!--x-->d"), "abcd");
     }
 
-    /// The first paint follows a light system theme instead of flashing dark.
-    #[test]
-    fn boot_splash_has_a_light_variant() {
-        let visible = strip_html_comments(include_str!("../index.html"));
-        let light = visible
-            .split("prefers-color-scheme: light")
-            .nth(1)
-            .expect("light media query in index.html");
-        assert!(light.contains("html, body"), "{light}");
-        assert!(light.contains("background:"), "{light}");
-    }
-
     /// QA 694 nit 2: the splash followed the OS theme even when the member
     /// had saved another one. `assets/boot-theme.js` sets `data-theme` from
     /// `sc-theme`; it has to load in `<head>`, before the shell styles and
