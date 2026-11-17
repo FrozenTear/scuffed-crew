@@ -137,8 +137,13 @@ pub const CUSTOMISE_CSS: &str = r#"
     .customise-choice:focus-within:not(:has(input:focus-visible)) {
         outline: none;
     }
+    /* A locked choice still tells the admin which font the site uses, so
+       its label keeps AA text contrast. The lock reads from the plain
+       surface, the not-allowed cursor and the note under the row; the dot
+       still marks the selected one. */
     .customise-choice.is-locked {
-        color: var(--text-disabled);
+        color: var(--text-3);
+        background: var(--surface);
         border-color: var(--border);
         cursor: not-allowed;
     }
@@ -412,6 +417,41 @@ mod tests {
             .unwrap_or_else(|| panic!("no rule for {selector}"))
             + open.len();
         &css[start..start + css[start..].find('}').expect("end of rule")]
+    }
+
+    /// QA 694 nit 10: the locked font chip read 2.94:1 (dark) and 3.04:1
+    /// (light) in `--text-disabled` on the selected fill. It shows the font
+    /// the site uses, so it keeps AA: `--text-3` on the plain surface, for
+    /// the selected chip too.
+    #[test]
+    fn locked_choice_label_keeps_aa_text_contrast() {
+        use crate::theme::brand::{BrandConfig, TEST_SWEEP_ACCENTS, contrast_ratio};
+        use crate::theme::tokens::{resolved_tokens, theme_css};
+
+        let base = CUSTOMISE_CSS
+            .split_once("@media (forced-colors: active)")
+            .expect("forced colours block")
+            .0;
+        let locked = rule(base, ".customise-choice.is-locked");
+        assert!(locked.contains("color: var(--text-3);"), "{locked}");
+        assert!(locked.contains("background: var(--surface);"), "{locked}");
+        assert!(!locked.contains("--text-disabled"), "{locked}");
+        // It comes after the selected rule, so it wins for a locked selected
+        // chip (same specificity).
+        let selected_at = base
+            .find(".customise-choice.is-selected {")
+            .expect("selected");
+        let locked_at = base.find(".customise-choice.is-locked {").expect("locked");
+        assert!(selected_at < locked_at);
+
+        for accent in TEST_SWEEP_ACCENTS {
+            let css = theme_css(&BrandConfig::from_settings(accent, accent));
+            for theme in ["dark", "light"] {
+                let tokens = resolved_tokens(&css, theme);
+                let ratio = contrast_ratio(&tokens["--text-3"], &tokens["--surface"]);
+                assert!(ratio >= 4.5, "{theme} {accent} {ratio:.2}");
+            }
+        }
     }
 
     /// The selected choice must differ from the others by more than colour

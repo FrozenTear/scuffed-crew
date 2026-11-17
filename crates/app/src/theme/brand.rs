@@ -281,7 +281,11 @@ pub fn normalize_hex(raw: &str) -> Option<String> {
 /// the derivation aims for.
 pub const AA_TEXT: f64 = 4.5;
 
-/// The live contrast check for one theme scope: the two pairs the brand
+/// WCAG AA for non-text shapes (1.4.11). A primary button or the nav mark
+/// is an accent fill with no border, so the fill itself is its edge.
+pub const AA_NON_TEXT: f64 = 3.0;
+
+/// The live contrast check for one theme scope: the three pairs the brand
 /// settings page shows, measured on the derived roles.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SchemeCheck {
@@ -291,18 +295,32 @@ pub struct SchemeCheck {
     pub ink_on_accent: f64,
     /// `--accent-text` on the page background `--bg`.
     pub accent_on_bg: f64,
+    /// `--accent-solid` on the surface it stands out from least: the page
+    /// background or a card. Below [`AA_NON_TEXT`] a primary button has no
+    /// visible edge.
+    pub fill_on_surface: f64,
 }
 
 impl SchemeCheck {
     fn new(roles: AccentRoles, scheme: Scheme) -> Self {
         let ink_on_accent = contrast_ratio(&roles.on_accent, &roles.solid);
         let accent_on_bg = contrast_ratio(&roles.text, scheme.surfaces()[0]);
+        let fill_on_surface = scheme
+            .surfaces()
+            .iter()
+            .map(|surface| contrast_ratio(&roles.solid, surface))
+            .fold(f64::INFINITY, f64::min);
         Self {
             scheme,
             roles,
             ink_on_accent,
             accent_on_bg,
+            fill_on_surface,
         }
+    }
+
+    pub fn fill_passes(&self) -> bool {
+        self.fill_on_surface >= AA_NON_TEXT
     }
 
     pub fn ink_passes(&self) -> bool {
@@ -314,7 +332,7 @@ impl SchemeCheck {
     }
 
     pub fn passes(&self) -> bool {
-        self.ink_passes() && self.text_passes()
+        self.ink_passes() && self.text_passes() && self.fill_passes()
     }
 
     fn theme_word(&self) -> &'static str {
@@ -326,7 +344,7 @@ impl SchemeCheck {
 }
 
 /// Both theme scopes for one brand config. Save is blocked unless every
-/// pair reaches [`AA_TEXT`].
+/// text pair reaches [`AA_TEXT`] and the fill reaches [`AA_NON_TEXT`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct AccentCheck {
     pub dark: SchemeCheck,
@@ -360,17 +378,23 @@ impl AccentCheck {
                     "Ink on this accent does not reach 4.5:1 in the {theme} preview."
                 ));
             }
+            if !check.fill_passes() {
+                return Some(format!(
+                    "Buttons in this accent do not reach 3:1 against the {theme} page and cards, so they lose their edge."
+                ));
+            }
         }
         None
     }
 }
 
 /// A ratio as the contrast lines print it: one decimal, rounded. A pair
-/// just under the floor is rounded down instead, so a failing pair never
-/// reads as `4.5:1`.
+/// just under its floor is rounded down instead, so a failing pair never
+/// reads as `4.5:1` (text) or `3.0:1` (fill).
 pub fn format_ratio(ratio: f64) -> String {
     let rounded = (ratio * 10.0).round() / 10.0;
-    let shown = if ratio < AA_TEXT && rounded >= AA_TEXT {
+    let just_under = |floor: f64| ratio < floor && rounded >= floor;
+    let shown = if just_under(AA_TEXT) || just_under(AA_NON_TEXT) {
         (ratio * 10.0).floor() / 10.0
     } else {
         rounded
@@ -394,6 +418,17 @@ pub const TEST_MINT_ACCENT: &str = MINT_DARK;
 /// A second passing accent that is not the mint and not in any token file.
 #[cfg(test)]
 pub const TEST_OTHER_ACCENT: &str = "#ff5fa2";
+/// An accent as dark as the dark page: every text pair passes, but a
+/// primary button in it has no edge, so the fill pair blocks it.
+#[cfg(test)]
+pub const TEST_EDGELESS_ACCENT: &str = "#000000";
+/// Accents for contrast sweeps: the extremes, the page colours, and the
+/// accents QA 694 measured (pale yellow, sky, lilac, mint, the defaults).
+#[cfg(test)]
+pub const TEST_SWEEP_ACCENTS: [&str; 11] = [
+    "#000000", "#ffffff", "#ffe680", "#46d8a4", "#38bdf8", "#c084fc", "#8f73ff", "#6d4aff",
+    "#ff0000", "#17171d", "#f7f7f9",
+];
 
 type Rgb = (u8, u8, u8);
 
@@ -450,8 +485,9 @@ fn passes_all(hex: &str, surfaces: &[&str], min: f64) -> bool {
     surfaces.iter().all(|s| contrast_ratio(hex, s) >= min)
 }
 
-/// `fg` at `alpha` over `bg`, as an opaque hex.
-fn composite(fg: &str, alpha: f64, bg: &str) -> String {
+/// `fg` at `alpha` over `bg`, as an opaque hex. The same mix as CSS
+/// `color-mix(in srgb, fg alpha, bg)`.
+pub(crate) fn composite(fg: &str, alpha: f64, bg: &str) -> String {
     let f = parse_rgb(fg);
     let b = parse_rgb(bg);
     let mix = |f: u8, b: u8| f64::from(f) * alpha + f64::from(b) * (1.0 - alpha);
@@ -762,6 +798,58 @@ mod tests {
         assert_eq!(format_ratio(9.87), "9.9:1");
         assert_eq!(format_ratio(4.5), "4.5:1");
         assert_eq!(format_ratio(21.0), "21.0:1");
+        // The fill floor too: a fill just under 3:1 never reads as 3.0:1.
+        assert_eq!(format_ratio(2.97), "2.9:1");
+        assert_eq!(format_ratio(3.0), "3.0:1");
+    }
+
+    /// QA 694 nit 4: an accent that matches the dark page passed the text
+    /// pairs, but the primary button and the nav mark had no edge against
+    /// the page (1.0:1). The lock now checks the fill against every surface.
+    #[test]
+    fn contrast_check_blocks_a_fill_with_no_edge() {
+        for accent in ["#000000", "#17171d", "#1f1f27", "#282831"] {
+            let check = AccentCheck::for_brand(&BrandConfig::from_settings(accent, accent));
+            assert!(check.dark.text_passes(), "{accent} text is lifted");
+            assert!(check.dark.ink_passes(), "{accent} white ink clears");
+            assert!(
+                !check.dark.fill_passes(),
+                "{accent} {}",
+                check.dark.fill_on_surface
+            );
+            assert!(check.light.passes(), "{accent} light solid clears 4.5:1");
+            assert!(!check.passes(), "{accent}");
+            assert_eq!(
+                check.fail_reason().as_deref(),
+                Some(
+                    "Buttons in this accent do not reach 3:1 against the dark page and cards, so they lose their edge."
+                ),
+                "{accent}"
+            );
+        }
+    }
+
+    /// The fill pair is measured on the least distinct surface, and the
+    /// accents the site ships keep a visible edge on all of them.
+    #[test]
+    fn fill_pair_is_the_lowest_surface_ratio() {
+        for brand in [
+            BrandConfig::product_default(),
+            BrandConfig::pending(),
+            BrandConfig::from_settings(MINT_DARK, MINT_DARK),
+            BrandConfig::from_settings(TEST_OTHER_ACCENT, TEST_OTHER_ACCENT),
+        ] {
+            let check = AccentCheck::for_brand(&brand);
+            for (scheme, surfaces) in [(&check.dark, DARK_SURFACES), (&check.light, LIGHT_SURFACES)]
+            {
+                let lowest = surfaces
+                    .iter()
+                    .map(|s| contrast_ratio(&scheme.roles.solid, s))
+                    .fold(f64::INFINITY, f64::min);
+                assert_eq!(scheme.fill_on_surface, lowest);
+                assert!(scheme.fill_passes(), "{:?} {lowest:.2}", scheme.scheme);
+            }
+        }
     }
 
     #[test]

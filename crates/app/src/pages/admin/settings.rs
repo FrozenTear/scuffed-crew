@@ -4,6 +4,7 @@ use crate::components::{AccessDenied, Toast, use_toast};
 use crate::routes::Route;
 use crate::state::site_settings::SiteSettingsState;
 use crate::state::use_auth;
+use crate::theme::brand::{AccentCheck, BrandConfig};
 use crate::theme::tokens::BG_DARK;
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::UpdateSettingsRequest;
@@ -48,6 +49,9 @@ struct PackBrand {
     /// ticking it again brings the same pair back without a second Apply
     /// pack (which would also reset copy, shell and skin).
     offer: Option<PackAccents>,
+    /// Why the last Apply pack's pair was not offered: it fails the same
+    /// contrast lock as brand settings, so Save never writes it.
+    refused: Option<String>,
 }
 
 impl PackBrand {
@@ -55,6 +59,7 @@ impl PackBrand {
         Self {
             ticked: true,
             offer: None,
+            refused: None,
         }
     }
 
@@ -62,11 +67,34 @@ impl PackBrand {
     /// offers nothing and drops an older pack's offer.
     fn apply(&mut self, preset: &scuffed_types::HomepagePreset) {
         let brand = preset.suggested_brand;
-        self.offer = (!brand.accent_dark.is_empty()).then(|| PackAccents {
-            pack: preset.name.to_string(),
-            dark: brand.accent_dark.to_string(),
-            light: brand.accent_light.to_string(),
-        });
+        self.offer_pair(preset.name, brand.accent_dark, brand.accent_light);
+    }
+
+    /// The pair `pack` suggests goes through the brand settings contrast
+    /// lock (`AccentCheck`) before Save may write it. A refused pair is
+    /// named in the note instead, and the stored accent stays.
+    fn offer_pair(&mut self, pack: &str, dark: &str, light: &str) {
+        self.offer = None;
+        self.refused = None;
+        let (dark, light) = (dark.trim(), light.trim());
+        if dark.is_empty() {
+            return;
+        }
+        let check = AccentCheck::for_brand(&BrandConfig::from_settings(dark, light));
+        match check.fail_reason() {
+            None => {
+                self.offer = Some(PackAccents {
+                    pack: pack.to_string(),
+                    dark: dark.to_string(),
+                    light: light.to_string(),
+                });
+            }
+            Some(reason) => {
+                self.refused = Some(format!(
+                    "Save keeps the current accent. The {pack} pack's accents fail the brand contrast check: {reason}"
+                ));
+            }
+        }
     }
 
     fn set_ticked(&mut self, on: bool) {
@@ -76,6 +104,7 @@ impl PackBrand {
     /// The server answered (a load or a successful save): nothing is waiting.
     fn clear(&mut self) {
         self.offer = None;
+        self.refused = None;
     }
 
     /// The pair Save will write, if any.
@@ -100,6 +129,7 @@ impl PackBrand {
             Some(PackAccents { pack, dark, light }) => format!(
                 "Save will also set the brand accents from the {pack} pack: {dark} in dark, {light} in light. Untick \"Also set brand accents\" to keep the current accent."
             ),
+            None if self.ticked => self.refused.clone().unwrap_or_default(),
             None => String::new(),
         }
     }
@@ -1126,6 +1156,7 @@ fn LinesField(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::theme::brand::{TEST_BLOCKED_ACCENT, TEST_EDGELESS_ACCENT};
 
     fn collect_rs_containing(
         dir: &std::path::Path,
@@ -1307,6 +1338,80 @@ mod tests {
         assert_eq!(state.pending(), None);
         assert_eq!(state.note(), "");
         assert_eq!(body_accents(&state), serde_json::json!({}));
+    }
+
+    /// QA 694 nit 5: the pack path wrote its pair without the brand
+    /// contrast lock. A pair the lock blocks is never offered, the note says
+    /// why, and Save keeps the stored accent.
+    #[test]
+    fn a_pack_pair_that_fails_the_contrast_lock_is_never_saved() {
+        let (first, _) = two_packs();
+        let mut blocked = first.clone();
+        blocked.suggested_brand = scuffed_types::PresetBrand {
+            accent_dark: TEST_BLOCKED_ACCENT,
+            accent_light: TEST_BLOCKED_ACCENT,
+        };
+        let mut state = PackBrand::new();
+        state.apply(&first);
+        assert!(state.pending().is_some());
+
+        state.apply(&blocked);
+        assert_eq!(
+            state.pending(),
+            None,
+            "a blocked pair drops the older offer"
+        );
+        assert_eq!(body_accents(&state), serde_json::json!({}));
+        let note = state.note();
+        assert!(note.starts_with("Save keeps the current accent."), "{note}");
+        assert!(
+            note.contains(&format!("The {} pack's accents fail", first.name)),
+            "{note}"
+        );
+        assert!(
+            note.contains("Ink on this accent does not reach 4.5:1 in the dark preview."),
+            "{note}"
+        );
+
+        // Ticking does not bring it back, and unticking hides the reason.
+        state.set_ticked(false);
+        assert_eq!(state.note(), "");
+        state.set_ticked(true);
+        assert_eq!(body_accents(&state), serde_json::json!({}));
+        assert!(state.note().starts_with("Save keeps the current accent."));
+
+        // A fill with no edge is refused the same way.
+        let mut dark = first.clone();
+        dark.suggested_brand = scuffed_types::PresetBrand {
+            accent_dark: TEST_EDGELESS_ACCENT,
+            accent_light: TEST_EDGELESS_ACCENT,
+        };
+        state.apply(&dark);
+        assert_eq!(body_accents(&state), serde_json::json!({}));
+        assert!(state.note().contains("lose their edge"), "{}", state.note());
+
+        // The server answering clears the reason too.
+        state.clear();
+        assert_eq!(state.note(), "");
+    }
+
+    /// Every pack the catalog ships passes the lock, so the gate above
+    /// never hides a shipped pack's pair.
+    #[test]
+    fn every_catalog_pack_pair_passes_the_contrast_lock() {
+        for preset in homepage_presets() {
+            if preset.suggested_brand.accent_dark.is_empty() {
+                continue;
+            }
+            let mut state = PackBrand::new();
+            state.apply(&preset);
+            assert!(
+                state.pending().is_some(),
+                "{}: {}",
+                preset.name,
+                state.note()
+            );
+        }
     }
 
     fn render_element(element: fn() -> Element) -> String {

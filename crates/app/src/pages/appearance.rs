@@ -8,6 +8,7 @@
 use dioxus::prelude::*;
 
 use crate::routes::Route;
+use crate::state::unsaved::use_unsaved_guard;
 use crate::state::use_auth;
 use crate::styles::customise::{CUSTOMISE_CSS, CUSTOMISE_CSS_ID};
 use crate::theme::{Density, ThemeCtx, ThemeMode};
@@ -69,11 +70,11 @@ pub fn AppearanceSettings() -> Element {
     let density_note_id = format!("{owner}-appearance-density-note");
     let theme_name = format!("{owner}-appearance-theme");
     let density_name = format!("{owner}-appearance-density");
-    let status = status_text(
-        (theme(), density()),
-        ((ctx.mode)(), (ctx.density)()),
-        just_saved(),
-    );
+    let draft = (theme(), density());
+    let saved = ((ctx.mode)(), (ctx.density)());
+    let status = status_text(draft, saved, just_saved());
+    // Ask before a link, a reload or closing the tab drops the draft.
+    use_unsaved_guard(draft != saved);
 
     rsx! {
         crate::styles::StyleOnce { id: CUSTOMISE_CSS_ID, css: CUSTOMISE_CSS }
@@ -413,5 +414,21 @@ mod tests {
         assert_eq!(prod.matches("ctx.density.set(").count(), 1);
         assert!(!prod.contains("set_attribute"));
         assert!(!prod.contains("local_storage"));
+    }
+
+    /// QA 694 nit 9: leaving with an unsaved theme or density asks first.
+    /// The guard uses the same comparison as the "unsaved changes" line.
+    #[test]
+    fn the_leave_guard_follows_the_unsaved_line() {
+        let saved = (ThemeMode::Dark, Density::Default);
+        assert_eq!(status_text(saved, saved, false), "");
+        assert_eq!(
+            status_text((ThemeMode::Light, Density::Default), saved, false),
+            "You have unsaved changes."
+        );
+        let src = include_str!("appearance.rs");
+        let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        assert!(prod.contains("let status = status_text(draft, saved, just_saved());"));
+        assert!(prod.contains("use_unsaved_guard(draft != saved);"));
     }
 }
