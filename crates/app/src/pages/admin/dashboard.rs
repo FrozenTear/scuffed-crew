@@ -427,6 +427,13 @@ fn RelayOfflineTitle(link: bool) -> Element {
     }
 }
 
+/// The header lead. Settings is admin only (the page and the sub-nav both
+/// gate it on the admin role, QA 706), so officers are not pointed at it.
+fn dashboard_lead(is_admin: bool) -> String {
+    let rest = if is_admin { "settings" } else { "moderation" };
+    format!("A snapshot of the crew. Use the sub-nav for members, applications, and {rest}.")
+}
+
 #[component]
 pub fn AdminDashboard() -> Element {
     let members = use_api_list::<Member>("/api/members");
@@ -457,6 +464,7 @@ pub fn AdminDashboard() -> Element {
     let status = needs_status(has_rows, applications_source, relay_source);
     // The relay page is admin only: officers get the words, not a link.
     let relay_link = use_auth()().is_admin();
+    let lead = dashboard_lead(relay_link);
     let offline_text = RelayNote::Offline.text();
     // A failed relay check keeps its reason and Retry. A relay that is fine
     // or optional is one quiet line with the way to its page.
@@ -479,7 +487,7 @@ pub fn AdminDashboard() -> Element {
         PageShell { width: PageWidth::Wide, class: "admin-dashboard-page",
             PageHeader {
                 title: "Admin dashboard",
-                lead: "A snapshot of the crew. Use the sub-nav for members, applications, and settings.",
+                lead,
             }
 
             div { class: "summary-cards",
@@ -646,6 +654,35 @@ mod tests {
         assert_eq!(Source::of(true, Some(&1u8)), Failed);
         assert_eq!(Source::of(false, Some(&1u8)), Ready);
         assert_eq!(Source::of(false, None::<&u8>), Pending);
+    }
+
+    /// QA's 706 nit: an officer saw "Access Denied" on /admin/settings.
+    /// Settings stays admin only, as the sub-nav already had it (the page
+    /// denies officers with the shared wall, the sub-nav hides the entry);
+    /// the dashboard lead no longer sends officers there.
+    #[test]
+    fn the_lead_names_settings_only_for_admins() {
+        let admin = render_admin_route("/admin", Some(OrgRole::Admin));
+        assert!(
+            admin.contains("Use the sub-nav for members, applications, and settings."),
+            "{admin}"
+        );
+        let officer = render_admin_route("/admin", Some(OrgRole::Officer));
+        assert!(
+            officer.contains("Use the sub-nav for members, applications, and moderation."),
+            "{officer}"
+        );
+        assert!(!officer.contains("and settings."), "{officer}");
+        assert!(!officer.contains("href=\"/admin/settings\""), "{officer}");
+        assert!(officer.contains("href=\"/admin/moderation\""), "{officer}");
+        // The page and the sub-nav agree: no link for officers, the wall
+        // on a typed URL.
+        let denied = render_admin_route("/admin/settings", Some(OrgRole::Officer));
+        assert!(
+            denied.contains("<h1>You do not have access</h1>"),
+            "{denied}"
+        );
+        assert!(!denied.contains("href=\"/admin/settings\""), "{denied}");
     }
 
     #[test]
