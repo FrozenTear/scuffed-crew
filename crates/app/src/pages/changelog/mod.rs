@@ -239,7 +239,7 @@ pub fn Changelog(tab: String) -> Element {
 
 /// Page lead. Names the configured org, the same name the title uses. While
 /// settings are pending or failed it stays generic rather than invent one.
-/// A name that already starts with "The " gets no second article.
+/// A name that already starts with the word "The" gets no second article.
 fn page_lead(org_name: Option<&str>) -> String {
     match org_name.map(str::trim).filter(|name| !name.is_empty()) {
         Some(name) if starts_with_the(name) => {
