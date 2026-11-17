@@ -11,10 +11,11 @@ use super::*;
 /// Rialto 13c3fc574a5aca40: rows 25, 29 (sure), 33 held and flagged, 33
 /// again, then a final Tab with a vouched 35. The quiet final board makes
 /// 29 to 35 a lone +6 jump from the gate's accepted 29 (past `JUMP_MAX`),
-/// so the gate holds the sure read. The row keeps the 33 the game already
-/// stored, flagged, instead of falling back to the accepted 29.
+/// so the gate holds the sure read. From the stored 33, 35 is a +2 within
+/// the rate cap, so the row stores 35, flagged, the same as an unvouched
+/// 35 would, and never falls back to the accepted 29.
 #[tokio::test]
-async fn a_gate_held_sure_jump_keeps_the_stored_unsure_read() {
+async fn a_gate_held_sure_jump_stores_the_read_plausible_from_the_stored_one() {
     let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let ctx = o8_ctx(dir.path(), true).await;
@@ -40,10 +41,10 @@ async fn a_gate_held_sure_jump_keeps_the_stored_unsure_read() {
     assert!(seen.iter().all(|tab| tab.recorded), "{seen:?}");
     let rows = ctx.store.get_session_snapshots("o10").await.unwrap();
     let elims: Vec<u32> = rows.iter().map(|r| r.elims).collect();
-    assert_eq!(elims, vec![25, 29, 33, 33, 33], "stored elims");
+    assert_eq!(elims, vec![25, 29, 33, 33, 35], "stored elims");
     assert!(
         rows[4].suspect_fields.iter().any(|f| f == "e"),
-        "the kept 33 is flagged: {:?}",
+        "the stored 35 is flagged: {:?}",
         rows[4].suspect_fields
     );
 }
@@ -51,7 +52,10 @@ async fn a_gate_held_sure_jump_keeps_the_stored_unsure_read() {
 /// Lijiang Tower 087e7b495ba0f516 with every elims cell held from 33 on.
 /// Busy Tabs store the unsure 33 and 38; the quiet repeat Tabs of the same
 /// board keep them. The stored Lijiang series was
-/// 22,28,28,33,28,28,38,28,28,28,28,28.
+/// 22,28,28,33,28,28,38,28,28,28,28,28. This pins the #632 behaviour
+/// (held repeat Tabs keep the stored unsure read) and passes before this
+/// change too; it guards the real series, it is not a regression test for
+/// the gate-held sure read.
 #[tokio::test]
 async fn held_repeat_tabs_keep_the_stored_unsure_read() {
     let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
@@ -135,11 +139,13 @@ async fn a_gate_held_sure_repeat_does_not_drop_to_the_accepted_value() {
     );
 }
 
+/// Control, not a regression test: it passes before this change too.
 /// After the stored unsure 33, a Tab whose own row is suspect (it may be
 /// another player's) reads a higher sure 36. None of that row's digits
-/// land in the stored row.
+/// land in the stored row, so the gate-held sure read path never takes a
+/// digit from a row that may not be the player's.
 #[tokio::test]
-async fn a_suspect_own_row_never_replaces_the_stored_unsure_read() {
+async fn control_a_suspect_own_row_never_replaces_the_stored_unsure_read() {
     use detect::own_row::combine;
     let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
     let dir = tempfile::tempdir().unwrap();
@@ -170,5 +176,93 @@ async fn a_suspect_own_row_never_replaces_the_stored_unsure_read() {
     assert!(
         !elims.contains(&36),
         "a suspect row's digit was stored: {elims:?}"
+    );
+}
+
+/// The Rialto shape ending on a quiet board with 35 elims: a vouched 35
+/// the gate holds as a lone jump stores the same row as an unvouched 35,
+/// flagged both times.
+#[tokio::test]
+async fn a_vouched_and_an_unvouched_held_read_store_the_same() {
+    let held_33 = [
+        Some((33, true)),
+        sure(11),
+        sure(2),
+        sure(8656),
+        sure(1263),
+        sure(2574),
+    ];
+    let held_35 = [
+        Some((35, true)),
+        sure(12),
+        sure(2),
+        sure(8707),
+        sure(1263),
+        sure(2674),
+    ];
+    let mut stored = Vec::new();
+    for last in [all_sure([35, 12, 2, 8707, 1263, 2674]), held_35] {
+        let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = o8_ctx(dir.path(), true).await;
+        let (_, seen) = o10_run(
+            &ctx,
+            vec![
+                (0, all_sure([25, 9, 2, 6862, 1048, 2029])),
+                (111, all_sure([29, 9, 2, 8446, 1263, 2429])),
+                (70, held_33),
+                (7, held_33),
+                (81, last),
+            ],
+        )
+        .await;
+        assert!(seen.iter().all(|tab| tab.recorded), "{seen:?}");
+        let rows = ctx.store.get_session_snapshots("o10").await.unwrap();
+        let last = rows.last().unwrap();
+        assert!(
+            last.suspect_fields.iter().any(|f| f == "e"),
+            "the final elims is flagged: {:?}",
+            last.suspect_fields
+        );
+        stored.push(rows.iter().map(|r| r.elims).collect::<Vec<u32>>());
+    }
+    assert_eq!(stored[0], vec![25, 29, 33, 33, 35], "vouched 35");
+    assert_eq!(stored[1], stored[0], "unvouched 35 stores the same");
+}
+
+/// A sure read below the accepted value (a monotonic hold) does not keep a
+/// higher stored unsure read: the row falls back to the accepted 29,
+/// flagged, rather than keep showing the stale 33.
+#[tokio::test]
+async fn a_held_lower_sure_read_does_not_keep_a_higher_unsure_read() {
+    let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = o8_ctx(dir.path(), true).await;
+    let held_33 = [
+        Some((33, true)),
+        sure(11),
+        sure(2),
+        sure(8656),
+        sure(1263),
+        sure(2574),
+    ];
+    let (_, seen) = o10_run(
+        &ctx,
+        vec![
+            (0, all_sure([25, 9, 2, 6862, 1048, 2029])),
+            (111, all_sure([29, 9, 2, 8446, 1263, 2429])),
+            (70, held_33),
+            (20, all_sure([27, 11, 2, 8656, 1263, 2574])),
+        ],
+    )
+    .await;
+    assert!(seen.iter().all(|tab| tab.recorded), "{seen:?}");
+    let rows = ctx.store.get_session_snapshots("o10").await.unwrap();
+    let elims: Vec<u32> = rows.iter().map(|r| r.elims).collect();
+    assert_eq!(elims, vec![25, 29, 33, 29], "stored elims");
+    assert!(
+        rows[3].suspect_fields.iter().any(|f| f == "e"),
+        "the fallback 29 is flagged: {:?}",
+        rows[3].suspect_fields
     );
 }
