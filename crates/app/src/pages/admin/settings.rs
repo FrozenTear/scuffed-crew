@@ -157,7 +157,6 @@ fn BrandSettingsLink() -> Element {
         p {
             class: "settings-hint",
             id: "admin-settings-brand-link-warning",
-            style: "margin-top:0.4rem;",
             "{BRAND_LINK_WARNING}"
         }
     }
@@ -664,7 +663,7 @@ pub fn AdminSettings() -> Element {
                 }
                 div { class: "form-section-card",
                     div { class: "settings-subhead", "Brand" }
-                    p { class: "settings-hint", style: "margin-bottom:0.65rem;",
+                    p { class: "settings-hint",
                         "One accent for both themes, with a live preview and a contrast check."
                     }
                     BrandSettingsLink {}
@@ -1671,9 +1670,9 @@ mod tests {
         assert!(!crate::styles::admin::CSS.contains(".nav-row"));
     }
 
-    /// Every field label on this page is tied to its control by id. The two
-    /// accent labels belong to a block another change replaces; they are the
-    /// only ones allowed to be untied.
+    /// Every field label on this page is tied to its control by id. (S4d
+    /// allowed the two accent labels; S3 moved the accents to brand
+    /// settings, so none is left untied.)
     #[test]
     fn field_labels_are_tied_by_id_and_nothing_is_styled_inline() {
         let prod = prod_source();
@@ -1686,12 +1685,7 @@ mod tests {
             .filter(|line| !line.contains("r#for:"))
             .map(str::trim)
             .collect();
-        for line in &untied {
-            assert!(
-                line.contains("\"Dark theme\"") || line.contains("\"Light theme\""),
-                "label without a for: {line}"
-            );
-        }
+        assert!(untied.is_empty(), "labels without a for: {untied:?}");
         // Ids are fixed, page-unique names.
         let mut ids: Vec<&str> = prod
             .split("id: \"settings-")
