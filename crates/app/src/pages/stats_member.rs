@@ -463,12 +463,38 @@ pub(crate) fn rate_cell(tally: Tally, text: &str, class: &str) -> Element {
     }
 }
 
-/// Failed load of one stats block: plain words plus Retry.
-pub(crate) fn stats_load_error(what: &'static str, mut refresh: Signal<u64>) -> Element {
+/// The words for a failed load of one stats block, and whether Retry can
+/// help. A refused request is not a connection problem: a retry gives the
+/// same answer, so it gets no button.
+fn load_error_copy(what: &str, error: Option<&str>) -> (String, bool) {
+    match error {
+        Some(err) if is_http_status(err, 401) => (
+            format!("Couldn't load {what}: you are logged out. Log in again to see it."),
+            false,
+        ),
+        Some(err) if is_http_status(err, 403) => (
+            format!("Couldn't load {what}: your account can't see it."),
+            false,
+        ),
+        _ => (
+            format!("Couldn't load {what}. Check your connection and try again."),
+            true,
+        ),
+    }
+}
+
+/// Failed load of one stats block: plain words, plus Retry when a retry can
+/// help. `error` is the fetch error text.
+pub(crate) fn stats_load_error(
+    what: &'static str,
+    error: Option<String>,
+    mut refresh: Signal<u64>,
+) -> Element {
+    let (message, can_retry) = load_error_copy(what, error.as_deref());
     rsx! {
         LoadError {
-            message: "Couldn't load {what}. Check your connection and try again.",
-            on_retry: move |_| refresh += 1,
+            message,
+            on_retry: can_retry.then(|| EventHandler::new(move |_: ()| refresh += 1)),
         }
     }
 }
@@ -532,11 +558,20 @@ fn member_view(summary_error: Option<&str>) -> MemberView {
     }
 }
 
+/// The zero-game card's message. All time has no season to name.
+fn member_no_games_message(season: Option<&str>) -> &'static str {
+    match season {
+        None => "This member has not uploaded any games yet. See who has on the leaderboards.",
+        Some(_) => "This member has not uploaded any games for this season. Try another season, or see who has on the leaderboards.",
+    }
+}
+
 /// The line screen readers hear for the open tab. Always rendered, only its
 /// text changes.
+/// A failure says nothing here: its card is an alert that already says it.
 fn panel_status(what: &str, loading: bool, failed: bool, empty: bool) -> String {
     if failed {
-        format!("Couldn't load {what}.")
+        String::new()
     } else if loading {
         format!("Loading {what}.")
     } else if empty {
@@ -706,7 +741,7 @@ pub fn StatsMember(id: String) -> Element {
                         Some(s) if s.total_matches == 0 => rsx! {
                             EmptyCard {
                                 title: "No games tracked yet",
-                                message: "This member has not uploaded any games for this season. Try another season, or see who has on the leaderboards.",
+                                message: member_no_games_message(season.selected_id().as_deref()),
                                 actions: rsx! {
                                     Link { to: Route::Leaderboards {}, class: btn_class(true), "See the leaderboards" }
                                 },
@@ -747,7 +782,7 @@ pub fn StatsMember(id: String) -> Element {
                                     p { class: "visually-hidden", role: "status", "{status}" }
                                     match panel {
                                         RolePanel::Pending => rsx! { SkeletonBars { rows: 3 } },
-                                        RolePanel::Failed => stats_load_error("the role breakdown", roles.refresh),
+                                        RolePanel::Failed => stats_load_error("the role breakdown", err.clone(), roles.refresh),
                                         RolePanel::Ready(_) if shown.is_empty() => rsx! {
                                             p { class: "stats-view-note", "No role stats yet. They show up once this member has tracked games on a role." }
                                         },
@@ -792,7 +827,7 @@ pub fn StatsMember(id: String) -> Element {
                                 h2 { id: "member-stats-heroes-title", class: "ui-section-title", "Heroes" }
                                 p { class: "visually-hidden", role: "status", "{status}" }
                                 match list {
-                                    None if failed => stats_load_error("hero stats", heroes.refresh),
+                                    None if failed => stats_load_error("hero stats", heroes.error.read().clone(), heroes.refresh),
                                     None => rsx! { SkeletonBars { rows: 4 } },
                                     Some(list) if list.is_empty() => rsx! {
                                         p { class: "stats-view-note", "No hero stats yet. They show up once this member has tracked games." }
@@ -875,7 +910,7 @@ pub fn StatsMember(id: String) -> Element {
                                 h2 { id: "member-stats-maps-title", class: "ui-section-title", "Maps" }
                                 p { class: "visually-hidden", role: "status", "{status}" }
                                 match list {
-                                    None if failed => stats_load_error("map stats", maps.refresh),
+                                    None if failed => stats_load_error("map stats", maps.error.read().clone(), maps.refresh),
                                     None => rsx! { SkeletonBars { rows: 4 } },
                                     Some(list) if list.is_empty() => rsx! {
                                         p { class: "stats-view-note", "No map stats yet. They show up once this member has tracked games." }
@@ -969,15 +1004,34 @@ mod tests {
     }
 
     #[test]
+    fn all_time_names_no_season() {
+        assert!(!member_no_games_message(None).contains("season"));
+        assert!(member_no_games_message(Some("s1")).contains("this season"));
+    }
+
+    #[test]
+    fn a_refused_load_is_not_a_connection_problem() {
+        let (text, retry) = load_error_copy("hero stats", Some("HTTP error 403: Forbidden"));
+        assert!(!text.contains("connection"), "{text}");
+        assert!(!retry, "a retry gets the same 403");
+        let (text, retry) = load_error_copy("map stats", Some("HTTP error 401: Unauthorized"));
+        assert!(!text.contains("connection") && text.contains("Log in again"), "{text}");
+        assert!(!retry);
+        let (text, retry) = load_error_copy("map stats", Some("HTTP error 500: Internal error"));
+        assert!(text.contains("Check your connection"), "{text}");
+        assert!(retry);
+        let (_, retry) = load_error_copy("map stats", None);
+        assert!(retry);
+    }
+
+    #[test]
     fn panel_status_names_the_state_and_is_empty_when_rows_show() {
         assert_eq!(
             panel_status("hero stats", true, false, false),
             "Loading hero stats."
         );
-        assert_eq!(
-            panel_status("hero stats", true, true, false),
-            "Couldn't load hero stats."
-        );
+        // The failure card is the alert: the status line does not repeat it.
+        assert_eq!(panel_status("hero stats", true, true, false), "");
         assert_eq!(
             panel_status("hero stats", false, false, true),
             "No hero stats yet."

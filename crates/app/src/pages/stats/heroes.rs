@@ -6,7 +6,6 @@ use crate::hooks::ApiResource;
 use crate::pages::stats_member::{
     Col, STATS_VIEWS_CSS, STATS_VIEWS_CSS_ID, StatsTable, rate_cell, stats_load_error,
 };
-use crate::routes::Route;
 
 use super::role::hero_row_matches_filter;
 use super::{HeroStats, wr_bar_color, wr_text_class};
@@ -34,7 +33,9 @@ const SORT_CHIPS: [[&str; 2]; 3] = [
 /// changes.
 fn heroes_status(loaded: Option<usize>, failed: bool, shown: usize) -> String {
     match loaded {
-        None if failed => "Couldn't load hero stats.".to_string(),
+        // The failure card is an alert that says it; the status line stays
+        // quiet so it is not announced twice.
+        None if failed => String::new(),
         None => "Loading hero stats.".to_string(),
         Some(0) => "No hero stats yet.".to_string(),
         Some(_) if shown == 0 => "No heroes match this role.".to_string(),
@@ -51,7 +52,9 @@ fn HeroesEmpty() -> Element {
             title: "No hero stats yet",
             message: "Hero results show up here after the tracker uploads your first games.",
             actions: rsx! {
-                Link { to: Route::StatsTokens {}, class: btn_class(true), "Set up the tracker" }
+                // The install steps are on this page, as the summary card's
+                // link says.
+                a { class: btn_class(true), href: "{super::TRACKER_ANCHOR}", "Set up the tracker" }
             },
         }
     }
@@ -78,7 +81,7 @@ pub(super) fn heroes_tab(
     let status = heroes_status(list.map(Vec::len), failed, filtered.len());
 
     let body = match list {
-        None if failed => stats_load_error("hero stats", heroes.refresh),
+        None if failed => stats_load_error("hero stats", heroes.error.read().clone(), heroes.refresh),
         None => rsx! { SkeletonBars { rows: 4 } },
         Some(list) if list.is_empty() => rsx! { HeroesEmpty {} },
         Some(_) => {
@@ -291,7 +294,7 @@ mod tests {
     #[test]
     fn status_line_names_every_state() {
         assert_eq!(heroes_status(None, false, 0), "Loading hero stats.");
-        assert_eq!(heroes_status(None, true, 0), "Couldn't load hero stats.");
+        assert_eq!(heroes_status(None, true, 0), "", "the alert says it once");
         assert_eq!(heroes_status(Some(0), false, 0), "No hero stats yet.");
         assert_eq!(
             heroes_status(Some(4), false, 0),

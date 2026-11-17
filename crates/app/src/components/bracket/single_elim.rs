@@ -81,20 +81,21 @@ pub(super) fn swipe_hint(labels: &[String]) -> Option<String> {
     Some(format!("Swipe for {list}"))
 }
 
-/// Accessible name of a scroller: what it holds, then the hint.
-pub(super) fn scroller_name(name: &str, hint: Option<&str>) -> String {
-    match hint {
-        Some(hint) => format!("{name}. {hint}."),
-        None => name.to_string(),
-    }
-}
-
 /// Heading level of the round labels: H2 right under the page H1, H3 when the
 /// bracket sits under a section title of its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HeadLevel {
     H2,
     H3,
+}
+
+/// The heading a round starts with: visually hidden, since the header row
+/// shows the same words above the column.
+fn round_heading(head: HeadLevel, text: &str) -> Element {
+    match head {
+        HeadLevel::H2 => rsx! { h2 { class: "visually-hidden", "{text}" } },
+        HeadLevel::H3 => rsx! { h3 { class: "visually-hidden", "{text}" } },
+    }
 }
 
 /// Rounds side by side. `labels` has one entry per round. With `champion` a
@@ -109,6 +110,10 @@ pub(super) fn BracketColumns(
     participant_names: HashMap<String, String>,
     #[props(default = false)] champion: bool,
     #[props(default = HeadLevel::H2)] head: HeadLevel,
+    /// Title of the section the columns sit under. A round with the same
+    /// label gets no heading of its own: the section heading already says it.
+    #[props(default)]
+    section_title: Option<String>,
 ) -> Element {
     if rounds.is_empty() {
         return rsx! { p { class: "bracket-note", "No rounds have been drawn yet." } };
@@ -129,8 +134,9 @@ pub(super) fn BracketColumns(
         heads.push("Champion".to_string());
     }
     let cols = heads.len();
+    // The hint is visible text on narrow screens only (CSS), and never part
+    // of the scroller's name: the name says what the region holds.
     let hint = swipe_hint(&heads);
-    let label = scroller_name(&name, hint.as_deref());
 
     // The champion is the winner of the last round when that round is one
     // match (the final).
@@ -160,20 +166,21 @@ pub(super) fn BracketColumns(
                 class: "bracket-scroller",
                 role: "region",
                 tabindex: "0",
-                aria_label: "{label}",
+                aria_label: "{name}",
                 div { class: "bracket", style: "--bracket-cols: {cols};",
+                    // The visible header row is decoration: each round
+                    // carries its own heading first, so a screen reader meets
+                    // a round's title right before that round's matches.
                     for text in heads.iter() {
-                        if head == HeadLevel::H2 {
-                            h2 { class: "bracket-head", "{text}" }
-                        } else {
-                            h3 { class: "bracket-head", "{text}" }
-                        }
+                        p { key: "{text}", class: "bracket-head", aria_hidden: "true", "{text}" }
                     }
                     for (ri, round) in rounds.iter().enumerate() {
                         section {
                             key: "{round.id}",
                             class: "bracket-round",
-                            aria_label: heads[ri].clone(),
+                            if section_title.as_deref() != Some(heads[ri].as_str()) {
+                                {round_heading(head, &heads[ri])}
+                            }
                             for m in by_round[ri].iter() {
                                 MatchCard {
                                     key: "{m.id}",
@@ -189,7 +196,8 @@ pub(super) fn BracketColumns(
                         }
                     }
                     if champion {
-                        section { class: "bracket-round", aria_label: "Champion",
+                        section { class: "bracket-round",
+                            {round_heading(head, "Champion")}
                             div { class: "bracket-slot",
                                 if let Some(winner) = &champion_name {
                                     p { class: "slot-team is-winner", "{winner}" }
@@ -412,26 +420,36 @@ mod tests {
             "{html}"
         );
         assert_eq!(html.matches("bracket-hint").count(), 1, "{html}");
-        // The scroller is focusable and named.
+        // The scroller is focusable and named for what it holds; the swipe
+        // hint is not part of the name.
         assert!(
             html.contains(
                 "<div class=\"bracket-scroller\" role=\"region\" tabindex=\"0\" \
-                 aria-label=\"Test Cup bracket. Swipe for Final and Champion.\">"
+                 aria-label=\"Test Cup bracket\">"
             ),
             "{html}"
         );
-        // Three labels first (one header row), then three rounds.
+        // Three labels in one header row, hidden from assistive tech, then
+        // three rounds, each opening with its own heading.
         assert!(
             html.contains(
                 "<div class=\"bracket\" style=\"--bracket-cols: 3;\">\
-                 <h2 class=\"bracket-head\">Semi-finals</h2>\
-                 <h2 class=\"bracket-head\">Final</h2>\
-                 <h2 class=\"bracket-head\">Champion</h2>\
-                 <section class=\"bracket-round\" aria-label=\"Semi-finals\">"
+                 <p class=\"bracket-head\" aria-hidden=\"true\">Semi-finals</p>\
+                 <p class=\"bracket-head\" aria-hidden=\"true\">Final</p>\
+                 <p class=\"bracket-head\" aria-hidden=\"true\">Champion</p>\
+                 <section class=\"bracket-round\"><h2 class=\"visually-hidden\">Semi-finals</h2>\
+                 <div class=\"bracket-slot\">"
             ),
             "{html}"
         );
         assert_eq!(html.matches("<section class=\"bracket-round\"").count(), 3);
+        // Reading order: each heading comes right before its round's
+        // matches, never all the headings first.
+        let semis = html.find("<h2 class=\"visually-hidden\">Semi-finals</h2>").unwrap();
+        let final_head = html.find("<h2 class=\"visually-hidden\">Final</h2>").unwrap();
+        let first_match = html.find("Won 2 to 0").unwrap();
+        assert!(semis < first_match && first_match < final_head, "{html}");
+        assert_eq!(html.matches("<h2").count(), 3, "{html}");
         assert_eq!(html.matches("class=\"bracket-slot\"").count(), 4, "{html}");
         // The fade is decoration, after the scroller inside the clip.
         assert!(
@@ -460,7 +478,7 @@ mod tests {
         );
         assert!(
             html.contains(
-                "<section class=\"bracket-round\" aria-label=\"Champion\">\
+                "<section class=\"bracket-round\"><h2 class=\"visually-hidden\">Champion</h2>\
                  <div class=\"bracket-slot\"><p class=\"slot-team is-open\">To be decided</p>\
                  <p class=\"slot-meta\">After the final</p></div></section>"
             ),

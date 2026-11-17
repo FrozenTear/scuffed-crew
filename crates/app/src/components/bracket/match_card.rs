@@ -94,6 +94,14 @@ pub fn MatchCard(
         Some(Side::B) => Some("slot-mark is-down"),
         None => None,
     };
+    // "Won 2 to 1" sits between the two names, so on its own it reads as if
+    // the team above won. Assistive tech hears the winner's name first.
+    let subject = match winner {
+        Some(_) if is_bye => None,
+        Some(Side::A) => Some(team_a.clone().unwrap_or_else(|| "The winner".to_string())),
+        Some(Side::B) => Some(team_b.clone().unwrap_or_else(|| "The winner".to_string())),
+        None => None,
+    };
     let show_codes = !replay_codes.is_empty() && state == MatchCardState::Completed;
     let codes_last = replay_codes.len().saturating_sub(1);
 
@@ -108,6 +116,9 @@ pub fn MatchCard(
                 p { class: "slot-meta",
                     if let Some(mark) = mark {
                         span { class: "{mark}", aria_hidden: "true" }
+                    }
+                    if let Some(subject) = &subject {
+                        span { class: "visually-hidden", "{subject}: " }
                     }
                     "{meta}"
                 }
@@ -159,6 +170,30 @@ mod tests {
     }
 
     #[test]
+    fn a_second_team_win_names_the_winner_on_the_result_line() {
+        fn app() -> Element {
+            rsx! {
+                MatchCard {
+                    team_a: Some("Squad Alpha".to_string()),
+                    team_b: Some("Crew Beta".to_string()),
+                    score_a: Some(1),
+                    score_b: Some(2),
+                    winner: Some(Side::B),
+                    state: MatchCardState::Completed,
+                }
+            }
+        }
+        let html = render(app);
+        assert!(
+            html.contains(
+                "<p class=\"slot-meta\"><span class=\"slot-mark is-down\" aria-hidden=\"true\"></span>\
+                 <span class=\"visually-hidden\">Crew Beta: </span>Won 2 to 1</p>"
+            ),
+            "{html}"
+        );
+    }
+
+    #[test]
     fn winner_has_a_word_a_mark_and_a_name_for_assistive_tech() {
         fn app() -> Element {
             rsx! {
@@ -177,7 +212,8 @@ mod tests {
             html,
             "<div class=\"bracket-slot\">\
              <p class=\"slot-team is-winner\">Squad Alpha<span class=\"visually-hidden\">, winner</span></p>\
-             <p class=\"slot-meta\"><span class=\"slot-mark is-up\" aria-hidden=\"true\"></span>Won 2 to 0</p>\
+             <p class=\"slot-meta\"><span class=\"slot-mark is-up\" aria-hidden=\"true\"></span>\
+             <span class=\"visually-hidden\">Squad Alpha: </span>Won 2 to 0</p>\
              <p class=\"slot-team\">Crew Beta</p>\
              </div>"
         );
@@ -204,7 +240,8 @@ mod tests {
         );
         assert!(
             html.contains(
-                "<span class=\"slot-mark is-down\" aria-hidden=\"true\"></span>Won 2 to 1</p>"
+                "<span class=\"slot-mark is-down\" aria-hidden=\"true\"></span>\
+                 <span class=\"visually-hidden\">Crew Delta: </span>Won 2 to 1</p>"
             ),
             "{html}"
         );

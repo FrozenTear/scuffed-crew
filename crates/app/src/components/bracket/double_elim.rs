@@ -24,6 +24,7 @@ fn BracketSection(
         section { class: "ui-stack",
             h2 { class: "ui-section-title", "{title}" }
             BracketColumns {
+                section_title: title.clone(),
                 name,
                 labels,
                 rounds,
@@ -148,16 +149,20 @@ mod tests {
             );
         }
         assert_eq!(html.matches("role=\"region\" tabindex=\"0\"").count(), 3);
-        // Round labels sit under the stage title, one level down.
+        // Round headings sit under the stage title, one level down, each at
+        // the start of its own round. The header row is decoration.
         assert!(
-            html.contains("<h3 class=\"bracket-head\">Round 1</h3>"),
+            html.contains("<section class=\"bracket-round\"><h3 class=\"visually-hidden\">Round 1</h3>"),
             "{html}"
         );
         assert!(
-            html.contains("<h3 class=\"bracket-head\">Grand final</h3>"),
+            html.contains("<p class=\"bracket-head\" aria-hidden=\"true\">Grand final</p>"),
             "{html}"
         );
-        assert!(!html.contains("<h2 class=\"bracket-head\""), "{html}");
+        assert!(!html.contains("<h2 class=\"visually-hidden\""), "{html}");
+        // The one grand final round is not a second "Grand final" heading
+        // under the H2 of the same name.
+        assert_eq!(html.matches(">Grand final</h").count(), 1, "{html}");
         // No Champion column outside the knockout view.
         assert!(!html.contains("Champion"), "{html}");
         // Two columns at most here: no swipe hint.
@@ -170,7 +175,8 @@ mod tests {
         assert!(
             html.contains(
                 "<p class=\"slot-team\">Squad Alpha</p>\
-                 <p class=\"slot-meta\"><span class=\"slot-mark is-down\" aria-hidden=\"true\"></span>Won 2 to 0</p>\
+                 <p class=\"slot-meta\"><span class=\"slot-mark is-down\" aria-hidden=\"true\"></span>\
+                 <span class=\"visually-hidden\">Crew Beta: </span>Won 2 to 0</p>\
                  <p class=\"slot-team is-winner\">Crew Beta<span class=\"visually-hidden\">, winner</span></p>"
             ),
             "{html}"

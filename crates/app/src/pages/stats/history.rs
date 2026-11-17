@@ -2,10 +2,10 @@ use dioxus::prelude::*;
 
 use chrono::{DateTime, Utc};
 
+use crate::components::ui::inline_confirm::focus_element_by_id_soon;
 use crate::components::ui::{ChipButton, ChipRow, EmptyCard, SkeletonBars, btn_class};
 use crate::hooks::ApiResource;
 use crate::pages::stats_member::{STATS_VIEWS_CSS, STATS_VIEWS_CSS_ID, stats_load_error};
-use crate::routes::Route;
 
 use super::MatchPage;
 use super::bans_picks::{BANS_PICKS_CARD_CSS, bans_picks_line};
@@ -14,7 +14,9 @@ use super::history_filter::{
     ALL, HISTORY_CSS, Outcome, UNKNOWN_MAP, filter_rows, map_rows, map_table, mode_label,
     outcome_kind, page_modes,
 };
-use super::rank::{RANK_CSS, RankChart, chart_series, rank_badge_line, rank_series_with_outcomes};
+use super::rank::{
+    RANK_CSS, RankChart, RankWindow, chart_series, rank_badge_line, rank_series_with_outcomes,
+};
 use super::role::game_role_label;
 
 /// The tracker stores outcomes as `victory` / `defeat` / `draw` (see the
@@ -50,9 +52,10 @@ fn outcome_pill_class(outcome: &str) -> &'static str {
     }
 }
 
-/// The date of a game as the frames write it: "12 Nov 2026".
+/// The date of a game as the frames write it: "12 Nov 2026", on the
+/// viewer's own day like the rank chart and the match page.
 pub(super) fn game_date(played_at: &DateTime<Utc>) -> String {
-    played_at.format("%-d %b %Y").to_string()
+    super::local_day(*played_at).format("%-d %b %Y").to_string()
 }
 
 /// Visible label when a row was not read by the old Tesseract reader.
@@ -326,7 +329,9 @@ fn marked_text(
 /// changes.
 fn history_status(loaded: Option<usize>, failed: bool, shown: usize) -> String {
     match loaded {
-        None if failed => "Couldn't load match history.".to_string(),
+        // The failure card is an alert that says it; the status line stays
+        // quiet so it is not announced twice.
+        None if failed => String::new(),
         None => "Loading match history.".to_string(),
         Some(0) => "No games recorded yet.".to_string(),
         Some(_) if shown == 0 => "No games match these filters on this page.".to_string(),
@@ -343,10 +348,29 @@ fn HistoryEmpty() -> Element {
             title: "No games recorded yet",
             message: "Your games show up here after the tracker uploads them.",
             actions: rsx! {
-                Link { to: Route::StatsTokens {}, class: btn_class(true), "Set up the tracker" }
+                // The install steps are on this page, as the summary card's
+                // link says.
+                a { class: btn_class(true), href: "{super::TRACKER_ANCHOR}", "Set up the tracker" }
             },
         }
     }
+}
+
+/// Open the page after the one shown. `next` comes from the page on screen,
+/// so a second press before the new page lands names the same cursor: it is
+/// not pushed again, or the trail would hold one page twice and Previous
+/// would stay on it. Returns whether the trail moved.
+fn push_next_page(trail: &mut Vec<Option<String>>, next: &str) -> bool {
+    if trail.last().and_then(|c| c.as_deref()) == Some(next) {
+        return false;
+    }
+    trail.push(Some(next.to_string()));
+    true
+}
+
+/// Id of an Outcome filter chip, from its filter value.
+fn outcome_chip_id(value: &str) -> String {
+    format!("history-outcome-{value}")
 }
 
 /// Class of a Previous or Next step of the shared pager look.
@@ -386,7 +410,7 @@ pub(super) fn history_tab(
     let no_games = page.is_some_and(|page| page.data.is_empty());
 
     let body = match page {
-        None if failed => stats_load_error("match history", matches.refresh),
+        None if failed => stats_load_error("match history", matches.error.read().clone(), matches.refresh),
         None => rsx! { SkeletonBars { rows: 5 } },
         Some(_) if no_games => rsx! { HistoryEmpty {} },
         Some(page) => {
@@ -409,7 +433,7 @@ pub(super) fn history_tab(
 
             rsx! {
                 if !rank_chart.is_empty() {
-                    RankChart { series: rank_chart, player }
+                    RankChart { series: rank_chart, window: RankWindow::Page(page_no), player }
                 }
                 section { class: "ui-stack", aria_labelledby: "history-games-title",
                     h2 { id: "history-games-title", class: "ui-section-title", "Games" }
@@ -421,6 +445,7 @@ pub(super) fn history_tab(
                                     rsx! {
                                         ChipButton {
                                             key: "{k}",
+                                            id: outcome_chip_id(k),
                                             class: "chip".to_string(),
                                             label: label.to_string(),
                                             pressed: of == k,
@@ -478,7 +503,13 @@ pub(super) fn history_tab(
 
                     if rows.is_empty() {
                         div { class: "stats-view-card history-no-match",
-                            p { class: "stats-view-note", "No games on this page match these filters. Clear them, or open the next page." }
+                            p { class: "stats-view-note",
+                                if has_next {
+                                    "No games on this page match these filters. Clear them, or open the next page."
+                                } else {
+                                    "No games on this page match these filters. Clear them to see every game."
+                                }
+                            }
                             button {
                                 r#type: "button",
                                 id: "history-clear-filters",
@@ -487,6 +518,9 @@ pub(super) fn history_tab(
                                     outcome_filter.set(ALL);
                                     role_filter.set(ALL);
                                     mode_filter.set(ALL.to_string());
+                                    // This button leaves with the empty card:
+                                    // focus the first filter it reset.
+                                    focus_element_by_id_soon(outcome_chip_id(ALL));
                                 },
                                 "Clear filters"
                             }
@@ -658,9 +692,10 @@ pub(super) fn history_tab(
                                 onclick: move |_| {
                                     if let Some(nc) = &next_c {
                                         let mut hist = cursor_history();
-                                        hist.push(Some(nc.clone()));
-                                        cursor_history.set(hist);
-                                        page_cursor.set(Some(nc.clone()));
+                                        if push_next_page(&mut hist, nc) {
+                                            cursor_history.set(hist);
+                                            page_cursor.set(Some(nc.clone()));
+                                        }
                                     }
                                 },
                                 "Next"
@@ -804,6 +839,49 @@ mod tests {
             rest = &after[end + 4..];
         }
         assert!(anchors > 0, "the page has links to check: {html}");
+    }
+
+    /// The tab with one loaded game and the Draw filter on, so no row
+    /// matches. `next` is the page's next cursor.
+    fn filtered_out(next: Option<&'static str>) -> String {
+        thread_local! { static NEXT: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) }; }
+        NEXT.with(|n| n.set(next));
+        fn view() -> Element {
+            let page = super::super::MatchPage {
+                data: vec![row("old", "ocr-v1", &[], "Reinhardt", "Havana", "control", 6)],
+                next_cursor: NEXT.with(|n| n.get()).map(str::to_string),
+            };
+            history_tab(
+                resource_of(Some(page)),
+                use_signal(|| None::<String>),
+                use_signal(|| vec![None::<String>]),
+                use_signal(|| "draw"),
+                use_signal(|| "all"),
+                use_signal(|| "all".to_string()),
+                None,
+            )
+        }
+        let mut dom = VirtualDom::new(view);
+        dom.rebuild_in_place();
+        pump(&mut dom);
+        dioxus_ssr::render(&dom)
+    }
+
+    #[test]
+    fn no_match_copy_offers_the_next_page_only_when_there_is_one() {
+        let last = filtered_out(None);
+        assert!(last.contains("history-no-match"), "{last}");
+        assert!(!last.contains("open the next page"), "{last}");
+        assert!(last.contains("Clear them to see every game."), "{last}");
+        let more = filtered_out(Some("c2"));
+        assert!(more.contains("Clear them, or open the next page."), "{more}");
+        // Clear filters removes itself; focus goes to the Outcome All chip.
+        assert!(last.contains(&format!("id=\"{}\"", outcome_chip_id(ALL))), "{last}");
+        let src = include_str!("history.rs");
+        let body = &src[..src.find("#[cfg(test)]").unwrap()];
+        let clear = body.find("\"Clear filters\"").unwrap();
+        let handler = &body[body[..clear].rfind("onclick:").unwrap()..clear];
+        assert!(handler.contains("focus_element_by_id_soon(outcome_chip_id(ALL))"), "{handler}");
     }
 
     #[test]
@@ -1418,12 +1496,20 @@ mod tests {
     }
 
     #[test]
+    fn next_twice_before_the_page_lands_opens_it_once() {
+        let mut trail = vec![None];
+        assert!(push_next_page(&mut trail, "c2"));
+        assert!(!push_next_page(&mut trail, "c2"), "same cursor again");
+        assert_eq!(trail, vec![None, Some("c2".to_string())]);
+        assert!(push_next_page(&mut trail, "c3"));
+        assert_eq!(trail.len(), 3);
+    }
+
+    #[test]
     fn status_line_names_every_state() {
         assert_eq!(history_status(None, false, 0), "Loading match history.");
-        assert_eq!(
-            history_status(None, true, 0),
-            "Couldn't load match history."
-        );
+        // The failure card is the alert: the status line does not repeat it.
+        assert_eq!(history_status(None, true, 0), "");
         assert_eq!(history_status(Some(0), false, 0), "No games recorded yet.");
         assert_eq!(
             history_status(Some(5), false, 0),

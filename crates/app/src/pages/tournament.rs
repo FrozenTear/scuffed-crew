@@ -13,7 +13,7 @@ use super::tournaments::{
     FACTS_CSS, FACTS_CSS_ID, format_label, meta_facts, start_word, status_label, team_cap,
 };
 use crate::components::bracket::{
-    BRACKET_STYLES, BracketMatch, BracketRound, BracketView, SwissStanding,
+    BRACKET_STYLES, BracketMatch, BracketRound, BracketView, StandingsLoad, SwissStanding,
 };
 use crate::components::ui::{
     EmptyCard, LoadError, PageHeader, PageShell, PageWidth, Pill, PillTone, SkeletonBars, btn_class,
@@ -172,13 +172,13 @@ pub fn Tournament(id: String) -> Element {
             .map(|r| r.data)
     });
 
-    let standings = use_resource(move || {
+    let mut standings = use_resource(move || {
         let id = id_for_standings.clone();
         async move {
             ApiClient::web()
                 .fetch::<Vec<SwissStanding>>(&format!("/api/tournaments/{id}/standings"))
                 .await
-                .ok()
+                .map_err(|e| e.to_string())
         }
     });
 
@@ -191,12 +191,11 @@ pub fn Tournament(id: String) -> Element {
         .into_iter()
         .map(|t| (t.id, t.name))
         .collect();
-    let swiss = standings
-        .read()
-        .as_ref()
-        .and_then(|s| s.as_ref())
-        .cloned()
-        .unwrap_or_default();
+    let swiss = match standings.read().as_ref() {
+        None => StandingsLoad::Loading,
+        Some(Ok(rows)) => StandingsLoad::Ready(rows.clone()),
+        Some(Err(_)) => StandingsLoad::Failed,
+    };
     let load = Load::of(bracket_data.read().as_ref());
     let retrying = is_retrying(bracket_data.state()(), &load);
     crate::head::use_page_title(tab_label(&load));
@@ -208,6 +207,7 @@ pub fn Tournament(id: String) -> Element {
             swiss,
             retrying,
             on_retry: move |_| refresh += 1,
+            on_standings_retry: move |_| standings.restart(),
         }
     }
 }
@@ -219,9 +219,10 @@ fn TournamentView(
     load: Load<BracketData>,
     /// Team id to team name, for participants that are org teams.
     team_names: HashMap<String, String>,
-    swiss: Vec<SwissStanding>,
+    swiss: StandingsLoad,
     #[props(default = false)] retrying: bool,
     on_retry: EventHandler<()>,
+    #[props(default)] on_standings_retry: Option<EventHandler<()>>,
 ) -> Element {
     let status = load_status(&load, retrying, "Loading tournament");
     let current = match &load {
@@ -282,6 +283,7 @@ fn TournamentView(
                         data: data.clone(),
                         team_names: team_names.clone(),
                         swiss: swiss.clone(),
+                        on_standings_retry,
                     }
                 },
             }}
@@ -361,7 +363,8 @@ fn TournamentHeader(data: BracketData) -> Element {
 fn TournamentBody(
     data: BracketData,
     team_names: HashMap<String, String>,
-    swiss: Vec<SwissStanding>,
+    swiss: StandingsLoad,
+    #[props(default)] on_standings_retry: Option<EventHandler<()>>,
 ) -> Element {
     let t = &data.tournament;
     let names = participant_names(&data.participants, &team_names);
@@ -388,6 +391,7 @@ fn TournamentBody(
                 participant_names: names,
                 participant_ids: ids,
                 swiss_standings: swiss,
+                on_standings_retry,
             }
         } else if entrants == 0 {
             EmptyCard {
@@ -509,7 +513,7 @@ mod tests {
                 TournamentView {
                     load: load.clone(),
                     team_names: team_names(),
-                    swiss: Vec::new(),
+                    swiss: StandingsLoad::Ready(Vec::new()),
                     retrying,
                     on_retry: move |_| {},
                 }
@@ -570,13 +574,13 @@ mod tests {
     fn bracket_shows_names_round_labels_and_the_named_scroller() {
         let html = render(Load::Ready(test_cup()));
         assert!(
-            html.contains("aria-label=\"Test Cup bracket. Swipe for Final and Champion.\""),
+            html.contains("aria-label=\"Test Cup bracket\""),
             "{html}"
         );
         assert!(html.contains("tabindex=\"0\""), "{html}");
         for head in ["Semi-finals", "Final", "Champion"] {
             assert!(
-                html.contains(&format!("<h2 class=\"bracket-head\">{head}</h2>")),
+                html.contains(&format!("<h2 class=\"visually-hidden\">{head}</h2>")),
                 "{head}: {html}"
             );
         }

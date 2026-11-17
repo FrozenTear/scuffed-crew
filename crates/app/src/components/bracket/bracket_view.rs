@@ -7,7 +7,7 @@ use super::single_elim::{
     BracketColumns, BracketMatch, BracketRound, BracketSingleElim, HeadLevel, numbered_labels,
     stage_rounds,
 };
-use super::swiss::{SwissStanding, SwissStandings};
+use super::swiss::{StandingsLoad, SwissStandings};
 
 /// The bracket of one tournament, by format. `name` is the tournament name:
 /// it names the scrollers for assistive tech.
@@ -19,7 +19,10 @@ pub fn BracketView(
     matches: Vec<BracketMatch>,
     participant_names: HashMap<String, String>,
     participant_ids: Vec<String>,
-    swiss_standings: Vec<SwissStanding>,
+    #[props(default)] swiss_standings: StandingsLoad,
+    /// Fetches the Swiss standings again after a failure.
+    #[props(default)]
+    on_standings_retry: Option<EventHandler<()>>,
 ) -> Element {
     match format.as_str() {
         "single_elim" => rsx! {
@@ -44,7 +47,11 @@ pub fn BracketView(
             rsx! {
                 section { class: "ui-stack",
                     h2 { class: "ui-section-title", "Standings" }
-                    SwissStandings { name: name.clone(), standings: swiss_standings }
+                    SwissStandings {
+                        name: name.clone(),
+                        standings: swiss_standings,
+                        on_retry: on_standings_retry,
+                    }
                 }
                 section { class: "ui-stack",
                     h2 { class: "ui-section-title", "Round pairings" }
@@ -82,7 +89,7 @@ mod tests {
                 matches,
                 participant_names: names(),
                 participant_ids: Vec::new(),
-                swiss_standings: Vec::new(),
+                swiss_standings: StandingsLoad::Ready(Vec::new()),
             }
         }
     }
@@ -99,11 +106,11 @@ mod tests {
             "{html}"
         );
         assert!(
-            html.contains("<h3 class=\"bracket-head\">Round 1</h3>"),
+            html.contains("<section class=\"bracket-round\"><h3 class=\"visually-hidden\">Round 1</h3>"),
             "{html}"
         );
         assert!(
-            html.contains("<h3 class=\"bracket-head\">Round 2</h3>"),
+            html.contains("<section class=\"bracket-round\"><h3 class=\"visually-hidden\">Round 2</h3>"),
             "{html}"
         );
         for wrong in ["Final", "Semi-finals", "Champion"] {
@@ -126,7 +133,7 @@ mod tests {
                     matches: Vec::new(),
                     participant_names: HashMap::new(),
                     participant_ids: Vec::new(),
-                    swiss_standings: Vec::new(),
+                    swiss_standings: StandingsLoad::Ready(Vec::new()),
                 }
             }
         }

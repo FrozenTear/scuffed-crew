@@ -257,6 +257,24 @@ fn tracker_release_notice_text(server: Option<&str>) -> String {
     )
 }
 
+/// The calendar day of `at` for a viewer `offset_secs` east of UTC.
+fn day_at_offset(at: DateTime<Utc>, offset_secs: i32) -> chrono::NaiveDate {
+    chrono::FixedOffset::east_opt(offset_secs)
+        .map(|offset| at.with_timezone(&offset).date_naive())
+        .unwrap_or_else(|| at.date_naive())
+}
+
+/// The calendar day a game is shown on, everywhere on the stats pages: the
+/// viewer's own day in the browser (as the match page's local time), the
+/// UTC day in native tests.
+pub(super) fn local_day(at: DateTime<Utc>) -> chrono::NaiveDate {
+    #[cfg(target_arch = "wasm32")]
+    let offset = chrono::Local::now().offset().local_minus_utc();
+    #[cfg(not(target_arch = "wasm32"))]
+    let offset = 0;
+    day_at_offset(at, offset)
+}
+
 /// Shared map → game mode (used by maps tab + overview mode chips).
 /// Delegates to [`scuffed_types::MapName`] so accented/unaccented live names
 /// (Paraíso/Paraiso, Esperança/Esperanca, Watchpoint: Grímsvötn/Grimsvotn)
@@ -265,63 +283,16 @@ pub(super) fn map_game_mode(name: &str) -> &'static str {
     scuffed_types::MapName::game_mode_label(name)
 }
 
-/// Page density. It is the `data-density` value on the stats page, so the
-/// density tokens (`--space-page`, `--space-section`, `--space-card-pad`,
-/// `--space-stack`, `--density-row`) follow the choice. Nothing stored is
-/// `default`, the density the frames are drawn at.
-const DENSITIES: [&str; 3] = ["default", "compact", "comfortable"];
+/// Every set-up-the-tracker link on `/stats`: the install steps lower on
+/// the same page.
+pub(super) const TRACKER_ANCHOR: &str = "#stats-tracker";
 
-/// The stored choice, or `default` for a missing or unknown value.
-fn density_from_store(stored: Option<&str>) -> &'static str {
-    DENSITIES
-        .into_iter()
-        .find(|density| Some(*density) == stored)
-        .unwrap_or(DENSITIES[0])
-}
-
-/// The density one press of the control moves to.
-fn next_density(current: &str) -> &'static str {
-    let at = DENSITIES
-        .iter()
-        .position(|density| *density == current)
-        .unwrap_or(0);
-    DENSITIES[(at + 1) % DENSITIES.len()]
-}
-
-/// Text of the density control: it names the density in use.
-fn density_label(density: &str) -> &'static str {
-    match density {
-        "compact" => "Density: Compact",
-        "comfortable" => "Density: Comfortable",
-        _ => "Density: Default",
+/// The zero-match card's message. All time has no season to name.
+fn no_logged_games_message(season: Option<&str>) -> &'static str {
+    match season {
+        None => "Nothing is logged yet. Install the stat tracker below and play: your games land here on their own.",
+        Some(_) => "Nothing is logged for this season. Install the stat tracker below and play: your games land here on their own.",
     }
-}
-
-fn initial_density() -> &'static str {
-    // Browser storage exists only in the wasm build; native tests read nothing.
-    #[cfg(all(feature = "web", target_arch = "wasm32"))]
-    {
-        if let Some(win) = web_sys::window()
-            && let Ok(Some(storage)) = win.local_storage()
-            && let Ok(stored) = storage.get_item("stats-ui-density")
-        {
-            return density_from_store(stored.as_deref());
-        }
-    }
-    density_from_store(None)
-}
-
-fn persist_density(d: &str) {
-    #[cfg(all(feature = "web", target_arch = "wasm32"))]
-    {
-        if let Some(win) = web_sys::window()
-            && let Ok(Some(storage)) = win.local_storage()
-        {
-            let _ = storage.set_item("stats-ui-density", d);
-        }
-    }
-    #[cfg(not(all(feature = "web", target_arch = "wasm32")))]
-    let _ = d;
 }
 
 /// Lead under "Your stats": who is signed in and which games the figures
@@ -340,10 +311,26 @@ fn stats_lead(username: Option<&str>, season: Option<&str>) -> String {
 }
 
 /// K/D tile text: two decimals, or "N/A" before there is a death to divide by.
-fn kd_text(kd: Option<f64>) -> String {
+/// What the K/D tile knows. "N/A" means a ratio with no deaths, so it is
+/// never shown while the role rows are still loading or failed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum KdTile {
+    /// The role rows have not arrived.
+    Loading,
+    /// The role rows failed; Time on role carries the error and Retry.
+    Failed,
+    /// Loaded: the ratio, or None with no deaths.
+    Ready(Option<f64>),
+}
+
+/// The tile value (visible) and, when the value is a dash, the words a
+/// screen reader hears instead.
+fn kd_text(kd: KdTile) -> (String, Option<&'static str>) {
     match kd {
-        Some(kd) => format!("{kd:.2}"),
-        None => "N/A".to_string(),
+        KdTile::Ready(Some(kd)) => (format!("{kd:.2}"), None),
+        KdTile::Ready(None) => ("N/A".to_string(), None),
+        KdTile::Loading => ("-".to_string(), Some("Loading")),
+        KdTile::Failed => ("-".to_string(), Some("Not available")),
     }
 }
 
@@ -351,14 +338,14 @@ fn kd_text(kd: Option<f64>) -> String {
 /// rate follows the small-sample rule in [`crate::sample`]: under 10 decided
 /// games the tile shows the record and reads "Too few games". From 10 on, the
 /// record sits in a line under the row.
-fn summary_tiles(season: Tally, kd: Option<f64>) -> Element {
+fn summary_tiles(season: Tally, kd: KdTile) -> Element {
     let rate = season.label();
     let (rate_label, record) = if season.has_win_rate() {
         ("Win rate", Some(season.record()))
     } else {
         (crate::sample::TOO_FEW_GAMES, None)
     };
-    let kd = kd_text(kd);
+    let (kd, kd_words) = kd_text(kd);
     rsx! {
         div { class: "stats-summary",
             div { class: "stats-tiles",
@@ -371,7 +358,14 @@ fn summary_tiles(season: Tally, kd: Option<f64>) -> Element {
                     div { class: "stat-tile-label", "Matches" }
                 }
                 div { class: "stat-tile",
-                    div { class: "stat-tile-value", "{kd}" }
+                    if let Some(words) = kd_words {
+                        div { class: "stat-tile-value",
+                            span { aria_hidden: "true", "{kd}" }
+                            span { class: "visually-hidden", "{words}" }
+                        }
+                    } else {
+                        div { class: "stat-tile-value", "{kd}" }
+                    }
                     div { class: "stat-tile-label", "K/D" }
                 }
             }
@@ -397,7 +391,8 @@ pub(crate) fn load_error_state(what: &'static str, mut refresh: Signal<u64>) -> 
 const STATS_CSS: &str = r#"
     .my-stats.stats-page {
         /* One horizontal inset for history headers and cards. The card pad
-           token follows data-density. */
+           token follows the density chosen in Settings (data-density on the
+           root element). */
         --history-pad-x: var(--space-card-pad);
         --history-border: 1px;
     }
@@ -417,8 +412,8 @@ const STATS_CSS: &str = r#"
         color: var(--accent-text);
         text-decoration: underline;
     }
-    /* One row under the page header: the tabs, then season, density and the
-       link to the leaderboards. */
+    /* One row under the page header: the tabs, then the season picker and
+       the link to the leaderboards. */
     .stats-header {
         display: flex;
         justify-content: space-between;
@@ -840,9 +835,6 @@ const STATS_CSS: &str = r#"
         gap: var(--space-section);
         min-width: 0;
     }
-    /* The overview's flex gap already spaces the rank section. Its own
-       bottom margin (for History, which has no gap) would double it. */
-    .stats-overview > .rank-block { margin-bottom: 0; }
     /* Time on role: label, bar and percent on one line. */
     .role-split { display: grid; gap: var(--space-3); }
     .role-row {
@@ -1170,15 +1162,15 @@ const STATS_CSS: &str = r#"
        is quieter through its ink, never through opacity, so the text keeps
        its contrast. */
     .my-stats .stats-row-muted { color: var(--text-subtle); }
-    .stats-page[data-density="comfortable"] .match-card {
+    [data-density="comfortable"] .stats-page .match-card {
         padding-top: var(--space-3);
         padding-bottom: var(--space-3);
     }
-    .stats-page[data-density="compact"] .match-card {
+    [data-density="compact"] .stats-page .match-card {
         padding-top: var(--space-1);
         padding-bottom: var(--space-1);
     }
-    .stats-page[data-density="compact"] .match-cards { gap: var(--space-1); }
+    [data-density="compact"] .stats-page .match-cards { gap: var(--space-1); }
 
     /* W4 polish: tables, mobile, hold layout */
     .my-stats.stats-page .match-stat {
@@ -1397,7 +1389,6 @@ pub fn Stats() -> Element {
         member_stats_url(&auth(), season.fetch_path("/api/stats/me/matches?limit=10"))
     });
 
-    let mut density = use_signal(initial_density);
     let hero_role = use_signal(|| "All");
     let hero_sort = use_signal(|| "matches");
     let hist_outcome = use_signal(|| "all");
@@ -1418,20 +1409,24 @@ pub fn Stats() -> Element {
     let mut setup_open = use_signal(|| false);
     let show_full_setup = !slim_tracker || setup_open();
 
-    // K/D comes from the role rows. Until they load, or if they fail, the
-    // tile reads "N/A"; the Time on role block carries the loading and
-    // failed states for that fetch.
-    let kd = role_stats
-        .data
-        .read()
-        .as_ref()
-        .and_then(|d| d.as_ref())
-        .and_then(|rows| role::kd_ratio(rows));
+    // K/D comes from the role rows. Until they load the tile is a dash,
+    // never "N/A" (no deaths); the Time on role block carries the loading
+    // and failed states for that fetch.
+    let kd = match role_stats.data.read().as_ref().and_then(|d| d.as_ref()) {
+        Some(rows) => KdTile::Ready(role::kd_ratio(rows)),
+        None if role_stats.error.read().is_some() => KdTile::Failed,
+        None => KdTile::Loading,
+    };
     // "See all matches" under Recent form: the same as pressing the History tab.
     let open_history = use_callback(move |_: ()| {
         tab.set(StatsTab::History);
         page_cursor.set(None);
         cursor_history.set(vec![None]);
+        // "See all matches" leaves with the Overview: focus the History tab
+        // it opened, not the page body.
+        crate::components::ui::inline_confirm::focus_element_by_id_soon(
+            stats_tab_id(StatsTab::History).to_string(),
+        );
     });
     // Zero matches in this season window: the empty card is the overview.
     let no_matches = has_matches == Some(false);
@@ -1458,9 +1453,6 @@ pub fn Stats() -> Element {
         ),
     };
 
-    let dens = density();
-    let dens_label = density_label(dens);
-
     if !auth().loading && !auth().is_logged_in() {
         return rsx! {
             crate::styles::StyleOnce { id: "scuffed-css-pages-stats-mod-stats-css", css: STATS_CSS }
@@ -1477,7 +1469,7 @@ pub fn Stats() -> Element {
         crate::styles::StyleOnce { id: "scuffed-css-pages-stats-mod-stats-css", css: STATS_CSS }
         crate::styles::StyleOnce { id: "scuffed-css-admin-shared", css: crate::styles::admin::CSS }
 
-        div { class: "stats-page my-stats", "data-density": dens,
+        div { class: "stats-page my-stats",
             PageShell { width: PageWidth::Wide, class: "stats-shell",
                 PageHeader {
                     title: "Your stats",
@@ -1542,17 +1534,6 @@ pub fn Stats() -> Element {
                             value: season.selected_id(),
                             onchange: move |s: Option<String>| season.choose(s),
                         }
-                        button {
-                            r#type: "button",
-                            class: btn_class(false),
-                            title: "Switch between default, compact and comfortable density",
-                            onclick: move |_| {
-                                let next = next_density(density());
-                                density.set(next);
-                                persist_density(next);
-                            },
-                            "{dens_label}"
-                        }
                         Link { to: Route::Leaderboards {}, class: btn_class(false), "Leaderboards" }
                     }
                 }
@@ -1572,9 +1553,9 @@ pub fn Stats() -> Element {
                             Some(s) if s.total_matches == 0 => rsx! {
                                 EmptyCard {
                                     title: "No logged matches yet",
-                                    message: "Nothing is logged for this season pick. Install the stat tracker below and play: your games land here on their own.",
+                                    message: no_logged_games_message(season.selected_id().as_deref()),
                                     actions: rsx! {
-                                        a { class: btn_class(true), href: "#stats-tracker", "Set up the tracker" }
+                                        a { class: btn_class(true), href: TRACKER_ANCHOR, "Set up the tracker" }
                                         Link { to: Route::StatsTokens {}, class: btn_class(false), "Tracker tokens" }
                                     },
                                 }
@@ -2516,6 +2497,37 @@ mod signed_out_tests {
 }
 
 #[cfg(test)]
+mod local_day_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn the_day_follows_the_viewer_offset() {
+        let late = Utc.with_ymd_and_hms(2026, 11, 12, 23, 30, 0).unwrap();
+        assert_eq!(day_at_offset(late, 0).to_string(), "2026-11-12");
+        assert_eq!(day_at_offset(late, 2 * 3600).to_string(), "2026-11-13");
+        assert_eq!(day_at_offset(late, -5 * 3600).to_string(), "2026-11-12");
+        let early = Utc.with_ymd_and_hms(2026, 11, 13, 0, 30, 0).unwrap();
+        assert_eq!(day_at_offset(early, -3600).to_string(), "2026-11-12");
+    }
+
+    #[test]
+    fn history_recent_form_and_chart_dates_share_the_viewer_day() {
+        // One source for the day: no stats date formats the UTC instant.
+        for (name, source) in [
+            ("history.rs", include_str!("history.rs")),
+            ("overview.rs", include_str!("overview.rs")),
+            ("rank.rs", include_str!("rank.rs")),
+        ] {
+            let body = source.split("#[cfg(test)]").next().unwrap();
+            assert!(!body.contains("played_at.format(\"%-d"), "{name}");
+            assert!(!body.contains("at.format(\"%-d"), "{name}");
+            assert!(body.contains("local_day("), "{name}");
+        }
+    }
+}
+
+#[cfg(test)]
 mod map_mode_tests {
     use super::map_game_mode;
 
@@ -2651,10 +2663,14 @@ mod shell_tests {
         assert_eq!(html.matches("<h1").count(), 1, "{html}");
         assert!(!html.contains("<main"), "the shell owns main: {html}");
         let page = page(&html);
+        // Density is the one chosen in Settings, on the root element: the
+        // page sets none of its own and has no density control.
         assert!(
-            page.starts_with("<div class=\"stats-page my-stats\" data-density=\"default\">"),
-            "nothing stored is the default density: {page}"
+            page.starts_with("<div class=\"stats-page my-stats\">"),
+            "{page}"
         );
+        assert!(!page.contains("data-density"), "{page}");
+        assert!(!page.contains("Density"), "{page}");
         assert!(
             page.contains("<div class=\"ui-shell ui-shell--wide stats-shell\">"),
             "{page}"
@@ -2696,11 +2712,8 @@ mod shell_tests {
             "{page}"
         );
         assert!(page.contains("class=\"chip stats-tab active\""), "{page}");
-        // The page-level controls are the shared buttons, each with a name.
-        assert!(
-            page.contains(">Density: Default</button>") && page.contains(">Leaderboards</a>"),
-            "{page}"
-        );
+        // The page-level control is the shared button, with a name.
+        assert!(page.contains(">Leaderboards</a>"), "{page}");
         // The tracker block comes after the stats, under its own h2.
         let panel = page.find("role=\"tabpanel\"").unwrap();
         let tracker = page
@@ -2719,10 +2732,10 @@ mod shell_tests {
     #[test]
     fn summary_is_three_tiles_with_the_label_under_the_value() {
         fn rate() -> Element {
-            summary_tiles(Tally::new(13, 8, 4, 1), Some(2.104))
+            summary_tiles(Tally::new(13, 8, 4, 1), KdTile::Ready(Some(2.104)))
         }
         fn few() -> Element {
-            summary_tiles(Tally::new(9, 6, 3, 0), None)
+            summary_tiles(Tally::new(9, 6, 3, 0), KdTile::Ready(None))
         }
         let html = render(rate);
         assert_eq!(html.matches("class=\"stat-tile\"").count(), 3, "{html}");
@@ -2751,6 +2764,56 @@ mod shell_tests {
             ),
             "{html}"
         );
+    }
+
+    #[test]
+    fn zero_match_copy_and_links_agree() {
+        assert!(!no_logged_games_message(None).contains("season"));
+        assert!(no_logged_games_message(Some("current")).contains("this season"));
+        // Every "Set up the tracker" on /stats goes to the steps on the page.
+        for (name, src) in [
+            ("mod.rs", include_str!("mod.rs")),
+            ("heroes.rs", include_str!("heroes.rs")),
+            ("maps.rs", include_str!("maps.rs")),
+            ("history.rs", include_str!("history.rs")),
+        ] {
+            let body = src.split("#[cfg(test)]").next().unwrap();
+            for (at, _) in body.match_indices("\"Set up the tracker\"") {
+                let line = &body[body[..at].rfind('\n').unwrap()..at];
+                assert!(line.contains("TRACKER_ANCHOR"), "{name}: {line}");
+            }
+        }
+        assert_eq!(TRACKER_ANCHOR, "#stats-tracker");
+        // See all matches removes itself with the Overview: focus goes to
+        // the History tab it opened.
+        let src = include_str!("mod.rs");
+        let open = &src[src.find("let open_history = use_callback").unwrap()..];
+        let open = &open[..open.find("});").unwrap()];
+        assert!(open.contains("focus_element_by_id_soon("), "{open}");
+        assert!(open.contains("stats_tab_id(StatsTab::History)"), "{open}");
+    }
+
+    #[test]
+    fn kd_reads_na_only_when_loaded_with_no_deaths() {
+        fn loading() -> Element {
+            summary_tiles(Tally::new(13, 8, 4, 1), KdTile::Loading)
+        }
+        fn failed() -> Element {
+            summary_tiles(Tally::new(13, 8, 4, 1), KdTile::Failed)
+        }
+        for (name, html, words) in [
+            ("loading", render(loading), "Loading"),
+            ("failed", render(failed), "Not available"),
+        ] {
+            assert!(!html.contains("N/A"), "{name}: {html}");
+            assert!(
+                html.contains(&format!(
+                    "<div class=\"stat-tile-value\"><span aria-hidden=\"true\">-</span>\
+                     <span class=\"visually-hidden\">{words}</span></div><div class=\"stat-tile-label\">K/D</div>"
+                )),
+                "{name}: {html}"
+            );
+        }
     }
 
     #[test]
@@ -2863,26 +2926,20 @@ mod shell_tests {
     }
 
     #[test]
-    fn density_follows_the_token_names_and_defaults_to_default() {
-        assert_eq!(density_from_store(None), "default");
-        assert_eq!(density_from_store(Some("compact")), "compact");
-        assert_eq!(density_from_store(Some("comfortable")), "comfortable");
-        assert_eq!(density_from_store(Some("default")), "default");
-        assert_eq!(density_from_store(Some("huge")), "default");
-        assert_eq!(next_density("default"), "compact");
-        assert_eq!(next_density("compact"), "comfortable");
-        assert_eq!(next_density("comfortable"), "default");
-        assert_eq!(density_label("default"), "Density: Default");
-        assert_eq!(density_label("compact"), "Density: Compact");
-        assert_eq!(density_label("comfortable"), "Density: Comfortable");
-        // Each value is a density the theme remaps the spacing tokens for.
-        let tokens = include_str!("../../theme/css/semantic.css");
-        for density in DENSITIES {
+    fn density_rules_follow_the_root_density_from_settings() {
+        // The root element carries the Settings density (`sc-density`), so
+        // every density rule here hangs off an ancestor of the page, never
+        // off the page wrapper, and the page keeps no density store.
+        assert!(!STATS_CSS.contains(".stats-page[data-density"), "{STATS_CSS}");
+        for density in ["compact", "comfortable"] {
             assert!(
-                tokens.contains(&format!("[data-density=\"{density}\"] {{")),
+                STATS_CSS.contains(&format!("[data-density=\"{density}\"] .stats-page ")),
                 "{density}"
             );
         }
+        let source = include_str!("mod.rs");
+        let store_key = ["stats-ui", "-density"].concat();
+        assert!(!source.contains(&store_key), "the page keeps no density store");
     }
 
     #[test]
@@ -2932,9 +2989,14 @@ mod shell_tests {
             "{summary}"
         );
         assert!(has_decl(&summary, "box-sizing: border-box"), "{summary}");
-        // The overview gap spaces the rank section once, not twice.
-        let rank = css_rule(STATS_CSS, ".stats-overview > .rank-block {");
-        assert!(has_decl(&rank, "margin-bottom: 0"), "{rank}");
+        // Overview and History space the rank section with their flex gap
+        // (`.stats-overview`, `.stats-view-body`), so the section has no
+        // outer margin of its own and no page needs to cancel one.
+        let rank = css_rule(super::rank::RANK_CHART_CSS, ".rank-block {");
+        assert!(has_decl(&rank, "margin: 0"), "{rank}");
+        assert!(!STATS_CSS.contains(".rank-block {"), "no override");
+        let body = css_rule(crate::pages::stats_member::STATS_VIEWS_CSS, ".stats-view-body {");
+        assert!(has_decl(&body, "gap: var(--space-section)"), "{body}");
         // A failed or gate card in the tabpanel starts at the left edge.
         let wall = css_rule(STATS_CSS, ".my-stats .stats-panel > .wall {");
         assert!(has_decl(&wall, "margin: 0"), "{wall}");

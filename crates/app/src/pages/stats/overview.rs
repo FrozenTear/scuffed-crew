@@ -9,7 +9,7 @@ use crate::hooks::ApiResource;
 use super::game::{match_path, open_match};
 use super::history::outcome_word;
 use super::history_filter::{Outcome, outcome_kind};
-use super::rank::{RankChart, RankChartLoading, chart_series, rank_series_with_outcomes};
+use super::rank::{RankChart, RankChartLoading, RankWindow, chart_series, rank_series_with_outcomes};
 use super::role::{RolePanel, role_aggs_from_rows, role_panel, role_result, role_shares};
 use super::{HeroStats, MapStats, MatchPage, PersonalMatch, load_error_state, map_game_mode};
 use crate::sample::Tally;
@@ -70,11 +70,13 @@ fn form_summary(rows: &[PersonalMatch]) -> String {
 }
 
 /// Date as the frames write it: `12 Nov`, with the year once it is not `now`'s.
+/// The day is the viewer's own, like History and the rank chart.
 fn form_date(played_at: &DateTime<Utc>, now: &DateTime<Utc>) -> String {
-    if played_at.year() == now.year() {
-        played_at.format("%-d %b").to_string()
+    let day = super::local_day(*played_at);
+    if day.year() == super::local_day(*now).year() {
+        day.format("%-d %b").to_string()
     } else {
-        played_at.format("%-d %b %Y").to_string()
+        day.format("%-d %b %Y").to_string()
     }
 }
 
@@ -172,7 +174,7 @@ pub(super) fn overview_tab(
     let form_rows: Vec<PersonalMatch> = form_loaded.map(|p| p.data.clone()).unwrap_or_default();
     drop(form_guard);
     // Empty when no loaded game has a rank: the section then shows its own
-    // "No rank yet" state, as the rank-empty frame draws it. The outcome word
+    // "No rank read" state, as the rank-empty frame draws it. The outcome word
     // lets the readout and table say Win or Loss.
     let rank_chart = chart_series(rank_series_with_outcomes(form_rows.iter().map(|m| {
         (
@@ -201,7 +203,7 @@ pub(super) fn overview_tab(
             // fetch leaves it out: "Recent form" carries the error and Retry,
             // and an empty chart would wrongly say there are no ranked games.
             if !form_waiting {
-                RankChart { series: rank_chart, player }
+                RankChart { series: rank_chart, window: RankWindow::Recent(form_rows.len()), player }
             } else if !form_err {
                 RankChartLoading {}
             }
@@ -548,7 +550,7 @@ mod tests {
             html.contains("aria-busy=\"true\"") && html.contains("Loading rank progress."),
             "rank progress shows its loading state while the matches load: {html}"
         );
-        assert!(!html.contains("No ranked games in this period"), "{html}");
+        assert!(!html.contains("No ranked games in"), "{html}");
     }
 
     #[test]
@@ -556,7 +558,7 @@ mod tests {
         // Loaded with no ranked game: the section's own empty state, named.
         let full = render(populated);
         assert!(
-            full.contains("Rank progress for Player01. There are no ranked games in this period"),
+            full.contains("Rank progress for Player01. There are no ranked games in your last"),
             "{full}"
         );
         let rank = full.find("class=\"rank-block\"").expect("rank section");

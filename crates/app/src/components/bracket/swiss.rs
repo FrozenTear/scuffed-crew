@@ -1,6 +1,8 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
+use crate::components::ui::LoadError;
+
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct SwissStanding {
     pub participant_id: String,
@@ -12,6 +14,16 @@ pub struct SwissStanding {
     pub game_losses: u32,
     pub buchholz: f64,
     pub rank: u32,
+}
+
+/// The standings fetch. Only a finished fetch with no rows means no round
+/// has been played: loading and failing say so in their own words.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum StandingsLoad {
+    #[default]
+    Loading,
+    Failed,
+    Ready(Vec<SwissStanding>),
 }
 
 /// A short column head with its full name for assistive tech.
@@ -31,13 +43,27 @@ pub(super) fn ShortHead(short: String, full: String) -> Element {
 pub fn SwissStandings(
     /// Tournament name, for the scroller's accessible name.
     name: String,
-    standings: Vec<SwissStanding>,
+    standings: StandingsLoad,
+    /// Fetches the standings again after a failure.
+    #[props(default)]
+    on_retry: Option<EventHandler<()>>,
 ) -> Element {
-    if standings.is_empty() {
-        return rsx! {
-            p { class: "bracket-note", "Standings show up here once the first round is played." }
-        };
-    }
+    let standings = match standings {
+        StandingsLoad::Loading => {
+            return rsx! { p { class: "bracket-note", "Loading standings..." } };
+        }
+        StandingsLoad::Failed => {
+            return rsx! {
+                LoadError { message: "Couldn't load the standings.", on_retry }
+            };
+        }
+        StandingsLoad::Ready(rows) if rows.is_empty() => {
+            return rsx! {
+                p { class: "bracket-note", "Standings show up here once the first round is played." }
+            };
+        }
+        StandingsLoad::Ready(rows) => rows,
+    };
 
     rsx! {
         p { class: "bracket-hint",
@@ -106,7 +132,12 @@ mod tests {
     #[test]
     fn standings_sit_in_a_named_focusable_scroller() {
         fn app() -> Element {
-            rsx! { SwissStandings { name: "Test Cup", standings: vec![standing(1), standing(2)] } }
+            rsx! {
+                SwissStandings {
+                    name: "Test Cup",
+                    standings: StandingsLoad::Ready(vec![standing(1), standing(2)]),
+                }
+            }
         }
         let html = render(app);
         assert!(
@@ -129,10 +160,34 @@ mod tests {
     #[test]
     fn no_standings_is_a_note_not_an_empty_table() {
         fn app() -> Element {
-            rsx! { SwissStandings { name: "Test Cup", standings: Vec::new() } }
+            rsx! { SwissStandings { name: "Test Cup", standings: StandingsLoad::Ready(Vec::new()) } }
         }
         let html = render(app);
         assert!(html.contains("once the first round is played"), "{html}");
+        assert!(!html.contains("<table"), "{html}");
+    }
+
+    #[test]
+    fn loading_and_failed_standings_do_not_claim_no_round_was_played() {
+        fn loading() -> Element {
+            rsx! { SwissStandings { name: "Test Cup", standings: StandingsLoad::Loading } }
+        }
+        let html = render(loading);
+        assert!(!html.contains("first round"), "{html}");
+        assert!(html.contains("Loading standings..."), "{html}");
+        fn failed() -> Element {
+            rsx! {
+                SwissStandings {
+                    name: "Test Cup",
+                    standings: StandingsLoad::Failed,
+                    on_retry: move |_| {},
+                }
+            }
+        }
+        let html = render(failed);
+        assert!(!html.contains("first round"), "{html}");
+        assert!(html.contains("Couldn&#39;t load the standings."), "{html}");
+        assert!(html.contains(">Retry</button>"), "{html}");
         assert!(!html.contains("<table"), "{html}");
     }
 }

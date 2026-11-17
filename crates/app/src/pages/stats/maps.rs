@@ -4,7 +4,6 @@ use crate::components::charts::{BarEntry, HBarChart};
 use crate::components::ui::{EmptyCard, SkeletonBars, btn_class};
 use crate::hooks::ApiResource;
 use crate::pages::stats_member::{STATS_VIEWS_CSS, STATS_VIEWS_CSS_ID, stats_load_error};
-use crate::routes::Route;
 
 use super::{MapStats, map_game_mode, wr_bar_color, wr_text_class};
 use crate::sample::{MAP_RULE_NOTE, TOO_FEW_GAMES, Tally, best_and_worst};
@@ -101,7 +100,9 @@ fn mode_id(mode: &str) -> String {
 /// changes.
 fn maps_status(loaded: Option<usize>, failed: bool) -> String {
     match loaded {
-        None if failed => "Couldn't load map stats.".to_string(),
+        // The failure card is an alert that says it; the status line stays
+        // quiet so it is not announced twice.
+        None if failed => String::new(),
         None => "Loading map stats.".to_string(),
         Some(0) => "No map stats yet.".to_string(),
         Some(1) => "Showing 1 map.".to_string(),
@@ -117,7 +118,9 @@ fn MapsEmpty() -> Element {
             title: "No map stats yet",
             message: "Map results show up here after the tracker uploads your first games.",
             actions: rsx! {
-                Link { to: Route::StatsTokens {}, class: btn_class(true), "Set up the tracker" }
+                // The install steps are on this page, as the summary card's
+                // link says.
+                a { class: btn_class(true), href: "{super::TRACKER_ANCHOR}", "Set up the tracker" }
             },
         }
     }
@@ -141,7 +144,7 @@ pub(super) fn maps_tab(maps: ApiResource<Vec<MapStats>>) -> Element {
     let list = data.as_ref().and_then(|d| d.as_ref());
     let status = maps_status(list.map(Vec::len), failed);
     let body = match list {
-        None if failed => stats_load_error("map stats", maps.refresh),
+        None if failed => stats_load_error("map stats", maps.error.read().clone(), maps.refresh),
         None => rsx! { SkeletonBars { rows: 4 } },
         Some(list) if list.is_empty() => rsx! { MapsEmpty {} },
         Some(list) => {
@@ -207,7 +210,7 @@ pub(super) fn maps_tab(maps: ApiResource<Vec<MapStats>>) -> Element {
                                     "{mode}"
                                 }
                                 p { class: "map-mode-agg",
-                                    "{total_m} matches · "
+                                    {format!("{} · ", crate::util::pluralize(total_m as usize, "match", "matches"))}
                                     span { class: "{mode_wr_cls}", "{mode_result}" }
                                 }
                             }
@@ -305,10 +308,26 @@ mod tests {
     #[test]
     fn status_line_names_every_state() {
         assert_eq!(maps_status(None, false), "Loading map stats.");
-        assert_eq!(maps_status(None, true), "Couldn't load map stats.");
+        assert_eq!(maps_status(None, true), "", "the alert says it once");
         assert_eq!(maps_status(Some(0), false), "No map stats yet.");
         assert_eq!(maps_status(Some(1), false), "Showing 1 map.");
         assert_eq!(maps_status(Some(7), false), "Showing 7 maps.");
+    }
+
+    #[test]
+    fn one_match_is_singular_and_empty_links_to_the_steps_on_this_page() {
+        fn one() -> Element {
+            maps_tab(resource_of(Some(vec![map(1, 1)])))
+        }
+        let html = render(one);
+        assert!(html.contains("1 match · "), "{html}");
+        assert!(!html.contains("1 matches"), "{html}");
+        fn none() -> Element {
+            maps_tab(resource_of(Some(Vec::<MapStats>::new())))
+        }
+        let html = render(none);
+        assert!(html.contains("href=\"#stats-tracker\""), "{html}");
+        assert!(!html.contains("href=\"/stats/tokens\""), "{html}");
     }
 
     #[test]

@@ -665,27 +665,15 @@ fn y_pct(pos: f64, ymin: i32, ymax: i32) -> f64 {
     (1.0 - (pos - f64::from(ymin)) / f64::from(ymax - ymin)) * 100.0
 }
 
-/// The calendar day shown for a game: the viewer's own day in the browser,
-/// the UTC day elsewhere (tests).
-fn day_of(at: DateTime<Utc>) -> chrono::NaiveDate {
-    #[cfg(target_arch = "wasm32")]
-    {
-        at.with_timezone(&chrono::Local).date_naive()
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        at.date_naive()
-    }
-}
-
-/// "12 Nov 2026".
+/// "12 Nov 2026", on the viewer's own day like every date on the stats
+/// pages ([`super::local_day`]).
 fn long_date(at: DateTime<Utc>) -> String {
-    day_of(at).format("%-d %b %Y").to_string()
+    super::local_day(at).format("%-d %b %Y").to_string()
 }
 
 /// "12 Nov", for the x axis.
 fn short_date(at: DateTime<Utc>) -> String {
-    day_of(at).format("%-d %b").to_string()
+    super::local_day(at).format("%-d %b").to_string()
 }
 
 /// Where a game sits on the ladder.
@@ -768,26 +756,50 @@ impl ChartRow {
 struct Step<'a> {
     rank: &'a str,
     tier: usize,
+    division: Option<u8>,
     pos: i32,
     progress: Option<i32>,
 }
 
-/// Change since the last plotted game, in words.
+/// Whether two games sit on the same rank, judged only on what both read.
+/// Different tiers, or two read divisions that differ, are a rank change.
+/// Same tier with a division read on one side only is unknown: None.
+fn same_rank(prev: &Step<'_>, cur: &Step<'_>) -> Option<bool> {
+    if prev.tier != cur.tier {
+        return Some(false);
+    }
+    match (prev.division, cur.division) {
+        (Some(a), Some(b)) => Some(a == b),
+        (None, None) => Some(true),
+        _ => None,
+    }
+}
+
+/// Change since the last plotted game, in words. A field the tracker did not
+/// read on either game is never counted as a move: an unread division or
+/// progress plots at a midpoint, and that midpoint is not a change.
 fn change_words(prev: Option<&Step<'_>>, cur: &Step<'_>) -> String {
     let Some(prev) = prev else {
         return "First point".to_string();
     };
     let delta = cur.pos - prev.pos;
-    if cur.rank == prev.rank {
-        return match delta {
-            0 => "No change".to_string(),
-            d => format!(
-                "{} {} {}",
-                if d > 0 { "Up" } else { "Down" },
-                d.abs(),
-                if d.abs() == 1 { "point" } else { "points" }
-            ),
-        };
+    match same_rank(prev, cur) {
+        None => return "Same tier, division not read".to_string(),
+        Some(true) if prev.progress.is_none() || cur.progress.is_none() => {
+            return "Same rank, progress not read".to_string();
+        }
+        Some(true) => {
+            return match delta {
+                0 => "No change".to_string(),
+                d => format!(
+                    "{} {} {}",
+                    if d > 0 { "Up" } else { "Down" },
+                    d.abs(),
+                    if d.abs() == 1 { "point" } else { "points" }
+                ),
+            };
+        }
+        Some(false) => {}
     }
     let direction = match delta {
         d if d > 0 => "Up to",
@@ -839,6 +851,7 @@ fn chart_rows(series: &RankSeries) -> Vec<ChartRow> {
                     p.placed.map(|placed| Step {
                         rank: &p.rank,
                         tier: placed.tier,
+                        division: p.division,
                         pos: placed.pos,
                         progress: p.progress,
                     })
@@ -846,12 +859,13 @@ fn chart_rows(series: &RankSeries) -> Vec<ChartRow> {
                 let cur = Step {
                     rank: &row.rank,
                     tier,
+                    division: shown.division,
                     pos,
                     progress: shown.progress,
                 };
                 row.change = change_words(prev_step.as_ref(), &cur);
                 if let Some(prev) = &prev_step {
-                    row.rank_changed = prev.rank != row.rank;
+                    row.rank_changed = same_rank(prev, &cur) == Some(false);
                     row.derank = row.rank_changed && pos < prev.pos;
                 }
                 last_placed = Some(rows.len());
@@ -940,9 +954,47 @@ fn join_clauses(parts: &[String]) -> String {
     }
 }
 
+/// Which games the chart was given. The chart only sees the loaded games, so
+/// its copy names that window rather than claiming the whole season.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RankWindow {
+    /// The latest games, newest first from the API: Overview's recent form.
+    Recent(usize),
+    /// One page of match history, by page number from 1.
+    Page(usize),
+}
+
+impl RankWindow {
+    /// "in your last 10 games", "on page 3 of your match history".
+    fn period(self) -> String {
+        match self {
+            RankWindow::Recent(1) => "in your last game".to_string(),
+            RankWindow::Recent(n) => format!("in your last {n} games"),
+            RankWindow::Page(1) => "on the first page of your match history".to_string(),
+            RankWindow::Page(n) => format!("on page {n} of your match history"),
+        }
+    }
+
+    /// Kicker of the first card. Only the newest games hold the current rank.
+    fn now_kicker(self) -> &'static str {
+        match self {
+            RankWindow::Recent(_) | RankWindow::Page(1) => "Current rank",
+            RankWindow::Page(_) => "Latest rank on this page",
+        }
+    }
+
+    /// Kicker of the second card.
+    fn range_kicker(self) -> &'static str {
+        match self {
+            RankWindow::Recent(_) => "Recent range",
+            RankWindow::Page(_) => "Range on this page",
+        }
+    }
+}
+
 /// The visually hidden text alternative of the plot. `player` is the name
 /// to use; without one the text speaks to the viewer ("You started at ...").
-fn summary_text(player: Option<&str>, rows: &[ChartRow]) -> String {
+fn summary_text(player: Option<&str>, rows: &[ChartRow], window: RankWindow) -> String {
     let (intro, subject) = match player {
         Some(name) => (format!("Rank progress for {name}"), name.to_string()),
         None => ("Your rank progress".to_string(), "You".to_string()),
@@ -951,7 +1003,8 @@ fn summary_text(player: Option<&str>, rows: &[ChartRow]) -> String {
     let tail = unplaced_summary(rows);
     let (Some(first), Some(last)) = (placed.first(), placed.last()) else {
         return format!(
-            "{intro}. There are no ranked games in this period, so the chart is empty.{tail}"
+            "{intro}. There are no ranked games {}, so the chart is empty.{tail}",
+            window.period()
         );
     };
     if placed.len() == 1 {
@@ -971,8 +1024,17 @@ fn summary_text(player: Option<&str>, rows: &[ChartRow]) -> String {
     // The first move into a higher tier: the case the old chart drew as a drop.
     let tier_up = (1..placed.len()).find(|&i| tier_of(placed[i]) > tier_of(placed[i - 1]));
     if let Some(i) = tier_up {
-        if i > 1 {
-            parts.push(format!("rose to {}", placed[i - 1].rank_words()));
+        // The game before the tier-up, said as a rise or a fall from the
+        // start: a dip before the promotion is not a rise.
+        let before = placed[i - 1];
+        match (i > 1).then(|| pos_of(before).cmp(&pos_of(first))) {
+            Some(std::cmp::Ordering::Greater) => {
+                parts.push(format!("rose to {}", before.rank_words()));
+            }
+            Some(std::cmp::Ordering::Less) => {
+                parts.push(format!("fell to {}", before.rank_words()));
+            }
+            _ => {}
         }
         if i < placed.len() - 1 {
             parts.push(format!(
@@ -1031,6 +1093,72 @@ fn nav_target(key: &Key, current: usize, len: usize) -> Option<usize> {
         Key::End => Some(last),
         _ => None,
     }
+}
+
+/// What the pointer and focus do to a game's hit target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PointerEvent {
+    Enter,
+    Leave,
+    Focus,
+    Blur,
+}
+
+/// The hovered game and the focused game, by match id. Hover wins while it
+/// lasts; leaving falls back to the focused game, and blur clears that, so a
+/// highlight never outlives the pointer or the focus that made it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Pointer {
+    hovered: Option<String>,
+    focused: Option<String>,
+}
+
+impl Pointer {
+    fn apply(&mut self, event: PointerEvent, id: &str) {
+        let slot = match event {
+            PointerEvent::Enter | PointerEvent::Leave => &mut self.hovered,
+            PointerEvent::Focus | PointerEvent::Blur => &mut self.focused,
+        };
+        match event {
+            PointerEvent::Enter | PointerEvent::Focus => *slot = Some(id.to_string()),
+            // Only the game that set it clears it: a late leave or blur from
+            // another game keeps the current one.
+            PointerEvent::Leave | PointerEvent::Blur => {
+                if slot.as_deref() == Some(id) {
+                    *slot = None;
+                }
+            }
+        }
+    }
+
+    /// The game the readout and the highlight follow.
+    fn active(&self) -> Option<String> {
+        self.hovered.clone().or_else(|| self.focused.clone())
+    }
+}
+
+/// One plotted game's hit target, built before the render so the loop body
+/// is the keyed button itself.
+struct Hit {
+    at: usize,
+    match_id: String,
+    id: String,
+    class: String,
+    style: String,
+    label: String,
+}
+
+/// Width of one game's slot on the x axis, as `--rank-slot` on the hit
+/// layer. A hit target is never wider than its slot, so with many games on a
+/// narrow plot the targets sit side by side instead of stacking (the table
+/// is the full-size alternative). One game gets the whole plot.
+fn hit_slot_style(n: usize) -> String {
+    let slot = if n <= 1 {
+        PLOT_W
+    } else {
+        PLOT_W / (n - 1) as f64
+    };
+    format!("--rank-slot:{:.2}%", slot / VIEW_W * 100.0)
 }
 
 /// Id of a game's hit target. Built from the series key, the match id and
@@ -1114,10 +1242,12 @@ fn credit() -> Element {
 
 /// All rank chart rules. [`RankChart`] and [`RankChartLoading`] inject it.
 pub(super) const RANK_CHART_CSS: &str = r#"
+/* No outer margin: Overview and History both space their sections with a
+   flex gap, so a margin here would double the gap under the chart. */
 .rank-block {
   display: grid;
   gap: var(--space-stack);
-  margin: 0 0 var(--space-section);
+  margin: 0;
   min-width: 0;
 }
 .rank-block > .ui-section-title { margin: 0; }
@@ -1289,6 +1419,9 @@ pub(super) const RANK_CHART_CSS: &str = r#"
 .rank-chart-x-label.is-last { transform: translateX(-100%); }
 .rank-chart-x-label.is-only { transform: translateX(-50%); }
 .rank-chart-band { fill: var(--neutral-soft); }
+/* Light: the mint line is under 3:1 on the soft band, so the bands take the
+   card fill and the tier lines alone mark the tiers. */
+[data-theme="light"] .rank-chart-band { fill: var(--card-bg); }
 .rank-chart-band-alt { fill: transparent; }
 .rank-chart-tier-line,
 .rank-chart-axis {
@@ -1345,12 +1478,12 @@ pub(super) const RANK_CHART_CSS: &str = r#"
 }
 .rank-chart-marks .is-active.rank-chart-mark-dot { width: 14px; height: 14px; }
 .rank-chart-marks .is-active.rank-chart-mark-change { width: 16px; height: 16px; }
+/* 44px, but never wider than the game's own slot on the x axis. */
 .rank-chart-hit {
   position: absolute;
   box-sizing: border-box;
-  width: var(--hit-target-min);
+  width: min(var(--hit-target-min), var(--rank-slot, var(--hit-target-min)));
   height: var(--hit-target-min);
-  min-width: var(--hit-target-min);
   min-height: var(--hit-target-min);
   margin: 0;
   padding: 0;
@@ -1574,6 +1707,26 @@ pub(super) const RANK_CHART_CSS: &str = r#"
     outline-offset: var(--focus-ring-offset);
   }
 }
+/* Forced colours drop backgrounds and author colours: the line, the marks
+   and the active ring use system colours so the plot still reads. */
+@media (forced-colors: active) {
+  .rank-chart-band { fill: Canvas; }
+  .rank-chart-tier-line,
+  .rank-chart-axis { stroke: GrayText; }
+  .rank-chart-line { stroke: CanvasText; }
+  .rank-chart-mark-dot {
+    forced-color-adjust: none;
+    background: CanvasText;
+    border-color: Canvas;
+  }
+  .rank-chart-mark-change {
+    forced-color-adjust: none;
+    background: Canvas;
+    border-color: CanvasText;
+  }
+  .rank-chart-guide { border-color: CanvasText; }
+  .rank-chart-hit.is-active { outline-color: Highlight; }
+}
 "#;
 
 const STYLE_ID: &str = "scuffed-css-pages-stats-rank-chart-css";
@@ -1582,8 +1735,9 @@ const SUMMARY_ID: &str = "rank-chart-summary";
 const NOTE_ID: &str = "rank-chart-note";
 const TABLE_ID: &str = "rank-chart-table";
 
-/// The two cards above the plot: Current rank and Season range.
-fn status_cards(rows: &[ChartRow]) -> Element {
+/// The two cards above the plot: the latest rank and the range, both over
+/// the games in `window`.
+fn status_cards(rows: &[ChartRow], window: RankWindow) -> Element {
     let placed: Vec<&ChartRow> = rows.iter().filter(|r| r.placed.is_some()).collect();
     let tier = |row: &ChartRow| row.placed.map(|p| p.tier);
     let (Some(current), Some(low), Some(high)) = (
@@ -1598,21 +1752,23 @@ fn status_cards(rows: &[ChartRow]) -> Element {
             .max_by_key(|row| row.placed.map(|p| p.pos))
             .copied(),
     ) else {
+        let period = window.period();
         return rsx! {
             div { class: "rank-status",
                 div { class: "rank-status-card",
-                    p { class: "rank-kicker", "Current rank" }
-                    p { class: "rank-now", "No rank yet" }
-                    p { class: "rank-sub", "Play a ranked match to earn a place on the ladder." }
+                    p { class: "rank-kicker", "{window.now_kicker()}" }
+                    p { class: "rank-now", "No rank read" }
+                    p { class: "rank-sub", "No game {period} has a rank. Play a ranked match to see it here." }
                 }
                 div { class: "rank-status-card",
-                    p { class: "rank-kicker", "Season range" }
+                    p { class: "rank-kicker", "{window.range_kicker()}" }
                     p { class: "rank-now", "None" }
-                    p { class: "rank-sub", "A range appears after the first ranked game." }
+                    p { class: "rank-sub", "A range appears once a game {period} has a rank." }
                 }
             }
         };
     };
+    let range_period = window.period();
     let sub = match (current.progress, current.division) {
         (Some(p), _) if p < 0 => format!("{p}%, demotion protection"),
         (Some(p), Some(_)) => format!("{p}% into the division"),
@@ -1622,7 +1778,7 @@ fn status_cards(rows: &[ChartRow]) -> Element {
     rsx! {
         div { class: "rank-status",
             div { class: "rank-status-card",
-                p { class: "rank-kicker", "Current rank" }
+                p { class: "rank-kicker", "{window.now_kicker()}" }
                 p { class: "rank-now rank-now-row",
                     {emblem(tier(current), true)}
                     "{current.rank}"
@@ -1630,7 +1786,7 @@ fn status_cards(rows: &[ChartRow]) -> Element {
                 p { class: "rank-sub", "{sub}" }
             }
             div { class: "rank-status-card",
-                p { class: "rank-kicker", "Season range" }
+                p { class: "rank-kicker", "{window.range_kicker()}" }
                 if low.rank == high.rank {
                     p { class: "rank-now rank-now-row",
                         {emblem(tier(low), true)}
@@ -1649,7 +1805,7 @@ fn status_cards(rows: &[ChartRow]) -> Element {
                         }
                     }
                 }
-                p { class: "rank-sub", "Lowest to highest rank in the games loaded on this page." }
+                p { class: "rank-sub", "Lowest to highest rank {range_period}." }
             }
         }
     }
@@ -1790,17 +1946,18 @@ fn data_table(rows: &[ChartRow], caption: &str, mut open: Signal<bool>) -> Eleme
 }
 
 /// Rank progress for one (queue, role) at a time, as absolute ladder
-/// position, with the Current rank and Season range cards, a readout per
+/// position, with the latest rank and range cards, a readout per
 /// game and a table with the same data. With no series it is the empty
 /// state. `player` is the name the hidden summary and the table caption use;
 /// without it they speak to the viewer.
 #[component]
 pub(super) fn RankChart(
     series: Vec<RankSeries>,
+    window: RankWindow,
     #[props(default)] player: Option<String>,
 ) -> Element {
     let mut picked = use_signal(|| None::<String>);
-    let mut active = use_signal(|| None::<String>);
+    let mut pointer = use_signal(Pointer::default);
     let table_open = use_signal(|| false);
     let fallback = default_key(&series);
     let current_key = picked()
@@ -1822,7 +1979,8 @@ pub(super) fn RankChart(
         Some(series) => status_text(series, &rows),
         None => "No ranked games to show.".to_string(),
     };
-    let summary = summary_text(player.as_deref(), &rows);
+    let summary = summary_text(player.as_deref(), &rows, window);
+    let period = window.period();
     let note = unplaced_note(&rows);
     let caption = match player.as_deref() {
         Some(name) => format!("{CHART_TITLE} for {name}, one row per game"),
@@ -1839,9 +1997,13 @@ pub(super) fn RankChart(
         placed.iter().map(|(_, _, p)| p.pos).min().unwrap_or(0),
         placed.iter().map(|(_, _, p)| p.pos).max().unwrap_or(0),
     );
-    // One active game for hover, focus and tap. A game that left the series
-    // (another queue or role was picked) is no longer active.
-    let active_id = active().filter(|id| placed.iter().any(|(_, row, _)| &row.match_id == id));
+    // One active game for hover, focus and tap: the hovered one, else the
+    // focused one. Leaving or blurring clears it, so no highlight is left
+    // behind. A game that left the series (another queue or role was
+    // picked) is no longer active.
+    let active_id = pointer()
+        .active()
+        .filter(|id| placed.iter().any(|(_, row, _)| &row.match_id == id));
     let active_at = placed
         .iter()
         .position(|(_, row, _)| Some(&row.match_id) == active_id.as_ref());
@@ -1899,7 +2061,7 @@ pub(super) fn RankChart(
             ""
         }
     };
-    let x_labels: Vec<(usize, &'static str)> = match n {
+    let x_slots: Vec<(usize, &'static str)> = match n {
         0 => Vec::new(),
         1 => vec![(0, "rank-chart-x-label is-only")],
         _ => vec![
@@ -1907,6 +2069,42 @@ pub(super) fn RankChart(
             (n - 1, "rank-chart-x-label is-last"),
         ],
     };
+    // (match id, class, style, date) per x label, so the loop body is the
+    // keyed element itself.
+    let x_labels: Vec<(String, &'static str, String, String)> = x_slots
+        .into_iter()
+        .map(|(i, class)| {
+            let row = &rows[i];
+            (
+                row.match_id.clone(),
+                class,
+                format!("left:{:.2}%", x_pct(i, n)),
+                row.date_short.clone(),
+            )
+        })
+        .collect();
+    // (key, label, pressed) per queue and role chip.
+    let picks: Vec<(String, String, bool)> = series
+        .iter()
+        .map(|s| {
+            let k = s.key();
+            let pressed = Some(&k) == current_key.as_ref();
+            (k, s.label(), pressed)
+        })
+        .collect();
+    let hits: Vec<Hit> = placed
+        .iter()
+        .enumerate()
+        .map(|(at, (_, row, _))| Hit {
+            at,
+            match_id: row.match_id.clone(),
+            id: hit_ids[at].clone(),
+            class: format!("rank-chart-hit{}", on_class(at)),
+            style: spots[at].clone(),
+            label: row.point_label(),
+        })
+        .collect();
+    let hit_slot = hit_slot_style(n);
 
     rsx! {
         crate::styles::StyleOnce { id: STYLE_ID, css: RANK_CHART_CSS }
@@ -1914,35 +2112,31 @@ pub(super) fn RankChart(
             h2 { class: "ui-section-title", id: TITLE_ID, "{CHART_TITLE}" }
             if series.len() > 1 {
                 ChipRow { label: "Queue and role".to_string(),
-                    for s in series.iter() {
-                        {
-                            let k = s.key();
-                            let pressed = Some(&k) == current_key.as_ref();
-                            let pick = k.clone();
-                            rsx! {
-                                ChipButton {
-                                    key: "{k}",
-                                    id: format!("rank-chart-{k}-pick"),
-                                    class: "chip".to_string(),
-                                    label: s.label(),
-                                    pressed,
-                                    onclick: move |_| picked.set(Some(pick.clone())),
-                                }
-                            }
+                    for (k, label, pressed) in picks {
+                        ChipButton {
+                            key: "{k}",
+                            id: format!("rank-chart-{k}-pick"),
+                            class: "chip".to_string(),
+                            label,
+                            pressed,
+                            onclick: {
+                                let pick = k.clone();
+                                move |_| picked.set(Some(pick.clone()))
+                            },
                         }
                     }
                 }
             }
             p { class: "visually-hidden rank-chart-picker-status", role: "status", "{status}" }
-            {status_cards(&rows)}
+            {status_cards(&rows, window)}
             div { class: "rank-chart",
                 p { class: "visually-hidden", id: SUMMARY_ID, "{summary}" }
                 if placed.is_empty() {
                     p { class: "rank-chart-empty",
                         if n == 0 {
-                            "No ranked games in this period. Play a ranked match and it will show up here."
+                            "No ranked games {period}. Play a ranked match and it will show up here."
                         } else {
-                            "No game in this period could be placed on the ladder. The games are listed in the table."
+                            "No game {period} could be placed on the ladder. The games are listed in the table."
                         }
                     }
                 } else {
@@ -2000,53 +2194,53 @@ pub(super) fn RankChart(
                                     }
                                 }
                             }
-                            div { class: "rank-chart-hits",
-                                for (at, (_, row, _)) in placed.iter().enumerate() {
-                                    {
-                                        let id = hit_ids[at].clone();
-                                        let focus_id = id.clone();
-                                        let ids = hit_ids.clone();
-                                        let (hover, focus, tap) = (
-                                            row.match_id.clone(),
-                                            row.match_id.clone(),
-                                            row.match_id.clone(),
-                                        );
-                                        rsx! {
-                                            button {
-                                                key: "{row.match_id}",
-                                                class: format!("rank-chart-hit{}", on_class(at)),
-                                                r#type: "button",
-                                                id: "{id}",
-                                                style: "{spots[at]}",
-                                                tabindex: if at == tab_stop { "0" } else { "-1" },
-                                                aria_label: row.point_label(),
-                                                onmouseenter: move |_| active.set(Some(hover.clone())),
-                                                onfocus: move |_| active.set(Some(focus.clone())),
-                                                onclick: move |_| {
-                                                    active.set(Some(tap.clone()));
-                                                    focus_element_by_id(&focus_id);
-                                                },
-                                                onkeydown: move |e: KeyboardEvent| {
-                                                    if let Some(next) = nav_target(&e.key(), at, ids.len()) {
-                                                        e.prevent_default();
-                                                        focus_element_by_id(&ids[next]);
-                                                    }
-                                                },
+                            div { class: "rank-chart-hits", style: "{hit_slot}",
+                                for hit in hits {
+                                    button {
+                                        key: "{hit.match_id}",
+                                        class: "{hit.class}",
+                                        r#type: "button",
+                                        id: "{hit.id}",
+                                        style: "{hit.style}",
+                                        tabindex: if hit.at == tab_stop { "0" } else { "-1" },
+                                        aria_label: "{hit.label}",
+                                        onmouseenter: {
+                                            let id = hit.match_id.clone();
+                                            move |_| pointer.with_mut(|p| p.apply(PointerEvent::Enter, &id))
+                                        },
+                                        onmouseleave: {
+                                            let id = hit.match_id.clone();
+                                            move |_| pointer.with_mut(|p| p.apply(PointerEvent::Leave, &id))
+                                        },
+                                        onfocus: {
+                                            let id = hit.match_id.clone();
+                                            move |_| pointer.with_mut(|p| p.apply(PointerEvent::Focus, &id))
+                                        },
+                                        onblur: {
+                                            let id = hit.match_id.clone();
+                                            move |_| pointer.with_mut(|p| p.apply(PointerEvent::Blur, &id))
+                                        },
+                                        onclick: {
+                                            let id = hit.id.clone();
+                                            move |_| focus_element_by_id(&id)
+                                        },
+                                        onkeydown: {
+                                            let ids = hit_ids.clone();
+                                            let at = hit.at;
+                                            move |e: KeyboardEvent| {
+                                                if let Some(next) = nav_target(&e.key(), at, ids.len()) {
+                                                    e.prevent_default();
+                                                    focus_element_by_id(&ids[next]);
+                                                }
                                             }
-                                        }
+                                        },
                                     }
                                 }
                             }
                         }
                         div { class: "rank-chart-x",
-                            for (i, class) in x_labels.iter() {
-                                {
-                                    let row = &rows[*i];
-                                    let left = format!("left:{:.2}%", x_pct(*i, n));
-                                    rsx! {
-                                        span { key: "{row.match_id}", class: "{class}", style: "{left}", "{row.date_short}" }
-                                    }
-                                }
+                            for (match_id , class , left , date) in x_labels {
+                                span { key: "{match_id}", class: "{class}", style: "{left}", "{date}" }
                             }
                         }
                     }
@@ -2116,6 +2310,7 @@ pub(super) fn RankChartLoading() -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::components::ui::test_support::{css_rule, has_decl};
     use chrono::TimeZone;
 
     fn rank(json: &str) -> Option<MatchRank> {
@@ -2603,10 +2798,15 @@ mod tests {
     }
 
     fn render_chart_for(series: Vec<RankSeries>, player: Option<&str>) -> String {
+        render_chart_in(series, player, RankWindow::Page(1))
+    }
+
+    fn render_chart_in(series: Vec<RankSeries>, player: Option<&str>, window: RankWindow) -> String {
         let mut dom = VirtualDom::new_with_props(
             RankChart,
             RankChartProps {
                 series,
+                window,
                 player: player.map(str::to_string),
             },
         );
@@ -2638,7 +2838,9 @@ mod tests {
         assert_eq!(CHAMPION_TOP, 4500);
         assert_eq!(SCALE_CEILING, 5000, "one reserved band above Champion 1");
         // The rank up is +34: the line rises.
-        assert_eq!(2030 - 1996, 34);
+        let up = ladder_position(tier("Emerald"), Some(5), Some(30))
+            - ladder_position(tier("Platinum"), Some(1), Some(96));
+        assert_eq!(up, 34);
     }
 
     #[test]
@@ -2786,45 +2988,50 @@ mod tests {
 
     #[test]
     fn single_step_and_edge_change_words() {
-        let step = |rank: &'static str, tier, pos, progress| Step {
+        let step = |rank: &'static str, tier, division, pos, progress| Step {
             rank,
             tier,
+            division,
             pos,
             progress,
         };
-        let a = step("Gold 3", 2, 1250, Some(50));
+        let a = step("Gold 3", 2, Some(3), 1250, Some(50));
         assert_eq!(
-            change_words(Some(&a), &step("Gold 3", 2, 1251, Some(51))),
+            change_words(Some(&a), &step("Gold 3", 2, Some(3), 1251, Some(51))),
             "Up 1 point"
         );
         assert_eq!(
-            change_words(Some(&a), &step("Gold 3", 2, 1250, Some(50))),
+            change_words(Some(&a), &step("Gold 3", 2, Some(3), 1250, Some(50))),
             "No change"
         );
         assert_eq!(
-            change_words(Some(&a), &step("Silver 1", 1, 990, Some(90))),
+            change_words(Some(&a), &step("Silver 1", 1, Some(1), 990, Some(90))),
             "Down to Silver 1, from Gold 3 at 50%"
         );
-        let unread = step("Gold", 2, 1250, None);
+        let unread = step("Gold", 2, None, 1250, None);
         assert_eq!(
-            change_words(Some(&unread), &step("Platinum 5", 3, 1510, Some(10))),
+            change_words(Some(&unread), &step("Platinum 5", 3, Some(5), 1510, Some(10))),
             "Up to Platinum 5, from Gold"
         );
-        assert_eq!(change_words(Some(&unread), &a), "Now Gold 3");
+        // Same tier with the division read on one game only: not a move.
+        assert_eq!(
+            change_words(Some(&unread), &a),
+            "Same tier, division not read"
+        );
     }
 
     #[test]
     fn summary_sentence_matches_the_spec() {
         let rows = chart_rows(&series_of(&POPULATED));
         assert_eq!(
-            summary_text(Some("Player01"), &rows),
+            summary_text(Some("Player01"), &rows, RankWindow::Page(1)),
             "Rank progress for Player01 from 2 Nov 2026 to 15 Nov 2026. \
              The chart plots absolute ladder position, so a rank up stays an up. \
              Player01 started at Platinum 3 at 40 percent, rose to Platinum 1 at 96 percent, \
              then ranked up to Emerald 5 at 30 percent (that move is up on this chart, not a drop), \
              peaked at Emerald 4, and ended at Emerald 5 at 40 percent after a derank on 15 Nov 2026."
         );
-        let anon = summary_text(None, &rows);
+        let anon = summary_text(None, &rows, RankWindow::Page(1));
         assert!(
             anon.starts_with("Your rank progress from 2 Nov 2026"),
             "{anon}"
@@ -2836,13 +3043,13 @@ mod tests {
     fn summary_for_one_game_and_for_none() {
         let one = chart_rows(&series_of(&[(8, "Gold", Some(3), Some(50), Some("win"))]));
         assert_eq!(
-            summary_text(Some("Player01"), &one),
+            summary_text(Some("Player01"), &one, RankWindow::Page(1)),
             "Rank progress for Player01. One ranked game on 8 Nov 2026: Gold 3 at 50 percent, a win. \
              A single game is shown as a point, with no line."
         );
         assert_eq!(
-            summary_text(Some("Player01"), &[]),
-            "Rank progress for Player01. There are no ranked games in this period, so the chart is empty."
+            summary_text(Some("Player01"), &[], RankWindow::Recent(10)),
+            "Rank progress for Player01. There are no ranked games in your last 10 games, so the chart is empty."
         );
         assert_eq!(
             group_label(1, 0),
@@ -2872,7 +3079,7 @@ mod tests {
             Some("1 game not plotted: rank \"Emerlad\" not recognised")
         );
         assert_eq!(unplaced_note(&chart_rows(&series_of(&POPULATED))), None);
-        let summary = summary_text(Some("Player01"), &rows);
+        let summary = summary_text(Some("Player01"), &rows, RankWindow::Page(1));
         assert!(
             summary.ends_with(
                 "after a derank on 16 Nov 2026. One game on 13 Nov 2026 with rank \"Emerlad\" was not plotted \
@@ -2935,7 +3142,7 @@ mod tests {
             Some("1 game not plotted: rank not read")
         );
         let html = render_chart(vec![series]);
-        assert!(html.contains("No rank yet"), "{html}");
+        assert!(html.contains("No rank read"), "{html}");
         assert!(html.contains("could be placed on the ladder"), "{html}");
         assert!(html.contains("<table"), "the game is still listed: {html}");
         assert!(!html.contains("rank-chart-hit"), "{html}");
@@ -3129,7 +3336,7 @@ mod tests {
             .next()
             .expect("cards come before the chart");
         assert!(
-            cards.contains("Current rank") && cards.contains("Season range"),
+            cards.contains("Current rank") && cards.contains("Range on this page"),
             "{cards}"
         );
         assert!(cards.contains("40% into the division"), "{cards}");
@@ -3205,7 +3412,6 @@ mod tests {
 
     #[test]
     fn one_game_default_readout_stays_phone_only_and_lights_its_point() {
-        use crate::components::ui::test_support::{css_rule, has_decl};
         let html = render_chart(vec![series_of(&[(
             8,
             "Gold",
@@ -3259,7 +3465,6 @@ mod tests {
 
     #[test]
     fn table_toggle_keeps_its_gap_over_the_shared_button_margin() {
-        use crate::components::ui::test_support::{css_rule, has_decl};
         // `.btn` sets `margin: 0`; a lone class selector loses to it when the
         // button sheet loads later, so the toggle sat flush on the legend.
         let rule = css_rule(RANK_CHART_CSS, ".rank-chart .rank-chart-table-toggle {");
@@ -3269,17 +3474,17 @@ mod tests {
 
     #[test]
     fn empty_and_loading_states_say_so_in_words() {
-        let html = render_chart_for(Vec::new(), Some("Player01"));
-        assert!(html.contains("No rank yet"), "{html}");
+        let html = render_chart_in(Vec::new(), Some("Player01"), RankWindow::Recent(10));
+        assert!(html.contains("No rank read"), "{html}");
         assert!(html.contains(">None</p>"), "{html}");
         assert!(
             html.contains(
-                "No ranked games in this period. Play a ranked match and it will show up here."
+                "No ranked games in your last 10 games. Play a ranked match and it will show up here."
             ),
             "{html}"
         );
         assert!(
-            html.contains("There are no ranked games in this period, so the chart is empty."),
+            html.contains("There are no ranked games in your last 10 games, so the chart is empty."),
             "{html}"
         );
         assert!(!html.contains("<table") && !html.contains("<img"), "{html}");
@@ -3338,9 +3543,15 @@ mod tests {
 
     #[test]
     fn chart_css_uses_tokens_and_the_spec_sizes() {
-        use crate::components::ui::test_support::{css_rule, has_decl};
+        // 44px, capped at the game's slot (see hit_targets_never_overlap).
         let hit = css_rule(RANK_CHART_CSS, ".rank-chart-hit {");
-        assert!(has_decl(&hit, "width: var(--hit-target-min)"), "{hit}");
+        assert!(
+            has_decl(
+                &hit,
+                "width: min(var(--hit-target-min), var(--rank-slot, var(--hit-target-min)))"
+            ),
+            "{hit}"
+        );
         assert!(has_decl(&hit, "height: var(--hit-target-min)"), "{hit}");
         let line = css_rule(RANK_CHART_CSS, ".rank-chart-line {");
         assert!(has_decl(&line, "stroke: var(--chart-2)"), "{line}");
@@ -3374,64 +3585,267 @@ mod tests {
         }
     }
 
-    /// The emblem sources stay byte for byte as the design sources hold them.
+    /// FNV-1a, 64 bit: enough to pin a file's bytes without a hash crate.
+    fn fnv1a(bytes: &[u8]) -> u64 {
+        bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+            (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3)
+        })
+    }
+
+    /// The emblem sources stay byte for byte as the design sources hold them:
+    /// each file is pinned by length and by a hash of every byte.
     #[test]
     fn emblem_files_are_unchanged() {
-        let pins: [(&str, &[u8], usize); 9] = [
+        let pins: [(&str, &[u8], usize, u64); 9] = [
             (
                 "bronze",
                 include_bytes!("../../../assets/rank-icons/rank-bronze.png"),
                 7075,
+                0x59f0_113b_85de_21d8,
             ),
             (
                 "silver",
                 include_bytes!("../../../assets/rank-icons/rank-silver.png"),
                 6127,
+                0xcc25_9879_b50a_0e4f,
             ),
             (
                 "gold",
                 include_bytes!("../../../assets/rank-icons/rank-gold.png"),
                 7548,
+                0x10c0_a30d_0be6_65cc,
             ),
             (
                 "platinum",
                 include_bytes!("../../../assets/rank-icons/rank-platinum.png"),
                 9142,
+                0xa2a7_ef6d_361a_bf10,
             ),
             (
                 "emerald",
                 include_bytes!("../../../assets/rank-icons/rank-emerald.png"),
                 9963,
+                0xc908_99ab_9f2a_44cc,
             ),
             (
                 "diamond",
                 include_bytes!("../../../assets/rank-icons/rank-diamond.png"),
                 11025,
+                0x6dcc_73d6_69e2_5db4,
             ),
             (
                 "master",
                 include_bytes!("../../../assets/rank-icons/rank-master.png"),
                 11483,
+                0x27f5_a882_129e_4515,
             ),
             (
                 "grandmaster",
                 include_bytes!("../../../assets/rank-icons/rank-grandmaster.png"),
                 12901,
+                0xbdfd_f4a3_0bb2_0e9d,
             ),
             (
                 "champion",
                 include_bytes!("../../../assets/rank-icons/rank-champion.png"),
                 13101,
+                0x0dc1_0aab_fc73_a3e1,
             ),
         ];
-        for (i, (name, bytes, len)) in pins.iter().enumerate() {
+        for (i, (name, bytes, len, hash)) in pins.iter().enumerate() {
             assert_eq!(bytes.len(), *len, "{name}");
+            assert_eq!(fnv1a(bytes), *hash, "{name}: bytes changed");
             assert!(bytes.starts_with(b"\x89PNG"), "{name}");
             assert_eq!(TIERS[i].to_lowercase(), *name, "ladder order");
             let url = emblem_url(i).expect(name);
             assert!(url.ends_with(&format!("rank-{name}.png")), "{url}");
         }
         assert_eq!(emblem_url(9), None, "no emblem above Champion");
+    }
+
+    #[test]
+    fn a_dip_before_the_promotion_is_not_called_a_rise() {
+        // Platinum 1 at 60%, a loss to 40%, then the promotion: the game
+        // before the tier-up is lower than the start.
+        let rows = chart_rows(&series_of(&[
+            (2, "Platinum", Some(1), Some(60), None),
+            (3, "Platinum", Some(1), Some(40), Some("loss")),
+            (4, "Emerald", Some(5), Some(10), Some("win")),
+        ]));
+        let text = summary_text(Some("Player01"), &rows, RankWindow::Page(1));
+        assert!(!text.contains("rose to"), "{text}");
+        assert!(text.contains("fell to Platinum 1 at 40 percent"), "{text}");
+        // A climb before the promotion still reads as a rise.
+        let rows = chart_rows(&series_of(&[
+            (2, "Platinum", Some(1), Some(40), None),
+            (3, "Platinum", Some(1), Some(60), Some("win")),
+            (4, "Emerald", Some(5), Some(10), Some("win")),
+        ]));
+        let text = summary_text(Some("Player01"), &rows, RankWindow::Page(1));
+        assert!(text.contains("rose to Platinum 1 at 60 percent"), "{text}");
+    }
+
+    #[test]
+    fn unread_fields_never_count_as_a_change() {
+        // Gold 3, then Gold with the division unread: no derank, no diamond.
+        let rows = chart_rows(&series_of(&[
+            (2, "Gold", Some(3), Some(80), None),
+            (3, "Gold", None, Some(80), None),
+            (4, "Gold", Some(3), None, None),
+            (5, "Gold", Some(3), Some(70), None),
+        ]));
+        assert!(!rows[1].rank_changed && !rows[1].derank, "{:?}", rows[1]);
+        assert_eq!(rows[1].change, "Same tier, division not read");
+        assert!(!rows[2].rank_changed && !rows[2].derank, "{:?}", rows[2]);
+        assert_eq!(rows[2].change, "Same tier, division not read");
+        // Progress read on one game only: the midpoint is not a step.
+        assert_eq!(rows[3].change, "Same rank, progress not read");
+        assert!(!rows[3].rank_changed);
+        // Read on both games, the step is still counted.
+        let rows = chart_rows(&series_of(&[
+            (2, "Gold", Some(3), None, None),
+            (3, "Gold", Some(2), None, None),
+        ]));
+        assert_eq!(rows[1].change, "Up to Gold 2");
+        assert!(rows[1].rank_changed && !rows[1].derank);
+    }
+
+    #[test]
+    fn a_highlight_clears_when_the_pointer_or_focus_leaves() {
+        let mut p = Pointer::default();
+        p.apply(PointerEvent::Enter, "a");
+        assert_eq!(p.active().as_deref(), Some("a"));
+        p.apply(PointerEvent::Leave, "a");
+        assert_eq!(p.active(), None, "hover alone leaves nothing behind");
+        p.apply(PointerEvent::Focus, "b");
+        p.apply(PointerEvent::Enter, "c");
+        assert_eq!(p.active().as_deref(), Some("c"), "hover wins while it lasts");
+        p.apply(PointerEvent::Leave, "c");
+        assert_eq!(p.active().as_deref(), Some("b"), "back to the focused game");
+        // A late blur from another game keeps the current one.
+        p.apply(PointerEvent::Blur, "a");
+        assert_eq!(p.active().as_deref(), Some("b"));
+        p.apply(PointerEvent::Blur, "b");
+        assert_eq!(p.active(), None);
+        // The hit targets clear on leave and blur.
+        let html = render_chart(vec![series_of(&POPULATED)]);
+        assert!(!html.contains("is-active"), "{html}");
+        let source = include_str!("rank.rs");
+        let render = &source[source.find("for hit in hits {").expect("hit loop")..];
+        let render = &render[..render.find("div { class: \"rank-chart-x\"").expect("x axis")];
+        for handler in ["onmouseleave:", "onblur:"] {
+            assert!(render.contains(handler), "{handler}");
+        }
+    }
+
+    /// WCAG contrast of two `#rrggbb` colours.
+    fn contrast(a: &str, b: &str) -> f64 {
+        fn lum(hex: &str) -> f64 {
+            let c = |i: usize| {
+                let v = f64::from(u8::from_str_radix(&hex[i..i + 2], 16).expect(hex)) / 255.0;
+                if v <= 0.039_28 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * c(1) + 0.7152 * c(3) + 0.0722 * c(5)
+        }
+        let (a, b) = (lum(a), lum(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    /// A `--name: #rrggbb;` value from a token sheet.
+    fn hex_token(css: &str, name: &str) -> String {
+        let at = css.find(&format!("{name}: #")).expect(name) + name.len() + 2;
+        css[at..at + 7].to_string()
+    }
+
+    #[test]
+    fn light_chart_line_keeps_three_to_one_on_every_band() {
+        let primitives = include_str!("../../theme/css/primitives.css");
+        let line = hex_token(primitives, "--chart-mint-light");
+        let card = hex_token(primitives, "--neutral-0");
+        // Light: the bands take the card fill, so the line only ever sits on
+        // the card.
+        let band = css_rule(RANK_CHART_CSS, "[data-theme=\"light\"] .rank-chart-band {");
+        assert!(has_decl(&band, "fill: var(--card-bg)"), "{band}");
+        let look = include_str!("../../theme/css/look_a.css");
+        let light = &look[look.find("[data-theme=\"light\"] {").expect("light")..];
+        assert!(light.contains("--surface: var(--neutral-0);"));
+        assert!(light.contains("--chart-2: var(--chart-mint-light);"));
+        assert!(contrast(&line, &card) >= 3.0, "{line} on {card}");
+        // The soft band it replaces is under 3:1: the reason for the rule.
+        let semantic = include_str!("../../theme/css/semantic.css");
+        let light_soft = &semantic[semantic.find("pre-composited on A --surface #ffffff").expect("light soft")..];
+        let soft = hex_token(light_soft, "--neutral-soft");
+        assert!(contrast(&line, &soft) < 3.0, "{line} on {soft}");
+        // The table toggle stays as the text fallback whenever the plot shows.
+        let html = render_chart(vec![series_of(&POPULATED)]);
+        assert!(html.contains("Show rank progress as a table"), "{html}");
+    }
+
+    #[test]
+    fn copy_names_the_games_the_chart_was_given() {
+        // Overview: ten unranked recent games are not "no rank yet".
+        let mut series = series_of(&[(8, "Gold", Some(3), Some(50), None)]);
+        series.points[0].shown.tier = None;
+        let html = render_chart_in(vec![series], None, RankWindow::Recent(10));
+        assert!(!html.contains("No rank yet"), "{html}");
+        assert!(html.contains("No game in your last 10 games has a rank"), "{html}");
+        assert!(html.contains("Recent range"), "{html}");
+        // History page 3: its newest game is not the current rank.
+        let html = render_chart_in(vec![series_of(&POPULATED)], None, RankWindow::Page(3));
+        assert!(!html.contains("Current rank"), "{html}");
+        assert!(html.contains("Latest rank on this page"), "{html}");
+        assert!(html.contains("Range on this page"), "{html}");
+        assert!(
+            html.contains("Lowest to highest rank on page 3 of your match history."),
+            "{html}"
+        );
+        // The first page and Overview do hold the current rank.
+        let html = render_chart_in(vec![series_of(&POPULATED)], None, RankWindow::Recent(13));
+        assert!(html.contains("Current rank"), "{html}");
+        assert_eq!(RankWindow::Recent(1).period(), "in your last game");
+    }
+
+    #[test]
+    fn hit_targets_never_overlap_their_neighbours() {
+        // A 25-game history page: each target is capped at its slot width.
+        let slot = hit_slot_style(25);
+        assert_eq!(slot, format!("--rank-slot:{:.2}%", PLOT_W / 24.0 / VIEW_W * 100.0));
+        let hit = css_rule(RANK_CHART_CSS, ".rank-chart-hit {");
+        assert!(
+            has_decl(
+                &hit,
+                "width: min(var(--hit-target-min), var(--rank-slot, var(--hit-target-min)))"
+            ),
+            "{hit}"
+        );
+        assert!(!has_decl(&hit, "min-width: var(--hit-target-min)"), "{hit}");
+        assert!(has_decl(&hit, "height: var(--hit-target-min)"), "{hit}");
+        // Neighbouring slots touch but do not overlap: the slot is the x step.
+        assert!((x_pct(1, 25) - x_pct(0, 25) - PLOT_W / 24.0 / VIEW_W * 100.0).abs() < 1e-9);
+        let html = render_chart(vec![series_of(&POPULATED)]);
+        assert!(
+            html.contains(&format!("class=\"rank-chart-hits\" style=\"{}\"", hit_slot_style(13))),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn forced_colours_keep_the_line_and_marks_visible() {
+        use crate::components::ui::test_support::media_block;
+        let forced = media_block(RANK_CHART_CSS, "@media (forced-colors: active)");
+        let line = css_rule(&forced, ".rank-chart-line {");
+        assert!(has_decl(&line, "stroke: CanvasText"), "{line}");
+        let dot = css_rule(&forced, ".rank-chart-mark-dot {");
+        assert!(has_decl(&dot, "forced-color-adjust: none"), "{dot}");
+        assert!(has_decl(&dot, "background: CanvasText"), "{dot}");
+        let diamond = css_rule(&forced, ".rank-chart-mark-change {");
+        assert!(has_decl(&diamond, "border-color: CanvasText"), "{diamond}");
+        let active = css_rule(&forced, ".rank-chart-hit.is-active {");
+        assert!(has_decl(&active, "outline-color: Highlight"), "{active}");
     }
 
     #[test]

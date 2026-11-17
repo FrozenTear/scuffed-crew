@@ -9,6 +9,7 @@ use serde::Deserialize;
 
 use scuffed_api_client::ApiClient;
 
+use crate::components::ui::inline_confirm::focus_element_by_id_soon;
 use crate::components::ui::{
     EmptyCard, HeroSelect, LoadError, PageHeader, PageShell, PageWidth, Pager, SeasonSelect,
     SkeletonBars, TabButton, btn_class, clamp_page, page_count, page_slice, show_list_top,
@@ -351,10 +352,27 @@ const LB_PANEL: &str = "leaderboard-panel";
 /// Heading of the unranked list. Its table region is named by it.
 const UNRANKED_TITLE_ID: &str = "leaderboard-unranked-title";
 
+/// Most rows one board fetch asks for. A full fetch may leave players out.
+const BOARD_LIMIT: usize = 50;
+
+/// The pager noun for the ranked table. At the fetch cap the count is how
+/// many are shown, not how many players there are.
+fn ranked_noun(rows_fetched: usize) -> (&'static str, &'static str) {
+    if rows_fetched >= BOARD_LIMIT {
+        ("ranked players shown", "ranked player shown")
+    } else {
+        ("ranked players", "ranked player")
+    }
+}
+
 /// Id of a board tab button. The tabpanel is labelled by the selected one.
 fn metric_tab_id(metric: &str) -> String {
     format!("leaderboard-tab-{metric}")
 }
+
+/// Id of the hero picker. The all-heroes button removes itself, so focus
+/// moves here, to the control it just reset. The picker passes the same id.
+const HERO_PICK_ID: &str = "leaderboard-hero";
 
 /// What the panel shows for one fetch state.
 #[derive(Debug, Clone, PartialEq)]
@@ -407,10 +425,15 @@ pub fn Leaderboards() -> Element {
             label_tick += 1;
         }
     });
+    // Whether the rows on screen were fetched for one hero. It changes when
+    // they land, with the rows, so a refetch never pairs the old rows with
+    // the new filter (which flashed the wrong empty card).
+    let mut shown_for_hero = use_signal(|| false);
     let mut rows = use_resource(move || {
         let m = metric();
         let h = hero();
-        let mut url = format!("/api/public/leaderboards?metric={m}&limit=50");
+        let for_hero = h.is_some();
+        let mut url = format!("/api/public/leaderboards?metric={m}&limit={BOARD_LIMIT}");
         if let Some(h) = h {
             url.push_str(&format!("&hero={}", encode_query(&h)));
         }
@@ -433,12 +456,13 @@ pub fn Leaderboards() -> Element {
                 }
             }
             .await;
+            shown_for_hero.set(for_hero);
             // The board travels with its rows, so a tab switch never splits
             // the previous board's rows by the new board's rule.
             (m, load)
         }
     });
-    let hero_filtered = hero().is_some();
+    let hero_filtered = shown_for_hero();
     let (message, view, board) = {
         let snapshot = rows.read();
         let message = leaderboard_message(snapshot.as_ref().map(|(_, load)| load), hero_filtered);
@@ -592,6 +616,7 @@ fn BoardPanel(
     // The pager clamps a page past the end; the rank numbers use the same page.
     let current = clamp_page(page, page_count(ranked.len(), BOARD_PAGE_SIZE));
     let first_rank = (current - 1) * BOARD_PAGE_SIZE + 1;
+    let (ranked_plural, ranked_singular) = ranked_noun(ranked.len() + unranked.len());
     let label = board_label(&board);
     let note = board_note(&board);
     let sort = |metric: &str| (board == metric).then_some("descending");
@@ -623,7 +648,10 @@ fn BoardPanel(
                             button {
                                 r#type: "button",
                                 class: btn_class(true),
-                                onclick: move |_| on_all_heroes.call(()),
+                                onclick: move |_| {
+                                    on_all_heroes.call(());
+                                    focus_element_by_id_soon(HERO_PICK_ID.to_string());
+                                },
                                 "Show all heroes"
                             }
                         },
@@ -634,7 +662,7 @@ fn BoardPanel(
                         title: message.clone(),
                         message: "The board fills from personal stats uploaded with the tracker. Players show up after a few games.",
                         actions: rsx! {
-                            Link { class: btn_class(true), to: Route::Stats {}, "Open My Stats" }
+                            Link { class: btn_class(true), to: Route::Stats {}, "Open your stats" }
                         },
                     }
                 },
@@ -646,7 +674,12 @@ fn BoardPanel(
                             button {
                                 r#type: "button",
                                 class: btn_class(true),
-                                onclick: move |_| on_board.call("games"),
+                                onclick: move |_| {
+                                    on_board.call("games");
+                                    // The button leaves with the board: focus
+                                    // the Games tab it just picked.
+                                    focus_element_by_id_soon(metric_tab_id("games"));
+                                },
                                 "See the Games board"
                             }
                         },
@@ -692,16 +725,21 @@ fn BoardPanel(
                 page: current,
                 total: ranked.len(),
                 page_size: BOARD_PAGE_SIZE,
-                noun: "ranked players",
-                noun_singular: "ranked player",
+                noun: ranked_plural,
+                noun_singular: ranked_singular,
                 show_page_count: true,
                 label: "Leaderboard pages",
                 on_change: move |next| on_page.call(next),
             }
         }
 
-        if !unranked.is_empty() {
-            section { class: "ui-stack", aria_labelledby: UNRANKED_TITLE_ID,
+        // The section is always in the tree so its pager's status line is
+        // too; with no unranked players it is hidden and has nothing to say.
+        section {
+            class: "ui-stack",
+            hidden: unranked.is_empty(),
+            aria_labelledby: if !unranked.is_empty() { UNRANKED_TITLE_ID },
+            if !unranked.is_empty() {
                 h2 { id: UNRANKED_TITLE_ID, class: "ui-section-title", "{UNRANKED_TITLE}" }
                 p { class: "lb-note", "{UNRANKED_NOTE}" }
                 div {
@@ -726,17 +764,17 @@ fn BoardPanel(
                     }
                 }
             }
-        }
-        Pager {
-            id: "leaderboard-unranked-pager",
-            page: unranked_page,
-            total: unranked.len(),
-            page_size: BOARD_PAGE_SIZE,
-            noun: "players with too few games",
-            noun_singular: "player with too few games",
-            show_page_count: true,
-            label: "Too few games pages",
-            on_change: move |next| on_unranked_page.call(next),
+            Pager {
+                id: "leaderboard-unranked-pager",
+                page: unranked_page,
+                total: unranked.len(),
+                page_size: BOARD_PAGE_SIZE,
+                noun: "players with too few games",
+                noun_singular: "player with too few games",
+                show_page_count: true,
+                label: "Too few games pages",
+                on_change: move |next| on_unranked_page.call(next),
+            }
         }
     }
 }
@@ -1258,6 +1296,60 @@ mod tests {
         assert!(!page.contains("main {"), "the shell owns <main>");
     }
 
+    /// The real page, not the hand-built shell above: one H1, no main, the
+    /// panel, and the controls focus moves to when a button removes itself.
+    #[test]
+    fn the_real_page_has_one_h1_and_the_focus_targets() {
+        let html = render_routed(|| rsx! { Leaderboards {} });
+        assert_eq!(html.matches("<h1").count(), 1, "{html}");
+        assert!(html.contains("<h1>Leaderboards</h1>"), "{html}");
+        assert!(!html.contains("<main"), "{html}");
+        assert!(html.contains(&format!("id=\"{LB_PANEL}\"")), "{html}");
+        assert!(html.contains(&format!("id=\"{HERO_PICK_ID}\"")), "{html}");
+        assert!(
+            html.contains(&format!("id=\"{}\"", metric_tab_id("games"))),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn a_full_fetch_counts_the_players_shown_and_the_short_list_owns_its_pager() {
+        assert_eq!(ranked_noun(BOARD_LIMIT - 1).0, "ranked players");
+        assert_eq!(ranked_noun(BOARD_LIMIT).0, "ranked players shown");
+        assert!(include_str!("leaderboards.rs").contains("&limit={BOARD_LIMIT}"));
+        let full = render_case(PanelCase::new("games", rows_view("games", &players(BOARD_LIMIT))));
+        assert!(full.contains("of 50 ranked players shown"), "{full}");
+        // The Too few games pager sits inside its own section.
+        let mut rows = players(3);
+        rows.push(named("member:99", "Player99", 2, 1, 0.5));
+        let html = render_case(PanelCase::new("winrate", rows_view("winrate", &rows)));
+        let title = html
+            .find(&format!("id=\"{UNRANKED_TITLE_ID}\""))
+            .expect("short list");
+        let section = html[..title].rfind("<section").expect("section");
+        let pager = html.find("id=\"leaderboard-unranked-pager-meta\"").expect("pager");
+        let close = section + html[section..].find("</section>").unwrap();
+        assert!(section < pager && pager < close, "{html}");
+        // The heading copy matches the page it opens.
+        let empty = render_case(PanelCase::new("winrate", BoardView::Empty));
+        assert!(!empty.contains("My Stats"), "{empty}");
+    }
+
+    #[test]
+    fn buttons_that_remove_themselves_hand_focus_on() {
+        let src = include_str!("leaderboards.rs");
+        let page = &src[..src.find("#[cfg(test)]").unwrap()];
+        for button in ["\"Show all heroes\"", "\"See the Games board\""] {
+            let end = page.find(button).expect(button);
+            let handler = &page[page[..end].rfind("onclick:").expect(button)..end];
+            assert!(handler.contains("focus_element_by_id_soon("), "{button}: {handler}");
+        }
+        // The empty card follows the rows on screen, not the filter that is
+        // still fetching.
+        assert!(page.contains("let hero_filtered = shown_for_hero();"));
+        assert!(!page.contains("let hero_filtered = hero().is_some();"));
+    }
+
     #[test]
     fn tabs_are_a_named_tablist_that_labels_the_panel() {
         let html = render_case(PanelCase::new("kd", rows_view("kd", &players(3))));
@@ -1383,7 +1475,7 @@ mod tests {
         let empty = render_case(PanelCase::new("winrate", BoardView::Empty));
         assert!(empty.contains("<h2>No ranked players yet</h2>"), "{empty}");
         assert!(
-            empty.contains("class=\"btn is-primary\"") && empty.contains(">Open My Stats</a>"),
+            empty.contains("class=\"btn is-primary\"") && empty.contains(">Open your stats</a>"),
             "{empty}"
         );
         assert!(empty.contains("href=\"/stats\""), "{empty}");

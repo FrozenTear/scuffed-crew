@@ -6,9 +6,11 @@
 //! right edge of the scroller and the next column peeks under it.
 
 pub const BRACKET_STYLES: &str = r#"
-/* --- Hint line above a scroller --- */
+/* --- Hint line above a scroller ---
+   Swiping is a narrow-screen gesture: wider screens show the whole bracket
+   or the fade, so the hint is hidden there. */
 .bracket-hint {
-  display: flex;
+  display: none;
   align-items: center;
   gap: var(--space-2);
   margin: 0 0 var(--space-3);
@@ -17,6 +19,9 @@ pub const BRACKET_STYLES: &str = r#"
   font-family: var(--font-body);
   font-size: var(--text-sm);
   line-height: var(--leading-ui);
+}
+@media (max-width: 820px) {
+  .bracket-hint { display: flex; }
 }
 .swipe-arrow {
   flex: 0 0 var(--space-3);
@@ -72,7 +77,7 @@ pub const BRACKET_STYLES: &str = r#"
   grid-template-rows: auto 1fr;
   column-gap: var(--space-5);
   row-gap: var(--space-3);
-  align-items: start;
+  align-items: stretch;
   width: max-content;
   padding-inline-end: var(--space-8);
 }
@@ -90,10 +95,13 @@ pub const BRACKET_STYLES: &str = r#"
   line-height: var(--leading-ui);
   color: var(--text-3);
 }
+/* Every round is as tall as the tallest, and its slots share that height
+   evenly, so a later round's slot sits centred between its two feeders. */
 .bracket-round {
   grid-row: 2;
   display: flex;
   flex-direction: column;
+  justify-content: space-around;
   gap: var(--space-4);
   min-width: 0;
 }
@@ -225,7 +233,7 @@ pub const BRACKET_STYLES: &str = r#"
 mod tests {
     use super::BRACKET_STYLES;
     use crate::components::ui::test_support::{
-        assert_ink_clears_aa, assert_sizes_from_tokens, css_rule, has_decl,
+        assert_ink_clears_aa, assert_sizes_from_tokens, css_rule, has_decl, media_block,
     };
 
     #[test]
@@ -298,7 +306,11 @@ mod tests {
 
     #[test]
     fn scrollers_show_the_token_focus_ring() {
-        let focus = css_rule(BRACKET_STYLES, ".bracket-table-scroll:focus-visible {");
+        // Both scrollers share the one rule: the bracket and the tables.
+        let focus = css_rule(
+            BRACKET_STYLES,
+            ".bracket-scroller:focus-visible,\n.bracket-table-scroll:focus-visible {",
+        );
         assert!(
             has_decl(
                 &focus,
@@ -306,6 +318,22 @@ mod tests {
             ),
             "{focus}"
         );
+    }
+
+    #[test]
+    fn later_rounds_centre_between_their_feeders() {
+        let grid = css_rule(BRACKET_STYLES, ".bracket {");
+        assert!(has_decl(&grid, "align-items: stretch"), "{grid}");
+        let round = css_rule(BRACKET_STYLES, ".bracket-round {");
+        assert!(has_decl(&round, "justify-content: space-around"), "{round}");
+    }
+
+    #[test]
+    fn the_swipe_hint_shows_on_narrow_screens_only() {
+        let hint = css_rule(BRACKET_STYLES, ".bracket-hint {");
+        assert!(has_decl(&hint, "display: none"), "{hint}");
+        let narrow = media_block(BRACKET_STYLES, "@media (max-width: 820px)");
+        assert!(narrow.contains(".bracket-hint { display: flex; }"), "{narrow}");
     }
 
     #[test]
