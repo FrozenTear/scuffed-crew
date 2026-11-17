@@ -92,6 +92,7 @@ fn sanitize_brand_accent(raw: &str) -> Result<String, String> {
 
 /// Display font: one of `BRAND_FONT_DISPLAY_ALLOWED`, compared exactly.
 /// Never a free font name or URL, so nothing here is trimmed or normalized.
+/// See `docs/api/site-settings.md`.
 fn validate_brand_font_display(raw: &str) -> Result<String, String> {
     if scuffed_types::is_allowed_brand_font_display(raw) {
         Ok(raw.to_string())
@@ -208,6 +209,9 @@ pub async fn get_settings(
 /// PUT /api/settings — Admin: full `UpdateSettingsRequest`.
 /// Officer: `strategies_enabled` only; any other set field, including
 /// `officers_can_edit_teams`, is 403.
+///
+/// `brand_font_display` (values, who may set it, every status code, upgrade
+/// and rollback): `docs/api/site-settings.md`.
 pub async fn update_settings(
     State(state): State<AppState>,
     officer: OfficerUser,

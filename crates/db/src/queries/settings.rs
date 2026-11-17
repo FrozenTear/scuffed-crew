@@ -673,41 +673,75 @@ mod tests {
         block.trim().to_string()
     }
 
-    /// Rollback B: the optional cleanup query, run exactly as the doc gives it.
+    /// Rollback B: the optional cleanup query, run exactly as the doc gives it,
+    /// once the older build is up. Its boot backfill runs right after, with no
+    /// settings save in between, and must be accepted.
     #[tokio::test]
     async fn rollback_documented_remove_field_query_works() {
         let query = documented_rollback_query();
         assert_eq!(
             query,
-            "REMOVE FIELD IF EXISTS brand_font_display ON TABLE site_settings;"
+            "REMOVE FIELD IF EXISTS brand_font_display ON TABLE site_settings; \
+             UPDATE site_settings UNSET brand_font_display;"
         );
+
+        // Why the UNSET is there: REMOVE FIELD alone leaves the value on the
+        // SCHEMAFULL row with no definition, and every partial update of the
+        // row is refused, the boot backfill included.
+        {
+            let db = migrated().await;
+            set_font(&db, Some("ibm-plex-sans")).await;
+            db.client
+                .query("REMOVE FIELD IF EXISTS brand_font_display ON TABLE site_settings")
+                .await
+                .expect("remove only")
+                .check()
+                .expect("remove only ok");
+            assert!(
+                backfill_officers_can_edit_teams(&db.client).await.is_err(),
+                "REMOVE FIELD alone must break the backfill, or this control proves nothing"
+            );
+        }
 
         let db = migrated().await;
         set_font(&db, Some("ibm-plex-sans")).await;
+        // The older build is up: its boot backfill ran with the definition in place.
+        backfill_officers_can_edit_teams(&db.client)
+            .await
+            .expect("old build boot backfill before the cleanup");
 
-        // With the definition gone the old build's save drops the stored font.
         db.client
             .query(&query)
             .await
             .expect("doc query")
             .check()
             .expect("doc query ok");
+        assert_eq!(stored_font(&db).await, None, "no font left on the row");
+
+        // Right after the query, no settings save in between: the next boot
+        // backfill of the older build is accepted.
+        backfill_officers_can_edit_teams(&db.client)
+            .await
+            .expect("old build boot backfill right after the cleanup");
         assert_eq!(
             old_build_save(&db, "Cleaned Up").await.as_deref(),
             Ok("Cleaned Up")
         );
-        assert_eq!(stored_font(&db).await, None, "no font left on the row");
+        assert_eq!(stored_font(&db).await, None);
         backfill_officers_can_edit_teams(&db.client)
             .await
-            .expect("old build boot backfill");
+            .expect("old build boot backfill after a save");
 
-        // Idempotent, and a later roll forward starts from the default.
+        // Safe to run again, and a later roll forward starts from the default.
         db.client
             .query(&query)
             .await
             .expect("doc query twice")
             .check()
             .expect("doc query twice ok");
+        backfill_officers_can_edit_teams(&db.client)
+            .await
+            .expect("backfill after the second run");
         run_migrations(&db.client).await.expect("roll forward");
         assert_eq!(
             db.get_settings().await.expect("read").brand_font_display,

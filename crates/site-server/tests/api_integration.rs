@@ -2132,6 +2132,38 @@ async fn officer_cannot_set_brand_font_display() {
     }
     let got = get_settings_json(&state).await;
     assert_eq!(got["brand_font_display"], "");
+
+    // docs/api/site-settings.md: a non-string is 422 for an officer too (the
+    // session is checked first, then axum's Json extractor answers), and
+    // `null` is "keep", so it is not refused.
+    for body in [
+        json!({ "brand_font_display": 1 }),
+        json!({ "brand_font_display": ["urbanist"] }),
+    ] {
+        let resp = create_router(state.clone())
+            .oneshot(authed_json_request(
+                Method::PUT,
+                "/api/settings",
+                OFFICER_TOKEN,
+                body.clone(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    }
+    let (status, _) = put_settings(
+        &state,
+        ADMIN_TOKEN,
+        json!({ "brand_font_display": "ibm-plex-sans" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, json) =
+        put_settings(&state, OFFICER_TOKEN, json!({ "brand_font_display": null })).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["brand_font_display"], "ibm-plex-sans");
+    let got = get_settings_json(&state).await;
+    assert_eq!(got["brand_font_display"], "ibm-plex-sans");
 }
 
 #[tokio::test]

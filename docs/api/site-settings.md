@@ -24,7 +24,9 @@ The key is always present, also when it is `""`:
 - `GET /api/settings` (public, no session needed).
 - The body of a successful `PUT /api/settings`.
 - The `#sc-settings` JSON in the SPA shell, so the client has it on first
-  paint. That block is the `GET /api/settings` object plus `public_base_url`.
+  paint. That block is the `GET /api/settings` object. It also carries
+  `public_base_url`, but only when `REDIRECT_BASE_URL` is a public http(s)
+  origin; otherwise the block is that object byte for byte.
 
 A settings row written before the field existed reads as `""`.
 
@@ -43,10 +45,11 @@ A settings row written before the field existed reads as `""`.
 | Signed out                              | 401 `{"error":"Authentication required"}`                                                |
 | Unknown or expired session              | 401 `{"error":"Session expired or invalid"}`                                             |
 | Member or recruit                       | 403 `{"error":"Officer access required"}`                                                |
-| Officer, any value for this key         | 403 `{"error":"Admin access required"}`                                                  |
+| Officer, any string for this key        | 403 `{"error":"Admin access required"}`                                                  |
+| Officer or admin, `null` for this key   | 200, stored font kept (`null` means keep, like an absent key)                            |
 | Admin, a listed value                   | 200 with the full settings object                                                        |
 | Admin, any other string                 | 400 `{"error":"Display font must be urbanist or ibm-plex-sans (or empty for default)"}` |
-| Admin, a value that is not a string     | 422, plain text from the JSON extractor                                                  |
+| Officer or admin, not a string or null  | 422, plain text from the JSON extractor                                                  |
 
 ## Upgrade
 
@@ -67,20 +70,36 @@ create only, and `TYPE string` is checked on every write.
 
 Revert the change and start the older build. Nothing else is required. The
 field definition stays in the database, and because it is `DEFAULT ALWAYS ''`
-the older build's settings save (a full row without this field) is accepted.
-Each such save sets the stored font back to `""`.
+the older build's settings save (a full row without this field) is accepted,
+and so is its boot backfill. Each such save sets the stored font back to `""`.
+Until the older build saves settings, the font stored before the rollback
+stays on the row; the older build ignores it.
 
-Optional cleanup, to drop the definition as well:
+Rolling forward again needs no step: the field is defined again at startup.
+The row then reads `""` if the older build saved settings in between, and
+otherwise the font stored before the rollback.
+
+Optional cleanup, to drop the definition and the value. Run it only once the
+older build is up, never while this build still serves (this build's next
+settings save would be refused, a 500, until it restarts). Both statements, in
+one query, in this order:
 
 ```surql
-REMOVE FIELD IF EXISTS brand_font_display ON TABLE site_settings;
+REMOVE FIELD IF EXISTS brand_font_display ON TABLE site_settings; UPDATE site_settings UNSET brand_font_display;
 ```
 
-After it, the next settings save by the older build removes the stored value
-from the row. Rolling forward again needs no step in either case: the field is
-defined again at startup and the row reads as `""`.
+The `UNSET` is what matters. `REMOVE FIELD` deletes the definition only, and
+the row keeps its value (after one boot of this build every row has at least
+`""`). `site_settings` is `SCHEMAFULL`, so a row with a field that has no
+definition refuses every partial update ("Found field 'brand_font_display',
+but no such field exists"), including the older build's boot backfill, and a
+`surreal export` taken then does not restore the settings row on import. An
+`UNSET` before the `REMOVE` does nothing: `DEFAULT ALWAYS` fills the value
+straight back. The query can be run again safely. After it, rolling forward
+reads `""`.
 
 Both paths are tested in `crates/db/src/queries/settings.rs`
 (`rollback_old_build_saves_settings_with_the_field_definition_in_place` and
 `rollback_documented_remove_field_query_works`, which runs the query above as
-read from this file).
+read from this file and then the older build's boot backfill with no settings
+save in between).
