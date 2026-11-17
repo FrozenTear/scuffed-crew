@@ -13,6 +13,7 @@ use dioxus::prelude::*;
 
 use crate::components::{AccessDenied, Toast, use_toast};
 use crate::state::site_settings::SiteSettingsState;
+use crate::state::unsaved::use_unsaved_guard;
 use crate::state::use_auth;
 use crate::styles::customise::{CUSTOMISE_CSS, CUSTOMISE_CSS_ID};
 use crate::theme::brand::{AccentCheck, BrandConfig, SchemeCheck, format_ratio, normalize_hex};
@@ -65,6 +66,19 @@ impl BrandDraft {
             accent: saved.accent_dark.clone(),
             font: saved.font,
         }
+    }
+
+    /// True when this draft differs from what the server stored, so
+    /// leaving the page would drop it.
+    /// Two spellings of one colour (`#46D8A4`, `46d8a4`, `#46d8a4`) are
+    /// the same accent, so retyping the stored value is not an edit.
+    fn is_unsaved(&self, saved: &SavedBrand) -> bool {
+        let stored = Self::from_saved(saved);
+        let same_accent = match (normalize_hex(&self.accent), normalize_hex(&stored.accent)) {
+            (Some(a), Some(b)) => a == b,
+            _ => self.accent.trim() == stored.accent.trim(),
+        };
+        !same_accent || self.font != stored.font
     }
 
     fn product_default() -> Self {
@@ -269,6 +283,8 @@ fn BrandSettingsForm(saved: SavedBrand) -> Element {
     let mut saving = use_signal(|| false);
     #[cfg(test)]
     TEST_FORM_DRAFT.with(|slot| slot.set(Some(draft)));
+    // Ask before a link, a reload or closing the tab drops the draft.
+    use_unsaved_guard(draft.read().is_unsaved(&saved_now.read()));
 
     let on_save = move |_| {
         if saving() {
@@ -491,6 +507,12 @@ fn PreviewCard(check: SchemeCheck, font: DisplayFont) -> Element {
                 ratio: check.accent_on_bg,
                 passes: check.text_passes(),
             }
+            ContrastLine {
+                label: "Button edge on page and cards",
+                kind: "fill",
+                ratio: check.fill_on_surface,
+                passes: check.fill_passes(),
+            }
         }
     }
 }
@@ -520,8 +542,8 @@ mod tests {
     use crate::components::ToastProvider;
     use crate::state::AuthState;
     use crate::theme::brand::{
-        TEST_BLOCKED_ACCENT, TEST_INVALID_ACCENTS, TEST_MINT_ACCENT, TEST_OTHER_ACCENT,
-        TEST_SHORT_ACCENT,
+        TEST_BLOCKED_ACCENT, TEST_EDGELESS_ACCENT, TEST_INVALID_ACCENTS, TEST_MINT_ACCENT,
+        TEST_OTHER_ACCENT, TEST_SHORT_ACCENT,
     };
     use scuffed_types::{OrgRole, UserInfo};
 
@@ -674,7 +696,7 @@ mod tests {
         // The id it points at is the visible reason.
         assert!(
             html.contains(
-                "id=\"site-brand-accent-reason\" role=\"status\">Ink on this accent does not reach 4.5:1 in the dark preview.</p>"
+                "id=\"site-brand-accent-reason\" role=\"status\">Ink on this accent does not reach 4.5:1 in the dark theme.</p>"
             ),
             "{html}"
         );
@@ -706,6 +728,69 @@ mod tests {
             "{html}"
         );
         assert!(!html.contains("Fails"), "{html}");
+    }
+
+    /// QA 694 nit 4: an accent as dark as the page passes both text pairs,
+    /// so the lock also checks the button fill against the page and cards.
+    #[test]
+    fn a_fill_with_no_edge_blocks_save_and_says_why() {
+        let html = render_form(TEST_MINT_ACCENT, TEST_EDGELESS_ACCENT);
+        let button = save_button(&html);
+        assert!(button.contains("aria-disabled=\"true\""), "{button}");
+        assert!(
+            button.contains("aria-describedby=\"site-brand-accent-reason\""),
+            "{button}"
+        );
+        assert!(
+            html.contains(
+                "id=\"site-brand-accent-reason\" role=\"status\">Buttons in this accent do not reach 3:1 against the dark page and cards, so they lose their edge.</p>"
+            ),
+            "{html}"
+        );
+        // The dark fill line is the one that fails, with its icon.
+        let fill_lines: Vec<&str> = html.split("data-contrast=\"fill\"").skip(1).collect();
+        assert_eq!(fill_lines.len(), 2, "{html}");
+        assert!(fill_lines[0].contains("1.2:1 Fails"), "{}", fill_lines[0]);
+        assert!(fill_lines[1].contains("Pass"), "{}", fill_lines[1]);
+        assert!(save_body(&draft(TEST_EDGELESS_ACCENT), &saved(TEST_MINT_ACCENT)).is_none());
+    }
+
+    #[test]
+    fn every_preview_shows_the_button_edge_line() {
+        let html = render_form(TEST_MINT_ACCENT, TEST_MINT_ACCENT);
+        assert_eq!(
+            html.matches("Button edge on page and cards").count(),
+            2,
+            "{html}"
+        );
+        assert_eq!(html.matches("data-contrast=\"fill\"").count(), 2, "{html}");
+    }
+
+    /// QA 694 nit 9: leaving with a draft asks first. The guard is on
+    /// exactly while the draft differs from what the server stored.
+    #[test]
+    fn the_leave_guard_follows_the_unsaved_draft() {
+        let stored = saved(TEST_MINT_ACCENT);
+        assert!(!BrandDraft::from_saved(&stored).is_unsaved(&stored));
+        assert!(draft(TEST_OTHER_ACCENT).is_unsaved(&stored));
+        assert!(draft("").is_unsaved(&stored), "reset is an edit too");
+        // Vision 694 r3 nit 3: the same colour typed another way is no edit.
+        let upper = TEST_MINT_ACCENT.to_ascii_uppercase();
+        for same in [upper.as_str(), &TEST_MINT_ACCENT[1..], &upper[1..]] {
+            assert!(!draft(same).is_unsaved(&stored), "{same}");
+        }
+        let mut font = BrandDraft::from_saved(&stored);
+        font.font = DisplayFont::IbmPlexSans;
+        assert!(font.is_unsaved(&stored));
+        // After a save the stored value is the draft, so nothing is lost.
+        assert!(!draft(TEST_OTHER_ACCENT).is_unsaved(&saved(TEST_OTHER_ACCENT)));
+
+        let src = include_str!("brand_settings.rs");
+        let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        assert!(
+            prod.contains("use_unsaved_guard(draft.read().is_unsaved(&saved_now.read()));"),
+            "the form owns the guard"
+        );
     }
 
     #[test]

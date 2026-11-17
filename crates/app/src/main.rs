@@ -4,6 +4,8 @@
 // in-progress work; tighten once everything is wired up.
 #![allow(dead_code)]
 
+#[cfg(test)]
+mod boot_cascade_tests;
 mod canvas;
 mod client_error;
 mod components;
@@ -53,6 +55,13 @@ static SITE_FAVICON_ICO: manganis::Asset = asset!(
 #[used]
 static SITE_APPLE_TOUCH: manganis::Asset = asset!(
     "/assets/apple-touch-icon.png",
+    manganis::AssetOptions::builder().with_hash_suffix(false)
+);
+/// `index.html` loads this from a stable path in `<head>`, so the boot
+/// splash follows the saved theme before the app paints.
+#[used]
+static BOOT_THEME_JS: manganis::Asset = asset!(
+    "/assets/boot-theme.js",
     manganis::AssetOptions::builder().with_hash_suffix(false)
 );
 
@@ -271,6 +280,40 @@ mod tests {
             .expect("light media query in index.html");
         assert!(light.contains("html, body"), "{light}");
         assert!(light.contains("background:"), "{light}");
+    }
+
+    /// QA 694 nit 2: the splash followed the OS theme even when the member
+    /// had saved another one. `assets/boot-theme.js` sets `data-theme` from
+    /// `sc-theme`; it has to load in `<head>`, before the shell styles and
+    /// the splash, as an external file (the enforcing CSP hashes inline
+    /// scripts only), and ship at a stable path. Which rule then paints is
+    /// checked in `boot_cascade_tests`; what the script sets is checked in
+    /// the browser pass (no JS engine here).
+    #[test]
+    fn boot_theme_script_loads_before_first_paint() {
+        let visible = strip_html_comments(include_str!("../index.html"));
+        let tag = "<script src=\"/assets/boot-theme.js\"></script>";
+        assert_eq!(visible.matches(tag).count(), 1, "one boot theme script");
+        let at = visible.find(tag).expect("boot theme script");
+        assert!(at < visible.find("</head>").expect("head"), "loads in head");
+        assert!(
+            at < visible.find("<style>").expect("shell style"),
+            "the attribute is set before the shell styles apply"
+        );
+        assert_eq!(
+            visible.matches("<script>").count(),
+            1,
+            "only the mount watcher is inline"
+        );
+        let asset = crate::BOOT_THEME_JS.bundled();
+        assert!(
+            asset
+                .absolute_source_path()
+                .ends_with("/assets/boot-theme.js"),
+            "{}",
+            asset.absolute_source_path()
+        );
+        assert!(!asset.options().hash_suffix(), "shipped at a stable path");
     }
 
     /// dx still sees a closing body tag inside a comment, so that count stays

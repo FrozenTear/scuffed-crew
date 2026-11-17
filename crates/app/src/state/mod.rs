@@ -8,6 +8,7 @@ pub mod nostr;
 pub mod relay;
 pub mod site_settings;
 pub mod undo;
+pub mod unsaved;
 
 pub use auth::*;
 #[cfg(test)]

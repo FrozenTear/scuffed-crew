@@ -34,13 +34,16 @@ Best mobile Nostr client with full NIP-29 group support, push notifications, and
 
 ## Linking Your Existing Nostr Key
 
-If you already have a Nostr identity, link it to your clan account:
+If you already have a Nostr identity, link it to your clan account.
+
+Most members start with a server-managed key, and `/identity` offers **Link & Verify** only when no key is linked and a NIP-07 extension is installed. So with a server-managed key, unlink it first:
 
 1. Install a NIP-07 browser extension (nos2x, Alby, or similar)
 2. Go to `/identity` on the clan site
-3. Click **Link & Verify**
-4. Approve the signing request in your extension
-5. Your Nostr pubkey is now linked — you're the same identity everywhere
+3. If **Key mode** shows **Server-managed**, back the key up first if you want to keep it (see below). Then open **Advanced**, click **Unlink key** and confirm. Chat and direct messages stop working until a key is linked again
+4. Under **Link a key**, click **Detect** to read your public key from the extension (or paste it)
+5. Click **Link & Verify** and approve the signing request in your extension
+6. Your Nostr pubkey is now linked, and you're the same identity everywhere
 
 ## Backing Up Your Server-Managed Key
 
