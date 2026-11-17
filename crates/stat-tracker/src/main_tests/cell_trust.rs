@@ -2,6 +2,9 @@
 
 use super::*;
 
+mod elims_no_fallback;
+mod elims_unsure_base;
+
 #[test]
 fn the_new_reader_reads_no_stat_cell_and_calibrates_nothing() {
     let named = || {
