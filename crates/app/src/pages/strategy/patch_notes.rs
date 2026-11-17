@@ -517,8 +517,8 @@ const PAGE_CSS: &str = r#"
     }
     .patch-toolbar {
         position: sticky;
-        /* Public site-nav is 48px fixed. Strategy nav is 50px in-flow, so stick at 0. */
-        top: 48px;
+        /* Sticks under the site top bar, which is sticky on every page. */
+        top: var(--nav-height-used);
         z-index: 8;
         display: flex;
         flex-direction: column;
@@ -818,11 +818,13 @@ const PAGE_CSS: &str = r#"
     }
     .patch-hero-toc {
         position: sticky;
-        top: calc(48px + 5.5rem);
+        top: calc(var(--nav-height-used) + 5.5rem);
         display: flex;
         flex-direction: column;
         gap: 0.28rem;
-        max-height: calc(100vh - 8.5rem);
+        /* The bottom tab bar shows up to 820px, so subtract the whole
+           shell chrome (top bar plus tab bar), not just the top bar. */
+        max-height: calc(100vh - var(--shell-chrome-height, var(--nav-height-used)) - 5.5rem);
         overflow-y: auto;
         padding-right: 0.15rem;
     }
@@ -872,7 +874,7 @@ const PAGE_CSS: &str = r#"
         border: 1px solid var(--border);
         border-radius: var(--radius-control);
         overflow: hidden;
-        scroll-margin-top: calc(48px + 5.75rem);
+        scroll-margin-top: calc(var(--nav-height-used) + 5.75rem);
     }
     .patch-hero-card.open {
         grid-column: 1 / -1;
@@ -1111,16 +1113,6 @@ const PAGE_CSS: &str = r#"
         .patch-card-featured .patch-card-title {
             font-size: 1.05rem;
         }
-    }
-    /* StrategyLayout nav is 50px in document flow (not fixed). */
-    [data-accent="strategy"] .patch-toolbar {
-        top: 0;
-    }
-    [data-accent="strategy"] .patch-hero-toc {
-        top: 5.5rem;
-    }
-    [data-accent="strategy"] .patch-hero-card {
-        scroll-margin-top: 5.75rem;
     }
 "#;
 

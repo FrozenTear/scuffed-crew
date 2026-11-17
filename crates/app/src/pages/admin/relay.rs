@@ -123,27 +123,29 @@ pub fn AdminRelay() -> Element {
 
                         div { class: "form-section",
                             h2 { "Primary Relay" }
-                            table { class: "data-table",
-                                tbody {
-                                    tr {
-                                        td { style: "font-weight: 600; width: 180px;", "URL" }
-                                        td {
-                                            code { "{url_display}" }
-                                        }
-                                    }
-                                    tr {
-                                        td { style: "font-weight: 600;", "Status" }
-                                        td {
-                                            StatusPill {
-                                                status: status_pill.to_string(),
+                            div { class: "data-table-scroll",
+                                table { class: "data-table",
+                                    tbody {
+                                        tr {
+                                            td { style: "font-weight: 600; width: 180px;", "URL" }
+                                            td {
+                                                code { "{url_display}" }
                                             }
                                         }
-                                    }
-                                    tr {
-                                        td { style: "font-weight: 600;", "Forum Mode" }
-                                        td {
-                                            StatusPill {
-                                                status: h.forum_backend.clone(),
+                                        tr {
+                                            td { style: "font-weight: 600;", "Status" }
+                                            td {
+                                                StatusPill {
+                                                    status: status_pill.to_string(),
+                                                }
+                                            }
+                                        }
+                                        tr {
+                                            td { style: "font-weight: 600;", "Forum Mode" }
+                                            td {
+                                                StatusPill {
+                                                    status: h.forum_backend.clone(),
+                                                }
                                             }
                                         }
                                     }
@@ -166,16 +168,18 @@ pub fn AdminRelay() -> Element {
                         if !h.extra_relay_urls.is_empty() {
                             div { class: "form-section",
                                 h2 { "Extra Relays" }
-                                table { class: "data-table",
-                                    thead {
-                                        tr {
-                                            th { "URL" }
+                                div { class: "data-table-scroll",
+                                    table { class: "data-table",
+                                        thead {
+                                            tr {
+                                                th { "URL" }
+                                            }
                                         }
-                                    }
-                                    tbody {
-                                        for url in h.extra_relay_urls.iter() {
-                                            tr { key: "{url}",
-                                                td { code { "{url}" } }
+                                        tbody {
+                                            for url in h.extra_relay_urls.iter() {
+                                                tr { key: "{url}",
+                                                    td { code { "{url}" } }
+                                                }
                                             }
                                         }
                                     }
