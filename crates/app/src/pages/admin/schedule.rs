@@ -1,4 +1,6 @@
 use dioxus::prelude::*;
+
+use crate::components::admin_shared::{after_delete_focus_ids, focus_after_delete_soon};
 use serde::Deserialize;
 
 use crate::components::ui::{
@@ -259,11 +261,27 @@ pub fn AdminSchedule() -> Element {
     let on_delete_confirm = move |_| {
         if let Some(evt) = delete_modal.get_target() {
             let id = evt.id.clone();
+            // B9: once the row is gone, focus the next row's Edit, else the
+            // previous row's, else New event.
+            let keys: Vec<String> = events
+                .data
+                .peek()
+                .as_ref()
+                .and_then(|d| d.as_ref())
+                .map(|all| all.iter().map(|e| e.id.clone()).collect())
+                .unwrap_or_default();
+            let focus_next = after_delete_focus_ids(
+                &keys,
+                &id,
+                |k| vec![event_edit_button_id(k)],
+                &[NEW_EVENT_ID],
+            );
             delete_modal.close();
             spawn(async move {
                 match ApiClient::web().delete(&format!("/api/events/{id}")).await {
                     Ok(_) => {
                         toast.show(Toast::success("Event deleted."));
+                        focus_after_delete_soon(event_edit_button_id(&id), focus_next);
                         events.refresh += 1;
                         teams.refresh += 1;
                         members.refresh += 1;

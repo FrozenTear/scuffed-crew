@@ -3,6 +3,8 @@
 use chrono::Utc;
 use dioxus::prelude::*;
 
+use crate::components::admin_shared::{after_delete_focus_ids, focus_after_delete_soon};
+
 use scuffed_api_client::{ApiClient, ClientError};
 
 use crate::components::{Toast, use_toast};
@@ -14,7 +16,7 @@ use super::stat_reports::{
     MY_REPORTS_HEADING_ID, MyReportsBody, PreparedRows, ReportIntent, StatReportList,
     StatReportWithdrawn, WithdrawTrainingBody, apply_own_filter, apply_reports_switch,
     confirm_escape_closes, is_reports_disabled, member_screen, mutation_failure_copy,
-    prepare_member_rows, without_expired,
+    opener_focus_id, prepare_member_rows, without_expired,
 };
 
 /// Id of the list region the pager scrolls back to.
@@ -290,6 +292,26 @@ pub fn MyReports() -> Element {
             .read()
             .pending()
             .map(|action| action.return_focus_id.clone());
+        // B9: a removed row takes its buttons with it. Focus the next row's
+        // Delete, else the previous row's, else the page heading.
+        let removed_id = gate.read().pending().map(|action| action.report_id.clone());
+        let after_removal = removed_id.as_deref().map(|removed| {
+            let keys: Vec<String> = reports
+                .peek()
+                .as_ref()
+                .and_then(|list| list.as_ref())
+                .map(|list| list.reports.iter().map(|r| r.id.clone()).collect())
+                .unwrap_or_default();
+            (
+                opener_focus_id(ReportIntent::Delete, removed),
+                after_delete_focus_ids(
+                    &keys,
+                    removed,
+                    |k| vec![opener_focus_id(ReportIntent::Delete, k)],
+                    &[MY_REPORTS_HEADING_ID],
+                ),
+            )
+        });
         let Some(mutation) = gate.write().confirm() else {
             return;
         };
@@ -320,7 +342,12 @@ pub fn MyReports() -> Element {
                     toast.show(Toast::success(message));
                     // A deleted row and its button are gone after the refresh.
                     if removed {
-                        focus_element(MY_REPORTS_HEADING_ID);
+                        match after_removal {
+                            Some((gone, ids)) => focus_after_delete_soon(gone, ids),
+                            None => {
+                                focus_element(MY_REPORTS_HEADING_ID);
+                            }
+                        }
                     } else if let Some(id) = &return_id {
                         focus_element(id);
                     }

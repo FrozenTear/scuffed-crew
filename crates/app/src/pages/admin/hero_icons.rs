@@ -10,6 +10,8 @@
 
 use dioxus::prelude::*;
 
+use crate::components::admin_shared::{after_delete_focus_ids, focus_after_delete_soon};
+
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::HeroIconMemberCount;
 
@@ -60,13 +62,37 @@ pub fn AdminHeroIcons() -> Element {
 
     let delete_for = use_callback(move |member: HeroIconMemberCount| {
         busy.set(true);
+        // B9: the confirm strip, and the focus in it, goes when the delete
+        // ends. Then focus the next row's Delete, else the previous row's,
+        // else this row's own Delete (the row stays, with nothing to delete).
+        let prefix = text::admin_delete_prefix(&member.member_id);
+        let trigger = |member_id: &str| format!("{}-trigger", text::admin_delete_prefix(member_id));
+        let own_trigger = trigger(&member.member_id);
+        let keys: Vec<String> = members
+            .data
+            .peek()
+            .as_ref()
+            .and_then(|d| d.as_ref())
+            .map(|rows| rows.iter().map(|r| r.member_id.clone()).collect())
+            .unwrap_or_default();
+        let focus_next = after_delete_focus_ids(
+            &keys,
+            &member.member_id,
+            |k| vec![trigger(k)],
+            &[own_trigger.as_str()],
+        );
         spawn(async move {
             let path = format!("/api/hero-icons/members/{}", member.member_id);
+            let strip_cancel = format!("{prefix}-cancel");
             match ApiClient::web().delete(&path).await {
                 Ok(()) => {
-                    action_status.set(text::admin_deleted(&member.display_name, member.icon_count))
+                    action_status.set(text::admin_deleted(&member.display_name, member.icon_count));
+                    focus_after_delete_soon(strip_cancel, focus_next);
                 }
-                Err(e) => action_status.set(text::failure_text("Deleting icons", &e)),
+                Err(e) => {
+                    action_status.set(text::failure_text("Deleting icons", &e));
+                    focus_after_delete_soon(strip_cancel, vec![own_trigger]);
+                }
             }
             pending.set(None);
             busy.set(false);

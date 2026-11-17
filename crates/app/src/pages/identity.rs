@@ -1,4 +1,6 @@
 use dioxus::prelude::*;
+
+use crate::components::admin_shared::focus_after_delete_soon;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
@@ -64,6 +66,7 @@ const IMPORT_NCRYPTSEC_ID: &str = "identity-import-ncryptsec";
 const IMPORT_PASSWORD_ID: &str = "identity-import-password";
 const IMPORT_STATUS_ID: &str = "identity-import-status";
 const UNLINK_STATUS_ID: &str = "identity-unlink-status";
+const UNLINK_TRIGGER_ID: &str = "unlink-identity-trigger";
 
 /// Account keys only. The cards, fields and save lines are the shared
 /// account pieces in profile_settings.rs.
@@ -423,10 +426,25 @@ pub fn IdentitySettings() -> Element {
                     unlink_state.set(SaveState::Saved("Key unlinked.".to_string()));
                     toast.show(Toast::success("Key unlinked."));
                     refresh += 1;
+                    // B9: the unlink block goes with the key. Focus the
+                    // public key field of Link a key once it is back.
+                    focus_after_delete_soon(
+                        UNLINK_TRIGGER_ID.to_string(),
+                        vec![
+                            LINK_PUBKEY_ID.to_string(),
+                            "identity-link-heading".to_string(),
+                        ],
+                    );
                 }
                 Err(e) => {
                     unlink_state.set(SaveState::failed("Could not unlink the key", &e));
                     toast.show(Toast::error(format!("Unlink failed: {e}")));
+                    // The confirm strip closed with focus in it: back to
+                    // Unlink key.
+                    focus_after_delete_soon(
+                        "unlink-identity-cancel".to_string(),
+                        vec![UNLINK_TRIGGER_ID.to_string()],
+                    );
                 }
             }
             working.set(false);
@@ -529,7 +547,9 @@ pub fn IdentitySettings() -> Element {
 
                 if !has_pubkey {
                     section { class: "account-section", aria_labelledby: "identity-link-heading",
-                        h2 { id: "identity-link-heading", class: "ui-section-title", "Link a key" }
+                        // Focusable from script only: an unlink without a
+                        // browser extension lands here (B9).
+                        h2 { id: "identity-link-heading", class: "ui-section-title", tabindex: "-1", "Link a key" }
                         if has_extension {
                             form { class: "account-card", onsubmit: on_link_identity,
                                 div { class: "account-field",
@@ -713,7 +733,7 @@ pub fn IdentitySettings() -> Element {
                             } else {
                                 div { class: "account-actions",
                                     button {
-                                        id: "unlink-identity-trigger",
+                                        id: UNLINK_TRIGGER_ID,
                                         r#type: "button",
                                         class: "btn is-danger",
                                         aria_disabled: if busy { "true" },

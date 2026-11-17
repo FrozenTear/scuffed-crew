@@ -10,6 +10,8 @@
 
 use dioxus::prelude::*;
 
+use crate::components::admin_shared::focus_after_delete_soon;
+
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::MyHeroIcons;
 
@@ -281,12 +283,21 @@ pub fn TrainingCropSettings(member_id: String) -> Element {
         }
     };
 
+    let delete_prefix = text::delete_all_prefix(&member_id);
+    let delete_trigger = format!("{delete_prefix}-trigger");
+    let delete_prefix_for_focus = delete_prefix.clone();
+    let delete_trigger_for_focus = delete_trigger.clone();
     let delete_all = move |_| {
         if busy() {
             return;
         }
         busy.set(true);
         let before = count;
+        // B9: the confirm strip, and the focus in it, goes when the delete
+        // ends. Focus comes back to Delete all my icons, which says there is
+        // nothing left to delete, next to the status line.
+        let strip_cancel = format!("{delete_prefix_for_focus}-cancel");
+        let back_to = vec![delete_trigger_for_focus.clone()];
         spawn(async move {
             match ApiClient::web().delete("/api/hero-icons/mine").await {
                 Ok(()) => {
@@ -301,6 +312,7 @@ pub fn TrainingCropSettings(member_id: String) -> Element {
                 Err(e) => status.set(text::failure_text("Deleting your icons", &e)),
             }
             confirming_delete.set(false);
+            focus_after_delete_soon(strip_cancel, back_to);
             busy.set(false);
             refresh += 1;
         });
@@ -313,8 +325,6 @@ pub fn TrainingCropSettings(member_id: String) -> Element {
     let question_id = text::question_id(&member_id);
     let keep_id = text::choice_id(&member_id, OptOutChoice::Keep);
     let delete_id = text::choice_id(&member_id, OptOutChoice::Delete);
-    let delete_prefix = text::delete_all_prefix(&member_id);
-    let delete_trigger = format!("{delete_prefix}-trigger");
     let ask_go_id = format!("{question_id}-go");
     let ask_cancel_id = format!("{question_id}-cancel");
     let esc_target = hero_switch_id.clone();

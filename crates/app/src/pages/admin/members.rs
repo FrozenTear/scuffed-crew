@@ -1,4 +1,6 @@
 use dioxus::prelude::*;
+
+use crate::components::admin_shared::{after_delete_focus_ids, focus_after_delete_soon};
 use serde::{Deserialize, Serialize};
 
 use crate::components::ui::inline_confirm::{
@@ -867,7 +869,7 @@ fn GameAccountsTable(
                         RowActions {
                             button {
                                 r#type: "button",
-                                id: "member-account-remove-{acct.id}",
+                                id: account_remove_id(&acct.id),
                                 class: "btn is-danger",
                                 aria_label: "Remove {acct.account_name}",
                                 onclick: {
@@ -925,6 +927,19 @@ fn PasswordField(member_id: String, value: String, on_input: EventHandler<String
             }
         }
     }
+}
+
+/// Id of a linked account's Remove button.
+fn account_remove_id(account_id: &str) -> String {
+    format!("member-account-remove-{account_id}")
+}
+
+/// The game accounts dialog's draft: only its add form. Removals in the
+/// table save right away, and an add that went through clears the form.
+fn account_draft_unsaved(game_id: &str, name: &str, account_id: &str) -> bool {
+    [game_id, name, account_id]
+        .iter()
+        .any(|field| !field.trim().is_empty())
 }
 
 /// The add form of the game accounts dialog.
@@ -1343,9 +1358,17 @@ pub fn AdminMembers() -> Element {
         {
             let mid = member.id.clone();
             let aid = acct.id.clone();
+            // B9: the removed row's button leaves the dialog. Once it is
+            // gone, focus the next account's Remove, else the previous one's,
+            // else the dialog title.
+            let keys: Vec<String> = accts_data.peek().iter().map(|a| a.id.clone()).collect();
+            let focus_next = after_delete_focus_ids(
+                &keys,
+                &aid,
+                |k| vec![account_remove_id(k)],
+                &["form-modal-title"],
+            );
             del_acct_modal.close();
-            // The removed row's button leaves the dialog: focus the title.
-            focus_element_by_id_soon("form-modal-title".to_string());
             spawn(async move {
                 match ApiClient::web()
                     .delete(&format!("/api/members/{mid}/game-accounts/{aid}"))
@@ -1354,6 +1377,7 @@ pub fn AdminMembers() -> Element {
                     Ok(_) => {
                         toast.show(Toast::success("Game account removed."));
                         accts_refresh += 1;
+                        focus_after_delete_soon(account_remove_id(&aid), focus_next);
                     }
                     Err(e) => toast.show(Toast::error(profile_edit_failure("Delete failed", &e))),
                 }
@@ -2007,6 +2031,7 @@ pub fn AdminMembers() -> Element {
                     submit_label: Some("Add account".to_string()),
                     error: add_acct_error(),
                     restore_focus_id: Some(member_actions_toggle_id(&member_id)),
+                    dirty: Some(account_draft_unsaved(&add_acct_game_id(), &add_acct_name(), &add_acct_id())),
                     on_close: on_accts_close,
                     on_submit: on_add_acct,
                     if accts_loading() {
@@ -2052,7 +2077,7 @@ pub fn AdminMembers() -> Element {
                     open: del_acct_modal.is_open(),
                     danger: true,
                     confirm_label: "Remove".to_string(),
-                    restore_focus_id: target.as_ref().map(|a| format!("member-account-remove-{}", a.id)),
+                    restore_focus_id: target.as_ref().map(|a| account_remove_id(&a.id)),
                     on_confirm: on_del_acct_confirm,
                     on_cancel: on_del_acct_cancel,
                 }
@@ -2113,6 +2138,57 @@ fn AvatarField(file_label: String, on_change: EventHandler<Event<FormData>>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_game_accounts_dialog_asks_only_about_its_add_form() {
+        // Vision S4 on PR 706: an add or a removal that saved still left the
+        // dialog asking about unsaved changes on close.
+        assert!(!account_draft_unsaved("", "", ""));
+        assert!(!account_draft_unsaved(" ", "", "  "));
+        assert!(account_draft_unsaved("ow", "", ""));
+        assert!(account_draft_unsaved("", "Player01", ""));
+        assert!(account_draft_unsaved("", "", "1234"));
+        let src = include_str!("members.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(prod.contains(
+            "dirty: Some(account_draft_unsaved(&add_acct_game_id(), &add_acct_name(), &add_acct_id())),"
+        ));
+        // A successful add clears all three fields: back to the baseline.
+        let ok = prod
+            .split("toast.show(Toast::success(\"Game account added.\"));")
+            .nth(1)
+            .and_then(|rest| rest.split("Err(e)").next())
+            .unwrap();
+        for field in ["add_acct_game_id", "add_acct_name", "add_acct_id"] {
+            assert!(
+                ok.contains(&format!("{field}.set(String::new());")),
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn removing_a_game_account_focuses_the_next_account() {
+        // B9: focus used to jump to the dialog title before the request ran.
+        let src = include_str!("members.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let confirm = prod
+            .split("let on_del_acct_confirm = move |_| {")
+            .nth(1)
+            .and_then(|rest| rest.split("let on_del_acct_cancel").next())
+            .unwrap();
+        assert!(!confirm.contains("focus_element_by_id_soon"), "{confirm}");
+        assert!(
+            confirm.contains("|k| vec![account_remove_id(k)],"),
+            "{confirm}"
+        );
+        assert!(confirm.contains("&[\"form-modal-title\"],"), "{confirm}");
+        assert!(
+            confirm.contains("focus_after_delete_soon(account_remove_id(&aid), focus_next);"),
+            "{confirm}"
+        );
+        assert_eq!(account_remove_id("a1"), "member-account-remove-a1");
+    }
 
     fn member(id: &str, active: bool) -> Member {
         Member {

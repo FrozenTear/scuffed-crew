@@ -1762,6 +1762,33 @@ mod tests {
     /// so the page scroller keeps focus clear of the sticky top bar at every
     /// width and of the fixed tab bar on phone, from the shell's own height
     /// tokens, never a fixed length.
+    /// Vision S4 on PR 706: `--tab-bar-height` must live on the root, the
+    /// element that declares `scroll-padding-bottom`; a value set on
+    /// `.site-app` would never reach `html`. One declaration, inside the
+    /// phone block, on `html`.
+    #[test]
+    fn the_tab_bar_height_is_declared_once_on_the_root_in_the_phone_block() {
+        assert_eq!(SHELL_CSS.matches("--tab-bar-height:").count(), 1);
+        let at = SHELL_CSS.find("--tab-bar-height:").unwrap();
+        let before = &SHELL_CSS[..at];
+        let media = before.rfind("@media (max-width: 820px) {").unwrap();
+        // Two blocks open at the declaration: the phone query and `html`.
+        let open = before.matches('{').count() - before.matches('}').count();
+        assert_eq!(open, 2);
+        let inside = &before[media..];
+        assert_eq!(
+            inside.matches('{').count() - inside.matches('}').count(),
+            2,
+            "the declaration is not inside the phone block"
+        );
+        let selector = before[..before.rfind('{').unwrap()]
+            .rsplit(['}', '{'])
+            .next()
+            .unwrap()
+            .trim();
+        assert_eq!(selector, "html");
+    }
+
     #[test]
     fn focus_scrolling_clears_the_top_bar_and_the_phone_tab_bar() {
         let (wide, phone) = SHELL_CSS

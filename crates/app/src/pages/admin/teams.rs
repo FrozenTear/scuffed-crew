@@ -1,4 +1,6 @@
 use dioxus::prelude::*;
+
+use crate::components::admin_shared::{after_delete_focus_ids, focus_after_delete_soon};
 use serde::Deserialize;
 
 use crate::components::ui::{
@@ -197,6 +199,16 @@ fn roster_role_id(member_id: &str) -> String {
 }
 
 /// Id of a roster row's Remove button, from the member id.
+/// The role the roster add form starts with, and goes back to after an add.
+const ROSTER_ADD_DEFAULT_ROLE: &str = "player";
+
+/// The roster dialog's draft: only its add form. Role changes and removals
+/// in the table save right away, and an add that went through resets the
+/// form, so neither leaves anything to ask about.
+fn roster_draft_unsaved(member_id: &str, role: &str) -> bool {
+    !member_id.trim().is_empty() || role != ROSTER_ADD_DEFAULT_ROLE
+}
+
 fn roster_remove_id(member_id: &str) -> String {
     format!("roster-remove-{member_id}")
 }
@@ -263,7 +275,7 @@ pub fn AdminTeams() -> Element {
 
     // Add member to roster form
     let mut add_member_id = use_signal(String::new);
-    let mut add_member_role = use_signal(|| "player".to_string());
+    let mut add_member_role = use_signal(|| ROSTER_ADD_DEFAULT_ROLE.to_string());
     let mut add_submitting = use_signal(|| false);
     let mut add_member_error = use_signal(String::new);
     let mut add_error = use_signal(|| None::<String>);
@@ -433,7 +445,7 @@ pub fn AdminTeams() -> Element {
         roster_phase.set(RosterPhase::Loading);
         roster_error.set(String::new());
         add_member_id.set(String::new());
-        add_member_role.set("player".to_string());
+        add_member_role.set(ROSTER_ADD_DEFAULT_ROLE.to_string());
         add_member_error.set(String::new());
         add_error.set(None);
         roster_modal.show(team);
@@ -468,7 +480,7 @@ pub fn AdminTeams() -> Element {
                     Ok(_) => {
                         toast.show(Toast::success("Member added to roster."));
                         add_member_id.set(String::new());
-                        add_member_role.set("player".to_string());
+                        add_member_role.set(ROSTER_ADD_DEFAULT_ROLE.to_string());
                         roster_refresh += 1;
                     }
                     Err(e) => {
@@ -516,6 +528,19 @@ pub fn AdminTeams() -> Element {
         {
             let team_id = team.id.clone();
             let member_id = entry.member_id.clone();
+            // B9: once the row is gone, focus the next member's role, else
+            // the previous one's, else the add form's member picker.
+            let keys: Vec<String> = roster_data
+                .peek()
+                .iter()
+                .map(|e| e.member_id.clone())
+                .collect();
+            let focus_next = after_delete_focus_ids(
+                &keys,
+                &member_id,
+                |k| vec![roster_role_id(k)],
+                &[ROSTER_ADD_MEMBER_ID],
+            );
             remove_modal.close();
             spawn(async move {
                 match ApiClient::web()
@@ -525,6 +550,7 @@ pub fn AdminTeams() -> Element {
                     Ok(_) => {
                         toast.show(Toast::success("Member removed from roster."));
                         roster_refresh += 1;
+                        focus_after_delete_soon(roster_remove_id(&member_id), focus_next);
                     }
                     Err(e) => toast.show(Toast::error(format!("Remove failed: {e}"))),
                 }
@@ -805,6 +831,7 @@ pub fn AdminTeams() -> Element {
             submit_label: Some("Add to roster".to_string()),
             error: add_error(),
             restore_focus_id: roster_focus,
+            dirty: Some(roster_draft_unsaved(&add_member_id(), &add_member_role())),
 
             p { class: "field-hint admin-roster-hint", id: ROSTER_HINT_ID,
                 "Role changes and removals save right away. To add someone, pick a member and a role, then Add to roster."
@@ -942,6 +969,52 @@ pub fn AdminTeams() -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_roster_dialog_asks_only_about_its_add_form() {
+        // Vision S4 on PR 706: a role change or a removal saved right away,
+        // then closing asked about unsaved changes. The draft is the add
+        // form against its empty baseline, which a successful add resets.
+        assert!(!roster_draft_unsaved("", ROSTER_ADD_DEFAULT_ROLE));
+        assert!(!roster_draft_unsaved("  ", "player"));
+        assert!(roster_draft_unsaved("member:1", ROSTER_ADD_DEFAULT_ROLE));
+        assert!(roster_draft_unsaved("", "captain"));
+        let src = include_str!("teams.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            prod.contains(
+                "dirty: Some(roster_draft_unsaved(&add_member_id(), &add_member_role())),"
+            )
+        );
+        // The add resets the form to the same baseline it opens with.
+        assert_eq!(
+            prod.matches("add_member_role.set(ROSTER_ADD_DEFAULT_ROLE.to_string());")
+                .count(),
+            2
+        );
+        assert!(prod.contains("use_signal(|| ROSTER_ADD_DEFAULT_ROLE.to_string())"));
+    }
+
+    #[test]
+    fn a_roster_removal_moves_focus_to_the_next_member() {
+        // B9: the removed row's button goes with it.
+        let src = include_str!("teams.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let confirm = prod
+            .split("let on_remove_confirm = move |_| {")
+            .nth(1)
+            .and_then(|rest| rest.split("let on_remove_cancel").next())
+            .unwrap();
+        assert!(
+            confirm.contains("|k| vec![roster_role_id(k)],"),
+            "{confirm}"
+        );
+        assert!(confirm.contains("&[ROSTER_ADD_MEMBER_ID],"), "{confirm}");
+        assert!(
+            confirm.contains("focus_after_delete_soon(roster_remove_id(&member_id), focus_next);"),
+            "{confirm}"
+        );
+    }
 
     /// This sheet sets no type, so the shared check (which needs a
     /// font-size) does not apply: no rem, no px past a hairline, no hex.

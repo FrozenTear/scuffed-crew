@@ -1,4 +1,6 @@
 use dioxus::prelude::*;
+
+use crate::components::admin_shared::{after_delete_focus_ids, focus_after_delete_soon};
 use serde::Deserialize;
 
 use crate::components::ui::{
@@ -183,6 +185,16 @@ pub fn AdminAnnouncements() -> Element {
             return;
         };
         let id = target.id.clone();
+        // B9: once the row is gone, focus the next row's Edit, else the
+        // previous row's, else New announcement.
+        let keys: Vec<String> = announcements
+            .data
+            .peek()
+            .as_ref()
+            .and_then(|d| d.as_ref())
+            .map(|all| all.iter().map(|a| a.id.clone()).collect())
+            .unwrap_or_default();
+        let focus_next = after_delete_focus_ids(&keys, &id, |k| vec![edit_button_id(k)], &[NEW_ID]);
         delete_modal.close();
         spawn(async move {
             let client = ApiClient::web();
@@ -190,6 +202,7 @@ pub fn AdminAnnouncements() -> Element {
                 Ok(_) => {
                     toast.show(Toast::success("Announcement deleted."));
                     announcements.refresh += 1;
+                    focus_after_delete_soon(edit_button_id(&id), focus_next);
                 }
                 Err(e) => {
                     toast.show(Toast::error(format!(

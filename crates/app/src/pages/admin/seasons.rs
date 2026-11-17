@@ -7,6 +7,8 @@
 use chrono::{DateTime, NaiveDateTime, Utc};
 use dioxus::prelude::*;
 
+use crate::components::admin_shared::{after_delete_focus_ids, focus_after_delete_soon};
+
 use crate::components::ui::{
     EmptyCard, FieldError, PageHeader, PageShell, PageWidth, Pager, Pill, PillTone, page_slice,
     show_list_top,
@@ -256,6 +258,21 @@ fn SeasonsPage() -> Element {
         let Some(target) = delete_modal.get_target() else {
             return;
         };
+        // B9: once the row is gone, focus the next row's Edit, else the
+        // previous row's, else New season.
+        let keys: Vec<String> = seasons
+            .data
+            .peek()
+            .as_ref()
+            .and_then(|d| d.as_ref())
+            .map(|all| all.iter().map(|s| s.id.clone()).collect())
+            .unwrap_or_default();
+        let focus_next = after_delete_focus_ids(
+            &keys,
+            &target.id,
+            |k| vec![edit_button_id(k)],
+            &[NEW_SEASON_ID],
+        );
         delete_modal.close();
         spawn(async move {
             match ApiClient::web()
@@ -265,6 +282,7 @@ fn SeasonsPage() -> Element {
                 Ok(_) => {
                     toast.show(Toast::success("Season deleted."));
                     seasons.refresh += 1;
+                    focus_after_delete_soon(edit_button_id(&target.id), focus_next);
                 }
                 Err(e) => {
                     toast.show(Toast::error(format!("Failed to delete season: {e}")));

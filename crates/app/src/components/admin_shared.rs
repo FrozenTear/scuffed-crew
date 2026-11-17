@@ -528,6 +528,16 @@ enum CloseRequest {
     Ignore,
 }
 
+/// Whether the dialog holds a draft that closing would drop. A dialog that
+/// knows its draft passes `dirty` (its fields against their baseline, which
+/// a save resets); one that does not falls back to `typed`, set by any input
+/// in the body. `dirty` matters for dialogs whose table saves right away
+/// (Roster, Game accounts): a role change or a removal there is not a draft,
+/// and an add that went through clears its form.
+fn draft_unsaved(dirty: Option<bool>, typed: bool) -> bool {
+    dirty.unwrap_or(typed)
+}
+
 fn close_request(submitting: bool, changed: bool) -> CloseRequest {
     if submitting {
         CloseRequest::Ignore
@@ -591,6 +601,71 @@ fn restore_focus_if_lost(ids: &[String]) {
     let _ = ids;
 }
 
+/// Where focus goes after a confirmed delete removes a row (B9): the targets
+/// of the row after it, else of the row before it, then `fallback` (the add
+/// button or the list) in order. `keys` is the list in the order it shows;
+/// `targets` maps a row key to that row's focus targets, the one shown on
+/// desktop first. A key not in `keys` gives the fallback alone.
+pub(crate) fn after_delete_focus_ids(
+    keys: &[String],
+    removed: &str,
+    targets: impl Fn(&str) -> Vec<String>,
+    fallback: &[&str],
+) -> Vec<String> {
+    let mut ids = Vec::new();
+    if let Some(at) = keys.iter().position(|k| k == removed) {
+        if let Some(next) = keys.get(at + 1) {
+            ids.extend(targets(next));
+        }
+        if let Some(prev) = at.checked_sub(1).and_then(|i| keys.get(i)) {
+            ids.extend(targets(prev));
+        }
+    }
+    ids.extend(fallback.iter().map(|id| id.to_string()));
+    ids
+}
+
+/// After a confirmed delete went through: once `gone_id` (an element of the
+/// deleted row) has left the page, that is the list refreshed, focus goes to
+/// the first shown id of `ids` if it was lost with the row. Focus the member
+/// moved on purpose stays. Gives up waiting after about three seconds and
+/// then only moves focus that is already lost.
+pub(crate) fn focus_after_delete_soon(gone_id: String, ids: Vec<String>) {
+    if ids.is_empty() {
+        return;
+    }
+    dioxus::core::spawn_forever(async move {
+        #[cfg(feature = "web")]
+        {
+            for _ in 0..60 {
+                gloo_timers::future::TimeoutFuture::new(50).await;
+                if !element_exists(&gone_id) {
+                    break;
+                }
+            }
+        }
+        #[cfg(not(feature = "web"))]
+        let _ = &gone_id;
+        restore_focus_if_lost(&ids);
+    });
+}
+
+#[cfg(target_arch = "wasm32")]
+#[cfg_attr(not(feature = "web"), allow(dead_code))]
+fn element_exists(id: &str) -> bool {
+    web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.get_element_by_id(id))
+        .is_some()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(feature = "web"), allow(dead_code))]
+fn element_exists(id: &str) -> bool {
+    let _ = id;
+    false
+}
+
 /// The ids a closed dialog gives focus back to, in order.
 fn restore_ids(primary: Option<String>, fallback: Option<String>) -> Vec<String> {
     primary.into_iter().chain(fallback).collect()
@@ -606,7 +681,9 @@ fn restore_ids(primary: Option<String>, fallback: Option<String>) -> Vec<String>
 /// first). Pass `restore_focus_id` (the button that opened it) to get focus
 /// back there when it closes, by any path; `restore_focus_fallback` is tried
 /// when that one is not shown. `submit_label` replaces "Save". `error` is the
-/// failure text; keep the server's reason in it.
+/// failure text; keep the server's reason in it. `dirty` is the dialog's
+/// own unsaved state against its baseline; leave it out to ask after any
+/// input.
 #[component]
 pub fn FormModal(
     title: String,
@@ -620,6 +697,7 @@ pub fn FormModal(
     #[props(default)] error: Option<String>,
     #[props(default)] restore_focus_id: Option<String>,
     #[props(default)] restore_focus_fallback: Option<String>,
+    #[props(default)] dirty: Option<bool>,
     children: Element,
 ) -> Element {
     if !open {
@@ -636,6 +714,7 @@ pub fn FormModal(
             submit_label,
             error,
             restore_focus: restore_ids(restore_focus_id, restore_focus_fallback),
+            dirty,
             {children}
         }
     }
@@ -654,6 +733,7 @@ fn FormModalOpen(
     submit_label: Option<String>,
     error: Option<String>,
     restore_focus: Vec<String>,
+    dirty: Option<bool>,
     children: Element,
 ) -> Element {
     let title_id = format!("{FORM_MODAL_ID}-title");
@@ -668,12 +748,14 @@ fn FormModalOpen(
     // dropped by one stray Escape.
     let mut changed = use_signal(|| false);
     let mut asking = use_signal(|| false);
-    let request_close = use_callback(move |_: ()| match close_request(submitting, changed()) {
-        CloseRequest::Ignore => {}
-        CloseRequest::Close => on_close.call(()),
-        CloseRequest::AskDiscard => {
-            asking.set(true);
-            focus_element_by_id_soon(FORM_MODAL_KEEP_ID.to_string());
+    let request_close = use_callback(move |_: ()| {
+        match close_request(submitting, draft_unsaved(dirty, changed())) {
+            CloseRequest::Ignore => {}
+            CloseRequest::Close => on_close.call(()),
+            CloseRequest::AskDiscard => {
+                asking.set(true);
+                focus_element_by_id_soon(FORM_MODAL_KEEP_ID.to_string());
+            }
         }
     });
     let keep_editing = use_callback(move |_: ()| {
@@ -1366,6 +1448,105 @@ mod admin_pattern_tests {
             }
         }
         assert_eq!(render(closed), "");
+    }
+
+    #[test]
+    fn a_dialog_that_knows_its_draft_does_not_ask_after_a_save() {
+        // Vision S4 on PR 706: Roster and Game accounts asked "unsaved
+        // changes" after edits that had already saved, because the typed
+        // flag was the only baseline and nothing reset it. A dialog that
+        // passes `dirty` is judged by its draft alone.
+        assert!(!draft_unsaved(Some(false), true));
+        assert!(draft_unsaved(Some(true), false));
+        // Without `dirty`, any input still counts.
+        assert!(draft_unsaved(None, true));
+        assert!(!draft_unsaved(None, false));
+        assert_eq!(
+            close_request(false, draft_unsaved(Some(false), true)),
+            CloseRequest::Close
+        );
+
+        let src = include_str!("admin_shared.rs");
+        let open = src
+            .split("fn FormModalOpen(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn FormModalFooter(").next())
+            .expect("FormModalOpen");
+        assert!(open.contains("draft_unsaved(dirty, changed())"), "{open}");
+        let modal = src
+            .split("pub fn FormModal(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn FormModalOpen(").next())
+            .expect("FormModal");
+        assert!(modal.contains("#[props(default)] dirty: Option<bool>,"));
+        assert!(modal.contains("            dirty,\n"));
+    }
+
+    #[test]
+    fn a_confirmed_delete_focuses_the_next_row_else_the_previous_else_the_fallback() {
+        // Every delete flow S4d touches hands focus on once its row is gone.
+        for (name, src) in [
+            (
+                "announcements",
+                include_str!("../pages/admin/announcements.rs"),
+            ),
+            ("articles", include_str!("../pages/admin/articles.rs")),
+            ("patch_notes", include_str!("../pages/admin/patch_notes.rs")),
+            ("schedule", include_str!("../pages/admin/schedule.rs")),
+            ("seasons", include_str!("../pages/admin/seasons.rs")),
+            ("teams roster", include_str!("../pages/admin/teams.rs")),
+            ("tournaments", include_str!("../pages/admin/tournaments.rs")),
+            (
+                "members game accounts",
+                include_str!("../pages/admin/members.rs"),
+            ),
+            (
+                "hero icons admin",
+                include_str!("../pages/admin/hero_icons.rs"),
+            ),
+            (
+                "hero icon settings",
+                include_str!("../pages/hero_icon_settings.rs"),
+            ),
+            ("identity unlink", include_str!("../pages/identity.rs")),
+            ("my reports", include_str!("../pages/my_reports.rs")),
+        ] {
+            let prod = src.split("#[cfg(test)]").next().unwrap();
+            assert!(prod.contains("focus_after_delete_soon("), "{name}");
+        }
+
+        // B9: the deleted row's button leaves the page with it.
+        let keys: Vec<String> = ["a", "b", "c"].iter().map(|k| k.to_string()).collect();
+        let targets = |k: &str| vec![format!("{k}-edit"), format!("{k}-toggle")];
+        assert_eq!(
+            after_delete_focus_ids(&keys, "b", targets, &["new"]),
+            ["c-edit", "c-toggle", "a-edit", "a-toggle", "new"]
+        );
+        // The last row: the row before it.
+        assert_eq!(
+            after_delete_focus_ids(&keys, "c", targets, &["new"]),
+            ["b-edit", "b-toggle", "new"]
+        );
+        // The only row: the fallback.
+        let one = vec!["a".to_string()];
+        assert_eq!(
+            after_delete_focus_ids(&one, "a", targets, &["list", "new"]),
+            ["list", "new"]
+        );
+        // Not in the list (it moved): the fallback alone.
+        assert_eq!(
+            after_delete_focus_ids(&keys, "z", targets, &["new"]),
+            ["new"]
+        );
+        // The focus move waits for the row to leave and only moves lost focus.
+        let src = include_str!("admin_shared.rs");
+        let body = src
+            .split("pub(crate) fn focus_after_delete_soon(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("focus_after_delete_soon");
+        assert!(body.contains("if !element_exists(&gone_id)"), "{body}");
+        assert!(body.contains("restore_focus_if_lost(&ids)"), "{body}");
     }
 
     #[test]

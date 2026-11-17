@@ -13,6 +13,8 @@
 
 use dioxus::prelude::*;
 
+use crate::components::admin_shared::{after_delete_focus_ids, focus_after_delete_soon};
+
 use crate::components::ui::{
     EmptyCard, PageHeader, PageShell, PageWidth, Pager, page_slice, show_list_top,
 };
@@ -492,6 +494,17 @@ pub fn AdminPatchNotes() -> Element {
             return;
         };
         let version = target.version.clone();
+        // B9: once the row is gone, focus the next row's Edit, else the
+        // previous row's, else New patch note.
+        let keys: Vec<String> = notes
+            .data
+            .peek()
+            .as_ref()
+            .and_then(|d| d.as_ref())
+            .map(|envelope| envelope.data.iter().map(|n| n.version.clone()).collect())
+            .unwrap_or_default();
+        let focus_next =
+            after_delete_focus_ids(&keys, &version, |k| vec![edit_button_id(k)], &[NEW_ID]);
         delete_modal.close();
         spawn(async move {
             match ApiClient::web()
@@ -501,6 +514,7 @@ pub fn AdminPatchNotes() -> Element {
                 Ok(_) => {
                     toast.show(Toast::success("Patch note deleted."));
                     notes.refresh += 1;
+                    focus_after_delete_soon(edit_button_id(&version), focus_next);
                 }
                 Err(e) => {
                     toast.show(Toast::error(format_write_error("delete", &e)));

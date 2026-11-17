@@ -1,4 +1,6 @@
 use dioxus::prelude::*;
+
+use crate::components::admin_shared::{after_delete_focus_ids, focus_after_delete_soon};
 use serde::Deserialize;
 use std::collections::HashMap;
 
@@ -457,6 +459,27 @@ pub fn AdminTournaments() -> Element {
     let on_delete_confirm = move |_| {
         if let Some(t) = delete_modal.get_target() {
             let id = t.id.clone();
+            // B9: an archived row leaves a filtered list. Once it is gone,
+            // focus the next row's View, else the previous row's, else New
+            // tournament.
+            let keys: Vec<String> = tournaments
+                .data
+                .peek()
+                .as_ref()
+                .and_then(|d| d.as_ref())
+                .map(|all| {
+                    filter_tournaments(all, &status_filter.peek())
+                        .iter()
+                        .map(|t| t.id.clone())
+                        .collect()
+                })
+                .unwrap_or_default();
+            let focus_next = after_delete_focus_ids(
+                &keys,
+                &id,
+                |k| vec![view_button_id(k)],
+                &[NEW_TOURNAMENT_ID],
+            );
             delete_modal.close();
             let body = StatusChangeRequest {
                 status: "archived".into(),
@@ -469,6 +492,7 @@ pub fn AdminTournaments() -> Element {
                     Ok(_) => {
                         toast.show(Toast::success("Tournament archived."));
                         tournaments.refresh += 1;
+                        focus_after_delete_soon(view_button_id(&id), focus_next);
                         games.refresh += 1;
                         members.refresh += 1;
                         detail_id.set(None);
@@ -574,6 +598,19 @@ pub fn AdminTournaments() -> Element {
             && let Some(tid) = detail_id()
         {
             let pid = p.id.clone();
+            // B9: once the row is gone, focus the next participant's Remove,
+            // else the previous one's, else Add participant.
+            let keys: Vec<String> = bracket_data
+                .peek()
+                .as_ref()
+                .map(|b| b.participants.iter().map(|p| p.id.clone()).collect())
+                .unwrap_or_default();
+            let focus_next = after_delete_focus_ids(
+                &keys,
+                &pid,
+                |k| vec![remove_participant_id(k)],
+                &[ADD_PARTICIPANT_ID],
+            );
             remove_part_modal.close();
             spawn(async move {
                 match ApiClient::web()
@@ -583,6 +620,7 @@ pub fn AdminTournaments() -> Element {
                     Ok(_) => {
                         toast.show(Toast::success("Participant removed."));
                         detail_refresh += 1;
+                        focus_after_delete_soon(remove_participant_id(&pid), focus_next);
                     }
                     Err(e) => toast.show(Toast::error(format!("Remove failed: {e}"))),
                 }
