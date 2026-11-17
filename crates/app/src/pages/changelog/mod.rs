@@ -17,6 +17,7 @@ use dioxus::prelude::*;
 use model::Entry;
 pub use model::Tab;
 
+use crate::components::ui::{PageShell, PageWidth};
 use crate::layouts::focus_element;
 use crate::pages::{NotFoundLink, NotFoundPanel};
 use crate::routes::Route;
@@ -216,12 +217,16 @@ pub(crate) fn changelog_not_found_links() -> Vec<NotFoundLink> {
 
 #[component]
 pub fn ChangelogNotFound(path: String) -> Element {
+    // Same narrow frame as the catch-all not-found page: the panel is only
+    // the wall card, the page supplies the container.
     rsx! {
-        NotFoundPanel {
-            title: "Page not found",
-            message: "There is no changelog here. Pick the Site or the Tracker changes.",
-            path,
-            links: changelog_not_found_links(),
+        PageShell { width: PageWidth::Narrow, class: "nf-page",
+            NotFoundPanel {
+                title: "Page not found",
+                message: "There is no changelog here. Pick the Site or the Tracker changes.",
+                path,
+                links: changelog_not_found_links(),
+            }
         }
     }
 }
