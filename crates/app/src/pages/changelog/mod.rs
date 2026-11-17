@@ -237,26 +237,15 @@ pub fn Changelog(tab: String) -> Element {
     }
 }
 
-/// Page lead. Names the configured org, the same name the title uses. While
-/// settings are pending or failed it stays generic rather than invent one.
-/// A name that already starts with the word "The" gets no second article.
+/// Page lead. Names the configured org, the same name the title uses, with
+/// no article before it: "Site and Overwatch tracker updates for {name}."
+/// While settings are pending or failed it stays generic rather than invent
+/// a name.
 fn page_lead(org_name: Option<&str>) -> String {
     match org_name.map(str::trim).filter(|name| !name.is_empty()) {
-        Some(name) if starts_with_the(name) => {
-            format!("Updates to {name} site and the Overwatch tracker.")
-        }
-        Some(name) => format!("Updates to the {name} site and the Overwatch tracker."),
+        Some(name) => format!("Site and Overwatch tracker updates for {name}."),
         None => "Updates to the site and the Overwatch tracker.".to_string(),
     }
-}
-
-/// True when the name opens with the word "The" (any case), e.g. "The
-/// Scuffed Crew", "THE OWLS" or a bare "The", but not "Theta". Any
-/// whitespace may follow the word.
-fn starts_with_the(name: &str) -> bool {
-    name.get(..3)
-        .is_some_and(|head| head.eq_ignore_ascii_case("the"))
-        && name[3..].chars().next().is_none_or(char::is_whitespace)
 }
 
 fn entry_heading_id(tab: Tab, index: usize) -> String {
@@ -799,16 +788,11 @@ mod tests {
 
     #[test]
     fn page_lead_names_the_configured_org_or_stays_generic() {
-        assert_eq!(
-            page_lead(Some("Night Owls")),
-            "Updates to the Night Owls site and the Overwatch tracker."
-        );
-        assert_eq!(
-            page_lead(Some("  Night Owls ")),
-            "Updates to the Night Owls site and the Overwatch tracker."
-        );
-        // A name that already opens with "The" gets no second article.
+        // No article ever goes before the name, whatever the name is.
         for name in [
+            "Night Owls",
+            "  Night Owls ",
+            "Scuffed Crew",
             "The Scuffed Crew",
             "the Scuffed Crew",
             "THE OWLS",
@@ -817,23 +801,32 @@ mod tests {
             "The",
             "the",
             "  THE  ",
+            "Theta",
+            "Theta Squad",
         ] {
             let lead = page_lead(Some(name));
             assert_eq!(
                 lead,
-                format!("Updates to {} site and the Overwatch tracker.", name.trim()),
+                format!("Site and Overwatch tracker updates for {}.", name.trim()),
                 "{name}"
             );
             assert!(!lead.to_lowercase().contains("the the"), "{lead}");
         }
-        // Only the whole word counts: "Theta" keeps the article.
         assert_eq!(
-            page_lead(Some("Theta Squad")),
-            "Updates to the Theta Squad site and the Overwatch tracker."
+            page_lead(Some("The Scuffed Crew")),
+            "Site and Overwatch tracker updates for The Scuffed Crew."
+        );
+        assert_eq!(
+            page_lead(Some("The")),
+            "Site and Overwatch tracker updates for The."
         );
         assert_eq!(
             page_lead(Some("Theta")),
-            "Updates to the Theta site and the Overwatch tracker."
+            "Site and Overwatch tracker updates for Theta."
+        );
+        assert_eq!(
+            page_lead(Some("Scuffed Crew")),
+            "Site and Overwatch tracker updates for Scuffed Crew."
         );
         for none in [None, Some(""), Some("   ")] {
             assert_eq!(
@@ -850,7 +843,7 @@ mod tests {
             let page = page_of(&html);
             assert!(
                 page.contains(
-                    "<p class=\"page-lead\">Updates to the Night Owls site and the Overwatch tracker.</p>"
+                    "<p class=\"page-lead\">Site and Overwatch tracker updates for Night Owls.</p>"
                 ),
                 "{path}: {page}"
             );
@@ -860,7 +853,7 @@ mod tests {
             let page = page_of(&html);
             assert!(
                 page.contains(
-                    "<p class=\"page-lead\">Updates to The Scuffed Crew site and the Overwatch tracker.</p>"
+                    "<p class=\"page-lead\">Site and Overwatch tracker updates for The Scuffed Crew.</p>"
                 ),
                 "{path}: {page}"
             );
