@@ -13,8 +13,9 @@
 //!   cell that equals no source pixel ([`cells`]).
 //!
 //! When neither kind is kept, the name-column fallback keeps each verified
-//! row with its name column filled, copying only the row's light grey
-//! pixels (digits, icons) on one flat colour ([`name_column_fallback`]).
+//! row with its portrait cell and name column filled, copying only the
+//! light grey pixels right of the name column (digits, round and perk
+//! icons) on one flat colour ([`name_column_fallback`]).
 //!
 //! Names, titles, badges, the header, the hero card, notices, nameplates and
 //! the world all stay fill. A measurement that fails keeps nothing of the
@@ -66,7 +67,10 @@ pub const FILL: Rgb<u8> = Rgb([32, 32, 32]);
 /// * 13: the name-column fallback keeps only light grey pixels of a row on
 ///   one flat colour, so nameplates behind the see-through 5v5 board stay
 ///   out (2026-11-17).
-pub const BLANK_TABLE_VERSION: u32 = 13;
+/// * 14: the name-column fallback fills every portrait cell with the row's
+///   flat colour, so no portrait pixel is kept on any board, as with
+///   [`COPY_PORTRAITS`] off (2026-11-17).
+pub const BLANK_TABLE_VERSION: u32 = 14;
 
 /// An earlier capture is a reference for the portrait check only when it is
 /// at least this old: an overlay that shows on both captures has to stay
@@ -497,7 +501,7 @@ pub struct BlankedBoard {
     pub board: Result<(), String>,
     pub rows: Vec<RowVerdict>,
     /// Rows kept by the name-column fallback ([`name_column_fallback`]):
-    /// the row copied with its name column filled. 0 when the allowlist
+    /// the row kept with its portrait cell and name column filled. 0 when the allowlist
     /// kept anything.
     pub name_fill_rows: usize,
 }
@@ -847,12 +851,19 @@ pub(crate) const NAME_COL: (f64, f64) = (101.0, 380.0);
 
 /// Fallback when the allowlist kept nothing on a measured board (strict
 /// digit gates reject the row, portraits are off): keep each verified row
-/// of the table between `L` and `R` with its name column filled. Of the
-/// rest of the row only light grey pixels ([`board::header_light`]: the
-/// white and grey digits and icons) are copied; every other pixel of the
-/// row is one flat colour, the row's median. The 5v5 board is see-through:
-/// in-world nameplates behind it show in the stat columns, tinted by the
-/// board and far too dark to pass as light, so they never reach the output.
+/// of the table between `L` and `R` with its portrait cell and name column
+/// filled. The portrait cell (role bar and hero portrait) runs from `L` to
+/// the name column ([`NAME_COL`] starts right after the portrait art, and
+/// the name column covers the rest of the measured path's cell up to
+/// `portrait::PORTRAIT_END`); it is the row's flat colour, so no portrait
+/// pixel is kept, as on every board with [`COPY_PORTRAITS`] off. When that
+/// geometry does not hold, the row keeps nothing left of its first stat
+/// column. Right of the name column only light grey pixels
+/// ([`board::header_light`]: the white and grey digits and the round and
+/// perk icons) are copied; every other pixel is the same flat colour, the
+/// median of those pixels. The 5v5 board is see-through: in-world
+/// nameplates behind it show in the stat columns, tinted by the board and
+/// far too dark to pass as light, so they never reach the output.
 /// Everything else (outside the table, unverified rows, the header) stays
 /// fill. A row the chat box may cover is not copied (chat text carries
 /// names), and with chat unknown nothing is.
@@ -864,19 +875,28 @@ fn name_column_fallback(src: &RgbImage, b: &board::Board, chat: Chat, out: &mut 
     let x0 = b.l.min(w);
     let x1 = b.r.min(w);
     let (n0, n1) = b.name;
+    // `[x0, keep)` keeps no frame pixel: the portrait cell `[x0, n0)` is
+    // flat and the name column `[n0, n1)` is fill. Fail safe: with no
+    // portrait cell, all of it up to the first stat column is fill.
+    let cell = (x0 <= n0 && n0 <= n1 && n1 <= x1).then_some(x0..n0);
+    let keep = match cell {
+        Some(_) => n1,
+        None => (b.wins[0].0 as u32).max(n1),
+    }
+    .clamp(x0, x1);
     let mut kept = 0;
     for r in b
         .rows
         .iter()
         .filter(|r| r.verified && !chat.covers(r.bot, h))
     {
-        let span = || {
-            (r.top..r.bot.min(h))
-                .flat_map(move |y| (x0..x1).map(move |x| (x, y)))
-                .filter(|(x, _)| !(n0..n1).contains(x))
+        let ys = r.top..r.bot.min(h);
+        let stats = || {
+            ys.clone()
+                .flat_map(move |y| (keep..x1).map(move |x| (x, y)))
         };
         let mut chans: [Vec<u8>; 3] = Default::default();
-        for (x, y) in span() {
+        for (x, y) in stats() {
             let p = src.get_pixel(x, y).0;
             if !board::header_light(p) {
                 for (c, v) in chans.iter_mut().zip(p) {
@@ -888,12 +908,13 @@ fn name_column_fallback(src: &RgbImage, b: &board::Board, chat: Chat, out: &mut 
             c.sort_unstable();
             c.get(c.len() / 2).copied().unwrap_or(FILL.0[0])
         }));
-        for y in r.top..r.bot.min(h) {
-            for x in n0.max(x0)..n1.min(x1) {
-                out.image.put_pixel(x, y, FILL);
+        for y in ys.clone() {
+            for x in x0..keep {
+                let in_cell = cell.as_ref().is_some_and(|c| c.contains(&x));
+                out.image.put_pixel(x, y, if in_cell { flat } else { FILL });
             }
         }
-        for (x, y) in span() {
+        for (x, y) in stats() {
             let p = *src.get_pixel(x, y);
             let px = if board::header_light(p.0) { p } else { flat };
             out.image.put_pixel(x, y, px);
@@ -1021,7 +1042,7 @@ mod tests {
         let doc = include_str!("../../../docs/report-bundle.md");
         for line in [
             "RGB 32, 32, 32",
-            "(`BLANK_TABLE_VERSION`, 13 for this revision)",
+            "(`BLANK_TABLE_VERSION`, 14 for this revision)",
             "only light grey pixels (every channel at least 150, spread at most 40)",
             "a channel more than 30 from its 5x5 median",
             "at most 0.45 of the text height in ink",
@@ -1032,7 +1053,7 @@ mod tests {
         ] {
             assert!(doc.contains(line), "spec line missing: {line}");
         }
-        assert_eq!(BLANK_TABLE_VERSION, 13);
+        assert_eq!(BLANK_TABLE_VERSION, 14);
         assert_eq!(FILL, Rgb([32, 32, 32]));
     }
 

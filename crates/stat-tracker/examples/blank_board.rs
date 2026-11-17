@@ -8,7 +8,8 @@
 //!
 //! The input is a full frame (2560x1440, 1920x1080, ...) or a saved
 //! scoreboard crop (1664x1007 from `debug/accepted/`). Writes
-//! `<name>.blanked.png` (the picture a report would attach) and
+//! `<name>.blanked.png` (the picture a report would attach, only when it
+//! would attach one) and
 //! `<name>.boxes.png` (the input with everything blacked out tinted red),
 //! and prints why the board or each row kept what it did. A crop has no
 //! chat context, so it is blanked as if no chat is on screen.
@@ -57,7 +58,8 @@ fn main() {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "board".into());
     let blanked_path = out_dir.join(format!("{stem}.blanked.png"));
-    if blanked.has_picture() {
+    let picture = blanked.has_picture();
+    if picture {
         blanked.image.save(&blanked_path).expect("write blanked");
     } else {
         println!("no picture saved: the tracker attaches no picture for this board");
@@ -74,9 +76,13 @@ fn main() {
     }
     let boxes_path = out_dir.join(format!("{stem}.boxes.png"));
     boxes.save(&boxes_path).expect("write boxes");
-    println!(
-        "wrote {} and {}",
-        blanked_path.display(),
-        boxes_path.display()
-    );
+    if picture {
+        println!(
+            "wrote {} and {}",
+            blanked_path.display(),
+            boxes_path.display()
+        );
+    } else {
+        println!("wrote {}", boxes_path.display());
+    }
 }

@@ -997,6 +997,91 @@ fn nameplates_behind_a_see_through_5v5_board_are_not_kept() {
     assert!(digits > 500, "{digits} digit px over the plates");
 }
 
+/// Every portrait cell stays fill on every board ([`super::COPY_PORTRAITS`]
+/// off), and the name-column fallback is no exception: a bright hero
+/// portrait, light enough to pass [`board::header_light`], comes out as the
+/// row's flat colour across its whole cell, from `L` to the name column
+/// (QA on PR 702: v13 kept its light pixels as a white silhouette).
+#[test]
+fn a_bright_portrait_on_a_see_through_5v5_board_is_filled() {
+    let (mut src, _) = see_through_5v5();
+    let b = board::measure(&src, 5).unwrap();
+    let (c0, c1) = (b.l, b.name.0);
+    assert!(c1 > c0 + 40, "portrait cell {c0}..{c1}");
+    for i in 0..10 {
+        let (top, bot) = synth::row_span_5(i);
+        for y in top..bot {
+            for x in c0..c1 {
+                // a white silhouette with grey shading
+                let v = 200 + ((x * 7 + y * 3) % 50) as u8;
+                src.put_pixel(x, y, image::Rgb([v, v, v.saturating_sub(10)]));
+            }
+        }
+    }
+    let out = super::blank_crop(&src, Some(5), super::Chat::None);
+    assert_eq!(out.board, Ok(()));
+    assert_eq!(out.name_fill_rows, 10);
+    // no portrait pixel anywhere in the portrait columns
+    for y in 0..src.height() {
+        for x in c0..c1 {
+            let o = *out.image.get_pixel(x, y);
+            assert!(!board::header_light(o.0), "({x}, {y}) kept {o:?}");
+        }
+    }
+    // every row's whole cell is its flat colour, the name column fill
+    for r in b.rows.iter().filter(|r| r.verified) {
+        let flat = *out.image.get_pixel(1045, r.top + 4);
+        for y in r.top..r.bot {
+            for x in c0..c1 {
+                let o = *out.image.get_pixel(x, y);
+                assert_eq!(o, flat, "row {}/{} ({x}, {y})", r.team, r.idx);
+            }
+            for x in c1..b.name.1 {
+                let o = *out.image.get_pixel(x, y);
+                assert_eq!(o, super::FILL, "row {}/{} ({x}, {y})", r.team, r.idx);
+            }
+        }
+    }
+}
+
+/// Fail safe: when the fallback cannot place the portrait cell (the name
+/// column does not sit inside the table), a row keeps nothing left of its
+/// first stat column, and still keeps its digits.
+#[test]
+fn a_fallback_row_with_no_portrait_cell_keeps_nothing_left_of_its_stats() {
+    let (src, _) = see_through_5v5();
+    let mut b = board::measure(&src, 5).unwrap();
+    let stat0 = b.wins[0].0 as u32;
+    b.name = (b.name.1, b.name.0);
+    let (w, h) = src.dimensions();
+    let mut out = super::BlankedBoard {
+        image: RgbImage::from_pixel(w, h, super::FILL),
+        board: Ok(()),
+        rows: Vec::new(),
+        name_fill_rows: 0,
+    };
+    super::name_column_fallback(&src, &b, super::Chat::None, &mut out);
+    assert_eq!(out.name_fill_rows, 10);
+    assert!(stat0 > b.name.0, "first stat column at {stat0}");
+    for r in b.rows.iter().filter(|r| r.verified) {
+        let mut digits = 0;
+        for y in r.top..r.bot {
+            for x in 0..stat0 {
+                let o = *out.image.get_pixel(x, y);
+                assert_eq!(o, super::FILL, "row {}/{} ({x}, {y})", r.team, r.idx);
+            }
+            for x in stat0..b.r {
+                let s = *src.get_pixel(x, y);
+                if board::header_light(s.0) {
+                    assert_eq!(*out.image.get_pixel(x, y), s);
+                    digits += 1;
+                }
+            }
+        }
+        assert!(digits > 100, "row {}/{}: {digits} digit px", r.team, r.idx);
+    }
+}
+
 /// Fail safe: a see-through 5v5 board whose geometry cannot be measured
 /// (here the world behind breaks up its header strip) keeps no picture at
 /// all, so the kit saves the reads and no `scoreboard.png`.
