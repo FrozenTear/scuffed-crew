@@ -19,7 +19,8 @@ pub(crate) fn chat_status_copy(availability: RelayAvailability) -> &'static str 
 
 const CSS: &str = r#"
 .chat-unavailable {
-    min-height: calc(100vh - 48px);
+    /* The shell's top bar, plus the tab bar on phone, share the viewport. */
+    min-height: calc(100vh - var(--shell-chrome-height, var(--nav-height-used)));
     display: flex;
     align-items: center;
     justify-content: center;

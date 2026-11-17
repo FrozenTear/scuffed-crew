@@ -172,7 +172,7 @@ mod tests {
         assert!(html.contains("Page not found"), "{html}");
         assert!(html.contains("/definitely/not/a/page"), "{html}");
         assert!(
-            html.contains("site-nav"),
+            html.contains("d1-top"),
             "the 404 must keep the site nav: {html}"
         );
     }
@@ -182,7 +182,7 @@ mod tests {
         for path in ["/admin/nope", "/strategy/nope"] {
             let html = render_route(path);
             assert!(html.contains("nf-page"), "{path}: {html}");
-            assert!(html.contains("site-nav"), "{path}: {html}");
+            assert!(html.contains("d1-top"), "{path}: {html}");
         }
     }
 }

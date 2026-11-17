@@ -72,8 +72,22 @@ fn main() {
     // see `LoginBannerSlot`.
     // Untested call site: login tests cover the probe harness, not `main`.
     pages::capture_initial_login_banner();
+    #[cfg(all(feature = "web", not(feature = "desktop")))]
+    dioxus::LaunchBuilder::new()
+        .with_cfg(dioxus::web::Config::new().rootname(APP_ROOT_ID))
+        .launch(App);
+    #[cfg(not(all(feature = "web", not(feature = "desktop"))))]
     dioxus::launch(App);
 }
+
+/// The element in `index.html` that the web app mounts into.
+///
+/// Not Dioxus' default `main`: that id belongs to the page's main landmark,
+/// which the skip link focuses. Two elements with one id sent the skip link
+/// to this wrapper, and the `min-height: 100vh` meant for the wrapper landed
+/// on the landmark too.
+#[cfg(any(test, all(feature = "web", not(feature = "desktop"))))]
+const APP_ROOT_ID: &str = "app-root";
 
 #[cfg(feature = "desktop")]
 const DESKTOP_CANVAS_JS: &str = include_str!("../assets/desktop_canvas.js");
@@ -210,6 +224,24 @@ fn App() -> Element {
 
 #[cfg(test)]
 mod tests {
+    /// The mount root and the main landmark must not share an id: the skip
+    /// link focuses `#main`, and `getElementById` returns the first match.
+    #[test]
+    fn app_mounts_into_its_own_root_not_the_main_landmark() {
+        let html = strip_html_comments(include_str!("../index.html"));
+        let root = format!("<div id=\"{}\"></div>", super::APP_ROOT_ID);
+        assert_eq!(html.matches(&root).count(), 1, "one mount root: {root}");
+        assert_ne!(super::APP_ROOT_ID, "main");
+        assert!(
+            !html.contains("id=\"main\"") && !html.contains("#main "),
+            "index.html must leave the `main` id to the page landmark"
+        );
+        assert!(
+            html.contains(&format!("getElementById(\"{}\")", super::APP_ROOT_ID)),
+            "the boot skeleton watches the mount root"
+        );
+    }
+
     /// The live shell must contain exactly one of each rewritten head tag,
     /// including `og:site_name`. Comments are removed before those counts.
     #[test]
