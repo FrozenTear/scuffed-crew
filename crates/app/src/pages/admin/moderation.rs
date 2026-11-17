@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
+use crate::components::admin_shared::focus_after_delete_soon;
 use crate::components::ui::{
     EmptyCard, PageHeader, PageShell, PageWidth, Pager, Pill, PillTone, show_list_top,
 };
@@ -149,6 +150,19 @@ fn lift_button_id(action_id: &str) -> String {
     format!("moderation-lift-{action_id}")
 }
 
+/// Where focus goes once a lifted action's page has refreshed and its Lift
+/// button has gone: the next Lift on the page, else the previous one (the
+/// nearest first), else New action. Ids that are not shown are skipped.
+fn after_lift_focus_ids(keys: &[String], lifted: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    if let Some(at) = keys.iter().position(|k| k == lifted) {
+        ids.extend(keys[at + 1..].iter().map(|k| lift_button_id(k)));
+        ids.extend(keys[..at].iter().rev().map(|k| lift_button_id(k)));
+    }
+    ids.push(NEW_ACTION_ID.to_string());
+    ids
+}
+
 /// One page of actions. On phone every row is a card: the member and Lift on
 /// top, the type pill under the name, then state, issuer and date on one
 /// line, and the reason as a labelled line.
@@ -169,7 +183,7 @@ fn ModerationTable(
             cards: true,
             label: "Moderation actions",
             for action in rows.iter() {
-                {
+                Fragment { key: "{action.id}", {
                     let id = action.id.clone();
                     let member = action.member_label(&names);
                     let issuer = action.issuer_label();
@@ -202,7 +216,7 @@ fn ModerationTable(
                             }
                         }
                     }
-                }
+                } }
             }
         }
     }
@@ -288,6 +302,14 @@ pub fn AdminModeration() -> Element {
 
     let confirm_lift = move |_| {
         let id = lift_modal.get_target().unwrap_or_default();
+        let keys: Vec<String> = actions
+            .data
+            .peek()
+            .as_ref()
+            .and_then(|d| d.as_ref())
+            .map(|r| r.entries.iter().map(|a| a.id.clone()).collect())
+            .unwrap_or_default();
+        let focus_next = after_lift_focus_ids(&keys, &id);
         lift_modal.close();
         spawn(async move {
             let path = format!("/api/moderation/{id}/lift");
@@ -298,6 +320,9 @@ pub fn AdminModeration() -> Element {
                 Ok(_) => {
                     toast.show(Toast::success("Action lifted"));
                     actions.refresh += 1;
+                    // The Lift button goes with the refresh (the row stays,
+                    // Lifted); then focus the nearest other Lift.
+                    focus_after_delete_soon(lift_button_id(&id), focus_next);
                 }
                 Err(e) => toast.show(Toast::error(format!("Failed to lift: {e}"))),
             }
@@ -540,6 +565,22 @@ fn NewActionFields(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_lift_hands_focus_to_the_nearest_other_lift() {
+        // Vision nit 2 on PR 706: the Lift button goes with the refresh.
+        let keys: Vec<String> = ["a", "b", "c", "d"].iter().map(|k| k.to_string()).collect();
+        let l = lift_button_id;
+        assert_eq!(
+            after_lift_focus_ids(&keys, "b"),
+            [l("c"), l("d"), l("a"), NEW_ACTION_ID.to_string()]
+        );
+        assert_eq!(after_lift_focus_ids(&[], "x"), [NEW_ACTION_ID.to_string()]);
+        let src = include_str!("moderation.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(prod.contains("focus_after_delete_soon(lift_button_id(&id), focus_next);"));
+        assert!(prod.contains("Fragment { key: \"{action.id}\","));
+    }
 
     fn render(view: fn() -> Element) -> String {
         let mut dom = VirtualDom::new(view);

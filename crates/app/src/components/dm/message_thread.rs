@@ -269,7 +269,7 @@ pub fn MessageThread(
                     }
                 } else {
                     for m in msgs.iter() {
-                        {render_message(m, self_pk.as_deref(), &me_label, &peer_label)}
+                        Fragment { key: "{m.id}", {render_message(m, self_pk.as_deref(), &me_label, &peer_label)} }
                     }
                 }
             }

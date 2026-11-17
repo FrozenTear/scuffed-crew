@@ -552,7 +552,7 @@ fn MembersIndex(
                         }
                         div { class: "member-grid",
                             for m in page_slice(&visible, page, MEMBERS_PAGE_SIZE).iter().copied() {
-                                {render_member_card(m, hero.as_deref())}
+                                Fragment { key: "{m.id}", {render_member_card(m, hero.as_deref())} }
                             }
                         }
                     },

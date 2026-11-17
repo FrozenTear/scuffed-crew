@@ -658,7 +658,7 @@ fn ArticlesTable(
             cards: true,
             label: "Articles".to_string(),
             for a in rows {
-                {
+                Fragment { key: "{a.id}", {
                     let edit = a.clone();
                     let delete = a.clone();
                     let slug = a.slug.clone();
@@ -713,7 +713,7 @@ fn ArticlesTable(
                             }
                         }
                     }
-                }
+                } }
             }
         }
     }

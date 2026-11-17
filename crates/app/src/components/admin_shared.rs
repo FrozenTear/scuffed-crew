@@ -631,6 +631,30 @@ pub(crate) fn after_delete_focus_ids(
 /// moved on purpose stays. Gives up waiting after about three seconds and
 /// then only moves focus that is already lost.
 pub(crate) fn focus_after_delete_soon(gone_id: String, ids: Vec<String>) {
+    focus_when_soon(move || !element_exists(&gone_id), ids);
+}
+
+/// [`focus_after_delete_soon`] for a row that may stay after its delete
+/// (an admin hero icons row whose member still shares keeps a row with no
+/// icons). Waits until `watch_id` (the row's count cell) has left the page or
+/// reads `settled`, that is the refreshed list is on screen, then moves focus
+/// that was lost to the first shown id of `ids`.
+pub(crate) fn focus_after_refresh_soon(watch_id: String, settled: String, ids: Vec<String>) {
+    focus_when_soon(
+        move || list_refreshed(element_text(&watch_id).as_deref(), &settled),
+        ids,
+    );
+}
+
+/// The refreshed list is on screen: the watched cell is gone (the row went)
+/// or shows the value the delete leaves (the row stayed).
+fn list_refreshed(text: Option<&str>, settled: &str) -> bool {
+    text.is_none_or(|t| t.trim() == settled)
+}
+
+/// Polls `done` every 50 ms for up to about three seconds, then moves focus
+/// that was lost to the first shown id of `ids`.
+fn focus_when_soon(done: impl Fn() -> bool + 'static, ids: Vec<String>) {
     if ids.is_empty() {
         return;
     }
@@ -639,15 +663,31 @@ pub(crate) fn focus_after_delete_soon(gone_id: String, ids: Vec<String>) {
         {
             for _ in 0..60 {
                 gloo_timers::future::TimeoutFuture::new(50).await;
-                if !element_exists(&gone_id) {
+                if done() {
                     break;
                 }
             }
         }
         #[cfg(not(feature = "web"))]
-        let _ = &gone_id;
+        let _ = &done;
         restore_focus_if_lost(&ids);
     });
+}
+
+#[cfg(target_arch = "wasm32")]
+#[cfg_attr(not(feature = "web"), allow(dead_code))]
+fn element_text(id: &str) -> Option<String> {
+    web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.get_element_by_id(id))
+        .map(|el| el.text_content().unwrap_or_default())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(feature = "web"), allow(dead_code))]
+fn element_text(id: &str) -> Option<String> {
+    let _ = id;
+    None
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1483,6 +1523,165 @@ mod admin_pattern_tests {
     }
 
     #[test]
+    fn every_s4d_list_loop_keys_its_items() {
+        // Vision nit 1 on PR 706: a loop body that is a block or a helper
+        // call gives Dioxus no key, so it rebuilds every row after a removed
+        // one and drops the focus inside it. Each item is keyed by its record
+        // id with a `Fragment` (or the element itself).
+        for (name, src) in [
+            (
+                "components/admin_shared.rs",
+                include_str!("admin_shared.rs"),
+            ),
+            ("components/dm/compose.rs", include_str!("dm/compose.rs")),
+            (
+                "components/dm/conversation_list.rs",
+                include_str!("dm/conversation_list.rs"),
+            ),
+            (
+                "components/dm/message_thread.rs",
+                include_str!("dm/message_thread.rs"),
+            ),
+            ("components/post/card.rs", include_str!("post/card.rs")),
+            ("layouts/admin.rs", include_str!("../layouts/admin.rs")),
+            (
+                "pages/admin/announcements.rs",
+                include_str!("../pages/admin/announcements.rs"),
+            ),
+            (
+                "pages/admin/applications.rs",
+                include_str!("../pages/admin/applications.rs"),
+            ),
+            (
+                "pages/admin/articles.rs",
+                include_str!("../pages/admin/articles.rs"),
+            ),
+            (
+                "pages/admin/audit_log.rs",
+                include_str!("../pages/admin/audit_log.rs"),
+            ),
+            (
+                "pages/admin/forum.rs",
+                include_str!("../pages/admin/forum.rs"),
+            ),
+            (
+                "pages/admin/games.rs",
+                include_str!("../pages/admin/games.rs"),
+            ),
+            (
+                "pages/admin/hero_icons.rs",
+                include_str!("../pages/admin/hero_icons.rs"),
+            ),
+            (
+                "pages/admin/matches.rs",
+                include_str!("../pages/admin/matches.rs"),
+            ),
+            (
+                "pages/admin/member_matches.rs",
+                include_str!("../pages/admin/member_matches.rs"),
+            ),
+            (
+                "pages/admin/members.rs",
+                include_str!("../pages/admin/members.rs"),
+            ),
+            (
+                "pages/admin/moderation.rs",
+                include_str!("../pages/admin/moderation.rs"),
+            ),
+            (
+                "pages/admin/patch_notes.rs",
+                include_str!("../pages/admin/patch_notes.rs"),
+            ),
+            (
+                "pages/admin/relay.rs",
+                include_str!("../pages/admin/relay.rs"),
+            ),
+            (
+                "pages/admin/reports.rs",
+                include_str!("../pages/admin/reports.rs"),
+            ),
+            (
+                "pages/admin/schedule.rs",
+                include_str!("../pages/admin/schedule.rs"),
+            ),
+            (
+                "pages/admin/seasons.rs",
+                include_str!("../pages/admin/seasons.rs"),
+            ),
+            (
+                "pages/admin/settings.rs",
+                include_str!("../pages/admin/settings.rs"),
+            ),
+            (
+                "pages/admin/teams.rs",
+                include_str!("../pages/admin/teams.rs"),
+            ),
+            (
+                "pages/admin/tournaments.rs",
+                include_str!("../pages/admin/tournaments.rs"),
+            ),
+            (
+                "pages/article_author.rs",
+                include_str!("../pages/article_author.rs"),
+            ),
+            ("pages/dm.rs", include_str!("../pages/dm.rs")),
+            (
+                "pages/forum_thread.rs",
+                include_str!("../pages/forum_thread.rs"),
+            ),
+            (
+                "pages/hero_icon_settings.rs",
+                include_str!("../pages/hero_icon_settings.rs"),
+            ),
+            ("pages/members.rs", include_str!("../pages/members.rs")),
+            (
+                "pages/profile_settings.rs",
+                include_str!("../pages/profile_settings.rs"),
+            ),
+            (
+                "pages/stat_reports.rs",
+                include_str!("../pages/stat_reports.rs"),
+            ),
+            ("pages/team_page.rs", include_str!("../pages/team_page.rs")),
+        ] {
+            let body = src.split("#[cfg(test)]").next().unwrap();
+            let lines: Vec<&str> = body.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                let t = line.trim();
+                if !(t.starts_with("for ") && t.contains(" in ") && t.ends_with('{')) {
+                    continue;
+                }
+                let next = lines[i + 1..]
+                    .iter()
+                    .map(|l| l.trim())
+                    .find(|l| !l.is_empty() && !l.starts_with("//"))
+                    .unwrap_or_default();
+                assert!(
+                    !next.starts_with('{'),
+                    "{name}:{}: unkeyed loop body `{next}`",
+                    i + 1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_refreshed_list_is_a_gone_cell_or_its_settled_value() {
+        assert!(list_refreshed(None, "0"), "the row left");
+        assert!(list_refreshed(Some(" 0 "), "0"), "the row stayed, now 0");
+        assert!(!list_refreshed(Some("12"), "0"), "the old list is still up");
+        // Both helpers share the one wait-then-restore body.
+        let src = include_str!("admin_shared.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert_eq!(
+            prod.matches("focus_when_soon(").count(),
+            3,
+            "two callers and the fn"
+        );
+        assert!(prod.contains("focus_when_soon(move || !element_exists(&gone_id), ids);"));
+    }
+
+    #[test]
     fn a_confirmed_delete_focuses_the_next_row_else_the_previous_else_the_fallback() {
         // Every delete flow S4d touches hands focus on once its row is gone.
         for (name, src) in [
@@ -1545,8 +1744,14 @@ mod admin_pattern_tests {
             .nth(1)
             .and_then(|rest| rest.split("\n}\n").next())
             .expect("focus_after_delete_soon");
-        assert!(body.contains("if !element_exists(&gone_id)"), "{body}");
-        assert!(body.contains("restore_focus_if_lost(&ids)"), "{body}");
+        assert!(body.contains("!element_exists(&gone_id)"), "{body}");
+        let wait = src
+            .split("fn focus_when_soon(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("focus_when_soon");
+        assert!(wait.contains("if done() {"), "{wait}");
+        assert!(wait.contains("restore_focus_if_lost(&ids)"), "{wait}");
     }
 
     #[test]

@@ -172,7 +172,8 @@ fn sync_failed_notice(err: &ClientError) -> String {
         ClientError::Http { status: 412, .. } => {
             "New messages need a server-managed key. Check Account keys."
         }
-        ClientError::Http { status: 503, .. } => "The relay is not set up on this site.",
+        // 503 is the relay or the encryption service not configured.
+        ClientError::Http { status: 503, .. } => "Messaging is not set up on this site.",
         ClientError::Http { status: 429, .. } => "Too many syncs. Try again in a minute.",
         ClientError::Http { .. } | ClientError::Deserialize(_) => "Could not sync messages.",
     };
@@ -683,6 +684,11 @@ mod tests {
             assert!(!text.contains("reach the relay"), "{status}: {text}");
             assert!(text.ends_with(" Showing saved messages."), "{text}");
         }
+        // 503 is the relay or the encryption service, so it names neither.
+        assert_eq!(
+            sync_failed_notice(&ClientError::http(503, "", None)),
+            "Messaging is not set up on this site. Showing saved messages."
+        );
         assert_eq!(
             sync_failed_notice(&ClientError::Deserialize("x".into())),
             "Could not sync messages. Showing saved messages."

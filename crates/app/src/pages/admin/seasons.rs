@@ -324,7 +324,7 @@ fn SeasonsPage() -> Element {
                             cards: true,
                             label: "Seasons",
                             for season in rows.iter() {
-                                {
+                                Fragment { key: "{season.id}", {
                                     let e = season.clone();
                                     let d = season.clone();
                                     let name = season.name.clone();
@@ -363,7 +363,7 @@ fn SeasonsPage() -> Element {
                                             }
                                         }
                                     }
-                                }
+                                } }
                             }
                         }
                     }

@@ -397,7 +397,7 @@ pub fn AdminSchedule() -> Element {
                             cards: true,
                             label: "Events",
                             for evt in rows.iter() {
-                                {
+                                Fragment { key: "{evt.id}", {
                                     let e_edit = evt.clone();
                                     let e_del = evt.clone();
                                     let e_att = evt.clone();
@@ -459,7 +459,7 @@ pub fn AdminSchedule() -> Element {
                                             }
                                         }
                                     }
-                                }
+                                } }
                             }
                         }
                     }
@@ -679,7 +679,7 @@ pub fn AdminSchedule() -> Element {
                             cards: true,
                             label: "Attendance",
                             for (idx, member) in list.iter().enumerate() {
-                                {
+                                Fragment { key: "{member.id}", {
                                     let current_status = entries
                                         .get(idx)
                                         .map(|e| e.status.clone())
@@ -710,7 +710,7 @@ pub fn AdminSchedule() -> Element {
                                             }
                                         }
                                     }
-                                }
+                                } }
                             }
                         }
                     },

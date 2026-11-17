@@ -1425,10 +1425,10 @@ pub(crate) fn OfficerReportsBody(
                             }
                             tbody {
                                 for (index, row) in rows.iter().enumerate() {
-                                    {officer_row(
+                                    Fragment { key: "{row.id}", {officer_row(
                                         row,
                                         display_names.get(index).and_then(|name| name.as_deref()),
-                                    )}
+                                    )} }
                                 }
                             }
                         }

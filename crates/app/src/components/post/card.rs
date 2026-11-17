@@ -158,7 +158,7 @@ pub fn PostCard(
             if !tags.is_empty() {
                 ChipRow { label: "Tags",
                     for tag in tags.iter() {
-                        {render_tag(tag, on_tag_click, active_tag.as_deref())}
+                        Fragment { key: "{tag}", {render_tag(tag, on_tag_click, active_tag.as_deref())} }
                     }
                 }
             }

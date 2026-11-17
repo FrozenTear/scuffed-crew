@@ -804,7 +804,7 @@ pub fn AdminTournaments() -> Element {
                             cards: true,
                             label: "Tournaments",
                             for t in rows.iter() {
-                                {
+                                Fragment { key: "{t.id}", {
                                     let t_edit = t.clone();
                                     let t_del = t.clone();
                                     let t_view_id = t.id.clone();
@@ -876,7 +876,7 @@ pub fn AdminTournaments() -> Element {
                                             }
                                         }
                                     }
-                                }
+                                } }
                             }
                         }
                     }
@@ -1008,7 +1008,7 @@ pub fn AdminTournaments() -> Element {
                                 cards: true,
                                 label: "Participants",
                                 for p in parts.iter() {
-                                    {
+                                    Fragment { key: "{p.id}", {
                                         let p_rm = p.clone();
                                         let pname = p.name.clone();
                                         rsx! {
@@ -1029,7 +1029,7 @@ pub fn AdminTournaments() -> Element {
                                                 }
                                             }
                                         }
-                                    }
+                                    } }
                                 }
                             }
                         },
@@ -1047,7 +1047,7 @@ pub fn AdminTournaments() -> Element {
                         match (rounds, matches) {
                             (Some(rnds), Some(mtchs)) if !rnds.is_empty() => rsx! {
                                 for round in rnds.iter() {
-                                    {
+                                    Fragment { key: "{round.id}", {
                                         let round_matches: Vec<BracketMatch> = mtchs
                                             .iter()
                                             .filter(|m| m.round_id == round.id)
@@ -1065,7 +1065,7 @@ pub fn AdminTournaments() -> Element {
                                                     cards: true,
                                                     label: round_label.clone(),
                                                     for bm in round_matches.iter() {
-                                                        {
+                                                        Fragment { key: "{bm.id}", {
                                                             let a_name = bm.participant_a_id.as_ref()
                                                                 .and_then(|id| pmap.get(id))
                                                                 .cloned()
@@ -1106,12 +1106,12 @@ pub fn AdminTournaments() -> Element {
                                                                     }
                                                                 }
                                                             }
-                                                        }
+                                                        } }
                                                     }
                                                 }
                                             }
                                         }
-                                    }
+                                    } }
                                 }
                             },
                             _ => rsx! {

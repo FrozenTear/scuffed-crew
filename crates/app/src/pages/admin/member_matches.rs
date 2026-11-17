@@ -507,7 +507,7 @@ fn MatchesTable(rows: Vec<MemberMatch>) -> Element {
             cards: true,
             label: "Matches",
             for m in rows.iter() {
-                {
+                Fragment { key: "{m.id}", {
                     let fields = m.suspect_fields.as_deref().unwrap_or(&[]);
                     let played = played_label(&m.played_at);
                     let played_iso = m.played_at.to_rfc3339();
@@ -532,7 +532,7 @@ fn MatchesTable(rows: Vec<MemberMatch>) -> Element {
                             td { class: "num mm-stat", "data-label": "Healing", {value_cell(group_thousands(m.healing), cell_is_unsure(fields, "h"), "Healing")} }
                         }
                     }
-                }
+                } }
             }
         }
     }

@@ -666,7 +666,7 @@ fn PatchNotesTable(
             cards: true,
             label: "Patch notes".to_string(),
             for note in rows {
-                {
+                Fragment { key: "{note.version}", {
                     let edit = note.clone();
                     let delete = note.clone();
                     let title = display_title(&note);
@@ -707,7 +707,7 @@ fn PatchNotesTable(
                             }
                         }
                     }
-                }
+                } }
             }
         }
     }

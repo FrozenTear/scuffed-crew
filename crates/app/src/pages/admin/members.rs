@@ -7,12 +7,12 @@ use crate::components::ui::inline_confirm::{
     focus_element_by_id, focus_element_by_id_soon, key_cancels,
 };
 use crate::components::ui::{
-    ChipButton, ChipRow, EmptyCard, PageHeader, PageShell, PageWidth, Pager, page_slice,
-    show_list_top,
+    ChipButton, ChipRow, EmptyCard, PageHeader, PageShell, PageWidth, Pager, Pill, PillTone,
+    page_slice, show_list_top,
 };
 use crate::components::{
     ADMIN_PAGE_SIZE, AdminDate, ConfirmDialog, DataTable, FormModal, FormStatus, RolePill,
-    RowActions, SaveState, StatusPill, SummaryCard, Toast, admin_list_pending, list_cap_notice,
+    RowActions, SaveState, SummaryCard, Toast, admin_list_pending, list_cap_notice,
     row_menu_toggle_id, status_label, use_toast,
 };
 use crate::hooks::{ModalController, use_api_list, use_api_list_prefer};
@@ -59,6 +59,9 @@ struct ModerationAction {
     action_type: String,
     reason: String,
     is_active: bool,
+    /// End of a timed action, RFC 3339. `None` for a permanent one.
+    #[serde(default)]
+    expires_at: Option<String>,
     created_at: String,
 }
 
@@ -271,6 +274,34 @@ fn bulk_deactivate_targets(selected: Vec<Member>, user: Option<&UserInfo>) -> Bu
         out.targets.push(member);
     }
     out
+}
+
+/// The state of one moderation action in the member dialog, as on the
+/// Moderation page: the server clears `is_active` only on Lift, and an action
+/// past its end date stays `is_active` but has ended.
+fn moderation_state(
+    action: &ModerationAction,
+    now: chrono::DateTime<chrono::Utc>,
+) -> (&'static str, PillTone) {
+    let ended = action
+        .expires_at
+        .as_deref()
+        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        .is_some_and(|end| end.with_timezone(&chrono::Utc) <= now);
+    if !action.is_active {
+        ("Lifted", PillTone::Neutral)
+    } else if ended {
+        ("Ended", PillTone::Neutral)
+    } else {
+        ("Active", PillTone::Info)
+    }
+}
+
+/// True when the bulk deactivate dialog has at least one member to send.
+fn bulk_deactivate_sends_any(selected: &[Member], user: Option<&UserInfo>) -> bool {
+    !bulk_deactivate_targets(selected.to_vec(), user)
+        .targets
+        .is_empty()
 }
 
 /// Question of the bulk deactivate dialog: the count that will be sent, then
@@ -622,7 +653,7 @@ fn MembersTable(
             cards: true,
             label: "Members",
             for member in rows.iter() {
-                {
+                Fragment { key: "{member.id}", {
                     let id = member.id.clone();
                     let name = member.display_name.clone();
                     let checked = selected.contains(&member.id);
@@ -752,7 +783,7 @@ fn MembersTable(
                             }
                         }
                     }
-                }
+                } }
             }
         }
     }
@@ -1777,7 +1808,7 @@ pub fn AdminMembers() -> Element {
                         cards: true,
                         label: "Recently deactivated members",
                         for member in inactive.iter() {
-                            {
+                            Fragment { key: "{member.id}", {
                                 let m_toggle = member.clone();
                                 let locked = officer_locked_out(me.as_ref(), member);
                                 let lock_note = format!("member-inactive-lock-{}", member.id);
@@ -1810,7 +1841,7 @@ pub fn AdminMembers() -> Element {
                                         }
                                     }
                                 }
-                            }
+                            } }
                         }
                     }
                 }
@@ -1871,8 +1902,14 @@ pub fn AdminMembers() -> Element {
                 &bulk_deactivate_targets(selected_members(), me.as_ref()),
             ),
             open: bulk_deactivate_open(),
-            danger: true,
-            confirm_label: "Deactivate".to_string(),
+            // Nothing to send: no danger button, just OK (it writes the
+            // status line naming what was left out).
+            danger: bulk_deactivate_sends_any(&selected_members(), me.as_ref()),
+            confirm_label: if bulk_deactivate_sends_any(&selected_members(), me.as_ref()) {
+                "Deactivate".to_string()
+            } else {
+                "OK".to_string()
+            },
             restore_focus_id: Some(BULK_DEACTIVATE_OPEN_ID.to_string()),
             on_confirm: on_bulk_deactivate,
             on_cancel: move |_| bulk_deactivate_open.set(false),
@@ -1957,17 +1994,17 @@ pub fn AdminMembers() -> Element {
                         cards: true,
                         label: "Moderation history",
                         for action in mod_data.read().iter() {
-                            {
-                                let active_str = if action.is_active { "active" } else { "inactive" };
+                            Fragment { key: "{action.id}", {
+                                let (state, tone) = moderation_state(action, chrono::Utc::now());
                                 rsx! {
                                     tr { key: "{action.id}",
                                         td { class: "cell-who", "{status_label(&action.action_type)}" }
                                         td { "data-label": "Reason", "{action.reason}" }
-                                        td { class: "cell-badge", StatusPill { status: active_str.to_string() } }
+                                        td { class: "cell-badge", Pill { tone, "{state}" } }
                                         td { class: "cell-meta num", AdminDate { iso: action.created_at.clone() } }
                                     }
                                 }
-                            }
+                            } }
                         }
                     }
                 }
@@ -2861,6 +2898,60 @@ mod tests {
             bulk_result("Changed the role of", 1, 1, &[], &plan.skipped).text(),
             "Changed the role of 1 member. Left out Player01 (your own account): change your own role from its row."
         );
+    }
+
+    #[test]
+    fn a_bulk_deactivate_with_nothing_to_send_has_no_danger_button() {
+        let officer = user("user-01", OrgRole::Officer);
+        let own_and_admin = vec![
+            bulk_row("01", "officer", true),
+            bulk_row("03", "admin", true),
+        ];
+        assert!(!bulk_deactivate_sends_any(&own_and_admin, Some(&officer)));
+        assert!(!bulk_deactivate_sends_any(
+            &[bulk_row("04", "recruit", false)],
+            Some(&officer)
+        ));
+        assert!(bulk_deactivate_sends_any(
+            &[bulk_row("02", "member", true)],
+            Some(&officer)
+        ));
+        let src = include_str!("members.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let dialog = &prod[prod.find("title: \"Deactivate members\"").unwrap()..];
+        let dialog = &dialog[..dialog.find("on_confirm").unwrap()];
+        assert!(
+            dialog.contains("danger: bulk_deactivate_sends_any(&selected_members(), me.as_ref()),"),
+            "{dialog}"
+        );
+        assert!(dialog.contains("\"OK\".to_string()"), "{dialog}");
+    }
+
+    #[test]
+    fn moderation_history_reads_lifted_ended_or_active() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-17T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let action = |is_active: bool, expires_at: Option<&str>| ModerationAction {
+            id: "a".into(),
+            action_type: "suspension".into(),
+            reason: "r".into(),
+            is_active,
+            expires_at: expires_at.map(str::to_string),
+            created_at: "2026-11-01T00:00:00Z".into(),
+        };
+        // The server clears `is_active` only on Lift.
+        assert_eq!(moderation_state(&action(false, None), now).0, "Lifted");
+        assert_eq!(
+            moderation_state(&action(true, Some("2026-11-10T00:00:00Z")), now).0,
+            "Ended",
+            "past its end date, still is_active"
+        );
+        assert_eq!(
+            moderation_state(&action(true, Some("2026-12-01T00:00:00Z")), now).0,
+            "Active"
+        );
+        assert_eq!(moderation_state(&action(true, None), now).0, "Active");
     }
 
     #[test]

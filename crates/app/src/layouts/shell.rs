@@ -1758,10 +1758,6 @@ mod tests {
             .any(|part| part.lines().any(|line| line.trim() == decl))
     }
 
-    /// QA 696 nit 2 (WCAG 2.4.11): Tab and the skip link scroll the page,
-    /// so the page scroller keeps focus clear of the sticky top bar at every
-    /// width and of the fixed tab bar on phone, from the shell's own height
-    /// tokens, never a fixed length.
     /// Vision S4 on PR 706: `--tab-bar-height` must live on the root, the
     /// element that declares `scroll-padding-bottom`; a value set on
     /// `.site-app` would never reach `html`. One declaration, inside the
@@ -1789,6 +1785,10 @@ mod tests {
         assert_eq!(selector, "html");
     }
 
+    /// QA 696 nit 2 (WCAG 2.4.11): Tab and the skip link scroll the page,
+    /// so the page scroller keeps focus clear of the sticky top bar at every
+    /// width and of the fixed tab bar on phone, from the shell's own height
+    /// tokens, never a fixed length.
     #[test]
     fn focus_scrolling_clears_the_top_bar_and_the_phone_tab_bar() {
         let (wide, phone) = SHELL_CSS

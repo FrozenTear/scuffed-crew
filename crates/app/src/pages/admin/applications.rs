@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
+use crate::components::admin_shared::{after_delete_focus_ids, focus_after_delete_soon};
 use crate::components::ui::{
     ChipButton, ChipRow, EmptyCard, PageHeader, PageShell, PageWidth, Pager, page_slice,
     show_list_top,
@@ -135,6 +136,22 @@ fn status_filter_id(status: &str) -> String {
 }
 
 /// The applications a status chip keeps. The empty filter keeps all.
+/// Id of a row's Accept button. It leaves the page once the application is
+/// reviewed, which is how the focus move knows the list has refreshed.
+fn application_accept_id(app_id: &str) -> String {
+    format!("application-accept-{app_id}")
+}
+
+/// Where focus goes once an accepted or declined application's list has
+/// refreshed: its own View if the row stays (no status filter), else the next
+/// row's View, else the previous row's. `keys` is the filtered list in order.
+fn after_review_focus_ids(keys: &[String], reviewed: &str) -> Vec<String> {
+    let view = |k: &str| vec![application_view_trigger_id(k)];
+    let mut ids = view(reviewed);
+    ids.extend(after_delete_focus_ids(keys, reviewed, view, &[]));
+    ids
+}
+
 fn filter_applications(list: &[Application], status: &str) -> Vec<Application> {
     list.iter()
         .filter(|app| status.is_empty() || app.status == status)
@@ -390,7 +407,7 @@ fn ApplicationsTable(
             cards: true,
             label: "Applications",
             for app in rows.iter() {
-                {
+                Fragment { key: "{app.id}", {
                     let id = app.id.clone();
                     let accept_id = app.id.clone();
                     let reject_id = app.id.clone();
@@ -410,6 +427,7 @@ fn ApplicationsTable(
                         button {
                             r#type: "button",
                             class: "btn is-primary",
+                            id: application_accept_id(&id),
                             aria_label: "Accept {applicant}",
                             aria_describedby: accept_described_by.clone(),
                             onclick: move |_| on_accept.call(accept_id.clone()),
@@ -454,7 +472,7 @@ fn ApplicationsTable(
                             }
                         }
                     }
-                }
+                } }
             }
         }
     }
@@ -479,7 +497,24 @@ pub fn AdminApplications() -> Element {
     let mut view_open = use_signal(|| false);
     let mut view_target = use_signal(|| None::<Application>);
 
+    // The shown list's ids, for where focus goes after a review.
+    let review_keys = move || -> Vec<String> {
+        applications
+            .data
+            .peek()
+            .as_ref()
+            .and_then(|d| d.as_ref())
+            .map(|all| {
+                filter_applications(all, *status_filter.peek())
+                    .into_iter()
+                    .map(|a| a.id)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
     let accept = move |id: String| {
+        let focus_next = after_review_focus_ids(&review_keys(), &id);
         spawn(async move {
             accept_name_error.set(None);
             let body = PatchApplicationRequest {
@@ -495,6 +530,7 @@ pub fn AdminApplications() -> Element {
                     accept_name_error.set(None);
                     toast.show(Toast::success("Application accepted"));
                     applications.refresh += 1;
+                    focus_after_delete_soon(application_accept_id(&id), focus_next);
                 }
                 Err(e) => {
                     if let Some(message) =
@@ -511,6 +547,7 @@ pub fn AdminApplications() -> Element {
 
     let confirm_reject = move |_| {
         let id = reject_modal.get_target().unwrap_or_default();
+        let focus_next = after_review_focus_ids(&review_keys(), &id);
         let notes = reject_notes().clone();
         reject_modal.close();
         reject_notes.set(String::new());
@@ -527,6 +564,7 @@ pub fn AdminApplications() -> Element {
                 Ok(_) => {
                     toast.show(Toast::success("Application declined"));
                     applications.refresh += 1;
+                    focus_after_delete_soon(application_accept_id(&id), focus_next);
                 }
                 Err(e) => toast.show(Toast::error(format!("Failed to decline: {e}"))),
             }
@@ -709,6 +747,27 @@ pub fn AdminApplications() -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_review_hands_focus_on_once_the_list_refreshed() {
+        // Vision nit 2 on PR 706: Accept and Decline switch the row's
+        // actions, so focus fell to the body.
+        let keys: Vec<String> = ["a", "b", "c"].iter().map(|k| k.to_string()).collect();
+        let v = application_view_trigger_id;
+        // Own View first (the row stays without a filter), then next, previous.
+        assert_eq!(after_review_focus_ids(&keys, "b"), [v("b"), v("c"), v("a")]);
+        assert_eq!(after_review_focus_ids(&keys, "c"), [v("c"), v("b")]);
+        let src = include_str!("applications.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert_eq!(
+            prod.matches("focus_after_delete_soon(application_accept_id(&id), focus_next);")
+                .count(),
+            2,
+            "Accept and Decline"
+        );
+        assert!(prod.contains("id: application_accept_id(&id),"));
+        assert!(prod.contains("Fragment { key: \"{app.id}\","));
+    }
 
     fn sample_application() -> Application {
         Application {

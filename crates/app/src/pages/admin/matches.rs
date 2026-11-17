@@ -385,7 +385,7 @@ pub fn AdminMatches() -> Element {
                             cards: true,
                             label: "Matches",
                             for m in rows.iter() {
-                                {
+                                Fragment { key: "{m.id}", {
                                     let mc = m.clone();
                                     // A scheduled match says so once (its pill); no "No
                                     // score" or "No map" noise in its card.
@@ -429,7 +429,7 @@ pub fn AdminMatches() -> Element {
                                             }
                                         }
                                     }
-                                }
+                                } }
                             }
                         }
                     }

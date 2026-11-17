@@ -345,7 +345,7 @@ fn AnnouncementsTable(
             cards: true,
             label: "Announcements".to_string(),
             for a in rows {
-                {
+                Fragment { key: "{a.id}", {
                     let edit = a.clone();
                     let delete = a.clone();
                     let title = a.title.clone();
@@ -386,7 +386,7 @@ fn AnnouncementsTable(
                             }
                         }
                     }
-                }
+                } }
             }
         }
     }

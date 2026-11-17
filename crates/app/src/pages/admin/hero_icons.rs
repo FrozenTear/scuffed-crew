@@ -10,7 +10,9 @@
 
 use dioxus::prelude::*;
 
-use crate::components::admin_shared::{after_delete_focus_ids, focus_after_delete_soon};
+use crate::components::admin_shared::{
+    after_delete_focus_ids, focus_after_delete_soon, focus_after_refresh_soon,
+};
 
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::HeroIconMemberCount;
@@ -47,6 +49,31 @@ const CSS: &str = r#"
     }
 "#;
 
+/// Id of the empty card's link: focus lands there when the last row goes.
+const EMPTY_NEXT_ID: &str = "hero-icons-admin-empty-next";
+
+/// Where focus goes after a confirmed delete of `removed`'s icons, in order.
+/// A member who turned sharing off has no row once the icons are gone, so
+/// it is the next row's Delete, else the previous row's, else the empty
+/// card's link. A member who still shares keeps a row with no icons, so its
+/// own Delete comes first.
+fn after_icon_delete_focus_ids(keys: &[String], removed: &str, sharing_off: bool) -> Vec<String> {
+    let trigger =
+        |member_id: &str| vec![format!("{}-trigger", text::admin_delete_prefix(member_id))];
+    let mut ids = if sharing_off {
+        Vec::new()
+    } else {
+        trigger(removed)
+    };
+    ids.extend(after_delete_focus_ids(
+        keys,
+        removed,
+        trigger,
+        &[EMPTY_NEXT_ID],
+    ));
+    ids
+}
+
 /// The empty list's next step: where a member turns sharing on.
 const EMPTY_NEXT: &str = "Counts show up here once a member turns on Share hero icons in Edit profile, under Training crops, and the tracker sends icons. You can start with your own profile.";
 
@@ -63,11 +90,12 @@ pub fn AdminHeroIcons() -> Element {
     let delete_for = use_callback(move |member: HeroIconMemberCount| {
         busy.set(true);
         // B9: the confirm strip, and the focus in it, goes when the delete
-        // ends. Then focus the next row's Delete, else the previous row's,
-        // else this row's own Delete (the row stays, with nothing to delete).
+        // ends. Focus moves only once the refreshed list is on screen: the
+        // row's count cell is gone (sharing off: the server drops the row)
+        // or reads 0 (still sharing: the row stays). See
+        // `after_icon_delete_focus_ids` for the order.
         let prefix = text::admin_delete_prefix(&member.member_id);
-        let trigger = |member_id: &str| format!("{}-trigger", text::admin_delete_prefix(member_id));
-        let own_trigger = trigger(&member.member_id);
+        let own_trigger = format!("{prefix}-trigger");
         let keys: Vec<String> = members
             .data
             .peek()
@@ -75,19 +103,16 @@ pub fn AdminHeroIcons() -> Element {
             .and_then(|d| d.as_ref())
             .map(|rows| rows.iter().map(|r| r.member_id.clone()).collect())
             .unwrap_or_default();
-        let focus_next = after_delete_focus_ids(
-            &keys,
-            &member.member_id,
-            |k| vec![trigger(k)],
-            &[own_trigger.as_str()],
-        );
+        let focus_next =
+            after_icon_delete_focus_ids(&keys, &member.member_id, text::sharing_is_off(&member));
+        let count_id = text::admin_count_id(&member.member_id);
         spawn(async move {
             let path = format!("/api/hero-icons/members/{}", member.member_id);
             let strip_cancel = format!("{prefix}-cancel");
             match ApiClient::web().delete(&path).await {
                 Ok(()) => {
                     action_status.set(text::admin_deleted(&member.display_name, member.icon_count));
-                    focus_after_delete_soon(strip_cancel, focus_next);
+                    focus_after_refresh_soon(count_id, "0".to_string(), focus_next);
                 }
                 Err(e) => {
                     action_status.set(text::failure_text("Deleting icons", &e));
@@ -133,7 +158,12 @@ pub fn AdminHeroIcons() -> Element {
                     title: "No hero icons yet",
                     message: format!("{} {EMPTY_NEXT}", text::ADMIN_EMPTY),
                     actions: rsx! {
-                        Link { to: Route::ProfileSettings {}, class: btn_class(false), "Open Edit profile" }
+                        Link {
+                            to: Route::ProfileSettings {},
+                            id: EMPTY_NEXT_ID,
+                            class: btn_class(false),
+                            "Open Edit profile"
+                        }
                     },
                 }
             },
@@ -144,7 +174,10 @@ pub fn AdminHeroIcons() -> Element {
                     cards: true,
                     label: "Hero icons per member",
                     for row in rows.iter() {
-                        {
+                        // Keyed by the member record id: an unkeyed body made
+                        // Dioxus rebuild every row after a removed one, which
+                        // dropped the focused Delete.
+                        Fragment { key: "{row.member_id}", {
                             let label = text::member_label(&row.display_name);
                             let count_id = text::admin_count_id(&row.member_id);
                             let prefix = text::admin_delete_prefix(&row.member_id);
@@ -215,7 +248,7 @@ pub fn AdminHeroIcons() -> Element {
                                     }
                                 }
                             }
-                        }
+                        } }
                     }
                 }
             },
@@ -242,6 +275,57 @@ pub fn AdminHeroIcons() -> Element {
 mod tests {
     use super::CSS;
     use crate::components::ui::test_support::assert_sizes_from_tokens;
+
+    #[test]
+    fn a_confirmed_delete_focuses_after_the_refreshed_list_renders() {
+        // Vision S4 blocking 1 on PR 706: focus moved when the confirm strip
+        // went, before the refresh, and the unkeyed loop then rebuilt the
+        // rows after the removed one, so focus fell to the body.
+        use super::{EMPTY_NEXT_ID, after_icon_delete_focus_ids};
+        let keys: Vec<String> = ["a", "b", "c"].iter().map(|k| k.to_string()).collect();
+        let t = |k: &str| format!("hero-icons-admin-{k}-delete-trigger");
+        // Sharing off: the row goes. Next, else previous, else the empty card.
+        assert_eq!(
+            after_icon_delete_focus_ids(&keys, "b", true),
+            [t("c"), t("a"), EMPTY_NEXT_ID.to_string()]
+        );
+        assert_eq!(
+            after_icon_delete_focus_ids(&keys, "c", true),
+            [t("b"), EMPTY_NEXT_ID.to_string()]
+        );
+        let only = vec!["a".to_string()];
+        assert_eq!(
+            after_icon_delete_focus_ids(&only, "a", true),
+            [EMPTY_NEXT_ID.to_string()]
+        );
+        // Still sharing: the row stays with 0 icons, so its own Delete first.
+        assert_eq!(
+            after_icon_delete_focus_ids(&keys, "b", false),
+            [t("b"), t("c"), t("a"), EMPTY_NEXT_ID.to_string()]
+        );
+
+        let src = include_str!("hero_icons.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        // The loop body is keyed by the member record id.
+        let lp = &prod[prod.find("for row in rows.iter() {").expect("loop")..];
+        let body = lp
+            .lines()
+            .skip(1)
+            .map(str::trim)
+            .find(|l| !l.is_empty() && !l.starts_with("//"))
+            .unwrap();
+        assert!(body.starts_with("Fragment {"), "{body}");
+        assert!(lp.contains(r#"key: "{row.member_id}","#), "{lp}");
+        // Success waits on the row's count cell, not the confirm strip.
+        let ok = &prod[prod.find("Ok(()) => {").unwrap()..prod.find("Err(e) => {").unwrap()];
+        assert!(
+            ok.contains(r#"focus_after_refresh_soon(count_id, "0".to_string(), focus_next);"#),
+            "{ok}"
+        );
+        assert!(!ok.contains("strip_cancel"), "{ok}");
+        // The empty card's link carries the fallback id.
+        assert!(prod.contains("id: EMPTY_NEXT_ID,"));
+    }
 
     #[test]
     fn empty_status_line_stays_in_the_tree() {

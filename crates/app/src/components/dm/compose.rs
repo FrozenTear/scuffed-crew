@@ -471,7 +471,7 @@ pub fn DmComposeModal(
                                 role: "listbox",
                                 aria_label: "Matching members",
                                 for (i, m) in filtered.iter().enumerate() {
-                                    {
+                                    Fragment { key: "{m.id}", {
                                         let pk = m.nostr_pubkey.clone().unwrap_or_default();
                                         let pk_short = truncate_pubkey(&pk);
                                         let name = m.display_name.clone();
@@ -495,7 +495,7 @@ pub fn DmComposeModal(
                                                 span { class: "dm-compose-option-key", "{pk_short}" }
                                             }
                                         }
-                                    }
+                                    } }
                                 }
                             }
                             if let Some(more) = more_hint.clone() {
@@ -562,7 +562,6 @@ fn FocusOnMount(id: &'static str) -> Element {
     rsx! {}
 }
 
-/// An option's id, from the member's record id.
 /// Bring the highlighted option into view inside the capped list, after the
 /// render that opens or moves it. `block: "nearest"` scrolls the list only as
 /// far as needed and leaves the page where it is.
@@ -598,6 +597,7 @@ fn scroll_option_into_view_soon(id: String) {
     });
 }
 
+/// An option's id, from the member's record id.
 fn option_id(member_id: &str) -> String {
     let safe: String = member_id
         .chars()

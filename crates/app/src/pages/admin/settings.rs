@@ -464,7 +464,7 @@ pub fn AdminSettings() -> Element {
                     h3 { class: "settings-subhead", id: "settings-pack-label", "Identity pack" }
                     div { class: "pack-grid", role: "group", aria_labelledby: "settings-pack-label",
                         for p in homepage_presets() {
-                            {
+                            Fragment { key: "{p.id}", {
                                 let id = p.id.to_string();
                                 let selected = homepage_preset_id() == p.id;
                                 let card_class = if selected {
@@ -485,7 +485,7 @@ pub fn AdminSettings() -> Element {
                                         span { class: "pack-card-meta", "{shell} · {skin}" }
                                     }
                                 }
-                            }
+                            } }
                         }
                     }
                     div { class: "pack-actions",
@@ -543,7 +543,7 @@ pub fn AdminSettings() -> Element {
                             ];
                             rsx! {
                                 for (shell, title, blurb) in shells {
-                                    {
+                                    Fragment { key: "{title}", {
                                         let selected = home_shell() == shell;
                                         let cls = if selected { "option-tile is-selected" } else { "option-tile" };
                                         rsx! {
@@ -559,7 +559,7 @@ pub fn AdminSettings() -> Element {
                                                 div { class: "option-tile-blurb", "{blurb}" }
                                             }
                                         }
-                                    }
+                                    } }
                                 }
                             }
                         }
@@ -573,7 +573,7 @@ pub fn AdminSettings() -> Element {
                             ];
                             rsx! {
                                 for (skin, title, blurb) in skins {
-                                    {
+                                    Fragment { key: "{title}", {
                                         let selected = home_skin() == skin;
                                         let cls = if selected { "option-tile is-selected" } else { "option-tile" };
                                         rsx! {
@@ -586,7 +586,7 @@ pub fn AdminSettings() -> Element {
                                                 div { class: "option-tile-blurb", "{blurb}" }
                                             }
                                         }
-                                    }
+                                    } }
                                 }
                             }
                         }

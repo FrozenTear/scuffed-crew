@@ -178,7 +178,7 @@ pub fn AdminGames() -> Element {
                             cards: true,
                             label: "Games",
                             for game in rows.iter() {
-                                {
+                                Fragment { key: "{game.id}", {
                                     let g = game.clone();
                                     let abbr = or_none(game.abbreviation.as_deref());
                                     let name = game.name.clone();
@@ -202,7 +202,7 @@ pub fn AdminGames() -> Element {
                                             }
                                         }
                                     }
-                                }
+                                } }
                             }
                         }
                     }

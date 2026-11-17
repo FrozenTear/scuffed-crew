@@ -198,7 +198,6 @@ fn roster_role_id(member_id: &str) -> String {
     format!("roster-role-{member_id}")
 }
 
-/// Id of a roster row's Remove button, from the member id.
 /// The role the roster add form starts with, and goes back to after an add.
 const ROSTER_ADD_DEFAULT_ROLE: &str = "player";
 
@@ -209,6 +208,7 @@ fn roster_draft_unsaved(member_id: &str, role: &str) -> bool {
     !member_id.trim().is_empty() || role != ROSTER_ADD_DEFAULT_ROLE
 }
 
+/// Id of a roster row's Remove button, from the member id.
 fn roster_remove_id(member_id: &str) -> String {
     format!("roster-remove-{member_id}")
 }
@@ -617,7 +617,7 @@ pub fn AdminTeams() -> Element {
                             cards: true,
                             label: "Teams",
                             for team in rows.iter() {
-                                {
+                                Fragment { key: "{team.id}", {
                                     let t_edit = team.clone();
                                     let t_roster = team.clone();
                                     let name = team.name.clone();
@@ -660,7 +660,7 @@ pub fn AdminTeams() -> Element {
                                             }
                                         }
                                     }
-                                }
+                                } }
                             }
                         }
                     }
@@ -866,7 +866,7 @@ pub fn AdminTeams() -> Element {
                         cards: true,
                         label: "Roster",
                         for entry in roster_data.read().iter() {
-                            {
+                            Fragment { key: "{entry.member_id}", {
                                 let e_remove = entry.clone();
                                 let mid = entry.member_id.clone();
                                 let current_role = entry.team_role.clone();
@@ -902,7 +902,7 @@ pub fn AdminTeams() -> Element {
                                         }
                                     }
                                 }
-                            }
+                            } }
                         }
                     }
                 },
