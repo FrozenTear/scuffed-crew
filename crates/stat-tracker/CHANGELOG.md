@@ -22,6 +22,7 @@ At 1440p, most hero icon training crops were dropped because their PNG was over 
 ### Highlights
 
 - If a hero icon crop still cannot be kept, a later Tab of the same game can try again.
+- Report kits now keep up to 300 games by default instead of 50, so the 14 day limit is what normally clears them and a week of games is still there for review. The 500 MB total size limit stays, and `report_kit_max_games` in the config still changes the number.
 
 ## 0.6.0-alpha.3.1
 
