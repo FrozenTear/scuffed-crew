@@ -151,7 +151,7 @@ for (const width of [1440, 390]) {
         check('apply', `the field focused from ${href} is in view` + tag, res.inView, JSON.stringify(res));
         check('apply', `the inline error of ${href} is in view too` + tag, res.errInView, JSON.stringify(res));
       }
-      const inline = await page.evaluate(() => ['apply-games-err', 'apply-role-err', 'apply-message-err'].map(id => { const e = document.getElementById(id); return id + '=' + (e ? e.textContent.trim().slice(0, 50) : 'MISSING'); }));
+      const inline = await page.evaluate(() => ['apply-games-err', 'apply-message-err'].map(id => { const e = document.getElementById(id); return id + '=' + (e ? e.textContent.trim().slice(0, 50) : 'MISSING'); }));
       check('apply', 'each invalid field has its inline error text' + tag, inline.every(s => !s.endsWith('MISSING')), inline.join(' | '));
     }
     await ctx.close();

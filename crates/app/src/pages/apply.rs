@@ -384,13 +384,44 @@ struct ApplyBody {
     message: Option<String>,
 }
 
-/// Main role choices, sent as the one entry of `preferred_roles`. The label
-/// is the value, because the admin review page prints the stored text.
+/// Main role choices. The role is optional: a picked one is sent as the one
+/// entry of `preferred_roles`, no pick sends an empty list. The label is the
+/// value, because the admin review page prints the stored text.
 const MAIN_ROLES: [&str; 4] = ["Tank", "Damage", "Support", "Flex"];
 
+/// DOM id of the optional main role select.
+const ROLE_ID: &str = "apply-role";
+
 /// Shortest "Why you want to join" text the form sends. A short message is
-/// enough; the rule only stops an empty or one-word answer.
+/// enough; the rule only stops an empty or one-word answer. The server runs
+/// the same check (`message.trim().chars().count() < 10` is a 400), so the
+/// count here must stay [`message_chars`].
 const MIN_MESSAGE_CHARS: usize = 10;
+
+/// Characters of the message as the server counts them: trimmed, then
+/// counted in `char`s (code points), not bytes.
+fn message_chars(message: &str) -> usize {
+    message.trim().chars().count()
+}
+
+/// The body `POST /api/applications` gets. The one builder the submit
+/// handler and the tests share.
+fn apply_body(games: Vec<String>, role: &str, message: String) -> ApplyBody {
+    let preferred_roles = if MAIN_ROLES.contains(&role) {
+        vec![role.to_string()]
+    } else {
+        Vec::new()
+    };
+    ApplyBody {
+        preferred_games: games,
+        preferred_roles,
+        message: if message.trim().is_empty() {
+            None
+        } else {
+            Some(message)
+        },
+    }
+}
 
 /// DOM id of the error summary, focused after a failed submit.
 const SUMMARY_ID: &str = "apply-error-summary";
@@ -403,6 +434,9 @@ const SIGN_IN_HEADING_ID: &str = "apply-sign-in-heading";
 const STATUS_HEADING_ID: &str = "apply-status-heading";
 /// DOM id of the always-rendered hint under "Why you want to join".
 const MESSAGE_HINT_ID: &str = "apply-message-hint";
+/// DOM id of the form's send status line, where a refused send (400) shows
+/// the server's reason.
+const SEND_STATUS_ID: &str = "apply-send-status";
 /// Id stem of the withdraw confirm strip; its trigger is `{stem}-trigger`.
 const WITHDRAW_ID: &str = "withdraw-application";
 const WITHDRAW_TRIGGER_ID: &str = "withdraw-application-trigger";
@@ -413,7 +447,6 @@ const WITHDRAW_TRIGGER_ID: &str = "withdraw-application-trigger";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ApplyField {
     Games,
-    Role,
     Message,
 }
 
@@ -422,7 +455,6 @@ impl ApplyField {
     const fn id(self) -> &'static str {
         match self {
             ApplyField::Games => "apply-games",
-            ApplyField::Role => "apply-role",
             ApplyField::Message => "apply-message",
         }
     }
@@ -431,7 +463,6 @@ impl ApplyField {
     const fn error_id(self) -> &'static str {
         match self {
             ApplyField::Games => "apply-games-err",
-            ApplyField::Role => "apply-role-err",
             ApplyField::Message => "apply-message-err",
         }
     }
@@ -439,7 +470,6 @@ impl ApplyField {
     const fn label(self) -> &'static str {
         match self {
             ApplyField::Games => "Games",
-            ApplyField::Role => "Main role",
             ApplyField::Message => "Why you want to join",
         }
     }
@@ -447,22 +477,19 @@ impl ApplyField {
     const fn error(self) -> &'static str {
         match self {
             ApplyField::Games => "Choose at least one game.",
-            ApplyField::Role => "Choose a role so we can place you.",
             ApplyField::Message => "Write at least 10 characters so we know why you want to join.",
         }
     }
 }
 
-/// Invalid fields in form order. Empty means the form can be sent.
-fn validate(games: &[String], role: &str, message: &str) -> Vec<ApplyField> {
+/// Invalid fields in form order. Empty means the form can be sent. The main
+/// role is optional, so it is never invalid.
+fn validate(games: &[String], message: &str) -> Vec<ApplyField> {
     let mut invalid = Vec::new();
     if games.is_empty() {
         invalid.push(ApplyField::Games);
     }
-    if !MAIN_ROLES.contains(&role) {
-        invalid.push(ApplyField::Role);
-    }
-    if message.trim().chars().count() < MIN_MESSAGE_CHARS {
+    if message_chars(message) < MIN_MESSAGE_CHARS {
         invalid.push(ApplyField::Message);
     }
     invalid
@@ -472,13 +499,8 @@ fn validate(games: &[String], role: &str, message: &str) -> Vec<ApplyField> {
 /// as its value is valid again, so `aria-invalid`, the inline message and the
 /// summary row never outlive the mistake. A change never adds an error: new
 /// ones only appear on the next submit.
-fn remaining_errors(
-    errors: &[ApplyField],
-    games: &[String],
-    role: &str,
-    message: &str,
-) -> Vec<ApplyField> {
-    let invalid = validate(games, role, message);
+fn remaining_errors(errors: &[ApplyField], games: &[String], message: &str) -> Vec<ApplyField> {
+    let invalid = validate(games, message);
     errors
         .iter()
         .copied()
@@ -553,6 +575,25 @@ fn action_failure_text(what: &str, err: &ClientError) -> String {
     }
 }
 
+/// Where a failed send is reported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SendFailure {
+    /// A 400: the server refused the content (the message rule). Its reason
+    /// goes in the form's send status line, next to the button.
+    Inline(String),
+    /// Anything else stays a toast.
+    Toast(String),
+}
+
+fn send_failure(err: &ClientError) -> SendFailure {
+    let text = action_failure_text("Couldn't send the application", err);
+    if err.http_status() == Some(400) {
+        SendFailure::Inline(text)
+    } else {
+        SendFailure::Toast(text)
+    }
+}
+
 /// True when the application fetch failed because the session is gone. A
 /// trial applicant who withdraws is logged out by the server, so the refetch
 /// that follows comes back 401 and a Retry could never work.
@@ -597,9 +638,10 @@ fn status_heading(just_sent: bool, status: &str) -> &'static str {
     }
 }
 
-/// Every field of the form is required, so the lead says so in words. The
-/// asterisks and the "* Required" key are the visual form of the same fact.
-const FORM_LEAD: &str = "Tell us what you play and why you want to join. Every field is required.";
+/// Games and the message are required and the main role is optional, so the
+/// lead says so in words. The asterisks and the "* Required" key are the
+/// visual form of the same fact.
+const FORM_LEAD: &str = "Tell us what you play and why you want to join. Games and the message are required; your main role is optional.";
 
 /// Page layout. Fields, labels, hints, error lines and buttons are the shared
 /// ones from `components/ui`.
@@ -680,6 +722,10 @@ fn ApplyForm(
     message: String,
     errors: Vec<ApplyField>,
     submitting: bool,
+    /// Text of the send status line: the server's reason after a 400, empty
+    /// otherwise. The line is always rendered; only this text changes.
+    #[props(default)]
+    send_status: String,
     on_toggle: EventHandler<String>,
     on_role: EventHandler<String>,
     on_message: EventHandler<String>,
@@ -689,7 +735,6 @@ fn ApplyForm(
     games_notice: Option<Element>,
     children: Element,
 ) -> Element {
-    let role_invalid = errors.contains(&ApplyField::Role);
     let message_invalid = errors.contains(&ApplyField::Message);
     rsx! {
         form {
@@ -746,27 +791,19 @@ fn ApplyForm(
                 {games_notice}
             }
 
+            // Optional: no asterisk, no `required`, never an error. The
+            // label says so in words.
             div { class: "apply-field",
-                label { class: "field-label", r#for: ApplyField::Role.id(),
-                    "{ApplyField::Role.label()}"
-                    {required_mark()}
-                }
+                label { class: "field-label", r#for: ROLE_ID, "Main role (optional)" }
                 select {
                     class: "field-input",
-                    id: ApplyField::Role.id(),
+                    id: ROLE_ID,
                     name: "role",
-                    required: true,
-                    aria_required: "true",
-                    aria_invalid: if role_invalid { "true" },
-                    aria_describedby: if role_invalid { ApplyField::Role.error_id() },
                     onchange: move |e: FormEvent| on_role.call(e.value()),
-                    option { value: "", selected: role.is_empty(), "Select a role" }
+                    option { value: "", selected: role.is_empty(), "No main role" }
                     for name in MAIN_ROLES {
                         option { key: "{name}", value: name, selected: role == name, "{name}" }
                     }
-                }
-                if role_invalid {
-                    {field_error(ApplyField::Role)}
                 }
             }
 
@@ -795,6 +832,10 @@ fn ApplyForm(
                     {field_error(ApplyField::Message)}
                 }
             }
+
+            // Always rendered with the form, so a refused send is announced
+            // as a text change. Empty until the server refuses one.
+            p { class: "apply-status apply-send-status", id: SEND_STATUS_ID, role: "status", "{send_status}" }
 
             div { class: "apply-actions",
                 button {
@@ -835,6 +876,8 @@ pub fn Apply() -> Element {
     let mut message = use_signal(String::new);
     // Result of the last submit. Empty until a submit fails validation.
     let mut errors = use_signal(Vec::<ApplyField>::new);
+    // The server's reason for the last refused (400) send. Empty otherwise.
+    let mut send_status = use_signal(String::new);
     let mut submitting = use_signal(|| false);
     // True from a successful send until the application changes again.
     let mut just_sent = use_signal(|| false);
@@ -1126,21 +1169,19 @@ pub fn Apply() -> Element {
                                     message: message(),
                                     errors: errors(),
                                     submitting: submitting(),
+                                    send_status: send_status(),
                                     // A corrected field loses its error at once, not
                                     // on the next submit.
                                     on_toggle: move |id: String| {
                                         toggle_game(&mut selected_games.write(), &id);
-                                        let left = remaining_errors(&errors(), &selected_games(), &role(), &message());
+                                        let left = remaining_errors(&errors(), &selected_games(), &message());
                                         errors.set(left);
                                     },
-                                    on_role: move |value: String| {
-                                        role.set(value);
-                                        let left = remaining_errors(&errors(), &selected_games(), &role(), &message());
-                                        errors.set(left);
-                                    },
+                                    // The role is optional and has no error to clear.
+                                    on_role: move |value: String| role.set(value),
                                     on_message: move |value: String| {
                                         message.set(value);
-                                        let left = remaining_errors(&errors(), &selected_games(), &role(), &message());
+                                        let left = remaining_errors(&errors(), &selected_games(), &message());
                                         errors.set(left);
                                     },
                                     on_submit: move |_| {
@@ -1151,7 +1192,7 @@ pub fn Apply() -> Element {
                                         let games = selected_games();
                                         let main_role = role();
                                         let msg = message();
-                                        let invalid = validate(&games, &main_role, &msg);
+                                        let invalid = validate(&games, &msg);
                                         let failed = !invalid.is_empty();
                                         errors.set(invalid);
                                         if failed {
@@ -1159,12 +1200,9 @@ pub fn Apply() -> Element {
                                             return;
                                         }
                                         submitting.set(true);
+                                        send_status.set(String::new());
                                         spawn(async move {
-                                            let body = ApplyBody {
-                                                preferred_games: games,
-                                                preferred_roles: vec![main_role],
-                                                message: if msg.trim().is_empty() { None } else { Some(msg) },
-                                            };
+                                            let body = apply_body(games, &main_role, msg);
                                             match ApiClient::web().post_json_empty("/api/applications", &body).await {
                                                 Ok(_) => {
                                                     toast.show(Toast::success("Application received"));
@@ -1174,10 +1212,10 @@ pub fn Apply() -> Element {
                                                 }
                                                 Err(e) => {
                                                     log_client_error("send application", &e);
-                                                    toast.show(Toast::error(action_failure_text(
-                                                        "Couldn't send the application",
-                                                        &e,
-                                                    )));
+                                                    match send_failure(&e) {
+                                                        SendFailure::Inline(text) => send_status.set(text),
+                                                        SendFailure::Toast(text) => toast.show(Toast::error(text)),
+                                                    }
                                                 }
                                             }
                                             submitting.set(false);
@@ -1729,38 +1767,86 @@ mod tests {
     fn validate_lists_invalid_fields_in_form_order() {
         let ow = vec!["game-ow".to_string()];
         assert!(LONG_MESSAGE.chars().count() >= MIN_MESSAGE_CHARS);
-        assert_eq!(validate(&ow, "Support", LONG_MESSAGE), []);
+        assert_eq!(validate(&ow, LONG_MESSAGE), []);
         assert_eq!(
-            validate(&[], "", "Hi"),
-            [ApplyField::Games, ApplyField::Role, ApplyField::Message]
+            validate(&[], "Hi"),
+            [ApplyField::Games, ApplyField::Message]
         );
-        assert_eq!(validate(&ow, "", LONG_MESSAGE), [ApplyField::Role]);
-        // Only a listed role counts.
-        assert_eq!(validate(&ow, "Healer", LONG_MESSAGE), [ApplyField::Role]);
-        for role in MAIN_ROLES {
-            assert_eq!(validate(&ow, role, LONG_MESSAGE), []);
-        }
+        assert_eq!(validate(&[], LONG_MESSAGE), [ApplyField::Games]);
         // Padding does not reach the minimum, and the count is characters.
         let padded = format!("Hi{}", " ".repeat(60));
-        assert_eq!(validate(&ow, "Tank", &padded), [ApplyField::Message]);
+        assert_eq!(validate(&ow, &padded), [ApplyField::Message]);
         assert_eq!(MIN_MESSAGE_CHARS, 10);
-        assert_eq!(validate(&ow, "Tank", &"a".repeat(9)), [ApplyField::Message]);
-        assert_eq!(validate(&ow, "Tank", &"a".repeat(10)), []);
+        assert_eq!(validate(&ow, &"a".repeat(9)), [ApplyField::Message]);
+        assert_eq!(validate(&ow, &"a".repeat(10)), []);
         // Two bytes each: 5 of them are 10 bytes but only 5 characters.
-        assert_eq!(validate(&ow, "Tank", &"å".repeat(5)), [ApplyField::Message]);
-        assert_eq!(validate(&ow, "Tank", &"å".repeat(10)), []);
+        assert_eq!(validate(&ow, &"å".repeat(5)), [ApplyField::Message]);
+        assert_eq!(validate(&ow, &"å".repeat(10)), []);
         // A short real answer passes; the old 40 character floor is gone.
-        assert_eq!(validate(&ow, "Tank", "I main Ana."), []);
-        assert_eq!(validate(&ow, "Tank", &"a".repeat(39)), []);
+        assert_eq!(validate(&ow, "I main Ana."), []);
+        assert_eq!(validate(&ow, &"a".repeat(39)), []);
+    }
+
+    #[test]
+    fn the_message_rule_is_the_servers_trim_then_count_chars() {
+        let ow = vec!["game-ow".to_string()];
+        // 9 characters once trimmed: refused, however much padding (spaces,
+        // tabs, newlines) brings the raw length to 10 or more.
+        for nine in [
+            "  123456789  ",
+            "\n\t123456789\n",
+            " Hi I heal ",
+            "ålesund99 ",
+        ] {
+            assert_eq!(message_chars(nine), 9, "{nine:?}");
+            assert_eq!(validate(&ow, nine), [ApplyField::Message], "{nine:?}");
+        }
+        // Inner spaces count, like on the server.
+        assert_eq!(message_chars("Hi, I heal"), 10);
+        assert_eq!(validate(&ow, "Hi, I heal"), []);
+        // 10 characters with multibyte letters is accepted: 10 chars, more
+        // than 10 bytes. A byte count would pass 9 of them too, so check that
+        // 9 such characters (still over 10 bytes) is refused.
+        for ten in [
+            "æøåÆØÅéüñß",
+            " Smørbrødet ",
+            "ゲームが好きです。!",
+            "🎮🎮🎮🎮🎮 heal",
+        ] {
+            assert_eq!(message_chars(ten), 10, "{ten:?}");
+            assert!(ten.trim().len() > 10, "{ten:?}");
+            assert_eq!(validate(&ow, ten), [], "{ten:?}");
+        }
+        let nine_multibyte = "æøåÆØÅéüñ";
+        assert!(nine_multibyte.len() > 10);
+        assert_eq!(validate(&ow, nine_multibyte), [ApplyField::Message]);
+    }
+
+    #[test]
+    fn the_main_role_is_optional() {
+        let ow = vec!["game-ow".to_string()];
+        // No role, or a value that is not a listed role, is not an error:
+        // validation does not look at the role at all.
+        assert_eq!(validate(&ow, LONG_MESSAGE), []);
+        // The error summary can only name games and the message.
+        let fields = [ApplyField::Games, ApplyField::Message];
+        assert!(fields.iter().all(|f| f.id() != ROLE_ID));
+        assert!(
+            !FORM_LEAD.contains("Every field is required"),
+            "{FORM_LEAD}"
+        );
+        assert!(FORM_LEAD.contains("main role is optional"), "{FORM_LEAD}");
     }
 
     #[test]
     fn field_ids_are_distinct_and_the_message_names_the_minimum() {
-        let fields = [ApplyField::Games, ApplyField::Role, ApplyField::Message];
+        let fields = [ApplyField::Games, ApplyField::Message];
         let mut ids: Vec<&str> = fields
             .iter()
             .flat_map(|f| [f.id(), f.error_id()])
             .chain([
+                ROLE_ID,
+                SEND_STATUS_ID,
                 SUMMARY_ID,
                 STATUS_HEADING_ID,
                 GAMES_STATUS_ID,
@@ -1785,13 +1871,13 @@ mod tests {
     #[test]
     fn the_send_body_carries_the_main_role_as_the_one_preferred_role() {
         // `POST /api/applications` takes `preferred_roles: Vec<String>` and
-        // stores it as sent. The form sends the chosen main role as the one
-        // entry; the rest of the body is as before.
-        let body = ApplyBody {
-            preferred_games: vec!["game-ow".to_string()],
-            preferred_roles: vec!["Support".to_string()],
-            message: Some("I main Ana.".to_string()),
-        };
+        // stores it as sent. A chosen main role is the one entry; the rest of
+        // the body is as before. Built by the submit handler's own builder.
+        let body = apply_body(
+            vec!["game-ow".to_string()],
+            "Support",
+            "I main Ana.".to_string(),
+        );
         assert_eq!(
             serde_json::to_value(&body).unwrap(),
             serde_json::json!({
@@ -1800,6 +1886,119 @@ mod tests {
                 "message": "I main Ana.",
             })
         );
+    }
+
+    #[test]
+    fn no_main_role_sends_an_empty_preferred_roles_list() {
+        // Nothing picked (the "No main role" option has the empty value):
+        // the list is empty, not `[""]`, and the key is still sent.
+        let body = apply_body(vec!["game-ow".to_string()], "", "Hi, I heal".to_string());
+        assert_eq!(
+            serde_json::to_value(&body).unwrap(),
+            serde_json::json!({
+                "preferred_games": ["game-ow"],
+                "preferred_roles": [],
+                "message": "Hi, I heal",
+            })
+        );
+        // A value that is not a listed role is not sent either.
+        assert!(
+            apply_body(vec![], "Healer", String::new())
+                .preferred_roles
+                .is_empty()
+        );
+        for role in MAIN_ROLES {
+            assert_eq!(
+                apply_body(vec![], role, String::new()).preferred_roles,
+                [role]
+            );
+        }
+    }
+
+    #[test]
+    fn a_400_on_send_shows_the_servers_text_in_the_form() {
+        let short = ClientError::http(
+            400,
+            r#"{"error":"Message must be at least 10 characters"}"#,
+            None,
+        );
+        assert_eq!(
+            send_failure(&short),
+            SendFailure::Inline(
+                "Couldn't send the application: Message must be at least 10 characters."
+                    .to_string()
+            )
+        );
+        // A 400 with no usable reason still goes inline, without "try again".
+        assert_eq!(
+            send_failure(&ClientError::http(400, "", None)),
+            SendFailure::Inline(
+                "Couldn't send the application. The server refused it.".to_string()
+            )
+        );
+        // Every other failure stays a toast, with the same words as before.
+        for err in [
+            ClientError::http(403, r#"{"error":"recruitment is currently closed"}"#, None),
+            ClientError::http(
+                409,
+                r#"{"error":"You already have an open application (pending)"}"#,
+                None,
+            ),
+            ClientError::http(401, "", None),
+            ClientError::http(500, "", None),
+            ClientError::Network("failed to fetch".to_string()),
+        ] {
+            assert_eq!(
+                send_failure(&err),
+                SendFailure::Toast(action_failure_text("Couldn't send the application", &err)),
+                "{err:?}"
+            );
+        }
+    }
+
+    fn form_refused() -> Element {
+        rsx! {
+            ApplyForm {
+                games_phase: SlotPhase::Ready,
+                games: games(),
+                selected: vec!["game-ow".to_string()],
+                role: String::new(),
+                message: "Hi, I heal".to_string(),
+                errors: vec![],
+                submitting: false,
+                send_status: "Couldn't send the application: Message must be at least 10 characters.".to_string(),
+                on_toggle: |_| {},
+                on_role: |_| {},
+                on_message: |_| {},
+                on_submit: |_| {},
+            }
+        }
+    }
+
+    #[test]
+    fn the_send_status_line_is_always_there_and_only_its_text_changes() {
+        // Before any send: mounted, empty.
+        let idle = html_of(form_empty);
+        assert!(
+            idle.contains(
+                r#"<p class="apply-status apply-send-status" id="apply-send-status" role="status"></p>"#
+            ),
+            "{idle}"
+        );
+        // After a 400: the same element, now with the server's text, before
+        // the submit button. No alert and no error summary.
+        let html = html_of(form_refused);
+        let line = r#"<p class="apply-status apply-send-status" id="apply-send-status" role="status">Couldn&#39;t send the application: Message must be at least 10 characters.</p>"#;
+        let at = html
+            .find(line)
+            .unwrap_or_else(|| panic!("{line} in {html}"));
+        assert!(
+            at < html.find(">Send application</button>").unwrap(),
+            "{html}"
+        );
+        assert_eq!(html.matches(r#"role="status""#).count(), 1, "{html}");
+        assert!(!html.contains(r#"role="alert""#), "{html}");
+        assert!(!html.contains(SUMMARY_ID), "{html}");
     }
 
     #[test]
@@ -1952,16 +2151,34 @@ mod tests {
             ApplyForm {
                 games_phase: SlotPhase::Ready,
                 games: games(),
-                selected: vec!["game-ow".to_string()],
+                selected: vec![],
                 role: String::new(),
                 message: "Hi".to_string(),
-                errors: vec![ApplyField::Role, ApplyField::Message],
+                errors: vec![ApplyField::Games, ApplyField::Message],
                 submitting: false,
                 on_toggle: |_| {},
                 on_role: |_| {},
                 on_message: |_| {},
                 on_submit: |_| {},
                 a { href: "/", "Cancel" }
+            }
+        }
+    }
+
+    fn form_message_failed() -> Element {
+        rsx! {
+            ApplyForm {
+                games_phase: SlotPhase::Ready,
+                games: games(),
+                selected: vec!["game-ow".to_string()],
+                role: String::new(),
+                message: "123456789".to_string(),
+                errors: vec![ApplyField::Message],
+                submitting: false,
+                on_toggle: |_| {},
+                on_role: |_| {},
+                on_message: |_| {},
+                on_submit: |_| {},
             }
         }
     }
@@ -2027,16 +2244,27 @@ mod tests {
             ),
             "{html}"
         );
-        // Three required fields, each with a visible asterisk.
-        assert_eq!(html.matches(r#"class="apply-req""#).count(), 4, "{html}");
-        for id in ["apply-role", "apply-message"] {
-            let tag = tag_with_id(&html, id);
-            assert!(tag.contains("required"), "{tag}");
-            assert!(tag.contains(r#"aria-required="true""#), "{tag}");
-            assert!(tag.contains(r#"class="field-input""#), "{tag}");
-            assert!(html.contains(&format!(r#"for="{id}""#)), "{html}");
-        }
-        assert!(!tag_with_id(&html, "apply-role").contains("aria-describedby"));
+        // Two required fields (games, message), each with a visible
+        // asterisk, plus the key's own.
+        assert_eq!(html.matches(r#"class="apply-req""#).count(), 3, "{html}");
+        let message = tag_with_id(&html, "apply-message");
+        assert!(message.contains("required"), "{message}");
+        assert!(message.contains(r#"aria-required="true""#), "{message}");
+        assert!(message.contains(r#"class="field-input""#), "{message}");
+        assert!(html.contains(r#"for="apply-message""#), "{html}");
+        // The main role is optional: labelled so in words, no asterisk, not
+        // required, nothing describing an error.
+        let role = tag_with_id(&html, "apply-role");
+        assert!(role.contains(r#"class="field-input""#), "{role}");
+        assert!(!role.contains("required"), "{role}");
+        assert!(!role.contains("aria-describedby"), "{role}");
+        assert!(
+            html.contains(
+                r#"<label class="field-label" for="apply-role">Main role (optional)</label>"#
+            ),
+            "{html}"
+        );
+        assert!(!html.contains("apply-role-err"), "{html}");
         // The 10 character minimum is said before the first submit: a hint
         // that is always there and always describes the field.
         assert!(
@@ -2056,11 +2284,14 @@ mod tests {
             ),
             "{html}"
         );
-        // Role choices, with the placeholder selected.
+        // Role choices, with the empty "No main role" choice selected.
         for role in MAIN_ROLES {
             assert!(html.contains(&format!(">{role}</option>")), "{html}");
         }
-        assert!(html.contains(">Select a role</option>"), "{html}");
+        let none = html.find(">No main role</option>").expect("empty choice");
+        let option = &html[html[..none].rfind("<option").unwrap()..none];
+        assert!(option.contains(r#"value="""#), "{option}");
+        assert!(option.contains("selected"), "{option}");
         // Game buttons take ids from the game id, not a counter.
         assert!(html.contains(r#"id="apply-game-game-ow""#), "{html}");
         assert!(html.contains(r#"id="apply-game-game-val""#), "{html}");
@@ -2105,40 +2336,58 @@ mod tests {
             "{html}"
         );
         assert!(html.find(SUMMARY_ID).unwrap() < html.find("apply-legend").unwrap());
-        // Summary links point at the invalid controls, in form order.
-        let role_link = html
-            .find(r##"<a href="#apply-role">Main role: Choose a role so we can place you.</a>"##)
-            .unwrap_or_else(|| panic!("role link in {html}"));
+        // Summary links point at the invalid controls, in form order. The
+        // optional role never has one.
+        let games_link = html
+            .find(r##"<a href="#apply-games">Games: Choose at least one game.</a>"##)
+            .unwrap_or_else(|| panic!("games link in {html}"));
         let message_link = html
             .find(
                 r##"<a href="#apply-message">Why you want to join: Write at least 10 characters so we know why you want to join.</a>"##,
             )
             .unwrap_or_else(|| panic!("message link in {html}"));
-        assert!(role_link < message_link);
+        assert!(games_link < message_link);
         assert_eq!(html.matches("<li>").count(), 2, "{html}");
-        // Each invalid control is marked and described by its message.
-        for (field, described_by) in [
-            (ApplyField::Role, "apply-role-err"),
-            // The hint keeps describing the field next to its error.
-            (ApplyField::Message, "apply-message-hint apply-message-err"),
-        ] {
-            let tag = tag_with_id(&html, field.id());
-            assert!(tag.contains(r#"aria-invalid="true""#), "{tag}");
-            assert!(
-                tag.contains(&format!(r#"aria-describedby="{described_by}""#)),
-                "{tag}"
-            );
-            // The message is an icon, then text.
-            let message = format!(
-                r#"<p class="field-error" id="{}"><span class="field-error-icon" aria-hidden="true"></span>{}</p>"#,
-                field.error_id(),
-                field.error()
-            );
-            assert!(html.contains(&message), "{message} in {html}");
-        }
-        // The valid Games group is left alone.
-        assert!(!html.contains("apply-games-err"), "{html}");
-        assert!(!html.contains("is-error"), "{html}");
+        assert!(!html.contains(r##"href="#apply-role""##), "{html}");
+        // The invalid message control is marked and described by its hint
+        // (kept next to the error) and its message.
+        let field = ApplyField::Message;
+        let tag = tag_with_id(&html, field.id());
+        assert!(tag.contains(r#"aria-invalid="true""#), "{tag}");
+        assert!(
+            tag.contains(r#"aria-describedby="apply-message-hint apply-message-err""#),
+            "{tag}"
+        );
+        // The message is an icon, then text.
+        let message = format!(
+            r#"<p class="field-error" id="{}"><span class="field-error-icon" aria-hidden="true"></span>{}</p>"#,
+            field.error_id(),
+            field.error()
+        );
+        assert!(html.contains(&message), "{message} in {html}");
+        // The invalid Games group carries its message too.
+        assert!(
+            html.contains(&format!(
+                r#"<p class="field-error" id="apply-games-err"><span class="field-error-icon" aria-hidden="true"></span>{}</p>"#,
+                ApplyField::Games.error()
+            )),
+            "{html}"
+        );
+        // The empty, optional role is left alone.
+        let role = tag_with_id(&html, "apply-role");
+        assert!(!role.contains("aria-invalid"), "{role}");
+        assert!(!html.contains("apply-role-err"), "{html}");
+        // With a game picked, only the message fails: the valid Games group
+        // and the empty role are left alone.
+        let one = html_of(form_message_failed);
+        assert!(!one.contains("apply-games-err"), "{one}");
+        assert!(!one.contains("is-error"), "{one}");
+        assert!(!tag_with_id(&one, "apply-role").contains("aria-invalid"));
+        assert!(
+            one.contains("<p>Fix the 1 item below, then send it again.</p>"),
+            "{one}"
+        );
+        assert_eq!(one.matches("<li>").count(), 1, "{one}");
         // Typed text is kept, and the button stays active for another try.
         assert!(
             html.contains(">Hi</textarea>") || html.contains(r#"value="Hi""#),
@@ -2193,25 +2442,22 @@ mod tests {
 
     #[test]
     fn a_corrected_field_loses_its_error_before_the_next_submit() {
-        let all = [ApplyField::Games, ApplyField::Role, ApplyField::Message];
+        let all = [ApplyField::Games, ApplyField::Message];
         let ow = vec!["game-ow".to_string()];
         // Nothing fixed yet: every error stands.
-        assert_eq!(remaining_errors(&all, &[], "", "Hi"), all);
-        // Picking a role clears only the role error.
-        assert_eq!(
-            remaining_errors(&all, &[], "Tank", "Hi"),
-            [ApplyField::Games, ApplyField::Message]
-        );
+        assert_eq!(remaining_errors(&all, &[], "Hi"), all);
         // Picking a game clears the group's error.
+        assert_eq!(remaining_errors(&all, &ow, "Hi"), [ApplyField::Message]);
+        // A long enough message clears only the message error.
         assert_eq!(
-            remaining_errors(&all, &ow, "", "Hi"),
-            [ApplyField::Role, ApplyField::Message]
+            remaining_errors(&all, &[], LONG_MESSAGE),
+            [ApplyField::Games]
         );
-        assert_eq!(remaining_errors(&all, &ow, "Tank", LONG_MESSAGE), []);
+        assert_eq!(remaining_errors(&all, &ow, LONG_MESSAGE), []);
         // A change never adds an error the last submit did not report.
-        assert_eq!(remaining_errors(&[], &[], "", ""), []);
+        assert_eq!(remaining_errors(&[], &[], ""), []);
         assert_eq!(
-            remaining_errors(&[ApplyField::Message], &[], "", LONG_MESSAGE),
+            remaining_errors(&[ApplyField::Message], &[], LONG_MESSAGE),
             []
         );
     }
@@ -2248,7 +2494,7 @@ mod tests {
             message_describedby(true),
             "apply-message-hint apply-message-err"
         );
-        assert!(FORM_LEAD.contains("Every field is required."));
+        assert!(FORM_LEAD.contains("Games and the message are required"));
         assert!(!FORM_LEAD.contains("asterisk"));
     }
 

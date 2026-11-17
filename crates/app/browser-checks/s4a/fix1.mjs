@@ -2,7 +2,8 @@
 //   node fix1.mjs            every group
 //   node fix1.mjs apply      only groups whose name contains the filter
 // Shots go to $SHOTS_DIR/fix1, results to $REPORT_DIR/report-fix1.json.
-// Covers apply (the decided rules: main role plus a 10 character message),
+// Covers apply (the decided rules: main role optional, a message of at
+// least 10 characters after trim, also checked by the API),
 // the pager and patch notes in normal and forced colours at 1440 and 390,
 // plus the other fixes that need a browser to see.
 import fs from 'node:fs';
@@ -84,35 +85,31 @@ if (want('apply')) {
     check('apply', 'form shows for an account with no application' + tag, await page.locator('.apply-form').count() === 1);
     const hint = await page.locator('#apply-message-hint').textContent();
     check('apply', 'hint says 10 characters before the first submit' + tag, hint.trim() === 'At least 10 characters.', hint);
-    const req = await page.evaluate(() => ['apply-role', 'apply-message'].map(id => document.getElementById(id).required));
-    check('apply', 'role and message are required controls' + tag, req.every(Boolean), JSON.stringify(req));
-    // Empty submit: three errors, focus on the summary, no live region.
+    const req = await page.evaluate(() => ({ role: document.getElementById('apply-role').required, message: document.getElementById('apply-message').required, label: document.querySelector('label[for=apply-role]').textContent.trim() }));
+    check('apply', 'message is required, main role is optional and says so' + tag, req.message && !req.role && req.label === 'Main role (optional)', JSON.stringify(req));
+    // Empty submit: two errors (games, message), focus on the summary, no live region.
     await page.click('.apply-form button[type=submit]');
     await page.waitForSelector('#apply-error-summary');
     await page.waitForTimeout(300);
     const sum = await page.evaluate(() => { const s = document.getElementById('apply-error-summary'); return { focused: document.activeElement === s, role: s.getAttribute('role'), live: s.getAttribute('aria-live'), name: (document.getElementById(s.getAttribute('aria-labelledby')) || {}).textContent, links: [...s.querySelectorAll('a')].map(a => a.textContent.trim()) }; });
-    check('apply', 'empty submit lists games, role and message' + tag, sum.links.length === 3, JSON.stringify(sum.links));
-    check('apply', 'message error says 10 characters, not 40' + tag, /at least 10 characters/.test(sum.links[2] || '') && !/40/.test(sum.links.join(' ')), sum.links[2]);
+    check('apply', 'empty submit lists games and message, not the optional role' + tag, sum.links.length === 2 && !/Main role/.test(sum.links.join(' ')), JSON.stringify(sum.links));
+    check('apply', 'message error says 10 characters, not 40' + tag, /at least 10 characters/.test(sum.links[1] || '') && !/40/.test(sum.links.join(' ')), sum.links[1]);
     check('apply', 'summary takes focus and is not an alert' + tag, sum.focused && sum.role === 'group' && !sum.live && /could not be sent/.test(sum.name || ''), JSON.stringify(sum));
     check('apply', 'no role=alert in the form' + tag, await page.locator('.apply-form [role=alert]').count() === 0);
     await shot(page, 'apply-errors', width, forced);
-    // Fill it in: a game, a role, and a 9 character message is still refused.
+    // Fill it in: a game and a message of 9 characters after trim is still refused.
     await page.locator('.apply-form .chip', { hasText: 'Overwatch' }).first().click();
-    await page.selectOption('#apply-role', 'Support');
-    await page.fill('#apply-message', '123456789');
+    await page.fill('#apply-message', '  123456789  ');
     await page.waitForTimeout(200);
     const left9 = await page.evaluate(() => [...document.querySelectorAll('#apply-error-summary a')].map(a => a.getAttribute('href')));
-    check('apply', 'with a game and role chosen only the message error is left' + tag, left9.length === 1 && left9[0] === '#apply-message', JSON.stringify(left9));
+    check('apply', 'with a game chosen only the message error is left' + tag, left9.length === 1 && left9[0] === '#apply-message', JSON.stringify(left9));
     let posted = 0; page.on('request', r => { if (r.method() === 'POST' && r.url().endsWith('/api/applications')) posted++; });
     await page.click('.apply-form button[type=submit]'); await page.waitForTimeout(500);
-    check('apply', '9 characters is refused in the browser, nothing is sent' + tag, posted === 0 && await page.locator('#apply-message[aria-invalid=true]').count() === 1, 'posts=' + posted);
-    // No role: refused too.
+    check('apply', '9 characters after trim is refused in the browser, nothing is sent' + tag, posted === 0 && await page.locator('#apply-message[aria-invalid=true]').count() === 1, 'posts=' + posted);
     await page.fill('#apply-message', 'Hi, I heal');
-    await page.selectOption('#apply-role', '');
-    await page.click('.apply-form button[type=submit]'); await page.waitForTimeout(400);
-    const noRole = await page.evaluate(() => [...document.querySelectorAll('#apply-error-summary a')].map(a => a.getAttribute('href')));
-    check('apply', 'no main role is refused, nothing is sent' + tag, posted === 0 && noRole.length === 1 && noRole[0] === '#apply-role', JSON.stringify(noRole));
-    await page.selectOption('#apply-role', 'Support');
+    // Odd runs pick a role, even runs leave it empty: no role is not an error.
+    const role = n % 2 === 1 ? 'Support' : '';
+    await page.selectOption('#apply-role', role);
     await shot(page, 'apply-filled', width, forced);
     if (n % 2 === 1) {
       // Exactly 10 characters is accepted, and the payload is the old one
@@ -131,6 +128,8 @@ if (want('apply')) {
       check('apply', '10 characters is accepted: "Application received" takes focus' + tag, head && head.text === 'Application received' && head.focused, JSON.stringify(head));
       await shot(page, 'apply-received', width, forced);
     } else {
+      // No role and 10 characters: nothing in the summary, no error.
+      check('apply', 'no main role is not an error' + tag, await page.locator('#apply-error-summary').count() === 0 && await page.locator('#apply-role[aria-invalid]').count() === 0);
       // The server refuses: 409 because an application now exists (sent
       // through the API behind the open form). The toast gives its reason.
       const j = new Jar(true); await j.login(user);
