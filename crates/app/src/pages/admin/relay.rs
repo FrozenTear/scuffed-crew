@@ -152,12 +152,12 @@ pub fn AdminRelay() -> Element {
 
                             if !h.configured {
                                 p {
-                                    style: "margin-top: 1rem; color: var(--text-3); font-size: 0.85rem;",
+                                    style: "margin-top: 1rem; color: var(--text-subtle); font-size: 0.85rem;",
                                     "{unconfigured_help}"
                                 }
                             } else if !h.reachable {
                                 p {
-                                    style: "margin-top: 1rem; color: var(--text-3); font-size: 0.85rem;",
+                                    style: "margin-top: 1rem; color: var(--text-subtle); font-size: 0.85rem;",
                                     "{offline_help}"
                                 }
                             }
@@ -181,7 +181,7 @@ pub fn AdminRelay() -> Element {
                                     }
                                 }
                                 p {
-                                    style: "margin-top: 0.5rem; color: var(--text-3); font-size: 0.85rem;",
+                                    style: "margin-top: 0.5rem; color: var(--text-subtle); font-size: 0.85rem;",
                                     "Configure extra relays in Settings > Forum > Extra Relay URLs."
                                 }
                             }

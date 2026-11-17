@@ -214,19 +214,19 @@ fn cell_or_dash(text: &str) -> String {
 }
 
 const MEMBER_MATCHES_CSS: &str = r#"
-    .mm-back { display: inline-block; margin-bottom: 1rem; color: var(--accent); }
-    .mm-status { color: var(--text-2); margin: 0 0 1rem; min-height: 1.5em; }
+    .mm-back { display: inline-block; margin-bottom: 1rem; color: var(--accent-text); }
+    .mm-status { color: var(--text-3); margin: 0 0 1rem; min-height: 1.5em; }
     .mm-totals { margin: 0 0 1.5rem; }
     .mm-totals h2 {
         font-family: var(--font-head);
         font-size: 1rem;
         text-transform: uppercase;
         letter-spacing: 0.06em;
-        color: var(--text-3);
+        color: var(--text-subtle);
         margin: 0 0 0.5rem;
     }
     .mm-totals dl { display: flex; flex-wrap: wrap; gap: 0.75rem 2rem; margin: 0; }
-    .mm-totals dt { font-size: 0.75rem; color: var(--text-3); text-transform: uppercase; }
+    .mm-totals dt { font-size: 0.75rem; color: var(--text-subtle); text-transform: uppercase; }
     .mm-totals dd { margin: 0; font-family: var(--font-head); font-size: 1.4rem; color: var(--text); }
     /* The visually hidden note is absolutely positioned. Without a positioned
        parent it escapes the table's scroll box and widens the whole page. */

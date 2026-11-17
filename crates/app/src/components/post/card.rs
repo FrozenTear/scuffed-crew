@@ -46,7 +46,7 @@ const CARD_CSS: &str = r#"
     height: 36px;
     border-radius: 50%;
     background: var(--accent-soft);
-    color: var(--accent);
+    color: var(--accent-text);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -62,10 +62,10 @@ const CARD_CSS: &str = r#"
 }
 .post-time {
     font-size: 0.7rem;
-    color: var(--text-3);
+    color: var(--text-subtle);
 }
 .post-content {
-    color: var(--text-2);
+    color: var(--text-3);
     font-size: 0.9rem;
     line-height: 1.7;
     margin-bottom: 0.75rem;
@@ -73,7 +73,7 @@ const CARD_CSS: &str = r#"
     word-break: break-word;
 }
 .post-content a {
-    color: var(--accent);
+    color: var(--accent-text);
     text-decoration: underline;
 }
 .post-tags {
@@ -84,7 +84,7 @@ const CARD_CSS: &str = r#"
 }
 .post-tag {
     background: var(--accent-soft);
-    color: var(--accent);
+    color: var(--accent-text);
     padding: 0.1rem 0.5rem;
     border-radius: 999px;
     font-size: 0.7rem;
@@ -102,7 +102,7 @@ const CARD_CSS: &str = r#"
 }
 .post-reply-count {
     font-size: 0.75rem;
-    color: var(--text-3);
+    color: var(--text-subtle);
     display: flex;
     align-items: center;
     gap: 0.3rem;

@@ -55,14 +55,14 @@ fn RsvpCell(event_id: String) -> Element {
     let data = summary.data.read();
     let data = data.as_ref().and_then(|d| d.as_ref());
     match data {
-        None => rsx! { span { style: "color: var(--text-3);", "-" } },
+        None => rsx! { span { style: "color: var(--text-subtle);", "-" } },
         Some(s) => rsx! {
             span { style: "font-size: 0.85rem; white-space: nowrap;",
-                span { style: "color: var(--ok);", "{s.yes_count}" }
+                span { style: "color: var(--win);", "{s.yes_count}" }
                 " / "
                 span { style: "color: var(--warn);", "{s.maybe_count}" }
                 " / "
-                span { style: "color: var(--text-3);", "{s.no_count}" }
+                span { style: "color: var(--text-subtle);", "{s.no_count}" }
             }
         },
     }

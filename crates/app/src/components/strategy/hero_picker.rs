@@ -11,7 +11,7 @@ const HERO_PICKER_CSS: &str = r##"
     .hero-picker .panel-title {
         font-family: var(--font-head);
         font-size: 0.75rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-transform: uppercase;
         letter-spacing: 0.08em;
         padding: 0.75rem 0.75rem 0.5rem;
@@ -31,16 +31,16 @@ const HERO_PICKER_CSS: &str = r##"
         background: none;
         border: none;
         border-left: 3px solid transparent;
-        color: var(--text-2);
+        color: var(--text-3);
         font-size: 0.8rem;
         cursor: pointer;
         transition: background 0.12s;
     }
     .role-header:hover {
-        background: var(--surface-2);
+        background: var(--surface-sunken);
     }
     .role-header.expanded {
-        background: var(--surface-2);
+        background: var(--surface-sunken);
     }
     .role-name {
         flex: 1;
@@ -49,12 +49,12 @@ const HERO_PICKER_CSS: &str = r##"
     }
     .role-count {
         font-size: 0.7rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         margin-right: 0.5rem;
     }
     .expand-icon {
         font-size: 0.65rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
     }
 
     /* ---- Hero grid ---- */
@@ -73,23 +73,23 @@ const HERO_PICKER_CSS: &str = r##"
         background: none;
         border: 1px solid transparent;
         border-radius: 6px;
-        color: var(--text-2);
+        color: var(--text-3);
         cursor: pointer;
         transition: background 0.12s, border-color 0.12s;
     }
     .hero-picker .hero-btn:hover {
-        background: var(--surface-2);
+        background: var(--surface-sunken);
     }
     .hero-picker .hero-btn.selected {
         background: var(--accent-soft);
-        border-color: var(--accent);
+        border-color: var(--accent-solid);
     }
     .hero-icon {
         width: 36px;
         height: 36px;
         border-radius: 50%;
         object-fit: cover;
-        background: var(--surface-2);
+        background: var(--surface-sunken);
     }
     .hero-name-short {
         font-size: 0.6rem;
@@ -116,7 +116,7 @@ const HERO_PICKER_CSS: &str = r##"
         height: 40px;
         border-radius: 50%;
         object-fit: cover;
-        background: var(--surface-2);
+        background: var(--surface-sunken);
     }
     .hero-picker .hero-detail-info h4 {
         margin: 0;
@@ -139,10 +139,10 @@ const HERO_PICKER_CSS: &str = r##"
         padding: 0.2rem 0.3rem;
         border-radius: 4px;
         font-size: 0.7rem;
-        color: var(--text-2);
+        color: var(--text-3);
     }
     .ability-item:hover {
-        background: var(--surface-2);
+        background: var(--surface-sunken);
     }
     .ability-key {
         display: inline-flex;
@@ -150,18 +150,18 @@ const HERO_PICKER_CSS: &str = r##"
         justify-content: center;
         width: 18px;
         height: 18px;
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         border: 1px solid var(--border);
         border-radius: 3px;
         font-size: 0.6rem;
         font-weight: 700;
-        color: var(--text-3);
+        color: var(--text-subtle);
     }
     .hero-picker .ability-name {
         flex: 1;
     }
     .hero-picker .ability-cooldown {
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-size: 0.65rem;
     }
     .hero-wr-badge {
@@ -171,9 +171,9 @@ const HERO_PICKER_CSS: &str = r##"
         border-radius: 3px;
         line-height: 1;
     }
-    .hero-wr-badge.high { color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); }
+    .hero-wr-badge.high { color: var(--win); background: color-mix(in srgb, var(--win) 12%, transparent); }
     .hero-wr-badge.mid { color: var(--warn); background: color-mix(in srgb, var(--warn) 12%, transparent); }
-    .hero-wr-badge.low { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+    .hero-wr-badge.low { color: var(--loss); background: color-mix(in srgb, var(--loss) 12%, transparent); }
 "##;
 
 /// Hero definition for the picker UI.

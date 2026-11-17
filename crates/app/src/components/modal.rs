@@ -28,7 +28,7 @@ const MODAL_CSS: &str = r#"
         right: 0.75rem;
         background: none;
         border: none;
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-size: 1.2rem;
         cursor: pointer;
         padding: 0.25rem 0.5rem;
@@ -36,7 +36,7 @@ const MODAL_CSS: &str = r#"
     }
     .modal-close:hover {
         color: var(--text);
-        background: var(--surface-2);
+        background: var(--surface-sunken);
     }
     @keyframes modal-fade-in {
         from { opacity: 0; }

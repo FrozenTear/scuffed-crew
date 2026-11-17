@@ -124,6 +124,8 @@ pub mod templates;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(crate) mod tests_synth;
 
 use std::path::Path;
 

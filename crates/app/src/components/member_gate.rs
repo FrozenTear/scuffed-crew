@@ -24,7 +24,7 @@ const GATE_CSS: &str = r#"
         margin: 0 0 0.6rem;
     }
     .member-gate p {
-        color: var(--text-2);
+        color: var(--text-3);
         font-size: 0.9rem;
         line-height: 1.5;
         margin: 0 0 1.25rem;
@@ -36,12 +36,12 @@ const GATE_CSS: &str = r#"
         flex-wrap: wrap;
     }
     .member-gate-status {
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-align: center;
         padding: 3rem 0;
     }
     .member-gate-error {
-        color: var(--danger);
+        color: var(--loss);
         text-align: center;
         padding: 2rem 1rem 0.75rem;
     }

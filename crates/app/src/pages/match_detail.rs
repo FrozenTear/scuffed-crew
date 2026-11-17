@@ -41,7 +41,7 @@ const PAGE_CSS: &str = r#"
         margin: 0 auto;
     }
     .match-status {
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-align: center;
         padding: 3rem 0;
     }
@@ -53,7 +53,7 @@ const PAGE_CSS: &str = r#"
         font-size: 0.65rem;
         letter-spacing: 0.12em;
         text-transform: uppercase;
-        color: var(--text-3);
+        color: var(--text-subtle);
         margin-bottom: 0.4rem;
     }
     .match-vs {
@@ -64,7 +64,7 @@ const PAGE_CSS: &str = r#"
         margin: 0 0 0.5rem;
         line-height: 1.2;
     }
-    .match-vs .opp { color: var(--accent); }
+    .match-vs .opp { color: var(--accent-text); }
     .match-meta-row {
         display: flex;
         flex-wrap: wrap;
@@ -80,10 +80,10 @@ const PAGE_CSS: &str = r#"
         margin: 0.5rem 0 0;
         white-space: nowrap;
     }
-    .match-score.win { color: var(--ok); }
-    .match-score.loss { color: var(--danger); }
+    .match-score.win { color: var(--win); }
+    .match-score.loss { color: var(--loss); }
     .match-score.draw { color: var(--warn); }
-    .match-score.pending { color: var(--text-3); font-size: 1.4rem; }
+    .match-score.pending { color: var(--text-subtle); font-size: 1.4rem; }
     .match-section {
         margin-top: 1.5rem;
     }
@@ -92,11 +92,11 @@ const PAGE_CSS: &str = r#"
         font-size: 1rem;
         text-transform: uppercase;
         letter-spacing: 0.06em;
-        color: var(--text-3);
+        color: var(--text-subtle);
         margin: 0 0 0.75rem;
     }
     .match-media a {
-        color: var(--accent);
+        color: var(--accent-text);
         font-weight: 600;
         text-decoration: none;
     }
@@ -106,7 +106,7 @@ const PAGE_CSS: &str = r#"
         font-size: 1.1rem;
         letter-spacing: 0.08em;
         color: var(--text);
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         border: 1px solid var(--border);
         padding: 0.6rem 0.85rem;
         display: inline-block;
@@ -118,7 +118,7 @@ const PAGE_CSS: &str = r#"
         border-top: 1px solid var(--border);
     }
     .match-back a {
-        color: var(--accent);
+        color: var(--accent-text);
         font-weight: 600;
         text-decoration: none;
         font-size: 0.9rem;
@@ -131,7 +131,7 @@ const PAGE_CSS: &str = r#"
         font-size: 0.9rem;
     }
     .match-dl dt {
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-family: var(--font-mono);
         font-size: 0.72rem;
         text-transform: uppercase;

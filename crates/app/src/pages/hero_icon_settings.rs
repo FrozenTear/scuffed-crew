@@ -28,22 +28,22 @@ const CSS: &str = r#"
     .training-crops__item { min-width: 0; }
     .training-crops__item .profile-edit-hint { margin: var(--space-1) 0 0; }
     .training-crops__name { min-width: 0; overflow-wrap: anywhere; }
-    .hero-icons__intro { color: var(--text-2); font-size: var(--text-sm); line-height: 1.5; margin: 0 0 var(--space-4); }
+    .hero-icons__intro { color: var(--text-3); font-size: var(--text-sm); line-height: 1.5; margin: 0 0 var(--space-4); }
     .hero-icons__switch { max-width: 100%; display: inline-flex; align-items: center; gap: var(--space-3);
         background: transparent; border: 0; padding: var(--space-1) 0; color: var(--text);
-        font-family: var(--font-body); font-size: var(--text-base); font-weight: 600; cursor: pointer;
+        font-family: var(--font-body); font-size: var(--text-md); font-weight: 600; cursor: pointer;
         text-align: left; }
     .hero-icons__switch:disabled { opacity: .5; cursor: not-allowed; }
-    .hero-icons__switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: var(--radius-md); }
+    .hero-icons__switch:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 3px; border-radius: var(--radius-control); }
     .hero-icons__track { flex: none; width: 2.5rem; height: 1.4rem; border-radius: 999px;
-        background: var(--surface-2); border: 1px solid var(--border); position: relative;
+        background: var(--surface-sunken); border: 1px solid var(--border); position: relative;
         transition: background .12s; }
     .hero-icons__thumb { position: absolute; top: 2px; left: 2px; width: calc(1.4rem - 6px);
-        height: calc(1.4rem - 6px); border-radius: 50%; background: var(--text-2); transition: left .12s; }
-    .hero-icons__switch[aria-checked="true"] .hero-icons__track { background: var(--accent); border-color: var(--accent); }
-    .hero-icons__switch[aria-checked="true"] .hero-icons__thumb { left: calc(100% - 1.4rem + 4px); background: var(--accent-fg); }
+        height: calc(1.4rem - 6px); border-radius: 50%; background: var(--text-3); transition: left .12s; }
+    .hero-icons__switch[aria-checked="true"] .hero-icons__track { background: var(--accent-solid); border-color: var(--accent-solid); }
+    .hero-icons__switch[aria-checked="true"] .hero-icons__thumb { left: calc(100% - 1.4rem + 4px); background: var(--on-accent); }
     .hero-icons__ask { margin: var(--space-3) 0; padding: var(--space-3); border: 1px solid var(--border);
-        border-radius: var(--radius-md); display: flex; flex-direction: column; gap: var(--space-2); }
+        border-radius: var(--radius-control); display: flex; flex-direction: column; gap: var(--space-2); }
     .hero-icons__ask legend { font-size: var(--text-sm); font-weight: 600; color: var(--text); padding: 0 var(--space-1); }
     .hero-icons__choice { display: flex; align-items: flex-start; gap: var(--space-2); font-size: var(--text-sm); color: var(--text); }
     .hero-icons__choice input { margin-top: .2rem; }
@@ -52,12 +52,12 @@ const CSS: &str = r#"
     .hero-icons__grid { list-style: none; margin: 0 0 var(--space-4); padding: 0; display: grid;
         grid-template-columns: repeat(auto-fill, minmax(5rem, 1fr)); gap: var(--space-2); }
     .hero-icons__tile { display: flex; flex-direction: column; align-items: center; gap: var(--space-1);
-        background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-md);
+        background: var(--surface-sunken); border: 1px solid var(--border); border-radius: var(--radius-control);
         padding: var(--space-2); min-width: 0; }
     .hero-icons__tile img { width: 4rem; height: 4rem; object-fit: contain; image-rendering: pixelated; }
-    .hero-icons__tile span { font-size: var(--text-xs); color: var(--text-2); max-width: 100%;
+    .hero-icons__tile span { font-size: var(--text-xs); color: var(--text-3); max-width: 100%;
         overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .hero-icons__status { min-height: 1.5em; margin: var(--space-3) 0 0; font-size: var(--text-sm); color: var(--text-2); }
+    .hero-icons__status { min-height: 1.5em; margin: var(--space-3) 0 0; font-size: var(--text-sm); color: var(--text-3); }
     .hero-icons__retry { margin-top: var(--space-2); }
 "#;
 

@@ -204,7 +204,7 @@ fn AttendanceStatsError(message: String) -> Element {
         p {
             class: "empty-state",
             role: "alert",
-            style: "color: var(--danger);",
+            style: "color: var(--loss);",
             "{message}"
         }
     }
@@ -867,7 +867,7 @@ pub fn AdminMembers() -> Element {
                         if mod_loading() {
                             p { class: "admin-loading", "Loading..." }
                         } else if let Some(err) = mod_error() {
-                            p { class: "empty-state", style: "color: var(--danger);",
+                            p { class: "empty-state", style: "color: var(--loss);",
                                 "Failed to load moderation history: {err}"
                             }
                         } else if mod_data.read().is_empty() {
@@ -950,11 +950,11 @@ pub fn AdminMembers() -> Element {
                                     div {
                                         style: "text-align:center;margin-top:1rem;",
                                         span {
-                                            style: "font-family:var(--font-head);font-size:2.5rem;color:var(--accent);",
+                                            style: "font-family:var(--font-head);font-size:2.5rem;color:var(--accent-text);",
                                             "{rate}"
                                         }
                                         div {
-                                            style: "font-size:0.75rem;color:var(--text-3);text-transform:uppercase;letter-spacing:0.05em;",
+                                            style: "font-size:0.75rem;color:var(--text-subtle);text-transform:uppercase;letter-spacing:0.05em;",
                                             "Attendance Rate"
                                         }
                                     }
@@ -991,7 +991,7 @@ pub fn AdminMembers() -> Element {
                         if accts_loading() {
                             p { class: "admin-loading", "Loading..." }
                         } else if let Some(err) = accts_error() {
-                            p { class: "empty-state", style: "color: var(--danger);",
+                            p { class: "empty-state", style: "color: var(--loss);",
                                 "Failed to load game accounts: {err}"
                             }
                         } else if accts_data.read().is_empty() {
@@ -1127,7 +1127,7 @@ pub fn AdminMembers() -> Element {
                     div { class: "form-modal-body",
                         div { class: "form-field",
                             label { class: "form-label", "Profile photo" }
-                            p { style: "color:var(--text-3);font-size:0.8rem;margin:0 0 0.65rem;",
+                            p { style: "color:var(--text-subtle);font-size:0.8rem;margin:0 0 0.65rem;",
                                 "PNG, JPEG, WebP, GIF, or AVIF, max 2 MB. Click the area below to choose a file."
                             }
                             {
@@ -1142,9 +1142,9 @@ pub fn AdminMembers() -> Element {
                                 rsx! {
                                     label {
                                         r#for: "avatar-file-input",
-                                        style: "display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0.5rem;min-height:7.5rem;padding:1.25rem;border:2px dashed var(--border);border-radius:10px;background:var(--surface-2);cursor:pointer;text-align:center;position:relative;",
+                                        style: "display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0.5rem;min-height:7.5rem;padding:1.25rem;border:2px dashed var(--border);border-radius:10px;background:var(--surface-sunken);cursor:pointer;text-align:center;position:relative;",
                                         span { style: "font-weight:600;color:var(--text);", "Choose image" }
-                                        span { style: "font-size:0.8rem;color:var(--text-3);", "{file_label}" }
+                                        span { style: "font-size:0.8rem;color:var(--text-subtle);", "{file_label}" }
                                         input {
                                             id: "avatar-file-input",
                                             r#type: "file",

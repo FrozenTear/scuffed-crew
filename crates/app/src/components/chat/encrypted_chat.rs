@@ -29,7 +29,7 @@ const ENCRYPTED_CHAT_CSS: &str = r#"
     background: var(--accent-soft);
     border-bottom: 1px solid var(--border);
     font-size: 11px;
-    color: var(--accent);
+    color: var(--accent-text);
 }
 
 .encrypted-chat__badge-icon {
@@ -44,7 +44,7 @@ const ENCRYPTED_CHAT_CSS: &str = r#"
     gap: 12px;
     padding: 2rem;
     text-align: center;
-    color: var(--text-2);
+    color: var(--text-3);
     font-size: 13px;
     flex: 1;
 }

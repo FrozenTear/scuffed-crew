@@ -1,10 +1,14 @@
 # Training crops (opt-in, from the stat tracker)
 
 Alpha.3 item 14. The stat tracker can send small PNG crops of what it read
-(hero icons, stat digits, map name banners) so recognizers can be trained on
+(hero icons, stat digits, map name banners, rank screen regions) so recognizers can be trained on
 real captures. Every kind is opt-in, off by default, and consent is only
-given on the site (with a session). The tracker sends crops itself with its
-sync token and shows the consent read-only, linking to the site. JSON types and error codes live in
+given with a session, never with the tracker's sync token. The site has a
+switch for `hero_icon`, `stat_digits` and `map_name`. **`rank` has no switch
+on the site yet**: the only way to turn it on is a session
+`PUT /api/training-crops/consent` with `{"rank": true}` (see Consent). The
+tracker sends crops itself with its sync token and shows the consent
+read-only, linking to the site. JSON types and error codes live in
 `crates/types/src/api/training_crops.rs`; kinds and caps live in
 `crates/types/src/training_crops.rs`.
 
@@ -28,6 +32,7 @@ This is the hero icon store generalized, not a second store:
 | `hero_icon` | yes | 500 | `HERO_ICON_MAX_PER_MEMBER` |
 | `stat_digits` | yes | 1000 | `STAT_DIGITS_MAX_PER_MEMBER` |
 | `map_name` | yes | 200 | `MAP_NAME_MAX_PER_MEMBER` |
+| `rank` | yes | 1000 | `RANK_MAX_PER_MEMBER` |
 | `full_screen` | **no**: refused with 422 `full_screen_not_accepted` | 0 | |
 
 `full_screen` uploads are refused before the body is read and nothing is
@@ -41,6 +46,7 @@ consent shapes have no `full_screen` field, a `PUT` naming it is 400
 |------|------------------------|-----------------------|-----------|
 | `hero_icon`, `stat_digits` | 8 to 256 each | 64 KiB | `HERO_ICON_MAX_EDGE`, `HERO_ICON_MAX_BYTES` |
 | `map_name` | 8 to 1536 wide, 8 to 256 tall | 256 KiB | `MAP_NAME_MAX_WIDTH`, `MAP_NAME_MAX_HEIGHT`, `MAP_NAME_MAX_BYTES` |
+| `rank` | 8 to 1536 wide, 8 to 720 tall | 384 KiB | `RANK_MAX_WIDTH`, `RANK_MAX_HEIGHT`, `RANK_MAX_BYTES` |
 
 Map name banners are wide and the tracker sends them unscaled (a native 4K
 banner is 1036 px wide), so `map_name` has the wider bound and a byte limit
@@ -49,6 +55,43 @@ about 72 KB at 1440p, about 121 KB estimated at 4K). The whole request
 stays capped at 2 MiB (`HERO_ICON_MAX_REQUEST_BYTES`) for every kind, so a
 request of large banners holds fewer than 20 of them. The bounds live on
 `CropKind::max_edges` and `CropKind::max_crop_bytes`.
+
+`rank` crops are regions of the post-game rank screen (role, tier, rank
+bar, result, SR), never a region with player names. The tracker's rank
+reader takes only 1080p and 1440p frames. At 1440p the regions are
+`rank_role` 440x90, `rank_tier` 420x680, `rank_bar` 1500x184,
+`rank_result` 700x170 and `rank_sr` 222 wide with a variable height, so
+1536 by 720 leaves room above the widest (bar) and the tallest (tier).
+The largest measured PNG is a tier at 216 KiB (bar 131 KiB, result 90 KiB,
+role 20 KiB, SR about 19 KiB), so 384 KiB leaves room above it; with the
+2 MiB request limit a request holds at most five crops of that size.
+About five crops per competitive game make the 1000 cap about 200 games.
+
+A `rank` bound of 1536 by 720 is large enough to hold a whole 1280x720
+screen, and members are told crops are never whole screens. So every
+`rank` crop's `meta` must carry `screen_width` and `screen_height`, at
+least `RANK_MIN_SCREEN_WIDTH` (1856) by `RANK_MIN_SCREEN_HEIGHT` (1056);
+otherwise the crop is 400 `invalid_crop_meta`. The tracker's rank reader
+takes 1080p with the height within 2% (down to 1059) and the aspect within
+0.02 of 16:9, so its smallest client area is about 1862x1059; 1856x1056 is
+just below that, and it is larger than the largest `rank` crop on both
+edges, so a `rank` crop is never the whole screen it reports. The screen
+size is what the tracker reports; the server cannot see the screen.
+
+From this version on, every stored file is also within its kind's byte
+limit (files stored by an earlier build keep their size): the server
+re-encodes each crop at 8 bits per sample (default PNG compression, the
+best level only when the default result is over the limit) and refuses
+one whose re-encode is still over the limit (see below). So the
+worst-case disk use per consenting member, at every cap with every stored
+file at its byte limit, is: `hero_icon` 500 x 64 KiB (about 31 MiB),
+`stat_digits` 1000 x 64 KiB (about 62 MiB), `map_name` 200 x 256 KiB
+(50 MiB), `rank` 1000 x 384 KiB (375 MiB); about 519 MiB for a member who
+consents to every kind. `rank` is the largest by far. Real crops are
+smaller (the measured `rank` maximums average about 95 KiB across the five
+regions). Before this bound, a re-encode kept 16-bit samples and used fast
+compression, so a small upload could be stored many times larger (QA saw
+an 89,866-byte 16-bit `rank` upload stored as 8,848,823 bytes).
 
 ## Auth
 
@@ -73,7 +116,8 @@ or banned). It is accepted, besides a session, on exactly these routes:
 
 Setting consent is session only, so a leaked or misused sync token can never
 turn a kind on. The tracker shows the consent read-only and links to the site
-to change it.
+to change it. The site has no `rank` switch yet, so `rank` consent is only
+set through the API `PUT` with a session.
 
 The four routes that take the sync token share one per-IP limit: burst 40
 requests, then one every 2 s (`STATS_UPLOAD_IP_BURST`,
@@ -106,15 +150,20 @@ is present, the Bearer is tried as a sync token.
 
 ## Consent
 
+The site's consent page has switches for `hero_icon`, `stat_digits` and
+`map_name` only. `rank` has no switch on the site yet: it stays off unless
+the member sends `PUT /api/training-crops/consent` with `{"rank": true}`
+from a session.
+
 `GET /api/training-crops/consent`:
 
 ```json
-{ "hero_icon": false, "stat_digits": false, "map_name": false }
+{ "hero_icon": false, "stat_digits": false, "map_name": false, "rank": false }
 ```
 
 `PUT /api/training-crops/consent` (session only; a sync token is 401) with
-any subset of the three kinds. Kinds left out keep their value. The answer is
-all three as stored.
+any subset of the four kinds. Kinds left out keep their value. The answer is
+all four as stored.
 
 ```json
 { "stat_digits": true, "map_name": false }
@@ -174,9 +223,12 @@ Check order:
 7. 409 `crop_limit_reached` when the caller is already at the kind's cap.
 8. 400 `invalid_multipart` when the body is not readable multipart.
 9. The parts, in order. Each `meta`: 400 `invalid_crop_meta` or
-   `unknown_hero`. Each `crop`: 415 `not_png`, 413 `icon_too_large` (over
-   the kind's byte limit), 400 `icon_bad_dimensions` (outside the kind's
-   edges, see Crop size per kind), 400 `invalid_png`. A 21st pair is 413
+   `unknown_hero`. Each `crop`, in this order: 415 `not_png`, 413
+   `icon_too_large` (over the kind's byte limit), 400 `invalid_png` (the
+   chunk list is refused, see below), 400 `icon_bad_dimensions` (the
+   `IHDR` size is outside the kind's edges, see Crop size per kind), 400
+   `invalid_png` (the pixels do not decode), 413 `icon_too_large` (its
+   re-encode is over the kind's byte limit). A 21st pair is 413
    `too_many_crops_in_request`. A body over 2 MiB is 413 `icon_too_large`.
 10. 400 `no_crops` when there was no pair.
 11. 409 `crop_limit_reached` when this request would pass the cap.
@@ -187,7 +239,71 @@ consent are checked again: if another upload pushed the caller over the cap
 rows and files are removed again.
 
 The PNG is decoded and re-encoded before it is stored, as for hero icons, so
-text chunks and other metadata in the file are dropped.
+text chunks and other metadata in the file are dropped. Before decoding,
+the chunk list is walked (nothing is inflated) and the width and height
+are read from the `IHDR` bytes and checked (an absurd header is 400
+`icon_bad_dimensions`, nothing decoded). Only `IHDR`, `PLTE`, `tRNS`,
+`IDAT` and `IEND` are passed to the decoder: colour profiles (`iCCP`),
+text and every other ancillary chunk (lowercase first letter) are dropped
+without being inflated, so they never cause an error and cost no memory.
+The walk refuses with 400 `invalid_png`: a missing or wrong-length leading
+`IHDR`, a chunk running past the end, a `PLTE` whose length is not a
+multiple of 3 (for any colour type; png 0.18.1 panics on one in a
+palette image), and any critical chunk (uppercase first letter) other than
+`IHDR`, `PLTE`, `IDAT` and `IEND`, wherever it appears, since the PNG spec
+says a decoder must not ignore an unknown critical chunk.
+The decoder is also capped at 32 MiB (`PNG_DECODE_MAX_ALLOC`) as a
+backstop. Each re-encode attempt (default level, then Best) writes into a
+writer capped at the kind's byte limit, so an attempt that goes over stops
+there and keeps nothing, and the default attempt's output is gone before
+Best runs. The PNG encoder's own compression buffer is not capped (png
+0.18 compresses the whole image before writing it out); the figures below
+include it.
+
+Measured peak heap for one whole crop, accepted or refused: chunk walk,
+decode, 8-bit conversion and re-encode in one `clean_png_within` call,
+counted by a test-only allocator in the unit test
+`one_png_read_stays_within_its_measured_peak` (debug build), which also
+asserts the accepted rank crop under 20 MiB, the refused rank crop under
+16 MiB and the refused hero icon under 1.2 MiB. The right column is the
+same test's stand-in for the earlier code path of each row: for the
+accepted rows, one decoder over the whole upload with the colour profile
+included and copied, then the decode; for the refused rank row, the two
+re-encodes uncapped with the default output kept while Best runs. Each is
+a re-creation, not the old code.
+
+| Upload | Peak heap now | Stand-in for the earlier code path |
+|--------|---------------|-------------------------------|
+| 58 KB, 1536x720, `iCCP` inflating to 40 MiB | 3.6 MiB | 33.2 MiB |
+| 49 KB, 1536x720, `iCCP` inflating to 31 MiB | 3.6 MiB | 67.5 MiB |
+| 47 KB, 1536x720 16-bit RGBA, the largest `rank` crop (the most pixel memory any kind accepts) | 12.7 MiB | 8.7 MiB (decode only) |
+| 4 KB, 256x256 16-bit RGBA, the largest `hero_icon` (also the `stat_digits` bound) | 0.8 MiB | 0.8 MiB |
+| 265 KB, 1536x720 Adam7 RGBA built to re-encode to about 4.4 MB (4.2 MiB) at both levels: refused, 413 (QA's input) | 12.9 MiB | about 29 MiB (the two uncapped encodes measured 24.9 MiB on top of the 4.2 MiB decoded image; QA counted 29.4 MiB) |
+| 51 KB, 256x256 Adam7 RGBA, the same attack at the `hero_icon` bound: refused, 413 | 0.9 MiB | not measured |
+
+So one `rank` crop, accepted or refused, peaks at about 13 MiB of heap:
+12.9 MiB here for the refused crop and 12.7 MiB for the largest accepted
+one; the Site review measured up to 13.0 MiB for an accepted crop.
+
+Measured another way, by process RSS on real builds, the Site review
+found the same order: the 40 MiB-profile bomb at +3.4 MiB now against
++33.8 MiB before, the 31 MiB profile at +3.4 MiB against +63.7 MiB (heap
+peak 64.2 MiB) before.
+
+The heap is per crop and per request in flight; uploads are not
+serialized, so concurrent uploads add up, and process RSS grows by more
+than the heap (the allocator keeps freed memory). QA measured one 20-crop
+`rank` request at +12.6 to +80.7 MiB RSS on a fresh server and eight at
+once at about +231 MiB. The re-encode is
+8 bits per sample (gray, gray with alpha, RGB or RGBA, as the upload has
+them; a 16-bit upload is rounded to 8 bits, a palette upload becomes RGB or
+RGBA) at the default PNG compression level. Only when that is over the
+kind's byte limit is it encoded again at the best level, which costs far
+more CPU (QA measured about +0.4 s per typical rank crop when every crop
+went through it). If the re-encode is still over the kind's byte limit the
+crop is 413 `icon_too_large`, the same answer as an
+oversized part, and nothing of the request is stored. `size_bytes` is the
+stored size, so from this version on it is never over the limit.
 
 The tracker version is taken from a `User-Agent` of the form
 `scuffed-stat-tracker/<semver>` (same parsing as the stats sync legacy-id
@@ -214,7 +330,7 @@ Every field is optional unless noted. Unknown fields are refused (400
 | `spot_version` | string | Same as `icon_set_version` |
 | `vote_card_filled` | bool | |
 | `locked_in` | bool | |
-| `screen_width`, `screen_height` | int | Game resolution. Both or neither, each 320 to 16384 |
+| `screen_width`, `screen_height` | int | Game resolution in pixels, both or neither, each 320 to 16384. These stay the game's size even when a `hero_icon` PNG is a 171 px downscale. **Required for `rank`**: both, at least 1856x1056 (`RANK_MIN_SCREEN_WIDTH`, `RANK_MIN_SCREEN_HEIGHT`), else 400 `invalid_crop_meta`. Optional for the other kinds |
 | `ui_scale` | float | Above 0, at most 200 (same range as the report bundle) |
 | `found_spot` | object `{x, y, w, h}` | Unsigned ints, `w` and `h` at least 1, the box inside the resolution when one is given (inside 16384 otherwise). Unknown keys refused. Sending it only for unknown screen sizes is the tracker's rule: the server accepts it at any resolution, since it cannot know the tracker's layouts |
 | `found_confidence` | float | 0 to 1. `found_spot` and `found_confidence` come together or not at all |
@@ -222,14 +338,19 @@ Every field is optional unless noted. Unknown fields are refused (400
 Any bound failure is the one stable code 400 `invalid_crop_meta`; the server
 logs the field name at debug level.
 
-The server takes any `slot_type` of that shape. The tracker sends these,
-all with `screen` `tab`:
+The server takes any `slot_type` of that shape. The tracker sends these.
+`hero_icon`, `stat_digits` and `map_name` crops come from the Tab screen
+and carry `screen` `tab`. `rank` crops come from the post-game rank
+screen, not the Tab: the tracker picks their `screen` and `slot_type`
+(for example `screen` `rank`), and they must carry the screen size (see
+Crop size per kind).
 
 | Kind | `slot_type` | What the crop is |
 |------|-------------|------------------|
-| `hero_icon` | `career_panel` | The career panel's hero portrait, with `hero`, `score`, `runner_up`, `margin` and the hero pack name as `icon_set_version` |
+| `hero_icon` | `career_panel` | The career panel's hero portrait: a `hero_icon` is shrunk to 171 px with Lanczos3 (smaller steps only if still needed) only when its PNG is over the 65,536-byte cap; otherwise stored as the native card; screen fields stay the game's. Carries `hero`, `score`, `runner_up`, `margin` and the hero pack name as `icon_set_version` |
 | `stat_digits` | `elims`, `assists`, `deaths`, `damage`, `healing`, `mitigation` | One stat cell of the member's own row, named by its column left to right, with `hero` only when that Tab's own read named it |
 | `map_name` | none | The map name banner |
+| `rank` | tracker's choice | One rank screen region (role, tier, bar, result, SR). No player names |
 
 There is no colourblind filter field. It hints at a member's colour vision
 and is not in the agreed field list or the consent text, so it is not
@@ -282,11 +403,12 @@ of every kind, consented or not, newest first, with the usual cursor
 
 ```json
 {
-  "consent": { "hero_icon": true, "stat_digits": true, "map_name": false },
+  "consent": { "hero_icon": true, "stat_digits": true, "map_name": false, "rank": false },
   "kinds": [
     { "kind": "hero_icon", "count": 12, "consented": true, "max": 500 },
     { "kind": "stat_digits", "count": 40, "consented": true, "max": 1000 },
-    { "kind": "map_name", "count": 0, "consented": false, "max": 200 }
+    { "kind": "map_name", "count": 0, "consented": false, "max": 200 },
+    { "kind": "rank", "count": 0, "consented": false, "max": 1000 }
   ],
   "crops": [ /* TrainingCropEntry, as in the upload answer */ ],
   "next_cursor": "00000019"
@@ -420,20 +542,20 @@ Every error body is `{"error": "<code>"}`, except the shared 429 body
 | 400 | `unknown_crop_kind` | `kind` missing or unknown (upload), or unknown (`?kind=` filters) |
 | 422 | `full_screen_not_accepted` | Upload with `kind=full_screen`, with or without consent (wins over 403, see Check order). Nothing read or stored |
 | 403 | `crop_consent_required` | Upload of a kind the caller does not consent to. Nothing stored |
-| 400 | `invalid_crop_meta` | A `meta` part that is not JSON, over 4 KiB, has an unknown field (`colorblind_filter` included), or a value out of bounds |
+| 400 | `invalid_crop_meta` | A `meta` part that is not JSON, over 4 KiB, has an unknown field (`colorblind_filter` included), or a value out of bounds; or a `rank` crop's `meta` without a screen size of at least 1856x1056 |
 | 400 | `unknown_hero` | `hero` not a known hero, or missing on a `hero_icon` crop |
 | 400 | `unexpected_field` | Part named other than `meta`/`crop`, or pairs out of order |
 | 400 | `no_crops` | No `meta`/`crop` pair |
 | 400 | `invalid_multipart` | Body is not readable multipart |
-| 400 | `icon_bad_dimensions` | PNG width or height outside the kind's bound (8 to 256; `map_name` 8 to 1536 wide, 8 to 256 tall) |
-| 400 | `invalid_png` | PNG signature present but the image does not decode |
+| 400 | `icon_bad_dimensions` | PNG width or height outside the kind's bound (8 to 256; `map_name` 8 to 1536 wide, 8 to 256 tall; `rank` 8 to 1536 wide, 8 to 720 tall) |
+| 400 | `invalid_png` | PNG signature present but the chunk list is refused (no leading 13-byte `IHDR`, a chunk past the end, a `PLTE` whose length is not a multiple of 3, or a critical chunk other than `IHDR`, `PLTE`, `IDAT`, `IEND`), or the pixels do not decode (a broken `IDAT`, for example). The decoder's 32 MiB cap is a backstop only: the edge check keeps every accepted size far below it. Colour profiles (`iCCP`) and other ancillary chunks are dropped before decoding and never cause it |
 | 400 | `invalid_consent` | Consent body not JSON, unknown kind (`full_screen` included), or not a bool |
 | 401 | session error (as for every member route) | `PUT /consent` without a session; a sync token is not a session there |
 | 403 | `Admin access required` | Officer session on another member's image or delete; non-admin on the admin list or `/resolutions` |
 | 403 | `Officer access required` | Member session on `/members` |
 | 404 | `crop_not_found` | Unknown id, malformed id, or a crop the caller may not see |
 | 409 | `crop_limit_reached` | The upload would pass the kind's cap |
-| 413 | `icon_too_large` | A `crop` part over the kind's limit (64 KiB; `map_name` 256 KiB), or the body over 2 MiB |
+| 413 | `icon_too_large` | A `crop` part over the kind's limit (64 KiB; `map_name` 256 KiB; `rank` 384 KiB), its re-encode over that limit, or the body over 2 MiB |
 | 413 | `too_many_crops_in_request` | More than 20 pairs |
 | 415 | `not_png` | A `crop` part without the PNG signature |
 | 429 | `rate_limited` | Per-member, per-kind upload limiter, or the per-IP limit of the sync token routes |
@@ -444,7 +566,7 @@ Every error body is `{"error": "<code>"}`, except the shared 429 body
 Additive only (`crates/db/src/migrations.rs`):
 
 - `hero_icon.kind`: `string`, `DEFAULT 'hero_icon'`, asserted to
-  `hero_icon`, `stat_digits` or `map_name`. A fatal startup step
+  `hero_icon`, `stat_digits`, `map_name` or `rank`. A fatal startup step
   (`hero_icon kind backfill`) writes `kind = 'hero_icon'` on rows that have
   none, so existing rows become hero icons. A no-op after the first boot.
 - `hero` keeps its type. `hero_icon` rows keep holding the display name
@@ -460,26 +582,111 @@ Additive only (`crates/db/src/migrations.rs`):
   store it empty when no hero was sent.
 - Index `hero_icon_member_kind_idx` on `(member_id, kind)`.
 - `member_settings.stat_digits_opt_in`, `map_name_opt_in`: `bool DEFAULT
-  false`. Older rows read false. `hero_icon_opt_in` is untouched and is the
-  `hero_icon` consent. There is no `full_screen_opt_in`: that consent is
-  never stored.
+  ALWAYS false`. Older rows read false. `hero_icon_opt_in` (also `DEFAULT
+  ALWAYS false` now) keeps its values and is the `hero_icon` consent.
+  There is no `full_screen_opt_in`: that consent is never stored.
+- `member_settings.rank_opt_in`: `bool DEFAULT ALWAYS false`, added with
+  the `rank` kind. Additive: no row is rewritten, rows from before it read
+  false.
+- Why `DEFAULT ALWAYS`: the migration does not rewrite rows, so a row from
+  before a field lacks it until it is next written. SurrealDB 3.2.3 applies
+  a plain `DEFAULT` only when a row is created, so an update of such a row
+  that does not set the field fails the `TYPE bool` check. `DEFAULT
+  ALWAYS` fills an absent value on every write (it never replaces a stored
+  one), so every writer works on old rows. Redefining a field's default
+  touches no row.
+- A build without the `rank` kind ignores `rank_opt_in` and skips `rank`
+  rows on read (an unknown stored kind is skipped). See Rollback A.
 
 Take a database snapshot before deploying this change. Restoring it is only
 for a rollback right after the deploy: it rolls back every table, so once
 members have used the site it loses their new data (members, applications,
 stats). Later, roll back with the steps below instead.
 
-Rollback to the build before this change:
+There are two rollback targets. Pick the one you need; they are not steps
+of one procedure.
 
-1. Before deploying the old build, remove crops of the new kinds, files
-   first. This deletes members' contributed `stat_digits` and `map_name`
-   crops for good, so it needs FrozenTear's yes first: list `SELECT id, file_name FROM hero_icon WHERE kind != 'hero_icon'`,
+The opt-in backfill used by both (it touches only rows missing a field):
+
+```sql
+UPDATE member_settings SET stats_visibility = stats_visibility ?? 'public', hero_icon_opt_in = hero_icon_opt_in ?? false, stat_digits_opt_in = stat_digits_opt_in ?? false, map_name_opt_in = map_name_opt_in ?? false, rank_opt_in = rank_opt_in ?? false;
+```
+
+It only fills absent fields (`stats_visibility` with `'public'`, the
+opt-ins with false) and changes no member's choice. `stats_visibility` is
+in it because that field has a plain `DEFAULT` too: on a row from before
+it, an `UPDATE` that leaves it absent fails with "Expected string but found
+NONE", and one failing row stops the whole statement, so nothing would be
+filled. The db test
+`rollback_backfill_fills_old_rows_including_stats_visibility` runs this
+exact statement on rows missing every one of these fields.
+
+### Rollback A: undo only the `rank` kind (back to the build before PR 682)
+
+The build before PR 682 already has `stat_digits` and `map_name`, so their
+crops and consent stay as they are. `rank` consent does not survive: step 4
+clears it, so if this kind is deployed again later, every member starts
+with `rank` off and must opt in again. No consent comes back on by itself.
+
+1. Rank crops can stay. The old build skips rows of a kind it does not
+   know on every list and count, and a member's own delete-all
+   (`DELETE /api/training-crops/mine`) still finds and removes them (base
+   db test `unknown_stored_kind_is_found_by_owner_and_deleted`). They keep
+   their disk space until then. To remove them instead (needs FrozenTear's
+   yes; members' contributed `rank` crops are deleted for good): list
+   `SELECT id, file_name FROM hero_icon WHERE kind = 'rank'`, delete those
+   files from `HERO_ICONS_DIR`, then `DELETE hero_icon WHERE kind = 'rank'`.
+   Never use `kind != 'hero_icon'` here: that also deletes every member's
+   `stat_digits` and `map_name` crops.
+2. Before deploying the old build, run the backfill above. The old build
+   redefines `hero_icon_opt_in`, `stat_digits_opt_in` and `map_name_opt_in`
+   with a plain `DEFAULT false`, which SurrealDB applies only when a row is
+   created: on a row that lacks one of them, the old build's stats settings
+   and hero icon opt-in saves would fail the `TYPE bool` check (500).
+3. Deploy the old build. Its migrations put back the `hero_icon.kind`
+   assert without `'rank'` (stored `rank` rows stay; the assert is checked
+   only when a row is written) and the plain defaults above. `rank_opt_in`
+   stays defined with `DEFAULT ALWAYS false` and unused, so it never blocks
+   a write.
+4. Required, right after the old build is up: clear `rank` consent and
+   its field, both statements in one query:
+
+   ```sql
+   REMOVE FIELD rank_opt_in ON member_settings; UPDATE member_settings UNSET rank_opt_in;
+   ```
+
+   The `UNSET` is what matters. `member_settings` is `SCHEMAFULL`, and the
+   backfill in step 2 wrote `rank_opt_in` on every row: once the field
+   definition is gone, any write of a row that still carries the value
+   fails with "Found field 'rank_opt_in', but no such field exists" (every
+   stats settings, hero icon opt-in and consent save would be 500). The
+   `UPDATE ... UNSET` removes the value from every row, so saves work
+   again and no stored `rank` consent is left to come back on a later
+   deploy. Run it after step 3, not before: the build from this PR writes
+   `rank_opt_in` on every save. A save that lands between the two
+   statements can 500 once; that is why they go in one query. `REMOVE
+   FIELD` has to come first: while the field is still defined with
+   `DEFAULT ALWAYS false`, an `UNSET` is filled straight back with false,
+   so it would leave the value in every row. The db test
+   `rollback_a_clears_rank_consent_and_saves_still_work` runs these exact
+   statements.
+
+### Rollback B: undo the whole training crops feature (back to the build before #653)
+
+1. Before deploying the old build, remove crops of every kind but
+   `hero_icon`, files first. This deletes members' contributed
+   `stat_digits`, `map_name` and `rank` crops for good, so it needs
+   FrozenTear's yes first: list `SELECT id, file_name FROM hero_icon WHERE kind != 'hero_icon'`,
    delete those files from `HERO_ICONS_DIR`, then
-   `DELETE hero_icon WHERE kind != 'hero_icon'`. The old build has no kind
+   `DELETE hero_icon WHERE kind != 'hero_icon'`. That build has no kind
    filter and would otherwise show them as hero icons with an empty hero.
-   (Files left behind are also removed by the old build's orphan sweep after
-   one hour once their rows are gone.)
-2. Deploy the old build. Its migrations redefine only the old fields; the new
+   (Files left behind are also removed by its orphan sweep after one hour
+   once their rows are gone.)
+2. Run the backfill above. That build does not define the
+   `stat_digits`, `map_name` or `rank` consent fields, so they keep
+   `DEFAULT ALWAYS false`; the backfill still fills `stats_visibility` and
+   `hero_icon_opt_in` on rows that lack them, and is harmless otherwise.
+3. Deploy the old build. Its migrations redefine only the old fields; the new
    columns, the index and the consent fields stay defined and unused, and
    hero icon rows keep working: the old build reads rows with its own row
    struct, which picks its fields by name and ignores the others, so a row
@@ -487,10 +694,32 @@ Rollback to the build before this change:
    test `old_build_row_shape_reads_rows_with_kind_and_metadata`, which reads
    such a row with a copy of the old struct). Hero icons the old build
    writes get `kind = 'hero_icon'` from the field default.
-3. Optional cleanup:
-   `REMOVE INDEX hero_icon_member_kind_idx ON hero_icon;` and
-   `REMOVE FIELD <name> ON hero_icon;` / `ON member_settings` for each new
-   field. Not needed for the old build to run.
+4. Required, right after the old build is up, the same as Rollback A
+   step 4 for every training crop consent: clear `stat_digits`,
+   `map_name` and `rank` consent and their fields, all in one query.
+   Without it, every member's stored consent for those kinds would come
+   back on by itself if the feature is deployed again; with it, members
+   must opt in again. `hero_icon_opt_in` is the hero icon opt-in from
+   before #653 and stays.
+
+   ```sql
+   REMOVE FIELD stat_digits_opt_in ON member_settings; REMOVE FIELD map_name_opt_in ON member_settings; REMOVE FIELD rank_opt_in ON member_settings; UPDATE member_settings UNSET stat_digits_opt_in, map_name_opt_in, rank_opt_in;
+   ```
+
+   `member_settings` is `SCHEMAFULL` and the backfill in step 2 wrote these
+   fields on every row, so each `REMOVE FIELD` must be followed by the
+   `UNSET` in the same query: a row that still carries a value of a
+   removed field fails every write with "Found field ..., but no such field
+   exists". `REMOVE FIELD` comes first for the reason given in Rollback A.
+5. Optional cleanup of the crop columns, after the old build is up. The
+   same rule: every `REMOVE FIELD` with an `UNSET` of that field in the
+   same query. Skip it if in doubt: the old build runs with these fields
+   still defined.
+
+   ```sql
+   REMOVE INDEX hero_icon_member_kind_idx ON hero_icon;
+   REMOVE FIELD kind ON hero_icon; REMOVE FIELD screen ON hero_icon; REMOVE FIELD slot_type ON hero_icon; REMOVE FIELD slot_index ON hero_icon; REMOVE FIELD game_token ON hero_icon; REMOVE FIELD score ON hero_icon; REMOVE FIELD runner_up ON hero_icon; REMOVE FIELD margin ON hero_icon; REMOVE FIELD icon_set_version ON hero_icon; REMOVE FIELD spot_version ON hero_icon; REMOVE FIELD vote_card_filled ON hero_icon; REMOVE FIELD locked_in ON hero_icon; REMOVE FIELD screen_width ON hero_icon; REMOVE FIELD screen_height ON hero_icon; REMOVE FIELD ui_scale ON hero_icon; REMOVE FIELD tracker_version ON hero_icon; REMOVE FIELD found_x ON hero_icon; REMOVE FIELD found_y ON hero_icon; REMOVE FIELD found_w ON hero_icon; REMOVE FIELD found_h ON hero_icon; REMOVE FIELD found_confidence ON hero_icon; UPDATE hero_icon UNSET kind, screen, slot_type, slot_index, game_token, score, runner_up, margin, icon_set_version, spot_version, vote_card_filled, locked_in, screen_width, screen_height, ui_scale, tracker_version, found_x, found_y, found_w, found_h, found_confidence;
+   ```
 
 Hero icon opt-ins are never rewritten, so a rollback keeps every member's
 hero icon choice.

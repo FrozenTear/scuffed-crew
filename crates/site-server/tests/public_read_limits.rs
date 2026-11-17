@@ -20,11 +20,25 @@ use tower::ServiceExt;
 use scuffed_auth::SessionConfig;
 use scuffed_db::Database;
 use scuffed_db::migrations::run_migrations;
-use scuffed_site_server::create_router;
 use scuffed_site_server::state::{AppState, OAuthConfig};
+use scuffed_site_server::{PublicReadLimit, create_router, create_router_with_public_read_limit};
 
-/// Public governor budget from `create_router_with_dist`.
+/// Public governor burst of the production router.
 const PUBLIC_BURST: usize = 100;
+
+/// The production public read limit, except that no token comes back while
+/// a test runs (one per hour). With the 100 ms refill, a runner that stalls
+/// between the 429 that ends a drain and the next request gets a fresh
+/// token, so "the next read is 429" raced the wall clock and flaked in CI.
+const NO_REFILL: PublicReadLimit = PublicReadLimit {
+    replenish_ms: 60 * 60 * 1000,
+    burst: PublicReadLimit::PRODUCTION.burst,
+};
+
+/// Router with the production public burst and no refill during the test.
+async fn no_refill_app() -> axum::Router {
+    create_router_with_public_read_limit(test_state(None).await, "dist", NO_REFILL)
+}
 
 async fn test_state(relay_url: Option<String>) -> AppState {
     let db = Database::connect_memory().await.expect("in-memory DB");
@@ -126,10 +140,8 @@ const ANONYMOUS_READS: &[&str] = &[
 ];
 
 /// Spend `peer`'s public budget: GET `/api/teams` until the first 429.
-/// Returns how many requests succeeded first.
-///
-/// The bucket refills one token per 100 ms while the loop runs, so the count
-/// can exceed the burst slightly; it can never be below it.
+/// Returns how many requests succeeded first. With [`NO_REFILL`] that is
+/// exactly the burst.
 async fn drain(app: &axum::Router, peer: [u8; 4]) -> usize {
     for ok in 0..(PUBLIC_BURST * 4) {
         let (status, _, body) = call(app, Method::GET, "/api/teams", peer).await;
@@ -141,15 +153,27 @@ async fn drain(app: &axum::Router, peer: [u8; 4]) -> usize {
     panic!("GET /api/teams was never rate limited");
 }
 
+#[test]
+fn production_public_read_limit_is_unchanged() {
+    assert_eq!(
+        PublicReadLimit::PRODUCTION,
+        PublicReadLimit {
+            replenish_ms: 100,
+            burst: 100,
+        }
+    );
+    assert_eq!(PublicReadLimit::PRODUCTION.burst as usize, PUBLIC_BURST);
+}
+
 #[tokio::test]
 async fn anonymous_reads_share_the_public_per_ip_budget() {
-    let app = create_router(test_state(None).await);
+    let app = no_refill_app().await;
     let peer = [203, 0, 113, 77];
 
     let allowed = drain(&app, peer).await;
-    assert!(
-        (PUBLIC_BURST..PUBLIC_BURST * 2).contains(&allowed),
-        "expected the {PUBLIC_BURST} burst before the first 429, got {allowed}"
+    assert_eq!(
+        allowed, PUBLIC_BURST,
+        "expected exactly the {PUBLIC_BURST} burst before the first 429"
     );
     let (status, headers, body) = call(&app, Method::GET, "/api/teams", peer).await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
@@ -163,10 +187,8 @@ async fn anonymous_reads_share_the_public_per_ip_budget() {
     );
 
     // One bucket for every anonymous read: once `/api/teams` has spent it,
-    // each of them is refused. Re-drain first so a token that refilled in
-    // the meantime cannot let one through.
+    // each of them is refused. Nothing refills, so no re-drain is needed.
     for path in ANONYMOUS_READS {
-        drain(&app, peer).await;
         let (status, _, body) = call(&app, Method::GET, path, peer).await;
         assert_eq!(
             status,
@@ -174,6 +196,12 @@ async fn anonymous_reads_share_the_public_per_ip_budget() {
             "GET {path} is outside the public governor: {body}"
         );
     }
+
+    // A runner that stalls longer than the production refill (100 ms)
+    // still finds the budget spent.
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let (status, _, body) = call(&app, Method::GET, "/api/teams", peer).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
 
     // Writes on the same paths keep their old behaviour (auth check, no
     // public budget), and a wrong method is still a JSON 405 that does not

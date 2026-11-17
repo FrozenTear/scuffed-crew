@@ -15,6 +15,14 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## Unreleased
+
+At 1440p, most hero icon training crops were dropped because their PNG was over the size cap. They are now kept at 171 px, the same size as a 1080p card. A 4K portrait is still skipped.
+
+### Highlights
+
+- If a hero icon crop still cannot be kept, a later Tab of the same game can try again.
+
 ## 0.6.0-alpha.3.1
 
 **Read my rank after Comp games** now works: with it on, the tracker reads your rank screen after each Comp game and sends the rank it read with your game uploads. Every reader switch now sits together under one Readers heading in Settings, and the rank packs come from the site like the other reader packs.

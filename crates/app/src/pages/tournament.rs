@@ -98,7 +98,7 @@ const PAGE_CSS: &str = r#"
         flex-wrap: wrap;
         align-items: center;
         font-size: 0.8rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         margin-bottom: 1rem;
     }
     .tournament-card-status {
@@ -112,32 +112,32 @@ const PAGE_CSS: &str = r#"
     }
     .tournament-card-status.registration {
         background: color-mix(in srgb, var(--accent) 20%, transparent);
-        color: var(--accent);
+        color: var(--accent-text);
     }
     .tournament-card-status.in_progress {
-        background: color-mix(in srgb, var(--ok) 20%, transparent);
-        color: var(--ok);
+        background: color-mix(in srgb, var(--win) 20%, transparent);
+        color: var(--win);
     }
     .tournament-card-status.completed {
-        background: color-mix(in srgb, var(--text-2) 15%, transparent);
-        color: var(--text-2);
-    }
-    .tournament-card-status.archived {
         background: color-mix(in srgb, var(--text-3) 15%, transparent);
         color: var(--text-3);
+    }
+    .tournament-card-status.archived {
+        background: color-mix(in srgb, var(--text-subtle) 15%, transparent);
+        color: var(--text-subtle);
     }
     .tournament-card-status.draft {
         background: color-mix(in srgb, var(--warn) 20%, transparent);
         color: var(--warn);
     }
     .tournament-description {
-        color: var(--text-2);
+        color: var(--text-3);
         font-size: 0.9rem;
         line-height: 1.7;
         margin: 0 0 1rem;
     }
     .tournament-external-link {
-        color: var(--accent);
+        color: var(--accent-text);
         font-size: 0.85rem;
         text-decoration: none;
         word-break: break-all;
@@ -146,7 +146,7 @@ const PAGE_CSS: &str = r#"
         text-decoration: underline;
     }
     .tournament-external-text {
-        color: var(--text-2);
+        color: var(--text-3);
         font-size: 0.85rem;
         word-break: break-all;
     }
@@ -162,13 +162,13 @@ const PAGE_CSS: &str = r#"
         border-top: 1px solid var(--border);
     }
     .tournament-loading, .tournament-error {
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-align: center;
         padding: 3rem 0;
     }
     .tournament-back {
         display: inline-block;
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-size: 0.8rem;
         text-decoration: none;
     }
@@ -176,7 +176,7 @@ const PAGE_CSS: &str = r#"
         color: var(--text);
     }
     .tournament-no-bracket {
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-align: center;
         padding: 2rem 0;
     }

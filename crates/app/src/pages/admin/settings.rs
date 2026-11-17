@@ -253,8 +253,8 @@ pub fn AdminSettings() -> Element {
         }
 
         if let Some(err) = load_error() {
-            div { style: "padding:1rem;border:1px solid var(--danger);border-radius:8px;background:color-mix(in srgb, var(--danger) 12%, transparent);margin-bottom:1rem;",
-                p { style: "color:var(--danger);margin:0 0 0.75rem;", "Failed to load settings: {err}" }
+            div { style: "padding:1rem;border:1px solid var(--loss);border-radius:8px;background:color-mix(in srgb, var(--loss) 12%, transparent);margin-bottom:1rem;",
+                p { style: "color:var(--loss);margin:0 0 0.75rem;", "Failed to load settings: {err}" }
                 button {
                     class: "btn-add",
                     r#type: "button",
@@ -266,7 +266,7 @@ pub fn AdminSettings() -> Element {
                 }
             }
         } else if !loaded() {
-            p { style: "color: var(--text-3);", "Loading settings…" }
+            p { style: "color: var(--text-subtle);", "Loading settings…" }
         } else {
             div { class: "settings-page",
             div { class: "form-section",
@@ -924,7 +924,7 @@ fn NavColumn(
             h3 { "{title}" }
             p { class: "nav-hint", "{hint}" }
             if items.is_empty() {
-                p { style: "color:var(--text-3);font-size:0.85rem;margin:0;", "None" }
+                p { style: "color:var(--text-subtle);font-size:0.85rem;margin:0;", "None" }
             } else {
                 ul { style: "list-style:none;margin:0;padding:0;display:flex;flex-direction:column;",
                     for (id, label) in items {

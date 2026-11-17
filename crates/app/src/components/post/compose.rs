@@ -30,7 +30,7 @@ const COMPOSE_CSS: &str = r#"
 .post-compose textarea {
     width: 100%;
     min-height: 80px;
-    background: var(--surface-2);
+    background: var(--surface-sunken);
     border: 1px solid var(--border);
     border-radius: 8px;
     padding: 0.75rem;
@@ -41,17 +41,17 @@ const COMPOSE_CSS: &str = r#"
     line-height: 1.6;
 }
 .post-compose textarea:focus {
-    border-color: var(--accent);
+    border-color: var(--accent-solid);
 }
 .post-compose textarea::placeholder {
-    color: var(--text-3);
+    color: var(--text-subtle);
 }
 .post-compose-tags {
     margin-top: 0.5rem;
 }
 .post-compose-tags input {
     width: 100%;
-    background: var(--surface-2);
+    background: var(--surface-sunken);
     border: 1px solid var(--border);
     border-radius: 8px;
     padding: 0.5rem 0.75rem;
@@ -60,10 +60,10 @@ const COMPOSE_CSS: &str = r#"
     font-family: var(--font-body);
 }
 .post-compose-tags input:focus {
-    border-color: var(--accent);
+    border-color: var(--accent-solid);
 }
 .post-compose-tags input::placeholder {
-    color: var(--text-3);
+    color: var(--text-subtle);
 }
 .post-compose-actions {
     display: flex;

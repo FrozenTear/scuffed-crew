@@ -72,6 +72,33 @@ fn pack(kinds: &[u8]) -> TemplateSet {
 }
 
 #[test]
+fn merging_two_learners_is_one_learner_fed_both_frames() {
+    let shots = [
+        (frame(0, Screen::HeroBan, 230), NAMES[0]),
+        (frame(0, Screen::MapVote, 200), NAMES[0]),
+        (frame(1, Screen::HeroBan, 230), NAMES[1]),
+    ];
+    let screens = [Screen::HeroBan, Screen::MapVote, Screen::HeroBan];
+    let mut one = Learner::new();
+    let mut left = Learner::new();
+    let mut right = Learner::new();
+    for (i, ((img, name), screen)) in shots.iter().zip(screens).enumerate() {
+        assert!(one.add_frame(img, screen, name));
+        let part = if i == 0 { &mut left } else { &mut right };
+        assert!(part.add_frame(img, screen, name));
+    }
+    left.merge(&right);
+    // the sums and counts are the learner's whole state
+    assert_eq!(format!("{left:?}"), format!("{one:?}"));
+    let (merged, fed) = (left.build(), one.build());
+    assert_eq!(merged, fed);
+    assert_eq!(
+        merged.classes.iter().map(|c| c.n).collect::<Vec<_>>(),
+        vec![2, 1]
+    );
+}
+
+#[test]
 fn reads_each_known_title() {
     let r = Reader::new(pack(&[0, 1]));
     for k in [0u8, 1] {

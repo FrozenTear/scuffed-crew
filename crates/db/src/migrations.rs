@@ -856,7 +856,11 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
             DEFAULT 'public'
             ASSERT $value IN ['public', 'members', 'private'];
         -- Opted in to contributing hero icons. Off by default; legacy rows read false.
-        DEFINE FIELD OVERWRITE hero_icon_opt_in ON member_settings TYPE bool DEFAULT false;
+        -- DEFAULT ALWAYS: SurrealDB applies a plain DEFAULT only on create, so an
+        -- update of a row from before this field that does not set it would fail
+        -- TYPE bool. ALWAYS fills an absent value on every write and never
+        -- replaces a stored one. No row is rewritten by this definition.
+        DEFINE FIELD OVERWRITE hero_icon_opt_in ON member_settings TYPE bool DEFAULT ALWAYS false;
 
         DEFINE INDEX IF NOT EXISTS ms_member_idx ON member_settings COLUMNS member_id UNIQUE;
 
@@ -1016,7 +1020,7 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         -- Additive only. Rollback: see docs/api/training-crops.md.
         -- ================================================
         DEFINE FIELD OVERWRITE kind ON hero_icon TYPE string DEFAULT 'hero_icon'
-            ASSERT $value IN ['hero_icon', 'stat_digits', 'map_name'];
+            ASSERT $value IN ['hero_icon', 'stat_digits', 'map_name', 'rank'];
         DEFINE FIELD OVERWRITE screen ON hero_icon TYPE option<string>;
         DEFINE FIELD OVERWRITE slot_type ON hero_icon TYPE option<string>;
         DEFINE FIELD OVERWRITE slot_index ON hero_icon TYPE option<int>;
@@ -1046,8 +1050,15 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         -- kinds are off by default; legacy rows read false. There is no
         -- full_screen consent field: whole screens are not accepted, so their
         -- consent is never stored.
-        DEFINE FIELD OVERWRITE stat_digits_opt_in ON member_settings TYPE bool DEFAULT false;
-        DEFINE FIELD OVERWRITE map_name_opt_in ON member_settings TYPE bool DEFAULT false;
+        -- DEFAULT ALWAYS for the same reason as hero_icon_opt_in: rows from
+        -- before these fields lack them, and every writer (stats settings,
+        -- hero icon opt-in) must still be able to update those rows.
+        DEFINE FIELD OVERWRITE stat_digits_opt_in ON member_settings TYPE bool DEFAULT ALWAYS false;
+        DEFINE FIELD OVERWRITE map_name_opt_in ON member_settings TYPE bool DEFAULT ALWAYS false;
+        -- rank crop consent (role, tier, rank bar, result, SR regions).
+        -- Additive: off by default, rows from before it read false, no row
+        -- rewrite.
+        DEFINE FIELD OVERWRITE rank_opt_in ON member_settings TYPE bool DEFAULT ALWAYS false;
     "#,
             )
             .await?

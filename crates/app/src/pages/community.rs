@@ -51,7 +51,7 @@ const PAGE_CSS: &str = r#"
         margin: 0 0 0.5rem;
     }
     .community-subtitle {
-        color: var(--text-2);
+        color: var(--text-3);
         font-size: 0.95rem;
         margin: 0 0 2rem;
     }
@@ -93,7 +93,7 @@ const PAGE_CSS: &str = r#"
         margin: 0 0 0.5rem;
     }
     .community-desc {
-        color: var(--text-2);
+        color: var(--text-3);
         font-size: 0.9rem;
         line-height: 1.6;
         margin: 0 0 1.5rem;
@@ -109,11 +109,11 @@ const PAGE_CSS: &str = r#"
     .community-stat-value {
         font-family: var(--font-head);
         font-size: 2rem;
-        color: var(--accent);
+        color: var(--accent-text);
     }
     .community-stat-label {
         font-size: 0.75rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-transform: uppercase;
         letter-spacing: 0.05em;
     }
@@ -130,11 +130,11 @@ const PAGE_CSS: &str = r#"
         border-bottom: 1px solid var(--border);
     }
     .community-rules {
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         border: 1px solid var(--border);
         border-radius: 8px;
         padding: 1rem 1.25rem;
-        color: var(--text-2);
+        color: var(--text-3);
         font-size: 0.85rem;
         line-height: 1.6;
         white-space: pre-wrap;
@@ -149,7 +149,7 @@ const PAGE_CSS: &str = r#"
         align-items: center;
         gap: 0.5rem;
         padding: 0.5rem 0.75rem;
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         border: 1px solid var(--border);
         border-radius: 8px;
     }
@@ -158,7 +158,7 @@ const PAGE_CSS: &str = r#"
         height: 28px;
         border-radius: 50%;
         background: var(--accent-soft);
-        color: var(--accent);
+        color: var(--accent-text);
         display: flex;
         align-items: center;
         justify-content: center;
@@ -181,26 +181,26 @@ const PAGE_CSS: &str = r#"
         display: inline-flex;
         align-items: center;
         gap: 0.5rem;
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         border: 1px solid var(--border);
         border-radius: 6px;
         padding: 0.5rem 1rem;
         font-family: var(--font-mono);
         font-size: 0.8rem;
-        color: var(--text-2);
+        color: var(--text-3);
     }
     .community-relay-dot {
         width: 8px;
         height: 8px;
         border-radius: 50%;
-        background: var(--ok);
+        background: var(--win);
     }
     .community-nostr-badge {
         display: inline-flex;
         align-items: center;
         gap: 0.4rem;
         background: var(--accent-soft);
-        color: var(--accent);
+        color: var(--accent-text);
         padding: 0.25rem 0.75rem;
         border-radius: 999px;
         font-size: 0.7rem;
@@ -210,7 +210,7 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 1rem;
     }
     .community-loading {
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-align: center;
         padding: 3rem 0;
     }
