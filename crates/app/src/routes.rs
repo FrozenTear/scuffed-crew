@@ -43,6 +43,8 @@ pub enum Route {
         IdentitySettings {},
         #[route("/profile/edit")]
         ProfileSettings {},
+        #[route("/settings")]
+        AppearanceSettings {},
         #[route("/reports")]
         MyReports {},
         #[route("/dm")]
@@ -135,6 +137,8 @@ pub enum Route {
         AdminRelay {},
         #[route("/admin/settings")]
         AdminSettings {},
+        #[route("/admin/brand")]
+        AdminBrandSettings {},
     #[end_layout]
 
     // Strategy section (strategy nav layout)
@@ -193,6 +197,8 @@ mod tests {
             "/admin",
             "/admin/members",
             "/admin/members/abc/matches",
+            "/admin/brand",
+            "/settings",
             "/strategy",
             "/strategy/editor/abc",
             "/login",
