@@ -216,6 +216,15 @@ pub fn Changelog(tab: String) -> Element {
     }
 }
 
+/// Page lead. Names the configured org, the same name the title uses. While
+/// settings are pending or failed it stays generic rather than invent one.
+fn page_lead(org_name: Option<&str>) -> String {
+    match org_name.map(str::trim).filter(|name| !name.is_empty()) {
+        Some(name) => format!("Updates to the {name} site and the Overwatch tracker."),
+        None => "Updates to the site and the Overwatch tracker.".to_string(),
+    }
+}
+
 fn entry_heading_id(tab: Tab, index: usize) -> String {
     format!("cl-{}-{index}", tab.slug())
 }
@@ -247,6 +256,11 @@ impl SwitchTracker {
 
 #[component]
 fn ChangelogPage(tab: Tab) -> Element {
+    let site_settings = crate::state::use_site_settings();
+    let lead = page_lead(
+        crate::state::loaded_site_settings(site_settings.resolved.read().as_ref())
+            .map(|settings| settings.org_name.as_str()),
+    );
     let tracker = use_hook(|| SwitchTracker::new(tab));
     let after_switch = tracker.observe(tab);
     // (tab, shown). A tab switch starts the list over at the first batch.
@@ -336,7 +350,7 @@ fn ChangelogPage(tab: Tab) -> Element {
         div { class: "changelog-page",
             header { class: "page-header",
                 h1 { "What's changed" }
-                p { class: "page-lead", "Updates to the Scuffed Crew site and the Overwatch tracker." }
+                p { class: "page-lead", "{lead}" }
             }
             nav { class: "cl-toggle", aria_label: "What's changed",
                 for option in Tab::ALL {
@@ -459,6 +473,28 @@ mod tests {
 
     fn render(path: &str, source: Option<&str>) -> String {
         render_with(path, source).0
+    }
+
+    /// Render `path` with the shipped files and `org_name` as the embedded
+    /// site settings (None = no settings embedded).
+    fn render_with_org(path: &str, org_name: Option<&str>) -> String {
+        crate::state::set_test_embedded_json(org_name.map(|name| {
+            serde_json::json!({
+                "id": "site",
+                "org_name": name,
+                "site_description": "desc",
+                "recruitment_open": true,
+                "recruitment_message": "msg",
+                "min_age": 16,
+                "forum_backend": "local",
+                "extra_relay_urls": "",
+                "updated_at": "2026-10-06T00:00:00Z",
+            })
+            .to_string()
+        }));
+        let html = render(path, None);
+        crate::state::set_test_embedded_json(None);
+        html
     }
 
     fn page_of(html: &str) -> &str {
@@ -675,6 +711,49 @@ mod tests {
                 "{path}: {account}"
             );
             assert!(account.contains("What&#39;s changed") || account.contains("What's changed"));
+        }
+    }
+
+    #[test]
+    fn page_lead_names_the_configured_org_or_stays_generic() {
+        assert_eq!(
+            page_lead(Some("Night Owls")),
+            "Updates to the Night Owls site and the Overwatch tracker."
+        );
+        assert_eq!(
+            page_lead(Some("  Night Owls ")),
+            "Updates to the Night Owls site and the Overwatch tracker."
+        );
+        for none in [None, Some(""), Some("   ")] {
+            assert_eq!(
+                page_lead(none),
+                "Updates to the site and the Overwatch tracker."
+            );
+        }
+    }
+
+    #[test]
+    fn page_lead_uses_the_org_name_from_site_settings() {
+        for path in ["/changelog/site", "/changelog/tracker"] {
+            let html = render_with_org(path, Some("Night Owls"));
+            let page = page_of(&html);
+            assert!(
+                page.contains(
+                    "<p class=\"page-lead\">Updates to the Night Owls site and the Overwatch tracker.</p>"
+                ),
+                "{path}: {page}"
+            );
+            assert!(!page.contains("Scuffed Crew"), "{path}: {page}");
+
+            let html = render_with_org(path, None);
+            let page = page_of(&html);
+            assert!(
+                page.contains(
+                    "<p class=\"page-lead\">Updates to the site and the Overwatch tracker.</p>"
+                ),
+                "{path}: {page}"
+            );
+            assert!(!page.contains("Scuffed Crew"), "{path}: {page}");
         }
     }
 }
