@@ -1,0 +1,52 @@
+# What's changed: Tracker
+#
+# This file is the Tracker tab of the public "What's changed" page
+# (/changelog/tracker). One entry per stat tracker release. The build
+# checks it and compiles it in, so a change shows up with the next site
+# deploy. No server or database change is needed.
+#
+# How to add an entry
+# 1. Copy the [[entry]] block below and paste it ABOVE the newest entry.
+#    Keep the file newest first. The page also sorts by date, newest first.
+# 2. Set version to the version from the release tag (the tag
+#    stat-tracker-v0.6.0-alpha.3.1 gives "v0.6.0-alpha.3.1"), and date to
+#    the release day, written as "YYYY-MM-DD" (Europe/Oslo).
+# 3. Write the changes for members in plain words, not commit titles.
+#    Use one list:
+#        changes = ["...", "..."]
+#    or split them into groups. Only the groups you write are shown:
+#        added   = ["..."]
+#        changed = ["..."]
+#        fixed   = ["..."]
+# 4. Optional: link = "https://..." for public release notes. Leave it out
+#    when the release is private. Only https links are allowed.
+# 5. No em or en dashes, and no personal names. Don't name the org; the
+#    page does that from Settings. If the owner must be named, write
+#    FrozenTear.
+# 6. The build checks this file: a broken file fails `cargo build`,
+#    `dx build` and `cargo test -p scuffed-app changelog`, with the reason.
+#
+# Example (as a comment, do not ship it):
+# [[entry]]
+# version = "v0.6.0-alpha.3.1"
+# date = "2026-11-15"
+# fixed = ["Wins on the magenta scoreboard count again."]
+# link = "https://github.com/example/example/releases/tag/v0.6.0-alpha.3.1"
+
+[[entry]]
+version = "v0.6.0-alpha.3.1"
+date = "2026-11-15"
+added = [
+    "Read my rank after Comp games now works. With it on, the tracker reads your rank screen after each Competitive game and sends the rank with your game uploads. It is off by default.",
+]
+changed = [
+    "Every reader switch now sits under one Readers heading in Settings, under Advanced, Capture and reading. Read my rank moved there from Website account, and the extra number reader moved there from Troubleshooting.",
+    "The rank packs now come from the site like the other reader packs. A rank pack folder you placed by hand is moved to templates-kept in the data folder, not deleted.",
+]
+fixed = [
+    "A rank screen seen right after you alt-tab back to the game is no longer lost.",
+    "Stopping the tracker while the rank screen is still up now keeps the rank on its game.",
+    "A ban results screen captured before the bans show is no longer stored as four empty bans.",
+    "The tracker no longer cleans up its database at every start when the database sits near the cleanup size.",
+]
+link = "https://github.com/FrozenTear/scuffed-crew/releases/tag/stat-tracker-v0.6.0-alpha.3.1"

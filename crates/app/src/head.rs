@@ -431,6 +431,10 @@ fn page_label(route: &Route) -> PageLabel {
         Route::StatsMember { id } => named(format!("Player stats | {id}")),
         Route::StatsMatch { .. } => named("Match stats"),
         Route::PatchNotes {} => named("Patch notes"),
+        Route::Changelog { tab } => match crate::pages::ChangelogTab::from_slug(tab) {
+            Some(tab) => named(tab.page_label()),
+            None => named("Page not found"),
+        },
         Route::AdminDashboard {} => named("Admin dashboard"),
         Route::AdminMembers {} => named("Admin members"),
         Route::AdminMemberMatches { .. } => named("Admin member matches"),
@@ -468,6 +472,9 @@ fn named(label: impl Into<String>) -> PageLabel {
 }
 
 fn is_public_route(route: &Route) -> bool {
+    if let Route::Changelog { tab } = route {
+        return crate::pages::ChangelogTab::from_slug(tab).is_some();
+    }
     matches!(
         route,
         Route::Home {}
@@ -778,11 +785,46 @@ mod tests {
             Route::ForumThread { id: "42".into() },
             Route::Leaderboards {},
             Route::PatchNotes {},
+            Route::Changelog { tab: "site".into() },
+            Route::Changelog {
+                tab: "tracker".into(),
+            },
             Route::StrategyBrowse {},
             Route::StrategyHeroes {},
             Route::StrategyMeta {},
             Route::StrategyPatchNotes {},
         ]
+    }
+
+    #[test]
+    fn changelog_titles_name_the_active_tab() {
+        let site = document_head(
+            &Route::Changelog { tab: "site".into() },
+            Some("The Scuffed Crew"),
+            "",
+            None,
+        );
+        assert_eq!(site.title, "What's changed, Site | The Scuffed Crew");
+        assert_eq!(site.canonical.as_deref(), Some("/changelog/site"));
+        let tracker = document_head(
+            &Route::Changelog {
+                tab: "tracker".into(),
+            },
+            Some("The Scuffed Crew"),
+            "",
+            None,
+        );
+        assert_eq!(tracker.title, "What's changed, Tracker | The Scuffed Crew");
+        let unknown = document_head(
+            &Route::Changelog {
+                tab: "unknown".into(),
+            },
+            Some("The Scuffed Crew"),
+            "",
+            None,
+        );
+        assert_eq!(unknown.title, "Page not found | The Scuffed Crew");
+        assert_eq!(unknown.canonical, None);
     }
 
     #[test]

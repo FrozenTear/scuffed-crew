@@ -39,7 +39,28 @@ const SEP_RGB: Rgb<u8> = Rgb([12, 10, 14]);
 pub(crate) const DIGIT_TOP: u32 = 30;
 const DIGIT_H: f64 = 13.0;
 const WHITE: f64 = 250.0;
+/// The grey of a dim zero: the brightest pixel of the real 1440p dim zero
+/// crops `test-data/vision-baseline/native_*dim0*.png` is RGB 172,169,172
+/// on purple (186,181,169 on yellow, where the tint adds to the grey).
 const DIM_ZERO: f64 = 172.0;
+/// Template coverage (relative to the glyph's peak) from which a
+/// [`Ink::Flat`] stroke is solid [`DIM_ZERO`]. Real dim zeros have a flat
+/// stroke about 2 px wide at that grey; the template fades out from a peak
+/// of about 0.95 coverage, so drawn as is its stroke never reaches the
+/// real grey and is under 1 px wide at the light threshold (150).
+const FLAT_FROM: f32 = 0.6;
+
+/// How [`draw_number_h`] lays ink.
+#[derive(Clone, Copy, PartialEq)]
+enum Ink {
+    /// Template coverage blended as is, glyph gaps of 1-2 px.
+    Soft,
+    /// Centre spacing and no grey halo (see [`board_drawn`]).
+    Crisp,
+    /// [`Ink::Soft`] spacing, with the stroke solid from [`FLAT_FROM`] of
+    /// the glyph's peak coverage, like a real dim zero.
+    Flat,
+}
 
 /// The measured table edges `(L, R)`.
 #[derive(Clone, Copy, Debug)]
@@ -146,7 +167,7 @@ fn glyphs(digit_h: f64) -> Vec<(Vec<f32>, usize, usize, usize, usize)> {
 /// Draw `text` (digits and commas) centred at `cx`, glyph tops at `top`,
 /// blended over what is there in `colour`.
 pub(crate) fn draw_number(img: &mut RgbImage, text: &str, cx: f64, top: u32, colour: f64) {
-    draw_number_h(img, text, cx, top, colour, DIGIT_H, false);
+    draw_number_h(img, text, cx, top, colour, DIGIT_H, Ink::Soft);
 }
 
 /// [`draw_number`] at digit height `digit_h`.
@@ -157,8 +178,9 @@ fn draw_number_h(
     top: u32,
     colour: f64,
     digit_h: f64,
-    crisp: bool,
+    ink: Ink,
 ) {
+    let crisp = ink == Ink::Crisp;
     let gl = glyphs(digit_h);
     let idx: Vec<usize> = text
         .chars()
@@ -200,13 +222,19 @@ fn draw_number_h(
     };
     for (i, &c) in idx.iter().enumerate() {
         let (cov, gw, gh, a, b) = &gl[c];
+        let peak = cov.iter().copied().fold(0.0f32, f32::max);
         for gy in 0..*gh {
             for gx in *a..*b {
                 let v = cov[gy * gw + gx];
                 if crisp && !crisp_ink(cov, *gw, *gh, gx, gy, v) {
                     continue;
                 }
-                let paint = if crisp && v >= 0.85 { 1.0 } else { v };
+                let paint = match ink {
+                    Ink::Crisp if v >= 0.85 => 1.0,
+                    Ink::Flat if v >= FLAT_FROM * peak => 1.0,
+                    Ink::Flat => v / peak,
+                    _ => v,
+                };
                 let (px, py) = (x + (gx - a) as i64, i64::from(top) + gy as i64);
                 if paint <= 0.0
                     || px < 0
@@ -434,7 +462,7 @@ fn board_drawn(layout: Layout, values: &[[u32; 6]; 12], crisp: bool) -> RgbImage
                     top + DIGIT_TOP,
                     colour,
                     DIGIT_H,
-                    true,
+                    Ink::Crisp,
                 );
             } else {
                 draw_number(&mut img, &text_for(v, k), cx, top + DIGIT_TOP, colour);
@@ -574,7 +602,13 @@ pub(crate) fn board_5v5(drawn: usize) -> RgbImage {
         let vals = VALUES[if row < 5 { row } else { row + 1 }];
         for (k, &v) in vals.iter().enumerate() {
             let cx = f64::from(r) - OFF[k] * K5;
-            let colour = if v == 0 { DIM_ZERO } else { WHITE };
+            // zeros as real dim zeros: a flat stroke at the real grey, so
+            // they keep their ring under the fallback's light test
+            let (colour, ink) = if v == 0 {
+                (DIM_ZERO, Ink::Flat)
+            } else {
+                (WHITE, Ink::Soft)
+            };
             let dtop = top + (f64::from(DIGIT_TOP) * K5).round() as u32;
             draw_number_h(
                 &mut img,
@@ -583,7 +617,7 @@ pub(crate) fn board_5v5(drawn: usize) -> RgbImage {
                 dtop,
                 colour,
                 DIGIT_H * K5,
-                false,
+                ink,
             );
         }
     }
