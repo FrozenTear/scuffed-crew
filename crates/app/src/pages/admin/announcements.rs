@@ -7,7 +7,7 @@ use crate::components::ui::{
 };
 use crate::components::{
     ADMIN_PAGE_SIZE, AdminDate, ConfirmDialog, DataTable, FormModal, RowActions, Toast,
-    admin_list_pending, list_cap_notice, row_menu_toggle_id, use_toast,
+    admin_list_pending, delete_button_id, list_cap_notice, row_menu_toggle_id, use_toast,
 };
 use crate::hooks::{ModalController, use_api_list};
 use scuffed_api_client::ApiClient;
@@ -307,7 +307,10 @@ pub fn AdminAnnouncements() -> Element {
             open: delete_modal.is_open(),
             danger: true,
             confirm_label: "Delete".to_string(),
-            restore_focus_id: delete_target.as_ref().map(|a| row_menu_toggle_id(&actions_id(&a.id))),
+            // Delete sits in the row on desktop and behind "Actions" on phone:
+            // focus goes back to whichever is shown.
+            restore_focus_id: delete_target.as_ref().map(|a| delete_button_id(&actions_id(&a.id))),
+            restore_focus_fallback: delete_target.as_ref().map(|a| row_menu_toggle_id(&actions_id(&a.id))),
             on_confirm: on_confirm_delete,
             on_cancel: on_cancel_delete,
         }
@@ -351,6 +354,7 @@ fn AnnouncementsTable(
                                     more: rsx! {
                                         button {
                                             r#type: "button",
+                                            id: delete_button_id(&actions_id(&a.id)),
                                             class: "btn is-danger",
                                             aria_label: "Delete {title}",
                                             onclick: move |_| on_delete.call(delete.clone()),
@@ -531,6 +535,15 @@ mod tests {
         assert!(
             group.contains("aria-label=\"Delete Scrim night\""),
             "{group}"
+        );
+        // The delete dialog gives focus back to this id (Vision 9, PR 706).
+        assert!(
+            group.contains("id=\"announcement-actions-announcement-a1-delete\""),
+            "{group}"
+        );
+        assert_eq!(
+            delete_button_id(&actions_id("announcement:a1")),
+            "announcement-actions-announcement-a1-delete"
         );
         assert!(
             html.contains("<time class=\"date\" datetime=\"2026-11-10\">10 Nov 2026</time>"),

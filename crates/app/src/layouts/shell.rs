@@ -2495,15 +2495,36 @@ mod tests {
     }
 
     /// QA blocking 1: `/admin/relay` was 518px wide at 390. Wide admin
-    /// content scrolls inside the admin area. The redesigned relay page has
+    /// content is clipped by the admin area (`overflow-x: clip`, which makes
+    /// no scroll container, so the sticky settings save bar still sticks;
+    /// Vision blocking 2 on PR 706) and wide tables scroll on their own. The redesigned relay page has
     /// no tables: its facts are a two-column list whose values may shrink
     /// and break long URLs, so nothing on it is wider than the column.
     #[test]
     fn wide_admin_content_scrolls_inside_the_admin_area() {
         let admin = include_str!("admin.rs");
         let rule = css_rule(admin, ".admin-main {");
-        assert!(has_decl(&rule, "overflow-y: auto"), "{rule}");
+        assert!(has_decl(&rule, "overflow-x: clip"), "{rule}");
         assert!(has_decl(&rule, "min-width: 0"), "{rule}");
+        // `auto`, `scroll` or `hidden` on either axis would make the admin
+        // area the sticky bar's scroll container, and it would sit at the
+        // end of the page instead of the bottom of the viewport.
+        for scroller in [
+            "overflow-y: auto",
+            "overflow: auto",
+            "overflow-x: auto",
+            "overflow: hidden",
+            "overflow-y: scroll",
+        ] {
+            assert!(!has_decl(&rule, scroller), "{scroller} in {rule}");
+        }
+        let bar = css_rule(crate::styles::admin::CSS, ".settings-save-bar {");
+        assert!(has_decl(&bar, "position: sticky"), "{bar}");
+        let pad = css_rule(crate::styles::admin::CSS, "html:has(.settings-save-bar) {");
+        assert!(
+            pad.contains("scroll-padding-bottom: calc(var(--tab-bar-height, 0%) +"),
+            "{pad}"
+        );
         let main = css_rule(SHELL_CSS, ".site-main {");
         assert!(has_decl(&main, "min-width: 0"), "{main}");
 
@@ -2909,6 +2930,11 @@ mod tests {
         assert!(has_decl(&app, "min-height: 100vh"), "{app}");
         let bar = css_rule(SHELL_CSS, ".d1-top {");
         assert!(has_decl(&bar, "position: sticky"), "{bar}");
+        let pad = css_rule(crate::styles::admin::CSS, "html:has(.settings-save-bar) {");
+        assert!(
+            pad.contains("scroll-padding-bottom: calc(var(--tab-bar-height, 0%) +"),
+            "{pad}"
+        );
         assert!(has_decl(&bar, "background: var(--bg)"), "{bar}");
     }
 

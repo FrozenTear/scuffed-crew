@@ -18,7 +18,7 @@ use crate::components::ui::{
 };
 use crate::components::{
     ADMIN_PAGE_SIZE, AccessDenied, AdminDate, ConfirmDialog, DataTable, FormModal, RowActions,
-    Toast, admin_list_pending, row_menu_toggle_id, use_toast,
+    Toast, admin_list_pending, delete_button_id, row_menu_toggle_id, use_toast,
 };
 use crate::hooks::{ModalController, use_api};
 use crate::state::use_auth;
@@ -627,7 +627,10 @@ pub fn AdminPatchNotes() -> Element {
             open: delete_modal.is_open(),
             danger: true,
             confirm_label: "Delete".to_string(),
-            restore_focus_id: delete_target.as_ref().map(|n| row_menu_toggle_id(&actions_id(&n.version))),
+            // Delete sits in the row on desktop and behind "Actions" on phone:
+            // focus goes back to whichever is shown.
+            restore_focus_id: delete_target.as_ref().map(|n| delete_button_id(&actions_id(&n.version))),
+            restore_focus_fallback: delete_target.as_ref().map(|n| row_menu_toggle_id(&actions_id(&n.version))),
             on_confirm: on_confirm_delete,
             on_cancel: on_cancel_delete,
         }
@@ -671,6 +674,7 @@ fn PatchNotesTable(
                                     more: rsx! {
                                         button {
                                             r#type: "button",
+                                            id: delete_button_id(&actions_id(&note.version)),
                                             class: "btn is-danger",
                                             aria_label: "Delete version {version}",
                                             onclick: move |_| on_delete.call(delete.clone()),
@@ -1273,6 +1277,9 @@ mod tests {
             group.contains("aria-label=\"Delete version 2.18.1\""),
             "{group}"
         );
+        // The delete dialog gives focus back to this id (Vision 9, PR 706).
+        let delete_id = delete_button_id(&actions_id("2.18.1"));
+        assert!(group.contains(&format!("id=\"{delete_id}\"")), "{group}");
     }
 
     #[test]

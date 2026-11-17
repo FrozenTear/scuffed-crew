@@ -211,6 +211,13 @@ pub fn row_menu_toggle_id(id: &str) -> String {
     format!("{id}-toggle")
 }
 
+/// Id of the Delete button inside a [`RowActions`] with this id stem. A
+/// delete dialog gives focus back to it, or to [`row_menu_toggle_id`] when
+/// Delete is folded away (phone).
+pub fn delete_button_id(id: &str) -> String {
+    format!("{id}-delete")
+}
+
 /// Id of the overflow group the "Actions" button controls.
 fn row_menu_group_id(id: &str) -> String {
     format!("{id}-more")
@@ -505,14 +512,98 @@ fn tab_wraps_to(shift: bool, inside: bool, at_first: bool, at_last: bool) -> Opt
 /// Default id stem of a [`FormModal`]. One form dialog is open at a time, so
 /// the ids are unique on the page.
 const FORM_MODAL_ID: &str = "form-modal";
+/// "Keep editing" of the discard prompt; focus goes there when it shows.
+const FORM_MODAL_KEEP_ID: &str = "form-modal-keep";
+
+/// What a request to close the form dialog (Escape, the backdrop, Cancel)
+/// does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloseRequest {
+    /// Close now: nothing was typed.
+    Close,
+    /// A field changed: ask before the draft is dropped.
+    AskDiscard,
+    /// A save is running: the dialog stays, so the request cannot be sent
+    /// twice and its answer is not lost.
+    Ignore,
+}
+
+fn close_request(submitting: bool, changed: bool) -> CloseRequest {
+    if submitting {
+        CloseRequest::Ignore
+    } else if changed {
+        CloseRequest::AskDiscard
+    } else {
+        CloseRequest::Close
+    }
+}
+
+/// Move focus back to where a dialog was opened from, once it is gone, and
+/// only when focus was lost with it (it sits on the body). A flow that moved
+/// focus on purpose (a result line) keeps it. `ids` are tried in order and
+/// the first one that is shown wins: a row's Delete button is in the row on
+/// desktop, while on phone it is folded behind "Actions".
+pub(crate) fn restore_focus_if_lost_soon(ids: Vec<String>) {
+    if ids.is_empty() {
+        return;
+    }
+    dioxus::core::spawn_forever(async move {
+        #[cfg(feature = "web")]
+        {
+            gloo_timers::future::TimeoutFuture::new(0).await;
+        }
+        restore_focus_if_lost(&ids);
+    });
+}
+
+#[cfg(target_arch = "wasm32")]
+fn restore_focus_if_lost(ids: &[String]) {
+    use wasm_bindgen::JsCast;
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return;
+    };
+    let lost = match (document.active_element(), document.body()) {
+        (None, _) => true,
+        (Some(active), Some(body)) => active.is_same_node(Some(body.as_ref())),
+        (Some(_), None) => false,
+    };
+    if !lost {
+        return;
+    }
+    for id in ids {
+        let Some(el) = document.get_element_by_id(id) else {
+            continue;
+        };
+        if el.get_client_rects().length() == 0 {
+            continue;
+        }
+        if let Ok(el) = el.dyn_into::<web_sys::HtmlElement>() {
+            let _ = el.focus();
+            return;
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn restore_focus_if_lost(ids: &[String]) {
+    let _ = ids;
+}
+
+/// The ids a closed dialog gives focus back to, in order.
+fn restore_ids(primary: Option<String>, fallback: Option<String>) -> Vec<String> {
+    primary.into_iter().chain(fallback).collect()
+}
 
 /// The edit dialog: a titled modal with the form fields as children, Cancel
 /// and a solid submit button, and a live line that carries the save state
 /// and the server's reason for a failed save.
 ///
-/// It opens with focus on its title, keeps Tab inside, and closes on Escape.
-/// Pass `restore_focus_id` (the button that opened it) to get focus back
-/// there on Cancel or Escape. `submit_label` replaces "Save". `error` is the
+/// It opens with focus on its title and keeps Tab inside. Escape, the
+/// backdrop and Cancel close it, except while it saves (they are ignored)
+/// and once a field changed (it asks "Keep editing" or "Discard changes"
+/// first). Pass `restore_focus_id` (the button that opened it) to get focus
+/// back there when it closes, by any path; `restore_focus_fallback` is tried
+/// when that one is not shown. `submit_label` replaces "Save". `error` is the
 /// failure text; keep the server's reason in it.
 #[component]
 pub fn FormModal(
@@ -526,6 +617,7 @@ pub fn FormModal(
     #[props(default)] submit_label: Option<String>,
     #[props(default)] error: Option<String>,
     #[props(default)] restore_focus_id: Option<String>,
+    #[props(default)] restore_focus_fallback: Option<String>,
     children: Element,
 ) -> Element {
     if !open {
@@ -541,14 +633,14 @@ pub fn FormModal(
             wide,
             submit_label,
             error,
-            restore_focus_id,
+            restore_focus: restore_ids(restore_focus_id, restore_focus_fallback),
             {children}
         }
     }
 }
 
 /// The open dialog. Split from `FormModal` so the focus effect runs once per
-/// open.
+/// open, and the "changed" flag starts clean on every open.
 #[component]
 fn FormModalOpen(
     title: String,
@@ -559,40 +651,45 @@ fn FormModalOpen(
     wide: bool,
     submit_label: Option<String>,
     error: Option<String>,
-    restore_focus_id: Option<String>,
+    restore_focus: Vec<String>,
     children: Element,
 ) -> Element {
     let title_id = format!("{FORM_MODAL_ID}-title");
     let status_id = format!("{FORM_MODAL_ID}-status");
     let focus_title = title_id.clone();
     use_effect(move || focus_element_by_id(&focus_title));
+    // Closed by any path (Cancel, Escape, a save that went through): focus
+    // goes back to the opener, unless the flow already moved it.
+    use_drop(move || restore_focus_if_lost_soon(restore_focus.clone()));
 
-    let close = use_callback(move |_: ()| {
-        on_close.call(());
-        if let Some(id) = restore_focus_id.clone() {
-            focus_element_by_id_soon(id);
+    // Set by any input or change inside the body, so a typed draft is never
+    // dropped by one stray Escape.
+    let mut changed = use_signal(|| false);
+    let mut asking = use_signal(|| false);
+    let request_close = use_callback(move |_: ()| match close_request(submitting, changed()) {
+        CloseRequest::Ignore => {}
+        CloseRequest::Close => on_close.call(()),
+        CloseRequest::AskDiscard => {
+            asking.set(true);
+            focus_element_by_id_soon(FORM_MODAL_KEEP_ID.to_string());
         }
     });
-    let state = match (&error, submitting) {
-        (_, true) => SaveState::Saving,
-        (Some(reason), false) => SaveState::Failed(reason.clone()),
-        (None, false) => SaveState::Idle,
-    };
-    let status = state.text();
-    let label = submit_label.unwrap_or_else(|| "Save".to_string());
-    let label = if submitting {
-        "Saving...".to_string()
-    } else {
-        label
-    };
+    let keep_editing = use_callback(move |_: ()| {
+        asking.set(false);
+        focus_element_by_id_soon(format!("{FORM_MODAL_ID}-title"));
+    });
     rsx! {
         div {
             class: "form-modal-overlay",
-            onclick: move |_| close.call(()),
+            onclick: move |_| request_close.call(()),
             onkeydown: move |evt| {
                 if key_cancels(&evt.key()) {
                     evt.stop_propagation();
-                    close.call(());
+                    if asking() {
+                        keep_editing.call(());
+                    } else {
+                        request_close.call(());
+                    }
                 } else if evt.key() == Key::Tab
                     && trap_tab_in(FORM_MODAL_ID, evt.modifiers().contains(Modifiers::SHIFT))
                 {
@@ -608,33 +705,105 @@ fn FormModalOpen(
                 aria_describedby: "{status_id}",
                 onclick: move |e| e.stop_propagation(),
                 h2 { id: "{title_id}", class: "form-modal-header", tabindex: "-1", "{title}" }
-                div { class: "form-modal-body", {children} }
-                div { class: "form-modal-footer",
-                    p {
-                        id: "{status_id}",
-                        class: if state.is_error() { "form-modal-status is-error" } else { "form-modal-status" },
-                        role: "status",
-                        "{status}"
-                    }
-                    button {
-                        class: "btn is-ghost",
-                        r#type: "button",
-                        onclick: move |_| close.call(()),
-                        "Cancel"
-                    }
-                    button {
-                        class: if danger { "btn is-danger" } else { "btn is-primary" },
-                        r#type: "button",
-                        // Busy, but still focusable: focus is not dropped
-                        // while the request runs.
-                        aria_disabled: if submitting { "true" },
-                        onclick: move |_| {
-                            if !submitting {
-                                on_submit.call(());
-                            }
-                        },
-                        "{label}"
-                    }
+                div {
+                    class: "form-modal-body",
+                    oninput: move |_| changed.set(true),
+                    onchange: move |_| changed.set(true),
+                    {children}
+                }
+                FormModalFooter {
+                    status_id: status_id.clone(),
+                    submitting,
+                    asking: asking(),
+                    danger,
+                    submit_label,
+                    error,
+                    on_cancel: move |_| request_close.call(()),
+                    on_submit,
+                    on_keep: move |_| keep_editing.call(()),
+                    on_discard: move |_| on_close.call(()),
+                }
+            }
+        }
+    }
+}
+
+/// The footer of the form dialog: the live status line (always rendered,
+/// only its text changes), then either Cancel and the submit button, or,
+/// while it asks about a changed draft, "Keep editing" and "Discard changes".
+#[component]
+fn FormModalFooter(
+    status_id: String,
+    submitting: bool,
+    asking: bool,
+    danger: bool,
+    submit_label: Option<String>,
+    error: Option<String>,
+    on_cancel: EventHandler<()>,
+    on_submit: EventHandler<()>,
+    on_keep: EventHandler<()>,
+    on_discard: EventHandler<()>,
+) -> Element {
+    let state = match (&error, submitting) {
+        (_, true) => SaveState::Saving,
+        (Some(reason), false) => SaveState::Failed(reason.clone()),
+        (None, false) => SaveState::Idle,
+    };
+    let status = if asking {
+        "You have unsaved changes. Discard them?".to_string()
+    } else {
+        state.text()
+    };
+    let label = submit_label.unwrap_or_else(|| "Save".to_string());
+    let label = if submitting {
+        "Saving...".to_string()
+    } else {
+        label
+    };
+    rsx! {
+        div { class: "form-modal-footer",
+            p {
+                id: "{status_id}",
+                class: if state.is_error() && !asking { "form-modal-status is-error" } else { "form-modal-status" },
+                role: "status",
+                "{status}"
+            }
+            if asking {
+                button {
+                    id: FORM_MODAL_KEEP_ID,
+                    class: "btn is-ghost",
+                    r#type: "button",
+                    onclick: move |_| on_keep.call(()),
+                    "Keep editing"
+                }
+                button {
+                    class: "btn is-danger",
+                    r#type: "button",
+                    onclick: move |_| on_discard.call(()),
+                    "Discard changes"
+                }
+            } else {
+                button {
+                    class: "btn is-ghost",
+                    r#type: "button",
+                    // Busy, but still focusable. A save that is running
+                    // cannot be walked away from.
+                    aria_disabled: if submitting { "true" },
+                    onclick: move |_| on_cancel.call(()),
+                    "Cancel"
+                }
+                button {
+                    class: if danger { "btn is-danger" } else { "btn is-primary" },
+                    r#type: "button",
+                    // Busy, but still focusable: focus is not dropped
+                    // while the request runs.
+                    aria_disabled: if submitting { "true" },
+                    onclick: move |_| {
+                        if !submitting {
+                            on_submit.call(());
+                        }
+                    },
+                    "{label}"
                 }
             }
         }
@@ -649,7 +818,8 @@ const CONFIRM_DIALOG_ID: &str = "confirm-dialog";
 /// Modal confirm. Opens with focus on Cancel, keeps Tab inside, closes on
 /// Esc, and names the action on the solid button (`confirm_label`, default
 /// "Confirm"). Pass `restore_focus_id` to move focus back to the button that
-/// opened it.
+/// opened it when the dialog closes (cancel or confirm), and
+/// `restore_focus_fallback` for when that button is not shown.
 #[component]
 pub fn ConfirmDialog(
     title: String,
@@ -658,6 +828,7 @@ pub fn ConfirmDialog(
     #[props(default = false)] danger: bool,
     #[props(default = "Confirm".to_string())] confirm_label: String,
     #[props(default)] restore_focus_id: Option<String>,
+    #[props(default)] restore_focus_fallback: Option<String>,
     on_confirm: EventHandler<()>,
     on_cancel: EventHandler<()>,
     #[props(default = None)] extra: Option<Element>,
@@ -671,7 +842,7 @@ pub fn ConfirmDialog(
             message,
             danger,
             confirm_label,
-            restore_focus_id,
+            restore_focus: restore_ids(restore_focus_id, restore_focus_fallback),
             on_confirm,
             on_cancel,
             extra,
@@ -687,19 +858,17 @@ fn ConfirmDialogOpen(
     message: String,
     danger: bool,
     confirm_label: String,
-    restore_focus_id: Option<String>,
+    restore_focus: Vec<String>,
     on_confirm: EventHandler<()>,
     on_cancel: EventHandler<()>,
     extra: Option<Element>,
 ) -> Element {
     use_effect(|| focus_element_by_id(CONFIRM_CANCEL_ID));
+    // Closed by Cancel, Escape or the confirm: focus goes back to the
+    // opener (the first one shown), unless the flow already moved it.
+    use_drop(move || restore_focus_if_lost_soon(restore_focus.clone()));
 
-    let cancel = use_callback(move |_: ()| {
-        on_cancel.call(());
-        if let Some(id) = restore_focus_id.clone() {
-            focus_element_by_id_soon(id);
-        }
-    });
+    let cancel = use_callback(move |_: ()| on_cancel.call(()));
     rsx! {
         div {
             class: "form-modal-overlay",
@@ -1171,6 +1340,14 @@ mod admin_pattern_tests {
         }
         let html = render(busy);
         assert!(html.contains("aria-disabled=\"true\""), "{html}");
+        // Cancel is busy too: a running save cannot be walked away from
+        // (Vision blocking 3 on PR 706).
+        assert!(
+            html.contains(
+                "<button class=\"btn is-ghost\" type=\"button\" aria-disabled=\"true\">Cancel</button>"
+            ),
+            "{html}"
+        );
         assert!(html.contains(">Saving...</button>"), "{html}");
         assert!(html.contains("role=\"status\">Saving...</p>"), "{html}");
 
@@ -1187,6 +1364,106 @@ mod admin_pattern_tests {
             }
         }
         assert_eq!(render(closed), "");
+    }
+
+    #[test]
+    fn form_modal_close_is_ignored_while_saving_and_asks_once_a_field_changed() {
+        // Vision blocking 3 on PR 706: one Escape dropped a typed draft, and
+        // the dialog could be closed (and resubmitted) mid-save.
+        assert_eq!(close_request(true, false), CloseRequest::Ignore);
+        assert_eq!(close_request(true, true), CloseRequest::Ignore);
+        assert_eq!(close_request(false, true), CloseRequest::AskDiscard);
+        assert_eq!(close_request(false, false), CloseRequest::Close);
+
+        // Escape, the backdrop and Cancel all go through the same request,
+        // and the body marks the draft changed on any input or change.
+        let src = include_str!("admin_shared.rs");
+        let open = src
+            .split("fn FormModalOpen(")
+            .nth(1)
+            .and_then(|rest| rest.split("fn FormModalFooter(").next())
+            .expect("FormModalOpen");
+        assert!(
+            open.contains("onclick: move |_| request_close.call(())"),
+            "backdrop"
+        );
+        assert!(open.contains("request_close.call(());"), "Escape");
+        assert!(
+            open.contains("on_cancel: move |_| request_close.call(())"),
+            "Cancel"
+        );
+        assert!(open.contains("oninput: move |_| changed.set(true)"));
+        assert!(open.contains("onchange: move |_| changed.set(true)"));
+        assert!(
+            !open.contains("on_close.call(());\n                    }"),
+            "no direct close on Escape"
+        );
+    }
+
+    #[test]
+    fn form_modal_asks_before_discarding_with_the_live_line() {
+        fn app() -> Element {
+            rsx! {
+                FormModalFooter {
+                    status_id: "form-modal-status".to_string(),
+                    submitting: false,
+                    asking: true,
+                    danger: false,
+                    submit_label: None,
+                    error: Some("HTTP error 409: slug taken".to_string()),
+                    on_cancel: |_| {},
+                    on_submit: |_| {},
+                    on_keep: |_| {},
+                    on_discard: |_| {},
+                }
+            }
+        }
+        let html = render(app);
+        assert!(
+            html.contains(
+                "<p id=\"form-modal-status\" class=\"form-modal-status\" role=\"status\">You have unsaved changes. Discard them?</p>"
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains("<button id=\"form-modal-keep\" class=\"btn is-ghost\" type=\"button\">Keep editing</button>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("class=\"btn is-danger\" type=\"button\">Discard changes</button>"),
+            "{html}"
+        );
+        assert!(!html.contains(">Save</button>"), "{html}");
+        assert!(!html.contains(">Cancel</button>"), "{html}");
+    }
+
+    #[test]
+    fn closed_dialogs_give_focus_back_by_any_path() {
+        // Vision blocking 9 on PR 706: a save or a confirm left focus on the
+        // body, and a cancel aimed at a hidden "Actions" button.
+        assert_eq!(
+            restore_ids(Some("row-delete".into()), Some("row-toggle".into())),
+            ["row-delete", "row-toggle"]
+        );
+        assert_eq!(restore_ids(None, Some("t".into())), ["t"]);
+        assert!(restore_ids(None, None).is_empty());
+        let src = include_str!("admin_shared.rs");
+        for (start, end) in [
+            ("fn FormModalOpen(", "fn FormModalFooter("),
+            ("fn ConfirmDialogOpen(", "pub fn status_tone("),
+        ] {
+            let body = src
+                .split(start)
+                .nth(1)
+                .and_then(|rest| rest.split(end).next())
+                .expect(start);
+            assert!(
+                body.contains(
+                    "use_drop(move || restore_focus_if_lost_soon(restore_focus.clone()));"
+                ),
+                "{start}"
+            );
+        }
     }
 
     #[test]

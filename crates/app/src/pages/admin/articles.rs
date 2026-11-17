@@ -6,7 +6,7 @@ use crate::components::ui::{
 };
 use crate::components::{
     AdminDate, ConfirmDialog, DataTable, FormModal, RowActions, Toast, admin_list_pending,
-    row_menu_toggle_id, use_toast,
+    delete_button_id, row_menu_toggle_id, use_toast,
 };
 use crate::hooks::{ModalController, use_api_with};
 use crate::state::use_auth;
@@ -617,7 +617,10 @@ pub fn AdminArticles() -> Element {
             open: delete_modal.is_open(),
             danger: true,
             confirm_label: "Delete".to_string(),
-            restore_focus_id: delete_target.as_ref().map(|a| row_menu_toggle_id(&actions_id(&a.id))),
+            // Delete sits in the row on desktop and behind "Actions" on phone:
+            // focus goes back to whichever is shown.
+            restore_focus_id: delete_target.as_ref().map(|a| delete_button_id(&actions_id(&a.id))),
+            restore_focus_fallback: delete_target.as_ref().map(|a| row_menu_toggle_id(&actions_id(&a.id))),
             on_confirm: on_confirm_delete,
             on_cancel: on_cancel_delete,
         }
@@ -676,6 +679,7 @@ fn ArticlesTable(
                                         if can_delete {
                                             button {
                                                 r#type: "button",
+                                                id: delete_button_id(&actions_id(&a.id)),
                                                 class: "btn is-danger",
                                                 aria_label: "Delete {title}",
                                                 onclick: move |_| on_delete.call(delete.clone()),
@@ -931,6 +935,25 @@ mod tests {
         assert!(html.contains("id=\"article-a1-edit\""), "{html}");
         // Officers cannot delete: no Delete button at all.
         assert!(!html.contains(">Delete</button>"), "{html}");
+        // Admins get Delete with the id the delete dialog gives focus back
+        // to (Vision 9, PR 706).
+        fn admin_view() -> Element {
+            rsx! {
+                ArticlesTable {
+                    rows: vec![row("a1", "Tank basics", false)],
+                    can_delete: true,
+                    on_edit: |_| {},
+                    on_delete: |_| {},
+                    on_set_published: |_| {},
+                }
+            }
+        }
+        let html = render(admin_view);
+        let delete_id = delete_button_id(&actions_id("a1"));
+        assert!(
+            html.contains(&format!("id=\"{delete_id}\" class=\"btn is-danger\"")),
+            "{html}"
+        );
     }
 
     #[test]

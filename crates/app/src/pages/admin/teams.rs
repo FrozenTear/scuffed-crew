@@ -59,7 +59,20 @@ const OFFICER_TEAM_EDIT_DENIED: &str = "Only admins can edit teams right now.";
 enum RosterPhase {
     Loading,
     Ready,
+    /// Loaded, and loading again after a role change, removal or add. The
+    /// rows stay on screen, so the control that has focus is not removed
+    /// and Tab stays in the dialog.
+    Refreshing,
     Failed,
+}
+
+/// Phase while the roster loads: a first load shows the wait, a reload of a
+/// loaded roster keeps its rows.
+fn roster_load_phase(current: RosterPhase) -> RosterPhase {
+    match current {
+        RosterPhase::Ready | RosterPhase::Refreshing => RosterPhase::Refreshing,
+        RosterPhase::Loading | RosterPhase::Failed => RosterPhase::Loading,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,8 +88,8 @@ fn roster_panel(phase: RosterPhase, len: usize) -> RosterPanel {
     match phase {
         RosterPhase::Loading => RosterPanel::Loading,
         RosterPhase::Failed => RosterPanel::Error,
-        RosterPhase::Ready if len == 0 => RosterPanel::Empty,
-        RosterPhase::Ready => RosterPanel::Rows,
+        RosterPhase::Ready | RosterPhase::Refreshing if len == 0 => RosterPanel::Empty,
+        RosterPhase::Ready | RosterPhase::Refreshing => RosterPanel::Rows,
     }
 }
 
@@ -289,7 +302,9 @@ pub fn AdminTeams() -> Element {
             return;
         };
         let requested = team.id.clone();
-        roster_phase.set(RosterPhase::Loading);
+        // `peek`: reading the phase must not make this loader re-run.
+        let phase = roster_load_phase(*roster_phase.peek());
+        roster_phase.set(phase);
         match ApiClient::web()
             .fetch::<Vec<RosterEntry>>(&format!("/api/teams/{requested}/roster"))
             .await
@@ -1000,6 +1015,28 @@ mod tests {
         assert_eq!(roster_panel(RosterPhase::Ready, 0), RosterPanel::Empty);
         assert_eq!(roster_panel(RosterPhase::Ready, 2), RosterPanel::Rows);
         assert_eq!(roster_panel(RosterPhase::Loading, 0), RosterPanel::Loading);
+    }
+
+    #[test]
+    fn a_roster_reload_keeps_the_rows_and_their_focus() {
+        // Vision blocking 9 on PR 706: a role change swapped the table for a
+        // skeleton, removing the focused select, and Tab left the dialog.
+        assert_eq!(
+            roster_load_phase(RosterPhase::Ready),
+            RosterPhase::Refreshing
+        );
+        assert_eq!(
+            roster_load_phase(RosterPhase::Refreshing),
+            RosterPhase::Refreshing
+        );
+        assert_eq!(roster_panel(RosterPhase::Refreshing, 2), RosterPanel::Rows);
+        assert_eq!(roster_panel(RosterPhase::Refreshing, 0), RosterPanel::Empty);
+        // A first load and a retry after a failure still show the wait.
+        assert_eq!(
+            roster_load_phase(RosterPhase::Loading),
+            RosterPhase::Loading
+        );
+        assert_eq!(roster_load_phase(RosterPhase::Failed), RosterPhase::Loading);
     }
 
     #[test]

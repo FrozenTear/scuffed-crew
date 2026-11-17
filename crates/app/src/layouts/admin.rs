@@ -17,9 +17,11 @@ const ADMIN_CSS: &str = r#"
        and its one H1 in a `PageHeader`, so this wrapper adds no padding. */
     .admin-main {
         min-width: 0;
-        /* Wide admin content scrolls inside the admin area and never widens
-           the page. `overflow-y: auto` makes `overflow-x` compute to auto too. */
-        overflow-y: auto;
+        /* Wide admin content never widens the page. `clip` (not `auto`)
+           makes no scroll container, so a `position: sticky` bar inside
+           (the settings save bar) sticks to the viewport. Wide tables scroll
+           in their own `.data-table-scroll`. */
+        overflow-x: clip;
     }
     /* A page body that is not in a `PageShell` still gets the page gutters
        and the wide column, so it never runs edge to edge. */
@@ -29,7 +31,10 @@ const ADMIN_CSS: &str = r#"
         margin: 0 auto;
         padding: var(--space-section) var(--space-page);
     }
-    .admin-main:not(:has(> .ui-shell)) h1 {
+    /* Only a bare page's own title: `> h1`, so a page with its own header
+       (Brand settings' `.customise-header h1`) is never matched and its gap
+       does not depend on which stylesheet was injected first. */
+    .admin-main:not(:has(> .ui-shell)) > h1 {
         margin: 0 0 var(--space-section);
         font-family: var(--font-head);
         font-weight: var(--font-head-weight);
@@ -372,6 +377,16 @@ mod tests {
         ] {
             assert!(has_decl(&bare, decl), "{decl}: {bare}");
         }
+        // The fallback title rule reaches only a direct child h1. A
+        // descendant selector ties with `.customise .customise-header h1`
+        // (Brand settings) and the winner was load order (Vision nit 2 on
+        // PR 706).
+        assert!(
+            super::ADMIN_CSS.contains(".admin-main:not(:has(> .ui-shell)) > h1 {"),
+            "{}",
+            super::ADMIN_CSS
+        );
+        assert!(!super::ADMIN_CSS.contains(".admin-main:not(:has(> .ui-shell)) h1"));
     }
 
     #[test]

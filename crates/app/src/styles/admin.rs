@@ -875,6 +875,12 @@ pub const CSS: &str = r#"
         font-weight: var(--font-label-weight);
         line-height: var(--leading-ui);
     }
+    /* Fields scrolled into view (focus, find) stop above the stuck bar:
+       its 44px button, its padding and the phone tab bar. The fallback is
+       `0%`, not `0`: a unitless zero makes the whole calc() invalid. */
+    html:has(.settings-save-bar) {
+        scroll-padding-bottom: calc(var(--tab-bar-height, 0%) + var(--hit-target-min) + var(--space-6) + 1px);
+    }
     .settings-save-bar {
         position: sticky;
         bottom: var(--tab-bar-height, 0);
