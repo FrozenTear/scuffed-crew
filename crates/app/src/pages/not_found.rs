@@ -53,6 +53,11 @@ pub fn NotFound(segments: Vec<String>) -> Element {
         format!("/{}", segments.join("/"))
     };
 
+    // Anything deeper under /changelog offers both changelogs.
+    if segments.first().map(String::as_str) == Some("changelog") {
+        return rsx! { crate::pages::changelog::ChangelogNotFound { path } };
+    }
+
     rsx! {
         // The no-permission frame this view copies is a narrow page.
         PageShell { width: PageWidth::Narrow, class: "nf-page",

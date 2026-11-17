@@ -305,8 +305,7 @@ fn read_rows(img: &RgbImage, b: &Board, tint_sat: &[Option<f64>]) -> Vec<Option<
             read.push(None);
             continue;
         }
-        let y0 = (i64::from(r.top) + pyround(BAND.0 * s)).max(0) as usize;
-        let y1 = ((i64::from(r.top) + pyround(BAND.1 * s)).max(0) as usize).min(h as usize);
+        let (y0, y1) = digit_band(r, s, h);
         let mut segs: Vec<Option<reader::Segment>> = b
             .wins
             .iter()
@@ -835,29 +834,43 @@ pub(super) fn output_ink(out: &RgbImage) -> Plane {
     reader::neutral_ink(&image::DynamicImage::ImageRgb8(out.clone()))
 }
 
-/// Re-read a painted row from the output (`n` = [`output_ink`]) with the
-/// same geometry: every kept cell must read its kept value again.
-pub(super) fn reads_back(n: &Plane, b: &Board, row: &Row, kept: &KeptRow) -> bool {
-    let (h, s) = (n.h as u32, b.s);
-    let tpl = reader::templates_for(h);
+/// Rows `[y0, y1)` of a row's digit cells (the reader's analysis band),
+/// cut at the image height `h`. With the column windows `b.wins` they are
+/// the six digit cells of the row.
+pub(super) fn digit_band(row: &Row, s: f64, h: u32) -> (usize, usize) {
     let y0 = (i64::from(row.top) + pyround(BAND.0 * s)).max(0) as usize;
     let y1 = ((i64::from(row.top) + pyround(BAND.1 * s)).max(0) as usize).min(h as usize);
+    (y0, y1)
+}
+
+/// Read a row's six cells from `n` (an image's neutral ink) with the
+/// board's geometry.
+pub(super) fn read_row(n: &Plane, b: &Board, row: &Row) -> [Option<u32>; 6] {
+    let h = n.h as u32;
+    let tpl = reader::templates_for(h);
+    let band = digit_band(row, b.s, h);
     let mut segs: Vec<Option<reader::Segment>> = b
         .wins
         .iter()
-        .map(|&win| reader::segment_cell(n, (y0, y1), win, 0))
+        .map(|&win| reader::segment_cell(n, band, win, 0))
         .collect();
-    let band = reader::row_text_band(&segs);
-    kept.cells.iter().enumerate().all(|(k, kc)| {
-        let Some(mut seg) = segs[k].take() else {
-            return false;
-        };
-        reader::apply_row_band(&mut seg, band);
-        let Some(cell) = reader::prepare_cell(seg) else {
-            return false;
-        };
-        reader::read_cell(Some(&cell), tpl, k, false).value == Some(kc.value)
+    let text = reader::row_text_band(&segs);
+    std::array::from_fn(|k| {
+        let mut seg = segs[k].take()?;
+        reader::apply_row_band(&mut seg, text);
+        let cell = reader::prepare_cell(seg)?;
+        reader::read_cell(Some(&cell), tpl, k, false).value
     })
+}
+
+/// Re-read a painted row from the output (`n` = [`output_ink`]) with the
+/// same geometry: every kept cell must read its kept value again.
+pub(super) fn reads_back(n: &Plane, b: &Board, row: &Row, kept: &KeptRow) -> bool {
+    let read = read_row(n, b, row);
+    kept.cells
+        .iter()
+        .enumerate()
+        .all(|(k, kc)| read[k] == Some(kc.value))
 }
 
 /// Every piece of every cell of the verified rows, for calibration (tests).

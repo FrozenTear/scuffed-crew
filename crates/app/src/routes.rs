@@ -89,6 +89,10 @@ pub enum Route {
         StatsMatch { id: String },
         #[route("/patch-notes")]
         PatchNotes {},
+        // "What's changed". The URL always names the tab.
+        #[redirect("/changelog", || Route::Changelog { tab: "site".to_string() })]
+        #[route("/changelog/:tab")]
+        Changelog { tab: String },
         #[redirect("/strategies", || Route::StrategyBrowse {})]
         #[redirect("/matches", || Route::Home {})]
         #[route("/:..segments")]
