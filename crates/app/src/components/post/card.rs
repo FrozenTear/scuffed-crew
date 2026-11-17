@@ -7,6 +7,7 @@ use dioxus::prelude::*;
 
 use crate::components::chat::{ReactionBar, ReactionCount};
 use crate::components::ui::ChipRow;
+use crate::pages::article_author::{AUTHOR_FALLBACK, initials};
 use crate::util::pluralize;
 
 #[derive(Clone, Debug, PartialEq, serde::Deserialize)]
@@ -30,9 +31,6 @@ pub struct ReactionCountDto {
     #[serde(default)]
     pub reacted_by_me: bool,
 }
-
-/// Shown when a post carries no display name. The raw key is never shown.
-pub(crate) const AUTHOR_FALLBACK: &str = "Crew member";
 
 const CARD_CSS: &str = r#"
 .post-card {
@@ -187,27 +185,6 @@ fn author_name(name: Option<&str>) -> String {
         .filter(|name| !name.is_empty())
         .unwrap_or(AUTHOR_FALLBACK)
         .to_string()
-}
-
-/// Up to two initials, upper case, the same two the account avatar in the top
-/// bar shows: the first letter of the first two words, or the first two
-/// letters or digits of a single word.
-fn initials(name: &str) -> String {
-    let mut words = name.split_whitespace();
-    let (first, second) = (words.next().unwrap_or(""), words.next());
-    let picked: Vec<char> = match second {
-        Some(second) => first
-            .chars()
-            .take(1)
-            .chain(second.chars().take(1))
-            .collect(),
-        None => first
-            .chars()
-            .filter(|c| c.is_alphanumeric())
-            .take(2)
-            .collect(),
-    };
-    picked.into_iter().flat_map(char::to_uppercase).collect()
 }
 
 /// Each tag once (any case, first spelling kept), so the chip keys stay
@@ -381,6 +358,16 @@ mod tests {
 
     #[test]
     fn initials_match_the_account_avatar() {
+        // The shared helper the articles use, not a copy.
+        let prod = include_str!("card.rs").split("mod tests").next().unwrap();
+        assert!(
+            !prod.contains("fn initials("),
+            "a copy of article_author::initials"
+        );
+        assert!(
+            !prod.contains("const AUTHOR_FALLBACK"),
+            "a copy of the fallback name"
+        );
         assert_eq!(initials("Player02"), "PL");
         assert_eq!(initials("player two"), "PT");
         assert_eq!(initials(""), "");

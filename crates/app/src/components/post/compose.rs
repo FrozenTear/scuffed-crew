@@ -11,7 +11,7 @@ use super::card::FeedPost;
 use crate::components::ui::FieldError;
 use crate::components::{Toast, use_toast};
 use crate::util::log_client_error;
-use scuffed_api_client::ApiClient;
+use scuffed_api_client::{ApiClient, ClientError};
 
 #[derive(Serialize)]
 struct CreatePostBody {
@@ -26,7 +26,36 @@ const TAGS_HINT_ID: &str = "feed-compose-tags-hint";
 const ERROR_ID: &str = "feed-compose-error";
 
 const EMPTY_ERROR: &str = "Write something before you post.";
+/// Only a request that never reached the server blames the connection.
 const SEND_ERROR: &str = "Couldn't publish your post. Check your connection and try again.";
+const RELAY_OFF_ERROR: &str = "Posting is off on this site: no chat relay is set up. An admin can set one on the admin Relay page.";
+const KEY_ERROR: &str =
+    "Posting needs a server-managed key. Set one up under Account keys in your account menu.";
+const SIGNED_OUT_ERROR: &str = "Your session ended. Log in again to post.";
+const FORBIDDEN_ERROR: &str = "Your account can't post to the feed.";
+const RATE_ERROR: &str = "Too many posts in a row. Wait a moment and try again.";
+const SERVER_ERROR: &str = "Couldn't publish your post. Try again in a moment.";
+
+/// What the error line says for a failed `POST /api/nostr/post`. The route
+/// answers 503 when no relay is configured, 400 for a member whose key is
+/// not server-managed and 404 when that key is missing.
+fn post_error_copy(err: &ClientError) -> &'static str {
+    match err {
+        ClientError::Network(_) => SEND_ERROR,
+        ClientError::Http { status: 503, .. } => RELAY_OFF_ERROR,
+        ClientError::Http { status: 404, .. } => KEY_ERROR,
+        ClientError::Http {
+            status: 400, body, ..
+        } if body.contains("Server-managed Nostr key") => KEY_ERROR,
+        ClientError::Http {
+            status: 400, body, ..
+        } if body.contains("must not be empty") => EMPTY_ERROR,
+        ClientError::Http { status: 401, .. } => SIGNED_OUT_ERROR,
+        ClientError::Http { status: 403, .. } => FORBIDDEN_ERROR,
+        ClientError::Http { status: 429, .. } => RATE_ERROR,
+        _ => SERVER_ERROR,
+    }
+}
 
 const COMPOSE_CSS: &str = r#"
 .post-compose {
@@ -139,7 +168,7 @@ pub fn PostCompose(
                         content.set(text);
                         tags_input.set(tags_text);
                     }
-                    error.set(SEND_ERROR.to_string());
+                    error.set(post_error_copy(&e).to_string());
                     toasts.show(Toast::error("Couldn't publish your post"));
                 }
             }
@@ -259,6 +288,52 @@ mod tests {
             "{html}"
         );
         assert!(!html.contains(" disabled"), "{html}");
+    }
+
+    #[test]
+    fn a_refused_post_says_why_and_only_a_network_error_blames_the_connection() {
+        let http = |status, body: &str| ClientError::http(status, body, None);
+        assert_eq!(
+            post_error_copy(&http(503, r#"{"error":"Relay not configured"}"#)),
+            RELAY_OFF_ERROR
+        );
+        assert_eq!(
+            post_error_copy(&http(
+                400,
+                r#"{"error":"Server-managed Nostr key required to publish posts"}"#
+            )),
+            KEY_ERROR
+        );
+        assert_eq!(
+            post_error_copy(&http(404, r#"{"error":"No server-managed key found"}"#)),
+            KEY_ERROR
+        );
+        assert_eq!(
+            post_error_copy(&http(400, r#"{"error":"Post content must not be empty"}"#)),
+            EMPTY_ERROR
+        );
+        assert_eq!(post_error_copy(&http(401, "")), SIGNED_OUT_ERROR);
+        assert_eq!(post_error_copy(&http(403, "")), FORBIDDEN_ERROR);
+        assert_eq!(post_error_copy(&http(429, "")), RATE_ERROR);
+        assert_eq!(post_error_copy(&http(500, "")), SERVER_ERROR);
+        assert_eq!(
+            post_error_copy(&ClientError::Network("offline".into())),
+            SEND_ERROR
+        );
+        for copy in [
+            RELAY_OFF_ERROR,
+            KEY_ERROR,
+            SIGNED_OUT_ERROR,
+            FORBIDDEN_ERROR,
+            RATE_ERROR,
+            SERVER_ERROR,
+        ] {
+            assert!(!copy.contains("connection"), "{copy}");
+            assert!(
+                !copy.contains('\u{2014}') && !copy.contains('\u{2013}'),
+                "{copy}"
+            );
+        }
     }
 
     #[test]
