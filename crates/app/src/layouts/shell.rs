@@ -442,6 +442,12 @@ fn entry_class(entry: &NavEntry, current: &Route) -> &'static str {
 }
 
 const SHELL_CSS: &str = r#"
+    /* WCAG 2.4.11: Tab, the skip link and in-page jumps scroll the page, so
+       the page keeps a focused control clear of the sticky top bar (and of
+       the phone tab bar below). Fixed on the page scroller once, for every page. */
+    html {
+        scroll-padding-top: calc(var(--nav-height-used) + var(--space-2));
+    }
     .skip-link {
         position: fixed;
         top: var(--space-2);
@@ -1074,9 +1080,13 @@ const SHELL_CSS: &str = r#"
         .admin-subnav {
             padding: 0 var(--space-2);
         }
-        .site-app {
-            /* The tab bar is one hit target plus its 1px top border. */
+        html {
+            /* The tab bar is one hit target plus its 1px top border. Set on
+               the root so the page scroller and the shell read one value. */
             --tab-bar-height: calc(var(--hit-target-min) + 1px + env(safe-area-inset-bottom, 0px));
+            scroll-padding-bottom: calc(var(--tab-bar-height) + var(--space-2));
+        }
+        .site-app {
             --shell-chrome-height: calc(var(--nav-height-used) + var(--tab-bar-height));
             padding-bottom: var(--tab-bar-height);
         }
@@ -1755,6 +1765,53 @@ mod tests {
         block
             .split(';')
             .any(|part| part.lines().any(|line| line.trim() == decl))
+    }
+
+    /// QA 696 nit 2 (WCAG 2.4.11): Tab and the skip link scroll the page,
+    /// so the page scroller keeps focus clear of the sticky top bar at every
+    /// width and of the fixed tab bar on phone, from the shell's own height
+    /// tokens, never a fixed length.
+    #[test]
+    fn focus_scrolling_clears_the_top_bar_and_the_phone_tab_bar() {
+        let (wide, phone) = SHELL_CSS
+            .split_once("@media (max-width: 820px) {")
+            .expect("phone block");
+        let root = css_rule(wide, "\n    html {");
+        assert!(
+            has_decl(
+                &root,
+                "scroll-padding-top: calc(var(--nav-height-used) + var(--space-2))"
+            ),
+            "{root}"
+        );
+        let phone_root = css_rule(phone, "\n        html {");
+        assert!(
+            has_decl(
+                &phone_root,
+                "--tab-bar-height: calc(var(--hit-target-min) + 1px + env(safe-area-inset-bottom, 0px))"
+            ),
+            "{phone_root}"
+        );
+        assert!(
+            has_decl(
+                &phone_root,
+                "scroll-padding-bottom: calc(var(--tab-bar-height) + var(--space-2))"
+            ),
+            "{phone_root}"
+        );
+        // The shell's padding and chrome height read the same root value.
+        let app = css_rule(phone, ".site-app {");
+        assert!(
+            has_decl(&app, "padding-bottom: var(--tab-bar-height)"),
+            "{app}"
+        );
+        // The tab bar is exactly that tall: one hit target plus its border.
+        let bar = css_rule(phone, ".site-tab-bar {");
+        assert!(has_decl(&bar, "min-height: var(--hit-target-min)"), "{bar}");
+        assert!(
+            has_decl(&bar, "border-top: 1px solid var(--border-strong)"),
+            "{bar}"
+        );
     }
 
     #[test]

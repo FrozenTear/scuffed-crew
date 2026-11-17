@@ -24,6 +24,7 @@ struct WikiPageData {
     content_markdown: String,
     /// Member who started the page. Shown only as a display name.
     author_member_id: String,
+    created_at: String,
     updated_at: String,
 }
 
@@ -43,6 +44,13 @@ struct WikiRevisionsResponse {
 /// article chrome (`ARTICLE_CSS`) plus the shared prose (`MARKDOWN_CSS`);
 /// fields, buttons and the error line come from `components/ui`.
 const PAGE_CSS: &str = r#"
+.wiki-topic {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--accent-text);
+  overflow-wrap: anywhere;
+}
 .wiki-edit-form {
   display: flex;
   flex-direction: column;
@@ -305,6 +313,8 @@ pub fn WikiPage(topic: String) -> Element {
                         WikiHead {
                             title: page.title.clone(),
                             author: author_label(Some(&names), &page.author_member_id),
+                            topic: page.topic.clone(),
+                            created_at: page.created_at.clone(),
                             updated_at: page.updated_at.clone(),
                             // Saving needs membership (the API answers 403
                             // otherwise), so only a crew member gets Edit.
@@ -486,15 +496,18 @@ fn wiki_state_head(load: &Load<WikiPageData>) -> Element {
     }
 }
 
-/// Title, author line and the Edit and History controls.
+/// Title, topic line, author line and the Edit and History controls.
 ///
 /// The row only names who started the page, so the line reads
-/// "Player03 · Updated 10 Nov 2026" and does not claim who made the update.
+/// "Player03 · Created 2 Nov 2026 · Updated 10 Nov 2026" and does not claim
+/// who made the update.
 /// History keeps one label; `aria-expanded` carries its state.
 #[component]
 fn WikiHead(
     title: String,
     author: Option<String>,
+    topic: String,
+    created_at: String,
     updated_at: String,
     can_edit: bool,
     history_open: bool,
@@ -507,7 +520,11 @@ fn WikiHead(
         PageHeader {
             title,
             meta: rsx! {
+                p { class: "wiki-topic", "{topic}" }
                 ArticleByline { author,
+                    span { "Created" }
+                    {entry_date(&created_at)}
+                    span { class: "entry-sep", aria_hidden: "true", "·" }
                     span { "Updated" }
                     {entry_date(&updated_at)}
                 }
@@ -623,6 +640,8 @@ mod tests {
             WikiHead {
                 title: "Tank basics",
                 author: props.author,
+                topic: "tank-basics",
+                created_at: "2026-11-02T08:00:00Z",
                 updated_at: "2026-11-10T08:00:00Z",
                 can_edit: props.can_edit,
                 history_open: props.history_open,
@@ -666,6 +685,44 @@ mod tests {
             ),
             "{html}"
         );
+    }
+
+    /// QA 696 nit 4: the redesign had dropped the topic line and the
+    /// Created date; both are back, in the header, once each.
+    #[test]
+    fn head_shows_the_topic_line_and_the_created_date() {
+        let html = head(Some("Player03"), false, false);
+        assert_eq!(
+            html.matches("<p class=\"wiki-topic\">tank-basics</p>")
+                .count(),
+            1,
+            "{html}"
+        );
+        let h1 = html.find("<h1").expect("h1");
+        let topic = html.find("wiki-topic").expect("topic");
+        let byline = html.find("article-byline").expect("byline");
+        assert!(h1 < topic && topic < byline, "{html}");
+        let created = "<span>Created</span><time class=\"entry-date\" datetime=\"2026-11-02\">2 Nov 2026</time>";
+        assert_eq!(html.matches(created).count(), 1, "{html}");
+        let updated = html.find("<span>Updated</span>").expect("updated");
+        assert!(html.find(created).expect("created") < updated, "{html}");
+        // Without a known author the dates still read on their own.
+        let anon = head(None, false, false);
+        assert!(anon.contains(created), "{anon}");
+        assert!(!anon.contains("entry-author"), "{anon}");
+    }
+
+    #[test]
+    fn wiki_page_reads_the_created_date_from_the_api() {
+        let page: WikiPageData = serde_json::from_str(
+            r#"{"id":"wiki_page:1","topic":"tank-basics","title":"Tank basics",
+            "content_markdown":"x","author_member_id":"member:1",
+            "created_at":"2026-11-02T08:00:00Z","updated_at":"2026-11-10T08:00:00Z",
+            "is_active":true}"#,
+        )
+        .expect("page");
+        assert_eq!(page.created_at, "2026-11-02T08:00:00Z");
+        assert_eq!(page.topic, "tank-basics");
     }
 
     #[test]

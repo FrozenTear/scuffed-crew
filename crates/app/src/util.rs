@@ -426,7 +426,16 @@ pub fn season_url(path: &str, season: Option<&str>) -> String {
 
 /// Log a raw client error to the browser console. User-facing copy stays a
 /// plain sentence; the technical text goes here for whoever debugs it.
+/// A fetch the browser cancelled (`AbortError`): the page is being left, or
+/// the request was replaced. Not a failure, so it is never logged.
+pub fn is_aborted_fetch(err: &dyn std::fmt::Display) -> bool {
+    err.to_string().contains("AbortError")
+}
+
 pub fn log_client_error(what: &str, err: &dyn std::fmt::Display) {
+    if is_aborted_fetch(err) {
+        return;
+    }
     #[cfg(target_arch = "wasm32")]
     web_sys::console::warn_1(&format!("{what}: {err}").into());
     #[cfg(not(target_arch = "wasm32"))]
@@ -438,6 +447,48 @@ pub fn log_client_error(what: &str, err: &dyn std::fmt::Display) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// QA 696 nit 8: Firefox rejects an in-flight fetch with `AbortError`
+    /// when the page is left; that is not an error and is not logged.
+    #[test]
+    fn an_aborted_fetch_is_not_an_error() {
+        use scuffed_api_client::ClientError;
+        let aborted =
+            ClientError::Network("JsValue(AbortError: The operation was aborted. )".to_string());
+        assert!(is_aborted_fetch(&aborted));
+        assert!(!is_aborted_fetch(&ClientError::Network(
+            "JsValue(TypeError: NetworkError when attempting to fetch resource.)".to_string()
+        )));
+        assert!(!is_aborted_fetch(&ClientError::http(500, "{}", None)));
+        let src = include_str!("util.rs");
+        let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let log = prod
+            .split("pub fn log_client_error(")
+            .nth(1)
+            .expect("log_client_error");
+        let guard = log.find("if is_aborted_fetch(err)").expect("abort guard");
+        let warn = log.find("console::warn_1").expect("warn");
+        assert!(guard < warn, "the abort check runs before the log");
+
+        // The page-level guard for the bundle's own fetch: only AbortError
+        // is marked handled.
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/boot-theme.js");
+        let script = std::fs::read_to_string(path).expect("assets/boot-theme.js");
+        assert_eq!(
+            script
+                .matches("addEventListener(\"unhandledrejection\"")
+                .count(),
+            1,
+            "{script}"
+        );
+        assert!(
+            script.contains(
+                "if (reason && reason.name === \"AbortError\") {\n    event.preventDefault();"
+            ),
+            "{script}"
+        );
+        assert_eq!(script.matches("preventDefault()").count(), 1, "{script}");
+    }
 
     #[test]
     fn truncate_chars_is_length_safe() {

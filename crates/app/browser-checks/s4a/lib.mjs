@@ -39,7 +39,19 @@ export class Jar {
     if (!this.quiet) console.log(method, path, r.status, (typeof j === 'string' ? j : JSON.stringify(j)).slice(0, 160));
     return { status: r.status, j };
   }
-  async login(name) { const r = await this.req('POST', '/api/auth/local/login', { username: name, password: PW }); if (r.status !== 200) throw new Error('login ' + name + ' ' + r.status); return this; }
+  // A fresh stack rate-limits logins (the S2 seed logs in just before): on
+  // a 429, wait the server's `retry_after` (1 to 10 s) and try again, at
+  // most 3 times, the same as the S2 Jar. Any other status fails at once.
+  async login(name) {
+    for (let attempt = 0; ; attempt++) {
+      const r = await this.req('POST', '/api/auth/local/login', { username: name, password: PW });
+      if (r.status === 200) return this;
+      if (r.status !== 429 || attempt >= 3) throw new Error('login ' + name + ' ' + r.status);
+      const wait = Math.min(Math.max(Number(r.j && r.j.retry_after) || 1, 1), 10);
+      console.log(`login ${name}: 429, retrying in ${wait} s`);
+      await sleep(wait * 1000);
+    }
+  }
 }
 export const rows = j => Array.isArray(j) ? j : (j && (j.data || j.items)) || [];
 export async function adminJar(quiet = true) { return new Jar(quiet).login('TestAdmin'); }

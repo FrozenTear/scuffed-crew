@@ -160,13 +160,28 @@ fn NewsIndex(
     }
 }
 
+/// The card's own id, from the announcement id: letters and digits kept,
+/// everything else a `-`, so the fragment needs no escaping.
+fn news_anchor(id: &str) -> String {
+    let slug: String = id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    format!("news-{slug}")
+}
+
 /// "Pinned" is a word in a badge next to the title, so it does not rest on
 /// colour or position.
+///
+/// News has no page of its own, so the title links to the card itself (a
+/// permalink), like Blog and Wiki cards link to theirs. The pill sits outside
+/// the link: the link's name is the title alone.
 fn render_news_card(a: &Announcement, names: Option<&AuthorNames>) -> Element {
+    let anchor = news_anchor(&a.id);
     rsx! {
-        article { key: "{a.id}", class: "entry-row",
+        article { key: "{a.id}", id: "{anchor}", class: "entry-row",
             h2 {
-                span { "{a.title}" }
+                a { href: "#{anchor}", "{a.title}" }
                 if a.pinned {
                     // A real space, so the name reads "Notice 1 Pinned".
                     " "
@@ -259,12 +274,55 @@ mod tests {
         assert!(!html.contains("<main"), "{html}");
         assert!(
             html.contains(
-                "<h2><span>Notice 1</span> <span class=\"ui-pill ui-pill--neutral\">Pinned</span></h2>"
+                "<h2><a href=\"#news-announcement-1\">Notice 1</a> <span class=\"ui-pill ui-pill--neutral\">Pinned</span></h2>"
             ),
             "{html}"
         );
-        assert!(html.contains("<h2><span>Notice 2</span></h2>"), "{html}");
+        assert!(
+            html.contains("<h2><a href=\"#news-announcement-2\">Notice 2</a></h2>"),
+            "{html}"
+        );
         assert_eq!(html.matches(">Pinned<").count(), 1, "{html}");
+    }
+
+    /// Vision nit 11 / QA 696 nit 5: the title is the card's link, as on
+    /// Blog and Wiki. News has no page of its own, so the link is the card's
+    /// permalink. One link per card, no button inside it, and the link's name
+    /// is the title alone (the Pinned pill is outside it).
+    #[test]
+    fn the_title_is_the_cards_one_link() {
+        let html = render(
+            Load::Ready(vec![item(1, true), item(2, false)]),
+            Some(names()),
+            1,
+        );
+        for n in [1, 2] {
+            assert!(
+                html.contains(&format!(
+                    "<article id=\"news-announcement-{n}\" class=\"entry-row\">"
+                )),
+                "{html}"
+            );
+            assert_eq!(
+                html.matches(&format!("href=\"#news-announcement-{n}\""))
+                    .count(),
+                1,
+                "{html}"
+            );
+        }
+        let cards = html.split("<article").skip(1).collect::<Vec<_>>();
+        assert_eq!(cards.len(), 2, "{html}");
+        for card in cards {
+            let card = card.split("</article>").next().unwrap_or_default();
+            assert_eq!(card.matches("<a ").count(), 1, "{card}");
+            assert!(!card.contains("<button"), "{card}");
+            let link = card
+                .split("<a ")
+                .nth(1)
+                .and_then(|l| l.split("</a>").next());
+            assert!(!link.unwrap_or_default().contains("Pinned"), "{card}");
+        }
+        assert_eq!(news_anchor("announcement:x9_Z"), "news-announcement-x9-Z");
     }
 
     #[test]
@@ -363,7 +421,7 @@ mod tests {
 
         let second = render(Load::Ready(items), Some(names()), 2);
         assert_eq!(second.matches("class=\"entry-row\"").count(), 2, "{second}");
-        assert!(second.contains("<span>Notice 12</span>"), "{second}");
+        assert!(second.contains(">Notice 12</a>"), "{second}");
         assert!(!second.contains("Pinned"), "{second}");
     }
 }

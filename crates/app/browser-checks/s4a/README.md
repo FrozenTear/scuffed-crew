@@ -45,14 +45,16 @@ tournament in registration so Home shows its Teams table and Tournaments
 panel. Both are safe to rerun. Seed output and saved sessions go to `.state/`
 (gitignored).
 
-The `withdraw` group in `fix1.mjs` withdraws Applicant01's application. Run
-`npm run reapply` to give Applicant01 a pending application again before the
-next run.
+The `withdraw` group in `fix1.mjs` withdraws Applicant01's application.
+`npm run reapply` gives Applicant01 a pending application again; run it after
+every `fix1` run, before `keys` (which checks the withdraw trigger) or another
+`fix1`.
 
 ## 3. Run
 
 ```bash
 npm run fix1
+npm run reapply   # fix1 withdrew Applicant01; keys needs the pending application
 npm run keys
 npm run shots
 ```

@@ -16,3 +16,15 @@
     // Storage blocked: the OS preference decides, as before.
   }
 })();
+
+// QA 696 nit 8: leaving a page while a fetch is in flight (the app bundle
+// itself, or an API call) makes Firefox reject that fetch with an
+// AbortError. Nothing failed: the page is going away. Mark only that
+// rejection handled, so it is not reported as an uncaught error. Every
+// other rejection still reaches the console.
+window.addEventListener("unhandledrejection", function (event) {
+  var reason = event.reason;
+  if (reason && reason.name === "AbortError") {
+    event.preventDefault();
+  }
+});
