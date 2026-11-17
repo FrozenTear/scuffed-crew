@@ -75,8 +75,10 @@ impl BrandDraft {
     /// stored value is not an edit.
     ///
     /// The same "changed" rules as [`save_body`]: the accent through
-    /// [`accent_changed`], the font by value. A draft is unsaved exactly when
-    /// Save would send at least one key.
+    /// [`accent_changed`], the font by value. When Save is not locked, a
+    /// draft is unsaved exactly when Save would send a request. A locked
+    /// draft (a changed accent that fails the contrast check) is unsaved,
+    /// but Save sends nothing for it.
     fn is_unsaved(&self, saved: &SavedBrand) -> bool {
         accent_changed(self, saved) || self.font != saved.font
     }
@@ -1225,14 +1227,16 @@ mod tests {
         // Typing that purple as a new accent is still locked by the fill floor.
         assert!(save_body(&draft(TEST_FILL_ONLY_ACCENT), &stored).is_none());
 
-        // Changing the accent to another failing one still locks Save.
+        // The stored failing accent typed in another case is no change, so
+        // it does not lock Save.
         let mut other = BrandDraft::from_saved(&stored);
         other.accent = TEST_BLOCKED_ACCENT.to_uppercase();
         assert!(
             save_body(&other, &stored).is_some(),
             "same accent, any case"
         );
-        // The field takes hex without the `#` too.
+        // Changing the accent to another failing one still locks Save. The
+        // field takes hex without the `#` too.
         other.accent = "e91e63".into();
         assert!(
             Verdict::of(&other, &stored).blocked(),
@@ -1380,6 +1384,64 @@ mod tests {
             .expect("save handler");
         assert!(handler.contains("save_request(&draft.read(), &saved_now.read())"));
         assert!(!handler.contains("save_body("), "{handler}");
+    }
+
+    /// Site review 4, nit 6: the words match the rules. The API doc says the
+    /// font is sent only when it changed, so over a stored "urbanist" a pick
+    /// of Urbanist sends nothing. The is_unsaved doc does not claim a locked
+    /// draft gets a request, and the lock comment sits on the lock assertion.
+    #[test]
+    fn docs_and_comments_match_the_save_rules() {
+        // Behaviour the doc describes.
+        let explicit = SavedBrand::from_settings(&settings_with_font(TEST_MINT_ACCENT, "urbanist"));
+        let mut pick_urbanist = BrandDraft::from_saved(&explicit);
+        pick_urbanist.font = DisplayFont::Urbanist;
+        assert!(save_request(&pick_urbanist, &explicit).is_none());
+        let plex =
+            SavedBrand::from_settings(&settings_with_font(TEST_MINT_ACCENT, "ibm-plex-sans"));
+        let mut back = BrandDraft::from_saved(&plex);
+        back.font = DisplayFont::Urbanist;
+        let request = save_request(&back, &plex).expect("font changed");
+        assert_eq!(request.brand_font_display.as_deref(), Some(""));
+
+        // Compared with line breaks folded, as the page wraps at 76 columns.
+        let doc = include_str!("../../../../../docs/api/site-settings.md")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            doc.contains("sends `brand_font_display` only when the font differs from the"),
+            "{doc}"
+        );
+        assert!(
+            doc.contains("over a stored `\"urbanist\"`, picking Urbanist sends nothing"),
+            "{doc}"
+        );
+
+        let src = include_str!("brand_settings.rs");
+        let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let guard_doc = prod
+            .split("fn is_unsaved")
+            .next()
+            .and_then(|head| head.rsplit("/// True when this draft differs").next())
+            .expect("is_unsaved doc");
+        assert!(!guard_doc.contains("exactly when\n    /// Save would send at least one key"));
+        assert!(guard_doc.contains("A locked\n    /// draft"), "{guard_doc}");
+
+        let tests = src.split("#[cfg(test)]\nmod tests").nth(1).unwrap();
+        let lock = tests
+            .find("// Changing the accent to another failing one still locks Save.")
+            .expect("lock comment");
+        let failing = tests
+            .find("other.accent = \"e91e63\".into();")
+            .expect("failing accent");
+        let same = tests
+            .find("other.accent = TEST_BLOCKED_ACCENT.to_uppercase();")
+            .expect("same accent");
+        assert!(
+            same < lock && lock < failing,
+            "the comment sits on the lock assertion"
+        );
     }
 
     /// The leave guard (`is_unsaved`) and Save agree on "changed": a draft

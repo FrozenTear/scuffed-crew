@@ -17,10 +17,13 @@ The list is `BRAND_FONT_DISPLAY_ALLOWED` in `scuffed-types`, checked with
 `is_allowed_brand_font_display`. The value is an id from that list. It is
 never a font name, a file path or a URL.
 
-The brand settings page (`/admin/brand`) stores `""` when the admin picks
-Urbanist or presses Reset to default, the same as the accent's empty
-default. It sends the key only when the font changed. `"urbanist"` stays a
-valid value for API callers and reads the same as `""`.
+The brand settings page (`/admin/brand`) sends `brand_font_display` only
+when the font differs from the stored one, compared as fonts (`""` and
+`"urbanist"` are both Urbanist). When it does send Urbanist, by a pick or by
+Reset to default, it sends `""`, the same as the accent's empty default. So
+over a stored `"urbanist"`, picking Urbanist sends nothing and the stored
+value stays. `"urbanist"` stays a valid value for API callers and reads the
+same as `""`.
 
 ## Reading
 
