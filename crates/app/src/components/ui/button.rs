@@ -95,11 +95,14 @@ pub const BTN_CSS: &str = r#"
   outline: var(--focus-ring-width) solid var(--focus-ring);
   outline-offset: var(--focus-ring-offset);
 }
-/* Busy: still focusable, so focus is not dropped while a request runs. */
+/* Not ready or busy: still focusable, so focus is not dropped. Only a
+   button that says it is working (`aria-busy`) shows the progress cursor;
+   one that is waiting for input (an empty Send) is just not available. */
 .btn[aria-disabled="true"] {
   opacity: 0.6;
-  cursor: progress;
+  cursor: not-allowed;
 }
+.btn[aria-disabled="true"][aria-busy="true"] { cursor: progress; }
 "#;
 
 /// `btn` class string for the first (primary) action of a row or a later one.

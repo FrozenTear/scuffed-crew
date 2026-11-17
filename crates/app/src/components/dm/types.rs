@@ -174,27 +174,11 @@ pub fn peer_label(pubkey: &str, server_name: Option<&str>, members: &[DmMember])
         .unwrap_or_else(|| truncate_pubkey(pubkey))
 }
 
-/// Up to two initials for an avatar, the same rule as the article byline and
-/// the account avatar: two words give the first letter of each ("Player Two"
-/// is "PT"), one word its first two letters or digits ("Player02" is "PL").
+/// Up to two initials for an avatar: the shared rule
+/// (`components::ui::avatar::name_initials`) the account avatar and the
+/// article byline use too ("Player02" is "P2", "Player Two" is "PT").
 pub fn avatar_initials(name: &str) -> String {
-    let mut words = name.split_whitespace();
-    let (first, second) = (words.next().unwrap_or(""), words.next());
-    let picked: Vec<char> = match second {
-        Some(second) => first
-            .chars()
-            .filter(|c| c.is_alphanumeric())
-            .take(1)
-            .chain(second.chars().filter(|c| c.is_alphanumeric()).take(1))
-            .collect(),
-        None => first
-            .chars()
-            .filter(|c| c.is_alphanumeric())
-            .take(2)
-            .collect(),
-    };
-    let out: String = picked.into_iter().flat_map(char::to_uppercase).collect();
-    if out.is_empty() { "?".to_string() } else { out }
+    crate::components::ui::avatar::name_initials(name)
 }
 
 /// Render an RFC3339 timestamp as a relative label ("2m", "3h", "5d").
@@ -252,9 +236,10 @@ mod tests {
 
     #[test]
     fn avatar_initials_take_two_characters() {
-        assert_eq!(avatar_initials("Player02"), "PL");
+        assert_eq!(avatar_initials("Player02"), "P2");
+        assert_eq!(avatar_initials("Player03"), "P3");
         assert_eq!(avatar_initials("Player Two"), "PT");
-        assert_eq!(avatar_initials("npub1\u{2026}abcdef"), "NP");
+        assert_eq!(avatar_initials("npub1\u{2026}abcdef"), "N1");
         assert_eq!(avatar_initials(""), "?");
     }
 

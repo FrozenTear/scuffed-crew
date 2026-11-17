@@ -7,7 +7,7 @@ use crate::components::ui::{
 };
 use crate::components::{
     ADMIN_PAGE_SIZE, AdminDate, ConfirmDialog, DataTable, FormModal, RowActions, Toast,
-    admin_pending, list_cap_notice, row_menu_toggle_id, use_toast,
+    admin_list_pending, list_cap_notice, row_menu_toggle_id, use_toast,
 };
 use crate::hooks::{ModalController, use_api_list};
 use scuffed_api_client::ApiClient;
@@ -207,7 +207,7 @@ pub fn AdminAnnouncements() -> Element {
     let list = {
         let data = announcements.data.read();
         match data.as_ref().and_then(|d| d.as_ref()) {
-            None => admin_pending(&announcements, "announcements"),
+            None => admin_list_pending(&announcements, "announcements"),
             Some(all) => {
                 let total = all.len();
                 let rows = page_slice(all, page(), ADMIN_PAGE_SIZE).to_vec();

@@ -273,6 +273,25 @@ pub const CSS: &str = r#"
             align-items: center;
         }
         .row-actions.is-inline-desktop .row-menu-toggle { display: none; }
+        /* A long overflow set opened on desktop: compact buttons that wrap
+           in the cell, and the row's other cells stay level with the
+           Actions button instead of floating to the middle of a tall row. */
+        .row-actions:not(.is-inline-desktop) > .row-menu-group {
+            flex-direction: row;
+            flex-wrap: wrap;
+            align-items: center;
+            /* Capped, so the open group wraps instead of widening the
+               Actions column and squeezing the name and status columns. */
+            max-width: calc(var(--hit-target-min) * 8);
+        }
+        .data-table tr:has(.row-actions.is-open:not(.is-inline-desktop)) td {
+            vertical-align: top;
+        }
+        /* Text cells drop to the middle of the 44px Actions button. */
+        .data-table tr:has(.row-actions.is-open:not(.is-inline-desktop))
+            td:not(.cell-actions):not(.cell-select) {
+            padding-top: calc(var(--space-1) + var(--space-3));
+        }
     }
 
     /* Older page lists. New pages use the shared Pager. */
@@ -398,9 +417,12 @@ pub const CSS: &str = r#"
             order: 4;
             flex: 0 1 auto;
         }
-        .is-cards .data-table td.cell-meta:not(:empty) ~ td.cell-meta:not(:empty)::before {
+        /* The dot ends a fact that has another after it, so when the line
+           wraps the dot stays at the end of the line above and the next
+           line never starts with a lone dot. */
+        .is-cards .data-table td.cell-meta:not(:empty):has(~ td.cell-meta:not(:empty))::after {
             content: "\00B7";
-            margin-inline-end: var(--space-2);
+            margin-inline-start: var(--space-2);
             color: var(--text-3);
             font-weight: var(--font-body-weight);
         }
@@ -852,6 +874,14 @@ pub const CSS: &str = r#"
         font-size: var(--text-lg);
         font-weight: var(--font-label-weight);
         line-height: var(--leading-ui);
+    }
+    .settings-save-bar {
+        position: sticky;
+        bottom: var(--tab-bar-height, 0);
+        z-index: 5;
+        padding: var(--space-3) 0;
+        background: var(--bg);
+        border-top: 1px solid var(--border);
     }
     .settings-divider {
         height: 1px;

@@ -62,11 +62,11 @@ pub(crate) const MY_REPORTS_CSS: &str = r#"
     padding: var(--space-3) var(--table-pad-x);
     text-align: left;
     white-space: nowrap;
-    font-family: var(--font-body);
+    font-family: var(--font-head);
     font-size: var(--text-xs);
     font-weight: var(--table-header-weight);
     text-transform: uppercase;
-    letter-spacing: var(--tracking-caps);
+    letter-spacing: var(--font-head-tracking);
     color: var(--table-header-fg);
     border-bottom: 1px solid var(--table-row-border);
 }
@@ -146,7 +146,7 @@ pub(crate) const MY_REPORTS_CSS: &str = r#"
         font-size: var(--text-xs);
         font-weight: var(--font-label-weight);
         text-transform: uppercase;
-        letter-spacing: var(--tracking-caps);
+        letter-spacing: var(--font-head-tracking);
         color: var(--table-header-fg);
     }
     .my-reports-table .my-reports-actions-cell { padding-top: var(--space-3); }
@@ -174,6 +174,11 @@ pub fn MyReports() -> Element {
     let mut list_error = use_signal(|| None::<ClientError>);
     let reports = use_resource(move || async move {
         let _generation = refresh();
+        // A guest gets the sign-in wall; asking the API would only 401.
+        // Reading auth here reruns the fetch once the session is known.
+        if !auth.read().is_logged_in() {
+            return None;
+        }
         match ApiClient::web()
             .fetch::<StatReportList>("/api/stat-reports")
             .await

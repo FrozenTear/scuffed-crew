@@ -30,6 +30,21 @@ const CONVERSATION_LIST_CSS: &str = r#"
     list-style: none;
 }
 .dm-inbox-list > li { margin: 0; }
+.dm-sync-notice {
+    flex: 0 0 auto;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2) var(--space-3);
+    margin: 0;
+    padding: var(--space-2) var(--space-4);
+    border-bottom: 1px solid var(--border);
+    background: var(--warn-soft);
+    color: var(--text);
+    font-size: var(--text-sm);
+    line-height: var(--leading-body);
+}
 .dm-inbox-body {
     flex: 1 1 auto;
     min-height: 0;
@@ -154,6 +169,9 @@ pub fn ConversationList(
     #[props(default)] failure: Option<DmLoadFailure>,
     #[props(default)] on_retry: Option<EventHandler<()>>,
     refreshing: bool,
+    /// Said under the head when the last relay sync failed.
+    #[props(default)]
+    notice: Option<String>,
     on_refresh: EventHandler<()>,
     on_compose: EventHandler<()>,
 ) -> Element {
@@ -195,6 +213,22 @@ pub fn ConversationList(
             }
         }
         p { id: INBOX_STATUS_ID, class: "visually-hidden", role: "status", "{status}" }
+        if let Some(notice) = notice {
+            div { class: "dm-sync-notice",
+                p { role: "status", class: "dm-sync-notice-text", "{notice}" }
+                button {
+                    class: "btn is-ghost",
+                    r#type: "button",
+                    aria_disabled: if refreshing { "true" },
+                    onclick: move |_| {
+                        if !refreshing {
+                            on_refresh.call(());
+                        }
+                    },
+                    "Try again"
+                }
+            }
+        }
         if let Some(failure) = failure {
             div { class: "dm-inbox-body",
                 DmFailureNotice {
@@ -210,8 +244,9 @@ pub fn ConversationList(
                         title: "No conversations yet",
                         message: "Messages you send or get from crew members show up here. Start one with New message.",
                         actions: rsx! {
+                            // New in the head is the primary; one primary per view.
                             button {
-                                class: "btn is-primary",
+                                class: "btn is-ghost",
                                 r#type: "button",
                                 "aria-haspopup": "dialog",
                                 onclick: move |_| compose_from_empty.call(()),
@@ -224,7 +259,8 @@ pub fn ConversationList(
                 }
             }
         } else {
-            ul { class: "dm-inbox-list", aria_label: "Conversations",
+            // The aside around the list is already named "Conversations".
+            ul { class: "dm-inbox-list",
                 for c in conversations.iter() {
                     li { key: "{c.peer_pubkey}",
                         {render_row(c, selected_peer.as_deref(), &members)}
@@ -388,7 +424,7 @@ mod tests {
         );
         assert!(html.contains(">Player02<"), "{html}");
         assert!(!html.contains("npub1"), "{html}");
-        assert!(html.contains("<span class=\"dm-avatar\" aria-hidden=\"true\">PL</span>"));
+        assert!(html.contains("<span class=\"dm-avatar\" aria-hidden=\"true\">P2</span>"));
         // The count is a word too, not a coloured dot alone.
         assert!(
             html.contains("1<span class=\"visually-hidden\"> unread</span>"),
@@ -402,6 +438,26 @@ mod tests {
         let html = list(vec![], ConversationListState::Ready, None);
         assert!(html.contains("No conversations yet"), "{html}");
         assert!(html.contains(">New message</button>"), "{html}");
+    }
+
+    #[test]
+    fn a_failed_sync_is_said_with_a_way_to_try_again() {
+        let html = render_routed(|| {
+            rsx! {
+                ConversationList {
+                    conversations: vec![],
+                    load_state: ConversationListState::Ready,
+                    selected_peer: None,
+                    refreshing: false,
+                    notice: Some("Could not reach the relay. Showing saved messages.".to_string()),
+                    on_refresh: move |_| {},
+                    on_compose: move |_| {},
+                }
+            }
+        });
+        assert!(html.contains("Could not reach the relay"), "{html}");
+        assert!(html.contains(">Try again</button>"), "{html}");
+        assert!(!html.contains("aria-label=\"Conversations\""), "{html}");
     }
 
     #[test]

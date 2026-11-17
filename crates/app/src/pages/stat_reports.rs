@@ -562,21 +562,20 @@ const REPORT_MONTHS: [&str; 12] = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
 
-/// Short stamp in a fixed offset from UTC.
-///
-/// Same year as `now_year` is `Nov 8, 15:30`. Any other year is
-/// `Nov 8, 2025, 15:30`. `minutes_east` is local time minus UTC (`-300` is
-/// five hours behind). My reports passes the browser offset and the viewer
-/// year. Native tests pass `0` and an explicit year.
-pub(crate) fn format_report_local(at: DateTime<Utc>, minutes_east: i32, now_year: i32) -> String {
+/// Short stamp in a fixed offset from UTC: `8 Nov 2026, 15:30`, the admin
+/// date (`AdminDate`, day first, always with the year) plus the clock.
+/// `minutes_east` is local time minus UTC (`-300` is five hours behind).
+/// My reports passes the browser offset. Native tests pass `0`.
+pub(crate) fn format_report_local(at: DateTime<Utc>, minutes_east: i32) -> String {
     let local = at + chrono::Duration::minutes(i64::from(minutes_east));
     let month = REPORT_MONTHS[local.month0() as usize];
-    let clock = format!("{:02}:{:02}", local.hour(), local.minute());
-    if local.year() == now_year {
-        format!("{month} {}, {clock}", local.day())
-    } else {
-        format!("{month} {}, {}, {clock}", local.day(), local.year())
-    }
+    format!(
+        "{} {month} {}, {:02}:{:02}",
+        local.day(),
+        local.year(),
+        local.hour(),
+        local.minute()
+    )
 }
 
 /// Sent and delete dates on `/reports`, in the viewer zone.
@@ -584,18 +583,7 @@ pub(crate) fn format_report_local(at: DateTime<Utc>, minutes_east: i32, now_year
 /// Wasm reads the offset and the current year from the browser. Native builds
 /// (unit tests) use UTC with the same short layout, and do not append `UTC`.
 pub(crate) fn format_report_when_local(at: DateTime<Utc>) -> String {
-    format_report_local(at, viewer_minutes_east(at), viewer_now_year())
-}
-
-fn viewer_now_year() -> i32 {
-    #[cfg(all(feature = "web", target_arch = "wasm32"))]
-    {
-        let year = js_sys::Date::new_0().get_full_year();
-        if let Ok(year) = i32::try_from(year) {
-            return year;
-        }
-    }
-    Utc::now().year()
+    format_report_local(at, viewer_minutes_east(at))
 }
 
 fn viewer_minutes_east(at: DateTime<Utc>) -> i32 {
@@ -1191,8 +1179,9 @@ fn member_row(
     let usable = is_report_id(&row.id);
     let delete_id = control_id("delete", &row.id);
     let withdraw_id = control_id("withdraw", &row.id);
-    let delete_label = format!("Delete report {}", row.id);
-    let withdraw_label = format!("Withdraw training consent for report {}", row.id);
+    // Named by what the member can see (date and size), not the record id.
+    let delete_label = format!("Delete report from {when}, {size}");
+    let withdraw_label = format!("Withdraw training consent for the report from {when}, {size}");
     let delete_report_id = row.id.clone();
     let withdraw_report_id = row.id.clone();
     let training = row.training_consent;
@@ -1208,7 +1197,14 @@ fn member_row(
             }
             td {
                 span { class: "report-card-label", "Status" }
-                "{status}"
+                crate::components::ui::Pill {
+                    tone: if training {
+                        crate::components::ui::PillTone::Neutral
+                    } else {
+                        crate::components::ui::PillTone::Warn
+                    },
+                    "{status}"
+                }
             }
             td {
                 span { class: "report-card-label", "Training consent" }
@@ -1350,6 +1346,10 @@ pub(crate) fn OfficerReportsBody(
     display_names: Vec<Option<String>>,
     #[props(default)] truncated: bool,
     #[props(default)] on_retry: EventHandler<()>,
+    /// The H1 and the intro. The admin route says both in its own
+    /// `PageHeader`, so it turns them off here.
+    #[props(default = true)]
+    heading: bool,
 ) -> Element {
     rsx! {
         crate::styles::StyleOnce { id: "scuffed-css-pages-stat_reports-reports-css", css: REPORTS_CSS }
@@ -1360,21 +1360,21 @@ pub(crate) fn OfficerReportsBody(
             },
             OfficerScreen::Loading => rsx! {
                 div { class: "reports-page",
-                    h1 { "Reports" }
+                    if heading { h1 { "Reports" } }
                     p { class: "reports-status", "{COPY_LOADING_ALL}" }
                 }
             },
             OfficerScreen::Error => rsx! {
                 div { class: "reports-page",
-                    h1 { "Reports" }
-                    p { class: "reports-intro", "{COPY_INTRO_ALL}" }
+                    if heading { h1 { "Reports" } }
+                    if heading { p { class: "reports-intro", "{COPY_INTRO_ALL}" } }
                     p { class: "reports-status reports-error", "{visible_load_error(COPY_ERROR_ALL, http_status, &error_body, retry_after_seconds)}" }
                     {retry_button(OFFICER_REPORTS_RETRY_ID, on_retry)}
                 }
             },
             OfficerScreen::SignIn => rsx! {
                 div { class: "reports-page",
-                    h1 { "Reports" }
+                    if heading { h1 { "Reports" } }
                     p { class: "reports-status", "{COPY_OFFICER_SIGN_IN}" }
                     a {
                         href: "{login_return_href(OFFICER_REPORTS_PATH)}",
@@ -1386,21 +1386,21 @@ pub(crate) fn OfficerReportsBody(
             },
             OfficerScreen::Empty => rsx! {
                 div { class: "reports-page",
-                    h1 { "Reports" }
-                    p { class: "reports-intro", "{COPY_INTRO_ALL}" }
+                    if heading { h1 { "Reports" } }
+                    if heading { p { class: "reports-intro", "{COPY_INTRO_ALL}" } }
                     p { class: "reports-status", "{COPY_EMPTY_ALL}" }
                 }
             },
             OfficerScreen::Disabled => rsx! {
                 div { class: "reports-page",
-                    h1 { "Reports" }
+                    if heading { h1 { "Reports" } }
                     p { class: "reports-status", "{COPY_DISABLED}" }
                 }
             },
             OfficerScreen::Ready => rsx! {
                 div { class: "reports-page",
-                    h1 { "Reports" }
-                    p { class: "reports-intro", "{COPY_INTRO_ALL}" }
+                    if heading { h1 { "Reports" } }
+                    if heading { p { class: "reports-intro", "{COPY_INTRO_ALL}" } }
                     div { class: "reports-scroll",
                         table { class: "reports-table reports-table-officer",
                             thead {
@@ -1849,30 +1849,32 @@ mod tests {
     #[test]
     fn format_report_local_uses_the_viewer_offset_and_year() {
         let noon = at(2026, 11, 8, 15, 30);
-        assert_eq!(format_report_local(noon, 0, 2026), "Nov 8, 15:30");
-        assert_eq!(format_report_local(noon, -300, 2026), "Nov 8, 10:30");
-        assert_eq!(format_report_local(noon, 330, 2026), "Nov 8, 21:00");
+        assert_eq!(format_report_local(noon, 0), "8 Nov 2026, 15:30");
+        assert_eq!(format_report_local(noon, -300), "8 Nov 2026, 10:30");
+        assert_eq!(format_report_local(noon, 330), "8 Nov 2026, 21:00");
         assert_eq!(
-            format_report_local(at(2026, 11, 8, 2, 15), -300, 2026),
-            "Nov 7, 21:15"
+            format_report_local(at(2026, 11, 8, 2, 15), -300),
+            "7 Nov 2026, 21:15"
         );
         assert_eq!(
-            format_report_local(at(2026, 1, 1, 0, 30), -120, 2026),
-            "Dec 31, 2025, 22:30"
+            format_report_local(at(2026, 1, 1, 0, 30), -120),
+            "31 Dec 2025, 22:30"
         );
         assert_eq!(
-            format_report_local(at(2025, 11, 8, 15, 30), 0, 2026),
-            "Nov 8, 2025, 15:30"
+            format_report_local(at(2027, 1, 2, 3, 4), 0),
+            "2 Jan 2027, 03:04"
         );
-        assert_eq!(
-            format_report_local(at(2027, 1, 2, 3, 4), 0, 2026),
-            "Jan 2, 2027, 03:04"
-        );
-        let shown = format_report_local(noon, -300, 2026);
+        // The same day first, year always, as AdminDate.
+        let shown = format_report_local(noon, -300);
         assert!(!shown.contains("UTC"), "{shown}");
-        assert!(!shown.contains("2026"), "{shown}");
+        assert!(
+            shown.starts_with(
+                &crate::components::admin_shared::admin_short_date("2026-11-08")
+                    .unwrap()
+                    .1
+            )
+        );
         assert_plain(&shown);
-        assert_plain("Nov 8, 2025, 15:30");
         assert!(
             REPORTS_CSS.contains(".report-when { white-space: nowrap;"),
             "narrow screens keep the date on one line"
@@ -1989,11 +1991,7 @@ mod tests {
             scheduled,
             format!("Deleted on {}", format_report_when_local(when))
         );
-        if Utc::now().year() == 2026 {
-            assert_eq!(scheduled, "Deleted on Nov 8, 15:30");
-        } else {
-            assert!(scheduled.contains("2026"), "{scheduled}");
-        }
+        assert_eq!(scheduled, "Deleted on 8 Nov 2026, 15:30");
         assert_plain(&scheduled);
         let kept = expiry_text(true, Some(when));
         assert_eq!(kept, "No deletion date");

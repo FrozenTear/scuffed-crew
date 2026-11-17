@@ -613,7 +613,8 @@ pub fn AdminSettings() -> Element {
 
                 div { class: "form-section-card",
                     fieldset { class: "admin-check-group", aria_describedby: "settings-sections-hint",
-                        legend { class: "field-label", "Visible sections" }
+                        // A sub-group like Identity pack, Shell and Skin: same level.
+                        legend { class: "settings-subhead", "Visible sections" }
                         p { class: "settings-hint", id: "settings-sections-hint",
                             "Hero is always on. Empty data may still hide some blocks depending on shell."
                         }
@@ -689,10 +690,14 @@ pub fn AdminSettings() -> Element {
                                 input {
                                     class: "field-input",
                                     id: "settings-bg-color",
-                                    placeholder: "empty = theme default",
+                                    placeholder: "Theme default",
+                                    aria_describedby: "settings-bg-color-hint",
                                     value: "{page_bg_color}",
                                     oninput: move |e| page_bg_color.set(e.value()),
                                 }
+                            }
+                            p { class: "settings-hint", id: "settings-bg-color-hint",
+                                "Leave empty to use the theme's own background."
                             }
                         }
                         button {
@@ -955,8 +960,10 @@ pub fn AdminSettings() -> Element {
         }
 
         // Save sits under the form, with its live line. Both are rendered in
-        // every state; while the settings load, Save does nothing.
-        div { class: "admin-form-actions",
+        // every state; while the settings load, Save does nothing. The bar
+        // sticks to the bottom of the view (above the phone tab bar), so Save
+        // and a failure are in sight anywhere on this long page.
+        div { class: "admin-form-actions settings-save-bar",
             button {
                 class: "btn is-primary",
                 r#type: "button",

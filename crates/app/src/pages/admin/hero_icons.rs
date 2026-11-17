@@ -16,7 +16,7 @@ use scuffed_types::api::HeroIconMemberCount;
 use crate::components::ui::{
     EmptyCard, InlineConfirm, PageHeader, PageShell, Pill, PillTone, btn_class,
 };
-use crate::components::{DataTable, RowActions, admin_pending, list_cap_notice};
+use crate::components::{DataTable, RowActions, admin_list_pending, list_cap_notice};
 use crate::hero_icons_ui as text;
 use crate::hooks::use_api_list;
 use crate::routes::Route;
@@ -89,7 +89,7 @@ pub fn AdminHeroIcons() -> Element {
     let list = {
         let data = members.data.read();
         match data.as_ref().and_then(|d| d.as_ref()) {
-            None => admin_pending(&members, "hero icon counts"),
+            None => admin_list_pending(&members, "hero icon counts"),
             Some(rows) if rows.is_empty() => rsx! {
                 EmptyCard {
                     title: "No hero icons yet",

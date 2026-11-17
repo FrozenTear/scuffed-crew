@@ -153,6 +153,9 @@ const COMPOSE_CSS: &str = r#"
 "#;
 
 const MAX_BODY_CHARS: usize = 2000;
+/// Suggestions shown at once; typing narrows the rest.
+const MAX_SUGGESTIONS: usize = 8;
+const SELF_RECIPIENT: &str = "That is your own key. Pick another member.";
 
 #[derive(Debug, Serialize)]
 struct DmSendBody {
@@ -188,9 +191,15 @@ pub fn DmComposeModal(
     let mut state = use_signal(|| SendState::Idle);
     let mut suggestions_open = use_signal(|| false);
     let mut active = use_signal(|| None::<usize>);
+    // The member picked from the list: (name shown in To, their key). Any
+    // later edit of To clears it, so the field shows a name, never a key.
+    let mut picked = use_signal(|| None::<(String, String)>);
+    // Bumped on focus and input, so a close queued by an earlier blur does
+    // not shut the list the visitor is typing into now.
+    let mut blur_generation = use_signal(|| 0u64);
     let mut toast = use_toast();
 
-    let members_for_send = members.clone();
+    let members_for_send = others(&members, self_pubkey.as_deref());
     let do_send = use_callback({
         let self_pubkey = self_pubkey.clone();
         move |_: ()| {
@@ -204,8 +213,21 @@ pub fn DmComposeModal(
                 ));
                 return;
             }
-            let Some(recipient_hex) = resolve_recipient(&recipient_trimmed, &members_for_send)
-            else {
+            if resolve_to(
+                &recipient_trimmed,
+                picked.peek().as_ref(),
+                &members_for_send,
+            )
+            .is_some_and(|hex| is_self(&hex, self_pubkey.as_deref()))
+            {
+                state.set(SendState::Invalid(SELF_RECIPIENT));
+                return;
+            }
+            let Some(recipient_hex) = resolve_to(
+                &recipient_trimmed,
+                picked.peek().as_ref(),
+                &members_for_send,
+            ) else {
                 toast.show(Toast::error("Recipient not recognized"));
                 state.set(SendState::Invalid(
                     "Recipient not recognized. Pick a member from the list, or paste an npub or a hex key.",
@@ -248,6 +270,7 @@ pub fn DmComposeModal(
                         };
                         body.set(String::new());
                         recipient_input.set(String::new());
+                        picked.set(None);
                         on_sent.call((recipient_hex, optimistic));
                     }
                     Err(ClientError::Http { status: 412, .. }) => {
@@ -281,34 +304,41 @@ pub fn DmComposeModal(
     let body_text = body();
     let body_len = body_text.chars().count();
     let body_over = body_len > MAX_BODY_CHARS;
-    let resolved_recipient = resolve_recipient(&recipient_trimmed, &members);
+    // Everyone but the viewer: nobody can pick themselves.
+    let candidates = others(&members, self_pubkey.as_deref());
+    let picked_now = picked();
+    let resolved_any = resolve_to(&recipient_trimmed, picked_now.as_ref(), &candidates);
+    let to_self = resolved_any
+        .as_deref()
+        .is_some_and(|hex| is_self(hex, self_pubkey.as_deref()));
+    let resolved_recipient = resolved_any.filter(|_| !to_self);
     let can_submit = !sending && body_problem(&body_text).is_none() && resolved_recipient.is_some();
-    let to_hint = recipient_hint(resolved_recipient.as_deref(), &members);
-
-    let query = recipient_trimmed.to_lowercase();
-    let filtered: Vec<DmMember> = if looks_like_pubkey(&query) {
-        Vec::new()
+    let to_hint = if to_self {
+        SELF_RECIPIENT.to_string()
     } else {
-        members
-            .iter()
-            .filter(|m| {
-                m.nostr_pubkey
-                    .as_deref()
-                    .is_some_and(|p| !p.trim().is_empty())
-            })
-            .filter(|m| query.is_empty() || m.display_name.to_lowercase().contains(&query))
-            .take(8)
-            .cloned()
-            .collect()
+        recipient_hint(resolved_recipient.as_deref(), &members)
     };
+
+    let (filtered, matching) = suggestions(&candidates, &recipient_trimmed);
+    let more_hint = (matching > filtered.len()).then(|| {
+        format!(
+            "Showing {} of {matching} members. Type more of a name to find the rest.",
+            filtered.len()
+        )
+    });
     let list_open = suggestions_open() && !filtered.is_empty();
     let active_index = active().filter(|i| *i < filtered.len());
     let active_id = active_index
         .filter(|_| list_open)
         .map(|i| option_id(&filtered[i].id));
-    let picks: Vec<String> = filtered
+    let picks: Vec<(String, String)> = filtered
         .iter()
-        .map(|m| m.nostr_pubkey.clone().unwrap_or_default())
+        .map(|m| {
+            (
+                m.display_name.clone(),
+                m.nostr_pubkey.clone().unwrap_or_default(),
+            )
+        })
         .collect();
     let count_cls = if body_over {
         "dm-compose-count is-over"
@@ -369,6 +399,8 @@ pub fn DmComposeModal(
                             autocomplete: "off",
                             oninput: move |e| {
                                 recipient_input.set(e.value());
+                                picked.set(None);
+                                *blur_generation.write() += 1;
                                 suggestions_open.set(true);
                                 active.set(None);
                                 if state.peek().is_error() {
@@ -393,7 +425,8 @@ pub fn DmComposeModal(
                                         Key::Enter if list_open => {
                                             if let Some(i) = active_index {
                                                 evt.prevent_default();
-                                                recipient_input.set(picks[i].clone());
+                                                recipient_input.set(picks[i].0.clone());
+                                                picked.set(Some(picks[i].clone()));
                                                 suggestions_open.set(false);
                                                 active.set(None);
                                             }
@@ -409,14 +442,21 @@ pub fn DmComposeModal(
                                     }
                                 }
                             },
-                            onfocus: move |_| suggestions_open.set(true),
+                            onfocus: move |_| {
+                                *blur_generation.write() += 1;
+                                suggestions_open.set(true);
+                            },
                             onblur: move |_| {
                                 // Delay close so a click on a suggestion still
-                                // registers before the list unmounts.
+                                // registers before the list unmounts. A focus
+                                // or keystroke since then cancels it.
+                                let at_blur = *blur_generation.peek();
                                 spawn(async move {
                                     #[cfg(feature = "web")]
                                     gloo_timers::future::TimeoutFuture::new(120).await;
-                                    suggestions_open.set(false);
+                                    if *blur_generation.peek() == at_blur {
+                                        suggestions_open.set(false);
+                                    }
                                 });
                             },
                         }
@@ -431,6 +471,7 @@ pub fn DmComposeModal(
                                     {
                                         let pk = m.nostr_pubkey.clone().unwrap_or_default();
                                         let pk_short = truncate_pubkey(&pk);
+                                        let name = m.display_name.clone();
                                         let selected = active_index == Some(i);
                                         rsx! {
                                             li {
@@ -442,7 +483,8 @@ pub fn DmComposeModal(
                                                 // mousedown beats blur so the pick actually fires
                                                 onmousedown: move |e| {
                                                     e.prevent_default();
-                                                    recipient_input.set(pk.clone());
+                                                    recipient_input.set(name.clone());
+                                                    picked.set(Some((name.clone(), pk.clone())));
                                                     suggestions_open.set(false);
                                                     active.set(None);
                                                 },
@@ -452,6 +494,9 @@ pub fn DmComposeModal(
                                         }
                                     }
                                 }
+                            }
+                            if let Some(more) = more_hint.clone() {
+                                p { class: "field-hint", "{more}" }
                             }
                         }
                     }
@@ -496,6 +541,7 @@ pub fn DmComposeModal(
                             r#type: "button",
                             // Not `disabled`: a click says what is missing.
                             aria_disabled: if !can_submit { "true" },
+                            aria_busy: if sending { "true" },
                             onclick: move |_| do_send.call(()),
                             if sending { "Sending..." } else { "Send" }
                         }
@@ -550,6 +596,57 @@ fn recipient_hint(resolved: Option<&str>, members: &[DmMember]) -> String {
         None => {
             "Type a member name and pick from the list, or paste an npub or a hex key.".to_string()
         }
+    }
+}
+
+/// Members with a key, minus the viewer.
+fn others(members: &[DmMember], self_pubkey: Option<&str>) -> Vec<DmMember> {
+    members
+        .iter()
+        .filter(|m| {
+            m.nostr_pubkey
+                .as_deref()
+                .is_some_and(|p| !p.trim().is_empty() && !is_self(p, self_pubkey))
+        })
+        .cloned()
+        .collect()
+}
+
+fn is_self(hex: &str, self_pubkey: Option<&str>) -> bool {
+    self_pubkey
+        .is_some_and(|me| !me.trim().is_empty() && me.trim().eq_ignore_ascii_case(hex.trim()))
+}
+
+/// The To suggestions in name order, at most [`MAX_SUGGESTIONS`], and how
+/// many members match in all. Nothing while the input is a pasted key.
+fn suggestions(candidates: &[DmMember], input: &str) -> (Vec<DmMember>, usize) {
+    let query = input.trim().to_lowercase();
+    if looks_like_pubkey(&query) {
+        return (Vec::new(), 0);
+    }
+    let mut matching: Vec<DmMember> = candidates
+        .iter()
+        .filter(|m| query.is_empty() || m.display_name.to_lowercase().contains(&query))
+        .cloned()
+        .collect();
+    matching.sort_by_key(|m| m.display_name.to_lowercase());
+    let total = matching.len();
+    matching.truncate(MAX_SUGGESTIONS);
+    (matching, total)
+}
+
+/// The key To stands for: the picked member while To still shows their
+/// name, else whatever the typed text resolves to.
+fn resolve_to(
+    input: &str,
+    picked: Option<&(String, String)>,
+    members: &[DmMember],
+) -> Option<String> {
+    match picked {
+        Some((name, pk)) if name.trim() == input.trim() && !pk.trim().is_empty() => {
+            Some(pk.trim().to_ascii_lowercase())
+        }
+        _ => resolve_recipient(input, members),
     }
 }
 
@@ -669,6 +766,52 @@ mod tests {
         ];
         assert_eq!(resolve_recipient("Player03", &members), None);
         assert_eq!(resolve_recipient("player", &members), Some(hex_pk(1)));
+    }
+
+    #[test]
+    fn the_viewer_is_never_suggested_or_resolved_by_name() {
+        let me = hex_pk(0x01);
+        let members = vec![
+            member("Player01", Some(&me)),
+            member("Player02", Some(&hex_pk(0x02))),
+        ];
+        let rest = others(&members, Some(&me.to_ascii_uppercase()));
+        assert_eq!(rest.len(), 1);
+        assert_eq!(rest[0].display_name, "Player02");
+        let (shown, total) = suggestions(&rest, "player");
+        assert_eq!((shown.len(), total), (1, 1));
+        assert_eq!(resolve_recipient("Player01", &rest), None);
+        // A pasted own key still resolves, and the dialog refuses it.
+        assert!(is_self(&resolve_recipient(&me, &rest).unwrap(), Some(&me)));
+    }
+
+    #[test]
+    fn suggestions_are_sorted_and_capped_with_a_total() {
+        let members: Vec<DmMember> = (0..12u8)
+            .rev()
+            .map(|i| member(&format!("Player{i:02}"), Some(&hex_pk(i + 1))))
+            .collect();
+        let (shown, total) = suggestions(&members, "");
+        assert_eq!(total, 12);
+        assert_eq!(shown.len(), MAX_SUGGESTIONS);
+        assert_eq!(shown[0].display_name, "Player00");
+        assert_eq!(suggestions(&members, &hex_pk(3)).1, 0);
+    }
+
+    #[test]
+    fn a_pick_shows_the_name_and_sends_to_the_picked_key() {
+        let members = vec![
+            member("Player02", Some(&hex_pk(2))),
+            member("Player02", Some(&hex_pk(3))),
+        ];
+        let pick = ("Player02".to_string(), hex_pk(3));
+        // Two members share the name: the pick decides, the name alone does not.
+        assert_eq!(
+            resolve_to("Player02", Some(&pick), &members),
+            Some(hex_pk(3))
+        );
+        // Editing To drops the pick.
+        assert_eq!(resolve_to("Player0", Some(&pick), &members), None);
     }
 
     #[test]

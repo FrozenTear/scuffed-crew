@@ -235,7 +235,7 @@ mod tests {
             "{html}"
         );
         assert!(
-            html.contains("<span class=\"article-avatar\" aria-hidden=\"true\">PL</span>"),
+            html.contains("<span class=\"article-avatar\" aria-hidden=\"true\">P2</span>"),
             "{html}"
         );
         assert!(

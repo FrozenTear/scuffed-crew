@@ -368,7 +368,8 @@ mod tests {
             !prod.contains("const AUTHOR_FALLBACK"),
             "a copy of the fallback name"
         );
-        assert_eq!(initials("Player02"), "PL");
+        assert_eq!(initials("Player02"), "P2");
+        assert_eq!(initials("Player03"), "P3");
         assert_eq!(initials("player two"), "PT");
         assert_eq!(initials(""), "");
     }
@@ -381,7 +382,7 @@ mod tests {
             "{html}"
         );
         assert!(
-            html.contains("<span class=\"post-avatar\" aria-hidden=\"true\">PL</span>"),
+            html.contains("<span class=\"post-avatar\" aria-hidden=\"true\">P2</span>"),
             "{html}"
         );
         assert!(

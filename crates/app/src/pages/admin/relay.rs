@@ -196,7 +196,7 @@ pub fn AdminRelay() -> Element {
             Some(h) => {
                 let state = RelayState::of(h);
                 (
-                    rsx! { RelayDetails { health: h.clone(), on_retry: move |_| refresh += 1 } },
+                    rsx! { RelayDetails { health: h.clone() } },
                     summary_text(state),
                 )
             }
@@ -228,7 +228,7 @@ pub fn AdminRelay() -> Element {
 
 /// Everything under the header once the health check answered.
 #[component]
-fn RelayDetails(health: RelayHealth, on_retry: EventHandler<()>) -> Element {
+fn RelayDetails(health: RelayHealth) -> Element {
     let h = health;
     let state = RelayState::of(&h);
     let local_forum = forum_is_local(&h.forum_backend);
@@ -264,9 +264,9 @@ fn RelayDetails(health: RelayHealth, on_retry: EventHandler<()>) -> Element {
 
     let banner = match state {
         RelayState::Offline => rsx! {
+            // "Check again" in the header is the one retry; no second button.
             LoadError {
                 message: format!("The primary relay is offline. {offline_help}"),
-                on_retry: move |_| on_retry.call(()),
             }
         },
         RelayState::NotNeeded | RelayState::NotSet => rsx! {
@@ -402,7 +402,7 @@ mod tests {
     #[test]
     fn online_relay_shows_the_word_and_shape_and_no_error() {
         let html = render_routed(|| {
-            rsx! { RelayDetails { health: health(true, true, "nostr"), on_retry: |_| {} } }
+            rsx! { RelayDetails { health: health(true, true, "nostr") } }
         });
         assert!(
             html.contains(
@@ -425,11 +425,11 @@ mod tests {
     #[test]
     fn offline_relay_is_an_error_with_retry() {
         let html = render_routed(|| {
-            rsx! { RelayDetails { health: health(true, false, "nostr"), on_retry: |_| {} } }
+            rsx! { RelayDetails { health: health(true, false, "nostr") } }
         });
-        assert!(html.contains("role=\"alert\""), "{html}");
         assert!(html.contains("The primary relay is offline."), "{html}");
-        assert!(html.contains(">Retry</button>"), "{html}");
+        // One way to check again: the header button, not a second Retry.
+        assert!(!html.contains(">Retry</button>"), "{html}");
         assert!(html.contains("relay-shape is-offline"), "{html}");
         assert!(html.contains(">Offline</span>"), "{html}");
     }
@@ -437,7 +437,7 @@ mod tests {
     #[test]
     fn missing_relay_is_an_empty_state_with_a_next_step() {
         let html = render_routed(|| {
-            rsx! { RelayDetails { health: health(false, false, "nostr"), on_retry: |_| {} } }
+            rsx! { RelayDetails { health: health(false, false, "nostr") } }
         });
         assert!(html.contains("No relay is set"), "{html}");
         assert!(html.contains("NOSTR_RELAY_URL"), "{html}");

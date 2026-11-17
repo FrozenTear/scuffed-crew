@@ -234,16 +234,16 @@ impl RelayNote {
     }
 }
 
+/// Optional only while no relay is set up. Once one is configured, DMs and
+/// chat depend on it whatever the forum backend is, so a configured relay
+/// that cannot be reached needs a look (and agrees with /admin/relay).
 fn relay_note(h: &RelayHealth) -> Option<RelayNote> {
-    let forum_local = h.forum_backend.eq_ignore_ascii_case("local") || h.forum_backend.is_empty();
-    if !h.configured || (forum_local && !h.reachable) {
+    if !h.configured {
         Some(RelayNote::Optional)
-    } else if h.configured && !h.reachable {
+    } else if !h.reachable {
         Some(RelayNote::Offline)
-    } else if h.reachable {
-        Some(RelayNote::Online)
     } else {
-        None
+        Some(RelayNote::Online)
     }
 }
 
@@ -548,9 +548,14 @@ mod tests {
             relay_note(&health(false, false, "local")),
             Some(RelayNote::Optional)
         );
+        // Configured but down with a local forum: DMs and chat still need it.
         assert_eq!(
             relay_note(&health(true, false, "local")),
-            Some(RelayNote::Optional)
+            Some(RelayNote::Offline)
+        );
+        assert_eq!(
+            relay_note(&health(true, true, "local")),
+            Some(RelayNote::Online)
         );
         assert_eq!(
             relay_note(&health(true, false, "nostr")),

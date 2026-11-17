@@ -5,7 +5,7 @@ use crate::components::ui::inline_confirm::focus_element_by_id;
 use crate::components::ui::{
     EmptyCard, FieldError, PageHeader, PageShell, PageWidth, Pill, PillTone,
 };
-use crate::components::{FormStatus, SaveState, Toast, admin_pending, use_toast};
+use crate::components::{FormStatus, SaveState, Toast, admin_list_pending, use_toast};
 use crate::hooks::use_api;
 use scuffed_api_client::ApiClient;
 
@@ -271,7 +271,7 @@ pub fn AdminForum() -> Element {
     let body = {
         let data = tree.data.read();
         match data.as_ref().and_then(|d| d.as_ref()) {
-            None => admin_pending(&tree, "the forum structure"),
+            None => admin_list_pending(&tree, "the forum structure"),
             Some(cats) => {
                 let cats = cats.clone();
                 let options = cats.clone();

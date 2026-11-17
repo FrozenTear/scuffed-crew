@@ -8,7 +8,8 @@ use crate::components::ui::{
 };
 use crate::components::{
     ADMIN_PAGE_SIZE, AdminDate, ConfirmDialog, DataTable, FormModal, RowActions, SaveState,
-    StatusPill, Toast, admin_pending, list_cap_notice, load_error_text, status_label, use_toast,
+    StatusPill, Toast, admin_list_pending, list_cap_notice, load_error_text, status_label,
+    use_toast,
 };
 use crate::hooks::{ModalController, use_api_list};
 use scuffed_api_client::ApiClient;
@@ -40,6 +41,37 @@ struct Tournament {
 struct Game {
     id: String,
     name: String,
+}
+
+/// `game:abc` and `abc` are the same record.
+fn bare_game_id(id: &str) -> &str {
+    id.trim().strip_prefix("game:").unwrap_or(id.trim())
+}
+
+/// The tournament's game as a word: the API name, else the name of its
+/// `game_id` in the games list. "No game" only when it has none.
+fn tournament_game(t: &Tournament, games: &[Game]) -> String {
+    if let Some(name) = t
+        .game_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+    {
+        return name.to_string();
+    }
+    match t
+        .game_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        None => "No game".to_string(),
+        Some(id) => games
+            .iter()
+            .find(|g| bare_game_id(&g.id) == bare_game_id(id))
+            .map(|g| g.name.clone())
+            .unwrap_or_else(|| "Unknown game".to_string()),
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -678,11 +710,21 @@ pub fn AdminTournaments() -> Element {
 
     // --- Render ---
 
+    // Game names for the list and the detail header, from the games list the
+    // form loads too. The API's game_name wins when it sends one.
+    let game_list: Vec<Game> = games
+        .data
+        .read()
+        .as_ref()
+        .and_then(|d| d.as_ref())
+        .cloned()
+        .unwrap_or_default();
+
     let list = {
         let data = tournaments.data.read();
         let filter = status_filter();
         match data.as_ref().and_then(|d| d.as_ref()) {
-            None => admin_pending(&tournaments, "tournaments"),
+            None => admin_list_pending(&tournaments, "tournaments"),
             Some(all) => {
                 let shown = filter_tournaments(all, &filter);
                 let total = shown.len();
@@ -731,7 +773,7 @@ pub fn AdminTournaments() -> Element {
                                     let tid_next = t.id.clone();
                                     let name = t.name.clone();
                                     let format = format_label(&t.format);
-                                    let game_display = t.game_name.clone().unwrap_or_else(|| "No game".into());
+                                    let game_display = tournament_game(t, &game_list);
                                     let max_display = t
                                         .max_participants
                                         .map(|n| format!("{n} max"))
@@ -848,10 +890,7 @@ pub fn AdminTournaments() -> Element {
         let is_registration = tournament.status == "registration";
         let advance = next_status(&tournament.status);
         let format = format_label(&tournament.format);
-        let game = tournament
-            .game_name
-            .clone()
-            .unwrap_or_else(|| "No game".to_string());
+        let game = tournament_game(&tournament, &game_list);
         let max = tournament
             .max_participants
             .map(|n| format!("{n} max"))
@@ -1430,6 +1469,22 @@ mod tests {
             max_participants: None,
             starts_at: None,
         }
+    }
+
+    #[test]
+    fn the_game_comes_from_game_id_when_the_api_sends_no_name() {
+        let games = vec![Game {
+            id: "game:ow".into(),
+            name: "Overwatch".into(),
+        }];
+        let mut t = tournament("t1", "draft");
+        assert_eq!(tournament_game(&t, &games), "No game");
+        t.game_id = Some("ow".into());
+        assert_eq!(tournament_game(&t, &games), "Overwatch");
+        t.game_id = Some("gone".into());
+        assert_eq!(tournament_game(&t, &games), "Unknown game");
+        t.game_name = Some("Marvel Rivals".into());
+        assert_eq!(tournament_game(&t, &games), "Marvel Rivals");
     }
 
     #[test]

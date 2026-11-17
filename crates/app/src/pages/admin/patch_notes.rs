@@ -18,7 +18,7 @@ use crate::components::ui::{
 };
 use crate::components::{
     ADMIN_PAGE_SIZE, AccessDenied, AdminDate, ConfirmDialog, DataTable, FormModal, RowActions,
-    Toast, admin_pending, row_menu_toggle_id, use_toast,
+    Toast, admin_list_pending, row_menu_toggle_id, use_toast,
 };
 use crate::hooks::{ModalController, use_api};
 use crate::state::use_auth;
@@ -351,7 +351,7 @@ fn actions_id(version: &str) -> String {
     patch_field_id(Some(version), "actions")
 }
 
-/// "2 heroes · 1 section": what a note holds, for the list.
+/// "2 heroes, 1 section": what a note holds, for the list.
 fn contents_summary(note: &PatchNote) -> String {
     let count = |n: usize, one: &str, many: &str| {
         if n == 1 {
@@ -361,7 +361,7 @@ fn contents_summary(note: &PatchNote) -> String {
         }
     };
     format!(
-        "{} · {}",
+        "{}, {}",
         count(note.hero_updates.len(), "hero", "heroes"),
         count(note.sections.len(), "section", "sections")
     )
@@ -522,7 +522,7 @@ pub fn AdminPatchNotes() -> Element {
     let list = {
         let data = notes.data.read();
         match data.as_ref().and_then(|d| d.as_ref()) {
-            None => admin_pending(&notes, "patch notes"),
+            None => admin_list_pending(&notes, "patch notes"),
             Some(envelope) => {
                 let all = &envelope.data;
                 let total = all.len();
@@ -658,7 +658,9 @@ fn PatchNotesTable(
                     rsx! {
                         tr { key: "{note.version}",
                             td { class: "cell-who", code { class: "patch-version", "{note.version}" } }
-                            td { "data-label": "Title", "{title}" }
+                            // On phone the title is the line under the version,
+                            // not a labelled line after the meta.
+                            td { class: "cell-badge patch-title", "{title}" }
                             td { class: "cell-meta", "{contents}" }
                             td { class: "cell-meta num", AdminDate { iso: note.date.clone() } }
                             td { class: "cell-actions",
@@ -1260,9 +1262,9 @@ mod tests {
             html.contains("<th scope=\"col\" class=\"num\">Date</th>"),
             "{html}"
         );
-        assert!(html.contains(">0 heroes · 1 section</td>"), "{html}");
+        assert!(html.contains(">0 heroes, 1 section</td>"), "{html}");
         assert!(
-            html.contains("data-label=\"Title\">No title</td>"),
+            html.contains("class=\"cell-badge patch-title\">No title</td>"),
             "{html}"
         );
         assert!(html.contains("id=\"patch-2-18-1-edit\""), "{html}");
@@ -1311,9 +1313,9 @@ mod tests {
     #[test]
     fn contents_count_words() {
         let mut note = sample_note();
-        assert_eq!(contents_summary(&note), "0 heroes · 1 section");
+        assert_eq!(contents_summary(&note), "0 heroes, 1 section");
         note.sections.clear();
-        assert_eq!(contents_summary(&note), "0 heroes · 0 sections");
+        assert_eq!(contents_summary(&note), "0 heroes, 0 sections");
         assert_eq!(patch_field_id(None, "url"), "patch-new-url");
     }
 }

@@ -7,7 +7,7 @@ use crate::components::ui::{
 };
 use crate::components::{
     ADMIN_PAGE_SIZE, ConfirmDialog, DataTable, FormModal, RowActions, SaveState, Toast,
-    admin_pending, list_cap_notice, load_error_text, status_label, use_toast,
+    admin_list_pending, list_cap_notice, load_error_text, status_label, use_toast,
 };
 use crate::hooks::{ModalController, use_api_list};
 use crate::routes::Route;
@@ -552,7 +552,7 @@ pub fn AdminTeams() -> Element {
     let list = {
         let data = teams.data.read();
         match data.as_ref().and_then(|d| d.as_ref()) {
-            None => admin_pending(&teams, "teams"),
+            None => admin_list_pending(&teams, "teams"),
             Some(all) => {
                 let total = all.len();
                 let rows = page_slice(all, page(), ADMIN_PAGE_SIZE).to_vec();

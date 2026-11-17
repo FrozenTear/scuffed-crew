@@ -8,7 +8,7 @@ use crate::components::ui::{
     EmptyCard, FieldError, PageHeader, PageShell, PageWidth, Pager, page_slice, show_list_top,
 };
 use crate::components::{
-    ADMIN_PAGE_SIZE, DataTable, FormModal, RowActions, SaveState, Toast, admin_pending,
+    ADMIN_PAGE_SIZE, DataTable, FormModal, RowActions, SaveState, Toast, admin_list_pending,
     list_cap_notice, use_toast,
 };
 use crate::hooks::{ModalController, use_api_list};
@@ -150,7 +150,7 @@ pub fn AdminGames() -> Element {
     let list = {
         let data = games.data.read();
         match data.as_ref().and_then(|d| d.as_ref()) {
-            None => admin_pending(&games, "games"),
+            None => admin_list_pending(&games, "games"),
             Some(all) => {
                 let total = all.len();
                 let rows = page_slice(all, page(), ADMIN_PAGE_SIZE).to_vec();

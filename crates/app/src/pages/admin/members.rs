@@ -10,7 +10,7 @@ use crate::components::ui::{
 };
 use crate::components::{
     ADMIN_PAGE_SIZE, AdminDate, ConfirmDialog, DataTable, FormModal, FormStatus, RolePill,
-    RowActions, SaveState, StatusPill, SummaryCard, Toast, admin_pending, list_cap_notice,
+    RowActions, SaveState, StatusPill, SummaryCard, Toast, admin_list_pending, list_cap_notice,
     row_menu_toggle_id, status_label, use_toast,
 };
 use crate::hooks::{ModalController, use_api_list, use_api_list_prefer};
@@ -329,6 +329,11 @@ const MEMBERS_CSS: &str = r#"
         justify-content: center;
     }
     .admin-members-page .data-table td.cell-select { width: var(--hit-target-min); }
+    /* In a phone card the box sits on the card's left text edge, in line
+       with the pill and meta lines under it; the 44px target runs right. */
+    .admin-members-page .is-cards .data-table td.cell-select .member-select.admin-check-row {
+        justify-content: flex-start;
+    }
     .members-inactive {
         display: flex;
         flex-direction: column;
@@ -1407,7 +1412,7 @@ pub fn AdminMembers() -> Element {
     };
 
     let list = match all.as_ref() {
-        None => admin_pending(&members, "members"),
+        None => admin_list_pending(&members, "members"),
         Some(all) => rsx! {
             if all.is_empty() {
                 EmptyCard {

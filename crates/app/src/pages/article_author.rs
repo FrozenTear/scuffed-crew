@@ -64,26 +64,14 @@ pub(crate) fn author_byline(
     }
 }
 
-/// Up to two initials of a display name, upper case. Two or more words give
-/// the first letter of the first two ("Player Two" is "PT"); a single word
-/// gives its first two letters or digits ("Player02" is "PL"), the same two
-/// the account avatar in the top bar shows for that name.
+/// Up to two initials of a display name, upper case, by the shared rule the
+/// account avatar in the top bar uses ("Player02" is "P2", "Player Two" is
+/// "PT"). Empty for a blank name.
 pub(crate) fn initials(name: &str) -> String {
-    let mut words = name.split_whitespace();
-    let (first, second) = (words.next().unwrap_or(""), words.next());
-    let picked: Vec<char> = match second {
-        Some(second) => first
-            .chars()
-            .take(1)
-            .chain(second.chars().take(1))
-            .collect(),
-        None => first
-            .chars()
-            .filter(|c| c.is_alphanumeric())
-            .take(2)
-            .collect(),
-    };
-    picked.into_iter().flat_map(char::to_uppercase).collect()
+    if name.trim().is_empty() {
+        return String::new();
+    }
+    crate::components::ui::avatar::name_initials(name)
 }
 
 const MONTHS: [&str; 12] = [
@@ -924,7 +912,7 @@ mod tests {
 
     #[test]
     fn initials_take_up_to_two_words() {
-        assert_eq!(initials("Player02"), "PL");
+        assert_eq!(initials("Player02"), "P2");
         assert_eq!(initials("x"), "X");
         assert_eq!(initials("player two extra"), "PT");
         assert_eq!(initials("  "), "");

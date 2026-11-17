@@ -39,6 +39,23 @@ const ADMIN_CSS: &str = r#"
         font-size: var(--text-3xl);
         color: var(--text);
     }
+    /* The sub-nav (base rule in layouts/shell.rs). On desktop it wraps, so
+       no tab is ever cut off; on phone it scrolls, the current tab is
+       scrolled into view, and an edge fades while there is more that way. */
+    nav.admin-subnav { position: relative; }
+    @media (min-width: 821px) {
+        nav.admin-subnav { flex-wrap: wrap; overflow-x: visible; }
+    }
+    nav.admin-subnav.has-more-end {
+        mask-image: linear-gradient(to right, black calc(100% - var(--space-10)), transparent);
+    }
+    nav.admin-subnav.has-more-start {
+        mask-image: linear-gradient(to left, black calc(100% - var(--space-10)), transparent);
+    }
+    nav.admin-subnav.has-more-start.has-more-end {
+        mask-image: linear-gradient(to right, transparent, black var(--space-10),
+            black calc(100% - var(--space-10)), transparent);
+    }
     /* The session check. It sits outside `.admin-main`. */
     .admin-gate {
         display: flex;
@@ -81,12 +98,32 @@ pub fn AdminLayout() -> Element {
         relay_on: true,
     });
 
+    // Which ends of the sub-nav have more tabs past the edge (phone).
+    let mut edges = use_signal(|| (false, false));
+    let route_key = route.to_string();
+    use_effect(use_reactive((&route_key, &allowed), move |(_, _)| {
+        reveal_active_subnav_tab();
+        edges.set(subnav_edges());
+    }));
+    let (more_start, more_end) = edges();
+    let edge_class = match (more_start, more_end) {
+        (true, true) => " has-more-start has-more-end",
+        (true, false) => " has-more-start",
+        (false, true) => " has-more-end",
+        (false, false) => "",
+    };
+
     // The sub-nav is only for people who can open the pages it lists.
     let subnav = (!session.loading && allowed).then(|| {
         rsx! {
             // tabindex -1: Firefox makes a scrolling box a Tab stop of its
             // own. Its links still scroll it when they take focus.
-            nav { class: "admin-subnav", aria_label: "Admin", tabindex: "-1",
+            nav {
+                id: SUBNAV_ID,
+                class: "admin-subnav{edge_class}",
+                aria_label: "Admin",
+                tabindex: "-1",
+                onscroll: move |_| edges.set(subnav_edges()),
                 for entry in entries.iter() {
                     Link {
                         key: "{entry.id}",
@@ -107,6 +144,58 @@ pub fn AdminLayout() -> Element {
             {admin_body(session.loading, allowed, signed_in, username, return_path)}
         }
     }
+}
+
+const SUBNAV_ID: &str = "admin-subnav";
+
+/// Scroll the sub-nav sideways (only sideways) so the current tab is in view.
+fn reveal_active_subnav_tab() {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let Some(nav) = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.get_element_by_id(SUBNAV_ID))
+        else {
+            return;
+        };
+        let Some(link) = nav.query_selector("a.is-active").ok().flatten() else {
+            return;
+        };
+        let (nav_box, link_box) = (
+            nav.get_bounding_client_rect(),
+            link.get_bounding_client_rect(),
+        );
+        let current = f64::from(nav.scroll_left());
+        // Where the tab starts and ends inside the scrolled strip.
+        let start = link_box.left() - nav_box.left() + current;
+        let end = start + link_box.width();
+        let view = f64::from(nav.client_width());
+        let margin = view / 4.0;
+        let next = if start < current {
+            (start - margin).max(0.0)
+        } else if end > current + view {
+            end - view + margin
+        } else {
+            return;
+        };
+        nav.set_scroll_left(next.round() as i32);
+    }
+}
+
+/// (more tabs before the left edge, more after the right edge).
+fn subnav_edges() -> (bool, bool) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        if let Some(nav) = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.get_element_by_id(SUBNAV_ID))
+        {
+            let left = nav.scroll_left();
+            let room = nav.scroll_width() - nav.client_width();
+            return (left > 1, room - left > 1);
+        }
+    }
+    (false, false)
 }
 
 /// Text of the session status line. It is always rendered; only this changes.
@@ -167,7 +256,8 @@ fn AdminNoAccess(signed_in: bool, username: String, return_path: String) -> Elem
     rsx! {
         PageShell { width: PageWidth::Narrow, class: "admin-no-access",
             Wall {
-                title: "You do not have access",
+                // A guest is not denied, just not signed in yet.
+                title: if signed_in { "You do not have access".to_string() } else { "Log in to open Admin".to_string() },
                 lead,
                 page_title: true,
                 actions: rsx! {
@@ -253,6 +343,8 @@ mod tests {
         let html = render_route("/admin", None);
         assert_eq!(html.matches("<h1").count(), 1, "{html}");
         let wall = wall(&html);
+        assert!(wall.contains("<h1>Log in to open Admin</h1>"), "{wall}");
+        assert!(!wall.contains("You do not have access"), "{wall}");
         assert!(!wall.contains("signed in as"), "{wall}");
         let actions = &wall[wall.find("wall-actions").expect("actions")..];
         let sign_in = actions.find(">Log in<").expect("sign in");

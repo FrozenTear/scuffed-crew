@@ -13,7 +13,7 @@ use crate::components::ui::{
 };
 use crate::components::{
     ADMIN_PAGE_SIZE, AccessDenied, ConfirmDialog, DataTable, FormModal, RowActions, SaveState,
-    Toast, admin_pending, admin_short_date, use_toast,
+    Toast, admin_list_pending, admin_short_date, use_toast,
 };
 use crate::hooks::{ModalController, use_api};
 use crate::state::use_auth;
@@ -116,9 +116,34 @@ fn SeasonEdge(at: DateTime<Utc>) -> Element {
     }
 }
 
+/// Admin only. The role is checked before any request: an officer gets the
+/// no-access page without first asking the API for seasons (a 403).
 #[component]
 pub fn AdminSeasons() -> Element {
     let auth = use_auth();
+    if !auth().is_admin() {
+        return rsx! {
+            AccessDenied { message: "You need admin permissions to manage seasons.".to_string() }
+        };
+    }
+    rsx! { SeasonsPage {} }
+}
+
+/// Where a season stands today, as a word and a tone.
+fn season_status(season: &Season, now: DateTime<Utc>) -> (&'static str, PillTone) {
+    if season.is_current {
+        ("Current", PillTone::Ok)
+    } else if now < season.starts_at {
+        ("Upcoming", PillTone::Info)
+    } else if now >= season.ends_at {
+        ("Ended", PillTone::Neutral)
+    } else {
+        ("In progress", PillTone::Neutral)
+    }
+}
+
+#[component]
+fn SeasonsPage() -> Element {
     let mut seasons = use_api::<Vec<Season>>("/api/admin/seasons");
     let mut toast = use_toast();
     let mut page = use_signal(|| 1usize);
@@ -252,16 +277,11 @@ pub fn AdminSeasons() -> Element {
         delete_modal.close();
     };
 
-    if !auth().is_admin() {
-        return rsx! {
-            AccessDenied { message: "You need admin permissions to manage seasons.".to_string() }
-        };
-    }
-
+    let now = Utc::now();
     let list = {
         let data = seasons.data.read();
         match data.as_ref().and_then(|d| d.as_ref()) {
-            None => admin_pending(&seasons, "seasons"),
+            None => admin_list_pending(&seasons, "seasons"),
             Some(all) => {
                 let total = all.len();
                 let rows = page_slice(all, page(), ADMIN_PAGE_SIZE).to_vec();
@@ -294,12 +314,15 @@ pub fn AdminSeasons() -> Element {
                                         tr { key: "{season.id}",
                                             td { class: "cell-who", "{season.name}" }
                                             td { class: "cell-badge",
-                                                if season.is_current {
-                                                    Pill { tone: PillTone::Ok, "Current" }
+                                                {
+                                                    let (word, tone) = season_status(season, now);
+                                                    rsx! { Pill { tone, "{word}" } }
                                                 }
                                             }
-                                            td { class: "cell-meta num", SeasonEdge { at: season.starts_at } }
-                                            td { class: "cell-meta num", SeasonEdge { at: season.ends_at } }
+                                            // Labelled lines on phone, so the two dates say
+                                            // which is the start and which the end.
+                                            td { class: "num", "data-label": "Starts", SeasonEdge { at: season.starts_at } }
+                                            td { class: "num", "data-label": "Ends", SeasonEdge { at: season.ends_at } }
                                             td { class: "cell-actions",
                                                 RowActions {
                                                     button {
@@ -508,6 +531,34 @@ mod tests {
             check_season_form(" S1 ", "2026-01-01T00:00", "2026-02-01T00:00:30").unwrap();
         assert_eq!(name, "S1");
         assert!(end > start);
+    }
+
+    #[test]
+    fn every_season_has_a_status_word() {
+        let at = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
+        let season = |current: bool| Season {
+            id: "s1".into(),
+            name: "Test Season".into(),
+            starts_at: at("2026-12-01T00:00:00Z"),
+            ends_at: at("2027-03-01T00:00:00Z"),
+            is_current: current,
+        };
+        assert_eq!(
+            season_status(&season(true), at("2026-11-17T00:00:00Z")).0,
+            "Current"
+        );
+        assert_eq!(
+            season_status(&season(false), at("2026-11-17T00:00:00Z")),
+            ("Upcoming", PillTone::Info)
+        );
+        assert_eq!(
+            season_status(&season(false), at("2027-03-02T00:00:00Z")).0,
+            "Ended"
+        );
+        assert_eq!(
+            season_status(&season(false), at("2027-01-02T00:00:00Z")).0,
+            "In progress"
+        );
     }
 
     #[test]

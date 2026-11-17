@@ -39,6 +39,8 @@ const HINT_BACKUP: &str =
     "An ncryptsec backup is your key locked with a password. You need the password to use it.";
 const HINT_ADVANCED: &str = "You rarely need these. Importing a key or unlinking changes how \
     chat and direct messages sign you in.";
+/// Under the collapsed "Advanced" title, so the visitor sees what it holds.
+const ADVANCED_CUE: &str = "Import a key or unlink yours.";
 const HINT_UNLINK: &str = "Chat and direct messages stop working until you link a key again.";
 
 const NIP05_UNSET: &str = "Not set up on this site.";
@@ -72,19 +74,43 @@ const PAGE_CSS: &str = r#"
     gap: var(--space-5);
     min-width: 0;
 }
+/* The summary drops the native marker (flex), so it draws its own chevron
+   and says what the group holds while it is closed. */
 .identity-advanced > summary {
     display: flex;
     align-items: center;
-    gap: var(--space-2);
+    justify-content: space-between;
+    gap: var(--space-3);
     min-height: var(--hit-target-min);
+    list-style: none;
+    cursor: pointer;
+}
+.identity-advanced > summary::-webkit-details-marker { display: none; }
+.identity-advanced-text {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    min-width: 0;
+}
+.identity-advanced-title {
     font-family: var(--font-head);
     font-weight: var(--font-head-weight);
     letter-spacing: var(--font-head-tracking);
     line-height: var(--leading-display);
     font-size: var(--text-xl);
     color: var(--text);
-    cursor: pointer;
 }
+.identity-advanced-chevron {
+    flex: 0 0 auto;
+    box-sizing: border-box;
+    width: var(--space-3);
+    height: var(--space-3);
+    margin-inline-end: var(--space-1);
+    border-inline-end: var(--focus-ring-width) solid var(--text-3);
+    border-bottom: var(--focus-ring-width) solid var(--text-3);
+    transform: rotate(45deg);
+}
+.identity-advanced[open] .identity-advanced-chevron { transform: rotate(-135deg); }
 .identity-advanced > summary:focus-visible {
     outline: var(--focus-ring-width) solid var(--focus-ring);
     outline-offset: var(--focus-ring-offset);
@@ -108,6 +134,14 @@ const PAGE_CSS: &str = r#"
 }
 .identity-key-input { font-family: var(--font-mono); }
 textarea.identity-key-input { min-height: calc(var(--hit-target-min) * 2); }
+/* The npub wraps inside its box instead of running off a phone screen. */
+textarea.field-input.identity-npub {
+    min-height: var(--hit-target-min);
+    field-sizing: content;
+    resize: none;
+    overflow-wrap: anywhere;
+    word-break: break-all;
+}
 @media (max-width: 820px) {
     .identity-facts { grid-template-columns: minmax(0, 1fr); }
 }
@@ -148,6 +182,21 @@ struct ImportKeyBody {
     password: String,
 }
 
+/// A 64-character hex public key as its NIP-19 `npub1...` form, the way the
+/// rest of the product (DMs, chat) writes keys. `None` when the value is not
+/// 32 bytes of hex.
+fn npub_from_hex(hex: &str) -> Option<String> {
+    let hex = hex.trim();
+    if hex.len() != 64 || !hex.is_ascii() {
+        return None;
+    }
+    let bytes = (0..32)
+        .map(|i| u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).ok())
+        .collect::<Option<Vec<u8>>>()?;
+    let hrp = bech32::Hrp::parse("npub").ok()?;
+    bech32::encode::<bech32::Bech32>(hrp, &bytes).ok()
+}
+
 fn truncate_pubkey(pk: &str) -> String {
     if pk.len() > 16 {
         format!("{}...{}", &pk[..8], &pk[pk.len() - 8..])
@@ -178,7 +227,13 @@ fn has_nip07_extension() -> bool {
 fn AdvancedGroup(children: Element) -> Element {
     rsx! {
         details { class: "account-card identity-advanced",
-            summary { "Advanced" }
+            summary {
+                span { class: "identity-advanced-text",
+                    span { class: "identity-advanced-title", "Advanced" }
+                    span { class: "field-hint", "{ADVANCED_CUE}" }
+                }
+                span { class: "identity-advanced-chevron", aria_hidden: "true" }
+            }
             p { class: "field-hint", "{HINT_ADVANCED}" }
             {children}
         }
@@ -421,13 +476,13 @@ pub fn IdentitySettings() -> Element {
                         if let Some(ref pubkey) = m.nostr_pubkey {
                             div { class: "account-field",
                                 label { class: "field-label", r#for: PUBLIC_KEY_ID, "Public key" }
-                                input {
+                                textarea {
                                     id: PUBLIC_KEY_ID,
-                                    class: "field-input identity-key-input",
-                                    r#type: "text",
+                                    class: "field-input identity-key-input identity-npub",
+                                    rows: 2,
                                     readonly: true,
                                     spellcheck: false,
-                                    value: "{pubkey}",
+                                    value: npub_from_hex(pubkey).unwrap_or_else(|| pubkey.clone()),
                                     aria_describedby: PUBLIC_KEY_HINT_ID,
                                 }
                                 p { id: PUBLIC_KEY_HINT_ID, class: "field-hint", "{HINT_PUBLIC_KEY}" }
@@ -452,17 +507,18 @@ pub fn IdentitySettings() -> Element {
                                             aria_describedby: NIP05_HINT_ID,
                                         }
                                         p { id: NIP05_HINT_ID, class: "field-hint",
-                                            "{HINT_NIP05_SET} "
+                                            "{HINT_NIP05} {HINT_NIP05_SET} "
                                             Link { to: Route::ProfileSettings {}, "Change display name" }
                                         }
                                     } else {
                                         p { class: "field-label", "NIP-05 name" }
                                         p { class: "account-fact", "{NIP05_UNSET}" }
-                                        p { id: NIP05_HINT_ID, class: "field-hint", "{HINT_NIP05_UNSET}" }
+                                        p { id: NIP05_HINT_ID, class: "field-hint",
+                                            "{HINT_NIP05} {HINT_NIP05_UNSET}"
+                                        }
                                     }
                                 }
                             }
-                            p { class: "field-hint", "{HINT_NIP05}" }
                         } else {
                             p { class: "account-lead",
                                 "No key is linked yet. Link one below, or ask an admin to set one up for you."
@@ -544,7 +600,9 @@ pub fn IdentitySettings() -> Element {
                                     r#type: "submit",
                                     class: btn_class(true),
                                     aria_disabled: if export_blocked { "true" },
-                                    aria_describedby: BACKUP_STATUS_ID,
+                                    aria_busy: if busy { "true" },
+                                    // The password rule is the reason it is not ready yet.
+                                    aria_describedby: "{BACKUP_PASSWORD_HINT_ID} {BACKUP_STATUS_ID}",
                                     if busy { "Exporting..." } else { "Export backup" }
                                 }
                                 AccountStatus { id: BACKUP_STATUS_ID, state: backup_state() }
@@ -815,7 +873,15 @@ mod tests {
         }
         let html = render(root);
         assert!(html.contains("<details"), "{html}");
-        assert!(html.contains("<summary>Advanced</summary>"), "{html}");
+        assert!(html.contains(">Advanced</span>"), "{html}");
+        assert!(
+            html.contains(ADVANCED_CUE),
+            "the closed group says what it holds: {html}"
+        );
+        assert!(
+            html.contains("class=\"identity-advanced-chevron\" aria-hidden=\"true\""),
+            "{html}"
+        );
         assert!(html.contains("Unlink your key"), "{html}");
         assert!(!html.contains(" open"), "must start collapsed: {html}");
     }
@@ -828,6 +894,7 @@ mod tests {
             HINT_NIP05,
             HINT_BACKUP,
             HINT_ADVANCED,
+            ADVANCED_CUE,
             HINT_UNLINK,
             NIP05_UNSET,
             HINT_NIP05_UNSET,
@@ -872,6 +939,18 @@ mod tests {
             html.contains("role=\"status\">Loading your account keys</p>"),
             "{html}"
         );
+    }
+
+    #[test]
+    fn public_keys_show_as_npub() {
+        // The NIP-19 test vector.
+        assert_eq!(
+            npub_from_hex("3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d")
+                .as_deref(),
+            Some("npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6")
+        );
+        assert_eq!(npub_from_hex("abc"), None);
+        assert_eq!(npub_from_hex(&"zz".repeat(32)), None);
     }
 
     #[test]

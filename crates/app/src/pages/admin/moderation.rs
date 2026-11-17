@@ -6,7 +6,7 @@ use crate::components::ui::{
 };
 use crate::components::{
     ADMIN_PAGE_SIZE, AccessDenied, AdminDate, ConfirmDialog, DataTable, FormModal, RowActions,
-    Toast, admin_pending, list_cap_notice, status_label, use_toast,
+    Toast, admin_list_pending, list_cap_notice, status_label, use_toast,
 };
 use crate::hooks::{ModalController, use_api_list, use_api_with};
 use crate::state::use_auth;
@@ -29,7 +29,6 @@ struct ModerationAction {
     issued_by_name: Option<String>,
     is_active: bool,
     created_at: String,
-    #[allow(dead_code)]
     #[serde(default)]
     expires_at: Option<String>,
     #[serde(default)]
@@ -37,10 +36,15 @@ struct ModerationAction {
 }
 
 impl ModerationAction {
-    fn member_label(&self) -> String {
+    /// The member's name: the server's, else the name from the full member
+    /// list (banned and deactivated members included, which the server's own
+    /// lookup misses), never the record id.
+    fn member_label(&self, names: &[(String, String)]) -> String {
         self.member_name
             .clone()
-            .unwrap_or_else(|| self.member_id.clone())
+            .filter(|n| !n.trim().is_empty())
+            .or_else(|| name_for(names, &self.member_id))
+            .unwrap_or_else(|| "Unknown member".to_string())
     }
 
     fn issuer_label(&self) -> String {
@@ -65,6 +69,19 @@ where
             .map(|s| s.to_string())
             .unwrap_or_else(|| other.to_string().trim_matches('"').to_string()),
     })
+}
+
+/// `member:abc` and `abc` are the same record.
+fn bare_id(id: &str) -> &str {
+    id.trim().strip_prefix("member:").unwrap_or(id.trim())
+}
+
+fn name_for(names: &[(String, String)], member_id: &str) -> Option<String> {
+    names
+        .iter()
+        .find(|(id, _)| bare_id(id) == bare_id(member_id))
+        .map(|(_, name)| name.clone())
+        .filter(|n| !n.trim().is_empty())
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -103,14 +120,29 @@ fn action_tone(action_type: &str) -> PillTone {
 }
 
 /// Whether an action still applies, as a word: active, lifted by someone, or
-/// ended on its own.
-fn action_state(action: &ModerationAction) -> (&'static str, PillTone) {
+/// ended on its own. The API sends no `lifted_at`, so an inactive action
+/// that had no end date, or whose end date is still ahead, was lifted; one
+/// whose end date has passed ended on its own. Active is info, so it never
+/// reads as the warn tone of the Warning and Suspension type pills.
+fn action_state(
+    action: &ModerationAction,
+    now: chrono::DateTime<chrono::Utc>,
+) -> (&'static str, PillTone) {
     if action.is_active {
-        ("Active", PillTone::Warn)
-    } else if action.lifted_at.is_some() {
-        ("Lifted", PillTone::Neutral)
-    } else {
+        return ("Active", PillTone::Info);
+    }
+    if action.lifted_at.is_some() {
+        return ("Lifted", PillTone::Neutral);
+    }
+    let ended_on_its_own = action
+        .expires_at
+        .as_deref()
+        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        .is_some_and(|end| end.with_timezone(&chrono::Utc) <= now);
+    if ended_on_its_own {
         ("Ended", PillTone::Neutral)
+    } else {
+        ("Lifted", PillTone::Neutral)
     }
 }
 
@@ -125,9 +157,13 @@ fn lift_button_id(action_id: &str) -> String {
 #[component]
 fn ModerationTable(
     rows: Vec<ModerationAction>,
+    /// (member id, display name) of every member, inactive ones included.
+    #[props(default)]
+    names: Vec<(String, String)>,
     can_lift: bool,
     on_lift: EventHandler<String>,
 ) -> Element {
+    let now = chrono::Utc::now();
     rsx! {
         DataTable {
             headers: vec!["Member", "Type", "Reason", "State", "Issued by", "Date", "Actions"],
@@ -137,9 +173,9 @@ fn ModerationTable(
             for action in rows.iter() {
                 {
                     let id = action.id.clone();
-                    let member = action.member_label();
+                    let member = action.member_label(&names);
                     let issuer = action.issuer_label();
-                    let (state_word, state_tone) = action_state(action);
+                    let (state_word, state_tone) = action_state(action, now);
                     let liftable = can_lift && action.is_active;
                     rsx! {
                         tr { key: "{id}",
@@ -179,6 +215,9 @@ pub fn AdminModeration() -> Element {
     let mut page = use_signal(|| 1usize);
     let mut actions = use_api_with::<ModerationResponse>(move || moderation_path(page()));
     let members = use_api_list::<Member>("/api/members");
+    // Names for the list, inactive members included: a ban deactivates, so
+    // the people this page is mostly about are not in the active list.
+    let all_members = use_api_list::<Member>("/api/members?include_inactive=true");
     let mut toast = use_toast();
 
     // Create modal state
@@ -274,10 +313,29 @@ pub fn AdminModeration() -> Element {
         };
     }
 
+    let names: Vec<(String, String)> = all_members
+        .data
+        .read()
+        .as_ref()
+        .and_then(|d| d.as_ref())
+        .map(|list| {
+            list.iter()
+                .map(|m| (m.id.clone(), m.display_name.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    // With no actions at all, the empty card holds the one New action.
+    let list_empty = actions
+        .data
+        .read()
+        .as_ref()
+        .and_then(|d| d.as_ref())
+        .is_some_and(|r| r.total == 0);
+
     let list = {
         let data = actions.data.read();
         match data.as_ref().and_then(|d| d.as_ref()) {
-            None => admin_pending(&actions, "moderation actions"),
+            None => admin_list_pending(&actions, "moderation actions"),
             Some(resp) => {
                 let total = usize::try_from(resp.total).unwrap_or(usize::MAX);
                 let rows = resp.entries.clone();
@@ -289,6 +347,7 @@ pub fn AdminModeration() -> Element {
                             actions: rsx! {
                                 button {
                                     r#type: "button",
+                                    id: NEW_ACTION_ID,
                                     class: "btn is-primary",
                                     onclick: move |_| open_create(),
                                     "New action"
@@ -311,6 +370,7 @@ pub fn AdminModeration() -> Element {
                     } else {
                         ModerationTable {
                             rows,
+                            names: names.clone(),
                             can_lift: is_admin,
                             on_lift: move |id: String| lift_modal.show(id),
                         }
@@ -342,12 +402,14 @@ pub fn AdminModeration() -> Element {
                 title: "Moderation",
                 lead: "Notes, warnings, suspensions and bans, newest first. Admins can lift an active action.",
                 actions: rsx! {
-                    button {
-                        r#type: "button",
-                        id: NEW_ACTION_ID,
-                        class: "btn is-primary",
-                        onclick: move |_| open_create(),
-                        "New action"
+                    if !list_empty {
+                        button {
+                            r#type: "button",
+                            id: NEW_ACTION_ID,
+                            class: "btn is-primary",
+                            onclick: move |_| open_create(),
+                            "New action"
+                        }
                     }
                 },
             }
@@ -565,6 +627,42 @@ mod tests {
         );
         assert!(second.contains(">Lifted</span>"), "{second}");
         assert!(!second.contains(">Lift</button>"), "{second}");
+        assert!(
+            first.contains("class=\"ui-pill ui-pill--info\">Active</span>"),
+            "{first}"
+        );
+    }
+
+    #[test]
+    fn state_comes_from_what_the_api_sends() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-17T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        // The real payload has no lifted_at.
+        let mut lifted = action("a", "warning", false, false);
+        assert_eq!(action_state(&lifted, now).0, "Lifted");
+        lifted.expires_at = Some("2026-12-01T00:00:00Z".into());
+        assert_eq!(action_state(&lifted, now).0, "Lifted");
+        let mut ended = action("b", "suspension", false, false);
+        ended.expires_at = Some("2026-11-10T00:00:00Z".into());
+        assert_eq!(action_state(&ended, now).0, "Ended");
+        assert_eq!(
+            action_state(&action("c", "ban", true, false), now),
+            ("Active", PillTone::Info)
+        );
+    }
+
+    #[test]
+    fn members_show_by_name_never_by_record_id() {
+        let mut banned = action("a", "ban", false, false);
+        banned.member_name = None;
+        banned.member_id = "mb0g1akg5eglvuix88qy".into();
+        let names = vec![(
+            "member:mb0g1akg5eglvuix88qy".to_string(),
+            "Player07".to_string(),
+        )];
+        assert_eq!(banned.member_label(&names), "Player07");
+        assert_eq!(banned.member_label(&[]), "Unknown member");
     }
 
     #[test]
@@ -609,9 +707,20 @@ mod tests {
     fn pages_by_offset_and_names_states() {
         assert_eq!(moderation_path(1), "/api/moderation?limit=20&offset=0");
         assert_eq!(moderation_path(3), "/api/moderation?limit=20&offset=40");
-        assert_eq!(action_state(&action("a", "note", true, false)).0, "Active");
-        assert_eq!(action_state(&action("a", "note", false, true)).0, "Lifted");
-        assert_eq!(action_state(&action("a", "note", false, false)).0, "Ended");
+        let now = chrono::Utc::now();
+        assert_eq!(
+            action_state(&action("a", "note", true, false), now).0,
+            "Active"
+        );
+        assert_eq!(
+            action_state(&action("a", "note", false, true), now).0,
+            "Lifted"
+        );
+        // Inactive with no end date: someone lifted it.
+        assert_eq!(
+            action_state(&action("a", "note", false, false), now).0,
+            "Lifted"
+        );
         assert_eq!(action_tone("note"), PillTone::Neutral);
     }
 }

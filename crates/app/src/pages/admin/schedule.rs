@@ -7,7 +7,7 @@ use crate::components::ui::{
 };
 use crate::components::{
     ADMIN_PAGE_SIZE, ConfirmDialog, DataTable, FormModal, RowActions, SaveState, Toast,
-    admin_pending, list_cap_notice, use_toast,
+    admin_list_pending, admin_pending, list_cap_notice, use_toast,
 };
 use crate::hooks::{ModalController, use_api_list, use_api_with};
 use crate::routes::Route;
@@ -342,7 +342,7 @@ pub fn AdminSchedule() -> Element {
     let list = {
         let data = events.data.read();
         match data.as_ref().and_then(|d| d.as_ref()) {
-            None => admin_pending(&events, "events"),
+            None => admin_list_pending(&events, "events"),
             Some(all) => {
                 let total = all.len();
                 let rows = page_slice(all, page(), ADMIN_PAGE_SIZE).to_vec();

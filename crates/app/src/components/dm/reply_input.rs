@@ -75,6 +75,9 @@ pub(crate) const REPLY_INPUT_CSS: &str = r#"
 /* Phones have no Ctrl or Cmd key to speak of: Send is the way to send. */
 @media (max-width: 820px) {
     .dm-reply-hint { display: none; }
+    /* With the hint hidden and no count, the row is empty: drop it, so its
+       gap does not pad the bottom of the composer. */
+    .dm-reply-meta:not(:has(.dm-reply-count)) { display: none; }
 }
 "#;
 
@@ -287,6 +290,7 @@ pub fn ReplyInput(
                     // Not `disabled`: focus stays on Send while it sends, and
                     // a click on an empty field says why nothing happened.
                     aria_disabled: if !can_submit { "true" },
+                    aria_busy: if sending { "true" },
                     onclick: move |_| do_send.call(()),
                     if sending { "Sending..." } else { "Send" }
                 }

@@ -12,8 +12,8 @@ use crate::components::ui::{
     ChipButton, ChipRow, EmptyCard, PageHeader, PageShell, PageWidth, Pager, btn_class,
     show_list_top,
 };
-use crate::components::{AccessDenied, DataTable, admin_pending, admin_short_date};
-use crate::hooks::use_api_with;
+use crate::components::{AccessDenied, DataTable, admin_list_pending, admin_short_date};
+use crate::hooks::{use_api_list, use_api_with};
 use crate::routes::Route;
 use crate::state::use_auth;
 
@@ -31,6 +31,13 @@ struct AuditLogEntry {
     target_label: String,
     details: Option<String>,
     created_at: String,
+}
+
+/// A member as `/api/members` returns them, for names in the details.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+struct NamedMember {
+    id: String,
+    display_name: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -61,6 +68,9 @@ const CSS: &str = r#"
         flex-direction: column;
         gap: var(--space-2);
     }
+    /* The search label sits above its field: line the chips up with the
+       field, not with the label. */
+    .admin-audit-page .admin-toolbar { align-items: flex-end; }
 "#;
 
 /// What kind of change an action is. The chips filter on it.
@@ -126,16 +136,52 @@ fn humanize(raw: &str) -> String {
     }
 }
 
-/// "Team: Squad Alpha". The raw id stands in when the server had no label
-/// (label empty or equal to the id).
+/// "Team: Squad Alpha". With no label from the server (label empty or equal
+/// to the id) it says so, and never prints the record id.
 fn target_text(entry: &AuditLogEntry) -> String {
     let kind = humanize(&entry.target_type);
-    let name = if !entry.target_label.trim().is_empty() && entry.target_label != entry.target_id {
-        entry.target_label.as_str()
+    if !entry.target_label.trim().is_empty() && entry.target_label != entry.target_id {
+        format!("{kind}: {}", entry.target_label)
     } else {
-        entry.target_id.as_str()
-    };
-    format!("{kind}: {name}")
+        format!("{kind} (no name recorded)")
+    }
+}
+
+/// `member:abc` and `abc` are the same record.
+fn bare_member_id(id: &str) -> &str {
+    id.trim().strip_prefix("member:").unwrap_or(id.trim())
+}
+
+/// The details line in words: member ids become their names, and a line
+/// that is only request parameters (`offset=0 limit=25 season=all`) reads
+/// "offset 0, limit 25, season all".
+fn details_text(details: &str, members: &[NamedMember]) -> String {
+    let words: Vec<&str> = details.split_whitespace().collect();
+    if !words.is_empty()
+        && words
+            .iter()
+            .all(|w| w.split_once('=').is_some_and(|(k, _)| !k.is_empty()))
+    {
+        return words
+            .iter()
+            .filter_map(|w| w.split_once('='))
+            .map(|(k, v)| format!("{} {}", k.replace('_', " "), v))
+            .collect::<Vec<_>>()
+            .join(", ");
+    }
+    words
+        .iter()
+        .map(|w| {
+            let core = w.trim_end_matches(['.', ',', ';', ':']);
+            let tail = &w[core.len()..];
+            members
+                .iter()
+                .find(|m| !core.is_empty() && bare_member_id(&m.id) == bare_member_id(core))
+                .map(|m| format!("{}{tail}", m.display_name))
+                .unwrap_or_else(|| (*w).to_string())
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// `2026-11-10T19:05:00Z` reads "10 Nov 2026 19:05" (UTC, as stored). A
@@ -180,9 +226,21 @@ fn filter_status_text(filtering: bool, matched: usize, loaded: usize) -> String 
     format!("{matched} of {loaded} {noun} on this page match the filters.")
 }
 
+/// Admin only. The role is checked before any request: an officer gets the
+/// no-access page without first asking the API for the log (a 403).
 #[component]
 pub fn AdminAuditLog() -> Element {
     let auth = use_auth();
+    if !auth().is_admin() {
+        return rsx! {
+            AccessDenied { message: "You need admin permissions to view the audit log.".to_string() }
+        };
+    }
+    rsx! { AuditLogPage {} }
+}
+
+#[component]
+fn AuditLogPage() -> Element {
     let mut page = use_signal(|| 1usize);
     let mut kind = use_signal(|| ActionKind::All);
     let mut query = use_signal(String::new);
@@ -191,12 +249,15 @@ pub fn AdminAuditLog() -> Element {
         let offset = page().saturating_sub(1) * PAGE_SIZE;
         format!("/api/audit-log?limit={PAGE_SIZE}&offset={offset}")
     });
-
-    if !auth().is_admin() {
-        return rsx! {
-            AccessDenied { message: "You need admin permissions to view the audit log.".to_string() }
-        };
-    }
+    // Names for member ids in the details, inactive members included.
+    let members = use_api_list::<NamedMember>("/api/members?include_inactive=true");
+    let member_names: Vec<NamedMember> = members
+        .data
+        .read()
+        .as_ref()
+        .and_then(|d| d.as_ref())
+        .cloned()
+        .unwrap_or_default();
 
     let filtering = kind() != ActionKind::All || !query().trim().is_empty();
     let mut clear_filters = move || {
@@ -207,7 +268,10 @@ pub fn AdminAuditLog() -> Element {
     let (list, status) = {
         let data = log_data.data.read();
         match data.as_ref().and_then(|d| d.as_ref()) {
-            None => (admin_pending(&log_data, "the audit log"), String::new()),
+            None => (
+                admin_list_pending(&log_data, "the audit log"),
+                String::new(),
+            ),
             Some(resp) => {
                 let total = usize::try_from(resp.total).unwrap_or(usize::MAX);
                 let rows: Vec<AuditLogEntry> = resp
@@ -261,7 +325,7 @@ pub fn AdminAuditLog() -> Element {
                         }
                     }
                 } else {
-                    rsx! { AuditTable { rows } }
+                    rsx! { AuditTable { rows, members: member_names.clone() } }
                 };
                 (
                     rsx! {
@@ -291,7 +355,7 @@ pub fn AdminAuditLog() -> Element {
         PageShell { width: PageWidth::Wide, class: "admin-audit-page",
             PageHeader {
                 title: "Audit log",
-                lead: "Every change an officer or admin made, newest first. Times are UTC. The filters narrow the page that is loaded.",
+                lead: "Every change an officer or admin made, and the admin views that are logged, newest first. Times are UTC. The filters narrow the page that is loaded.",
             }
             div { class: "admin-toolbar",
                 ChipRow { label: "Action filters", scroll: true,
@@ -334,7 +398,7 @@ pub fn AdminAuditLog() -> Element {
 /// entry is a card: the actor on top, then "Created game · 10 Nov 2026
 /// 19:05", then the target and details lines.
 #[component]
-fn AuditTable(rows: Vec<AuditLogEntry>) -> Element {
+fn AuditTable(rows: Vec<AuditLogEntry>, #[props(default)] members: Vec<NamedMember>) -> Element {
     rsx! {
         DataTable {
             headers: vec!["Actor", "Action", "Target", "Details", "Time (UTC)"],
@@ -345,7 +409,7 @@ fn AuditTable(rows: Vec<AuditLogEntry>) -> Element {
                 {
                     let action = humanize(&entry.action);
                     let target = target_text(entry);
-                    let details = entry.details.clone().unwrap_or_default();
+                    let details = details_text(entry.details.as_deref().unwrap_or_default(), &members);
                     let time = time_text(&entry.created_at);
                     rsx! {
                         tr { key: "{entry.id}",
@@ -465,10 +529,30 @@ mod tests {
         let mut e = entry("a1", "updated_team", None);
         assert_eq!(target_text(&e), "Team: Squad Alpha");
         e.target_label = "team:t1".into();
-        assert_eq!(target_text(&e), "Team: team:t1");
+        assert_eq!(target_text(&e), "Team (no name recorded)");
+        e.target_label = String::new();
+        assert!(!target_text(&e).contains("t1"), "never the record id");
         assert_eq!(time_text("2026-11-10T19:05:00Z"), "10 Nov 2026 19:05");
         assert_eq!(time_text("2026-11-10"), "10 Nov 2026");
         assert_eq!(time_text("soon"), "soon");
+    }
+
+    #[test]
+    fn details_name_members_and_read_parameters_as_words() {
+        let members = vec![NamedMember {
+            id: "member:mb0g1akg5eglvuix88qy".into(),
+            display_name: "Player07".into(),
+        }];
+        assert_eq!(
+            details_text("Lifted ban on member mb0g1akg5eglvuix88qy", &members),
+            "Lifted ban on member Player07"
+        );
+        assert_eq!(
+            details_text("offset=0 limit=25 season=all", &members),
+            "offset 0, limit 25, season all"
+        );
+        assert_eq!(details_text("", &members), "");
+        assert_eq!(details_text("Changed role.", &[]), "Changed role.");
     }
 
     #[test]

@@ -569,7 +569,7 @@ mod tests {
         // The starter is in the header line, with the reply count.
         assert!(
             html.contains(
-                "<p class=\"article-byline\"><span class=\"article-avatar\" aria-hidden=\"true\">PL</span><span class=\"entry-author\">Player02</span>"
+                "<p class=\"article-byline\"><span class=\"article-avatar\" aria-hidden=\"true\">P2</span><span class=\"entry-author\">Player02</span>"
             ),
             "{html}"
         );

@@ -7,7 +7,7 @@ use crate::components::ui::{
 };
 use crate::components::{
     ADMIN_PAGE_SIZE, AdminDate, ConfirmDialog, DataTable, RowActions, StatusPill, Toast,
-    admin_pending, list_cap_notice, use_toast,
+    admin_date_time, admin_list_pending, list_cap_notice, use_toast,
 };
 use crate::hooks::{ModalController, use_api_list};
 use crate::pages::display_name::{
@@ -15,7 +15,6 @@ use crate::pages::display_name::{
     display_name_error_message,
 };
 use crate::routes::Route;
-use crate::util::format_datetime;
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::PatchApplicationRequest;
 
@@ -48,6 +47,17 @@ impl Application {
             .unwrap_or_else(|| self.user_id.clone())
     }
 
+    /// Preferred roles as words ("Tank, Damage"), whatever case the form
+    /// stored them in.
+    fn roles_label(&self) -> String {
+        self.preferred_roles
+            .iter()
+            .map(|r| role_label(r))
+            .filter(|r| !r.is_empty())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     fn games_label(&self) -> String {
         match &self.preferred_game_names {
             Some(names) if !names.is_empty() => names.join(", "),
@@ -66,6 +76,25 @@ fn detail_text(value: &str) -> String {
     }
 }
 
+/// One preferred role as a word: the known ids by name (`dps` is Damage),
+/// anything else with a capital first letter.
+fn role_label(raw: &str) -> String {
+    let raw = raw.trim();
+    match raw.to_ascii_lowercase().as_str() {
+        "tank" => "Tank".to_string(),
+        "dps" | "damage" => "Damage".to_string(),
+        "support" | "healer" => "Support".to_string(),
+        "flex" => "Flex".to_string(),
+        _ => {
+            let mut chars = raw.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().chain(chars).collect(),
+                None => String::new(),
+            }
+        }
+    }
+}
+
 fn list_or_none(items: &[String]) -> String {
     let joined = items
         .iter()
@@ -74,6 +103,14 @@ fn list_or_none(items: &[String]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     detail_text(&joined)
+}
+
+/// The decline question, naming the applicant when the row is known.
+fn decline_message(applicant: Option<&str>) -> String {
+    match applicant.map(str::trim).filter(|n| !n.is_empty()) {
+        Some(name) => format!("Decline the application from {name}?"),
+        None => "Decline this application?".to_string(),
+    }
 }
 
 /// The list region: the pager's focus target after a page change.
@@ -255,12 +292,12 @@ fn ApplicationDetailDialog(
 ) -> Element {
     let title = format!("Application: {}", app.applicant_label());
     let games = detail_text(&app.games_label());
-    let roles = list_or_none(&app.preferred_roles);
+    let roles = detail_text(&app.roles_label());
     let message = detail_text(app.message.as_deref().unwrap_or(""));
     let notes = detail_text(app.review_notes.as_deref().unwrap_or(""));
-    let submitted = format_datetime(&app.created_at);
+    let submitted = admin_date_time(&app.created_at);
     let updated = match app.updated_at.as_deref() {
-        Some(iso) => detail_text(&format_datetime(iso)),
+        Some(iso) => detail_text(&admin_date_time(iso)),
         None => "None".to_string(),
     };
     rsx! {
@@ -309,11 +346,7 @@ fn ApplicationDetailDialog(
                             dt { "Roles" }
                             dd { "{roles}" }
                             dt { "Message" }
-                            dd {
-                                class: "application-detail-message",
-                                style: "white-space: pre-wrap; overflow-wrap: anywhere;",
-                                "{message}"
-                            }
+                            dd { class: "application-detail-message", "{message}" }
                             dt { "Review notes" }
                             dd { "{notes}" }
                             dt { "Submitted" }
@@ -363,7 +396,7 @@ fn ApplicationsTable(
                     let reject_id = app.id.clone();
                     let applicant = app.applicant_label();
                     let games = app.games_label();
-                    let roles = app.preferred_roles.join(", ");
+                    let roles = app.roles_label();
                     let view_trigger = application_view_trigger_id(&app.id);
                     let view_app = app.clone();
                     let row_error = name_error
@@ -506,10 +539,30 @@ pub fn AdminApplications() -> Element {
         .get_target()
         .map(|id| application_view_trigger_id(&id));
 
+    // The decline dialog names the applicant it is about.
+    let reject_message = {
+        let target = reject_modal.get_target();
+        let data = applications.data.read();
+        let name = target.and_then(|id| {
+            data.as_ref()
+                .and_then(|d| d.as_ref())
+                .and_then(|all| all.iter().find(|a| a.id == id))
+                .map(|a| a.applicant_label())
+        });
+        decline_message(name.as_deref())
+    };
+    let list_failed = applications.error.read().is_some()
+        && applications
+            .data
+            .read()
+            .as_ref()
+            .and_then(|d| d.as_ref())
+            .is_none();
+
     let list = {
         let data = applications.data.read();
         match data.as_ref().and_then(|d| d.as_ref()) {
-            None => admin_pending(&applications, "applications"),
+            None => admin_list_pending(&applications, "applications"),
             Some(all) => {
                 let shown = filter_applications(all, status_filter());
                 let total = shown.len();
@@ -577,6 +630,8 @@ pub fn AdminApplications() -> Element {
                 lead: "Filter by status. View an application to read it, then accept or decline it.",
             }
 
+            // Nothing to filter while the list failed to load.
+            if !list_failed {
             ChipRow { label: "Status filters", scroll: true,
                 for (status, word) in STATUS_FILTERS {
                     ChipButton {
@@ -591,6 +646,7 @@ pub fn AdminApplications() -> Element {
                         },
                     }
                 }
+            }
             }
 
             section {
@@ -625,7 +681,7 @@ pub fn AdminApplications() -> Element {
 
         ConfirmDialog {
             title: "Decline application".to_string(),
-            message: "Are you sure you want to decline this application?".to_string(),
+            message: reject_message,
             open: reject_modal.is_open(),
             danger: true,
             confirm_label: "Decline".to_string(),
@@ -953,16 +1009,9 @@ mod tests {
             message_tag.contains("application-detail-message"),
             "message field class: {message_tag}"
         );
-        assert!(
-            message_tag.contains("white-space:pre-wrap")
-                || message_tag.contains("white-space: pre-wrap"),
-            "message keeps line breaks: {message_tag}"
-        );
-        assert!(
-            message_tag.contains("overflow-wrap:anywhere")
-                || message_tag.contains("overflow-wrap: anywhere"),
-            "long message text wraps inside 390px: {message_tag}"
-        );
+        // The wrap and line breaks come from the class rule, never an
+        // inline style.
+        assert!(!message_tag.contains("style="), "{message_tag}");
         let css = crate::styles::admin::CSS;
         assert!(
             css.contains(".application-detail dd.application-detail-message"),
@@ -982,6 +1031,20 @@ mod tests {
         );
         assert!(!html.contains('\u{2014}'), "{html}");
         assert!(!html.contains("&mdash;"), "{html}");
+    }
+
+    #[test]
+    fn roles_read_as_words_and_decline_names_the_applicant() {
+        assert_eq!(role_label("dps"), "Damage");
+        assert_eq!(role_label(" tank "), "Tank");
+        assert_eq!(role_label("support"), "Support");
+        assert_eq!(role_label("flex"), "Flex");
+        assert_eq!(role_label("main tank"), "Main tank");
+        assert_eq!(
+            decline_message(Some("Applicant03")),
+            "Decline the application from Applicant03?"
+        );
+        assert_eq!(decline_message(None), "Decline this application?");
     }
 
     #[test]
@@ -1169,7 +1232,7 @@ mod tests {
         assert!(html.contains("Tank"), "{html}");
         assert!(html.contains("Hello"), "{html}");
         assert!(html.contains("Ready"), "{html}");
-        assert!(html.contains("2026-03-02 08:15"), "{html}");
+        assert!(html.contains("2 Mar 2026, 08:15 UTC"), "{html}");
         assert!(!html.contains('\u{2014}'), "{html}");
     }
 }

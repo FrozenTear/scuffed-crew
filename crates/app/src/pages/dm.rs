@@ -110,7 +110,7 @@ const PAGE_CSS: &str = r#"
     .dm-inbox { border-right: 0; }
     .dm-page.is-thread .dm-inbox { display: none; }
     .dm-page.is-inbox .dm-thread-pane { display: none; }
-    .dm-page .dm-thread-back { display: inline-flex; }
+    .dm-page .dm-thread-head .dm-thread-back { display: inline-flex; }
     .dm-avatar {
         width: var(--hit-target-min);
         height: var(--hit-target-min);
@@ -140,16 +140,28 @@ fn list_state(state: &LoadState) -> ConversationListState {
 }
 
 /// Thread-pane copy when no conversation is open (desktop only; phone shows
-/// the list). Loading and failure are said once, in the inbox column.
+/// the list). Loading, failure and an empty inbox are said once, in the
+/// inbox column (its empty card already says how to start one).
 fn inbox_pane_message(state: &LoadState, conversation_count: usize) -> Option<&'static str> {
     match state {
         LoadState::Loading | LoadState::Error(_) => None,
-        LoadState::Ready if conversation_count == 0 => {
-            Some("Your conversations will show here. Start one with New message.")
-        }
+        LoadState::Ready if conversation_count == 0 => None,
         LoadState::Ready => Some("Pick a conversation to read it."),
     }
 }
+
+/// The Refresh toast, or none when nothing new arrived.
+fn synced_toast(stored: u64) -> Option<String> {
+    match stored {
+        0 => None,
+        1 => Some("1 new message.".to_string()),
+        n => Some(format!("{n} new messages.")),
+    }
+}
+
+/// Said under the inbox head when the background sync could not reach the
+/// relay: the list is what the server already has.
+const SYNC_FAILED: &str = "Could not reach the relay. Showing saved messages.";
 
 /// The conversation to show on `/dm` without a click: the only one, on a
 /// wide screen. On phone the list comes first, so nothing opens (and nothing
@@ -230,6 +242,7 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
     let mut load_state = use_signal(|| LoadState::Loading);
     let mut conversations = use_signal::<Vec<ConversationSummary>>(Vec::new);
     let mut compose_open = use_signal(|| false);
+    let mut sync_notice = use_signal(|| None::<String>);
     let navigator = use_navigator();
 
     let me = use_resource(move || async move {
@@ -261,10 +274,30 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
 
         // Sync hits the relay and can hang. Do not await it before the list;
         // a stuck sync used to leave the inbox on the empty/in-flight state forever.
+        // When it lands: new messages reload the list (without another sync,
+        // so this never loops), and a failure is said, not hidden behind
+        // "No conversations yet".
         spawn(async move {
-            let _ = ApiClient::web()
+            match ApiClient::web()
                 .post_json::<_, SyncResponse>("/api/nostr/dm/sync", &serde_json::json!({}))
-                .await;
+                .await
+            {
+                Ok(resp) => {
+                    sync_notice.set(None);
+                    if resp.stored > 0
+                        && let Ok(list) = ApiClient::web()
+                            .fetch::<Vec<ConversationSummary>>("/api/nostr/dm/conversations")
+                            .await
+                    {
+                        conversations.set(list);
+                        load_state.set(LoadState::Ready);
+                    }
+                }
+                Err(err) => {
+                    crate::util::log_client_error("DM sync", &err);
+                    sync_notice.set(Some(SYNC_FAILED.to_string()));
+                }
+            }
         });
 
         match ApiClient::web()
@@ -347,14 +380,15 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
                 .await
             {
                 Ok(resp) => {
-                    if resp.fetched > 0 {
-                        toast.show(Toast::success(format!(
-                            "Synced {} new message(s)",
-                            resp.stored
-                        )));
+                    sync_notice.set(None);
+                    if let Some(text) = synced_toast(resp.stored) {
+                        toast.show(Toast::success(text));
                     }
                 }
-                Err(e) => toast.show(Toast::error(format!("Sync failed: {e}"))),
+                Err(e) => {
+                    sync_notice.set(Some(SYNC_FAILED.to_string()));
+                    toast.show(Toast::error(format!("Sync failed: {e}")));
+                }
             }
             syncing.set(false);
             refresh += 1;
@@ -433,6 +467,7 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
                         failure,
                         on_retry: move |_| refresh += 1,
                         refreshing: syncing(),
+                        notice: sync_notice(),
                         on_refresh: on_refresh,
                         on_compose: on_compose,
                     }
@@ -541,14 +576,19 @@ mod tests {
             inbox_pane_message(&LoadState::Error(DmLoadFailure::RelayConfig), 3),
             None
         );
-        assert_eq!(
-            inbox_pane_message(&LoadState::Ready, 0),
-            Some("Your conversations will show here. Start one with New message.")
-        );
+        // The inbox's empty card says it; the pane does not repeat it.
+        assert_eq!(inbox_pane_message(&LoadState::Ready, 0), None);
         assert_eq!(
             inbox_pane_message(&LoadState::Ready, 2),
             Some("Pick a conversation to read it.")
         );
+    }
+
+    #[test]
+    fn refresh_toast_counts_stored_messages_in_words() {
+        assert_eq!(synced_toast(0), None);
+        assert_eq!(synced_toast(1).as_deref(), Some("1 new message."));
+        assert_eq!(synced_toast(3).as_deref(), Some("3 new messages."));
     }
 
     fn convo(pk: &str) -> ConversationSummary {

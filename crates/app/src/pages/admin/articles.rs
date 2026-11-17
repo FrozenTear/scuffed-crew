@@ -5,7 +5,7 @@ use crate::components::ui::{
     EmptyCard, FieldError, PageHeader, PageShell, PageWidth, Pill, PillTone, show_list_top,
 };
 use crate::components::{
-    AdminDate, ConfirmDialog, DataTable, FormModal, RowActions, Toast, admin_pending,
+    AdminDate, ConfirmDialog, DataTable, FormModal, RowActions, Toast, admin_list_pending,
     row_menu_toggle_id, use_toast,
 };
 use crate::hooks::{ModalController, use_api_with};
@@ -113,6 +113,12 @@ const NEW_EMPTY_ID: &str = "articles-new-empty";
 
 /// Page CSS: the editor's long text box, the cover preview and the slug cell.
 const PAGE_CSS: &str = r#"
+/* Publish and Unpublish take the same width, so Delete after them lines up
+   from row to row. */
+.admin-articles-page .article-publish-toggle {
+    min-width: calc(var(--hit-target-min) * 2 + var(--space-4));
+    justify-content: center;
+}
     textarea.field-input.article-editor-content {
         min-height: calc(var(--hit-target-min) * 7);
         font-family: var(--font-mono);
@@ -458,7 +464,7 @@ pub fn AdminArticles() -> Element {
     let list = {
         let data = articles.data.read();
         match data.as_ref().and_then(|d| d.as_ref()) {
-            None => admin_pending(&articles, "articles"),
+            None => admin_list_pending(&articles, "articles"),
             Some(list) => {
                 let current = page();
                 let shown = list.len();
@@ -662,7 +668,7 @@ fn ArticlesTable(
                                     more: rsx! {
                                         button {
                                             r#type: "button",
-                                            class: if publish { "btn is-primary" } else { "btn is-ghost" },
+                                            class: if publish { "btn is-primary article-publish-toggle" } else { "btn is-ghost article-publish-toggle" },
                                             aria_label: "{toggle_word} {title}",
                                             onclick: move |_| on_set_published.call((slug.clone(), publish)),
                                             "{toggle_word}"

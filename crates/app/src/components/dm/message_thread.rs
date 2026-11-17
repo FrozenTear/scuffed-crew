@@ -27,7 +27,9 @@ const MESSAGE_THREAD_CSS: &str = r#"
     display: flex;
     flex-direction: column;
 }
-.dm-thread-back { display: none; }
+/* Back is for phone only (the inbox is beside the thread on desktop). Two
+   classes, so it beats `.btn { display: inline-flex }`. */
+.dm-thread-head .dm-thread-back { display: none; }
 .dm-thread-peer {
     min-width: 0;
     overflow: hidden;
@@ -369,6 +371,14 @@ mod tests {
         assert!(!thread_shows_empty(false, true, 0));
         assert!(thread_shows_empty(false, false, 0));
         assert!(!thread_shows_empty(false, false, 1));
+    }
+
+    #[test]
+    fn back_is_hidden_on_desktop_over_the_btn_rule() {
+        // `.btn { display: inline-flex }` is one class; the hide rule needs
+        // two, and the phone rule in pages/dm.rs three, to win in any order.
+        assert!(MESSAGE_THREAD_CSS.contains(".dm-thread-head .dm-thread-back { display: none; }"));
+        assert!(!MESSAGE_THREAD_CSS.contains("\n.dm-thread-back {"));
     }
 
     #[test]

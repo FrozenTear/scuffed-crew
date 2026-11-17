@@ -400,19 +400,10 @@ fn strategies_enabled_or_default(settings: Option<&SiteSettings>) -> bool {
     settings.map(|s| s.strategies_enabled).unwrap_or(true)
 }
 
-/// Two characters for the avatar when there is no picture.
+/// Two characters for the avatar when there is no picture, by the shared
+/// rule (`components::ui::avatar::name_initials`): "Player01" is "P1".
 fn user_initials(username: &str) -> String {
-    let initials: String = username
-        .chars()
-        .filter(|c| c.is_alphanumeric())
-        .take(2)
-        .flat_map(char::to_uppercase)
-        .collect();
-    if initials.is_empty() {
-        "?".to_string()
-    } else {
-        initials
-    }
+    crate::components::ui::avatar::name_initials(username)
 }
 
 /// Only same-site paths and https pictures reach the `src` attribute.
@@ -1964,7 +1955,7 @@ mod tests {
         );
         assert!(bar.contains("class=\"theme-toggle\""), "{bar}");
         // Initials when there is no picture, hidden from the name.
-        assert!(bar.contains("aria-hidden=\"true\">PL<"), "{bar}");
+        assert!(bar.contains("aria-hidden=\"true\">P1<"), "{bar}");
 
         let open = render(Who::Member, "/", Some(Disclosure::Account));
         let toggle = tag_with_id(&open, ACCOUNT_TOGGLE_ID);
@@ -2851,7 +2842,7 @@ mod tests {
 
     #[test]
     fn initials_and_avatar_sources() {
-        assert_eq!(user_initials("Player01"), "PL");
+        assert_eq!(user_initials("Player01"), "P1");
         assert_eq!(user_initials("x"), "X");
         assert_eq!(user_initials("_-"), "?");
         assert_eq!(user_initials(""), "?");

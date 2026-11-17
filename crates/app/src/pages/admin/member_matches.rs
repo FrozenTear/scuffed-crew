@@ -240,7 +240,28 @@ const MEMBER_MATCHES_CSS: &str = r#"
         gap: var(--space-stack);
         min-width: 0;
     }
+    /* Phone cards: the five stats share a line ("Elims: 10  Deaths: 3 ..."),
+       wrapping as needed, instead of one labelled line each. */
+    @media (max-width: 820px) {
+        .admin-member-matches-page .is-cards .data-table td.mm-stat {
+            flex: 0 0 auto;
+            margin-inline-end: var(--space-4);
+        }
+    }
 "#;
+
+/// `10000` as `10,000`: big stat values grouped in thousands.
+fn group_thousands(n: u32) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
 
 /// The list region: the pager's focus target after a page change.
 const LIST_ID: &str = "admin-member-matches-list";
@@ -504,11 +525,11 @@ fn MatchesTable(rows: Vec<MemberMatch>) -> Element {
                             td { class: "cell-meta num",
                                 time { class: "date", datetime: "{played_iso}", "{played}" }
                             }
-                            td { class: "num", "data-label": "Elims", {value_cell(m.elims.to_string(), cell_is_unsure(fields, "e"), "Eliminations")} }
-                            td { class: "num", "data-label": "Deaths", {value_cell(m.deaths.to_string(), cell_is_unsure(fields, "d"), "Deaths")} }
-                            td { class: "num", "data-label": "Assists", {value_cell(m.assists.to_string(), cell_is_unsure(fields, "a"), "Assists")} }
-                            td { class: "num", "data-label": "Damage", {value_cell(m.damage.to_string(), cell_is_unsure(fields, "dmg"), "Damage")} }
-                            td { class: "num", "data-label": "Healing", {value_cell(m.healing.to_string(), cell_is_unsure(fields, "h"), "Healing")} }
+                            td { class: "num mm-stat", "data-label": "Elims", {value_cell(group_thousands(m.elims), cell_is_unsure(fields, "e"), "Eliminations")} }
+                            td { class: "num mm-stat", "data-label": "Deaths", {value_cell(group_thousands(m.deaths), cell_is_unsure(fields, "d"), "Deaths")} }
+                            td { class: "num mm-stat", "data-label": "Assists", {value_cell(group_thousands(m.assists), cell_is_unsure(fields, "a"), "Assists")} }
+                            td { class: "num mm-stat", "data-label": "Damage", {value_cell(group_thousands(m.damage), cell_is_unsure(fields, "dmg"), "Damage")} }
+                            td { class: "num mm-stat", "data-label": "Healing", {value_cell(group_thousands(m.healing), cell_is_unsure(fields, "h"), "Healing")} }
                         }
                     }
                 }
@@ -520,6 +541,15 @@ fn MatchesTable(rows: Vec<MemberMatch>) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn big_stats_are_grouped_in_thousands() {
+        assert_eq!(group_thousands(0), "0");
+        assert_eq!(group_thousands(999), "999");
+        assert_eq!(group_thousands(6000), "6,000");
+        assert_eq!(group_thousands(10000), "10,000");
+        assert_eq!(group_thousands(1234567), "1,234,567");
+    }
 
     #[test]
     fn paths_use_the_601_routes() {

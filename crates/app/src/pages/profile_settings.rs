@@ -146,6 +146,7 @@ pub(crate) const ACCOUNT_CSS: &str = r#"
     box-sizing: border-box;
     display: flex;
     flex-direction: column;
+    gap: var(--space-5);
     min-width: 0;
     margin: 0;
     padding: var(--space-section);
@@ -155,9 +156,12 @@ pub(crate) const ACCOUNT_CSS: &str = r#"
     border-radius: var(--card-radius);
     box-shadow: var(--card-shadow);
 }
+/* The card spaces its children with `gap`, never sibling margins: a child
+   that resets its own margin (a field, a fieldset, a form) would cancel a
+   sibling margin and sit flush on the next one. A checkbox pair pulls back
+   to --space-3. */
 .account-card > * { margin: 0; }
-.account-card > * + * { margin-top: var(--space-5); }
-.account-card > .account-check + .account-check { margin-top: var(--space-3); }
+.account-card > .account-check + .account-check { margin-top: calc(var(--space-3) - var(--space-5)); }
 .account-sub-title {
     font-family: var(--font-head);
     font-weight: var(--font-head-weight);
@@ -482,6 +486,11 @@ pub fn ProfileSettings() -> Element {
 
     use_resource(move || async move {
         let _generation = stats_refresh();
+        // A guest gets the sign-in wall; asking the API would only 401.
+        // Reading auth here reruns the fetch once the session is known.
+        if !auth.read().is_logged_in() {
+            return;
+        }
         match ApiClient::web()
             .fetch::<MemberSettingsResponse>("/api/stats/settings")
             .await
@@ -549,7 +558,7 @@ pub fn ProfileSettings() -> Element {
             save_state.set(SaveState::Failed(
                 "Profile not saved. Enter a display name.".to_string(),
             ));
-            toast.show(Toast::error("Display name is required."));
+            toast.show(Toast::error(NAME_REQUIRED));
             crate::components::ui::inline_confirm::focus_element_by_id(NAME_ID);
             return;
         }
@@ -1104,10 +1113,13 @@ mod tests {
     #[test]
     fn page_css_uses_tokens() {
         assert_sizes_from_tokens(ACCOUNT_CSS);
+        // Sibling margins lose to a child's own `margin: 0` (same
+        // specificity, later rule), so the card must space with `gap`.
+        assert!(!ACCOUNT_CSS.contains("* + *"), "card spacing must use gap");
         for decl in [
             "padding: var(--space-section)",
-            ".account-card > * + * { margin-top: var(--space-5); }",
-            ".account-card > .account-check + .account-check { margin-top: var(--space-3); }",
+            "gap: var(--space-5);",
+            ".account-card > .account-check + .account-check { margin-top: calc(var(--space-3) - var(--space-5)); }",
             "gap: var(--space-2)",
             "min-height: var(--hit-target-min)",
         ] {

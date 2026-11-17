@@ -50,6 +50,39 @@ pub fn admin_pending<T: 'static>(resource: &ApiResource<T>, label: &str) -> Elem
     }
 }
 
+/// [`admin_pending`] for a page's main list: the failure is a card (title,
+/// the server's reason, Retry and a way back to the dashboard), as the spec
+/// asks for a failed load. Waiting is the same labelled skeleton.
+pub fn admin_list_pending<T: 'static>(resource: &ApiResource<T>, label: &str) -> Element {
+    let Some(err) = resource.error.read().as_ref().cloned() else {
+        return admin_pending(resource, label);
+    };
+    let mut refresh = resource.refresh;
+    let reason = err.trim().to_string();
+    let reason = if reason.is_empty() {
+        "The server did not answer. Try again in a moment.".to_string()
+    } else {
+        reason
+    };
+    rsx! {
+        div { class: "admin-pending", role: "alert",
+            section { class: "empty-card admin-load-error",
+                h2 { "Could not load {label}" }
+                p { "{reason}" }
+                div { class: "empty-card-actions",
+                    button {
+                        r#type: "button",
+                        class: "btn is-primary",
+                        onclick: move |_| refresh += 1,
+                        "Retry"
+                    }
+                    Link { to: Route::AdminDashboard {}, class: "btn is-ghost", "Back to dashboard" }
+                }
+            }
+        }
+    }
+}
+
 /// "Loading applications...": the labelled wait of a list or a page.
 pub fn loading_text(label: &str) -> String {
     format!("Loading {label}...")
@@ -293,6 +326,19 @@ pub fn admin_short_date(iso: &str) -> Option<(String, String)> {
         date.to_string(),
         format!("{day_number} {month_name} {year}"),
     ))
+}
+
+/// `2026-11-17T01:32:00Z` as `17 Nov 2026, 01:32 UTC`: the admin date with
+/// its time, for detail views. A value that is not a timestamp is returned
+/// as it is.
+pub fn admin_date_time(iso: &str) -> String {
+    let Some((_, day)) = admin_short_date(iso) else {
+        return iso.to_string();
+    };
+    match iso.get(10..16) {
+        Some(rest) if rest.starts_with('T') => format!("{day}, {} UTC", &rest[1..]),
+        _ => day,
+    }
 }
 
 /// A date cell value: `10 Nov 2026` in a `<time>` that keeps the machine
@@ -1147,6 +1193,16 @@ mod admin_pattern_tests {
             tab_wraps_to(false, false, false, false),
             Some(TabEdge::First)
         );
+    }
+
+    #[test]
+    fn detail_dates_read_like_the_list_dates_plus_the_time() {
+        assert_eq!(
+            admin_date_time("2026-11-17T01:32:09Z"),
+            "17 Nov 2026, 01:32 UTC"
+        );
+        assert_eq!(admin_date_time("2026-11-17"), "17 Nov 2026");
+        assert_eq!(admin_date_time("soon"), "soon");
     }
 
     #[test]

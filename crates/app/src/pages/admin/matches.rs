@@ -6,8 +6,8 @@ use crate::components::ui::{
     show_list_top,
 };
 use crate::components::{
-    ADMIN_PAGE_SIZE, AdminDate, DataTable, FormModal, RowActions, SaveState, Toast, admin_pending,
-    list_cap_notice, status_label, use_toast,
+    ADMIN_PAGE_SIZE, AdminDate, DataTable, FormModal, RowActions, SaveState, Toast,
+    admin_list_pending, admin_pending, list_cap_notice, status_label, use_toast,
 };
 use crate::hooks::{ModalController, use_api_list, use_api_list_with};
 use crate::routes::Route;
@@ -102,6 +102,28 @@ fn match_result(score_us: Option<u32>, score_them: Option<u32>) -> (&'static str
         (Some(_), Some(_)) => ("Draw", PillTone::Neutral),
         _ => ("Scheduled", PillTone::Info),
     }
+}
+
+/// A match with no score is still to be played.
+fn is_unplayed(m: &MatchResult) -> bool {
+    m.score_us.is_none() || m.score_them.is_none()
+}
+
+/// Matches still to be played first (soonest first), then played ones
+/// newest first, so the date column reads in order.
+fn sorted_matches(all: &[MatchResult]) -> Vec<MatchResult> {
+    let date = |m: &MatchResult| {
+        m.played_at
+            .clone()
+            .or(m.scheduled_at.clone())
+            .unwrap_or_default()
+    };
+    let mut upcoming: Vec<MatchResult> = all.iter().filter(|m| is_unplayed(m)).cloned().collect();
+    let mut played: Vec<MatchResult> = all.iter().filter(|m| !is_unplayed(m)).cloned().collect();
+    upcoming.sort_by_key(date);
+    played.sort_by_key(|m| std::cmp::Reverse(date(m)));
+    upcoming.extend(played);
+    upcoming
 }
 
 /// Id of a row's Edit button, from the match id.
@@ -337,10 +359,11 @@ pub fn AdminMatches() -> Element {
     } else {
         let data = matches.data.read();
         match data.as_ref().and_then(|d| d.as_ref()) {
-            None => admin_pending(&matches, "matches"),
+            None => admin_list_pending(&matches, "matches"),
             Some(all) => {
                 let total = all.len();
-                let rows = page_slice(all, page(), ADMIN_PAGE_SIZE).to_vec();
+                let ordered = sorted_matches(all);
+                let rows = page_slice(&ordered, page(), ADMIN_PAGE_SIZE).to_vec();
                 rsx! {
                     if all.is_empty() {
                         EmptyCard {
@@ -364,12 +387,16 @@ pub fn AdminMatches() -> Element {
                             for m in rows.iter() {
                                 {
                                     let mc = m.clone();
+                                    // A scheduled match says so once (its pill); no "No
+                                    // score" or "No map" noise in its card.
                                     let score = match (m.score_us, m.score_them) {
                                         (Some(u), Some(t)) => format!("{u}-{t}"),
-                                        _ => "No score".to_string(),
+                                        _ => String::new(),
                                     };
                                     let (result, tone) = match_result(m.score_us, m.score_them);
-                                    let map = m.map_name.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "No map".to_string());
+                                    let map = m.map_name.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| {
+                                        if is_unplayed(m) { String::new() } else { "No map".to_string() }
+                                    });
                                     let date = m.played_at.clone().or(m.scheduled_at.clone());
                                     let kind = status_label(&m.match_type);
                                     let public_label = if m.is_public { "Public" } else { "Members only" };
@@ -631,6 +658,40 @@ pub fn AdminMatches() -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn game(
+        id: &str,
+        score: Option<(u32, u32)>,
+        played: Option<&str>,
+        scheduled: Option<&str>,
+    ) -> MatchResult {
+        MatchResult {
+            id: id.into(),
+            opponent: format!("Team {id}"),
+            score_us: score.map(|s| s.0),
+            score_them: score.map(|s| s.1),
+            map_name: None,
+            match_type: "scrim".into(),
+            played_at: played.map(Into::into),
+            scheduled_at: scheduled.map(Into::into),
+            notes: None,
+            is_public: true,
+            vod_url: None,
+            replay_code: None,
+        }
+    }
+
+    #[test]
+    fn upcoming_matches_come_first_then_played_newest_first() {
+        let all = vec![
+            game("old", Some((2, 1)), Some("2026-11-01T19:00:00Z"), None),
+            game("new", Some((0, 2)), Some("2026-11-12T19:00:00Z"), None),
+            game("later", None, None, Some("2026-11-30T19:00:00Z")),
+            game("soon", None, None, Some("2026-11-20T19:00:00Z")),
+        ];
+        let ids: Vec<String> = sorted_matches(&all).into_iter().map(|m| m.id).collect();
+        assert_eq!(ids, ["soon", "later", "new", "old"]);
+    }
 
     /// This sheet sets no type, so the shared check (which needs a
     /// font-size) does not apply: no rem, no px past a hairline, no hex.
