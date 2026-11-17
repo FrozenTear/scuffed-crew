@@ -1,6 +1,8 @@
 //! Daemon tests: a stored stat never falls back below a value the same game
 //! already stored when the capture gate holds a jump on that cell (weekly
-//! review 2026-11-16, Wrecking Ball games with 30+ elims). A child of
+//! review 2026-11-16, Wrecking Ball games with 30+ elims). A held read
+//! below the stored value drops the row to the accepted value, flagged,
+//! and the stored unsure value stays the base for the next check. A child of
 //! `cell_trust.rs`, kept apart so both files stay under the size limit.
 //!
 //! `Some((v, true))` is a cell the digit reader does not vouch for (held);
@@ -230,11 +232,13 @@ async fn a_vouched_and_an_unvouched_held_read_store_the_same() {
     assert_eq!(stored[1], stored[0], "unvouched 35 stores the same");
 }
 
-/// A sure read below the accepted value (a monotonic hold) does not keep a
-/// higher stored unsure read: the row falls back to the accepted 29,
-/// flagged, rather than keep showing the stale 33.
+/// QA 701 series: 25, 29 (sure), 33 held, a sure 27 below the accepted 29
+/// (a monotonic hold), then a real sure 35 on the same quiet board. The
+/// held 27 is never stored: the row drops to the accepted 29, flagged,
+/// and the unsure 33 stays the base for the next check. From 33 the 35 is
+/// a +2, so it is stored (flagged), not held as a lone +6 jump from 29.
 #[tokio::test]
-async fn a_held_lower_sure_read_does_not_keep_a_higher_unsure_read() {
+async fn a_held_lower_sure_read_keeps_the_unsure_read_as_the_next_base() {
     let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
     let dir = tempfile::tempdir().unwrap();
     let ctx = o8_ctx(dir.path(), true).await;
@@ -253,16 +257,27 @@ async fn a_held_lower_sure_read_does_not_keep_a_higher_unsure_read() {
             (111, all_sure([29, 9, 2, 8446, 1263, 2429])),
             (70, held_33),
             (20, all_sure([27, 11, 2, 8656, 1263, 2574])),
+            (60, all_sure([35, 11, 2, 8656, 1263, 2574])),
         ],
     )
     .await;
     assert!(seen.iter().all(|tab| tab.recorded), "{seen:?}");
     let rows = ctx.store.get_session_snapshots("o10").await.unwrap();
     let elims: Vec<u32> = rows.iter().map(|r| r.elims).collect();
-    assert_eq!(elims, vec![25, 29, 33, 29], "stored elims");
-    assert!(
-        rows[3].suspect_fields.iter().any(|f| f == "e"),
-        "the fallback 29 is flagged: {:?}",
-        rows[3].suspect_fields
-    );
+    assert_eq!(elims, vec![25, 29, 33, 29, 35], "stored elims");
+    assert!(!elims.contains(&27), "the held 27 is never stored");
+    for (row, what) in [(2, "held 33"), (3, "fallback 29"), (4, "35")] {
+        assert!(
+            rows[row].suspect_fields.iter().any(|f| f == "e"),
+            "the {what} is flagged: {:?}",
+            rows[row].suspect_fields
+        );
+    }
+    for row in &rows[..2] {
+        assert!(
+            !row.suspect_fields.iter().any(|f| f == "e"),
+            "a sure row is not flagged: {:?}",
+            row.suspect_fields
+        );
+    }
 }

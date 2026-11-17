@@ -153,15 +153,29 @@ pub struct GateState {
     /// (flagged), so a repeat read of the same board never drops the row
     /// back to the older accepted value. A later refused digit (a held sure
     /// read counts as one) at or above the accepted value replaces it when
-    /// the row before already showed an unsure read and the digit also
-    /// passes the jump and rate-cap filter
-    /// measured from that shown value; otherwise the shown value is kept.
+    /// the row before already showed an unsure read (or kept one as
+    /// [`Self::unsure_base`]) and the digit also passes the jump and
+    /// rate-cap filter measured from that value; otherwise the shown value
+    /// is kept. A held read below the shown value drops the row to the
+    /// accepted value and moves the shown value to [`Self::unsure_base`].
     /// Missing on an older save means the stored row showed `accepted`.
     #[serde(default)]
     pub unsure_shown: [u32; GATE_COLS],
     /// Which columns have [`Self::unsure_shown`] set.
     #[serde(default)]
     pub has_unsure_shown: [bool; GATE_COLS],
+    /// The unsure read the row before showed, when a held read below it
+    /// dropped this stored row to the accepted value. Not shown and never
+    /// stored: it is only the base the next capture measures a refused
+    /// digit from (the jump and rate-cap filter), so a real read that is a
+    /// lone jump from the accepted value but plausible from the unsure
+    /// value is still stored. Only valid where [`Self::has_unsure_base`] is
+    /// set. Missing on an older save means none.
+    #[serde(default)]
+    pub unsure_base: [u32; GATE_COLS],
+    /// Which columns have [`Self::unsure_base`] set.
+    #[serde(default)]
+    pub has_unsure_base: [bool; GATE_COLS],
     /// Raw counters from a read the gate discarded (every cell suspect).
     ///
     /// Not a monotonic value: `accepted` stays where it was. The boundary
