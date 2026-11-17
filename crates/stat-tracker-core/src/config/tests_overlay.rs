@@ -151,9 +151,9 @@ fn shadow_env_override_is_never_saved() {
 }
 
 #[test]
-fn report_kit_retention_defaults_to_50_games_and_500_mb() {
+fn report_kit_retention_defaults_to_300_games_and_500_mb() {
     let cfg: Config = toml::from_str("data_dir = \"/tmp/x\"").unwrap();
-    assert_eq!(cfg.report_kit_retention(), Retention::new(50, 500));
+    assert_eq!(cfg.report_kit_retention(), Retention::new(300, 500));
     let cfg: Config =
         toml::from_str("data_dir = \"/tmp/x\"\nreport_kit_max_games = 20\nreport_kit_max_mb = 100")
             .unwrap();
