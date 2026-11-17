@@ -55,6 +55,13 @@ static SITE_APPLE_TOUCH: manganis::Asset = asset!(
     "/assets/apple-touch-icon.png",
     manganis::AssetOptions::builder().with_hash_suffix(false)
 );
+/// `index.html` loads this from a stable path in `<head>`, so the boot
+/// splash follows the saved theme before the app paints.
+#[used]
+static BOOT_THEME_JS: manganis::Asset = asset!(
+    "/assets/boot-theme.js",
+    manganis::AssetOptions::builder().with_hash_suffix(false)
+);
 
 fn main() {
     // The router drops undeclared query params as soon as it mounts. Snapshot
@@ -270,6 +277,72 @@ mod tests {
             .expect("light media query in index.html");
         assert!(light.contains("html, body"), "{light}");
         assert!(light.contains("background:"), "{light}");
+    }
+
+    /// QA 694 nit 2: the splash followed the OS theme even when the member
+    /// had saved another one. `assets/boot-theme.js` loads in `<head>`, before
+    /// any body content, reads `sc-theme` the way `ThemeProvider` does, and
+    /// the shell styles key on the `data-theme` it sets.
+    #[test]
+    fn boot_splash_follows_the_saved_theme() {
+        let visible = strip_html_comments(include_str!("../index.html"));
+        let tag = "<script src=\"/assets/boot-theme.js\"></script>";
+        assert_eq!(visible.matches(tag).count(), 1, "one boot theme script");
+        let head_end = visible.find("</head>").expect("head");
+        let at = visible.find(tag).expect("boot theme script");
+        assert!(at < head_end, "loads in head, before the splash paints");
+        assert!(
+            at < visible.find("<style>").expect("shell style"),
+            "the attribute is set before the shell styles apply"
+        );
+        // Not inline: the enforcing CSP hashes inline scripts only.
+        assert_eq!(
+            visible.matches("<script>").count(),
+            1,
+            "only the mount watcher is inline"
+        );
+
+        let main_src = include_str!("main.rs");
+        let prod = main_src.split("mod tests").next().unwrap_or(main_src);
+        assert!(
+            prod.contains("\"/assets/boot-theme.js\""),
+            "dx ships the file unhashed"
+        );
+
+        let js = include_str!("../assets/boot-theme.js");
+        assert!(js.contains("getItem(\"sc-theme\")"), "{js}");
+        assert!(
+            js.contains("saved === \"light\" ? \"light\" : \"dark\""),
+            "{js}"
+        );
+        assert!(
+            js.contains("if (saved !== null)"),
+            "no saved value leaves the OS choice"
+        );
+        assert!(js.contains("setAttribute(\n        \"data-theme\""), "{js}");
+        let provider = include_str!("theme/provider.rs");
+        assert!(provider.contains("const THEME_KEY: &str = \"sc-theme\";"));
+        assert!(provider.contains("return if v == \"light\" {"));
+
+        // Both saved themes beat the media query, with the Look A values
+        // of --bg, --text and --text-subtle for that theme.
+        let tokens_css = crate::theme::tokens::theme_css(&crate::theme::brand::current());
+        for theme in ["dark", "light"] {
+            let tokens = crate::theme::tokens::resolved_tokens(&tokens_css, theme);
+            let (bg, fg, label) = (&tokens["--bg"], &tokens["--text"], &tokens["--text-subtle"]);
+            let page = format!(
+                "html[data-theme=\"{theme}\"],\n      html[data-theme=\"{theme}\"] body {{\n        background: {bg};\n        color: {fg};\n      }}"
+            );
+            assert!(visible.contains(&page), "{theme} page: {visible}");
+            let label_rule =
+                format!("html[data-theme=\"{theme}\"] #sc-boot .label {{\n        color: {label};");
+            assert!(visible.contains(&label_rule), "{theme} label");
+            let media = visible.find("prefers-color-scheme: light").expect("media");
+            assert!(
+                visible.find(&page).unwrap() > media,
+                "saved theme rules come last"
+            );
+        }
     }
 
     /// dx still sees a closing body tag inside a comment, so that count stays

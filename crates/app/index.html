@@ -5,6 +5,8 @@
     <meta charset="UTF-8" />
     <meta content="text/html;charset=utf-8" http-equiv="Content-Type" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- Sets data-theme from the saved theme before first paint. -->
+    <script src="/assets/boot-theme.js"></script>
     <!-- Self-hosted display face (crates/app/src/theme/fonts.rs). -->
     <link rel="preload" as="font" type="font/woff2" href="/assets/urbanist.woff2" crossorigin />
     <meta name="description" content="A community site for teams, events, and scheduled play." />
@@ -68,6 +70,24 @@
         #sc-boot .label {
           color: #696975;
         }
+      }
+      /* A saved theme (assets/boot-theme.js) wins over the OS preference,
+         so the splash already matches the theme the app paints. */
+      html[data-theme="dark"],
+      html[data-theme="dark"] body {
+        background: #17171d;
+        color: #f4f4f8;
+      }
+      html[data-theme="dark"] #sc-boot .label {
+        color: #9696a3;
+      }
+      html[data-theme="light"],
+      html[data-theme="light"] body {
+        background: #f7f7f9;
+        color: #16161c;
+      }
+      html[data-theme="light"] #sc-boot .label {
+        color: #696975;
       }
     </style>
   </head>
