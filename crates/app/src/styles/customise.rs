@@ -302,8 +302,10 @@ pub const CUSTOMISE_CSS: &str = r#"
         color: var(--button-primary-fg);
         border-color: var(--button-primary-border);
     }
-    /* Blocked, not disabled: the button keeps focus so the reason it points
-       at is read out. The click handler does the blocking. */
+    /* Locked, not disabled: the button keeps focus, and the click handler
+       does the blocking. When the contrast check locks Save the button is
+       described by the visible reason, so focus reads it out. When there is
+       nothing to save it has no reason to point at. */
     .customise-btn[aria-disabled="true"] {
         background: var(--surface);
         color: var(--text-disabled);
@@ -379,6 +381,12 @@ pub const CUSTOMISE_CSS: &str = r#"
         .customise-choice:focus-within,
         .customise-swatch:focus-within {
             outline-color: Highlight;
+        }
+        /* aria-disabled is not :disabled, so forced colours would paint a
+           locked Save as enabled. GrayText is the system disabled colour. */
+        .customise-btn[aria-disabled="true"] {
+            color: GrayText;
+            border-color: GrayText;
         }
     }
 "#;
@@ -489,6 +497,18 @@ mod tests {
             "selected border, selected ring and dot, focus outline: {forced}"
         );
         assert!(!forced.contains("is-locked"), "{forced}");
+    }
+
+    /// Site review 5, nit 2: a locked Save (`aria-disabled`, not `:disabled`)
+    /// must also look disabled in forced colours.
+    #[test]
+    fn a_locked_button_looks_disabled_in_forced_colours() {
+        let (_, forced) = CUSTOMISE_CSS
+            .split_once("@media (forced-colors: active)")
+            .expect("forced colours block");
+        let locked = rule(forced, ".customise-btn[aria-disabled=\"true\"]");
+        assert!(locked.contains("color: GrayText;"), "{locked}");
+        assert!(locked.contains("border-color: GrayText;"), "{locked}");
     }
 
     /// `:has()` is not everywhere. Without it the focus ring must still show.
