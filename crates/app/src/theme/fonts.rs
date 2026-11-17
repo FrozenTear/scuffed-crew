@@ -168,6 +168,17 @@ impl DisplayFont {
         value.and_then(Self::from_id).unwrap_or_default()
     }
 
+    /// The value a save stores for this font. The default is stored as `""`
+    /// ("use the default"), the same as the accent's empty default, so a
+    /// reset never pins an explicit id. Other fonts store their [`Self::id`].
+    pub fn setting_value(self) -> &'static str {
+        if self == Self::default() {
+            ""
+        } else {
+            self.id()
+        }
+    }
+
     /// The font the site uses: the typed `brand_font_display` of loaded
     /// settings. Settings not loaded yet give the default.
     pub fn for_settings(settings: Option<&scuffed_types::SiteSettings>) -> Self {
