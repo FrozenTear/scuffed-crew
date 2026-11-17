@@ -476,8 +476,8 @@ enum PickerKey {
     Close,
     /// Tab or Shift+Tab: wrap inside the picker.
     KeepFocusInside,
-    /// Ctrl+S or Cmd+S: the editor does not save behind the modal, and the
-    /// browser's Save Page dialog must not open either.
+    /// Ctrl+S or Cmd+S: the editor does not save behind the modal (or the
+    /// phone drawer), and the browser's Save Page dialog must not open either.
     BlockBrowserSave,
 }
 
@@ -721,8 +721,13 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
     crate::layouts::use_document_keydown_capture(move |event: web_sys::KeyboardEvent| {
         // The site drawer (phone layout) covers the page and makes `main`
         // inert: the editor behind it takes no shortcut, even with focus
-        // on the body after a click on blank drawer space.
+        // on the body after a click on blank drawer space. Ctrl/Cmd+S still
+        // stops the browser's Save Page dialog, as in the picker.
         if crate::layouts::main_is_inert() {
+            let binding = keybindings::Keybinding::from_keyboard_event(&event);
+            if picker_key(&binding) == Some(PickerKey::BlockBrowserSave) {
+                event.prevent_default();
+            }
             return;
         }
         // The map picker is a modal: while it is open the editor behind it
@@ -1986,10 +1991,14 @@ mod tests {
             picker_current_id(Some(&format!("  {}  ", first.id))),
             Some(first.id)
         );
-        let by_name = crate::state::maps::PICKABLE_MAPS
-            .iter()
-            .find(|map| picker_current_id(Some(map.name)) == Some(map.id));
-        assert!(by_name.is_some(), "a display name finds its map");
+        for map in crate::state::maps::PICKABLE_MAPS {
+            assert_eq!(
+                picker_current_id(Some(map.name)),
+                Some(map.id),
+                "{} finds its map by display name",
+                map.name
+            );
+        }
         assert_eq!(picker_current_id(Some("not-a-map")), None);
         assert_eq!(picker_current_id(Some("")), None);
         assert_eq!(picker_current_id(None), None);

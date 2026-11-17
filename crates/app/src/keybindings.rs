@@ -456,7 +456,8 @@ impl KeybindingManager {
                 Keybinding::new("z").with_meta().with_shift(),
                 EditorAction::Redo,
             ),
-            (Keybinding::new("y").with_meta(), EditorAction::Redo),
+            // No Cmd+Y: on macOS it opens History in Chrome and Safari, and
+            // Cmd+Shift+Z is the Mac redo.
             (Keybinding::new("s").with_meta(), EditorAction::Save),
         ];
 
@@ -771,7 +772,7 @@ mod tests {
     }
 
     /// Every default binding as (binding, action), so the routing tests walk
-    /// all 42 of them.
+    /// all 41 of them.
     fn all_defaults() -> Vec<(Keybinding, EditorAction)> {
         let manager = KeybindingManager::new();
         let mut all: Vec<_> = manager
@@ -780,7 +781,7 @@ mod tests {
             .map(|(binding, action)| (binding.clone(), *action))
             .collect();
         all.sort_by(|a, b| format!("{:?}", a.0).cmp(&format!("{:?}", b.0)));
-        assert_eq!(all.len(), 42);
+        assert_eq!(all.len(), 41);
         all
     }
 
@@ -864,8 +865,8 @@ mod tests {
             }
         }
         assert_eq!(
-            chords, 8,
-            "undo, redo (two ways) and save, with Ctrl and with Cmd"
+            chords, 7,
+            "undo, redo (two ways with Ctrl, Cmd+Shift+Z with Cmd) and save"
         );
         // Tab is never an editor shortcut, wherever it lands.
         for target in [KeyTarget::MapCanvas, KeyTarget::Page, KeyTarget::Control] {
@@ -923,7 +924,7 @@ mod tests {
             let target = kind(tag, attrs);
             assert_eq!(target, Some(KeyTarget::Control), "{tag} {attrs:?}");
             let target = KeyTarget::Control;
-            for key in [" ", "arrowup", "arrowright", "home", "delete", "v", "1"] {
+            for key in [" ", "arrowleft", "arrowright", "home", "delete", "v", "1"] {
                 assert_eq!(
                     manager.action_for_target(&Keybinding::new(key), target),
                     None,
@@ -1145,18 +1146,19 @@ mod tests {
             chord(Keybinding::new("s").with_ctrl()),
             Some(EditorAction::Save)
         );
-        // Vision nit 15: the same four chords with Cmd, for macOS.
+        // Vision nit 15: undo, Shift+Z redo and save with Cmd, for macOS.
         for (binding, action) in [
             (Keybinding::new("z").with_meta(), EditorAction::Undo),
             (
                 Keybinding::new("z").with_meta().with_shift(),
                 EditorAction::Redo,
             ),
-            (Keybinding::new("y").with_meta(), EditorAction::Redo),
             (Keybinding::new("s").with_meta(), EditorAction::Save),
         ] {
             assert_eq!(chord(binding.clone()), Some(action), "{binding:?}");
         }
+        // Vision nit 24: Cmd+Y is left to the browser (History on macOS).
+        assert_eq!(chord(Keybinding::new("y").with_meta()), None);
         // The Ctrl form is still the one shown in help (keys print lowercase).
         assert_eq!(
             manager.display_for(EditorAction::Save).as_deref(),
@@ -1164,8 +1166,8 @@ mod tests {
         );
         assert_eq!(
             manager.bindings.len(),
-            42,
-            "only the four Cmd chords were added"
+            41,
+            "only the three Cmd chords were added"
         );
         assert_eq!(
             manager
