@@ -2847,13 +2847,13 @@ mod tests {
                         GameAccount {
                             id: "acct-1".into(),
                             game_id: "game-ow".into(),
-                            account_name: "Player01#1234".into(),
+                            account_name: "Player01 EU".into(),
                             account_id: None,
                         },
                         GameAccount {
                             id: "acct-2".into(),
                             game_id: "game-gone".into(),
-                            account_name: "Player02#5678".into(),
+                            account_name: "Player02 NA".into(),
                             account_id: Some("42".into()),
                         },
                     ],
@@ -2870,7 +2870,7 @@ mod tests {
         assert!(name_at < game_at, "{html}");
         assert!(
             html.contains(
-                "<td class=\"cell-who\">Player01#1234</td><td class=\"cell-meta\">Overwatch</td>"
+                "<td class=\"cell-who\">Player01 EU</td><td class=\"cell-meta\">Overwatch</td>"
             ),
             "{html}"
         );

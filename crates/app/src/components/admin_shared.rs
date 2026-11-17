@@ -574,13 +574,15 @@ fn restore_focus_if_lost(ids: &[String]) {
         let Some(el) = document.get_element_by_id(id) else {
             continue;
         };
-        if el.get_client_rects().length() == 0 {
+        let Ok(el) = el.dyn_into::<web_sys::HtmlElement>() else {
+            continue;
+        };
+        // No offset parent: it (or a box around it) is `display: none`.
+        if el.offset_parent().is_none() {
             continue;
         }
-        if let Ok(el) = el.dyn_into::<web_sys::HtmlElement>() {
-            let _ = el.focus();
-            return;
-        }
+        let _ = el.focus();
+        return;
     }
 }
 
