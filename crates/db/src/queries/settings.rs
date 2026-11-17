@@ -658,7 +658,8 @@ mod tests {
         );
     }
 
-    /// The one fenced `surql` statement in the doc's rollback section.
+    /// The cleanup query in the doc's rollback section: the text of its one
+    /// fenced `surql` block (two statements on one line).
     fn documented_rollback_query() -> String {
         let doc = include_str!("../../../../docs/api/site-settings.md");
         let section = doc
@@ -697,9 +698,18 @@ mod tests {
                 .expect("remove only")
                 .check()
                 .expect("remove only ok");
+            let err = backfill_officers_can_edit_teams(&db.client)
+                .await
+                .expect_err(
+                    "REMOVE FIELD alone must break the backfill, or this control proves nothing",
+                )
+                .to_string();
+            // The refusal Site review 2 quoted, not some other failure.
             assert!(
-                backfill_officers_can_edit_teams(&db.client).await.is_err(),
-                "REMOVE FIELD alone must break the backfill, or this control proves nothing"
+                err.contains(
+                    "Found field 'brand_font_display', but no such field exists for table 'site_settings'"
+                ),
+                "{err}"
             );
         }
 

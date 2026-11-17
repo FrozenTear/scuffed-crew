@@ -17,6 +17,11 @@ The list is `BRAND_FONT_DISPLAY_ALLOWED` in `scuffed-types`, checked with
 `is_allowed_brand_font_display`. The value is an id from that list. It is
 never a font name, a file path or a URL.
 
+The brand settings page (`/admin/brand`) stores `""` when the admin picks
+Urbanist or presses Reset to default, the same as the accent's empty
+default. It sends the key only when the font changed. `"urbanist"` stays a
+valid value for API callers and reads the same as `""`.
+
 ## Reading
 
 The key is always present, also when it is `""`:
@@ -24,9 +29,11 @@ The key is always present, also when it is `""`:
 - `GET /api/settings` (public, no session needed).
 - The body of a successful `PUT /api/settings`.
 - The `#sc-settings` JSON in the SPA shell, so the client has it on first
-  paint. That block is the `GET /api/settings` object. It also carries
-  `public_base_url`, but only when `REDIRECT_BASE_URL` is a public http(s)
-  origin; otherwise the block is that object byte for byte.
+  paint. That block holds the same JSON value as `GET /api/settings`. It
+  also carries `public_base_url`, but only when `REDIRECT_BASE_URL` is a
+  public http(s) origin. The bytes can differ: the shell writes `<`, `>`,
+  `&`, U+2028 and U+2029 inside strings as `\u` escapes so the block cannot
+  close its `<script>` element, and parsing gives back the same value.
 
 A settings row written before the field existed reads as `""`.
 
