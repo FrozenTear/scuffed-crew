@@ -259,10 +259,12 @@ pub(crate) fn hold_new_reader_stats_with_guesses(
             // same board read again, or a cell with no digit, carries no new
             // information. Keep showing the unsure read the row before
             // showed, flagged, rather than fall back to the older accepted
-            // value. The same goes for a sure read the gate held (a lone
-            // jump from the accepted value, the Rialto 29 to 35 at match
-            // end): the gate kept the older accepted value, and the row
-            // keeps what it already showed instead, flagged by the hold.
+            // value. The same goes for a sure read the gate held for any
+            // reason (a lone jump from the accepted value, like the Rialto
+            // 29 to 35 at match end, or a rate cap): the gate kept the
+            // older accepted value, and the row keeps what it already
+            // showed instead, flagged by the hold. It never goes below the
+            // value the gate stores, so a hold can only keep a row level.
             let gate_held = held.holds.iter().any(|hold| hold.col == col);
             fresh[col].is_none() && (held_cells[col] || gate_held) && shown >= stored[col]
         }) {
