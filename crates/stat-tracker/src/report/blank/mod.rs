@@ -14,8 +14,8 @@
 //!
 //! When neither kind is kept, the name-column fallback keeps each verified
 //! row with its portrait cell and name column filled, copying only the
-//! light grey pixels right of the name column (digits, round and perk
-//! icons) on one flat colour ([`name_column_fallback`]).
+//! light grey pixels inside the row's six digit cells (the digits) on one
+//! flat colour ([`name_column_fallback`]).
 //!
 //! Names, titles, badges, the header, the hero card, notices, nameplates and
 //! the world all stay fill. A measurement that fails keeps nothing of the
@@ -70,7 +70,11 @@ pub const FILL: Rgb<u8> = Rgb([32, 32, 32]);
 /// * 14: the name-column fallback fills every portrait cell with the row's
 ///   flat colour, so no portrait pixel is kept on any board, as with
 ///   [`COPY_PORTRAITS`] off (2026-11-17).
-pub const BLANK_TABLE_VERSION: u32 = 14;
+/// * 15: the name-column fallback copies light pixels only inside the six
+///   digit cells of a row; the perk icons, light text over the row outside
+///   those cells (a perk tooltip) and the strip past the MIT cell are not
+///   kept (2026-11-17).
+pub const BLANK_TABLE_VERSION: u32 = 15;
 
 /// An earlier capture is a reference for the portrait check only when it is
 /// at least this old: an overlay that shows on both captures has to stay
@@ -851,22 +855,27 @@ pub(crate) const NAME_COL: (f64, f64) = (101.0, 380.0);
 
 /// Fallback when the allowlist kept nothing on a measured board (strict
 /// digit gates reject the row, portraits are off): keep each verified row
-/// of the table between `L` and `R` with its portrait cell and name column
-/// filled. The portrait cell (role bar and hero portrait) runs from `L` to
-/// the name column ([`NAME_COL`] starts right after the portrait art, and
-/// the name column covers the rest of the measured path's cell up to
+/// of the table between `L` and `R` with only its digits copied. The
+/// portrait cell (role bar and hero portrait) runs from `L` to the name
+/// column ([`NAME_COL`] starts right after the portrait art, and the name
+/// column covers the rest of the measured path's cell up to
 /// `portrait::PORTRAIT_END`); it is the row's flat colour, so no portrait
-/// pixel is kept, as on every board with [`COPY_PORTRAITS`] off. When that
-/// geometry does not hold, the row keeps nothing left of its first stat
-/// column. Right of the name column only light grey pixels
-/// ([`board::header_light`]: the white and grey digits and the round and
-/// perk icons) are copied; every other pixel is the same flat colour, the
-/// median of those pixels. The 5v5 board is see-through: in-world
-/// nameplates behind it show in the stat columns, tinted by the board and
-/// far too dark to pass as light, so they never reach the output.
-/// Everything else (outside the table, unverified rows, the header) stays
-/// fill. A row the chat box may cover is not copied (chat text carries
-/// names), and with chat unknown nothing is.
+/// pixel is kept, as on every board with [`COPY_PORTRAITS`] off. The name
+/// column is fill. When that geometry does not hold, the row is fill up to
+/// its first stat column. From there to the end of the MIT cell the row is
+/// one flat colour, the median of its stat cells' other pixels, and only
+/// light grey pixels ([`board::header_light`]: the white digits and the
+/// grey zeros) inside the six digit cells (the column windows `b.wins` over
+/// the reader's digit band, [`cells::digit_band`]) are copied. The perk
+/// icons have no measured cell, so they are not kept, and nor is light text
+/// drawn over the row outside the digit cells (a perk tooltip). Past the
+/// MIT cell, up to `R`, is fill: on 5v5 the rows end there and the world
+/// shows. The 5v5 board is see-through: in-world nameplates behind it show
+/// in the stat columns, tinted by the board and far too dark to pass as
+/// light, so they never reach the output. Everything else (outside the
+/// table, unverified rows, the header) stays fill. A row the chat box may
+/// cover is not copied (chat text carries names), and with chat unknown
+/// nothing is.
 fn name_column_fallback(src: &RgbImage, b: &board::Board, chat: Chat, out: &mut BlankedBoard) {
     if chat == Chat::Unknown {
         return;
@@ -879,11 +888,20 @@ fn name_column_fallback(src: &RgbImage, b: &board::Board, chat: Chat, out: &mut 
     // flat and the name column `[n0, n1)` is fill. Fail safe: with no
     // portrait cell, all of it up to the first stat column is fill.
     let cell = (x0 <= n0 && n0 <= n1 && n1 <= x1).then_some(x0..n0);
+    let stat0 = (b.wins[0].0 as u32).clamp(x0, x1);
     let keep = match cell {
         Some(_) => n1,
-        None => (b.wins[0].0 as u32).max(n1),
+        None => stat0.max(n1),
     }
     .clamp(x0, x1);
+    // The digit cells: light pixels are copied only in these columns, and
+    // the row is flat up to the end of the last one.
+    let cols: Vec<std::ops::Range<u32>> = b
+        .wins
+        .iter()
+        .map(|&(a, z)| (a as u32).clamp(keep, x1)..(z as u32).clamp(keep, x1))
+        .collect();
+    let stat1 = cols[5].end;
     let mut kept = 0;
     for r in b
         .rows
@@ -891,16 +909,18 @@ fn name_column_fallback(src: &RgbImage, b: &board::Board, chat: Chat, out: &mut 
         .filter(|r| r.verified && !chat.covers(r.bot, h))
     {
         let ys = r.top..r.bot.min(h);
-        let stats = || {
-            ys.clone()
-                .flat_map(move |y| (keep..x1).map(move |x| (x, y)))
+        let (d0, d1) = cells::digit_band(r, b.s, h);
+        let in_digits = |x: u32, y: u32| {
+            (d0..d1).contains(&(y as usize)) && cols.iter().any(|c| c.contains(&x))
         };
         let mut chans: [Vec<u8>; 3] = Default::default();
-        for (x, y) in stats() {
-            let p = src.get_pixel(x, y).0;
-            if !board::header_light(p) {
-                for (c, v) in chans.iter_mut().zip(p) {
-                    c.push(v);
+        for y in ys.clone() {
+            for x in cols[0].start..stat1 {
+                let p = src.get_pixel(x, y).0;
+                if !board::header_light(p) {
+                    for (c, v) in chans.iter_mut().zip(p) {
+                        c.push(v);
+                    }
                 }
             }
         }
@@ -909,15 +929,22 @@ fn name_column_fallback(src: &RgbImage, b: &board::Board, chat: Chat, out: &mut 
             c.get(c.len() / 2).copied().unwrap_or(FILL.0[0])
         }));
         for y in ys.clone() {
-            for x in x0..keep {
+            for x in x0..x1 {
                 let in_cell = cell.as_ref().is_some_and(|c| c.contains(&x));
-                out.image.put_pixel(x, y, if in_cell { flat } else { FILL });
+                let px = if x < keep {
+                    if in_cell { flat } else { FILL }
+                } else if x >= stat1 {
+                    FILL
+                } else {
+                    let p = *src.get_pixel(x, y);
+                    if in_digits(x, y) && board::header_light(p.0) {
+                        p
+                    } else {
+                        flat
+                    }
+                };
+                out.image.put_pixel(x, y, px);
             }
-        }
-        for (x, y) in stats() {
-            let p = *src.get_pixel(x, y);
-            let px = if board::header_light(p.0) { p } else { flat };
-            out.image.put_pixel(x, y, px);
         }
         kept += 1;
     }
@@ -972,16 +999,21 @@ mod tests {
         for y in (0..1007).step_by(50) {
             assert_eq!(*out.image.get_pixel(1300, y), FILL);
         }
-        // the digits of a verified row are copied
-        let r = b.rows.iter().find(|r| r.verified).unwrap();
-        let light: Vec<(u32, u32)> = (r.top..r.bot)
-            .flat_map(|y| (b.r - 600..b.r).map(move |x| (x, y)))
-            .filter(|&(x, y)| super::board::header_light(crop.get_pixel(x, y).0))
-            .collect();
-        assert!(light.len() > 100, "{} digit px", light.len());
-        for (x, y) in light {
-            assert_eq!(out.image.get_pixel(x, y), crop.get_pixel(x, y));
+        // the digits of every verified row are copied: the output reads
+        // back the non-zero numbers the source reads (the synthetic grey
+        // zeros lose their ring, see tests_measured::assert_numbers_read)
+        let (n_src, n_out) = (cells::output_ink(&crop), cells::output_ink(&out.image));
+        let mut numbers = 0;
+        for r in b.rows.iter().filter(|r| r.verified) {
+            let read = cells::read_row(&n_src, &b, r);
+            assert!(read.iter().all(Option::is_some), "{read:?}");
+            let back = cells::read_row(&n_out, &b, r);
+            for k in (0..6).filter(|&k| read[k] != Some(0)) {
+                assert_eq!(back[k], read[k], "row {}/{} col {k}", r.team, r.idx);
+                numbers += 1;
+            }
         }
+        assert!(numbers > 40, "{numbers} numbers read back");
 
         // with chat possibly on screen, nothing is kept
         let mut unsure = BlankedBoard {
@@ -1042,8 +1074,8 @@ mod tests {
         let doc = include_str!("../../../docs/report-bundle.md");
         for line in [
             "RGB 32, 32, 32",
-            "(`BLANK_TABLE_VERSION`, 14 for this revision)",
-            "only light grey pixels (every channel at least 150, spread at most 40)",
+            "(`BLANK_TABLE_VERSION`, 15 for this revision)",
+            "Light grey pixels (every channel at least 150, spread at most 40) are copied only inside the row's six digit cells",
             "a channel more than 30 from its 5x5 median",
             "at most 0.45 of the text height in ink",
             "x 60 to 448, y 1250 to 1340",
@@ -1053,7 +1085,7 @@ mod tests {
         ] {
             assert!(doc.contains(line), "spec line missing: {line}");
         }
-        assert_eq!(BLANK_TABLE_VERSION, 14);
+        assert_eq!(BLANK_TABLE_VERSION, 15);
         assert_eq!(FILL, Rgb([32, 32, 32]));
     }
 
