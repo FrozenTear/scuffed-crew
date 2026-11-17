@@ -1781,10 +1781,14 @@ impl TrackerApp {
             .collect();
     }
 
-    fn game_choices(&self) -> Vec<crate::report::GameChoice> {
-        // Kit sessions stay listed. The newest games without a kit are capped
-        // so a long history is not a column of disabled chips.
+    fn game_choices(&self, selected: Option<&str>) -> Vec<crate::report::GameChoice> {
+        // `games` is newest first. Kits are kept for up to 300 games, so the
+        // games with a saved picture are capped too, at the newest 50, and
+        // the games without one at the newest 8: a long history is not a
+        // column of hundreds of chips. A game already selected stays listed.
+        const RECENT_WITH_KIT: usize = 50;
         const RECENT_WITHOUT_KIT: usize = 8;
+        let mut with_kit = 0;
         let mut without_kit = 0;
         let mut choices = Vec::new();
         for game in &self.games {
@@ -1792,11 +1796,17 @@ impl TrackerApp {
             // the report carries the stored values and the session id.
             let has_picture = self.sessions_with_kit.contains(&game.session_id);
             let has_kit = true;
-            if !has_picture {
-                if without_kit == RECENT_WITHOUT_KIT {
+            let (listed, cap) = if has_picture {
+                (&mut with_kit, RECENT_WITH_KIT)
+            } else {
+                (&mut without_kit, RECENT_WITHOUT_KIT)
+            };
+            if *listed == cap {
+                if selected != Some(game.session_id.as_str()) {
                     continue;
                 }
-                without_kit += 1;
+            } else {
+                *listed += 1;
             }
             choices.push(crate::report::GameChoice {
                 session_id: game.session_id.clone(),
@@ -1934,7 +1944,7 @@ impl TrackerApp {
                 dialog.game_session = session_id;
                 dialog.training = training;
                 dialog.game_choices = if choices.is_empty() {
-                    self.game_choices()
+                    self.game_choices(dialog.game_session.as_deref())
                 } else {
                     choices
                 };
@@ -1975,7 +1985,10 @@ impl TrackerApp {
                 self.rebuild_report()
             }
             ReportMessage::GameCategory(category) => {
-                let choices = self.game_choices();
+                let selected = self
+                    .report_dialog_mut()
+                    .and_then(|d| d.game_session.clone());
+                let choices = self.game_choices(selected.as_deref());
                 let Some(dialog) = self.report_dialog_mut() else {
                     return Task::none();
                 };
@@ -3225,6 +3238,46 @@ mod tests {
 
     fn fixture_app(tmp: &std::path::Path) -> super::TrackerApp {
         super::TrackerApp::new(crate::fixtures::test_cli(tmp)).0
+    }
+
+    /// Kits are kept for 300 games: the picker lists the newest 50 games
+    /// with a picture and the newest 8 without, plus a selected older game.
+    #[test]
+    fn game_picker_lists_the_newest_50_kit_games() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = fixture_app(tmp.path());
+        let template = crate::snapshot::games_from_snapshot(&crate::fixtures_games::snapshot())
+            .into_iter()
+            .next()
+            .expect("a fixture game");
+        let newest = template.played_at;
+        let game = |i: usize, sid: String| {
+            let mut g = template.clone();
+            g.session_id = sid;
+            g.played_at = newest - chrono::Duration::minutes(i as i64);
+            g
+        };
+        // Newest first, like the snapshot: 300 kit games, then 20 without.
+        app.games = (0..300)
+            .map(|i| game(i, format!("kit{i:03}")))
+            .chain((0..20).map(|i| game(300 + i, format!("bare{i:02}"))))
+            .collect();
+        app.sessions_with_kit = (0..300).map(|i| format!("kit{i:03}")).collect();
+
+        let sids = |choices: Vec<crate::report::GameChoice>| -> Vec<String> {
+            choices.into_iter().map(|c| c.session_id).collect()
+        };
+        let listed = sids(app.game_choices(None));
+        let want: Vec<String> = (0..50)
+            .map(|i| format!("kit{i:03}"))
+            .chain((0..8).map(|i| format!("bare{i:02}")))
+            .collect();
+        assert_eq!(listed, want, "newest 50 kit games, then newest 8 without");
+
+        let listed = sids(app.game_choices(Some("kit250")));
+        assert_eq!(listed.len(), 59);
+        assert_eq!(listed[50], "kit250", "the selected game stays listed");
+        assert_eq!(&listed[..50], &want[..50]);
     }
 
     /// GUI-2: tray Quit used to call `iced::exit()` mid-update and drop the
