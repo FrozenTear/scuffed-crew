@@ -22,6 +22,7 @@ At 1440p, most hero icon training crops were dropped because their PNG was over 
 ### Highlights
 
 - If a hero icon crop still cannot be kept, a later Tab of the same game can try again.
+- A final Overwatch scoreboard with a big jump in eliminations no longer saves a lower count than the game already saved. The higher count is kept and marked as unsure.
 
 ## 0.6.0-alpha.3.1
 

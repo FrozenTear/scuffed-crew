@@ -134,7 +134,10 @@ pub(crate) fn counters_from_cols(a: [u32; capture_gate::GATE_COLS]) -> Counters 
 /// digit only when it also passes the same jump and rate-cap filter
 /// measured from the stored unsure value (still flagged, still not
 /// below the accepted value). A jump or injected digit past that filter
-/// keeps the stored unsure read instead. A held cell with no read, or
+/// keeps the stored unsure read instead. A sure read the gate holds (a
+/// lone jump from the accepted value) also keeps the stored unsure read,
+/// flagged, so the row never falls below what the game already stored.
+/// A held cell with no read, or
 /// with a read the gate would hold (lower than the accepted value, a
 /// jump, an injected digit, past the rate cap), and no stored unsure
 /// read to keep, keeps the accepted value, flagged, as before.
@@ -256,8 +259,12 @@ pub(crate) fn hold_new_reader_stats_with_guesses(
             // same board read again, or a cell with no digit, carries no new
             // information. Keep showing the unsure read the row before
             // showed, flagged, rather than fall back to the older accepted
-            // value.
-            fresh[col].is_none() && held_cells[col] && shown >= stored[col]
+            // value. The same goes for a sure read the gate held (a lone
+            // jump from the accepted value, the Rialto 29 to 35 at match
+            // end): the gate kept the older accepted value, and the row
+            // keeps what it already showed instead, flagged by the hold.
+            let gate_held = held.holds.iter().any(|hold| hold.col == col);
+            fresh[col].is_none() && (held_cells[col] || gate_held) && shown >= stored[col]
         }) {
             if shown != stored[col] {
                 tracing::info!(
