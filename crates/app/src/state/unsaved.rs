@@ -9,11 +9,12 @@
 //!   listener on the document runs before the router's own click handler,
 //!   asks with [`LEAVE_PROMPT`], and stops the click when the answer is no.
 //!
-//! - Actions that are not links, such as Log out, call [`confirm_leave`]
-//!   first, which asks the same question while any guard is on.
-//!
 //! A yes is asked once: when the link leaves the app (a page the router does
 //! not handle), the browser's `beforeunload` prompt that follows is skipped.
+//! Chromium raises that prompt while the click is still being handled,
+//! Firefox a task or more later, so the yes is kept until the prompt it
+//! covers comes, and dropped as soon as it is clear the page stayed (see
+//! [`mark_leaving`]).
 //!
 //! The browser's back and forward buttons are not covered: the router has
 //! already moved by the time it hears of them.
@@ -21,11 +22,11 @@
 use std::cell::Cell;
 
 thread_local! {
-    /// Guards on right now, on any page.
-    static ARMED: Cell<usize> = const { Cell::new(0) };
-    /// The member just said yes to leaving, so the unload prompt that a
-    /// link out of the app raises next would ask a second time.
-    static LEAVING: Cell<bool> = const { Cell::new(false) };
+    /// The yes the member just gave to leaving, by number, so the unload
+    /// prompt that a link out of the app raises next does not ask again.
+    static LEAVING: Cell<Option<u64>> = const { Cell::new(None) };
+    /// The number the next yes gets.
+    static NEXT_YES: Cell<u64> = const { Cell::new(0) };
 }
 
 /// The question a link click asks while a draft is unsaved.
@@ -63,62 +64,41 @@ pub fn click_leaves_page(click: &LinkClick<'_>) -> bool {
     }
 }
 
-/// Counts as an armed guard while it lives.
-struct Armed;
-
-impl Armed {
-    fn new() -> Self {
-        ARMED.with(|n| n.set(n.get() + 1));
-        Self
-    }
+/// Ask [`LEAVE_PROMPT`] with `ask`, and remember a yes so the browser's
+/// unload prompt does not ask again. `Some` carries the yes (see
+/// [`mark_leaving`]); `None` means the member said no.
+fn decide_leave(ask: impl FnOnce(&str) -> bool) -> Option<u64> {
+    ask(LEAVE_PROMPT).then(mark_leaving)
 }
 
-impl Drop for Armed {
-    fn drop(&mut self) {
-        ARMED.with(|n| n.set(n.get().saturating_sub(1)));
-    }
+/// Remember a yes until the unload prompt it covers comes (it is used up
+/// there, see [`unload_asks`]) or until the page is known to have stayed
+/// ([`clear_leaving`]): the router or another handler took the click, or
+/// no unload began in time. Numbered, so a late clear of an old yes leaves
+/// a newer one alone.
+fn mark_leaving() -> u64 {
+    let id = NEXT_YES.with(|n| {
+        let id = n.get().wrapping_add(1);
+        n.set(id);
+        id
+    });
+    LEAVING.with(|l| l.set(Some(id)));
+    id
 }
 
-/// True while some page holds an unsaved draft.
-pub fn any_unsaved() -> bool {
-    ARMED.with(Cell::get) > 0
+/// The page stayed after yes number `id`: the unload prompt asks again.
+fn clear_leaving(id: u64) {
+    LEAVING.with(|l| {
+        if l.get() == Some(id) {
+            l.set(None);
+        }
+    });
 }
 
-/// Ask [`LEAVE_PROMPT`] with `ask` when `armed`, and remember a yes so the
-/// browser's unload prompt does not ask again. True means go on.
-fn decide_leave(armed: bool, ask: impl FnOnce(&str) -> bool) -> bool {
-    if !armed {
-        return true;
-    }
-    let leave = ask(LEAVE_PROMPT);
-    if leave {
-        mark_leaving();
-    }
-    leave
-}
-
-/// For a way out that is not a link (Log out): true when there is no
-/// unsaved draft, or the member says to drop it.
-pub fn confirm_leave() -> bool {
-    decide_leave(any_unsaved(), ask)
-}
-
-/// The unload prompt asks unless the member already said yes.
+/// The unload prompt asks unless the member just said yes to the link that
+/// raised it. A yes covers that one prompt, so it is used up here.
 fn unload_asks() -> bool {
-    !LEAVING.with(Cell::get)
-}
-
-/// Remember a yes until the current event is done. A link out of the app
-/// raises `beforeunload` while its click is still being handled (checked in
-/// Chromium), so the reset that is queued after it comes too late to make
-/// that prompt ask; a link the router handles stays on the page, and the
-/// reset re-arms the unload prompt for later.
-fn mark_leaving() {
-    LEAVING.with(|l| l.set(true));
-    #[cfg(all(feature = "web", target_arch = "wasm32"))]
-    web::reset_leaving_soon();
-    #[cfg(not(all(feature = "web", target_arch = "wasm32")))]
-    LEAVING.with(|l| l.set(false));
+    LEAVING.with(Cell::take).is_none()
 }
 
 fn ask(question: &str) -> bool {
@@ -154,20 +134,49 @@ mod web {
     use wasm_bindgen::JsCast;
     use wasm_bindgen::closure::Closure;
 
-    use super::{Armed, LinkClick, ask, click_leaves_page, decide_leave, unload_asks};
+    use super::{
+        LEAVE_PROMPT, LinkClick, ask, clear_leaving, click_leaves_page, decide_leave, unload_asks,
+    };
+
+    /// How long a yes waits for the unload it covers when the click was not
+    /// taken by the router. Both browsers start the unload long before this
+    /// (Chromium inside the click, Firefox a task or so later); a link that
+    /// never unloads (a fragment of this page, another app's scheme) gets
+    /// the unload prompt back after this.
+    const NO_UNLOAD_AFTER_MS: i32 = 2000;
 
     /// The two listeners, removed when this is dropped.
     struct Listeners {
         unload: Closure<dyn FnMut(web_sys::Event)>,
         click: Closure<dyn FnMut(web_sys::MouseEvent)>,
-        _armed: Armed,
     }
 
-    /// Clear the yes once the current event is done.
-    pub(super) fn reset_leaving_soon() {
-        let reset = Closure::once_into_js(|| super::LEAVING.with(|l| l.set(false)));
-        if let Some(window) = web_sys::window() {
-            let _ = window.set_timeout_with_callback(reset.unchecked_ref());
+    /// After yes number `id` to `event`: once every handler has seen the
+    /// click, a prevented default (the router took it, the page stays)
+    /// drops the yes at once; otherwise the page is on its way out and the
+    /// yes waits for the unload prompt, up to [`NO_UNLOAD_AFTER_MS`].
+    fn settle_yes(event: web_sys::MouseEvent, id: u64) {
+        let Some(window) = web_sys::window() else {
+            clear_leaving(id);
+            return;
+        };
+        let after_click = Closure::once_into_js(move || {
+            if event.default_prevented() {
+                clear_leaving(id);
+            }
+        });
+        let backstop = Closure::once_into_js(move || clear_leaving(id));
+        if window
+            .set_timeout_with_callback(after_click.unchecked_ref())
+            .is_err()
+            || window
+                .set_timeout_with_callback_and_timeout_and_arguments_0(
+                    backstop.unchecked_ref(),
+                    NO_UNLOAD_AFTER_MS,
+                )
+                .is_err()
+        {
+            clear_leaving(id);
         }
     }
 
@@ -180,8 +189,9 @@ mod web {
                     return;
                 }
                 event.prevent_default();
-                // Older browsers want a return value as well.
-                let _ = js_sys::Reflect::set(&event, &"returnValue".into(), &"".into());
+                // Firefox and older browsers also look for a non-empty
+                // return value; none of them show the text.
+                let _ = js_sys::Reflect::set(&event, &"returnValue".into(), &LEAVE_PROMPT.into());
             });
             let click =
                 Closure::<dyn FnMut(web_sys::MouseEvent)>::new(|event: web_sys::MouseEvent| {
@@ -209,9 +219,12 @@ mod web {
                     if !click_leaves_page(&click) {
                         return;
                     }
-                    if !decide_leave(true, ask) {
-                        event.prevent_default();
-                        event.stop_immediate_propagation();
+                    match decide_leave(ask) {
+                        Some(id) => settle_yes(event, id),
+                        None => {
+                            event.prevent_default();
+                            event.stop_immediate_propagation();
+                        }
                     }
                 });
             window
@@ -224,11 +237,7 @@ mod web {
                     true,
                 )
                 .ok()?;
-            Some(Self {
-                unload,
-                click,
-                _armed: Armed::new(),
-            })
+            Some(Self { unload, click })
         }
     }
 
@@ -316,41 +325,50 @@ mod tests {
         assert!(!click_leaves_page(&download));
     }
 
-    /// Vision 694 r3 nit 3: Log out asks while a draft is unsaved, and only
-    /// then; a no keeps the member signed in.
-    #[test]
-    fn a_way_out_asks_only_while_a_guard_is_on() {
-        assert!(!any_unsaved());
-        let mut asked = Vec::new();
-        assert!(decide_leave(any_unsaved(), |q| {
-            asked.push(q.to_string());
-            false
-        }));
-        assert!(asked.is_empty(), "nothing to lose, nothing asked");
-
-        let guard = Armed::new();
-        assert!(any_unsaved());
-        assert!(!decide_leave(any_unsaved(), |q| {
-            asked.push(q.to_string());
-            false
-        }));
-        assert_eq!(asked, [LEAVE_PROMPT], "asked once, with the prompt");
-        assert!(decide_leave(any_unsaved(), |_| true));
-        drop(guard);
-        assert!(!any_unsaved(), "the guard going disarms it");
-    }
-
-    /// Vision 694 r3 nit 3: a no leaves the unload prompt armed. (A yes
-    /// skips it until the click is done; that timing is checked in the
-    /// browser, because the reset runs from the event loop.)
+    /// A no is remembered nowhere, so the unload prompt still asks.
     #[test]
     fn a_no_keeps_the_unload_prompt() {
-        let _guard = Armed::new();
-        assert!(!decide_leave(true, |_| false));
+        let mut asked = Vec::new();
+        assert_eq!(
+            decide_leave(|q| {
+                asked.push(q.to_string());
+                false
+            }),
+            None
+        );
+        assert_eq!(asked, [LEAVE_PROMPT], "asked once, with the prompt");
         assert!(unload_asks());
-        LEAVING.with(|l| l.set(true));
-        assert!(!unload_asks(), "a yes skips the second prompt");
-        LEAVING.with(|l| l.set(false));
+        assert!(unload_asks());
+    }
+
+    /// QA 694 (e5c48067, Firefox): a yes held only until the click was done
+    /// was gone by the time Firefox raised its unload prompt, so the member
+    /// was asked twice. The yes now lasts until that prompt, which uses it
+    /// up, so a later reload asks again.
+    #[test]
+    fn a_yes_skips_one_unload_prompt_whenever_it_comes() {
+        let id = decide_leave(|_| true).expect("yes");
+        assert!(!unload_asks(), "the prompt the link raises is skipped");
+        assert!(unload_asks(), "the next unload asks again");
+        clear_leaving(id);
+        assert!(unload_asks(), "a late clear of a used yes changes nothing");
+    }
+
+    /// A link the router takes keeps the page, so its yes is dropped and a
+    /// reload after it still asks; a stale clear does not drop a newer yes.
+    #[test]
+    fn a_yes_the_page_survives_is_dropped() {
+        let first = decide_leave(|_| true).expect("yes");
+        clear_leaving(first);
+        assert!(unload_asks(), "router link: the unload prompt is back");
+
+        let old = decide_leave(|_| true).expect("yes");
+        clear_leaving(old);
+        let newer = decide_leave(|_| true).expect("yes");
+        clear_leaving(old);
+        assert!(!unload_asks(), "the old yes's backstop left the new one");
+        clear_leaving(newer);
+        assert!(unload_asks());
     }
 
     #[test]

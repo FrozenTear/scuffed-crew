@@ -788,10 +788,6 @@ pub fn PublicLayout() -> Element {
                             div { class: "nav-drop-sep" }
                             button {
                                 onclick: move |_| {
-                                    // Log out drops an unsaved draft too: ask first.
-                                    if !crate::state::unsaved::confirm_leave() {
-                                        return;
-                                    }
                                     let mut auth = auth;
                                     spawn(async move {
                                         let _ = ApiClient::web().logout().await;
@@ -936,10 +932,6 @@ pub fn PublicLayout() -> Element {
                 }
                 button {
                     onclick: move |_| {
-                        // Log out drops an unsaved draft too: ask first.
-                        if !crate::state::unsaved::confirm_leave() {
-                            return;
-                        }
                         let mut auth = auth;
                         spawn(async move {
                             let _ = ApiClient::web().logout().await;

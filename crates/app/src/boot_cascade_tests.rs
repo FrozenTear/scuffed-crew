@@ -400,7 +400,7 @@ fn the_test_cascade_follows_css_rules() {
     let mut rules = Vec::new();
     parse_rules(
         ":where(html[data-theme=\"dark\"]) body { background: navy; }
-         @media (prefers-color-scheme: light) { body { background: ivory; } }
+         @media (prefers-color-scheme: light) { body { background: silver; } }
          html, body { background-color: red; background-image: url(x.png); }",
         None,
         &mut rules,

@@ -70,8 +70,9 @@ impl BrandDraft {
 
     /// True when this draft differs from what the server stored, so
     /// leaving the page would drop it.
-    /// Two spellings of one colour (another letter case, no `#`, the short
-    /// form) are the same accent, so retyping the stored value is not an edit.
+    /// Two spellings of one colour (upper or lower case, with or without the
+    /// leading `#`, short or long form) are the same accent, so retyping the
+    /// stored value is not an edit.
     ///
     /// The same "changed" rules as [`save_body`]: the accent through
     /// [`accent_changed`], the font by value. A draft is unsaved exactly when

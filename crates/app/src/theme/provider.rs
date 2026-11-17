@@ -212,6 +212,29 @@ mod tests {
         }
     }
 
+    /// Vision 694 r4 nit 3: `assets/boot-theme.js` paints the splash from
+    /// the theme `ThemeProvider` saved, so it must read the same key and map
+    /// it the same way (`"light"` is light, anything else dark). Read from
+    /// disk at test time, so an edit to the script alone fails here too.
+    #[test]
+    fn boot_theme_script_reads_the_provider_key() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/boot-theme.js");
+        let script = std::fs::read_to_string(path).expect("assets/boot-theme.js");
+        let read = format!("localStorage.getItem(\"{THEME_KEY}\")");
+        assert_eq!(script.matches(&read).count(), 1, "{read} in {path}");
+        assert_eq!(script.matches("getItem(").count(), 1, "one storage read");
+        assert!(
+            script.contains("saved === \"light\" ? \"light\" : \"dark\""),
+            "light is light, any other saved value is dark"
+        );
+        let src = include_str!("provider.rs");
+        let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        assert!(prod.contains("storage.get_item(THEME_KEY)"));
+        assert!(prod.contains(
+            "return if v == \"light\" {\n                    ThemeMode::Light\n                } else {\n                    ThemeMode::Dark"
+        ));
+    }
+
     #[test]
     fn density_persists_next_to_the_theme() {
         assert_eq!(THEME_KEY, "sc-theme");
