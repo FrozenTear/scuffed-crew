@@ -112,10 +112,15 @@ impl Verdict {
         } else {
             normalize_hex(typed)
         };
-        // A field that is not a colour keeps the saved accent in the preview.
+        // An untouched accent previews what is stored, a separate light
+        // accent (an identity pack pair) included, because Save keeps it. A
+        // new accent previews the one accent in both themes, which is what
+        // Save writes. A field that is not a colour keeps the stored pair.
+        let stored = || BrandConfig::from_settings(&saved.accent_dark, &saved.accent_light);
         let brand = match &accent {
+            Some(_) if !accent_changed(draft, saved) => stored(),
             Some(hex) => BrandConfig::from_settings(hex, hex),
-            None => BrandConfig::from_settings(&saved.accent_dark, &saved.accent_light),
+            None => stored(),
         };
         let check = AccentCheck::for_brand(&brand);
         let reason = match &accent {
@@ -1245,6 +1250,69 @@ mod tests {
             let body = save_body(&same, &pack).expect("passing");
             assert_eq!(body_keys(&body), ["brand_font_display"], "{typed}");
         }
+    }
+
+    /// Site review 4, nit 1: an untouched pack pair previews and measures
+    /// its stored light accent, since Save keeps it. A changed accent
+    /// previews the one accent in both themes, since that is what Save writes.
+    #[test]
+    fn an_untouched_pack_pair_previews_its_stored_light_accent() {
+        let mut pack = saved(TEST_MINT_ACCENT);
+        pack.accent_light = TEST_OTHER_ACCENT.into();
+        let pair = BrandConfig::from_settings(TEST_MINT_ACCENT, TEST_OTHER_ACCENT);
+        let one = |hex: &str| BrandConfig::from_settings(hex, hex);
+        assert_ne!(
+            pair.light.css_decls(),
+            one(TEST_MINT_ACCENT).light.css_decls(),
+            "the pair's light roles differ from the dark accent's"
+        );
+
+        // Untouched, also typed another way: the stored pair, measured as
+        // stored.
+        let upper = TEST_MINT_ACCENT.to_ascii_uppercase();
+        for typed in [TEST_MINT_ACCENT, upper.as_str()] {
+            let mut untouched = BrandDraft::from_saved(&pack);
+            untouched.accent = typed.to_string();
+            let verdict = Verdict::of(&untouched, &pack);
+            assert_eq!(verdict.brand, pair, "{typed}");
+            let measured = AccentCheck::for_brand(&pair);
+            assert_eq!(
+                verdict.check.light.accent_on_bg,
+                measured.light.accent_on_bg
+            );
+            assert_eq!(
+                verdict.check.light.ink_on_accent,
+                measured.light.ink_on_accent
+            );
+            let html = render_with_draft(pack.clone(), untouched);
+            let light_card = html
+                .split("data-preview=\"light\"")
+                .nth(1)
+                .expect("light preview");
+            assert!(
+                light_card.contains(&pair.light.css_decls()),
+                "{typed}: {light_card}"
+            );
+        }
+
+        // Changed: the one accent in both themes, as Save writes it.
+        let changed = draft(TEST_SHORT_ACCENT);
+        let verdict = Verdict::of(&changed, &pack);
+        let short = normalize_hex(TEST_SHORT_ACCENT).expect("hex");
+        assert_eq!(verdict.brand, one(&short));
+        let html = render_with_draft(pack, changed);
+        let light_card = html
+            .split("data-preview=\"light\"")
+            .nth(1)
+            .expect("light preview");
+        assert!(
+            light_card.contains(&one(&short).light.css_decls()),
+            "{light_card}"
+        );
+        assert!(
+            !light_card.contains(&pair.light.css_decls()),
+            "{light_card}"
+        );
     }
 
     /// The leave guard (`is_unsaved`) and Save agree on "changed": a draft
