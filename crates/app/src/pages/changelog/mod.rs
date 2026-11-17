@@ -70,10 +70,25 @@ const CHANGELOG_CSS: &str = r#"
         text-decoration: none;
     }
     .cl-toggle a:hover { background: var(--surface-sunken); }
+    /* The selected tab is marked by more than its fill: a thick underline
+       and a border, so it still reads in forced colours and without colour. */
+    .cl-toggle a { border: var(--focus-ring-width) solid transparent; }
     .cl-toggle a[aria-current="page"],
     .cl-toggle a[aria-current="page"]:hover {
         background: var(--accent-solid);
         color: var(--on-accent);
+        border-color: currentColor;
+        text-decoration: underline;
+        text-decoration-thickness: var(--focus-ring-width);
+        text-underline-offset: 0.25em;
+    }
+    @media (forced-colors: active) {
+        .cl-toggle a { border-color: Canvas; color: LinkText; }
+        .cl-toggle a[aria-current="page"],
+        .cl-toggle a[aria-current="page"]:hover {
+            border-color: Highlight;
+            color: CanvasText;
+        }
     }
     .changelog-page a:focus-visible,
     .changelog-page button:focus-visible,
@@ -218,11 +233,22 @@ pub fn Changelog(tab: String) -> Element {
 
 /// Page lead. Names the configured org, the same name the title uses. While
 /// settings are pending or failed it stays generic rather than invent one.
+/// A name that already starts with "The " gets no second article.
 fn page_lead(org_name: Option<&str>) -> String {
     match org_name.map(str::trim).filter(|name| !name.is_empty()) {
+        Some(name) if starts_with_the(name) => {
+            format!("Updates to {name} site and the Overwatch tracker.")
+        }
         Some(name) => format!("Updates to the {name} site and the Overwatch tracker."),
         None => "Updates to the site and the Overwatch tracker.".to_string(),
     }
+}
+
+/// True when the name opens with the word "The" (any case), e.g. "The
+/// Scuffed Crew" or "THE OWLS", but not "Theta" or a bare "The".
+fn starts_with_the(name: &str) -> bool {
+    name.get(..4)
+        .is_some_and(|head| head.eq_ignore_ascii_case("the "))
 }
 
 fn entry_heading_id(tab: Tab, index: usize) -> String {
@@ -724,6 +750,26 @@ mod tests {
             page_lead(Some("  Night Owls ")),
             "Updates to the Night Owls site and the Overwatch tracker."
         );
+        // A name that already opens with "The" gets no second article.
+        for name in [
+            "The Scuffed Crew",
+            "the Scuffed Crew",
+            "THE OWLS",
+            " The Owls ",
+        ] {
+            let lead = page_lead(Some(name));
+            assert_eq!(
+                lead,
+                format!("Updates to {} site and the Overwatch tracker.", name.trim()),
+                "{name}"
+            );
+            assert!(!lead.to_lowercase().contains("the the"), "{lead}");
+        }
+        // Only the whole word counts: "Theta" keeps the article.
+        assert_eq!(
+            page_lead(Some("Theta Squad")),
+            "Updates to the Theta Squad site and the Overwatch tracker."
+        );
         for none in [None, Some(""), Some("   ")] {
             assert_eq!(
                 page_lead(none),
@@ -745,6 +791,16 @@ mod tests {
             );
             assert!(!page.contains("Scuffed Crew"), "{path}: {page}");
 
+            let html = render_with_org(path, Some("The Scuffed Crew"));
+            let page = page_of(&html);
+            assert!(
+                page.contains(
+                    "<p class=\"page-lead\">Updates to The Scuffed Crew site and the Overwatch tracker.</p>"
+                ),
+                "{path}: {page}"
+            );
+            assert!(!page.contains("the The"), "{path}: {page}");
+
             let html = render_with_org(path, None);
             let page = page_of(&html);
             assert!(
@@ -755,5 +811,54 @@ mod tests {
             );
             assert!(!page.contains("Scuffed Crew"), "{path}: {page}");
         }
+    }
+
+    /// The selected tab must not rely on its fill alone: it carries an
+    /// underline and a border, and forced colours give it a Highlight border.
+    #[test]
+    fn selected_tab_has_a_non_colour_cue_and_a_forced_colours_rule() {
+        let css = CHANGELOG_CSS;
+        let selected = css
+            .split_once(".cl-toggle a[aria-current=\"page\"]:hover {")
+            .map(|(_, rest)| rest.split_once('}').unwrap().0)
+            .expect("selected tab rule");
+        assert!(
+            selected.contains("text-decoration: underline;"),
+            "{selected}"
+        );
+        assert!(
+            selected.contains("text-decoration-thickness:"),
+            "{selected}"
+        );
+        assert!(
+            selected.contains("border-color: currentColor;"),
+            "{selected}"
+        );
+        // Every tab carries the same border width, so nothing shifts.
+        assert!(
+            css.contains(".cl-toggle a { border: var(--focus-ring-width) solid transparent; }"),
+            "{css}"
+        );
+
+        let (_, forced) = css
+            .split_once("@media (forced-colors: active) {")
+            .expect("forced colours block");
+        let forced_selected = forced
+            .split_once(".cl-toggle a[aria-current=\"page\"]:hover {")
+            .map(|(_, rest)| rest.split_once('}').unwrap().0)
+            .expect("forced selected rule");
+        assert!(
+            forced_selected.contains("border-color: Highlight;"),
+            "{forced_selected}"
+        );
+        assert!(
+            forced_selected.contains("color: CanvasText;"),
+            "{forced_selected}"
+        );
+        // The underline is outside the media block, so it applies there too.
+        assert!(
+            !forced_selected.contains("text-decoration: none"),
+            "{forced_selected}"
+        );
     }
 }

@@ -342,14 +342,49 @@ changes = ["Second fake change on the same day."]
     }
 
     #[test]
-    fn the_shipped_files_parse_and_carry_one_marked_placeholder() {
+    fn the_shipped_files_parse_and_hold_the_first_real_entries() {
         for tab in Tab::ALL {
             let entries = load(tab).unwrap_or_else(|e| panic!("{e}"));
             assert!(!entries.is_empty(), "{tab:?}");
             let src = tab.source();
             assert!(src.contains("How to add an entry"), "{tab:?}");
             assert!(!has_dash(src), "{tab:?}: the file has an em or en dash");
+            // The placeholders are gone, from the file and from the page.
+            assert!(!src.contains("PLACEHOLDER"), "{tab:?}");
+            for entry in &entries {
+                let version = entry.version.as_deref().unwrap_or("");
+                assert!(!version.contains("placeholder"), "{tab:?}: {version}");
+                let items = entry
+                    .changes
+                    .iter()
+                    .chain(entry.groups.iter().flat_map(|g| g.items.iter()));
+                for item in items {
+                    assert!(!item.to_lowercase().contains("placeholder"), "{item}");
+                    assert!(!item.contains("Overwatch 2"), "{item}");
+                }
+            }
         }
+
+        let site = load(Tab::Site).unwrap();
+        assert_eq!(site.len(), 1);
+        assert_eq!(site[0].date_iso(), "2026-11-17");
+        assert_eq!(site[0].version, None);
+        let kinds: Vec<GroupKind> = site[0].groups.iter().map(|g| g.kind).collect();
+        assert_eq!(
+            kinds,
+            [GroupKind::Added, GroupKind::Changed, GroupKind::Fixed]
+        );
+
+        let tracker = load(Tab::Tracker).unwrap();
+        assert_eq!(tracker.len(), 1);
+        assert_eq!(tracker[0].version.as_deref(), Some("v0.6.0-alpha.3.1"));
+        assert_eq!(tracker[0].date_iso(), "2026-11-15");
+        assert_eq!(
+            tracker[0].link.as_deref(),
+            Some(
+                "https://github.com/FrozenTear/scuffed-crew/releases/tag/stat-tracker-v0.6.0-alpha.3.1"
+            )
+        );
     }
 
     #[test]
