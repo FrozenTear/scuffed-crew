@@ -13,20 +13,31 @@ const ADMIN_CSS: &str = r#"
         color: var(--text);
         font-family: var(--font-body);
     }
+    /* Every admin page brings its own `PageShell` (width, gutters, rhythm)
+       and its one H1 in a `PageHeader`, so this wrapper adds no padding. */
     .admin-main {
         min-width: 0;
-        padding: 2rem 2.5rem;
         /* Wide admin content scrolls inside the admin area and never widens
            the page. `overflow-y: auto` makes `overflow-x` compute to auto too. */
         overflow-y: auto;
     }
-    .admin-main h1 {
+    /* A page body that is not in a `PageShell` still gets the page gutters
+       and the wide column, so it never runs edge to edge. */
+    .admin-main:not(:has(> .ui-shell)) {
+        box-sizing: border-box;
+        max-width: var(--content-max-wide);
+        margin: 0 auto;
+        padding: var(--space-section) var(--space-page);
+    }
+    .admin-main:not(:has(> .ui-shell)) h1 {
+        margin: 0 0 var(--space-section);
         font-family: var(--font-head);
-        font-size: 1.8rem;
+        font-weight: var(--font-head-weight);
+        letter-spacing: var(--font-head-tracking);
+        text-transform: var(--font-head-transform);
+        line-height: var(--leading-display);
+        font-size: var(--text-3xl);
         color: var(--text);
-        margin-bottom: 1.5rem;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
     }
     /* The session check. It sits outside `.admin-main`. */
     .admin-gate {
@@ -39,12 +50,6 @@ const ADMIN_CSS: &str = r#"
         text-align: center;
         color: var(--text-3);
         font-size: var(--text-md);
-    }
-    @media (max-width: 768px) {
-        .admin-main {
-            padding: 1rem;
-        }
-        .admin-main h1 { font-size: 1.35rem; margin-bottom: 1rem; }
     }
 "#;
 
@@ -256,6 +261,25 @@ mod tests {
         assert!(actions.contains("href=\"/login\""), "{actions}");
         assert!(!actions.contains(">Open your profile<"), "{actions}");
         assert_eq!(actions.matches("is-primary").count(), 1, "{actions}");
+    }
+
+    #[test]
+    fn admin_chrome_is_on_tokens_and_leaves_the_h1_to_the_page_header() {
+        use crate::components::ui::test_support::{assert_sizes_from_tokens, css_rule, has_decl};
+        assert_sizes_from_tokens(super::ADMIN_CSS);
+        // No padding of its own: the page's `PageShell` owns the gutters.
+        let main = css_rule(super::ADMIN_CSS, ".admin-main {");
+        assert!(!main.contains("padding"), "{main}");
+        // The old uppercase H1 rule is gone; the fallback follows the head
+        // font's own transform token.
+        assert!(!super::ADMIN_CSS.contains("text-transform: uppercase"));
+        let bare = css_rule(super::ADMIN_CSS, ".admin-main:not(:has(> .ui-shell)) {");
+        for decl in [
+            "max-width: var(--content-max-wide)",
+            "padding: var(--space-section) var(--space-page)",
+        ] {
+            assert!(has_decl(&bare, decl), "{decl}: {bare}");
+        }
     }
 
     #[test]

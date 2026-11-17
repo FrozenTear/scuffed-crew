@@ -13,25 +13,28 @@ use dioxus::prelude::*;
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::HeroIconMemberCount;
 
-use crate::components::DataTable;
-use crate::components::ui::{InlineConfirm, LoadError};
+use crate::components::ui::{
+    EmptyCard, InlineConfirm, PageHeader, PageShell, Pill, PillTone, btn_class,
+};
+use crate::components::{DataTable, RowActions, admin_pending, list_cap_notice};
 use crate::hero_icons_ui as text;
 use crate::hooks::use_api_list;
+use crate::routes::Route;
 use crate::state::use_auth;
 
 const CSS: &str = r#"
     .hero-icons-admin__name { overflow-wrap: anywhere; word-break: break-word; }
-    .hero-icons-admin__cell-confirm { min-width: 16rem; }
     .hero-icons-admin__cell-confirm .inline-confirm__title { overflow-wrap: anywhere; word-break: break-word; }
-    @media (max-width: 640px) {
-        .hero-icons-admin__cell-confirm { min-width: 0; width: 12rem; white-space: normal; }
-        .hero-icons-admin__status ~ .data-table-scroll .data-table { min-width: 0; }
-        .hero-icons-admin__status ~ .data-table-scroll .data-table th,
-        .hero-icons-admin__status ~ .data-table-scroll .data-table td { padding-left: 0.5rem; padding-right: 0.5rem; }
+    .hero-icons-admin__off { display: inline-block; margin-inline-start: var(--space-2); }
+    .hero-icons-admin__status { margin: 0; font-size: var(--text-sm); line-height: var(--leading-body); color: var(--text-3); }
+    .hero-icons-admin__status:empty { display: none; }
+    @media (max-width: 820px) {
+        .is-cards .data-table td.cell-actions .hero-icons-admin__cell-confirm { order: 8; flex: 0 0 100%; margin-top: var(--space-3); }
     }
-    .hero-icons-admin__off { display: inline-block; padding: 0 var(--space-2); border: 1px solid var(--border); border-radius: var(--radius-control); font-size: var(--text-sm); color: var(--text-3); white-space: nowrap; }
-    .hero-icons-admin__status { min-height: 1.5em; margin: 0 0 var(--space-3); font-size: var(--text-sm); color: var(--text-3); }
 "#;
+
+/// The empty list's next step: where a member turns sharing on.
+const EMPTY_NEXT: &str = "Counts show up here once a member turns on Share hero icons in Edit profile, under Training crops, and the tracker sends icons. You can start with your own profile.";
 
 #[component]
 pub fn AdminHeroIcons() -> Element {
@@ -59,19 +62,20 @@ pub fn AdminHeroIcons() -> Element {
         });
     });
 
+    // The always-rendered status line: the result of the last delete, or the
+    // count once loaded. While loading or after a failed load it is empty and
+    // `admin_pending` speaks instead.
     let status = {
         let data = members.data.read();
-        let failed = members.error.read().is_some();
         if !action_status.read().is_empty() {
             action_status.read().clone()
         } else {
             match data.as_ref().and_then(|d| d.as_ref()) {
-                Some(rows) => text::admin_loaded(
+                Some(rows) if !rows.is_empty() => text::admin_loaded(
                     rows.len(),
                     rows.iter().filter(|r| text::sharing_is_off(r)).count(),
                 ),
-                None if failed => "Could not load hero icon counts.".to_string(),
-                None => text::ADMIN_LOADING.to_string(),
+                _ => String::new(),
             }
         }
     };
@@ -82,99 +86,90 @@ pub fn AdminHeroIcons() -> Element {
         vec!["Member", "Icons sent"]
     };
 
-    rsx! {
-        crate::styles::StyleOnce { id: "scuffed-css-pages-admin-hero_icons-css", css: CSS }
-        div { class: "admin-toolbar",
-            h1 { "Hero icons" }
-        }
-        p { class: "empty-state", "{text::ADMIN_INTRO}" }
-        p {
-            id: "{text::admin_status_id()}",
-            class: "hero-icons-admin__status",
-            role: "status",
-            "{status}"
-        }
-
-        {
-            let data = members.data.read();
-            let data = data.as_ref().and_then(|d| d.as_ref());
-            match data {
-                None if members.error.read().is_some() => rsx! {
-                    LoadError {
-                        message: "Could not load hero icon counts.".to_string(),
-                        on_retry: move |_| refresh += 1,
-                    }
-                },
-                None => rsx! {},
-                Some(rows) if rows.is_empty() => rsx! {
-                    p { class: "empty-state", "{text::ADMIN_EMPTY}" }
-                },
-                Some(rows) => rsx! {
-                    DataTable { headers: headers.clone(),
-                        for row in rows.iter() {
-                            {
-                                let label = text::member_label(&row.display_name);
-                                let count_id = text::admin_count_id(&row.member_id);
-                                let prefix = text::admin_delete_prefix(&row.member_id);
-                                let trigger = format!("{prefix}-trigger");
-                                let aria = text::admin_delete_aria(&row.display_name);
-                                let title = text::admin_delete_title(&row.display_name, row.icon_count);
-                                let sharing_off = text::sharing_is_off(row);
-                                let sharing_id = text::admin_sharing_id(&row.member_id);
-                                let confirm_body = if sharing_off {
-                                    text::ADMIN_DELETE_BODY_HIDDEN
-                                } else {
-                                    text::ADMIN_DELETE_BODY
-                                };
-                                let confirming = pending.read().as_deref() == Some(row.member_id.as_str());
-                                let open_id = row.member_id.clone();
-                                let go_row = row.clone();
-                                let can_delete = row.icon_count > 0;
-                                rsx! {
-                                    tr { key: "{row.member_id}",
-                                        td { class: "hero-icons-admin__name",
-                                            "{label}"
-                                            if sharing_off {
-                                                " "
-                                                span {
-                                                    id: "{sharing_id}",
-                                                    class: "hero-icons-admin__off",
-                                                    "{text::SHARING_OFF_LABEL}"
-                                                }
+    let list = {
+        let data = members.data.read();
+        match data.as_ref().and_then(|d| d.as_ref()) {
+            None => admin_pending(&members, "hero icon counts"),
+            Some(rows) if rows.is_empty() => rsx! {
+                EmptyCard {
+                    title: "No hero icons yet",
+                    message: format!("{} {EMPTY_NEXT}", text::ADMIN_EMPTY),
+                    actions: rsx! {
+                        Link { to: Route::ProfileSettings {}, class: btn_class(false), "Open Edit profile" }
+                    },
+                }
+            },
+            Some(rows) => rsx! {
+                DataTable {
+                    headers: headers.clone(),
+                    num_cols: vec![1],
+                    cards: true,
+                    label: "Hero icons per member",
+                    for row in rows.iter() {
+                        {
+                            let label = text::member_label(&row.display_name);
+                            let count_id = text::admin_count_id(&row.member_id);
+                            let prefix = text::admin_delete_prefix(&row.member_id);
+                            let trigger = format!("{prefix}-trigger");
+                            let aria = text::admin_delete_aria(&row.display_name);
+                            let title = text::admin_delete_title(&row.display_name, row.icon_count);
+                            let sharing_off = text::sharing_is_off(row);
+                            let sharing_id = text::admin_sharing_id(&row.member_id);
+                            let confirm_body = if sharing_off {
+                                text::ADMIN_DELETE_BODY_HIDDEN
+                            } else {
+                                text::ADMIN_DELETE_BODY
+                            };
+                            let confirming = pending.read().as_deref() == Some(row.member_id.as_str());
+                            let open_id = row.member_id.clone();
+                            let go_row = row.clone();
+                            let can_delete = row.icon_count > 0;
+                            let off = busy() || !can_delete;
+                            rsx! {
+                                tr { key: "{row.member_id}",
+                                    td { class: "cell-who hero-icons-admin__name",
+                                        "{label}"
+                                        if sharing_off {
+                                            span { id: "{sharing_id}", class: "hero-icons-admin__off",
+                                                Pill { tone: PillTone::Neutral, "{text::SHARING_OFF_LABEL}" }
                                             }
                                         }
-                                        td { id: "{count_id}", "{row.icon_count}" }
-                                        if is_admin {
-                                            td {
-                                                if confirming {
-                                                    div { class: "hero-icons-admin__cell-confirm",
-                                                        InlineConfirm {
-                                                            id: prefix.clone(),
-                                                            title: title.clone(),
-                                                            body: confirm_body.to_string(),
-                                                            confirm_label: "Delete".to_string(),
-                                                            busy: busy(),
-                                                            on_confirm: move |_| delete_for.call(go_row.clone()),
-                                                            on_cancel: {
-                                                                let trigger = trigger.clone();
-                                                                move |_| {
-                                                                    pending.set(None);
-                                                                    text::focus_when_rendered(trigger.clone());
-                                                                }
-                                                            },
-                                                        }
+                                    }
+                                    td { id: "{count_id}", class: "num", "data-label": "Icons sent", "{row.icon_count}" }
+                                    if is_admin {
+                                        td { class: "cell-actions",
+                                            if confirming {
+                                                div { class: "hero-icons-admin__cell-confirm",
+                                                    InlineConfirm {
+                                                        id: prefix.clone(),
+                                                        title: title.clone(),
+                                                        body: confirm_body.to_string(),
+                                                        confirm_label: "Delete".to_string(),
+                                                        busy: busy(),
+                                                        on_confirm: move |_| delete_for.call(go_row.clone()),
+                                                        on_cancel: {
+                                                            let trigger = trigger.clone();
+                                                            move |_| {
+                                                                pending.set(None);
+                                                                text::focus_when_rendered(trigger.clone());
+                                                            }
+                                                        },
                                                     }
-                                                } else {
-                                                    div { class: "row-actions",
-                                                        button {
-                                                            id: "{trigger}",
-                                                            class: "row-btn danger",
-                                                            r#type: "button",
-                                                            "aria-label": "{aria}",
-                                                            disabled: busy() || !can_delete,
-                                                            onclick: move |_| pending.set(Some(open_id.clone())),
-                                                            "Delete"
-                                                        }
+                                                }
+                                            } else {
+                                                RowActions {
+                                                    button {
+                                                        id: "{trigger}",
+                                                        class: "btn is-danger",
+                                                        r#type: "button",
+                                                        aria_label: "{aria}",
+                                                        aria_disabled: if off { "true" },
+                                                        onclick: move |_| {
+                                                            if !off {
+                                                                pending.set(Some(open_id.clone()));
+                                                            }
+                                                        },
+                                                        "Delete"
                                                     }
                                                 }
                                             }
@@ -184,9 +179,23 @@ pub fn AdminHeroIcons() -> Element {
                             }
                         }
                     }
-                    {crate::components::list_cap_notice(&members, "members")}
-                },
+                }
+            },
+        }
+    };
+
+    rsx! {
+        crate::styles::StyleOnce { id: "scuffed-css-pages-admin-hero_icons-css", css: CSS }
+        PageShell { class: "admin-hero-icons-page",
+            PageHeader { title: "Hero icons", lead: text::ADMIN_INTRO.to_string() }
+            p {
+                id: "{text::admin_status_id()}",
+                class: "hero-icons-admin__status",
+                role: "status",
+                "{status}"
             }
+            section { class: "admin-list", aria_label: "Hero icons per member", {list} }
+            {list_cap_notice(&members, "members")}
         }
     }
 }
@@ -194,6 +203,7 @@ pub fn AdminHeroIcons() -> Element {
 #[cfg(test)]
 mod tests {
     use super::CSS;
+    use crate::components::ui::test_support::assert_sizes_from_tokens;
 
     #[test]
     fn name_cell_wraps_long_unbroken_names() {
@@ -216,8 +226,42 @@ mod tests {
         );
         let source = include_str!("hero_icons.rs");
         assert!(
-            source.contains("td { class: \"hero-icons-admin__name\","),
+            source.contains("td { class: \"cell-who hero-icons-admin__name\","),
             "the name cell must carry the wrap class"
         );
+    }
+
+    #[test]
+    fn page_css_sizes_come_from_tokens() {
+        assert_sizes_from_tokens(CSS);
+    }
+
+    #[test]
+    fn page_has_one_h1_a_status_line_and_a_labelled_wait_in_the_default_shell() {
+        use crate::components::admin_shared::test_page::render_admin_route;
+        for role in [
+            scuffed_types::OrgRole::Officer,
+            scuffed_types::OrgRole::Admin,
+        ] {
+            let html = render_admin_route("/admin/hero-icons", Some(role));
+            assert!(
+                html.contains("class=\"ui-shell admin-hero-icons-page\""),
+                "{html}"
+            );
+            assert_eq!(html.matches("<h1").count(), 1, "{html}");
+            assert!(html.contains("<h1>Hero icons</h1>"), "{html}");
+            assert_eq!(html.matches("<main").count(), 1, "{html}");
+            // The status line is in the tree, empty, before anything loads.
+            assert!(
+                html.contains(
+                    "<p id=\"hero-icons-admin-status\" class=\"hero-icons-admin__status\" role=\"status\"></p>"
+                ),
+                "{html}"
+            );
+            assert!(
+                html.contains("role=\"status\">Loading hero icon counts...</p>"),
+                "{html}"
+            );
+        }
     }
 }

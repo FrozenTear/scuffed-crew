@@ -295,7 +295,7 @@ mod tests {
     fn configured_relay_keeps_today_dm_and_chat_entry() {
         let dm = render_route("/dm", RelayAvailability::On);
         assert!(
-            dm.contains("You must be signed in"),
+            dm.contains("Log in to read your messages"),
             "logged-out DMs stay the login wall when a relay is configured: {dm}"
         );
         assert!(!shows_unavailable(&dm), "{dm}");

@@ -41,7 +41,8 @@ pub const BUTTON_CSS: &str = r#"
 
 /// The redesign button (`.btn` in the frames), for links and buttons alike:
 /// `btn` is the secondary button, `btn is-primary` the solid one, `btn
-/// is-ghost` the outline on a transparent fill. 44px tall at every width, on
+/// is-ghost` the outline on a transparent fill and `btn is-danger` a
+/// destructive action on the `--button-danger-*` tokens. 44px tall at every width, on
 /// the `--button-*` tokens only. The modifiers are `is-*` classes so they
 /// cannot meet the older admin `btn-ghost` rules.
 pub const BTN_CSS: &str = r#"
@@ -78,12 +79,18 @@ pub const BTN_CSS: &str = r#"
   color: var(--button-primary-fg);
   border-color: var(--button-primary-border);
 }
+.btn.is-danger {
+  background: var(--button-danger-bg);
+  color: var(--button-danger-fg);
+  border-color: var(--button-danger-border);
+}
 .btn:hover { border-color: var(--text); }
 .btn.is-primary:hover {
   background: var(--button-primary-hover-bg);
   border-color: var(--button-primary-border);
   text-decoration: underline;
 }
+.btn.is-danger:hover { border-color: var(--button-danger-fg); text-decoration: underline; }
 .btn:focus-visible {
   outline: var(--focus-ring-width) solid var(--focus-ring);
   outline-offset: var(--focus-ring-offset);
@@ -172,6 +179,14 @@ mod tests {
             "border-color: var(--button-primary-border)",
         ] {
             assert!(has_decl(&primary, decl), "missing {decl}: {primary}");
+        }
+        let danger = css_rule(BTN_CSS, ".btn.is-danger {");
+        for decl in [
+            "background: var(--button-danger-bg)",
+            "color: var(--button-danger-fg)",
+            "border-color: var(--button-danger-border)",
+        ] {
+            assert!(has_decl(&danger, decl), "missing {decl}: {danger}");
         }
         // Hovering the primary button keeps its own border.
         let hover = css_rule(BTN_CSS, ".btn.is-primary:hover {");

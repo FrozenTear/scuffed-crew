@@ -3,26 +3,33 @@ use serde::{Deserialize, Serialize};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
 
-use scuffed_api_client::ApiClient;
+use scuffed_api_client::{ApiClient, ClientError};
+use scuffed_types::MeResponse;
 
-use crate::components::ui::InlineConfirm;
-use crate::components::{Toast, is_http_status, use_toast};
+use super::profile_settings::{
+    ACCOUNT_CSS, ACCOUNT_CSS_ID, AccountPending, AccountStatus, AccountView,
+    account_view_from_auth, account_view_from_error,
+};
+use crate::components::ui::{InlineConfirm, PageHeader, PageShell, PageWidth, btn_class};
+use crate::components::{SaveState, Toast, use_toast};
 use crate::routes::Route;
-use crate::state::auth::use_auth;
+use crate::state::auth::{AuthState, use_auth};
 
 /// The one name for this page: the h1, the head title and the account menu.
 pub const ACCOUNT_KEYS: &str = "Account keys";
 
 const INTRO: &str = "Your account key is your ID in chat and direct messages. \
     We can keep one for you, or you can bring your own.";
-/// The Key mode pill in plain words. The stored values are
-/// `server_managed` and `external` (`NostrKeyMode` in `crates/db`).
-fn key_mode_label(mode: Option<&str>) -> &str {
+/// The Key mode fact in plain words, the same words
+/// `docs/external-clients.md` quotes. The stored values are
+/// `server_managed` and `external` (`NostrKeyMode` in `crates/db`); a value
+/// this build does not know reads with spaces for underscores.
+fn key_mode_label(mode: Option<&str>) -> String {
     match mode {
-        Some("server_managed") => "Server-managed",
-        Some("external") => "External",
-        Some(other) => other,
-        None => "Unknown",
+        Some("server_managed") => "Server-managed".to_string(),
+        Some("external") => "External".to_string(),
+        Some(other) if !other.trim().is_empty() => other.replace('_', " "),
+        _ => "Unknown".to_string(),
     }
 }
 
@@ -34,205 +41,76 @@ const HINT_ADVANCED: &str = "You rarely need these. Importing a key or unlinking
     chat and direct messages sign you in.";
 const HINT_UNLINK: &str = "Chat and direct messages stop working until you link a key again.";
 
+const NIP05_UNSET: &str = "Not set up on this site.";
+const HINT_NIP05_UNSET: &str = "NIP-05 names are switched on by whoever runs this site. \
+    Once they are, yours is your display name at this site's address.";
+const HINT_NIP05_SET: &str = "It follows your display name. Change the name to change it.";
+
+/// Fixed ids, one per field on the page.
+const PUBLIC_KEY_ID: &str = "identity-public-key";
+const PUBLIC_KEY_HINT_ID: &str = "identity-public-key-hint";
+const NIP05_ID: &str = "identity-nip05";
+const NIP05_HINT_ID: &str = "identity-nip05-hint";
+const LINK_PUBKEY_ID: &str = "identity-link-pubkey";
+const LINK_STATUS_ID: &str = "identity-link-status";
+const BACKUP_PASSWORD_ID: &str = "identity-backup-password";
+const BACKUP_PASSWORD_HINT_ID: &str = "identity-backup-password-hint";
+const BACKUP_STATUS_ID: &str = "identity-backup-status";
+const BACKUP_RESULT_ID: &str = "identity-backup-result";
+const BACKUP_RESULT_HINT_ID: &str = "identity-backup-result-hint";
+const IMPORT_NCRYPTSEC_ID: &str = "identity-import-ncryptsec";
+const IMPORT_PASSWORD_ID: &str = "identity-import-password";
+const IMPORT_STATUS_ID: &str = "identity-import-status";
+const UNLINK_STATUS_ID: &str = "identity-unlink-status";
+
+/// Account keys only. The cards, fields and save lines are the shared
+/// account pieces in profile_settings.rs.
 const PAGE_CSS: &str = r#"
-    .identity-page {
-        padding: 3rem 2rem;
-        max-width: 760px;
-        margin: 0 auto;
-    }
-    .identity-page-title {
-        font-family: var(--font-head);
-        font-size: 2.5rem;
-        color: var(--text);
-        letter-spacing: 3px;
-        margin: 0 0 0.75rem;
-    }
-    .identity-reports-link {
-        margin: 0 0 1.5rem;
-    }
-    .identity-reports-link a {
-        color: var(--accent-text);
-        font-weight: 600;
-        font-size: 0.9rem;
-        text-decoration: none;
-    }
-    .identity-section {
-        background: var(--surface);
-        border: 1px solid var(--border);
-        border-radius: 10px;
-        padding: 1.5rem;
-        margin-bottom: 1.25rem;
-    }
-    .identity-section h2 {
-        font-family: var(--font-head);
-        font-size: 1.15rem;
-        font-weight: 700;
-        color: var(--text);
-        margin: 0 0 0.75rem;
-    }
-    .identity-section p {
-        color: var(--text-3);
-        font-size: 0.85rem;
-        line-height: 1.5;
-        margin: 0 0 1rem;
-    }
-    .identity-field {
-        margin-bottom: 1rem;
-    }
-    .identity-label {
-        display: block;
-        font-size: 0.75rem;
-        font-weight: 600;
-        color: var(--text-subtle);
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-        margin-bottom: 0.35rem;
-    }
-    .identity-input {
-        width: 100%;
-        padding: 0.5rem 0.75rem;
-        background: var(--bg);
-        border: 1px solid var(--border);
-        border-radius: 6px;
-        color: var(--text);
-        font-size: 0.875rem;
-        transition: border-color 0.15s;
-        box-sizing: border-box;
-    }
-    .identity-input:focus {
-        border-color: var(--accent-solid);
-    }
-    .identity-mono {
-        font-family: var(--font-mono);
-        font-size: 0.8rem;
-        background: var(--bg);
-        padding: 0.5rem 0.75rem;
-        border-radius: 6px;
-        word-break: break-all;
-        display: block;
-        color: var(--text);
-        border: 1px solid var(--border);
-    }
-    .identity-pill {
-        display: inline-block;
-        font-size: 0.7rem;
-        padding: 0.15rem 0.6rem;
-        border-radius: var(--radius-pill);
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-        background: color-mix(in srgb, var(--accent) 20%, transparent);
-        color: var(--accent-text);
-    }
-    .identity-nip05 {
-        color: var(--text-3);
-        font-size: 0.85rem;
-    }
-    .identity-nip05-unset {
-        font-style: italic;
-        opacity: 0.75;
-    }
-    .identity-row {
-        display: flex;
-        gap: 0.5rem;
-        align-items: end;
-    }
-    .identity-row .identity-field { flex: 1; margin-bottom: 0; }
-    .identity-btn {
-        padding: 0.5rem 1rem;
-        border: none;
-        border-radius: 6px;
-        font-size: 0.85rem;
-        font-weight: 600;
-        cursor: pointer;
-        transition: filter 0.15s, opacity 0.15s;
-    }
-    .identity-btn:disabled {
-        opacity: 0.5;
-        cursor: not-allowed;
-    }
-    .identity-btn-primary {
-        background: var(--accent-solid);
-        color: var(--on-accent);
-    }
-    .identity-btn-primary:hover:not(:disabled) {
-        filter: brightness(1.15);
-    }
-    .identity-btn-danger {
-        background: var(--loss);
-        color: var(--on-loss);
-    }
-    .identity-btn-danger:hover:not(:disabled) {
-        filter: brightness(1.15);
-    }
-    .identity-btn-outline {
-        background: transparent;
-        color: var(--text-3);
-        border: 1px solid var(--border);
-    }
-    .identity-btn-outline:hover:not(:disabled) {
-        border-color: var(--text);
-        color: var(--text);
-    }
-    .identity-backup-box {
-        margin-top: 1rem;
-        padding: 1rem;
-        background: var(--bg);
-        border-radius: 8px;
-        border: 1px solid var(--border);
-    }
-    .identity-warning {
-        color: var(--warn);
-        font-size: 0.75rem;
-        margin-top: 0.5rem;
-    }
-    .identity-actions {
-        display: flex;
-        gap: 0.5rem;
-        margin-top: 0.5rem;
-    }
-    .identity-section p.identity-hint {
-        color: var(--text-subtle);
-        font-size: var(--text-xs);
-        margin: 0 0 1rem;
-    }
-    .identity-intro {
-        color: var(--text-3);
-        font-size: var(--text-md);
-        line-height: 1.5;
-        margin: 0 0 1rem;
-    }
-    .identity-advanced summary {
-        cursor: pointer;
-        font-family: var(--font-head);
-        font-size: 1.15rem;
-        font-weight: 700;
-        color: var(--text);
-    }
-    .identity-advanced summary:focus-visible {
-        outline: 2px solid var(--focus-ring);
-        outline-offset: 2px;
-    }
-    .identity-advanced[open] summary {
-        margin-bottom: 0.75rem;
-    }
-    .identity-sub {
-        border-top: 1px solid var(--border);
-        padding-top: 1rem;
-        margin-top: 1rem;
-    }
-    .identity-sub h3 {
-        font-family: var(--font-head);
-        font-size: var(--text-md);
-        color: var(--text);
-        margin: 0 0 0.5rem;
-    }
-    .identity-cta-actions {
-        display: flex;
-        gap: 0.6rem;
-        flex-wrap: wrap;
-        margin-top: 0.25rem;
-    }
+.identity-facts {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-5);
+    min-width: 0;
+}
+.identity-advanced > summary {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-height: var(--hit-target-min);
+    font-family: var(--font-head);
+    font-weight: var(--font-head-weight);
+    letter-spacing: var(--font-head-tracking);
+    line-height: var(--leading-display);
+    font-size: var(--text-xl);
+    color: var(--text);
+    cursor: pointer;
+}
+.identity-advanced > summary:focus-visible {
+    outline: var(--focus-ring-width) solid var(--focus-ring);
+    outline-offset: var(--focus-ring-offset);
+    border-radius: var(--radius-control);
+}
+.identity-sub {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-5);
+    min-width: 0;
+    padding-top: var(--space-5);
+    border-top: 1px solid var(--border);
+}
+.identity-sub > * { margin: 0; }
+.identity-warning {
+    margin: 0;
+    color: var(--warn);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    line-height: var(--leading-body);
+}
+.identity-key-input { font-family: var(--font-mono); }
+textarea.identity-key-input { min-height: calc(var(--hit-target-min) * 2); }
+@media (max-width: 820px) {
+    .identity-facts { grid-template-columns: minmax(0, 1fr); }
+}
 "#;
 
 #[derive(Serialize)]
@@ -279,10 +157,19 @@ fn truncate_pubkey(pk: &str) -> String {
 }
 
 fn has_nip07_extension() -> bool {
-    web_sys::window()
-        .and_then(|w| js_sys::Reflect::get(&w, &JsValue::from_str("nostr")).ok())
-        .map(|v| !v.is_undefined() && !v.is_null())
-        .unwrap_or(false)
+    // Only a browser has `window.nostr`. The native test build has no
+    // window, and web-sys calls panic there.
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window()
+            .and_then(|w| js_sys::Reflect::get(&w, &JsValue::from_str("nostr")).ok())
+            .map(|v| !v.is_undefined() && !v.is_null())
+            .unwrap_or(false)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        false
+    }
 }
 
 /// The collapsed group for rare, riskier actions. Closed until the visitor opens
@@ -290,11 +177,24 @@ fn has_nip07_extension() -> bool {
 #[component]
 fn AdvancedGroup(children: Element) -> Element {
     rsx! {
-        details { class: "identity-section identity-advanced",
+        details { class: "account-card identity-advanced",
             summary { "Advanced" }
-            p { class: "identity-hint", "{HINT_ADVANCED}" }
+            p { class: "field-hint", "{HINT_ADVANCED}" }
             {children}
         }
+    }
+}
+
+/// What the page shows before its content, from the session and the load.
+fn identity_view(auth: &AuthState, me: Option<&Result<MeResponse, ClientError>>) -> AccountView {
+    if let Some(view) = account_view_from_auth(auth) {
+        return view;
+    }
+    match me {
+        None => AccountView::Loading,
+        Some(Err(e)) => account_view_from_error(&e.to_string()),
+        Some(Ok(me)) if me.member.is_none() => AccountView::Apply,
+        Some(Ok(_)) => AccountView::Ready,
     }
 }
 
@@ -311,6 +211,10 @@ pub fn IdentitySettings() -> Element {
     let mut working = use_signal(|| false);
     let mut confirm_import = use_signal(|| false);
     let mut confirm_unlink = use_signal(|| false);
+    let mut link_state = use_signal(SaveState::default);
+    let mut backup_state = use_signal(SaveState::default);
+    let mut import_state = use_signal(SaveState::default);
+    let mut unlink_state = use_signal(SaveState::default);
 
     let auth = use_auth();
     let identity = use_resource(move || {
@@ -325,40 +229,61 @@ pub fn IdentitySettings() -> Element {
         spawn(async move {
             match get_pubkey_from_extension().await {
                 Ok(pk) => pubkey_input.set(pk),
-                Err(e) => toast.show(Toast::error(format!("Extension error: {e}"))),
+                Err(e) => {
+                    link_state.set(SaveState::Failed(format!("Extension error: {e}")));
+                    toast.show(Toast::error(format!("Extension error: {e}")));
+                }
             }
         });
     };
 
     // ─── NIP-07: Link identity via challenge-response ───
-    let on_link_identity = move |_| {
+    let on_link_identity = move |evt: FormEvent| {
+        evt.prevent_default();
+        if working() {
+            return;
+        }
         let pubkey = pubkey_input().trim().to_string();
         if pubkey.is_empty() {
+            link_state.set(SaveState::Failed("Enter a public key first.".to_string()));
             toast.show(Toast::error("Enter a pubkey first."));
             return;
         }
         working.set(true);
+        link_state.set(SaveState::Saving);
         spawn(async move {
             match link_nostr_identity(&pubkey).await {
                 Ok(()) => {
+                    link_state.set(SaveState::Saved("Key linked.".to_string()));
                     toast.show(Toast::success("Key linked."));
                     refresh += 1;
                     pubkey_input.set(String::new());
                 }
-                Err(e) => toast.show(Toast::error(format!("Link failed: {e}"))),
+                Err(e) => {
+                    link_state.set(SaveState::failed("Could not link the key", &e));
+                    toast.show(Toast::error(format!("Link failed: {e}")));
+                }
             }
             working.set(false);
         });
     };
 
     // ─── NIP-49: Export backup ───
-    let on_export_backup = move |_| {
+    let on_export_backup = move |evt: FormEvent| {
+        evt.prevent_default();
+        if working() {
+            return;
+        }
         let password = backup_password().trim().to_string();
         if password.len() < 12 {
+            backup_state.set(SaveState::Failed(
+                "Use a password of at least 12 characters.".to_string(),
+            ));
             toast.show(Toast::error("Password must be at least 12 characters."));
             return;
         }
         working.set(true);
+        backup_state.set(SaveState::Saving);
         spawn(async move {
             let body = ExportBackupBody { password };
             match ApiClient::web()
@@ -368,22 +293,34 @@ pub fn IdentitySettings() -> Element {
                 Ok(resp) => {
                     backup_result.set(Some(resp.ncryptsec));
                     backup_password.set(String::new());
+                    backup_state.set(SaveState::Saved("Backup ready. Copy it now.".to_string()));
                     toast.show(Toast::success("Key backup exported. Copy it now!"));
                 }
-                Err(e) => toast.show(Toast::error(format!("Export failed: {e}"))),
+                Err(e) => {
+                    backup_state.set(SaveState::failed("Could not export the backup", &e));
+                    toast.show(Toast::error(format!("Export failed: {e}")));
+                }
             }
             working.set(false);
         });
     };
 
     // ─── NIP-49: Import key ───
-    let on_import_key = move |_| {
+    let on_import_key = move |evt: FormEvent| {
+        evt.prevent_default();
+        if working() {
+            return;
+        }
         let ncryptsec = import_ncryptsec().trim().to_string();
         let password = import_password().trim().to_string();
         if ncryptsec.is_empty() || password.is_empty() {
+            import_state.set(SaveState::Failed(
+                "Enter the ncryptsec backup and its password.".to_string(),
+            ));
             toast.show(Toast::error("Both ncryptsec and password are required."));
             return;
         }
+        import_state.set(SaveState::Idle);
         // Importing links an *external* key and replaces any currently linked
         // identity, so ask first with the inline strip (DR1-NOSTR-003).
         confirm_import.set(true);
@@ -394,6 +331,7 @@ pub fn IdentitySettings() -> Element {
         let ncryptsec = import_ncryptsec().trim().to_string();
         let password = import_password().trim().to_string();
         working.set(true);
+        import_state.set(SaveState::Saving);
         spawn(async move {
             let body = ImportKeyBody {
                 ncryptsec,
@@ -404,12 +342,16 @@ pub fn IdentitySettings() -> Element {
                 .await
             {
                 Ok(_) => {
+                    import_state.set(SaveState::Saved("Key imported.".to_string()));
                     toast.show(Toast::success("Key imported successfully!"));
                     refresh += 1;
                     import_ncryptsec.set(String::new());
                     import_password.set(String::new());
                 }
-                Err(e) => toast.show(Toast::error(format!("Import failed: {e}"))),
+                Err(e) => {
+                    import_state.set(SaveState::failed("Could not import the key", &e));
+                    toast.show(Toast::error(format!("Import failed: {e}")));
+                }
             }
             working.set(false);
         });
@@ -419,19 +361,25 @@ pub fn IdentitySettings() -> Element {
     let do_unlink = move |_| {
         confirm_unlink.set(false);
         working.set(true);
+        unlink_state.set(SaveState::Saving);
         spawn(async move {
             match ApiClient::web().delete("/api/nostr/identity").await {
                 Ok(()) => {
+                    unlink_state.set(SaveState::Saved("Key unlinked.".to_string()));
                     toast.show(Toast::success("Key unlinked."));
                     refresh += 1;
                 }
-                Err(e) => toast.show(Toast::error(format!("Unlink failed: {e}"))),
+                Err(e) => {
+                    unlink_state.set(SaveState::failed("Could not unlink the key", &e));
+                    toast.show(Toast::error(format!("Unlink failed: {e}")));
+                }
             }
             working.set(false);
         });
     };
 
     let me_data = identity.read();
+    let view = identity_view(&auth(), me_data.as_ref());
     let me_ok = me_data.as_ref().and_then(|r| r.as_ref().ok());
     let member = me_ok.and_then(|me| me.member.as_ref());
 
@@ -441,263 +389,287 @@ pub fn IdentitySettings() -> Element {
     // identities pointing at a domain we do not own.
     let nip05 = me_ok.and_then(|me| me.nip05.clone());
 
-    let auth_state = auth();
-    let identity_gate: Option<(&str, &str, Route, &str)> = match me_data.as_ref() {
-        None if !auth_state.loading && !auth_state.is_logged_in() => Some((
-            "Sign in to manage your account keys.",
-            "Sign in",
-            Route::Login {},
-            "ui-btn ui-btn--primary ui-btn--md",
-        )),
-        None if !auth_state.loading && !auth_state.is_org_member() => Some((
-            "You need to be an org member to manage account keys.",
-            "Apply",
-            Route::Apply {},
-            "ui-btn ui-btn--primary ui-btn--md",
-        )),
-        Some(Err(e)) if is_http_status(&e.to_string(), 401) => Some((
-            "Sign in to manage your account keys.",
-            "Sign in",
-            Route::Login {},
-            "ui-btn ui-btn--primary ui-btn--md",
-        )),
-        Some(Ok(me)) if me.member.is_none() => Some((
-            "You need to be an org member to manage account keys.",
-            "Apply",
-            Route::Apply {},
-            "ui-btn ui-btn--primary ui-btn--md",
-        )),
-        _ => None,
-    };
-    let identity_fetch_error = me_data
-        .as_ref()
-        .and_then(|r| r.as_ref().err())
-        .and_then(|e| {
-            let msg = e.to_string();
-            if is_http_status(&msg, 401) {
-                None
-            } else {
-                Some(msg)
-            }
-        });
-
     let has_pubkey = member.map(|m| m.nostr_pubkey.is_some()).unwrap_or(false);
     let is_server_managed = member
         .map(|m| m.nostr_key_mode.as_deref() == Some("server_managed"))
         .unwrap_or(false);
+    let busy = working();
+    let link_blocked = busy || pubkey_input().trim().is_empty();
+    let export_blocked = busy || backup_password().trim().len() < 12;
+    let import_blocked =
+        busy || import_ncryptsec().trim().is_empty() || import_password().trim().is_empty();
 
     rsx! {
+        crate::styles::StyleOnce { id: ACCOUNT_CSS_ID, css: ACCOUNT_CSS }
         crate::styles::StyleOnce { id: "scuffed-css-pages-identity-page-css", css: PAGE_CSS }
 
-        main { class: "identity-page",
-            h1 { class: "identity-page-title", "{ACCOUNT_KEYS}" }
-            p { class: "identity-intro", "{INTRO}" }
-            p { class: "identity-reports-link",
-                Link { to: Route::MyReports {}, "My reports" }
-            }
+        PageShell { width: PageWidth::Narrow, class: "identity-page",
+            PageHeader { title: ACCOUNT_KEYS, lead: INTRO }
 
-            div { class: "identity-section",
-                h2 { "Your key" }
-                if let Some(m) = member {
-                    if let Some(ref pubkey) = m.nostr_pubkey {
-                        div { class: "identity-field",
-                            label { class: "identity-label", "Public key" }
-                            code { class: "identity-mono", "{pubkey}" }
-                        }
-                        p { class: "identity-hint", "{HINT_PUBLIC_KEY}" }
-                        div { class: "identity-row",
-                            div { class: "identity-field",
-                                label { class: "identity-label", "Key mode" }
-                                span { class: "identity-pill",
-                                    {key_mode_label(m.nostr_key_mode.as_deref())}
+            if view != AccountView::Ready {
+                AccountPending {
+                    view: view.clone(),
+                    noun: "your account keys",
+                    task: "manage your account keys",
+                    return_path: "/identity",
+                    on_retry: move |_| refresh += 1,
+                }
+            } else if let Some(m) = member {
+                section { class: "account-section", aria_labelledby: "identity-key-heading",
+                    h2 { id: "identity-key-heading", class: "ui-section-title", "Your key" }
+                    div { class: "account-card",
+                        if let Some(ref pubkey) = m.nostr_pubkey {
+                            div { class: "account-field",
+                                label { class: "field-label", r#for: PUBLIC_KEY_ID, "Public key" }
+                                input {
+                                    id: PUBLIC_KEY_ID,
+                                    class: "field-input identity-key-input",
+                                    r#type: "text",
+                                    readonly: true,
+                                    spellcheck: false,
+                                    value: "{pubkey}",
+                                    aria_describedby: PUBLIC_KEY_HINT_ID,
+                                }
+                                p { id: PUBLIC_KEY_HINT_ID, class: "field-hint", "{HINT_PUBLIC_KEY}" }
+                            }
+                            div { class: "identity-facts",
+                                div { class: "account-field",
+                                    p { class: "field-label", "Key mode" }
+                                    p { class: "account-fact",
+                                        "{key_mode_label(m.nostr_key_mode.as_deref())}"
+                                    }
+                                }
+                                div { class: "account-field",
+                                    if let Some(ref id) = nip05 {
+                                        label { class: "field-label", r#for: NIP05_ID, "NIP-05 name" }
+                                        input {
+                                            id: NIP05_ID,
+                                            class: "field-input",
+                                            r#type: "text",
+                                            readonly: true,
+                                            spellcheck: false,
+                                            value: "{id}",
+                                            aria_describedby: NIP05_HINT_ID,
+                                        }
+                                        p { id: NIP05_HINT_ID, class: "field-hint",
+                                            "{HINT_NIP05_SET} "
+                                            Link { to: Route::ProfileSettings {}, "Change display name" }
+                                        }
+                                    } else {
+                                        p { class: "field-label", "NIP-05 name" }
+                                        p { class: "account-fact", "{NIP05_UNSET}" }
+                                        p { id: NIP05_HINT_ID, class: "field-hint", "{HINT_NIP05_UNSET}" }
+                                    }
                                 }
                             }
-                            div { class: "identity-field",
-                                label { class: "identity-label", "NIP-05" }
-                                if let Some(ref id) = nip05 {
-                                    span { class: "identity-nip05", "{id}" }
-                                } else {
-                                    span { class: "identity-nip05 identity-nip05-unset",
-                                        "Not configured"
+                            p { class: "field-hint", "{HINT_NIP05}" }
+                        } else {
+                            p { class: "account-lead",
+                                "No key is linked yet. Link one below, or ask an admin to set one up for you."
+                            }
+                        }
+                    }
+                }
+
+                if !has_pubkey {
+                    section { class: "account-section", aria_labelledby: "identity-link-heading",
+                        h2 { id: "identity-link-heading", class: "ui-section-title", "Link a key" }
+                        if has_extension {
+                            form { class: "account-card", onsubmit: on_link_identity,
+                                div { class: "account-field",
+                                    label { class: "field-label", r#for: LINK_PUBKEY_ID, "Public key (hex or npub)" }
+                                    input {
+                                        id: LINK_PUBKEY_ID,
+                                        class: "field-input identity-key-input",
+                                        r#type: "text",
+                                        spellcheck: false,
+                                        autocomplete: "off",
+                                        placeholder: "64-char hex or npub1...",
+                                        value: "{pubkey_input}",
+                                        oninput: move |e| pubkey_input.set(e.value()),
+                                    }
+                                }
+                                div { class: "account-actions",
+                                    button {
+                                        r#type: "submit",
+                                        class: btn_class(true),
+                                        aria_disabled: if link_blocked { "true" },
+                                        aria_describedby: LINK_STATUS_ID,
+                                        if busy { "Linking..." } else { "Link and verify" }
+                                    }
+                                    button {
+                                        r#type: "button",
+                                        class: btn_class(false),
+                                        onclick: on_detect_pubkey,
+                                        "Detect from extension"
+                                    }
+                                    AccountStatus { id: LINK_STATUS_ID, state: link_state() }
+                                }
+                            }
+                        } else {
+                            div { class: "account-card",
+                                p { class: "account-lead",
+                                    "Install a NIP-07 browser extension (nos2x, Alby, or similar) to link your key."
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if is_server_managed {
+                    section { class: "account-section", aria_labelledby: "identity-backup-heading",
+                        h2 { id: "identity-backup-heading", class: "ui-section-title", "Back up your key" }
+                        form { class: "account-card", onsubmit: on_export_backup,
+                            p { class: "account-lead",
+                                "Export your key as an encrypted ncryptsec backup. Keep this password. You will need it to import the key later (which links it as an external identity)."
+                            }
+                            div { class: "account-field",
+                                label { class: "field-label", r#for: BACKUP_PASSWORD_ID, "Backup password" }
+                                input {
+                                    id: BACKUP_PASSWORD_ID,
+                                    class: "field-input",
+                                    r#type: "password",
+                                    autocomplete: "new-password",
+                                    minlength: 12,
+                                    aria_describedby: BACKUP_PASSWORD_HINT_ID,
+                                    value: "{backup_password}",
+                                    oninput: move |e| backup_password.set(e.value()),
+                                }
+                                p { id: BACKUP_PASSWORD_HINT_ID, class: "field-hint",
+                                    "At least 12 characters. {HINT_BACKUP}"
+                                }
+                            }
+                            div { class: "account-actions",
+                                button {
+                                    r#type: "submit",
+                                    class: btn_class(true),
+                                    aria_disabled: if export_blocked { "true" },
+                                    aria_describedby: BACKUP_STATUS_ID,
+                                    if busy { "Exporting..." } else { "Export backup" }
+                                }
+                                AccountStatus { id: BACKUP_STATUS_ID, state: backup_state() }
+                            }
+                            if let Some(ref ncryptsec) = *backup_result.read() {
+                                div { class: "account-field",
+                                    label { class: "field-label", r#for: BACKUP_RESULT_ID, "Your ncryptsec backup" }
+                                    textarea {
+                                        id: BACKUP_RESULT_ID,
+                                        class: "field-input identity-key-input",
+                                        readonly: true,
+                                        spellcheck: false,
+                                        aria_describedby: BACKUP_RESULT_HINT_ID,
+                                        value: "{ncryptsec}",
+                                    }
+                                    p { id: BACKUP_RESULT_HINT_ID, class: "identity-warning",
+                                        "Copy this now. It will not be shown again."
                                     }
                                 }
                             }
                         }
-                        p { class: "identity-hint", "{HINT_NIP05}" }
-                    } else {
-                        p { "No key is linked yet. Use one of the options below to get started." }
-                    }
-                } else if let Some((lead, label, route, btn_class)) = identity_gate {
-                    p { "{lead}" }
-                    div { class: "identity-cta-actions",
-                        Link { to: route, class: "{btn_class}", "{label}" }
-                    }
-                } else if let Some(err) = identity_fetch_error {
-                    p { "Couldn't load identity: {err}" }
-                } else {
-                    p { "Loading..." }
-                }
-            }
-
-            if member.is_some() && !has_pubkey {
-                div { class: "identity-section",
-                    h2 { "Link a key" }
-                    if has_extension {
-                        div { class: "identity-row",
-                            div { class: "identity-field",
-                                label { class: "identity-label", "Public key (hex or npub)" }
-                                input {
-                                    class: "identity-input",
-                                    r#type: "text",
-                                    placeholder: "64-char hex or npub1...",
-                                    value: "{pubkey_input}",
-                                    oninput: move |e| pubkey_input.set(e.value()),
-                                }
-                            }
-                            button {
-                                class: "identity-btn identity-btn-outline",
-                                onclick: on_detect_pubkey,
-                                "Detect"
-                            }
-                        }
-                        div { class: "identity-actions",
-                            button {
-                                class: "identity-btn identity-btn-primary",
-                                disabled: working() || pubkey_input().trim().is_empty(),
-                                onclick: on_link_identity,
-                                if working() { "Linking..." } else { "Link & Verify" }
-                            }
-                        }
-                    } else {
-                        p { "Install a NIP-07 browser extension (nos2x, Alby, or similar) to link your key." }
                     }
                 }
-            }
 
-            if member.is_some() && is_server_managed {
-                div { class: "identity-section",
-                    h2 { "Back up your key" }
-                    p { "Export your key as an encrypted ncryptsec backup. Keep this password. You will need it to import the key later (which links it as an external identity)." }
-                    p { class: "identity-hint", "{HINT_BACKUP}" }
-                    div { class: "identity-field",
-                        label { class: "identity-label", "Backup Password (min 12 chars)" }
-                        input {
-                            class: "identity-input",
-                            r#type: "password",
-                            placeholder: "Enter a strong password (12+ characters)",
-                            value: "{backup_password}",
-                            oninput: move |e| backup_password.set(e.value()),
-                        }
-                    }
-                    div { class: "identity-actions",
-                        button {
-                            class: "identity-btn identity-btn-primary",
-                            disabled: working() || backup_password().trim().len() < 12,
-                            onclick: on_export_backup,
-                            if working() { "Exporting..." } else { "Export Backup" }
-                        }
-                    }
-                    if let Some(ref ncryptsec) = *backup_result.read() {
-                        div { class: "identity-backup-box",
-                            label { class: "identity-label", "Your ncryptsec backup:" }
-                            code { class: "identity-mono", "{ncryptsec}" }
-                            p { class: "identity-warning",
-                                "Copy this now! It will not be shown again."
-                            }
-                        }
-                    }
-                }
-            }
-
-            if member.is_some() {
                 AdvancedGroup {
-                if is_server_managed {
-                    div { class: "identity-sub",
-                        h3 { "Import an external key" }
-                        p { class: "identity-warning",
-                            "You currently have a server-managed key. Importing an external key is \
-                             disabled to protect it. To switch to an external key, first unlink your \
-                             key below, then import. Importing does not restore a key into \
-                             server-managed mode."
-                        }
-                    }
-                } else {
-                    div { class: "identity-sub",
-                        h3 { "Import an external key" }
-                        p {
-                            "Link an external Nostr key from an ncryptsec backup. This sets your \
-                             identity to external mode. The server will not manage a key for you. \
-                             It replaces any currently linked external key. The nsec is decrypted \
-                             only to derive your public key."
-                        }
-                        div { class: "identity-field",
-                            label { class: "identity-label", "ncryptsec" }
-                            input {
-                                class: "identity-input",
-                                r#type: "text",
-                                placeholder: "ncryptsec1...",
-                                value: "{import_ncryptsec}",
-                                oninput: move |e| import_ncryptsec.set(e.value()),
+                    if is_server_managed {
+                        div { class: "identity-sub",
+                            h3 { class: "account-sub-title", "Import an external key" }
+                            p { class: "identity-warning",
+                                "You currently have a server-managed key. Importing an external key is \
+                                 disabled to protect it. To switch to an external key, first unlink your \
+                                 key below, then import. Importing does not restore a key into \
+                                 server-managed mode."
                             }
                         }
-                        div { class: "identity-field",
-                            label { class: "identity-label", "Password" }
-                            input {
-                                class: "identity-input",
-                                r#type: "password",
-                                placeholder: "Backup password",
-                                value: "{import_password}",
-                                oninput: move |e| import_password.set(e.value()),
+                    } else {
+                        form { class: "identity-sub", onsubmit: on_import_key,
+                            h3 { class: "account-sub-title", "Import an external key" }
+                            p { class: "account-lead",
+                                "Link an external Nostr key from an ncryptsec backup. This sets your \
+                                 identity to external mode. The server will not manage a key for you. \
+                                 It replaces any currently linked external key. The nsec is decrypted \
+                                 only to derive your public key."
                             }
-                        }
-                        if confirm_import() {
-                            InlineConfirm {
-                                id: "import-key".to_string(),
-                                title: "Replace your linked key?".to_string(),
-                                body: "Importing sets your key to one you manage yourself. The server will no longer manage a key for you, and any key linked now is replaced.".to_string(),
-                                confirm_label: "Import key".to_string(),
-                                busy: working(),
-                                on_confirm: do_import_key,
-                                on_cancel: move |_| confirm_import.set(false),
-                            }
-                        } else {
-                            div { class: "identity-actions",
-                                button {
-                                    id: "import-key-trigger",
-                                    class: "identity-btn identity-btn-primary",
-                                    disabled: working() || import_ncryptsec().trim().is_empty() || import_password().trim().is_empty(),
-                                    onclick: on_import_key,
-                                    if working() { "Importing..." } else { "Import Key" }
+                            div { class: "account-field",
+                                label { class: "field-label", r#for: IMPORT_NCRYPTSEC_ID, "ncryptsec backup" }
+                                input {
+                                    id: IMPORT_NCRYPTSEC_ID,
+                                    class: "field-input identity-key-input",
+                                    r#type: "text",
+                                    spellcheck: false,
+                                    autocomplete: "off",
+                                    placeholder: "ncryptsec1...",
+                                    value: "{import_ncryptsec}",
+                                    oninput: move |e| import_ncryptsec.set(e.value()),
                                 }
                             }
+                            div { class: "account-field",
+                                label { class: "field-label", r#for: IMPORT_PASSWORD_ID, "Backup password" }
+                                input {
+                                    id: IMPORT_PASSWORD_ID,
+                                    class: "field-input",
+                                    r#type: "password",
+                                    autocomplete: "current-password",
+                                    value: "{import_password}",
+                                    oninput: move |e| import_password.set(e.value()),
+                                }
+                            }
+                            if confirm_import() {
+                                InlineConfirm {
+                                    id: "import-key".to_string(),
+                                    title: "Replace your linked key?".to_string(),
+                                    body: "Importing sets your key to one you manage yourself. The server will no longer manage a key for you, and any key linked now is replaced.".to_string(),
+                                    confirm_label: "Import key".to_string(),
+                                    busy: busy,
+                                    on_confirm: do_import_key,
+                                    on_cancel: move |_| confirm_import.set(false),
+                                }
+                            } else {
+                                div { class: "account-actions",
+                                    button {
+                                        id: "import-key-trigger",
+                                        r#type: "submit",
+                                        class: btn_class(true),
+                                        aria_disabled: if import_blocked { "true" },
+                                        aria_describedby: IMPORT_STATUS_ID,
+                                        if busy { "Importing..." } else { "Import key" }
+                                    }
+                                }
+                            }
+                            AccountStatus { id: IMPORT_STATUS_ID, state: import_state() }
                         }
                     }
-                }
                     if has_pubkey {
                         div { class: "identity-sub",
-                            h3 { "Unlink your key" }
-                            p { class: "identity-hint", "{HINT_UNLINK}" }
-                        if confirm_unlink() {
-                            InlineConfirm {
-                                id: "unlink-identity".to_string(),
-                                title: "Unlink this key?".to_string(),
-                                body: "This removes the key from your account. Export a backup first if you want to keep it.".to_string(),
-                                confirm_label: "Unlink".to_string(),
-                                busy: working(),
-                                on_confirm: do_unlink,
-                                on_cancel: move |_| confirm_unlink.set(false),
-                            }
-                        } else {
-                            div { class: "identity-actions",
-                                button {
-                                    id: "unlink-identity-trigger",
-                                    class: "identity-btn identity-btn-danger",
-                                    disabled: working(),
-                                    onclick: move |_| confirm_unlink.set(true),
-                                    "Unlink key"
+                            h3 { class: "account-sub-title", "Unlink your key" }
+                            p { class: "field-hint", "{HINT_UNLINK}" }
+                            if confirm_unlink() {
+                                InlineConfirm {
+                                    id: "unlink-identity".to_string(),
+                                    title: "Unlink this key?".to_string(),
+                                    body: "This removes the key from your account. Export a backup first if you want to keep it.".to_string(),
+                                    confirm_label: "Unlink".to_string(),
+                                    busy: busy,
+                                    on_confirm: do_unlink,
+                                    on_cancel: move |_| confirm_unlink.set(false),
+                                }
+                            } else {
+                                div { class: "account-actions",
+                                    button {
+                                        id: "unlink-identity-trigger",
+                                        r#type: "button",
+                                        class: "btn is-danger",
+                                        aria_disabled: if busy { "true" },
+                                        aria_describedby: UNLINK_STATUS_ID,
+                                        onclick: move |_| {
+                                            if !working() {
+                                                confirm_unlink.set(true);
+                                            }
+                                        },
+                                        "Unlink key"
+                                    }
                                 }
                             }
-                        }
+                            AccountStatus { id: UNLINK_STATUS_ID, state: unlink_state() }
                         }
                     }
                 }
@@ -857,6 +829,9 @@ mod tests {
             HINT_BACKUP,
             HINT_ADVANCED,
             HINT_UNLINK,
+            NIP05_UNSET,
+            HINT_NIP05_UNSET,
+            HINT_NIP05_SET,
         ] {
             assert!(text.ends_with('.'), "{text}");
             assert!(text.len() < 160, "{text}");
@@ -865,6 +840,56 @@ mod tests {
                 "{text}"
             );
         }
+    }
+
+    #[test]
+    fn a_guest_gets_the_sign_in_wall_inside_the_page() {
+        use crate::components::admin_shared::test_page::render_admin_route as render_route;
+        use crate::components::member_gate::test_route::wall;
+        let html = render_route("/identity", None);
+        assert_eq!(html.matches("<h1").count(), 1, "{html}");
+        assert_eq!(html.matches("<main").count(), 1, "{html}");
+        assert!(html.contains(">Account keys</h1>"), "{html}");
+        assert!(
+            html.contains("ui-shell ui-shell--narrow identity-page"),
+            "{html}"
+        );
+        let card = wall(&html);
+        assert!(
+            card.contains("Log in to manage your account keys."),
+            "{card}"
+        );
+        assert!(card.contains("href=\"/login?return=/identity\""), "{card}");
+        assert!(!html.contains("My reports</a></p>"), "{html}");
+    }
+
+    #[test]
+    fn a_member_sees_a_labelled_wait() {
+        use crate::components::admin_shared::test_page::render_admin_route as render_route;
+        let html = render_route("/identity", Some(scuffed_types::OrgRole::Member));
+        assert_eq!(html.matches("<h1").count(), 1, "{html}");
+        assert!(
+            html.contains("role=\"status\">Loading your account keys</p>"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn key_modes_read_as_words() {
+        assert_eq!(key_mode_label(Some("server_managed")), "Server-managed");
+        assert_eq!(key_mode_label(Some("external")), "External");
+        assert_eq!(key_mode_label(Some("new_mode")), "new mode");
+        assert_eq!(key_mode_label(Some("  ")), "Unknown");
+        assert_eq!(key_mode_label(None), "Unknown");
+    }
+
+    #[test]
+    fn page_css_uses_tokens() {
+        crate::components::ui::test_support::assert_sizes_from_tokens(PAGE_CSS);
+        let src = include_str!("identity.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(!prod.contains("Route::MyReports"), "no stray reports link");
+        assert!(!prod.contains("main {"), "the shell owns main");
     }
 
     #[test]

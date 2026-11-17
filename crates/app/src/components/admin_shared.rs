@@ -1,15 +1,24 @@
 use dioxus::prelude::*;
 
+use crate::components::member_gate::Wall;
+use crate::components::ui::inline_confirm::{
+    focus_element_by_id, focus_element_by_id_soon, key_cancels,
+};
+use crate::components::ui::{PageShell, PageWidth, Pill, PillTone, SkeletonBars, btn_class};
 use crate::hooks::{ApiResource, LIST_MAX_PAGES};
 use crate::routes::Route;
+
+/// Rows per page of an admin list (the shared `Pager`'s `page_size`).
+pub const ADMIN_PAGE_SIZE: usize = 20;
 
 /// Shared pending-state renderer for admin list/detail resources.
 ///
 /// Call this from the `None` arm of a resource's `data` match. When the last
-/// fetch failed (`resource.error` is set) it renders the error message plus a
-/// Retry button that bumps the resource's refresh counter; otherwise it renders
-/// the "Loading…" placeholder. Standardizes the error UX across every admin page
-/// so a failed / 403 / 500 fetch never shows an infinite "Loading…".
+/// fetch failed (`resource.error` is set) it renders a plain sentence that
+/// keeps the server's reason, plus a Retry button that bumps the resource's
+/// refresh counter; otherwise it renders a labelled wait ("Loading
+/// applications...") over skeleton rows. A failed, 403 or 500 fetch never
+/// shows an endless wait.
 ///
 /// Takes `&ApiResource` (not by value): call sites hold a live read-guard on
 /// `resource.data` inside the `match`, and `ApiResource<T>` is only `Copy` when
@@ -18,18 +27,41 @@ use crate::routes::Route;
 pub fn admin_pending<T: 'static>(resource: &ApiResource<T>, label: &str) -> Element {
     if let Some(err) = resource.error.read().as_ref().cloned() {
         let mut refresh = resource.refresh;
+        let message = load_error_text(label, &err);
         rsx! {
-            p { class: "admin-loading", style: "color: var(--loss);",
-                "Failed to load {label}: {err}"
-            }
-            button {
-                class: "row-btn",
-                onclick: move |_| refresh += 1,
-                "Retry"
+            div { class: "fetch-error-wrap admin-pending", role: "alert",
+                p { class: "fetch-error", "{message}" }
+                button {
+                    r#type: "button",
+                    class: "fetch-error__retry",
+                    onclick: move |_| refresh += 1,
+                    "Retry"
+                }
             }
         }
     } else {
-        rsx! { p { class: "admin-loading", "Loading..." } }
+        let waiting = loading_text(label);
+        rsx! {
+            div { class: "admin-pending",
+                p { class: "admin-pending-text", role: "status", "{waiting}" }
+                SkeletonBars { rows: 3 }
+            }
+        }
+    }
+}
+
+/// "Loading applications...": the labelled wait of a list or a page.
+pub fn loading_text(label: &str) -> String {
+    format!("Loading {label}...")
+}
+
+/// A failed load in plain words, with the server's reason kept at the end.
+pub fn load_error_text(label: &str, reason: &str) -> String {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        format!("Could not load {label}.")
+    } else {
+        format!("Could not load {label}. {reason}")
     }
 }
 
@@ -73,33 +105,64 @@ fn cap_notice_text(truncated: bool, shown: usize, what: &str) -> String {
 /// Client-side authorization denial for admin pages whose server tier is stricter
 /// than the officer+ `AdminLayout` guard. Defense-in-depth: rendered when a user
 /// without the required role reaches the page (e.g. by typing the URL directly).
+///
+/// It is the whole page: the wall card in the narrow container, with the
+/// page's one H1. The person is signed in, so there is no sign-in link.
 #[component]
 pub fn AccessDenied(message: String) -> Element {
+    crate::head::use_page_title(Some("No access".to_string()));
     rsx! {
-        div {
-            style: "display:flex;flex-direction:column;align-items:center;justify-content:center;padding:4rem 1rem;color:var(--text-3);gap:0.5rem;text-align:center;",
-            h2 { style: "color:var(--text);margin-bottom:0.5rem;", "Access Denied" }
-            p { "{message}" }
-            Link {
-                to: Route::AdminDashboard {},
-                style: "color:var(--accent-text);margin-top:0.5rem;",
-                "Back to dashboard"
+        PageShell { width: PageWidth::Narrow, class: "admin-no-access",
+            Wall {
+                title: "You do not have access",
+                lead: message,
+                page_title: true,
+                actions: rsx! {
+                    Link { to: Route::AdminDashboard {}, class: btn_class(true), "Back to dashboard" }
+                    Link { to: Route::Home {}, class: btn_class(false), "Return home" }
+                },
             }
         }
     }
 }
 
+/// The admin table.
+///
+/// `num_cols` lists the indexes of right-aligned columns (numbers and dates);
+/// give the matching cells `class: "num"`. `label` names the table for
+/// assistive tech.
+///
+/// `cards: true` turns every row into a stacked card at phone width, with no
+/// second copy of the markup. The cells then say what they are:
+/// - `cell-select`: a row checkbox (bulk select), first on the top line;
+/// - `cell-who`: the name of the row, top line of the card;
+/// - `cell-badge`: the status pill, on its own line under the name;
+/// - `cell-meta`: short facts joined on one line ("Tank · 10 Nov 2026");
+/// - `cell-actions`: the cell that holds a [`RowActions`];
+/// - any other cell is a full line; give it `"data-label": "Games"` so the
+///   line carries its column name.
+///
+/// Without `cards` the table keeps its columns on phone and scrolls sideways
+/// inside its own box.
 #[component]
-pub fn DataTable(headers: Vec<&'static str>, children: Element) -> Element {
+pub fn DataTable(
+    headers: Vec<&'static str>,
+    #[props(default)] num_cols: Vec<usize>,
+    #[props(default = false)] cards: bool,
+    #[props(default)] label: Option<String>,
+    children: Element,
+) -> Element {
     rsx! {
-        // Horizontal scroll containment so wide admin tables don't blow out
-        // the layout on narrow viewports (see research-admin-mobile-grok.md).
-        div { class: "data-table-scroll",
-            table { class: "data-table",
+        div { class: if cards { "data-table-scroll is-cards" } else { "data-table-scroll" },
+            table { class: "data-table", aria_label: label,
                 thead {
                     tr {
-                        for h in headers.iter() {
-                            th { "{h}" }
+                        for (index, h) in headers.iter().enumerate() {
+                            th {
+                                scope: "col",
+                                class: if num_cols.contains(&index) { "num" },
+                                "{h}"
+                            }
                         }
                     }
                 }
@@ -109,6 +172,295 @@ pub fn DataTable(headers: Vec<&'static str>, children: Element) -> Element {
     }
 }
 
+/// Id of the "Actions" button of a [`RowActions`] with this id stem. Pass it
+/// as `restore_focus_id` to a dialog an overflow action opens.
+pub fn row_menu_toggle_id(id: &str) -> String {
+    format!("{id}-toggle")
+}
+
+/// Id of the overflow group the "Actions" button controls.
+fn row_menu_group_id(id: &str) -> String {
+    format!("{id}-more")
+}
+
+/// The actions of one row.
+///
+/// `children` are the always visible actions (at most two, so the phone card
+/// keeps the name beside them). `more` holds the rest: it sits behind an
+/// "Actions" button (`aria-expanded`, `aria-controls`) that opens a named
+/// group in place. Escape closes the group and returns focus to the button;
+/// choosing an action closes it too. Nothing floats, so nothing is clipped by
+/// the table's scroll box.
+///
+/// `inline_on_desktop: true` is for a short set: on desktop every action is in
+/// the row and there is no "Actions" button; phone folds `more` as above.
+///
+/// `id` is the id stem (record id plus a name, `"member-actions-{id}"`) and
+/// `label` names the group ("Actions for Player01"). Both are needed only
+/// with `more`.
+#[component]
+pub fn RowActions(
+    #[props(default)] id: String,
+    #[props(default)] label: String,
+    #[props(default)] more: Option<Element>,
+    #[props(default = false)] inline_on_desktop: bool,
+    children: Element,
+) -> Element {
+    let mut open = use_signal(|| false);
+    let Some(more) = more else {
+        return rsx! {
+            div { class: "row-actions",
+                div { class: "row-actions-main", {children} }
+            }
+        };
+    };
+    let toggle_id = row_menu_toggle_id(&id);
+    let group_id = row_menu_group_id(&id);
+    let class = row_actions_class(open(), inline_on_desktop);
+    let focus_back = toggle_id.clone();
+    let focus_after_choice = toggle_id.clone();
+    rsx! {
+        div {
+            class: "{class}",
+            onkeydown: move |evt| {
+                if open() && key_cancels(&evt.key()) {
+                    evt.stop_propagation();
+                    open.set(false);
+                    focus_element_by_id(&focus_back);
+                }
+            },
+            div { class: "row-actions-main",
+                {children}
+                button {
+                    r#type: "button",
+                    id: "{toggle_id}",
+                    class: "btn is-ghost row-menu-toggle",
+                    aria_expanded: if open() { "true" } else { "false" },
+                    aria_controls: "{group_id}",
+                    aria_label: "{label}",
+                    onclick: move |_| open.toggle(),
+                    "Actions"
+                }
+            }
+            div {
+                class: "row-menu-group",
+                id: "{group_id}",
+                role: "group",
+                aria_label: "{label}",
+                // An action was chosen: fold the group again. Its button is
+                // about to leave the layout, so focus goes to "Actions".
+                onclick: move |_| {
+                    if open() {
+                        open.set(false);
+                        focus_element_by_id(&focus_after_choice);
+                    }
+                },
+                {more}
+            }
+        }
+    }
+}
+
+fn row_actions_class(open: bool, inline_on_desktop: bool) -> String {
+    let mut class = String::from("row-actions");
+    if inline_on_desktop {
+        class.push_str(" is-inline-desktop");
+    }
+    if open {
+        class.push_str(" is-open");
+    }
+    class
+}
+
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+
+/// `2026-11-10T19:00:00Z` as (`2026-11-10`, `10 Nov 2026`): the machine date
+/// and the visible one, as the public lists write it. `None` when the value
+/// does not start with a date. The date is the UTC one the server stored.
+pub fn admin_short_date(iso: &str) -> Option<(String, String)> {
+    let date = iso.get(..10)?;
+    let mut parts = date.split('-');
+    let (year, month, day) = (parts.next()?, parts.next()?, parts.next()?);
+    if year.len() != 4 || month.len() != 2 || day.len() != 2 {
+        return None;
+    }
+    year.parse::<u16>().ok()?;
+    let month_name = MONTHS.get(month.parse::<usize>().ok()?.checked_sub(1)?)?;
+    let day_number = day.parse::<u8>().ok().filter(|d| (1..=31).contains(d))?;
+    Some((
+        date.to_string(),
+        format!("{day_number} {month_name} {year}"),
+    ))
+}
+
+/// A date cell value: `10 Nov 2026` in a `<time>` that keeps the machine
+/// date and never wraps. A value that is not a timestamp is shown as it is.
+#[component]
+pub fn AdminDate(iso: String) -> Element {
+    match admin_short_date(&iso) {
+        Some((machine, human)) => rsx! {
+            time { class: "date", datetime: "{machine}", "{human}" }
+        },
+        None => rsx! {
+            span { class: "date", "{iso}" }
+        },
+    }
+}
+
+/// Text of a form's or a dialog's live line.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum SaveState {
+    /// Nothing to say. The line stays in the tree, empty.
+    #[default]
+    Idle,
+    Saving,
+    /// A short confirmation ("Settings saved.").
+    Saved(String),
+    /// What failed, with the server's reason ("Could not save. name taken").
+    Failed(String),
+}
+
+impl SaveState {
+    pub fn text(&self) -> String {
+        match self {
+            SaveState::Idle => String::new(),
+            SaveState::Saving => "Saving...".to_string(),
+            SaveState::Saved(text) | SaveState::Failed(text) => text.clone(),
+        }
+    }
+
+    pub fn is_error(&self) -> bool {
+        matches!(self, SaveState::Failed(_))
+    }
+
+    /// A failure sentence that keeps the server's reason: `what` is the plain
+    /// part ("Could not save settings"), `reason` the error as received.
+    pub fn failed(what: &str, reason: impl std::fmt::Display) -> Self {
+        let reason = reason.to_string();
+        let reason = reason.trim();
+        if reason.is_empty() {
+            SaveState::Failed(format!("{what}."))
+        } else {
+            SaveState::Failed(format!("{what}. {reason}"))
+        }
+    }
+}
+
+/// The save line of a form: one `role="status"` paragraph that is always
+/// rendered, so a change of its text is announced. Put it beside the Save
+/// button, inside `.admin-form-actions`.
+#[component]
+pub fn FormStatus(state: SaveState, #[props(default)] id: Option<String>) -> Element {
+    let text = state.text();
+    rsx! {
+        p {
+            id,
+            class: if state.is_error() { "admin-form-status is-error" } else { "admin-form-status" },
+            role: "status",
+            "{text}"
+        }
+    }
+}
+
+/// Keep Tab inside the open dialog: from the last stop it goes to the first,
+/// and with Shift from the first to the last. True when focus was moved, so
+/// the caller cancels the key's default. Shared by the admin dialogs and the
+/// DM compose dialog.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn trap_tab_in(dialog_id: &str, shift: bool) -> bool {
+    use wasm_bindgen::JsCast;
+
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return false;
+    };
+    let Some(dialog) = document.get_element_by_id(dialog_id) else {
+        return false;
+    };
+    let Ok(stops) = dialog.query_selector_all(
+        "a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex=\"0\"]",
+    ) else {
+        return false;
+    };
+    let count = stops.length();
+    if count == 0 {
+        return false;
+    }
+    let stop = |index: u32| {
+        stops
+            .item(index)
+            .and_then(|node| node.dyn_into::<web_sys::HtmlElement>().ok())
+    };
+    let (first, last) = (stop(0), stop(count - 1));
+    let active = document.active_element();
+    let is_active = |el: &Option<web_sys::HtmlElement>| match (el, &active) {
+        (Some(el), Some(active)) => el.is_same_node(Some(active)),
+        _ => false,
+    };
+    let inside = active
+        .as_ref()
+        .is_some_and(|active| dialog.contains(Some(active)));
+    // The title holds focus when the dialog opens. It is not a tab stop, so
+    // Shift+Tab from it goes to the last one.
+    let on_title = active
+        .as_ref()
+        .is_some_and(|active| active.get_attribute("tabindex").as_deref() == Some("-1"));
+    let target = match tab_wraps_to(
+        shift,
+        inside,
+        is_active(&first) || on_title,
+        is_active(&last),
+    ) {
+        Some(TabEdge::First) => first,
+        Some(TabEdge::Last) => last,
+        None => return false,
+    };
+    match target {
+        Some(target) => {
+            let _ = target.focus();
+            true
+        }
+        None => false,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn trap_tab_in(dialog_id: &str, shift: bool) -> bool {
+    let _ = (dialog_id, shift);
+    false
+}
+
+#[cfg_attr(not(any(test, target_arch = "wasm32")), allow(dead_code))]
+#[derive(Debug, PartialEq, Eq)]
+enum TabEdge {
+    First,
+    Last,
+}
+
+/// Where a Tab that would leave the dialog goes instead. `None` leaves the
+/// key to the browser.
+#[cfg_attr(not(any(test, target_arch = "wasm32")), allow(dead_code))]
+fn tab_wraps_to(shift: bool, inside: bool, at_first: bool, at_last: bool) -> Option<TabEdge> {
+    if shift {
+        (!inside || at_first).then_some(TabEdge::Last)
+    } else {
+        (!inside || at_last).then_some(TabEdge::First)
+    }
+}
+
+/// Default id stem of a [`FormModal`]. One form dialog is open at a time, so
+/// the ids are unique on the page.
+const FORM_MODAL_ID: &str = "form-modal";
+
+/// The edit dialog: a titled modal with the form fields as children, Cancel
+/// and a solid submit button, and a live line that carries the save state
+/// and the server's reason for a failed save.
+///
+/// It opens with focus on its title, keeps Tab inside, and closes on Escape.
+/// Pass `restore_focus_id` (the button that opened it) to get focus back
+/// there on Cancel or Escape. `submit_label` replaces "Save". `error` is the
+/// failure text; keep the server's reason in it.
 #[component]
 pub fn FormModal(
     title: String,
@@ -118,41 +470,117 @@ pub fn FormModal(
     on_submit: EventHandler<()>,
     #[props(default = false)] danger: bool,
     #[props(default = false)] wide: bool,
+    #[props(default)] submit_label: Option<String>,
+    #[props(default)] error: Option<String>,
+    #[props(default)] restore_focus_id: Option<String>,
     children: Element,
 ) -> Element {
     if !open {
         return rsx! {};
     }
-    let save_class = if danger {
-        "btn-save danger"
-    } else {
-        "btn-save"
+    rsx! {
+        FormModalOpen {
+            title,
+            submitting,
+            on_close,
+            on_submit,
+            danger,
+            wide,
+            submit_label,
+            error,
+            restore_focus_id,
+            {children}
+        }
+    }
+}
+
+/// The open dialog. Split from `FormModal` so the focus effect runs once per
+/// open.
+#[component]
+fn FormModalOpen(
+    title: String,
+    submitting: bool,
+    on_close: EventHandler<()>,
+    on_submit: EventHandler<()>,
+    danger: bool,
+    wide: bool,
+    submit_label: Option<String>,
+    error: Option<String>,
+    restore_focus_id: Option<String>,
+    children: Element,
+) -> Element {
+    let title_id = format!("{FORM_MODAL_ID}-title");
+    let status_id = format!("{FORM_MODAL_ID}-status");
+    let focus_title = title_id.clone();
+    use_effect(move || focus_element_by_id(&focus_title));
+
+    let close = use_callback(move |_: ()| {
+        on_close.call(());
+        if let Some(id) = restore_focus_id.clone() {
+            focus_element_by_id_soon(id);
+        }
+    });
+    let state = match (&error, submitting) {
+        (_, true) => SaveState::Saving,
+        (Some(reason), false) => SaveState::Failed(reason.clone()),
+        (None, false) => SaveState::Idle,
     };
-    let modal_class = if wide {
-        "form-modal wide"
+    let status = state.text();
+    let label = submit_label.unwrap_or_else(|| "Save".to_string());
+    let label = if submitting {
+        "Saving...".to_string()
     } else {
-        "form-modal"
+        label
     };
     rsx! {
         div {
             class: "form-modal-overlay",
-            onclick: move |_| on_close.call(()),
+            onclick: move |_| close.call(()),
+            onkeydown: move |evt| {
+                if key_cancels(&evt.key()) {
+                    evt.stop_propagation();
+                    close.call(());
+                } else if evt.key() == Key::Tab
+                    && trap_tab_in(FORM_MODAL_ID, evt.modifiers().contains(Modifiers::SHIFT))
+                {
+                    evt.prevent_default();
+                }
+            },
             div {
-                class: "{modal_class}",
+                class: if wide { "form-modal wide" } else { "form-modal" },
+                id: FORM_MODAL_ID,
+                role: "dialog",
+                aria_modal: "true",
+                aria_labelledby: "{title_id}",
+                aria_describedby: "{status_id}",
                 onclick: move |e| e.stop_propagation(),
-                div { class: "form-modal-header", "{title}" }
+                h2 { id: "{title_id}", class: "form-modal-header", tabindex: "-1", "{title}" }
                 div { class: "form-modal-body", {children} }
                 div { class: "form-modal-footer",
+                    p {
+                        id: "{status_id}",
+                        class: if state.is_error() { "form-modal-status is-error" } else { "form-modal-status" },
+                        role: "status",
+                        "{status}"
+                    }
                     button {
-                        class: "btn-cancel",
-                        onclick: move |_| on_close.call(()),
+                        class: "btn is-ghost",
+                        r#type: "button",
+                        onclick: move |_| close.call(()),
                         "Cancel"
                     }
                     button {
-                        class: "{save_class}",
-                        disabled: submitting,
-                        onclick: move |_| on_submit.call(()),
-                        if submitting { "Saving..." } else { "Save" }
+                        class: if danger { "btn is-danger" } else { "btn is-primary" },
+                        r#type: "button",
+                        // Busy, but still focusable: focus is not dropped
+                        // while the request runs.
+                        aria_disabled: if submitting { "true" },
+                        onclick: move |_| {
+                            if !submitting {
+                                on_submit.call(());
+                            }
+                        },
+                        "{label}"
                     }
                 }
             }
@@ -163,10 +591,12 @@ pub fn FormModal(
 /// Id of the Cancel button, so focus can start there when the dialog opens.
 const CONFIRM_CANCEL_ID: &str = "confirm-dialog-cancel";
 const CONFIRM_TITLE_ID: &str = "confirm-dialog-title";
+const CONFIRM_DIALOG_ID: &str = "confirm-dialog";
 
-/// Modal confirm. Opens with focus on Cancel, closes on Esc, and names the
-/// action on the solid button (`confirm_label`, default "Confirm"). Pass
-/// `restore_focus_id` to move focus back to the button that opened it.
+/// Modal confirm. Opens with focus on Cancel, keeps Tab inside, closes on
+/// Esc, and names the action on the solid button (`confirm_label`, default
+/// "Confirm"). Pass `restore_focus_id` to move focus back to the button that
+/// opened it.
 #[component]
 pub fn ConfirmDialog(
     title: String,
@@ -209,10 +639,6 @@ fn ConfirmDialogOpen(
     on_cancel: EventHandler<()>,
     extra: Option<Element>,
 ) -> Element {
-    use crate::components::ui::inline_confirm::{
-        focus_element_by_id, focus_element_by_id_soon, key_cancels,
-    };
-
     use_effect(|| focus_element_by_id(CONFIRM_CANCEL_ID));
 
     let cancel = use_callback(move |_: ()| {
@@ -221,11 +647,6 @@ fn ConfirmDialogOpen(
             focus_element_by_id_soon(id);
         }
     });
-    let btn_class = if danger {
-        "btn-save danger"
-    } else {
-        "btn-save"
-    };
     rsx! {
         div {
             class: "form-modal-overlay",
@@ -234,15 +655,20 @@ fn ConfirmDialogOpen(
                 if key_cancels(&e.key()) {
                     e.stop_propagation();
                     cancel.call(());
+                } else if e.key() == Key::Tab
+                    && trap_tab_in(CONFIRM_DIALOG_ID, e.modifiers().contains(Modifiers::SHIFT))
+                {
+                    e.prevent_default();
                 }
             },
             div {
                 class: "form-modal",
+                id: CONFIRM_DIALOG_ID,
                 role: "dialog",
                 "aria-modal": "true",
                 "aria-labelledby": CONFIRM_TITLE_ID,
                 onclick: move |e| e.stop_propagation(),
-                div { id: CONFIRM_TITLE_ID, class: "form-modal-header", "{title}" }
+                h2 { id: CONFIRM_TITLE_ID, class: "form-modal-header", "{title}" }
                 div { class: "confirm-body",
                     p { "{message}" }
                     if let Some(extra) = extra {
@@ -252,13 +678,13 @@ fn ConfirmDialogOpen(
                 div { class: "form-modal-footer",
                     button {
                         id: CONFIRM_CANCEL_ID,
-                        class: "btn-cancel",
+                        class: "btn is-ghost",
                         r#type: "button",
                         onclick: move |_| cancel.call(()),
                         "Cancel"
                     }
                     button {
-                        class: "{btn_class}",
+                        class: if danger { "btn is-danger" } else { "btn is-primary" },
                         r#type: "button",
                         onclick: move |_| on_confirm.call(()),
                         "{confirm_label}"
@@ -269,18 +695,51 @@ fn ConfirmDialogOpen(
     }
 }
 
+/// Tone of a status word. Unknown words are neutral.
+pub fn status_tone(status: &str) -> PillTone {
+    match status {
+        "pending" | "in_progress" => PillTone::Warn,
+        "trial" => PillTone::Info,
+        "accepted" | "active" | "completed" => PillTone::Ok,
+        "rejected" | "declined" | "inactive" => PillTone::Danger,
+        "registration" => PillTone::Accent,
+        _ => PillTone::Neutral,
+    }
+}
+
+/// The word a status pill shows: `rejected` reads "Declined", and a stored
+/// `in_progress` reads "In progress". The pill recipe upper-cases it.
+pub fn status_label(status: &str) -> String {
+    match status {
+        "rejected" => "Declined".to_string(),
+        other => {
+            let words = other.replace('_', " ");
+            let mut chars = words.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().chain(chars).collect(),
+                None => String::new(),
+            }
+        }
+    }
+}
+
+/// A status as a pill from the shared recipe: the tone is never the only
+/// signal, the pill always carries the word.
 #[component]
 pub fn StatusPill(status: String) -> Element {
-    let class = format!("status-pill {status}");
-    rsx! { span { class: "{class}", "{status}" } }
+    let label = status_label(&status);
+    rsx! { Pill { tone: status_tone(&status), "{label}" } }
 }
 
+/// A role as a neutral pill from the shared recipe.
 #[component]
 pub fn RolePill(role: String) -> Element {
-    let class = format!("role-pill {role}");
-    rsx! { span { class: "{class}", "{role}" } }
+    let label = status_label(&role);
+    rsx! { Pill { tone: PillTone::Neutral, "{label}" } }
 }
 
+/// A count tile (the Home stat treatment): the value in the display face
+/// with tabular figures, the label under it.
 #[component]
 pub fn SummaryCard(
     value: String,
@@ -375,6 +834,348 @@ mod confirm_dialog_tests {
             }
         }
         assert!(render(app).contains(">Confirm</button>"));
+    }
+}
+
+/// Page tests for admin routes: the route rendered with the contexts the
+/// real app provides (session, site settings, theme, toasts). The first
+/// render is the loading state, since no request is answered in a test.
+#[cfg(test)]
+pub(crate) mod test_page {
+    use dioxus::prelude::*;
+    use scuffed_types::{OrgRole, UserInfo};
+
+    use crate::routes::Route;
+    use crate::state::AuthState;
+
+    thread_local! {
+        static SCENE: std::cell::RefCell<(String, Option<OrgRole>)> =
+            const { std::cell::RefCell::new((String::new(), None)) };
+    }
+
+    fn shell() -> Element {
+        let (path, role) = SCENE.with(|slot| slot.borrow().clone());
+        let history =
+            use_hook(|| std::rc::Rc::new(dioxus::history::MemoryHistory::with_initial_path(path)));
+        let auth = use_signal(|| AuthState {
+            user: role.map(|role| UserInfo {
+                id: "u1".into(),
+                username: "Player01".into(),
+                avatar_url: None,
+                role: Some(role),
+            }),
+            loading: false,
+        });
+        use_context_provider(|| auth);
+        crate::state::provide_site_settings();
+        rsx! {
+            crate::theme::ThemeProvider {
+                crate::components::ToastProvider {
+                    dioxus::router::components::HistoryProvider {
+                        history: move |_| history.clone() as std::rc::Rc<dyn dioxus::history::History>,
+                        Router::<Route> {}
+                    }
+                }
+            }
+        }
+    }
+
+    /// `role: None` is a guest.
+    pub fn render_admin_route(path: &str, role: Option<OrgRole>) -> String {
+        SCENE.with(|slot| *slot.borrow_mut() = (path.to_string(), role));
+        let mut dom = VirtualDom::new(shell);
+        dom.rebuild_in_place();
+        dioxus_ssr::render(&dom)
+    }
+}
+
+#[cfg(test)]
+mod admin_pattern_tests {
+    use super::*;
+    use crate::components::ui::test_support::{render, render_routed};
+
+    #[test]
+    fn table_marks_right_aligned_columns_and_card_mode() {
+        fn app() -> Element {
+            rsx! {
+                DataTable {
+                    headers: vec!["Applicant", "Date", "Actions"],
+                    num_cols: vec![1],
+                    cards: true,
+                    label: "Applications".to_string(),
+                    tr {
+                        td { class: "cell-who", "Player04" }
+                        td { class: "cell-meta num", AdminDate { iso: "2026-11-10T19:00:00Z".to_string() } }
+                        td { class: "cell-actions",
+                            RowActions { button { r#type: "button", class: "btn is-ghost", "View" } }
+                        }
+                    }
+                }
+            }
+        }
+        let html = render(app);
+        assert!(
+            html.contains("<div class=\"data-table-scroll is-cards\"><table class=\"data-table\" aria-label=\"Applications\">"),
+            "{html}"
+        );
+        assert!(html.contains("<th scope=\"col\">Applicant</th>"), "{html}");
+        assert!(
+            html.contains("<th scope=\"col\" class=\"num\">Date</th>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<time class=\"date\" datetime=\"2026-11-10\">10 Nov 2026</time>"),
+            "{html}"
+        );
+        // No overflow actions: no "Actions" button and no group.
+        assert!(
+            html.contains(
+                "<div class=\"row-actions\"><div class=\"row-actions-main\"><button type=\"button\" class=\"btn is-ghost\">View</button></div></div>"
+            ),
+            "{html}"
+        );
+        assert!(!html.contains("aria-expanded"), "{html}");
+    }
+
+    #[test]
+    fn plain_table_keeps_its_old_shape() {
+        fn app() -> Element {
+            rsx! {
+                DataTable { headers: vec!["Name"], tr { td { "Player01" } } }
+            }
+        }
+        let html = render(app);
+        assert!(
+            html.starts_with(
+                "<div class=\"data-table-scroll\"><table class=\"data-table\"><thead>"
+            ),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn overflow_actions_sit_behind_a_named_disclosure() {
+        fn app() -> Element {
+            rsx! {
+                RowActions {
+                    id: "member-actions-m1".to_string(),
+                    label: "Actions for Player01".to_string(),
+                    more: rsx! {
+                        button { r#type: "button", class: "btn is-ghost", "Change role" }
+                        button { r#type: "button", class: "btn is-danger", "Deactivate" }
+                    },
+                    button { r#type: "button", class: "btn is-ghost", "Edit" }
+                }
+            }
+        }
+        let html = render(app);
+        assert!(html.starts_with("<div class=\"row-actions\">"), "{html}");
+        // The button says what it opens, its state, and which group.
+        assert!(
+            html.contains(
+                "<button type=\"button\" id=\"member-actions-m1-toggle\" class=\"btn is-ghost row-menu-toggle\" aria-expanded=\"false\" aria-controls=\"member-actions-m1-more\" aria-label=\"Actions for Player01\">Actions</button>"
+            ),
+            "{html}"
+        );
+        // The group is always in the tree, so aria-controls resolves.
+        assert!(
+            html.contains(
+                "<div class=\"row-menu-group\" id=\"member-actions-m1-more\" role=\"group\" aria-label=\"Actions for Player01\">"
+            ),
+            "{html}"
+        );
+        // Always visible actions come before the "Actions" button.
+        let edit = html.find(">Edit<").expect("edit");
+        let toggle = html.find(">Actions<").expect("toggle");
+        let role = html.find(">Change role<").expect("overflow action");
+        assert!(edit < toggle && toggle < role, "{html}");
+        assert_eq!(
+            row_menu_toggle_id("member-actions-m1"),
+            "member-actions-m1-toggle"
+        );
+        assert_eq!(row_actions_class(true, false), "row-actions is-open");
+        assert_eq!(
+            row_actions_class(false, true),
+            "row-actions is-inline-desktop"
+        );
+    }
+
+    #[test]
+    fn status_and_role_pills_use_the_shared_recipe() {
+        for (status, tone, word) in [
+            ("pending", PillTone::Warn, "Pending"),
+            ("trial", PillTone::Info, "Trial"),
+            ("accepted", PillTone::Ok, "Accepted"),
+            ("rejected", PillTone::Danger, "Declined"),
+            ("withdrawn", PillTone::Neutral, "Withdrawn"),
+            ("in_progress", PillTone::Warn, "In progress"),
+        ] {
+            assert_eq!(status_tone(status), tone, "{status}");
+            assert_eq!(status_label(status), word, "{status}");
+        }
+        fn app() -> Element {
+            rsx! {
+                StatusPill { status: "rejected".to_string() }
+                RolePill { role: "officer".to_string() }
+            }
+        }
+        let html = render(app);
+        assert_eq!(
+            html,
+            "<span class=\"ui-pill ui-pill--danger\">Declined</span>\
+             <span class=\"ui-pill ui-pill--neutral\">Officer</span>"
+        );
+    }
+
+    #[test]
+    fn dates_read_day_month_year_and_odd_values_pass_through() {
+        assert_eq!(
+            admin_short_date("2026-11-10T19:00:00Z"),
+            Some(("2026-11-10".to_string(), "10 Nov 2026".to_string()))
+        );
+        assert_eq!(admin_short_date("soon"), None);
+        fn app() -> Element {
+            rsx! { AdminDate { iso: "soon".to_string() } }
+        }
+        assert_eq!(render(app), "<span class=\"date\">soon</span>");
+    }
+
+    #[test]
+    fn save_line_is_always_rendered_and_keeps_the_reason() {
+        fn idle() -> Element {
+            rsx! { FormStatus { state: SaveState::Idle } }
+        }
+        assert_eq!(
+            render(idle),
+            "<p class=\"admin-form-status\" role=\"status\"></p>"
+        );
+        fn failed() -> Element {
+            rsx! {
+                FormStatus {
+                    state: SaveState::failed("Could not save settings", "HTTP error 400: name too long"),
+                    id: "settings-save-status".to_string(),
+                }
+            }
+        }
+        assert_eq!(
+            render(failed),
+            "<p id=\"settings-save-status\" class=\"admin-form-status is-error\" role=\"status\">Could not save settings. HTTP error 400: name too long</p>"
+        );
+        assert_eq!(SaveState::Saving.text(), "Saving...");
+        assert_eq!(
+            SaveState::failed("Could not save", " "),
+            SaveState::Failed("Could not save.".to_string())
+        );
+    }
+
+    #[test]
+    fn form_modal_is_a_labelled_dialog_with_a_live_line() {
+        fn app() -> Element {
+            rsx! {
+                FormModal {
+                    title: "Edit team".to_string(),
+                    open: true,
+                    submitting: false,
+                    error: "Could not save the team. HTTP error 409: name taken".to_string(),
+                    on_close: |_| {},
+                    on_submit: |_| {},
+                    p { "fields" }
+                }
+            }
+        }
+        let html = render(app);
+        assert!(html.contains("role=\"dialog\""), "{html}");
+        assert!(html.contains("aria-modal=\"true\""), "{html}");
+        assert!(
+            html.contains("aria-labelledby=\"form-modal-title\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("<h2 id=\"form-modal-title\" class=\"form-modal-header\" tabindex=\"-1\">Edit team</h2>"),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                "<p id=\"form-modal-status\" class=\"form-modal-status is-error\" role=\"status\">Could not save the team. HTTP error 409: name taken</p>"
+            ),
+            "{html}"
+        );
+        assert!(html.contains(">Save</button>"), "{html}");
+        assert!(!html.contains(" disabled"), "{html}");
+
+        fn busy() -> Element {
+            rsx! {
+                FormModal {
+                    title: "Edit team".to_string(),
+                    open: true,
+                    submitting: true,
+                    submit_label: "Create".to_string(),
+                    on_close: |_| {},
+                    on_submit: |_| {},
+                    p { "fields" }
+                }
+            }
+        }
+        let html = render(busy);
+        assert!(html.contains("aria-disabled=\"true\""), "{html}");
+        assert!(html.contains(">Saving...</button>"), "{html}");
+        assert!(html.contains("role=\"status\">Saving...</p>"), "{html}");
+
+        fn closed() -> Element {
+            rsx! {
+                FormModal {
+                    title: "Edit team".to_string(),
+                    open: false,
+                    submitting: false,
+                    on_close: |_| {},
+                    on_submit: |_| {},
+                    p { "fields" }
+                }
+            }
+        }
+        assert_eq!(render(closed), "");
+    }
+
+    #[test]
+    fn tab_wraps_at_the_ends_of_a_dialog_only() {
+        assert_eq!(tab_wraps_to(false, true, false, true), Some(TabEdge::First));
+        assert_eq!(tab_wraps_to(true, true, true, false), Some(TabEdge::Last));
+        assert_eq!(tab_wraps_to(false, true, false, false), None);
+        assert_eq!(tab_wraps_to(true, true, false, false), None);
+        // Focus that left the dialog comes back in.
+        assert_eq!(
+            tab_wraps_to(false, false, false, false),
+            Some(TabEdge::First)
+        );
+    }
+
+    #[test]
+    fn pending_states_are_labelled_and_keep_the_reason() {
+        assert_eq!(loading_text("applications"), "Loading applications...");
+        assert_eq!(
+            load_error_text("applications", "HTTP error 500: boom"),
+            "Could not load applications. HTTP error 500: boom"
+        );
+        assert_eq!(load_error_text("teams", ""), "Could not load teams.");
+    }
+
+    #[test]
+    fn access_denied_is_a_whole_page_with_one_h1_and_no_sign_in() {
+        let html = render_routed(|| {
+            rsx! { AccessDenied { message: "You need admin permissions to view settings.".to_string() } }
+        });
+        assert!(
+            html.contains("class=\"ui-shell ui-shell--narrow admin-no-access\""),
+            "{html}"
+        );
+        assert_eq!(html.matches("<h1").count(), 1, "{html}");
+        assert!(html.contains("<h1>You do not have access</h1>"), "{html}");
+        assert!(
+            html.contains("You need admin permissions to view settings."),
+            "{html}"
+        );
+        assert!(!html.contains("Log in"), "{html}");
+        assert!(html.contains(">Back to dashboard</a>"), "{html}");
     }
 }
 

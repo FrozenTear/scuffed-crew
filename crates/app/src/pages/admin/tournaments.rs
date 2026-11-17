@@ -2,9 +2,13 @@ use dioxus::prelude::*;
 use serde::Deserialize;
 use std::collections::HashMap;
 
+use crate::components::ui::{
+    ChipButton, ChipRow, EmptyCard, FieldError, PageHeader, PageShell, PageWidth, Pager, Pill,
+    PillTone, SkeletonBars, page_slice, show_list_top,
+};
 use crate::components::{
-    ConfirmDialog, DataTable, FormModal, StatusPill, Toast, admin_pending, list_cap_notice,
-    use_toast,
+    ADMIN_PAGE_SIZE, AdminDate, ConfirmDialog, DataTable, FormModal, RowActions, SaveState,
+    StatusPill, Toast, admin_pending, list_cap_notice, load_error_text, status_label, use_toast,
 };
 use crate::hooks::{ModalController, use_api_list};
 use scuffed_api_client::ApiClient;
@@ -89,6 +93,140 @@ const STATUS_FILTERS: [&str; 6] = [
     "archived",
 ];
 
+/// The list region: the pager's focus target after a page change.
+const LIST_ID: &str = "admin-tournaments-list";
+const NEW_TOURNAMENT_ID: &str = "tournaments-new";
+const BACK_ID: &str = "tournament-back";
+const ADD_PARTICIPANT_ID: &str = "tournament-add-participant";
+const NAME_ID: &str = "tournament-name";
+const NAME_ERROR_ID: &str = "tournament-name-error";
+const FORMAT_ID: &str = "tournament-format";
+const GAME_ID: &str = "tournament-game";
+const MAX_ID: &str = "tournament-max";
+const DATE_ID: &str = "tournament-date";
+const TIME_ID: &str = "tournament-time";
+const TIME_HINT_ID: &str = "tournament-time-hint";
+const PARTICIPANT_ID: &str = "participant-member";
+const PARTICIPANT_ERROR_ID: &str = "participant-member-error";
+const SCORE_A_ID: &str = "report-score-a";
+const SCORE_B_ID: &str = "report-score-b";
+const SCORES_ERROR_ID: &str = "report-scores-error";
+const WINNER_ID: &str = "report-winner";
+const WINNER_ERROR_ID: &str = "report-winner-error";
+const REPLAYS_ID: &str = "report-replays";
+
+/// Page CSS: the head row of a detail block and the round headings.
+const PAGE_CSS: &str = r#"
+.admin-tournaments-page .tournament-block-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+}
+.admin-tournaments-page .tournament-round {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    min-width: 0;
+}
+.admin-tournaments-page .tournament-round + .tournament-round { margin-top: var(--space-5); }
+.admin-tournaments-page .tournament-round h3 {
+    margin: 0;
+    color: var(--text-3);
+    font-family: var(--font-head);
+    font-size: var(--text-sm);
+    font-weight: var(--font-label-weight);
+    letter-spacing: var(--tracking-caps);
+    text-transform: uppercase;
+    line-height: var(--leading-ui);
+}
+.admin-tournaments-page .tournament-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+    margin: var(--space-3) 0 0;
+    color: var(--text-3);
+    font-size: var(--text-md);
+}
+.admin-tournaments-page .bracket-side {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+}
+.admin-tournaments-page .bracket-side.is-winner { font-weight: var(--font-weight-700); }
+"#;
+
+/// The word a format reads as. The stored value stays the option value.
+fn format_label(format: &str) -> String {
+    match format {
+        "single_elim" => "Single elimination".to_string(),
+        "double_elim" => "Double elimination".to_string(),
+        "round_robin" => "Round robin".to_string(),
+        "swiss" => "Swiss".to_string(),
+        other => status_label(other),
+    }
+}
+
+/// The chip word of a status filter.
+fn filter_label(status: &str) -> String {
+    if status == "all" {
+        "All".to_string()
+    } else {
+        status_label(status)
+    }
+}
+
+/// The tournaments a status chip keeps. "all" keeps all.
+fn filter_tournaments(list: &[Tournament], status: &str) -> Vec<Tournament> {
+    list.iter()
+        .filter(|t| status == "all" || t.status == status)
+        .cloned()
+        .collect()
+}
+
+/// The next status of a tournament and the button word that moves it there
+/// (server: draft, registration, in_progress, completed, archived).
+fn next_status(status: &str) -> Option<(&'static str, &'static str)> {
+    match status {
+        "draft" => Some(("registration", "Open registration")),
+        "registration" => Some(("in_progress", "Start tournament")),
+        "in_progress" => Some(("completed", "Complete")),
+        "completed" => Some(("archived", "Archive")),
+        _ => None,
+    }
+}
+
+/// Id of a row's View button, from the tournament id. Dialogs opened from
+/// the row return focus here, because it is on screen at every width.
+fn view_button_id(tournament_id: &str) -> String {
+    format!("tournament-view-{tournament_id}")
+}
+
+/// Id of a participant's Remove button, from the participant id.
+fn remove_participant_id(participant_id: &str) -> String {
+    format!("participant-remove-{participant_id}")
+}
+
+/// Id of a bracket match's Report button, from the match id.
+fn report_button_id(match_id: &str) -> String {
+    format!("bracket-report-{match_id}")
+}
+
+/// `starts_at` split for the date and time inputs:
+/// "2026-03-11T18:00:00Z" becomes ("2026-03-11", "18:00").
+fn split_starts_at(raw: &str) -> (String, String) {
+    match raw.split_once('T') {
+        Some((d, rest)) => (
+            d.to_string(),
+            rest.trim_end_matches('Z').chars().take(5).collect(),
+        ),
+        None => (String::new(), String::new()),
+    }
+}
+
 #[component]
 pub fn AdminTournaments() -> Element {
     let mut tournaments = use_api_list::<Tournament>("/api/tournaments");
@@ -99,8 +237,9 @@ pub fn AdminTournaments() -> Element {
     // View toggle: None = list, Some(id) = detail
     let mut detail_id: Signal<Option<String>> = use_signal(|| None);
 
-    // Status filter
+    // Status filter and page of the list. Both live in memory.
     let mut status_filter = use_signal(|| "all".to_string());
+    let mut page = use_signal(|| 1usize);
 
     // Form modal state
     let mut modal = ModalController::<String>::new();
@@ -110,6 +249,9 @@ pub fn AdminTournaments() -> Element {
     let mut form_max = use_signal(String::new);
     let mut form_date = use_signal(String::new);
     let mut form_time = use_signal(String::new);
+    let mut name_error = use_signal(String::new);
+    let mut save_error = use_signal(|| None::<String>);
+    let mut opener = use_signal(|| NEW_TOURNAMENT_ID.to_string());
 
     // Delete confirm
     let mut delete_modal = ModalController::<Tournament>::new();
@@ -119,10 +261,14 @@ pub fn AdminTournaments() -> Element {
     let mut bracket_data: Signal<Option<BracketData>> = use_signal(|| None);
     let mut detail_tournament: Signal<Option<Tournament>> = use_signal(|| None);
     let mut detail_loading = use_signal(|| false);
+    // Why the tournament or its bracket did not load (the server's reason).
+    let mut detail_error = use_signal(|| None::<String>);
 
     // Add participant
     let mut add_part_modal = ModalController::<()>::new();
     let mut add_part_member_id = use_signal(String::new);
+    let mut add_part_member_error = use_signal(String::new);
+    let mut add_part_error = use_signal(|| None::<String>);
 
     // Remove participant confirm
     let mut remove_part_modal = ModalController::<Participant>::new();
@@ -133,23 +279,33 @@ pub fn AdminTournaments() -> Element {
     let mut match_score_b = use_signal(String::new);
     let mut match_winner = use_signal(String::new);
     let mut match_replays = use_signal(String::new);
+    let mut scores_error = use_signal(String::new);
+    let mut winner_error = use_signal(String::new);
+    let mut match_error = use_signal(|| None::<String>);
 
     // Detail data loader
     let _detail_loader = use_resource(move || async move {
         let _ = detail_refresh();
         if let Some(id) = detail_id() {
             detail_loading.set(true);
-            if let Ok(t) = ApiClient::web()
+            detail_error.set(None);
+            match ApiClient::web()
                 .fetch::<Tournament>(&format!("/api/tournaments/{id}"))
                 .await
             {
-                detail_tournament.set(Some(t));
+                Ok(t) => detail_tournament.set(Some(t)),
+                Err(e) => detail_error.set(Some(e.to_string())),
             }
-            if let Ok(b) = ApiClient::web()
+            match ApiClient::web()
                 .fetch::<BracketData>(&format!("/api/tournaments/{id}/bracket"))
                 .await
             {
-                bracket_data.set(Some(b));
+                Ok(b) => bracket_data.set(Some(b)),
+                Err(e) => {
+                    if detail_error.peek().is_none() {
+                        detail_error.set(Some(e.to_string()));
+                    }
+                }
             }
             detail_loading.set(false);
         }
@@ -157,20 +313,26 @@ pub fn AdminTournaments() -> Element {
 
     // --- List view handlers ---
 
-    let open_create = move |_| {
+    let mut open_create = move || {
         form_name.set(String::new());
         form_format.set("single_elim".to_string());
         form_game_id.set(None);
         form_max.set(String::new());
         form_date.set(String::new());
         form_time.set(String::new());
+        name_error.set(String::new());
+        save_error.set(None);
+        opener.set(NEW_TOURNAMENT_ID.to_string());
         modal.show_empty();
     };
 
     let mut open_edit = move |t: Tournament| {
+        name_error.set(String::new());
+        save_error.set(None);
+        opener.set(view_button_id(&t.id));
         form_name.set(t.name);
         form_format.set(t.format);
-        // Preserve real game id (was wrongly mapping game_name → empty string)
+        // Preserve real game id (was wrongly mapping game_name to an empty string)
         form_game_id.set(t.game_id.clone());
         form_max.set(
             t.max_participants
@@ -178,14 +340,9 @@ pub fn AdminTournaments() -> Element {
                 .unwrap_or_default(),
         );
         // Split "2026-03-11T18:00:00Z" into date + time
-        let raw = t.starts_at.unwrap_or_default();
-        if let Some((d, rest)) = raw.split_once('T') {
-            form_date.set(d.to_string());
-            form_time.set(rest.trim_end_matches('Z').chars().take(5).collect());
-        } else {
-            form_date.set(String::new());
-            form_time.set(String::new());
-        }
+        let (date, time) = split_starts_at(&t.starts_at.unwrap_or_default());
+        form_date.set(date);
+        form_time.set(time);
         modal.show(t.id);
     };
 
@@ -193,10 +350,13 @@ pub fn AdminTournaments() -> Element {
 
     let on_submit = move |_| {
         let name = form_name().trim().to_string();
+        save_error.set(None);
         if name.is_empty() {
+            name_error.set("Enter a name for the tournament.".to_string());
             toast.show(Toast::error("Name is required."));
             return;
         }
+        name_error.set(String::new());
         let max_str = form_max().trim().to_string();
         let max_val = if max_str.is_empty() {
             None
@@ -247,7 +407,12 @@ pub fn AdminTournaments() -> Element {
                     games.refresh += 1;
                     members.refresh += 1;
                 }
-                Err(e) => toast.show(Toast::error(format!("Failed to save: {e}"))),
+                Err(e) => {
+                    save_error.set(Some(
+                        SaveState::failed("Could not save the tournament", &e).text(),
+                    ));
+                    toast.show(Toast::error(format!("Failed to save: {e}")));
+                }
             }
         });
     };
@@ -296,7 +461,10 @@ pub fn AdminTournaments() -> Element {
                 .await;
             match result {
                 Ok(_) => {
-                    toast.show(Toast::success(format!("Status changed to {new_status}.")));
+                    toast.show(Toast::success(format!(
+                        "Status changed to {}.",
+                        status_label(&new_status)
+                    )));
                     tournaments.refresh += 1;
                     games.refresh += 1;
                     members.refresh += 1;
@@ -308,6 +476,7 @@ pub fn AdminTournaments() -> Element {
     };
 
     let mut view_detail = move |id: String| {
+        detail_error.set(None);
         detail_id.set(Some(id));
         bracket_data.set(None);
         detail_tournament.set(None);
@@ -324,6 +493,8 @@ pub fn AdminTournaments() -> Element {
 
     let on_add_part_open = move |_| {
         add_part_member_id.set(String::new());
+        add_part_member_error.set(String::new());
+        add_part_error.set(None);
         add_part_modal.show_empty();
     };
 
@@ -331,9 +502,12 @@ pub fn AdminTournaments() -> Element {
 
     let on_add_part_submit = move |_| {
         let mid = add_part_member_id().trim().to_string();
+        add_part_error.set(None);
         if mid.is_empty() {
+            add_part_member_error.set("Pick a member to add.".to_string());
             return;
         }
+        add_part_member_error.set(String::new());
         if let Some(id) = detail_id() {
             let body = AddParticipantRequest { member_id: mid };
             add_part_modal.start_submit();
@@ -348,7 +522,12 @@ pub fn AdminTournaments() -> Element {
                         add_part_modal.close();
                         detail_refresh += 1;
                     }
-                    Err(e) => toast.show(Toast::error(format!("Failed: {e}"))),
+                    Err(e) => {
+                        add_part_error.set(Some(
+                            SaveState::failed("Could not add the participant", &e).text(),
+                        ));
+                        toast.show(Toast::error(format!("Failed: {e}")));
+                    }
                 }
             });
         }
@@ -422,6 +601,9 @@ pub fn AdminTournaments() -> Element {
         match_score_b.set(m.score_b.map(|n| n.to_string()).unwrap_or_default());
         match_winner.set(m.winner_id.clone().unwrap_or_default());
         match_replays.set(String::new());
+        scores_error.set(String::new());
+        winner_error.set(String::new());
+        match_error.set(None);
         match_modal.show(m);
     };
 
@@ -438,14 +620,19 @@ pub fn AdminTournaments() -> Element {
             let sb = match_score_b().trim().parse::<u32>();
             let winner_raw = match_winner().trim().to_string();
             let replays_raw = match_replays().trim().to_string();
+            match_error.set(None);
             let (Ok(score_a), Ok(score_b)) = (sa, sb) else {
+                scores_error.set("Enter both scores as whole numbers.".to_string());
                 toast.show(Toast::error("Scores must be numbers."));
                 return;
             };
+            scores_error.set(String::new());
             if winner_raw.is_empty() {
+                winner_error.set("Pick the winner.".to_string());
                 toast.show(Toast::error("Select a winner."));
                 return;
             }
+            winner_error.set(String::new());
             let body = MatchReportRequest {
                 score_a,
                 score_b,
@@ -478,7 +665,12 @@ pub fn AdminTournaments() -> Element {
                         match_modal.close();
                         detail_refresh += 1;
                     }
-                    Err(e) => toast.show(Toast::error(format!("Failed: {e}"))),
+                    Err(e) => {
+                        match_error.set(Some(
+                            SaveState::failed("Could not save the result", &e).text(),
+                        ));
+                        toast.show(Toast::error(format!("Failed: {e}")));
+                    }
                 }
             });
         }
@@ -486,209 +678,352 @@ pub fn AdminTournaments() -> Element {
 
     // --- Render ---
 
-    rsx! {
-
-        if detail_id().is_some() {
-            // ==================== DETAIL VIEW ====================
-            {
-                if detail_loading() {
-                    rsx! { p { class: "admin-loading", "Loading tournament..." } }
-                } else if let Some(tournament) = detail_tournament() {
-                    let bracket = bracket_data();
-                    let participant_map: HashMap<String, String> = bracket
-                        .as_ref()
-                        .map(|b| {
-                            b.participants
-                                .iter()
-                                .map(|p| (p.id.clone(), p.name.clone()))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let t_id = tournament.id.clone();
-                    let t_id2 = tournament.id.clone();
-                    let is_swiss = tournament.format == "swiss";
-                    let is_in_progress = tournament.status == "in_progress";
-                    let is_registration = tournament.status == "registration";
-
-                    rsx! {
-                        div { class: "admin-toolbar",
-                            div { style: "display:flex;align-items:center;gap:1rem;",
+    let list = {
+        let data = tournaments.data.read();
+        let filter = status_filter();
+        match data.as_ref().and_then(|d| d.as_ref()) {
+            None => admin_pending(&tournaments, "tournaments"),
+            Some(all) => {
+                let shown = filter_tournaments(all, &filter);
+                let total = shown.len();
+                let rows = page_slice(&shown, page(), ADMIN_PAGE_SIZE).to_vec();
+                rsx! {
+                    if all.is_empty() {
+                        EmptyCard {
+                            title: "No tournaments yet",
+                            message: "Create a tournament, open registration, then generate the bracket once the participants are in.",
+                            actions: rsx! {
                                 button {
-                                    class: "row-btn",
-                                    onclick: back_to_list,
-                                    "\u{2190} Back"
+                                    r#type: "button",
+                                    class: "btn is-primary",
+                                    onclick: move |_| open_create(),
+                                    "New tournament"
                                 }
-                                h1 { "{tournament.name}" }
-                                StatusPill { status: tournament.status.clone() }
-                            }
-                            div { style: "display:flex;gap:0.5rem;flex-wrap:wrap;",
-                                // Status transitions (server: draft→registration→in_progress→completed→archived)
-                                if tournament.status == "draft" {
-                                    button {
-                                        class: "row-btn primary",
-                                        onclick: move |_| change_status((t_id.clone(), "registration".to_string())),
-                                        "Open Registration"
-                                    }
+                            },
+                        }
+                    } else if rows.is_empty() {
+                        EmptyCard {
+                            title: "No tournaments match these filters",
+                            message: "Clear the filters to see every tournament, or pick another status.",
+                            actions: rsx! {
+                                button {
+                                    r#type: "button",
+                                    class: "btn is-ghost",
+                                    onclick: move |_| {
+                                        status_filter.set("all".to_string());
+                                        page.set(1);
+                                    },
+                                    "Clear filters"
                                 }
-                                if is_registration {
-                                    button {
-                                        class: "row-btn primary",
-                                        onclick: move |_| change_status((t_id2.clone(), "in_progress".to_string())),
-                                        "Start Tournament"
-                                    }
-                                }
-                                if is_in_progress {
-                                    {
-                                        let tid_complete = tournament.id.clone();
-                                        rsx! {
+                            },
+                        }
+                    } else {
+                        DataTable {
+                            headers: vec!["Tournament", "Status", "Format", "Game", "Max", "Starts", "Actions"],
+                            num_cols: vec![4, 5],
+                            cards: true,
+                            label: "Tournaments",
+                            for t in rows.iter() {
+                                {
+                                    let t_edit = t.clone();
+                                    let t_del = t.clone();
+                                    let t_view_id = t.id.clone();
+                                    let tid_next = t.id.clone();
+                                    let name = t.name.clone();
+                                    let format = format_label(&t.format);
+                                    let game_display = t.game_name.clone().unwrap_or_else(|| "No game".into());
+                                    let max_display = t
+                                        .max_participants
+                                        .map(|n| format!("{n} max"))
+                                        .unwrap_or_else(|| "No limit".into());
+                                    let advance = next_status(&t.status).filter(|_| t.status != "completed");
+                                    let archivable = t.status != "archived";
+                                    let more = rsx! {
+                                        button {
+                                            r#type: "button",
+                                            class: "btn is-ghost",
+                                            aria_label: "Edit {name}",
+                                            onclick: move |_| open_edit(t_edit.clone()),
+                                            "Edit"
+                                        }
+                                        if let Some((to, word)) = advance {
                                             button {
-                                                class: "row-btn danger",
-                                                onclick: move |_| change_status((tid_complete.clone(), "completed".to_string())),
-                                                "Complete"
+                                                r#type: "button",
+                                                class: "btn is-ghost",
+                                                aria_label: "{word}: {name}",
+                                                onclick: move |_| change_status((tid_next.clone(), to.to_string())),
+                                                "{word}"
                                             }
                                         }
-                                    }
-                                }
-                                if tournament.status == "completed" {
-                                    {
-                                        let tid_arch = tournament.id.clone();
-                                        rsx! {
+                                        if archivable {
                                             button {
-                                                class: "row-btn",
-                                                onclick: move |_| change_status((tid_arch.clone(), "archived".to_string())),
+                                                r#type: "button",
+                                                class: "btn is-danger",
+                                                aria_label: "Archive {name}",
+                                                onclick: move |_| open_delete(t_del.clone()),
                                                 "Archive"
                                             }
                                         }
-                                    }
-                                }
-                                // Bracket only before/at registration (server requires bracket before start)
-                                if tournament.status == "draft" || is_registration {
-                                    button {
-                                        class: "btn-add",
-                                        onclick: generate_bracket,
-                                        "Generate Bracket"
-                                    }
-                                }
-                                if is_swiss && is_in_progress {
-                                    button {
-                                        class: "btn-add",
-                                        onclick: next_swiss_round,
-                                        "Next Swiss Round"
+                                    };
+                                    rsx! {
+                                        tr { key: "{t.id}",
+                                            td { class: "cell-who", "{t.name}" }
+                                            td { class: "cell-badge", StatusPill { status: t.status.clone() } }
+                                            td { class: "cell-meta", "{format}" }
+                                            td { class: "cell-meta", "{game_display}" }
+                                            td { class: "cell-meta num", "{max_display}" }
+                                            td { class: "cell-meta num",
+                                                match t.starts_at.clone() {
+                                                    Some(iso) => rsx! { AdminDate { iso } },
+                                                    None => rsx! { span { class: "date", "Date not set" } },
+                                                }
+                                            }
+                                            td { class: "cell-actions",
+                                                RowActions {
+                                                    id: "tournament-actions-{t.id}",
+                                                    label: "Actions for {name}",
+                                                    inline_on_desktop: true,
+                                                    more,
+                                                    button {
+                                                        r#type: "button",
+                                                        class: "btn is-ghost",
+                                                        id: view_button_id(&t.id),
+                                                        aria_label: "View {name}",
+                                                        onclick: move |_| view_detail(t_view_id.clone()),
+                                                        "View"
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
+                    }
+                    // Always rendered: its count line is the list's live line.
+                    Pager {
+                        id: "tournaments-pager",
+                        page: page(),
+                        total,
+                        page_size: ADMIN_PAGE_SIZE,
+                        noun: "tournaments",
+                        noun_singular: "tournament",
+                        show_page_count: true,
+                        on_change: move |next| {
+                            page.set(next);
+                            show_list_top(LIST_ID);
+                        },
+                    }
+                }
+            }
+        }
+    };
 
-                        // Participants section
-                        div { style: "margin-bottom:2rem;",
-                            div { style: "display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem;",
-                                h2 {
-                                    style: "font-family:var(--font-head),sans-serif;font-size:1.1rem;font-weight:700;color:var(--text);text-transform:uppercase;letter-spacing:0.04em;margin:0;",
-                                    "Participants"
-                                }
-                                button {
-                                    class: "btn-add",
-                                    onclick: on_add_part_open,
-                                    "+ Add"
-                                }
+    let back_button = rsx! {
+        button {
+            r#type: "button",
+            class: "btn is-ghost",
+            id: BACK_ID,
+            onclick: back_to_list,
+            "Back to tournaments"
+        }
+    };
+
+    let detail = if detail_id().is_none() {
+        rsx! {}
+    } else if let Some(tournament) = detail_tournament() {
+        let bracket = bracket_data();
+        let participant_map: HashMap<String, String> = bracket
+            .as_ref()
+            .map(|b| {
+                b.participants
+                    .iter()
+                    .map(|p| (p.id.clone(), p.name.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let t_id = tournament.id.clone();
+        let is_swiss = tournament.format == "swiss";
+        let is_in_progress = tournament.status == "in_progress";
+        let is_registration = tournament.status == "registration";
+        let advance = next_status(&tournament.status);
+        let format = format_label(&tournament.format);
+        let game = tournament
+            .game_name
+            .clone()
+            .unwrap_or_else(|| "No game".to_string());
+        let max = tournament
+            .max_participants
+            .map(|n| format!("{n} max"))
+            .unwrap_or_else(|| "No limit".to_string());
+        let refresh_error =
+            detail_error().map(|reason| load_error_text("part of this tournament", &reason));
+        rsx! {
+            PageShell { width: PageWidth::Wide, class: "admin-tournaments-page",
+                PageHeader {
+                    title: tournament.name.clone(),
+                    meta: rsx! {
+                        p { class: "tournament-meta",
+                            StatusPill { status: tournament.status.clone() }
+                            span { "{format} \u{b7} {game} \u{b7} {max}" }
+                        }
+                    },
+                    actions: rsx! {
+                        {back_button}
+                        // Status transitions (server: draft, registration,
+                        // in_progress, completed, archived).
+                        if let Some((to, word)) = advance {
+                            button {
+                                r#type: "button",
+                                class: if to == "archived" { "btn is-ghost" } else { "btn is-primary" },
+                                onclick: move |_| change_status((t_id.clone(), to.to_string())),
+                                "{word}"
                             }
-                            {
-                                match bracket.as_ref().map(|b| &b.participants) {
-                                    Some(parts) if !parts.is_empty() => rsx! {
-                                        DataTable { headers: vec!["Seed", "Name", "Actions"],
-                                            for p in parts.iter() {
-                                                {
-                                                    let p_rm = p.clone();
-                                                    rsx! {
-                                                        tr { key: "{p.id}",
-                                                            td { "#{p.seed}" }
-                                                            td { "{p.name}" }
-                                                            td {
-                                                                button {
-                                                                    class: "row-btn danger",
-                                                                    onclick: move |_| open_remove_part(p_rm.clone()),
-                                                                    "Remove"
-                                                                }
-                                                            }
+                        }
+                        // Bracket only before/at registration (server requires bracket before start)
+                        if tournament.status == "draft" || is_registration {
+                            button {
+                                r#type: "button",
+                                class: "btn is-ghost",
+                                onclick: generate_bracket,
+                                "Generate bracket"
+                            }
+                        }
+                        if is_swiss && is_in_progress {
+                            button {
+                                r#type: "button",
+                                class: "btn is-ghost",
+                                onclick: next_swiss_round,
+                                "Next Swiss round"
+                            }
+                        }
+                    },
+                }
+
+                if let Some(message) = refresh_error {
+                    div { class: "fetch-error-wrap", role: "alert",
+                        p { class: "fetch-error", "{message}" }
+                        button {
+                            r#type: "button",
+                            class: "fetch-error__retry",
+                            onclick: move |_| detail_refresh += 1,
+                            "Retry"
+                        }
+                    }
+                }
+
+                section { class: "ui-stack", aria_labelledby: "tournament-participants-title",
+                    div { class: "tournament-block-head",
+                        h2 { class: "ui-section-title", id: "tournament-participants-title", "Participants" }
+                        button {
+                            r#type: "button",
+                            class: "btn is-ghost",
+                            id: ADD_PARTICIPANT_ID,
+                            onclick: on_add_part_open,
+                            "Add participant"
+                        }
+                    }
+                    match bracket.as_ref().map(|b| &b.participants) {
+                        Some(parts) if !parts.is_empty() => rsx! {
+                            DataTable {
+                                headers: vec!["Participant", "Seed", "Actions"],
+                                num_cols: vec![1],
+                                cards: true,
+                                label: "Participants",
+                                for p in parts.iter() {
+                                    {
+                                        let p_rm = p.clone();
+                                        let pname = p.name.clone();
+                                        rsx! {
+                                            tr { key: "{p.id}",
+                                                td { class: "cell-who", "{p.name}" }
+                                                td { class: "num", "data-label": "Seed", "{p.seed}" }
+                                                td { class: "cell-actions",
+                                                    RowActions {
+                                                        button {
+                                                            r#type: "button",
+                                                            class: "btn is-danger",
+                                                            id: remove_participant_id(&p.id),
+                                                            aria_label: "Remove {pname}",
+                                                            onclick: move |_| open_remove_part(p_rm.clone()),
+                                                            "Remove"
                                                         }
                                                     }
                                                 }
                                             }
                                         }
-                                    },
-                                    _ => rsx! {
-                                        p { class: "empty-state", "No participants yet." }
-                                    },
+                                    }
                                 }
                             }
-                        }
+                        },
+                        _ => rsx! {
+                            p { class: "field-hint", "No participants yet. Use Add participant to sign members up." }
+                        },
+                    }
+                }
 
-                        // Rounds & matches section
-                        div {
-                            h2 {
-                                style: "font-family:var(--font-head),sans-serif;font-size:1.1rem;font-weight:700;color:var(--text);text-transform:uppercase;letter-spacing:0.04em;margin-bottom:0.75rem;",
-                                "Bracket"
-                            }
-                            {
-                                let rounds = bracket.as_ref().map(|b| &b.rounds);
-                                let matches = bracket.as_ref().map(|b| &b.matches);
-                                match (rounds, matches) {
-                                    (Some(rnds), Some(mtchs)) if !rnds.is_empty() => {
+                section { class: "ui-stack", aria_labelledby: "tournament-bracket-title",
+                    h2 { class: "ui-section-title", id: "tournament-bracket-title", "Bracket" }
+                    {
+                        let rounds = bracket.as_ref().map(|b| &b.rounds);
+                        let matches = bracket.as_ref().map(|b| &b.matches);
+                        match (rounds, matches) {
+                            (Some(rnds), Some(mtchs)) if !rnds.is_empty() => rsx! {
+                                for round in rnds.iter() {
+                                    {
+                                        let round_matches: Vec<BracketMatch> = mtchs
+                                            .iter()
+                                            .filter(|m| m.round_id == round.id)
+                                            .cloned()
+                                            .collect();
+                                        let pmap = participant_map.clone();
+                                        let stage = status_label(&round.stage);
+                                        let round_label = format!("Round {}", round.round_number);
                                         rsx! {
-                                            for round in rnds.iter() {
-                                                {
-                                                    let round_matches: Vec<BracketMatch> = mtchs
-                                                        .iter()
-                                                        .filter(|m| m.round_id == round.id)
-                                                        .cloned()
-                                                        .collect();
-                                                    let pmap = participant_map.clone();
-                                                    rsx! {
-                                                        div { style: "margin-bottom:1.5rem;",
-                                                            h3 {
-                                                                style: "font-family:var(--font-head),sans-serif;font-size:0.9rem;font-weight:600;color:var(--text-3);text-transform:uppercase;margin-bottom:0.5rem;",
-                                                                "Round {round.round_number} - {round.stage}"
-                                                            }
-                                                            DataTable { headers: vec!["#", "Player A", "Score", "Player B", "Status", "Actions"],
-                                                                for bm in round_matches.iter() {
-                                                                    {
-                                                                        let a_name = bm.participant_a_id.as_ref()
-                                                                            .and_then(|id| pmap.get(id))
-                                                                            .cloned()
-                                                                            .unwrap_or_else(|| "TBD".into());
-                                                                        let b_name = bm.participant_b_id.as_ref()
-                                                                            .and_then(|id| pmap.get(id))
-                                                                            .cloned()
-                                                                            .unwrap_or_else(|| "TBD".into());
-                                                                        let score_display = match (bm.score_a, bm.score_b) {
-                                                                            (Some(a), Some(b)) => format!("{a} - {b}"),
-                                                                            _ => "-".to_string(),
-                                                                        };
-                                                                        let bm_report = bm.clone();
-                                                                        rsx! {
-                                                                            tr { key: "{bm.id}",
-                                                                                td { "{bm.bracket_position}" }
-                                                                                td {
-                                                                                    span {
-                                                                                        style: if bm.winner_id == bm.participant_a_id && bm.winner_id.is_some() { "color:var(--accent-text);font-weight:700;" } else { "" },
-                                                                                        "{a_name}"
-                                                                                    }
-                                                                                }
-                                                                                td { "{score_display}" }
-                                                                                td {
-                                                                                    span {
-                                                                                        style: if bm.winner_id == bm.participant_b_id && bm.winner_id.is_some() { "color:var(--accent-text);font-weight:700;" } else { "" },
-                                                                                        "{b_name}"
-                                                                                    }
-                                                                                }
-                                                                                td { StatusPill { status: bm.status.clone() } }
-                                                                                td {
-                                                                                    button {
-                                                                                        class: "row-btn primary",
-                                                                                        onclick: move |_| open_match_report(bm_report.clone()),
-                                                                                        "Report"
-                                                                                    }
-                                                                                }
+                                            div { key: "{round.id}", class: "tournament-round",
+                                                h3 { "{round_label}, {stage}" }
+                                                DataTable {
+                                                    headers: vec!["Match", "Status", "Player A", "Score", "Player B", "Actions"],
+                                                    num_cols: vec![3],
+                                                    cards: true,
+                                                    label: round_label.clone(),
+                                                    for bm in round_matches.iter() {
+                                                        {
+                                                            let a_name = bm.participant_a_id.as_ref()
+                                                                .and_then(|id| pmap.get(id))
+                                                                .cloned()
+                                                                .unwrap_or_else(|| "To be decided".into());
+                                                            let b_name = bm.participant_b_id.as_ref()
+                                                                .and_then(|id| pmap.get(id))
+                                                                .cloned()
+                                                                .unwrap_or_else(|| "To be decided".into());
+                                                            let score_display = match (bm.score_a, bm.score_b) {
+                                                                (Some(a), Some(b)) => format!("{a} - {b}"),
+                                                                _ => "No score".to_string(),
+                                                            };
+                                                            let a_won = bm.winner_id.is_some() && bm.winner_id == bm.participant_a_id;
+                                                            let b_won = bm.winner_id.is_some() && bm.winner_id == bm.participant_b_id;
+                                                            let bm_report = bm.clone();
+                                                            rsx! {
+                                                                tr { key: "{bm.id}",
+                                                                    td { class: "cell-who", "Match {bm.bracket_position}" }
+                                                                    td { class: "cell-badge", StatusPill { status: bm.status.clone() } }
+                                                                    td { "data-label": "Player A",
+                                                                        BracketSide { name: a_name.clone(), won: a_won }
+                                                                    }
+                                                                    td { class: "num", "data-label": "Score", "{score_display}" }
+                                                                    td { "data-label": "Player B",
+                                                                        BracketSide { name: b_name.clone(), won: b_won }
+                                                                    }
+                                                                    td { class: "cell-actions",
+                                                                        RowActions {
+                                                                            button {
+                                                                                r#type: "button",
+                                                                                class: "btn is-ghost",
+                                                                                id: report_button_id(&bm.id),
+                                                                                aria_label: "Report match {bm.bracket_position}: {a_name} against {b_name}",
+                                                                                onclick: move |_| open_match_report(bm_report.clone()),
+                                                                                "Report"
                                                                             }
                                                                         }
                                                                     }
@@ -699,182 +1034,166 @@ pub fn AdminTournaments() -> Element {
                                                 }
                                             }
                                         }
-                                    },
-                                    _ => rsx! {
-                                        p { class: "empty-state", "No bracket generated yet." }
-                                    },
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    rsx! {
-                        p { class: "empty-state", "Tournament not found." }
-                        button { class: "row-btn", onclick: back_to_list, "\u{2190} Back to List" }
-                    }
-                }
-            }
-        } else {
-            // ==================== LIST VIEW ====================
-
-            div { class: "admin-toolbar",
-                h1 { "Tournaments" }
-                div { style: "display:flex;gap:0.75rem;align-items:center;",
-                    select {
-                        class: "form-select",
-                        value: "{status_filter}",
-                        onchange: move |e| status_filter.set(e.value()),
-                        for s in STATUS_FILTERS.iter() {
-                            option { value: "{s}", "{s}" }
-                        }
-                    }
-                    button { class: "btn-add", onclick: open_create, "+ Add Tournament" }
-                }
-            }
-
-            {
-                let data = tournaments.data.read();
-                let data = data.as_ref().and_then(|d| d.as_ref());
-                let filter = status_filter();
-                match data {
-                    None => admin_pending(&tournaments, "tournaments"),
-                    Some(list) => {
-                        let filtered: Vec<&Tournament> = list
-                            .iter()
-                            .filter(|t| filter == "all" || t.status == filter)
-                            .collect();
-                        if filtered.is_empty() {
-                            rsx! { p { class: "empty-state", "No tournaments found." } }
-                        } else {
-                            rsx! {
-                                DataTable { headers: vec!["Name", "Format", "Game", "Status", "Max", "Starts", "Actions"],
-                                    for t in filtered.iter() {
-                                        {
-                                            let t_edit = (*t).clone();
-                                            let t_del = (*t).clone();
-                                            let t_view_id = t.id.clone();
-                                            let game_display = t.game_name.clone().unwrap_or_else(|| "-".into());
-                                            let max_display = t.max_participants.map(|n| n.to_string()).unwrap_or_else(|| "-".into());
-                                            let starts_display = t.starts_at.clone().unwrap_or_else(|| "-".into());
-                                            let tid_reg = t.id.clone();
-                                            let tid_active = t.id.clone();
-                                            let tid_complete = t.id.clone();
-                                            let t_status = t.status.clone();
-                                            rsx! {
-                                                tr { key: "{t.id}",
-                                                    td { "{t.name}" }
-                                                    td { "{t.format}" }
-                                                    td { "{game_display}" }
-                                                    td { StatusPill { status: t.status.clone() } }
-                                                    td { "{max_display}" }
-                                                    td { "{starts_display}" }
-                                                    td {
-                                                        div { class: "row-actions",
-                                                            button {
-                                                                class: "row-btn",
-                                                                onclick: move |_| open_edit(t_edit.clone()),
-                                                                "Edit"
-                                                            }
-                                                            button {
-                                                                class: "row-btn primary",
-                                                                onclick: move |_| view_detail(t_view_id.clone()),
-                                                                "View"
-                                                            }
-                                                            if t_status != "archived" {
-                                                                button {
-                                                                    class: "row-btn danger",
-                                                                    onclick: move |_| open_delete(t_del.clone()),
-                                                                    "Archive"
-                                                                }
-                                                            }
-                                                            if t_status == "draft" {
-                                                                button {
-                                                                    class: "row-btn",
-                                                                    onclick: move |_| change_status((tid_reg.clone(), "registration".to_string())),
-                                                                    "\u{2192} Registration"
-                                                                }
-                                                            }
-                                                            if t_status == "registration" {
-                                                                button {
-                                                                    class: "row-btn",
-                                                                    onclick: move |_| change_status((tid_active.clone(), "in_progress".to_string())),
-                                                                    "\u{2192} In Progress"
-                                                                }
-                                                            }
-                                                            if t_status == "in_progress" {
-                                                                button {
-                                                                    class: "row-btn",
-                                                                    onclick: move |_| change_status((tid_complete.clone(), "completed".to_string())),
-                                                                    "\u{2192} Completed"
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
                                     }
                                 }
-                            }
+                            },
+                            _ => rsx! {
+                                p { class: "field-hint", "No bracket yet. Generate it once the participants are in, before the tournament starts." }
+                            },
                         }
-                    },
+                    }
+                }
+
+                {list_cap_notice(&members, "members")}
+            }
+        }
+    } else if detail_loading() || detail_error().is_none() {
+        rsx! {
+            PageShell { width: PageWidth::Wide, class: "admin-tournaments-page",
+                PageHeader { title: "Tournament", actions: back_button }
+                div { class: "admin-pending",
+                    p { class: "admin-pending-text", role: "status", "Loading tournament..." }
+                    SkeletonBars { rows: 3 }
                 }
             }
         }
+    } else {
+        let message = load_error_text("this tournament", &detail_error().unwrap_or_default());
+        rsx! {
+            PageShell { width: PageWidth::Wide, class: "admin-tournaments-page",
+                PageHeader { title: "Tournament", actions: back_button }
+                div { class: "fetch-error-wrap", role: "alert",
+                    p { class: "fetch-error", "{message}" }
+                    button {
+                        r#type: "button",
+                        class: "fetch-error__retry",
+                        onclick: move |_| detail_refresh += 1,
+                        "Retry"
+                    }
+                }
+            }
+        }
+    };
 
-        {list_cap_notice(&tournaments, "tournaments")}
-        {list_cap_notice(&games, "games")}
-        {list_cap_notice(&members, "members")}
+    let delete_focus = delete_modal.get_target().map(|t| view_button_id(&t.id));
+    let remove_focus = remove_part_modal
+        .get_target()
+        .map(|p| remove_participant_id(&p.id));
+    let report_focus = match_modal.get_target().map(|m| report_button_id(&m.id));
+    let name_invalid = !name_error().is_empty();
+    let part_invalid = !add_part_member_error().is_empty();
+    let scores_invalid = !scores_error().is_empty();
+    let winner_invalid = !winner_error().is_empty();
+
+    rsx! {
+        crate::styles::StyleOnce { id: "scuffed-css-pages-admin-tournaments-page-css", css: PAGE_CSS }
+
+        if detail_id().is_some() {
+            {detail}
+        } else {
+            PageShell { width: PageWidth::Wide, class: "admin-tournaments-page",
+                PageHeader {
+                    title: "Tournaments",
+                    lead: "Filter by status. View a tournament to manage its participants and bracket.",
+                    actions: rsx! {
+                        button {
+                            r#type: "button",
+                            class: "btn is-primary",
+                            id: NEW_TOURNAMENT_ID,
+                            onclick: move |_| open_create(),
+                            "New tournament"
+                        }
+                    },
+                }
+
+                ChipRow { label: "Status filters", scroll: true,
+                    for s in STATUS_FILTERS {
+                        ChipButton {
+                            key: "{s}",
+                            class: "chip",
+                            id: format!("tournament-filter-{s}"),
+                            label: filter_label(s),
+                            pressed: status_filter() == s,
+                            onclick: move |_| {
+                                status_filter.set(s.to_string());
+                                page.set(1);
+                            },
+                        }
+                    }
+                }
+
+                section {
+                    id: LIST_ID,
+                    class: "admin-list pager-target",
+                    tabindex: "-1",
+                    aria_label: "Tournaments",
+                    {list}
+                }
+
+                {list_cap_notice(&tournaments, "tournaments")}
+                {list_cap_notice(&games, "games")}
+                {list_cap_notice(&members, "members")}
+            }
+        }
 
         // --- Shared modals (always rendered) ---
 
         // Create/Edit tournament modal
         FormModal {
-            title: if modal.get_target().is_some() { "Edit Tournament".to_string() } else { "Add Tournament".to_string() },
+            title: if modal.get_target().is_some() { "Edit tournament".to_string() } else { "New tournament".to_string() },
             open: modal.is_open(),
             submitting: modal.is_submitting(),
             on_close: on_close,
             on_submit: on_submit,
             wide: true,
+            submit_label: modal.get_target().is_none().then(|| "Create".to_string()),
+            error: save_error(),
+            restore_focus_id: Some(opener()),
 
             div { class: "form-grid",
                 div { class: "form-field span-full",
-                    label { class: "form-label", "Name" }
+                    label { class: "field-label", r#for: NAME_ID, "Name" }
                     input {
-                        class: "form-input",
+                        class: "field-input",
+                        id: NAME_ID,
                         r#type: "text",
                         value: "{form_name}",
+                        aria_invalid: if name_invalid { "true" },
+                        aria_describedby: NAME_ERROR_ID,
                         oninput: move |e| form_name.set(e.value()),
                     }
+                    FieldError { id: NAME_ERROR_ID.to_string(), text: name_error() }
                 }
                 div { class: "form-field",
-                    label { class: "form-label", "Format" }
+                    label { class: "field-label", r#for: FORMAT_ID, "Format" }
                     select {
-                        class: "form-select",
+                        class: "field-input",
+                        id: FORMAT_ID,
                         value: "{form_format}",
                         onchange: move |e| form_format.set(e.value()),
                         for f in FORMATS.iter() {
-                            option { value: "{f}", "{f}" }
+                            option { key: "{f}", value: "{f}", "{format_label(f)}" }
                         }
                     }
                 }
                 div { class: "form-field",
-                    label { class: "form-label", "Game" }
+                    label { class: "field-label", r#for: GAME_ID, "Game (optional)" }
                     select {
-                        class: "form-select",
+                        class: "field-input",
+                        id: GAME_ID,
                         value: form_game_id().unwrap_or_default(),
                         onchange: move |e| {
                             let v = e.value();
                             form_game_id.set(if v.is_empty() { None } else { Some(v) });
                         },
-                        option { value: "", "- None -" }
+                        option { value: "", "No game" }
                         {
                             let g = games.data.read();
                             let g = g.as_ref().and_then(|d| d.as_ref());
                             match g {
                                 Some(list) => rsx! {
                                     for game in list.iter() {
-                                        option { value: "{game.id}", "{game.name}" }
+                                        option { key: "{game.id}", value: "{game.id}", "{game.name}" }
                                     }
                                 },
                                 None => rsx! {},
@@ -883,157 +1202,329 @@ pub fn AdminTournaments() -> Element {
                     }
                 }
                 div { class: "form-field span-full",
-                    label { class: "form-label", "Max Participants" }
+                    label { class: "field-label", r#for: MAX_ID, "Max participants (optional)" }
                     input {
-                        class: "form-input",
+                        class: "field-input",
+                        id: MAX_ID,
                         r#type: "number",
-                        placeholder: "e.g. 16",
+                        inputmode: "numeric",
+                        placeholder: "16",
                         value: "{form_max}",
                         oninput: move |e| form_max.set(e.value()),
                     }
                 }
                 div { class: "form-field",
-                    label { class: "form-label", "Date" }
+                    label { class: "field-label", r#for: DATE_ID, "Start date (optional)" }
                     input {
-                        class: "form-input",
+                        class: "field-input",
+                        id: DATE_ID,
                         r#type: "date",
+                        value: "{form_date}",
                         onchange: move |e| form_date.set(e.value()),
                     }
                 }
                 div { class: "form-field",
-                    label { class: "form-label", "Time" }
+                    label { class: "field-label", r#for: TIME_ID, "Start time, UTC (optional)" }
                     input {
-                        class: "form-input",
+                        class: "field-input",
+                        id: TIME_ID,
                         r#type: "time",
+                        aria_describedby: TIME_HINT_ID,
+                        value: "{form_time}",
                         onchange: move |e| form_time.set(e.value()),
                     }
+                    p { class: "field-hint", id: TIME_HINT_ID, "Without a time, the tournament starts at 00:00 UTC." }
                 }
             }
         }
 
         // Archive confirm (no hard-delete API)
         ConfirmDialog {
-            title: "Archive Tournament".to_string(),
+            title: "Archive tournament".to_string(),
             message: format!(
                 "Archive tournament \"{}\"? It will no longer appear as active.",
                 delete_modal.get_target().map(|t| t.name).unwrap_or_default()
             ),
             open: delete_modal.is_open(),
             danger: true,
+            confirm_label: "Archive".to_string(),
+            restore_focus_id: delete_focus,
             on_confirm: on_delete_confirm,
             on_cancel: on_delete_cancel,
         }
 
         // Add participant modal
         FormModal {
-            title: "Add Participant".to_string(),
+            title: "Add participant".to_string(),
             open: add_part_modal.is_open(),
             submitting: add_part_modal.is_submitting(),
             on_close: on_add_part_close,
             on_submit: on_add_part_submit,
+            submit_label: Some("Add".to_string()),
+            error: add_part_error(),
+            restore_focus_id: Some(ADD_PARTICIPANT_ID.to_string()),
 
             div { class: "form-field",
-                label { class: "form-label", "Member" }
+                label { class: "field-label", r#for: PARTICIPANT_ID, "Member" }
                 select {
-                    class: "form-select",
+                    class: "field-input",
+                    id: PARTICIPANT_ID,
                     value: "{add_part_member_id}",
+                    aria_invalid: if part_invalid { "true" },
+                    aria_describedby: PARTICIPANT_ERROR_ID,
                     onchange: move |e| add_part_member_id.set(e.value()),
-                    option { value: "", "-- Select Member --" }
+                    option { value: "", "Pick a member" }
                     {
                         let m = members.data.read();
                         let m = m.as_ref().and_then(|d| d.as_ref());
                         match m {
                             Some(list) => rsx! {
                                 for mem in list.iter() {
-                                    option { value: "{mem.id}", "{mem.display_name}" }
+                                    option { key: "{mem.id}", value: "{mem.id}", "{mem.display_name}" }
                                 }
                             },
                             None => rsx! {},
                         }
                     }
                 }
+                FieldError { id: PARTICIPANT_ERROR_ID.to_string(), text: add_part_member_error() }
             }
         }
 
         // Remove participant confirm
         ConfirmDialog {
-            title: "Remove Participant".to_string(),
+            title: "Remove participant".to_string(),
             message: format!(
                 "Remove \"{}\" from this tournament?",
                 remove_part_modal.get_target().map(|p| p.name).unwrap_or_default()
             ),
             open: remove_part_modal.is_open(),
             danger: true,
+            confirm_label: "Remove".to_string(),
+            restore_focus_id: remove_focus,
             on_confirm: on_remove_part_confirm,
             on_cancel: on_remove_part_cancel,
         }
 
         // Match report modal
         FormModal {
-            title: "Report Match Result".to_string(),
+            title: "Report match result".to_string(),
             open: match_modal.is_open(),
             submitting: match_modal.is_submitting(),
             on_close: on_match_close,
             on_submit: on_match_submit,
+            submit_label: Some("Save result".to_string()),
+            error: match_error(),
+            restore_focus_id: report_focus,
 
-            div { class: "form-field",
-                label { class: "form-label", "Score A" }
-                input {
-                    class: "form-input",
-                    r#type: "number",
-                    value: "{match_score_a}",
-                    oninput: move |e| match_score_a.set(e.value()),
-                }
-            }
-            div { class: "form-field",
-                label { class: "form-label", "Score B" }
-                input {
-                    class: "form-input",
-                    r#type: "number",
-                    value: "{match_score_b}",
-                    oninput: move |e| match_score_b.set(e.value()),
-                }
-            }
-            div { class: "form-field",
-                label { class: "form-label", "Winner" }
-                select {
-                    class: "form-select",
-                    value: "{match_winner}",
-                    onchange: move |e| match_winner.set(e.value()),
-                    option { value: "", "-- Select Winner --" }
-                    {
-                        if let Some(m) = match_modal.get_target() {
-                            let bd = bracket_data();
-                            let pmap: HashMap<String, String> = bd
-                                .as_ref()
-                                .map(|b| b.participants.iter().map(|p| (p.id.clone(), p.name.clone())).collect())
-                                .unwrap_or_default();
-                            let a_id = m.participant_a_id.clone().unwrap_or_default();
-                            let b_id = m.participant_b_id.clone().unwrap_or_default();
-                            let a_name = pmap.get(&a_id).cloned().unwrap_or_else(|| "Player A".into());
-                            let b_name = pmap.get(&b_id).cloned().unwrap_or_else(|| "Player B".into());
-                            rsx! {
-                                if !a_id.is_empty() {
-                                    option { value: "{a_id}", "{a_name}" }
-                                }
-                                if !b_id.is_empty() {
-                                    option { value: "{b_id}", "{b_name}" }
-                                }
+            {
+                let (a_name, b_name, a_id, b_id) = match match_modal.get_target() {
+                    Some(m) => {
+                        let bd = bracket_data();
+                        let pmap: HashMap<String, String> = bd
+                            .as_ref()
+                            .map(|b| b.participants.iter().map(|p| (p.id.clone(), p.name.clone())).collect())
+                            .unwrap_or_default();
+                        let a_id = m.participant_a_id.clone().unwrap_or_default();
+                        let b_id = m.participant_b_id.clone().unwrap_or_default();
+                        let a_name = pmap.get(&a_id).cloned().unwrap_or_else(|| "Player A".into());
+                        let b_name = pmap.get(&b_id).cloned().unwrap_or_else(|| "Player B".into());
+                        (a_name, b_name, a_id, b_id)
+                    }
+                    None => ("Player A".to_string(), "Player B".to_string(), String::new(), String::new()),
+                };
+                rsx! {
+                    div { class: "form-grid",
+                        div { class: "form-field",
+                            label { class: "field-label", r#for: SCORE_A_ID, "Score for {a_name}" }
+                            input {
+                                class: "field-input",
+                                id: SCORE_A_ID,
+                                r#type: "number",
+                                inputmode: "numeric",
+                                aria_invalid: if scores_invalid { "true" },
+                                aria_describedby: SCORES_ERROR_ID,
+                                value: "{match_score_a}",
+                                oninput: move |e| match_score_a.set(e.value()),
                             }
-                        } else {
-                            rsx! {}
                         }
+                        div { class: "form-field",
+                            label { class: "field-label", r#for: SCORE_B_ID, "Score for {b_name}" }
+                            input {
+                                class: "field-input",
+                                id: SCORE_B_ID,
+                                r#type: "number",
+                                inputmode: "numeric",
+                                aria_invalid: if scores_invalid { "true" },
+                                aria_describedby: SCORES_ERROR_ID,
+                                value: "{match_score_b}",
+                                oninput: move |e| match_score_b.set(e.value()),
+                            }
+                        }
+                        div { class: "span-full",
+                            FieldError { id: SCORES_ERROR_ID.to_string(), text: scores_error() }
+                        }
+                    }
+                    div { class: "form-field",
+                        label { class: "field-label", r#for: WINNER_ID, "Winner" }
+                        select {
+                            class: "field-input",
+                            id: WINNER_ID,
+                            value: "{match_winner}",
+                            aria_invalid: if winner_invalid { "true" },
+                            aria_describedby: WINNER_ERROR_ID,
+                            onchange: move |e| match_winner.set(e.value()),
+                            option { value: "", "Pick the winner" }
+                            if !a_id.is_empty() {
+                                option { value: "{a_id}", "{a_name}" }
+                            }
+                            if !b_id.is_empty() {
+                                option { value: "{b_id}", "{b_name}" }
+                            }
+                        }
+                        FieldError { id: WINNER_ERROR_ID.to_string(), text: winner_error() }
                     }
                 }
             }
             div { class: "form-field",
-                label { class: "form-label", "Replay Codes (one per line)" }
+                label { class: "field-label", r#for: REPLAYS_ID, "Replay codes (optional, one per line)" }
                 textarea {
-                    class: "form-textarea",
+                    class: "field-input",
+                    id: REPLAYS_ID,
                     value: "{match_replays}",
                     oninput: move |e| match_replays.set(e.value()),
                 }
             }
         }
+    }
+}
+
+/// One side of a bracket match. The winner is bold and carries a "Won"
+/// pill, so the result is never colour or weight alone.
+#[component]
+fn BracketSide(name: String, won: bool) -> Element {
+    rsx! {
+        span { class: if won { "bracket-side is-winner" } else { "bracket-side" },
+            "{name}"
+            if won {
+                Pill { tone: PillTone::Ok, "Won" }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::components::admin_shared::test_page::render_admin_route;
+    use scuffed_types::OrgRole;
+
+    fn tournament(id: &str, status: &str) -> Tournament {
+        Tournament {
+            id: id.into(),
+            name: format!("Cup {id}"),
+            format: "single_elim".into(),
+            game_name: None,
+            game_id: None,
+            status: status.into(),
+            max_participants: None,
+            starts_at: None,
+        }
+    }
+
+    #[test]
+    fn list_has_one_h1_status_chips_and_a_labelled_wait() {
+        let html = render_admin_route("/admin/tournaments", Some(OrgRole::Officer));
+        assert!(
+            html.contains("class=\"ui-shell ui-shell--wide admin-tournaments-page\""),
+            "{html}"
+        );
+        assert_eq!(html.matches("<h1").count(), 1, "{html}");
+        assert!(html.contains("<h1>Tournaments</h1>"), "{html}");
+        assert_eq!(html.matches("<main").count(), 1, "{html}");
+        assert!(
+            html.contains(
+                "<div class=\"chip-row is-scroll\" role=\"group\" aria-label=\"Status filters\">"
+            ),
+            "{html}"
+        );
+        assert_eq!(html.matches("id=\"tournament-filter-").count(), 6, "{html}");
+        assert!(
+            html.contains("id=\"tournament-filter-all\" aria-pressed=\"true\""),
+            "{html}"
+        );
+        assert!(html.contains(">In progress</button>"), "{html}");
+        assert!(
+            html.contains("role=\"status\">Loading tournaments...</p>"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn filters_statuses_and_formats_read_as_words() {
+        let list = vec![
+            tournament("a", "draft"),
+            tournament("b", "in_progress"),
+            tournament("c", "archived"),
+        ];
+        assert_eq!(filter_tournaments(&list, "all").len(), 3);
+        assert_eq!(filter_tournaments(&list, "in_progress")[0].id, "b");
+        assert!(filter_tournaments(&list, "completed").is_empty());
+        assert_eq!(filter_label("all"), "All");
+        assert_eq!(filter_label("in_progress"), "In progress");
+        assert_eq!(format_label("double_elim"), "Double elimination");
+        assert_eq!(
+            next_status("draft"),
+            Some(("registration", "Open registration"))
+        );
+        assert_eq!(next_status("completed"), Some(("archived", "Archive")));
+        assert_eq!(next_status("archived"), None);
+        assert_eq!(
+            split_starts_at("2026-03-11T18:00:00Z"),
+            ("2026-03-11".to_string(), "18:00".to_string())
+        );
+        assert_eq!(split_starts_at(""), (String::new(), String::new()));
+    }
+
+    #[test]
+    fn the_winner_is_named_in_words() {
+        fn view() -> Element {
+            rsx! {
+                BracketSide { name: "Player01".to_string(), won: true }
+                BracketSide { name: "Player02".to_string(), won: false }
+            }
+        }
+        let html = crate::components::ui::test_support::render(view);
+        assert!(html.contains("bracket-side is-winner"), "{html}");
+        assert_eq!(html.matches(">Won</span>").count(), 1, "{html}");
+        crate::components::ui::test_support::assert_sizes_from_tokens(PAGE_CSS);
+    }
+
+    #[test]
+    fn every_field_has_a_tied_label_and_no_inline_style() {
+        let src = include_str!("tournaments.rs");
+        let prod = src.split("mod tests").next().unwrap();
+        for id in [
+            "NAME_ID",
+            "FORMAT_ID",
+            "GAME_ID",
+            "MAX_ID",
+            "DATE_ID",
+            "TIME_ID",
+            "PARTICIPANT_ID",
+            "SCORE_A_ID",
+            "SCORE_B_ID",
+            "WINNER_ID",
+            "REPLAYS_ID",
+        ] {
+            assert!(prod.contains(&format!("r#for: {id}")), "{id}");
+            assert!(prod.contains(&format!("id: {id},")), "{id}");
+        }
+        assert!(!prod.contains("style:"));
+        assert!(!prod.contains('\u{2014}'));
+        assert!(
+            !prod.contains('\u{2192}'),
+            "no arrow glyphs in button words"
+        );
     }
 }

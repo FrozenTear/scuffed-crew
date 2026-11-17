@@ -1,11 +1,20 @@
+//! Edit profile (`/profile/edit`), the `d1-profile-edit` frame.
+//!
+//! This file also holds the pieces the other account pages share (account
+//! keys, my reports, device link): the account card and form CSS, the save
+//! line and the page-level wait, sign-in wall and failure card.
+
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::components::{Toast, use_toast};
-use crate::pages::display_name::{
-    DisplayNameAudience, DisplayNameField, name_field_after_edit, settle_name_field,
+use crate::components::member_gate::Wall;
+use crate::components::ui::{
+    FieldError, PageHeader, PageShell, PageWidth, SkeletonBars, btn_class,
 };
+use crate::components::{SaveState, Toast, is_http_status, use_toast};
+use crate::pages::display_name::{DisplayNameAudience, name_field_after_edit, settle_name_field};
 use crate::routes::Route;
+use crate::state::auth::{AuthState, use_auth};
 use scuffed_api_client::ApiClient;
 use scuffed_types::MeResponse;
 use scuffed_types::api::{MemberSettingsResponse, StatsVisibility};
@@ -71,7 +80,32 @@ struct AccountEdit {
     role: String,
 }
 
-const ROLE_OPTIONS: [&str; 5] = ["", "tank", "dps", "support", "flex"];
+/// Stored value and the word shown for it. The empty value clears the role.
+const ROLE_OPTIONS: [(&str, &str); 5] = [
+    ("", "Not set"),
+    ("tank", "Tank"),
+    ("dps", "Damage"),
+    ("support", "Support"),
+    ("flex", "Flex"),
+];
+
+const NAME_ID: &str = "profile-display-name";
+const NAME_ERROR_ID: &str = "profile-display-name-error";
+const ROLE_ID: &str = "profile-main-role";
+const BIO_ID: &str = "profile-bio";
+const TWITCH_ID: &str = "profile-twitch";
+const TWITCH_HINT_ID: &str = "profile-twitch-hint";
+const TWITTER_ID: &str = "profile-twitter";
+const TWITTER_HINT_ID: &str = "profile-twitter-hint";
+const SAVE_ID: &str = "profile-save";
+const SAVE_STATUS_ID: &str = "profile-save-status";
+const VISIBILITY_ID: &str = "profile-stats-visibility";
+const VISIBILITY_HINT_ID: &str = "profile-stats-visibility-hint";
+const VISIBILITY_SAVE_ID: &str = "profile-stats-visibility-save";
+const VISIBILITY_STATUS_ID: &str = "profile-stats-visibility-status";
+
+const NAME_REQUIRED: &str = "Enter a display name.";
+const PROFILE_SAVED: &str = "Profile saved.";
 
 fn none_if_empty(s: String) -> Option<String> {
     let t = s.trim();
@@ -82,126 +116,347 @@ fn none_if_empty(s: String) -> Option<String> {
     }
 }
 
-const PAGE_CSS: &str = r#"
-    .profile-edit-page {
-        padding: 3rem 2rem;
-        max-width: 640px;
-        margin: 0 auto;
-    }
-    .profile-edit-page h1 {
-        font-family: var(--font-head);
-        font-size: 1.8rem;
-        color: var(--text);
-        letter-spacing: 2px;
-        margin: 0 0 0.75rem;
-    }
-    .profile-edit-reports {
-        margin: 0 0 1.5rem;
-    }
-    .profile-edit-reports a {
-        color: var(--accent-text);
-        font-size: 0.85rem;
-        font-weight: 600;
-        text-decoration: none;
-    }
-    .profile-edit-section {
-        margin-bottom: 2.5rem;
-    }
-    .profile-edit-section h2 {
-        font-family: var(--font-head);
-        font-size: 1.1rem;
-        color: var(--text);
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-        margin: 0 0 1rem;
-    }
-    .profile-edit-field {
-        margin-bottom: 1rem;
-    }
-    .profile-edit-field label {
-        display: block;
-        font-size: 0.75rem;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.05em;
-        color: var(--text-subtle);
-        margin-bottom: 0.35rem;
-    }
-    .profile-edit-field input,
-    .profile-edit-field textarea,
-    .profile-edit-field select {
-        width: 100%;
-        background: var(--surface-sunken);
-        border: 1px solid var(--border);
-        border-radius: 6px;
-        color: var(--text);
-        font-size: 0.9rem;
-        padding: 0.55rem 0.7rem;
-    }
-    .profile-edit-field textarea {
-        min-height: 90px;
-        resize: vertical;
-    }
-    .profile-edit-hint {
-        font-size: 0.72rem;
-        color: var(--text-subtle);
-        margin-top: 0.3rem;
-    }
-    .profile-edit-btn {
-        background: var(--accent-solid);
-        color: var(--on-accent);
-        border: none;
-        border-radius: 6px;
-        font-weight: 700;
-        font-size: 0.85rem;
-        padding: 0.6rem 1.4rem;
-        cursor: pointer;
-    }
-    .profile-edit-btn:disabled {
-        opacity: 0.6;
-        cursor: default;
-    }
-    .profile-edit-account {
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        padding: 1rem;
-        margin-bottom: 1rem;
-    }
-    .profile-edit-account-name {
-        font-family: var(--font-head);
-        font-weight: 700;
-        color: var(--text);
-        margin-bottom: 0.75rem;
-    }
-    .profile-edit-account-grid {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-        gap: 0.75rem;
-        margin-bottom: 0.75rem;
-    }
-    .profile-edit-status {
-        color: var(--text-subtle);
-        text-align: center;
-        padding: 3rem 0;
-    }
-    .profile-edit-back {
-        margin-top: 2rem;
-        padding-top: 1.5rem;
-        border-top: 1px solid var(--border);
-    }
-    .profile-edit-back a {
-        color: var(--accent-text);
-        text-decoration: none;
-        font-size: 0.85rem;
-        font-weight: 600;
-    }
-    .profile-edit-back a:hover {
-        text-decoration: underline;
-    }
+/// A piece of an element id built from data: letters and digits kept,
+/// everything else a dash.
+fn id_part(raw: &str) -> String {
+    raw.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+/// Id of one field of a game account row: game id plus field name.
+fn account_field_id(game_id: &str, field: &str) -> String {
+    format!("profile-account-{}-{field}", id_part(game_id))
+}
+
+/// The account card, field and save line shared by the account pages
+/// (`d1-profile-edit`, `d1-identity`): a card padded `--space-section`,
+/// labels `--space-2` above their controls, `--space-5` from one field to the
+/// next, checkbox rows `--space-3` apart, and the actions `--space-5` under
+/// the last field. On phone the actions stack at full width.
+pub(crate) const ACCOUNT_CSS: &str = r#"
+.account-section {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-stack);
+    min-width: 0;
+    margin: 0;
+}
+.account-card {
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    margin: 0;
+    padding: var(--space-section);
+    background: var(--card-bg);
+    color: var(--card-fg);
+    border: 1px solid var(--card-border);
+    border-radius: var(--card-radius);
+    box-shadow: var(--card-shadow);
+}
+.account-card > * { margin: 0; }
+.account-card > * + * { margin-top: var(--space-5); }
+.account-card > .account-check + .account-check { margin-top: var(--space-3); }
+.account-sub-title {
+    font-family: var(--font-head);
+    font-weight: var(--font-head-weight);
+    letter-spacing: var(--font-head-tracking);
+    line-height: var(--leading-display);
+    font-size: var(--text-lg);
+    color: var(--text);
+    overflow-wrap: anywhere;
+}
+.account-lead {
+    color: var(--text-3);
+    font-family: var(--font-body);
+    font-size: var(--text-md);
+    line-height: var(--leading-body);
+}
+.account-field {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+}
+.account-field > .field-input { margin: 0; }
+.account-fact {
+    margin: 0;
+    color: var(--text);
+    font-family: var(--font-body);
+    font-size: var(--text-md);
+    line-height: var(--leading-body);
+    overflow-wrap: anywhere;
+}
+.account-mono { font-family: var(--font-mono); overflow-wrap: anywhere; }
+.account-check {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    width: 100%;
+    min-height: var(--hit-target-min);
+    color: var(--text);
+    font-family: var(--font-body);
+    font-size: var(--text-md);
+    line-height: var(--leading-body);
+    cursor: pointer;
+}
+.account-check input[type="checkbox"] {
+    flex: 0 0 auto;
+    width: calc(var(--space-4) + var(--space-1) / 2);
+    height: calc(var(--space-4) + var(--space-1) / 2);
+    margin: 0;
+    accent-color: var(--accent-solid);
+    cursor: pointer;
+}
+.account-card :is(input, select, textarea, button, summary, a):focus-visible {
+    outline: var(--focus-ring-width) solid var(--focus-ring);
+    outline-offset: var(--focus-ring-offset);
+}
+.account-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-3);
+    min-width: 0;
+}
+.account-status {
+    margin: 0;
+    color: var(--text-3);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    line-height: var(--leading-body);
+}
+.account-status.is-error { color: var(--loss); }
+/* No text: out of the layout, still in the tree so the next change is
+   announced. */
+.account-status:empty {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+/* The inline confirm strip sits where the card's other actions do, with
+   44px buttons on the button tokens. */
+.account-card .inline-confirm__actions { justify-content: flex-start; flex-wrap: wrap; }
+.account-card .inline-confirm__hint { text-align: left; }
+.account-card .inline-confirm__cancel,
+.account-card .inline-confirm__go {
+    min-height: var(--hit-target-min);
+    padding: var(--space-2) var(--button-pad-x);
+    font-family: var(--button-font);
+    font-size: var(--button-font-size);
+    font-weight: var(--button-font-weight);
+    line-height: var(--leading-ui);
+    border-radius: var(--button-radius);
+}
+.account-wait {
+    margin: 0;
+    color: var(--text-3);
+    font-family: var(--font-body);
+    font-size: var(--text-md);
+    line-height: var(--leading-body);
+}
+@media (max-width: 820px) {
+    .account-actions { flex-direction: column; align-items: stretch; }
+    .account-actions .btn { width: 100%; }
+}
 "#;
+
+pub(crate) const ACCOUNT_CSS_ID: &str = "scuffed-css-pages-profile_settings-account-css";
+
+/// Profile edit only: the game account rows.
+const PAGE_CSS: &str = r#"
+.profile-edit-page .profile-account + .profile-account { margin-top: var(--space-5); }
+.profile-account-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: var(--space-4);
+    min-width: 0;
+}
+@media (max-width: 820px) {
+    .profile-account-grid { grid-template-columns: minmax(0, 1fr); gap: var(--space-5); }
+}
+"#;
+
+/// The save line of an account form: one `role="status"` paragraph that is
+/// always rendered, so a change of its text is announced. A failure keeps the
+/// server's reason (see [`SaveState::failed`]).
+#[component]
+pub(crate) fn AccountStatus(id: String, state: SaveState) -> Element {
+    let text = state.text();
+    rsx! {
+        p {
+            id,
+            class: if state.is_error() { "account-status is-error" } else { "account-status" },
+            role: "status",
+            "{text}"
+        }
+    }
+}
+
+/// What an account page shows before its own content.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum AccountView {
+    /// The page's data is on its way.
+    Loading,
+    /// Not signed in.
+    SignIn,
+    /// Signed in without an org membership.
+    Apply,
+    /// The load failed; the server's reason.
+    Failed(String),
+    /// The page's own content.
+    Ready,
+}
+
+/// The view the session alone decides: a guest gets the sign-in wall and a
+/// signed-in non-member the membership wall. `None` while the session is
+/// still checked, or for a member.
+pub(crate) fn account_view_from_auth(auth: &AuthState) -> Option<AccountView> {
+    if auth.loading {
+        None
+    } else if !auth.is_logged_in() {
+        Some(AccountView::SignIn)
+    } else if !auth.is_org_member() {
+        Some(AccountView::Apply)
+    } else {
+        None
+    }
+}
+
+/// The view for a failed load: a 401 is the sign-in wall, anything else the
+/// failure card with the server's reason.
+pub(crate) fn account_view_from_error(err: &str) -> AccountView {
+    if is_http_status(err, 401) {
+        AccountView::SignIn
+    } else {
+        AccountView::Failed(err.to_string())
+    }
+}
+
+/// Text of the page status line. Empty for the walls: the card says it.
+pub(crate) fn account_status_text(view: &AccountView, noun: &str) -> String {
+    match view {
+        AccountView::Loading => format!("Loading {noun}"),
+        AccountView::Failed(reason) => failure_sentence(noun, reason),
+        AccountView::SignIn | AccountView::Apply | AccountView::Ready => String::new(),
+    }
+}
+
+fn failure_sentence(noun: &str, reason: &str) -> String {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        format!("Couldn't load {noun}.")
+    } else {
+        format!("Couldn't load {noun}. {reason}")
+    }
+}
+
+/// Everything an account page shows until its content is ready: an always
+/// rendered `role="status"` line (visible while loading, spoken only next to
+/// a card), then skeleton bars, the sign-in wall, the membership wall or the
+/// failure card with Retry. `noun` names the data ("your profile"), `task`
+/// what the page is for ("edit your profile"), `return_path` where Log in
+/// comes back to.
+#[component]
+pub(crate) fn AccountPending(
+    view: AccountView,
+    noun: String,
+    task: String,
+    return_path: String,
+    #[props(default)] on_retry: EventHandler<()>,
+) -> Element {
+    let status = account_status_text(&view, &noun);
+    let status_class = if view == AccountView::Loading {
+        "account-wait"
+    } else {
+        "visually-hidden"
+    };
+    let login_href = crate::pages::stat_reports::login_return_href(&return_path);
+    let remember = return_path.clone();
+    let card = match view {
+        AccountView::Loading => rsx! { SkeletonBars { rows: 4 } },
+        AccountView::SignIn => rsx! {
+            Wall {
+                title: "Log in required",
+                lead: "Log in to {task}.",
+                actions: rsx! {
+                    a {
+                        href: "{login_href}",
+                        class: btn_class(true),
+                        onclick: move |_| crate::pages::remember_login_return(&remember),
+                        "Log in"
+                    }
+                    Link { to: Route::Home {}, class: btn_class(false), "Return home" }
+                },
+            }
+        },
+        AccountView::Apply => rsx! {
+            Wall {
+                title: "Membership required",
+                lead: "You need to be an org member to {task}.",
+                actions: rsx! {
+                    Link { to: Route::Apply {}, class: btn_class(true), "Apply" }
+                    Link { to: Route::Home {}, class: btn_class(false), "Return home" }
+                },
+            }
+        },
+        AccountView::Failed(reason) => rsx! {
+            Wall {
+                title: "Couldn't load {noun}",
+                lead: failure_sentence(&noun, &reason),
+                actions: rsx! {
+                    button {
+                        r#type: "button",
+                        class: btn_class(true),
+                        onclick: move |_| on_retry.call(()),
+                        "Retry"
+                    }
+                    Link { to: Route::Home {}, class: btn_class(false), "Return home" }
+                },
+            }
+        },
+        AccountView::Ready => rsx! {},
+    };
+    rsx! {
+        p { id: "account-page-status", class: status_class, role: "status", "{status}" }
+        {card}
+    }
+}
+
+/// What the profile load came back with.
+#[derive(Clone, Debug, PartialEq)]
+enum ProfileLoad {
+    Loading,
+    NotMember,
+    Failed(String),
+    Ready,
+}
+
+fn profile_view(auth: &AuthState, load: &ProfileLoad) -> AccountView {
+    if let Some(view) = account_view_from_auth(auth) {
+        return view;
+    }
+    match load {
+        ProfileLoad::Loading => AccountView::Loading,
+        ProfileLoad::NotMember => AccountView::Apply,
+        ProfileLoad::Failed(err) => account_view_from_error(err),
+        ProfileLoad::Ready => AccountView::Ready,
+    }
+}
 
 #[component]
 pub fn ProfileSettings() -> Element {
+    let auth = use_auth();
     let mut toast = use_toast();
 
     let mut member_id = use_signal(String::new);
@@ -211,35 +466,45 @@ pub fn ProfileSettings() -> Element {
     let mut twitch = use_signal(String::new);
     let mut twitter = use_signal(String::new);
     let mut accounts = use_signal(Vec::<AccountEdit>::new);
-    let mut loaded = use_signal(|| false);
-    let mut load_error = use_signal(|| None::<String>);
+    let mut load = use_signal(|| ProfileLoad::Loading);
+    let mut load_refresh = use_signal(|| 0u64);
     let mut name_error = use_signal(|| None::<String>);
-    let mut saving = use_signal(|| false);
+    let mut save_state = use_signal(SaveState::default);
+    let mut account_saving = use_signal(|| false);
+    // Which account row the save line speaks for, and what it says.
+    let mut account_state = use_signal(|| None::<(String, SaveState)>);
+    let mut sr_invalid = use_signal(|| None::<String>);
     // None until GET /api/stats/settings answers.
     let mut stats_visibility = use_signal(|| None::<StatsVisibility>);
-    let mut stats_load_failed = use_signal(|| false);
-    let mut stats_saving = use_signal(|| false);
+    let mut stats_failed = use_signal(|| None::<String>);
+    let mut stats_refresh = use_signal(|| 0u64);
+    let mut visibility_state = use_signal(SaveState::default);
 
-    use_future(move || async move {
+    use_resource(move || async move {
+        let _generation = stats_refresh();
         match ApiClient::web()
             .fetch::<MemberSettingsResponse>("/api/stats/settings")
             .await
         {
-            Ok(s) => stats_visibility.set(Some(s.stats_visibility)),
-            Err(_) => stats_load_failed.set(true),
+            Ok(s) => {
+                stats_failed.set(None);
+                stats_visibility.set(Some(s.stats_visibility));
+            }
+            Err(e) => stats_failed.set(Some(e.to_string())),
         }
     });
 
-    use_future(move || async move {
+    use_resource(move || async move {
+        let _generation = load_refresh();
         let me = match ApiClient::web().fetch::<MeResponse>("/api/auth/me").await {
             Ok(me) => me,
-            Err(_) => {
-                load_error.set(Some("You must be logged in to edit your profile.".into()));
+            Err(e) => {
+                load.set(ProfileLoad::Failed(e.to_string()));
                 return;
             }
         };
         let Some(m) = me.member else {
-            load_error.set(Some("Only org members have an editable profile.".into()));
+            load.set(ProfileLoad::NotMember);
             return;
         };
         member_id.set(m.id.clone());
@@ -266,20 +531,29 @@ pub fn ProfileSettings() -> Element {
                         })
                         .collect(),
                 );
-                loaded.set(true);
+                load.set(ProfileLoad::Ready);
             }
-            Err(e) => load_error.set(Some(format!("Couldn't load your profile: {e}"))),
+            Err(e) => load.set(ProfileLoad::Failed(e.to_string())),
         }
     });
 
-    let on_save_profile = move |_| {
+    let on_save_profile = move |evt: FormEvent| {
+        evt.prevent_default();
+        if save_state() == SaveState::Saving {
+            return;
+        }
         let typed_at_submit = display_name();
         name_error.set(None);
         if typed_at_submit.trim().is_empty() {
+            name_error.set(Some(NAME_REQUIRED.to_string()));
+            save_state.set(SaveState::Failed(
+                "Profile not saved. Enter a display name.".to_string(),
+            ));
             toast.show(Toast::error("Display name is required."));
+            crate::components::ui::inline_confirm::focus_element_by_id(NAME_ID);
             return;
         }
-        saving.set(true);
+        save_state.set(SaveState::Saving);
         spawn(async move {
             let body = UpdateProfileBody {
                 display_name: typed_at_submit.trim().to_string(),
@@ -293,7 +567,10 @@ pub fn ProfileSettings() -> Element {
                 .put_json::<_, serde_json::Value>(&path, &body)
                 .await
             {
-                Ok(_) => toast.show(Toast::success("Profile saved.")),
+                Ok(_) => {
+                    save_state.set(SaveState::Saved(PROFILE_SAVED.to_string()));
+                    toast.show(Toast::success(PROFILE_SAVED));
+                }
                 Err(e) => {
                     let settled = settle_name_field(
                         &typed_at_submit,
@@ -303,20 +580,24 @@ pub fn ProfileSettings() -> Element {
                     );
                     display_name.set(settled.value);
                     name_error.set(settled.error.map(str::to_string));
+                    save_state.set(SaveState::failed("Could not save your profile", &e));
                     if settled.keep_existing_failure {
                         toast.show(Toast::error(format!("Save failed: {e}")));
                     }
                 }
             }
-            saving.set(false);
         });
     };
 
-    let on_save_visibility = move |_| {
+    let on_save_visibility = move |evt: FormEvent| {
+        evt.prevent_default();
+        if visibility_state() == SaveState::Saving {
+            return;
+        }
         let Some(choice) = stats_visibility() else {
             return;
         };
-        stats_saving.set(true);
+        visibility_state.set(SaveState::Saving);
         spawn(async move {
             // A PUT without player_name clears it, so read the stored name
             // right before saving. The in-game name is edited on My Stats.
@@ -335,29 +616,44 @@ pub fn ProfileSettings() -> Element {
             match result {
                 Ok(saved) => {
                     stats_visibility.set(Some(saved.stats_visibility));
+                    visibility_state.set(SaveState::Saved("Stats visibility saved.".to_string()));
                     toast.show(Toast::success("Stats visibility saved."));
                 }
-                Err(e) => toast.show(Toast::error(stats_privacy::save_error(&e))),
+                Err(e) => {
+                    let text = stats_privacy::save_error(&e);
+                    visibility_state.set(SaveState::Failed(text.clone()));
+                    toast.show(Toast::error(text));
+                }
             }
-            stats_saving.set(false);
         });
     };
 
     let mut on_save_account = move |idx: usize| {
+        if account_saving() {
+            return;
+        }
         let Some(acc) = accounts.with(|a| a.get(idx).cloned()) else {
             return;
         };
+        let game_id = acc.game_id.clone();
         let sr = match acc.sr.trim() {
             "" => None,
             raw => match raw.parse::<u32>() {
                 Ok(v) => Some(v),
                 Err(_) => {
+                    sr_invalid.set(Some(game_id.clone()));
+                    account_state.set(Some((
+                        game_id.clone(),
+                        SaveState::Failed("SR must be a number.".to_string()),
+                    )));
                     toast.show(Toast::error("SR must be a number."));
                     return;
                 }
             },
         };
-        saving.set(true);
+        sr_invalid.set(None);
+        account_saving.set(true);
+        account_state.set(Some((game_id.clone(), SaveState::Saving)));
         spawn(async move {
             let body = UpsertAccountBody {
                 game_id: acc.game_id,
@@ -372,190 +668,464 @@ pub fn ProfileSettings() -> Element {
                 .put_json::<_, serde_json::Value>(&path, &body)
                 .await
             {
-                Ok(_) => toast.show(Toast::success("Game account saved.")),
-                Err(e) => toast.show(Toast::error(format!("Save failed: {e}"))),
+                Ok(_) => {
+                    account_state.set(Some((
+                        game_id,
+                        SaveState::Saved("Game account saved.".to_string()),
+                    )));
+                    toast.show(Toast::success("Game account saved."));
+                }
+                Err(e) => {
+                    account_state.set(Some((
+                        game_id,
+                        SaveState::failed("Could not save the game account", &e),
+                    )));
+                    toast.show(Toast::error(format!("Save failed: {e}")));
+                }
             }
-            saving.set(false);
+            account_saving.set(false);
         });
     };
 
+    let view = profile_view(&auth(), &load());
+    let saving = save_state() == SaveState::Saving;
+    let name_err = name_error().unwrap_or_default();
+    let name_has_error = !name_err.is_empty();
+    let visibility_busy = visibility_state() == SaveState::Saving;
+
+    let header_actions = (view == AccountView::Ready).then(|| {
+        rsx! {
+            Link {
+                to: Route::MemberProfile { id: member_id() },
+                class: btn_class(false),
+                "View your public profile"
+            }
+        }
+    });
+
     rsx! {
+        crate::styles::StyleOnce { id: ACCOUNT_CSS_ID, css: ACCOUNT_CSS }
         crate::styles::StyleOnce { id: "scuffed-css-pages-profile_settings-page-css", css: PAGE_CSS }
 
-        main { class: "profile-edit-page",
-            h1 { "Edit Profile" }
-            p { class: "profile-edit-reports",
-                Link { to: Route::MyReports {}, "My reports" }
+        PageShell { width: PageWidth::Narrow, class: "profile-edit-page",
+            PageHeader {
+                title: "Edit profile",
+                lead: "This is what members and guests see on your public profile.",
+                actions: header_actions,
             }
 
-            if let Some(err) = load_error() {
-                p { class: "profile-edit-status", "{err}" }
-            } else if !loaded() {
-                p { class: "profile-edit-status", "Loading..." }
+            if view != AccountView::Ready {
+                AccountPending {
+                    view: view.clone(),
+                    noun: "your profile",
+                    task: "edit your profile",
+                    return_path: "/profile/edit",
+                    on_retry: move |_| {
+                        load.set(ProfileLoad::Loading);
+                        load_refresh += 1;
+                    },
+                }
             } else {
-                div { class: "profile-edit-section",
-                    h2 { "Profile" }
-                    DisplayNameField {
-                        id: "profile-display-name".to_string(),
-                        label: "Display name".to_string(),
-                        value: display_name(),
-                        error: name_error(),
-                        maxlength: 64,
-                        field_class: "profile-edit-field".to_string(),
-                        oninput: move |e: FormEvent| {
-                            let (next, cleared) = name_field_after_edit(e.value());
-                            display_name.set(next);
-                            name_error.set(cleared.map(str::to_string));
-                        },
-                    }
-                    div { class: "profile-edit-field",
-                        label { "Bio" }
-                        textarea {
-                            value: bio(),
-                            maxlength: 500,
-                            oninput: move |e| bio.set(e.value()),
+                section { class: "account-section", aria_labelledby: "profile-heading",
+                    h2 { id: "profile-heading", class: "ui-section-title", "Profile" }
+                    form { class: "account-card", onsubmit: on_save_profile,
+                        div { class: "account-field",
+                            label { class: "field-label", r#for: NAME_ID, "Display name" }
+                            input {
+                                id: NAME_ID,
+                                class: "field-input",
+                                r#type: "text",
+                                autocomplete: "nickname",
+                                maxlength: 64,
+                                value: display_name(),
+                                aria_invalid: if name_has_error { "true" },
+                                aria_describedby: if name_has_error { NAME_ERROR_ID },
+                                oninput: move |e: FormEvent| {
+                                    let (next, cleared) = name_field_after_edit(e.value());
+                                    display_name.set(next);
+                                    name_error.set(cleared.map(str::to_string));
+                                },
+                            }
+                            FieldError { id: NAME_ERROR_ID, text: name_err.clone(), role: "status".to_string() }
                         }
-                    }
-                    div { class: "profile-edit-field",
-                        label { "Main role" }
-                        select {
-                            value: main_role(),
-                            onchange: move |e| main_role.set(e.value()),
-                            for r in ROLE_OPTIONS.iter() {
-                                option { value: "{r}", selected: main_role() == *r,
-                                    if r.is_empty() { "-" } else { "{r}" }
+                        div { class: "account-field",
+                            label { class: "field-label", r#for: ROLE_ID, "Shown role" }
+                            select {
+                                id: ROLE_ID,
+                                class: "field-input",
+                                value: main_role(),
+                                onchange: move |e| main_role.set(e.value()),
+                                for (value, word) in ROLE_OPTIONS {
+                                    option { key: "{word}", value: value, selected: main_role() == value, "{word}" }
                                 }
                             }
                         }
-                    }
-                    div { class: "profile-edit-field",
-                        label { "Twitch" }
-                        input {
-                            r#type: "text",
-                            value: twitch(),
-                            maxlength: 32,
-                            placeholder: "handle, not URL",
-                            oninput: move |e| twitch.set(e.value()),
+                        div { class: "account-field",
+                            label { class: "field-label", r#for: BIO_ID, "About" }
+                            textarea {
+                                id: BIO_ID,
+                                class: "field-input",
+                                maxlength: 500,
+                                value: bio(),
+                                oninput: move |e| bio.set(e.value()),
+                            }
                         }
-                        p { class: "profile-edit-hint", "Just the handle. No https://, no @." }
-                    }
-                    div { class: "profile-edit-field",
-                        label { "Twitter / X" }
-                        input {
-                            r#type: "text",
-                            value: twitter(),
-                            maxlength: 32,
-                            placeholder: "handle, not URL",
-                            oninput: move |e| twitter.set(e.value()),
+                        div { class: "account-field",
+                            label { class: "field-label", r#for: TWITCH_ID, "Twitch" }
+                            input {
+                                id: TWITCH_ID,
+                                class: "field-input",
+                                r#type: "text",
+                                maxlength: 32,
+                                placeholder: "handle",
+                                aria_describedby: TWITCH_HINT_ID,
+                                value: twitch(),
+                                oninput: move |e| twitch.set(e.value()),
+                            }
+                            p { id: TWITCH_HINT_ID, class: "field-hint", "Just the handle. No https://, no @." }
                         }
-                    }
-                    button {
-                        class: "profile-edit-btn",
-                        disabled: saving(),
-                        onclick: on_save_profile,
-                        "Save profile"
+                        div { class: "account-field",
+                            label { class: "field-label", r#for: TWITTER_ID, "Twitter / X" }
+                            input {
+                                id: TWITTER_ID,
+                                class: "field-input",
+                                r#type: "text",
+                                maxlength: 32,
+                                placeholder: "handle",
+                                aria_describedby: TWITTER_HINT_ID,
+                                value: twitter(),
+                                oninput: move |e| twitter.set(e.value()),
+                            }
+                            p { id: TWITTER_HINT_ID, class: "field-hint", "Just the handle. No https://, no @." }
+                        }
+                        div { class: "account-actions",
+                            button {
+                                id: SAVE_ID,
+                                r#type: "submit",
+                                class: btn_class(true),
+                                aria_disabled: if saving { "true" },
+                                aria_describedby: SAVE_STATUS_ID,
+                                "Save profile"
+                            }
+                            AccountStatus { id: SAVE_STATUS_ID, state: save_state() }
+                        }
                     }
                 }
 
-                div { class: "profile-edit-section",
-                    h2 { "Stats privacy" }
+                section { class: "account-section", aria_labelledby: "profile-stats-heading",
+                    h2 { id: "profile-stats-heading", class: "ui-section-title", "Stats privacy" }
                     if let Some(choice) = stats_visibility() {
-                        div { class: "profile-edit-field",
-                            label { r#for: "stats-visibility", "Who can see my stats" }
-                            select {
-                                id: "stats-visibility",
-                                value: choice.as_str(),
-                                onchange: move |e| {
-                                    if let Some(next) = stats_privacy::parse(&e.value()) {
-                                        stats_visibility.set(Some(next));
-                                    }
-                                },
-                                for v in stats_privacy::OPTIONS {
-                                    option { value: v.as_str(), selected: choice == v,
-                                        "{stats_privacy::label(v)}"
+                        form { class: "account-card", onsubmit: on_save_visibility,
+                            div { class: "account-field",
+                                label { class: "field-label", r#for: VISIBILITY_ID, "Who can see my stats" }
+                                select {
+                                    id: VISIBILITY_ID,
+                                    class: "field-input",
+                                    aria_describedby: VISIBILITY_HINT_ID,
+                                    value: choice.as_str(),
+                                    onchange: move |e| {
+                                        if let Some(next) = stats_privacy::parse(&e.value()) {
+                                            stats_visibility.set(Some(next));
+                                        }
+                                    },
+                                    for v in stats_privacy::OPTIONS {
+                                        option { key: "{v.as_str()}", value: v.as_str(), selected: choice == v,
+                                            "{stats_privacy::label(v)}"
+                                        }
                                     }
                                 }
+                                p { id: VISIBILITY_HINT_ID, class: "field-hint", "{stats_privacy::hint(choice)}" }
                             }
-                            p { class: "profile-edit-hint", "{stats_privacy::hint(choice)}" }
+                            div { class: "account-actions",
+                                button {
+                                    id: VISIBILITY_SAVE_ID,
+                                    r#type: "submit",
+                                    class: btn_class(true),
+                                    aria_disabled: if visibility_busy { "true" },
+                                    aria_describedby: VISIBILITY_STATUS_ID,
+                                    "Save visibility"
+                                }
+                                AccountStatus { id: VISIBILITY_STATUS_ID, state: visibility_state() }
+                            }
                         }
-                        button {
-                            class: "profile-edit-btn",
-                            disabled: stats_saving(),
-                            onclick: on_save_visibility,
-                            "Save visibility"
+                    } else if let Some(reason) = stats_failed() {
+                        div { class: "account-card",
+                            p { class: "account-status is-error", role: "status",
+                                "Couldn't load your stats visibility. {reason}"
+                            }
+                            div { class: "account-actions",
+                                button {
+                                    r#type: "button",
+                                    class: btn_class(false),
+                                    onclick: move |_| {
+                                        stats_failed.set(None);
+                                        stats_refresh += 1;
+                                    },
+                                    "Retry"
+                                }
+                            }
                         }
-                    } else if stats_load_failed() {
-                        p { class: "profile-edit-hint", "Couldn't load your stats visibility." }
                     } else {
-                        p { class: "profile-edit-hint", "Loading..." }
+                        div { class: "account-card",
+                            p { class: "account-wait", role: "status", "Loading your stats visibility" }
+                        }
                     }
                 }
 
                 super::hero_icon_settings::TrainingCropSettings { member_id: member_id() }
 
                 if !accounts.read().is_empty() {
-                    div { class: "profile-edit-section",
-                        h2 { "Game Accounts" }
+                    section { class: "account-section", aria_labelledby: "profile-accounts-heading",
+                        h2 { id: "profile-accounts-heading", class: "ui-section-title", "Game accounts" }
                         for (idx, acc) in accounts.read().iter().enumerate() {
-                            div { class: "profile-edit-account", key: "{acc.game_id}-{idx}",
-                                div { class: "profile-edit-account-name", "{acc.account_name}" }
-                                div { class: "profile-edit-account-grid",
-                                    div { class: "profile-edit-field",
-                                        label { "Rank" }
-                                        input {
-                                            r#type: "text",
-                                            value: "{acc.rank}",
-                                            maxlength: 64,
-                                            placeholder: "e.g. Diamond 2",
-                                            oninput: move |e| accounts.with_mut(|a| {
-                                                if let Some(row) = a.get_mut(idx) { row.rank = e.value(); }
-                                            }),
-                                        }
-                                    }
-                                    div { class: "profile-edit-field",
-                                        label { "SR" }
-                                        input {
-                                            r#type: "number",
-                                            value: "{acc.sr}",
-                                            min: 0,
-                                            oninput: move |e| accounts.with_mut(|a| {
-                                                if let Some(row) = a.get_mut(idx) { row.sr = e.value(); }
-                                            }),
-                                        }
-                                    }
-                                    div { class: "profile-edit-field",
-                                        label { "Role" }
-                                        select {
-                                            value: "{acc.role}",
-                                            onchange: move |e| accounts.with_mut(|a| {
-                                                if let Some(row) = a.get_mut(idx) { row.role = e.value(); }
-                                            }),
-                                            for r in ROLE_OPTIONS.iter() {
-                                                option { value: "{r}", selected: acc.role == *r,
-                                                    if r.is_empty() { "-" } else { "{r}" }
+                            {
+                                let rank_id = account_field_id(&acc.game_id, "rank");
+                                let sr_id = account_field_id(&acc.game_id, "sr");
+                                let role_id = account_field_id(&acc.game_id, "role");
+                                let save_id = account_field_id(&acc.game_id, "save");
+                                let status_id = account_field_id(&acc.game_id, "status");
+                                let title_id = account_field_id(&acc.game_id, "title");
+                                let row_state = account_state()
+                                    .filter(|(game, _)| *game == acc.game_id)
+                                    .map(|(_, state)| state)
+                                    .unwrap_or_default();
+                                let row_busy = row_state == SaveState::Saving;
+                                let sr_bad = sr_invalid().as_deref() == Some(acc.game_id.as_str());
+                                let row_role = acc.role.clone();
+                                rsx! {
+                                    form {
+                                        key: "{acc.game_id}",
+                                        class: "account-card profile-account",
+                                        aria_labelledby: "{title_id}",
+                                        onsubmit: move |evt: FormEvent| {
+                                            evt.prevent_default();
+                                            on_save_account(idx);
+                                        },
+                                        h3 { id: "{title_id}", class: "account-sub-title", "{acc.account_name}" }
+                                        div { class: "profile-account-grid",
+                                            div { class: "account-field",
+                                                label { class: "field-label", r#for: "{rank_id}", "Rank" }
+                                                input {
+                                                    id: "{rank_id}",
+                                                    class: "field-input",
+                                                    r#type: "text",
+                                                    value: "{acc.rank}",
+                                                    maxlength: 64,
+                                                    placeholder: "Diamond 2",
+                                                    oninput: move |e| accounts.with_mut(|a| {
+                                                        if let Some(row) = a.get_mut(idx) { row.rank = e.value(); }
+                                                    }),
+                                                }
+                                            }
+                                            div { class: "account-field",
+                                                label { class: "field-label", r#for: "{sr_id}", "SR" }
+                                                input {
+                                                    id: "{sr_id}",
+                                                    class: "field-input",
+                                                    r#type: "number",
+                                                    value: "{acc.sr}",
+                                                    min: 0,
+                                                    aria_invalid: if sr_bad { "true" },
+                                                    aria_describedby: if sr_bad { "{status_id}" },
+                                                    oninput: move |e| accounts.with_mut(|a| {
+                                                        if let Some(row) = a.get_mut(idx) { row.sr = e.value(); }
+                                                    }),
+                                                }
+                                            }
+                                            div { class: "account-field",
+                                                label { class: "field-label", r#for: "{role_id}", "Role" }
+                                                select {
+                                                    id: "{role_id}",
+                                                    class: "field-input",
+                                                    value: "{acc.role}",
+                                                    onchange: move |e| accounts.with_mut(|a| {
+                                                        if let Some(row) = a.get_mut(idx) { row.role = e.value(); }
+                                                    }),
+                                                    for (value, word) in ROLE_OPTIONS {
+                                                        option { key: "{word}", value: value, selected: row_role == value, "{word}" }
+                                                    }
                                                 }
                                             }
                                         }
+                                        div { class: "account-actions",
+                                            button {
+                                                id: "{save_id}",
+                                                r#type: "submit",
+                                                class: btn_class(true),
+                                                aria_disabled: if row_busy { "true" },
+                                                aria_describedby: "{status_id}",
+                                                aria_label: "Save account {acc.account_name}",
+                                                "Save account"
+                                            }
+                                            AccountStatus { id: status_id.clone(), state: row_state.clone() }
+                                        }
                                     }
-                                }
-                                button {
-                                    class: "profile-edit-btn",
-                                    disabled: saving(),
-                                    onclick: move |_| on_save_account(idx),
-                                    "Save account"
                                 }
                             }
                         }
                     }
                 }
+            }
+        }
+    }
+}
 
-                div { class: "profile-edit-back",
-                    Link {
-                        to: Route::MemberProfile { id: member_id() },
-                        "View your public profile"
-                    }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::components::admin_shared::test_page::render_admin_route as render_route;
+    use crate::components::member_gate::test_route::wall;
+    use crate::components::ui::test_support::assert_sizes_from_tokens;
+    use scuffed_types::OrgRole;
+
+    fn auth(role: Option<OrgRole>, loading: bool) -> AuthState {
+        AuthState {
+            user: role.map(|role| scuffed_types::UserInfo {
+                id: "u1".into(),
+                username: "Player01".into(),
+                avatar_url: None,
+                role: Some(role),
+            }),
+            loading,
+        }
+    }
+
+    #[test]
+    fn a_guest_gets_the_sign_in_wall_not_a_bare_sentence() {
+        let html = render_route("/profile/edit", None);
+        assert_eq!(html.matches("<h1").count(), 1, "{html}");
+        assert_eq!(html.matches("<main").count(), 1, "{html}");
+        assert!(html.contains(">Edit profile</h1>"), "{html}");
+        let card = wall(&html);
+        assert!(card.contains("Log in required"), "{card}");
+        assert!(card.contains("Log in to edit your profile."), "{card}");
+        assert!(
+            card.contains("href=\"/login?return=/profile/edit\""),
+            "{card}"
+        );
+        assert!(!html.contains("You must be logged in"), "{html}");
+        assert!(html.contains("ui-shell ui-shell--narrow profile-edit-page"));
+    }
+
+    #[test]
+    fn a_member_sees_a_labelled_wait_inside_the_page() {
+        let html = render_route("/profile/edit", Some(OrgRole::Member));
+        assert_eq!(html.matches("<h1").count(), 1, "{html}");
+        assert_eq!(html.matches("<main").count(), 1, "{html}");
+        assert!(
+            html.contains(
+                "<p id=\"account-page-status\" class=\"account-wait\" role=\"status\">Loading your profile</p>"
+            ),
+            "{html}"
+        );
+        assert!(html.contains("ui-skel-list"), "{html}");
+        assert!(!html.contains("<section class=\"wall\""), "{html}");
+    }
+
+    #[test]
+    fn the_view_follows_the_session_then_the_load() {
+        let member = auth(Some(OrgRole::Member), false);
+        assert_eq!(
+            profile_view(&auth(None, false), &ProfileLoad::Ready),
+            AccountView::SignIn
+        );
+        assert_eq!(
+            profile_view(&auth(Some(OrgRole::Recruit), false), &ProfileLoad::Loading),
+            AccountView::Loading,
+            "a recruit has a role, so the load decides"
+        );
+        assert_eq!(
+            profile_view(&member, &ProfileLoad::NotMember),
+            AccountView::Apply
+        );
+        assert_eq!(
+            profile_view(&member, &ProfileLoad::Failed("HTTP error 401: no".into())),
+            AccountView::SignIn
+        );
+        assert_eq!(
+            profile_view(&member, &ProfileLoad::Failed("HTTP error 500: boom".into())),
+            AccountView::Failed("HTTP error 500: boom".into())
+        );
+        assert_eq!(
+            profile_view(&auth(None, true), &ProfileLoad::Loading),
+            AccountView::Loading
+        );
+    }
+
+    #[test]
+    fn a_failure_keeps_the_server_reason_and_offers_retry() {
+        fn view() -> Element {
+            rsx! {
+                AccountPending {
+                    view: AccountView::Failed("HTTP error 500: database offline".into()),
+                    noun: "your profile",
+                    task: "edit your profile",
+                    return_path: "/profile/edit",
                 }
             }
         }
+        let html = crate::components::ui::test_support::render_routed(view);
+        assert!(
+            html.contains("Couldn&#39;t load your profile. HTTP error 500: database offline")
+                || html.contains("Couldn't load your profile. HTTP error 500: database offline"),
+            "{html}"
+        );
+        assert!(html.contains(">Retry</button>"), "{html}");
+        assert_eq!(html.matches("role=\"status\"").count(), 1, "{html}");
+    }
+
+    #[test]
+    fn the_save_line_is_always_rendered() {
+        fn idle() -> Element {
+            rsx! { AccountStatus { id: "x-status", state: SaveState::Idle } }
+        }
+        fn failed() -> Element {
+            rsx! { AccountStatus { id: "x-status", state: SaveState::failed("Could not save your profile", "HTTP error 409: taken") } }
+        }
+        let html = crate::components::ui::test_support::render(idle);
+        assert_eq!(
+            html,
+            "<p id=\"x-status\" class=\"account-status\" role=\"status\"></p>"
+        );
+        let html = crate::components::ui::test_support::render(failed);
+        assert!(html.contains("account-status is-error"), "{html}");
+        assert!(html.contains("HTTP error 409: taken"), "{html}");
+    }
+
+    #[test]
+    fn ids_come_from_data() {
+        assert_eq!(
+            account_field_id("game:overwatch", "sr"),
+            "profile-account-game-overwatch-sr"
+        );
+        assert_ne!(account_field_id("a", "rank"), account_field_id("b", "rank"));
+    }
+
+    #[test]
+    fn page_css_uses_tokens() {
+        assert_sizes_from_tokens(ACCOUNT_CSS);
+        for decl in [
+            "padding: var(--space-section)",
+            ".account-card > * + * { margin-top: var(--space-5); }",
+            ".account-card > .account-check + .account-check { margin-top: var(--space-3); }",
+            "gap: var(--space-2)",
+            "min-height: var(--hit-target-min)",
+        ] {
+            assert!(ACCOUNT_CSS.contains(decl), "{decl}");
+        }
+        // PAGE_CSS has no type of its own; check it for units only.
+        for word in PAGE_CSS.split(|c: char| c.is_whitespace() || c == ';' || c == ')') {
+            assert!(!word.ends_with("rem"), "{word}");
+            assert!(!word.ends_with("px") || word == "820px", "{word}");
+        }
+    }
+
+    #[test]
+    fn no_em_dash_and_no_stray_reports_link() {
+        let src = include_str!("profile_settings.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(!prod.contains('\u{2014}') && !prod.contains('\u{2013}'));
+        assert!(!prod.contains("Route::MyReports"));
+        assert!(!prod.contains("main {"));
     }
 }

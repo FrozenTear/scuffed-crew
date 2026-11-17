@@ -9,7 +9,10 @@ use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
 use serde::Deserialize;
 
-use crate::components::{DataTable, is_http_status};
+use crate::components::ui::{
+    EmptyCard, PageHeader, PageShell, PageWidth, Pill, PillTone, SkeletonBars, show_list_top,
+};
+use crate::components::{DataTable, SummaryCard, is_http_status};
 use crate::hooks::use_api_with;
 use crate::routes::Route;
 use crate::util::encode_query;
@@ -38,7 +41,7 @@ struct Totals {
     draws: u32,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 struct MemberMatch {
     id: String,
     hero: String,
@@ -128,10 +131,18 @@ fn status_text(
         if is_hidden_by_member(err) {
             return HIDDEN_COPY.to_string();
         }
-        if page_number > 1 {
-            return format!("Couldn't load page {page_number} of matches.");
-        }
-        return "Couldn't load matches.".to_string();
+        // Keep the server's reason after the plain sentence.
+        let reason = err.trim();
+        let lead = if page_number > 1 {
+            format!("Couldn't load page {page_number} of matches.")
+        } else {
+            "Couldn't load matches.".to_string()
+        };
+        return if reason.is_empty() {
+            lead
+        } else {
+            format!("{lead} {reason}")
+        };
     }
     let rows = if loading { None } else { rows };
     match (rows, page_number > 1) {
@@ -197,7 +208,7 @@ fn value_cell(text: String, unsure: bool, stat_name: &str) -> Element {
             span { class: "mm-unsure", title: "{note}",
                 "{text}"
                 span { class: "mm-unsure-mark", aria_hidden: "true", "?" }
-                span { class: "mm-sr-only", "{note}" }
+                span { class: "visually-hidden", "{note}" }
             }
         }
     } else {
@@ -214,36 +225,48 @@ fn cell_or_dash(text: &str) -> String {
 }
 
 const MEMBER_MATCHES_CSS: &str = r#"
-    .mm-back { display: inline-block; margin-bottom: 1rem; color: var(--accent-text); }
-    .mm-status { color: var(--text-3); margin: 0 0 1rem; min-height: 1.5em; }
-    .mm-totals { margin: 0 0 1.5rem; }
-    .mm-totals h2 {
-        font-family: var(--font-head);
-        font-size: 1rem;
-        text-transform: uppercase;
-        letter-spacing: 0.06em;
-        color: var(--text-subtle);
-        margin: 0 0 0.5rem;
-    }
-    .mm-totals dl { display: flex; flex-wrap: wrap; gap: 0.75rem 2rem; margin: 0; }
-    .mm-totals dt { font-size: 0.75rem; color: var(--text-subtle); text-transform: uppercase; }
-    .mm-totals dd { margin: 0; font-family: var(--font-head); font-size: 1.4rem; color: var(--text); }
     /* The visually hidden note is absolutely positioned. Without a positioned
        parent it escapes the table's scroll box and widens the whole page. */
     .mm-unsure { position: relative; }
-    .mm-unsure-mark { margin-left: 0.15rem; color: var(--warn); }
-    .mm-sr-only {
-        position: absolute;
-        width: 1px;
-        height: 1px;
-        margin: -1px;
-        padding: 0;
-        overflow: hidden;
-        clip: rect(0, 0, 0, 0);
-        white-space: nowrap;
-        border: 0;
+    .mm-unsure-mark {
+        margin-inline-start: var(--space-1);
+        color: var(--warn);
+        font-size: var(--text-sm);
+        font-weight: var(--font-label-weight);
+    }
+    .mm-totals {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-stack);
+        min-width: 0;
     }
 "#;
+
+/// The list region: the pager's focus target after a page change.
+const LIST_ID: &str = "admin-member-matches-list";
+
+/// Tone of a result pill. The pill always carries the word.
+fn outcome_tone(outcome: &str) -> PillTone {
+    match outcome.trim().to_ascii_lowercase().as_str() {
+        "victory" | "win" => PillTone::Ok,
+        "defeat" | "loss" => PillTone::Danger,
+        _ => PillTone::Neutral,
+    }
+}
+
+/// `1 Nov 2026, 18:30 UTC`: the date the admin lists write, plus the time.
+fn played_label(at: &DateTime<Utc>) -> String {
+    at.format("%-d %b %Y, %H:%M UTC").to_string()
+}
+
+/// Class of a pager step: the shared pager's look, `is-disabled` at an end.
+fn step_class(off: bool) -> &'static str {
+    if off {
+        "pager-step is-disabled"
+    } else {
+        "pager-step"
+    }
+}
 
 /// The route component. The body is keyed on the id, so a change of `:id` in
 /// the URL mounts a fresh body: paging, loaded rows and totals reset instead of
@@ -307,128 +330,187 @@ fn MemberMatchesBody(id: String) -> Element {
         .and_then(|d| d.as_ref())
         .and_then(|p| p.next_cursor.clone());
 
+    let totals_error = totals.error.read().clone();
+    let mut totals_refresh = totals.refresh;
+    let mut matches_refresh = matches.refresh;
+    let empty_first_page = rows == Some(0) && page_number == 1 && error.is_none();
+
     rsx! {
         crate::styles::StyleOnce { id: "scuffed-css-pages-admin-member_matches-css", css: MEMBER_MATCHES_CSS }
+        PageShell { width: PageWidth::Wide, class: "admin-member-matches-page",
+            PageHeader {
+                title: heading,
+                lead: (!not_found).then(|| "Single matches from the stat tracker, newest first. A question mark marks a value that might be misread.".to_string()),
+                actions: rsx! {
+                    Link { class: "btn is-ghost", to: Route::AdminMembers {}, "Back to members" }
+                },
+            }
 
-        Link { class: "mm-back", to: Route::AdminMembers {}, "Back to members" }
-        div { class: "admin-toolbar",
-            h1 { "{heading}" }
-        }
+            if !not_found {
+                section { class: "mm-totals", aria_labelledby: "{totals_heading_id}",
+                    h2 { id: "{totals_heading_id}", class: "ui-section-title", "Totals" }
+                    {
+                        let data = totals.data.read();
+                        match data.as_ref().and_then(|d| d.as_ref()) {
+                            Some(t) => rsx! {
+                                div { class: "summary-cards",
+                                    SummaryCard { value: t.total_matches.to_string(), label: "Matches" }
+                                    SummaryCard { value: t.wins.to_string(), label: "Wins" }
+                                    SummaryCard { value: t.losses.to_string(), label: "Losses" }
+                                    SummaryCard { value: t.draws.to_string(), label: "Draws" }
+                                }
+                            },
+                            None => match totals_error.clone() {
+                                Some(err) => rsx! {
+                                    div { class: "fetch-error-wrap", role: "alert",
+                                        p { class: "fetch-error", "Couldn't load totals. {err}" }
+                                        button {
+                                            r#type: "button",
+                                            class: "fetch-error__retry",
+                                            onclick: move |_| totals_refresh += 1,
+                                            "Retry"
+                                        }
+                                    }
+                                },
+                                None => rsx! {
+                                    p { class: "admin-pending-text", role: "status", "Loading totals..." }
+                                    SkeletonBars { rows: 1 }
+                                },
+                            },
+                        }
+                    }
+                }
+            }
 
-        p { class: "mm-status", id: "{status_id}", role: "status", "{status}" }
-        if retry {
-            {
-                let mut refresh = matches.refresh;
-                rsx! {
+            section {
+                id: LIST_ID,
+                class: "admin-list pager-target",
+                tabindex: "-1",
+                aria_label: "Matches",
+                // Always rendered: every state of the list is said here.
+                p { class: "admin-pending-text", id: "{status_id}", role: "status", "{status}" }
+                if loading {
+                    SkeletonBars { rows: 3 }
+                }
+                if retry {
                     button {
-                        class: "row-btn",
+                        class: "fetch-error__retry",
                         r#type: "button",
-                        onclick: move |_| refresh += 1,
+                        onclick: move |_| matches_refresh += 1,
                         "Retry loading matches"
                     }
                 }
-            }
-        }
-
-        if !not_found {
-        section { class: "mm-totals", aria_labelledby: "{totals_heading_id}",
-            h2 { id: "{totals_heading_id}", "Totals" }
-            {
-                let data = totals.data.read();
-                match data.as_ref().and_then(|d| d.as_ref()) {
-                    Some(t) => rsx! {
-                        dl {
-                            div {
-                                dt { "Matches" }
-                                dd { id: "member-matches-total-{key}", "{t.total_matches}" }
-                            }
-                            div {
-                                dt { "Wins" }
-                                dd { id: "member-matches-wins-{key}", "{t.wins}" }
-                            }
-                            div {
-                                dt { "Losses" }
-                                dd { id: "member-matches-losses-{key}", "{t.losses}" }
-                            }
-                            div {
-                                dt { "Draws" }
-                                dd { id: "member-matches-draws-{key}", "{t.draws}" }
-                            }
-                        }
-                    },
-                    None if totals.error.read().is_some() => rsx! {
-                        p { class: "empty-state", "Couldn't load totals." }
-                    },
-                    None => rsx! { p { class: "admin-loading", "Loading totals." } },
+                if not_found {
+                    EmptyCard {
+                        title: "Nothing to show",
+                        message: "Check the link, or pick a member from the member list.",
+                        actions: rsx! {
+                            Link { class: "btn is-primary", to: Route::AdminMembers {}, "Open members" }
+                        },
+                    }
+                } else if empty_first_page {
+                    EmptyCard {
+                        title: "No matches yet",
+                        message: "Matches show up here once this member's stat tracker uploads a game.",
+                        actions: rsx! {
+                            Link { class: "btn is-ghost", to: Route::AdminMembers {}, "Back to members" }
+                        },
+                    }
                 }
-            }
-        }
-        }
+                {
+                    let data = matches.data.read();
+                    match data.as_ref().and_then(|d| d.as_ref()) {
+                        Some(page) if !page.data.is_empty() => rsx! {
+                            MatchesTable { rows: page.data.clone() }
+                        },
+                        _ => rsx! {},
+                    }
+                }
 
-        {
-            let data = matches.data.read();
-            match data.as_ref().and_then(|d| d.as_ref()) {
-                Some(page) if !page.data.is_empty() => rsx! {
-                    DataTable {
-                        headers: vec!["Played", "Result", "Hero", "Map", "Role", "Elims", "Deaths", "Assists", "Damage", "Healing"],
-                        for m in page.data.iter() {
-                            {
-                                let fields = m.suspect_fields.as_deref().unwrap_or(&[]);
-                                let played = m.played_at.format("%Y-%m-%d %H:%M UTC").to_string();
-                                let row_id = format!("member-match-{}", dom_key(&m.id));
-                                rsx! {
-                                    tr { key: "{m.id}", id: "{row_id}",
-                                        td { "{played}" }
-                                        td { {value_cell(outcome_label(&m.outcome), cell_is_unsure(fields, "result"), "Result")} }
-                                        td { {value_cell(cell_or_dash(&m.hero), cell_is_unsure(fields, "hero"), "Hero")} }
-                                        td { {value_cell(cell_or_dash(&m.map_name), cell_is_unsure(fields, "map"), "Map")} }
-                                        td { "{cell_or_dash(&m.role)}" }
-                                        td { {value_cell(m.elims.to_string(), cell_is_unsure(fields, "e"), "Eliminations")} }
-                                        td { {value_cell(m.deaths.to_string(), cell_is_unsure(fields, "d"), "Deaths")} }
-                                        td { {value_cell(m.assists.to_string(), cell_is_unsure(fields, "a"), "Assists")} }
-                                        td { {value_cell(m.damage.to_string(), cell_is_unsure(fields, "dmg"), "Damage")} }
-                                        td { {value_cell(m.healing.to_string(), cell_is_unsure(fields, "h"), "Healing")} }
+                // The pager stays on a later page even when that page failed to
+                // load, so Previous is always reachable. Next needs the cursor of
+                // a loaded page. The API has no total, so it steps by cursor.
+                if pager {
+                    div { id: "member-matches-pager", class: "pager",
+                        p { class: "pager-meta", "Page {page_number}" }
+                        nav { class: "pager-pages", aria_label: "Pages of matches",
+                            button {
+                                r#type: "button",
+                                id: "member-matches-pager-prev",
+                                class: step_class(!can_prev),
+                                aria_label: "Previous page of matches",
+                                aria_disabled: if !can_prev { "true" },
+                                onclick: move |_| {
+                                    let mut hist = cursor_history.write();
+                                    if hist.len() > 1 {
+                                        hist.pop();
+                                        let prev = hist.last().cloned().flatten();
+                                        drop(hist);
+                                        page_cursor.set(prev);
+                                        show_list_top(LIST_ID);
                                     }
-                                }
+                                },
+                                "Previous"
+                            }
+                            button {
+                                r#type: "button",
+                                id: "member-matches-pager-next",
+                                class: step_class(next.is_none()),
+                                aria_label: "Next page of matches",
+                                aria_disabled: if next.is_none() { "true" },
+                                onclick: move |_| {
+                                    if let Some(c) = next.clone() {
+                                        cursor_history.write().push(Some(c.clone()));
+                                        page_cursor.set(Some(c));
+                                        show_list_top(LIST_ID);
+                                    }
+                                },
+                                "Next"
                             }
                         }
                     }
-                },
-                _ => rsx! {},
+                }
             }
         }
+    }
+}
 
-        // The pager stays on a later page even when that page failed to load,
-        // so Previous is always reachable. Next needs the cursor of a loaded page.
-        if pager {
-            div { class: "pagination",
-                button {
-                    r#type: "button",
-                    aria_label: "Previous page of matches",
-                    disabled: !can_prev,
-                    onclick: move |_| {
-                        let mut hist = cursor_history.write();
-                        if hist.len() > 1 {
-                            hist.pop();
-                            let prev = hist.last().cloned().flatten();
-                            drop(hist);
-                            page_cursor.set(prev);
+/// One page of matches. On phone every row is a card: hero and the result
+/// on top, map, role and time on one line, then one line per stat.
+#[component]
+fn MatchesTable(rows: Vec<MemberMatch>) -> Element {
+    rsx! {
+        DataTable {
+            headers: vec!["Hero", "Result", "Map", "Role", "Played", "Elims", "Deaths", "Assists", "Damage", "Healing"],
+            num_cols: vec![4, 5, 6, 7, 8, 9],
+            cards: true,
+            label: "Matches",
+            for m in rows.iter() {
+                {
+                    let fields = m.suspect_fields.as_deref().unwrap_or(&[]);
+                    let played = played_label(&m.played_at);
+                    let played_iso = m.played_at.to_rfc3339();
+                    let row_id = format!("member-match-{}", dom_key(&m.id));
+                    rsx! {
+                        tr { key: "{m.id}", id: "{row_id}",
+                            td { class: "cell-who", {value_cell(cell_or_dash(&m.hero), cell_is_unsure(fields, "hero"), "Hero")} }
+                            td { class: "cell-badge",
+                                Pill { tone: outcome_tone(&m.outcome),
+                                    {value_cell(outcome_label(&m.outcome), cell_is_unsure(fields, "result"), "Result")}
+                                }
+                            }
+                            td { class: "cell-meta", {value_cell(cell_or_dash(&m.map_name), cell_is_unsure(fields, "map"), "Map")} }
+                            td { class: "cell-meta", "{cell_or_dash(&m.role)}" }
+                            td { class: "cell-meta num",
+                                time { class: "date", datetime: "{played_iso}", "{played}" }
+                            }
+                            td { class: "num", "data-label": "Elims", {value_cell(m.elims.to_string(), cell_is_unsure(fields, "e"), "Eliminations")} }
+                            td { class: "num", "data-label": "Deaths", {value_cell(m.deaths.to_string(), cell_is_unsure(fields, "d"), "Deaths")} }
+                            td { class: "num", "data-label": "Assists", {value_cell(m.assists.to_string(), cell_is_unsure(fields, "a"), "Assists")} }
+                            td { class: "num", "data-label": "Damage", {value_cell(m.damage.to_string(), cell_is_unsure(fields, "dmg"), "Damage")} }
+                            td { class: "num", "data-label": "Healing", {value_cell(m.healing.to_string(), cell_is_unsure(fields, "h"), "Healing")} }
                         }
-                    },
-                    "Previous"
-                }
-                span { class: "page-info", "Page {page_number}" }
-                button {
-                    r#type: "button",
-                    aria_label: "Next page of matches",
-                    disabled: next.is_none(),
-                    onclick: move |_| {
-                        if let Some(c) = next.clone() {
-                            cursor_history.write().push(Some(c.clone()));
-                            page_cursor.set(Some(c));
-                        }
-                    },
-                    "Next"
+                    }
                 }
             }
         }
@@ -539,7 +621,7 @@ mod tests {
                 None,
                 1
             ),
-            "Couldn't load matches."
+            "Couldn't load matches. HTTP error 500: Internal error"
         );
         assert_eq!(
             status_text(false, false, None, Some(0), 1),
@@ -566,7 +648,7 @@ mod tests {
         assert_eq!(status_text(true, false, None, None, 2), "Loading page 2.");
         assert_eq!(
             status_text(false, false, Some("HTTP error 500: x"), None, 2),
-            "Couldn't load page 2 of matches."
+            "Couldn't load page 2 of matches. HTTP error 500: x"
         );
         assert_eq!(
             status_text(false, false, None, Some(1), 2),
@@ -631,7 +713,7 @@ mod tests {
         let html = dioxus_ssr::render(&dom);
         assert!(html.contains("title=\"Damage might be misread\""), "{html}");
         assert!(
-            html.contains("<span class=\"mm-sr-only\">Damage might be misread</span>"),
+            html.contains("<span class=\"visually-hidden\">Damage might be misread</span>"),
             "{html}"
         );
         assert!(!html.contains("(unsure)"), "{html}");
@@ -648,7 +730,69 @@ mod tests {
             .find(|l| l.trim_start().starts_with(".mm-unsure {"))
             .expect("mm-unsure rule");
         assert!(rule.contains("position: relative"), "{rule}");
-        assert!(MEMBER_MATCHES_CSS.contains("position: absolute"));
+        // The note uses the shared visually-hidden class, which is absolute.
+        let common = crate::styles::common::CSS;
+        let hidden = &common[common.find(".visually-hidden {").expect("shared rule")..];
+        assert!(hidden[..hidden.find('}').unwrap()].contains("position: absolute"));
+        crate::components::ui::test_support::assert_sizes_from_tokens(MEMBER_MATCHES_CSS);
+    }
+
+    #[test]
+    fn page_has_one_h1_a_back_link_and_an_always_rendered_status_line() {
+        use crate::components::admin_shared::test_page::render_admin_route;
+        let html = render_admin_route(
+            "/admin/members/m1/matches",
+            Some(scuffed_types::OrgRole::Officer),
+        );
+        assert!(
+            html.contains("class=\"ui-shell ui-shell--wide admin-member-matches-page\""),
+            "{html}"
+        );
+        assert_eq!(html.matches("<h1").count(), 1, "{html}");
+        assert!(html.contains("<h1>Member matches</h1>"), "{html}");
+        assert_eq!(html.matches("<main").count(), 1, "{html}");
+        assert!(html.contains(">Back to members</a>"), "{html}");
+        assert!(
+            html.contains(
+                "<p class=\"admin-pending-text\" id=\"member-matches-status-member\" role=\"status\">Loading matches.</p>"
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains("role=\"status\">Loading totals...</p>"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn rows_are_cards_with_a_result_pill_and_labelled_stats() {
+        fn view() -> Element {
+            let row: MemberMatch = serde_json::from_str(
+                r#"{"id":"m1","hero":"Ana","map_name":"Ilios","role":"Support","outcome":"defeat","elims":10,"deaths":2,"assists":5,"damage":4000,"healing":9000,"played_at":"2026-11-01T18:30:00Z","suspect_fields":["dmg"]}"#,
+            )
+            .unwrap();
+            rsx! { MatchesTable { rows: vec![row] } }
+        }
+        let mut dom = VirtualDom::new(view);
+        dom.rebuild_in_place();
+        let html = dioxus_ssr::render(&dom);
+        assert!(html.contains("data-table-scroll is-cards"), "{html}");
+        assert!(
+            html.contains("<th scope=\"col\" class=\"num\">Damage</th>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("class=\"ui-pill ui-pill--danger\">Defeat</span>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<time class=\"date\" datetime=\"2026-11-01T18:30:00+00:00\">1 Nov 2026, 18:30 UTC</time>"),
+            "{html}"
+        );
+        assert!(html.contains("data-label=\"Healing\""), "{html}");
+        assert!(html.contains("Damage might be misread"), "{html}");
+        assert_eq!(outcome_tone("victory"), PillTone::Ok);
+        assert_eq!(outcome_tone("Draw"), PillTone::Neutral);
     }
 
     #[test]

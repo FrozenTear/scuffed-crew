@@ -1,161 +1,105 @@
 use dioxus::prelude::*;
 
-use super::types::{ConversationSummary, relative_time, truncate_pubkey};
+use super::failure::DmFailureNotice;
+use super::types::{
+    ConversationSummary, DmLoadFailure, DmMember, avatar_initials, peer_label, relative_time,
+};
+use crate::components::ui::{EmptyCard, SkeletonBars};
 use crate::routes::Route;
 
+/// Id of the header's New button. The compose dialog gives focus back to it.
+pub const NEW_MESSAGE_BUTTON_ID: &str = "dm-new-message";
+/// The inbox's always-rendered status line.
+pub const INBOX_STATUS_ID: &str = "dm-inbox-status";
+
+/// The inbox column of the `d1-dm` frame: a head with the title and New, then
+/// one row per conversation (avatar, name, preview, time and unread count).
 const CONVERSATION_LIST_CSS: &str = r#"
-.dm-conv-list {
+.dm-inbox-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-inline-start: auto;
+}
+.dm-inbox-list {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+.dm-inbox-list > li { margin: 0; }
+.dm-inbox-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+}
+.dm-inbox-body .empty-card {
+    margin: var(--space-4);
+    padding: var(--space-card-pad);
+}
+.dm-inbox-body .empty-card h2 { font-size: var(--text-xl); }
+.dm-inbox-body .ui-skel-list { padding: var(--space-4); }
+.dm-convo {
+    box-sizing: border-box;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: var(--space-3);
+    align-items: center;
+    min-height: max(var(--hit-target-min), var(--density-row));
+    padding: var(--space-3) var(--space-4);
+    border-bottom: 1px solid var(--border);
+    color: var(--text);
+    text-decoration: none;
+}
+.dm-convo:hover { background: var(--surface-raised); }
+.dm-convo.is-current,
+.dm-convo[aria-current="page"] { background: var(--accent-soft); }
+.dm-convo:focus-visible {
+    outline: var(--focus-ring-width) solid var(--focus-ring);
+    outline-offset: calc(var(--focus-ring-width) * -1);
+}
+.dm-convo-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.dm-convo-who {
+    font-family: var(--font-head);
+    font-size: var(--text-md);
+    font-weight: var(--font-label-weight);
+}
+.dm-convo-preview {
+    color: var(--text-3);
+    font-size: var(--text-sm);
+}
+.dm-convo-meta {
     display: flex;
     flex-direction: column;
-    height: 100%;
-    overflow-y: auto;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-}
-.dm-conv-list-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 1rem 1rem 0.75rem;
-    border-bottom: 1px solid var(--border);
-    position: sticky;
-    top: 0;
-    background: var(--surface);
-    z-index: 1;
-}
-.dm-conv-list-title {
-    font-family: var(--font-head);
-    font-weight: 700;
-    font-size: 1rem;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--text);
-    margin: 0;
-}
-.dm-conv-list-actions {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    flex-shrink: 0;
-}
-.dm-conv-list-new {
-    background: var(--accent-solid);
-    color: var(--on-accent);
-    border: none;
-    border-radius: 6px;
-    font-size: 0.75rem;
-    font-weight: 600;
-    padding: 0.3rem 0.65rem;
-    cursor: pointer;
-}
-.dm-conv-list-new:hover { filter: brightness(1.15); }
-.dm-conv-list-new:focus-visible {
-    outline: 2px solid var(--focus-ring);
-    outline-offset: 2px;
-}
-.dm-conv-list-refresh {
-    background: transparent;
+    align-items: flex-end;
+    gap: var(--space-1);
     color: var(--text-3);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    font-size: 0.75rem;
-    padding: 0.3rem 0.6rem;
-    cursor: pointer;
+    font-size: var(--text-sm);
+    white-space: nowrap;
 }
-.dm-conv-list-refresh:hover { color: var(--text); border-color: var(--accent-soft); }
-.dm-conv-list-refresh:disabled { opacity: 0.5; cursor: not-allowed; }
-.dm-conv-row {
-    display: flex;
-    gap: 0.75rem;
-    align-items: center;
-    padding: 0.75rem 1rem;
-    border-bottom: 1px solid var(--border);
-    text-decoration: none;
-    color: inherit;
-    transition: background-color 0.15s;
-}
-.dm-conv-row:hover { background: color-mix(in srgb, var(--accent) 4%, transparent); }
-.dm-conv-row.active { background: color-mix(in srgb, var(--accent) 10%, transparent); }
-.dm-conv-avatar {
-    width: 36px;
-    height: 36px;
-    border-radius: 50%;
-    background: var(--accent-soft);
-    color: var(--accent-text);
-    display: flex;
+.dm-unread {
+    box-sizing: border-box;
+    display: inline-flex;
     align-items: center;
     justify-content: center;
-    font-weight: 700;
-    font-size: 0.85rem;
-    flex-shrink: 0;
-}
-.dm-conv-body {
-    flex: 1;
-    min-width: 0;
-}
-.dm-conv-row-top {
-    display: flex;
-    justify-content: space-between;
-    align-items: baseline;
-    gap: 0.5rem;
-}
-.dm-conv-name {
-    font-family: var(--font-head);
-    font-weight: 700;
-    font-size: 0.95rem;
-    color: var(--text);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-.dm-conv-time {
-    font-size: 0.7rem;
-    color: var(--text-subtle);
-    white-space: nowrap;
-}
-.dm-conv-row-bottom {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 0.5rem;
-    margin-top: 0.15rem;
-}
-.dm-conv-preview {
-    font-size: 0.8rem;
-    color: var(--text-3);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    flex: 1;
-}
-.dm-conv-unread {
-    background: var(--accent-solid);
-    color: var(--on-accent);
-    font-size: 0.7rem;
-    font-weight: 700;
+    min-width: var(--space-5);
+    height: var(--space-5);
+    padding: 0 var(--space-1);
     border-radius: var(--radius-pill);
-    padding: 0.1rem 0.5rem;
-    flex-shrink: 0;
-}
-.dm-conv-empty {
-    padding: 2.5rem 1rem;
-    text-align: center;
-    color: var(--text-subtle);
-    font-size: 0.85rem;
-}
-.dm-conv-empty-cta {
-    margin-top: 0.75rem;
     background: var(--accent-solid);
     color: var(--on-accent);
-    border: none;
-    border-radius: 6px;
-    padding: 0.5rem 1rem;
-    font-size: 0.85rem;
-    font-weight: 600;
-    cursor: pointer;
+    font-family: var(--font-head);
+    font-size: var(--badge-font-size);
+    font-weight: var(--badge-font-weight);
+    text-transform: var(--badge-font-transform);
 }
-.dm-conv-empty-cta:hover { filter: brightness(1.15); }
 "#;
 
 /// Inbox list phase. Empty copy is only for [`ConversationListState::Ready`].
@@ -170,12 +114,27 @@ fn shows_empty_inbox(load_state: ConversationListState, len: usize) -> bool {
     load_state == ConversationListState::Ready && len == 0
 }
 
-/// Status line for an empty list that is not the ready-empty inbox.
-/// Failure is `None`: the page-level `DmFailureNotice` is the only error copy.
-fn list_pending_copy(load_state: ConversationListState) -> Option<&'static str> {
+/// Text of the inbox's status line. It is always rendered (only the text
+/// changes), so the change is announced. A failure has its own alert.
+fn inbox_status_text(load_state: ConversationListState, len: usize) -> String {
     match load_state {
-        ConversationListState::Loading => Some("Loading conversations…"),
-        ConversationListState::Failed | ConversationListState::Ready => None,
+        ConversationListState::Loading => "Loading conversations...".to_string(),
+        ConversationListState::Failed => String::new(),
+        ConversationListState::Ready => match len {
+            0 => "No conversations yet.".to_string(),
+            1 => "1 conversation.".to_string(),
+            n => format!("{n} conversations."),
+        },
+    }
+}
+
+/// The count to show on a row. The open conversation is being read, so it
+/// shows none even before the server's mark-read lands.
+fn shown_unread(c: &ConversationSummary, current: Option<&str>) -> u64 {
+    if current == Some(c.peer_pubkey.as_str()) {
+        0
+    } else {
+        c.unread_count
     }
 }
 
@@ -183,100 +142,129 @@ fn list_pending_copy(load_state: ConversationListState) -> Option<&'static str> 
 pub fn ConversationList(
     conversations: Vec<ConversationSummary>,
     load_state: ConversationListState,
+    /// Crew members, to show peers by name.
+    #[props(default)]
+    members: Vec<DmMember>,
+    /// The open conversation (from the address, or the only one on desktop).
     selected_peer: Option<String>,
+    /// True on `/dm`: the column title is the page's H1. On a thread the
+    /// peer's name is the H1 and this title is an H2.
+    #[props(default)]
+    title_is_h1: bool,
+    #[props(default)] failure: Option<DmLoadFailure>,
+    #[props(default)] on_retry: Option<EventHandler<()>>,
     refreshing: bool,
     on_refresh: EventHandler<()>,
     on_compose: EventHandler<()>,
 ) -> Element {
     let empty = shows_empty_inbox(load_state, conversations.len());
+    let status = inbox_status_text(load_state, conversations.len());
     // Header and empty-state each own a callback so compose stays available
     // after the first conversation exists. EventHandler is Copy.
     let compose_from_header = on_compose;
     let compose_from_empty = on_compose;
     rsx! {
         crate::styles::StyleOnce { id: "scuffed-css-components-dm-conversation_list-conversation-list-css", css: CONVERSATION_LIST_CSS }
-        div { class: "dm-conv-list",
-            div { class: "dm-conv-list-header",
-                h2 { class: "dm-conv-list-title", "Messages" }
-                div { class: "dm-conv-list-actions",
-                    button {
-                        class: "dm-conv-list-new",
-                        r#type: "button",
-                        "aria-label": "New message",
-                        onclick: move |_| compose_from_header.call(()),
-                        "New"
-                    }
-                    button {
-                        class: "dm-conv-list-refresh",
-                        r#type: "button",
-                        disabled: refreshing,
-                        onclick: move |_| on_refresh.call(()),
-                        if refreshing { "Syncing…" } else { "Refresh" }
-                    }
+        div { class: "dm-pane-head dm-inbox-head",
+            if title_is_h1 {
+                h1 { class: "dm-pane-title", "Messages" }
+            } else {
+                h2 { class: "dm-pane-title", "Messages" }
+            }
+            div { class: "dm-inbox-actions",
+                button {
+                    id: NEW_MESSAGE_BUTTON_ID,
+                    class: "btn is-primary",
+                    r#type: "button",
+                    "aria-label": "New message",
+                    "aria-haspopup": "dialog",
+                    onclick: move |_| compose_from_header.call(()),
+                    "New"
+                }
+                button {
+                    class: "btn is-ghost",
+                    r#type: "button",
+                    aria_disabled: if refreshing { "true" },
+                    onclick: move |_| {
+                        if !refreshing {
+                            on_refresh.call(());
+                        }
+                    },
+                    if refreshing { "Syncing..." } else { "Refresh" }
                 }
             }
-            if conversations.is_empty() {
-                if empty {
-                    div { class: "dm-conv-empty",
-                        "No conversations yet."
-                        div {
-                            button {
-                                class: "dm-conv-empty-cta",
-                                r#type: "button",
-                                onclick: move |_| compose_from_empty.call(()),
-                                "Start a conversation"
-                            }
-                        }
-                    }
-                } else if let Some(status) = list_pending_copy(load_state) {
-                    div { class: "dm-conv-empty", "{status}" }
-                } else {
-                    div { class: "dm-conv-empty", aria_hidden: "true" }
+        }
+        p { id: INBOX_STATUS_ID, class: "visually-hidden", role: "status", "{status}" }
+        if let Some(failure) = failure {
+            div { class: "dm-inbox-body",
+                DmFailureNotice {
+                    failure,
+                    title: "Could not load your conversations",
+                    on_retry,
                 }
-            } else {
+            }
+        } else if conversations.is_empty() {
+            div { class: "dm-inbox-body",
+                if empty {
+                    EmptyCard {
+                        title: "No conversations yet",
+                        message: "Messages you send or get from crew members show up here. Start one with New message.",
+                        actions: rsx! {
+                            button {
+                                class: "btn is-primary",
+                                r#type: "button",
+                                "aria-haspopup": "dialog",
+                                onclick: move |_| compose_from_empty.call(()),
+                                "New message"
+                            }
+                        },
+                    }
+                } else if load_state == ConversationListState::Loading {
+                    SkeletonBars { rows: 4 }
+                }
+            }
+        } else {
+            ul { class: "dm-inbox-list", aria_label: "Conversations",
                 for c in conversations.iter() {
-                    {render_row(c, selected_peer.as_deref())}
+                    li { key: "{c.peer_pubkey}",
+                        {render_row(c, selected_peer.as_deref(), &members)}
+                    }
                 }
             }
         }
     }
 }
 
-fn render_row(c: &ConversationSummary, selected: Option<&str>) -> Element {
-    let display_name = c
-        .peer_display_name
-        .clone()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| truncate_pubkey(&c.peer_pubkey));
-    let initials = display_name
-        .chars()
-        .next()
-        .unwrap_or('?')
-        .to_uppercase()
-        .to_string();
+fn render_row(c: &ConversationSummary, selected: Option<&str>, members: &[DmMember]) -> Element {
+    let display_name = peer_label(&c.peer_pubkey, c.peer_display_name.as_deref(), members);
+    let initials = avatar_initials(&display_name);
     let time = relative_time(&c.last_message_at);
-    let is_active = selected == Some(c.peer_pubkey.as_str());
-    let cls = if is_active {
-        "dm-conv-row active"
+    let is_current = selected == Some(c.peer_pubkey.as_str());
+    let cls = if is_current {
+        "dm-convo is-current"
     } else {
-        "dm-conv-row"
+        "dm-convo"
     };
-    let unread = c.unread_count;
+    let unread = shown_unread(c, selected);
+    let preview = c.last_message_preview.trim().to_string();
 
     rsx! {
         Link {
             to: Route::DmThread { peer_pubkey: c.peer_pubkey.clone() },
             class: "{cls}",
-            div { class: "dm-conv-avatar", "{initials}" }
-            div { class: "dm-conv-body",
-                div { class: "dm-conv-row-top",
-                    span { class: "dm-conv-name", "{display_name}" }
-                    span { class: "dm-conv-time", "{time}" }
+            span { class: "dm-avatar", aria_hidden: "true", "{initials}" }
+            span { class: "dm-convo-text",
+                span { class: "dm-convo-who", "{display_name}" }
+                if !preview.is_empty() {
+                    span { class: "dm-convo-preview", " {preview}" }
                 }
-                div { class: "dm-conv-row-bottom",
-                    span { class: "dm-conv-preview", "{c.last_message_preview}" }
-                    if unread > 0 {
-                        span { class: "dm-conv-unread", "{unread}" }
+            }
+            span { class: "dm-convo-meta",
+                time { datetime: "{c.last_message_at}", "{time}" }
+                if unread > 0 {
+                    span { class: "dm-unread",
+                        "{unread}"
+                        span { class: "visually-hidden", " unread" }
                     }
                 }
             }
@@ -287,6 +275,18 @@ fn render_row(c: &ConversationSummary, selected: Option<&str>) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::components::ui::test_support::{assert_sizes_from_tokens, render_routed};
+
+    fn convo(pk: &str, unread: u64) -> ConversationSummary {
+        ConversationSummary {
+            peer_pubkey: pk.to_string(),
+            peer_display_name: None,
+            last_message_preview: "Sure, after 20:00.".to_string(),
+            last_message_at: "2026-11-10T19:00:00Z".to_string(),
+            last_sender_pubkey: String::new(),
+            unread_count: unread,
+        }
+    }
 
     #[test]
     fn empty_inbox_copy_only_after_ready() {
@@ -297,13 +297,124 @@ mod tests {
     }
 
     #[test]
-    fn failed_list_has_no_error_line_of_its_own() {
+    fn status_line_text_follows_the_load() {
         assert_eq!(
-            list_pending_copy(ConversationListState::Loading),
-            Some("Loading conversations…")
+            inbox_status_text(ConversationListState::Loading, 0),
+            "Loading conversations..."
         );
-        assert_eq!(list_pending_copy(ConversationListState::Failed), None);
-        assert_eq!(list_pending_copy(ConversationListState::Ready), None);
+        assert_eq!(inbox_status_text(ConversationListState::Failed, 0), "");
+        assert_eq!(
+            inbox_status_text(ConversationListState::Ready, 0),
+            "No conversations yet."
+        );
+        assert_eq!(
+            inbox_status_text(ConversationListState::Ready, 1),
+            "1 conversation."
+        );
+        assert_eq!(
+            inbox_status_text(ConversationListState::Ready, 3),
+            "3 conversations."
+        );
+    }
+
+    #[test]
+    fn the_open_conversation_shows_no_unread_badge() {
+        let open = convo(&"ab".repeat(32), 3);
+        let other = convo(&"cd".repeat(32), 2);
+        let current = Some(open.peer_pubkey.as_str());
+        assert_eq!(shown_unread(&open, current), 0);
+        assert_eq!(shown_unread(&other, current), 2);
+        assert_eq!(shown_unread(&open, None), 3);
+    }
+
+    fn list(
+        conversations: Vec<ConversationSummary>,
+        load_state: ConversationListState,
+        failure: Option<DmLoadFailure>,
+    ) -> String {
+        render_routed(move || {
+            let conversations = conversations.clone();
+            let failure = failure.clone();
+            rsx! {
+                ConversationList {
+                    conversations,
+                    load_state,
+                    members: vec![DmMember {
+                        id: "member:p2".into(),
+                        display_name: "Player02".into(),
+                        nostr_pubkey: Some("ab".repeat(32)),
+                    }],
+                    selected_peer: None,
+                    title_is_h1: true,
+                    failure,
+                    on_retry: move |_| {},
+                    refreshing: false,
+                    on_refresh: move |_| {},
+                    on_compose: move |_| {},
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn status_line_is_rendered_in_every_state() {
+        let marker = format!("id=\"{INBOX_STATUS_ID}\"");
+        for (convs, state, failure) in [
+            (vec![], ConversationListState::Loading, None),
+            (vec![], ConversationListState::Ready, None),
+            (
+                vec![],
+                ConversationListState::Failed,
+                Some(DmLoadFailure::RelayConfig),
+            ),
+            (
+                vec![convo(&"ab".repeat(32), 1)],
+                ConversationListState::Ready,
+                None,
+            ),
+        ] {
+            let html = list(convs, state, failure);
+            assert_eq!(html.matches(&marker).count(), 1, "{html}");
+            assert!(html.contains("role=\"status\""), "{html}");
+        }
+    }
+
+    #[test]
+    fn rows_show_the_member_name_not_the_key() {
+        let html = list(
+            vec![convo(&"ab".repeat(32), 1)],
+            ConversationListState::Ready,
+            None,
+        );
+        assert!(html.contains(">Player02<"), "{html}");
+        assert!(!html.contains("npub1"), "{html}");
+        assert!(html.contains("<span class=\"dm-avatar\" aria-hidden=\"true\">PL</span>"));
+        // The count is a word too, not a coloured dot alone.
+        assert!(
+            html.contains("1<span class=\"visually-hidden\"> unread</span>"),
+            "{html}"
+        );
+        assert_eq!(html.matches("<h1").count(), 1, "{html}");
+    }
+
+    #[test]
+    fn empty_inbox_says_what_is_missing_and_offers_new_message() {
+        let html = list(vec![], ConversationListState::Ready, None);
+        assert!(html.contains("No conversations yet"), "{html}");
+        assert!(html.contains(">New message</button>"), "{html}");
+    }
+
+    #[test]
+    fn a_failed_load_has_its_reason_and_retry() {
+        let html = list(
+            vec![],
+            ConversationListState::Failed,
+            Some(DmLoadFailure::Other("HTTP 502: relay unreachable".into())),
+        );
+        assert!(html.contains("role=\"alert\""), "{html}");
+        assert!(html.contains("relay unreachable"), "{html}");
+        assert!(html.contains(">Retry</button>"), "{html}");
+        assert!(!html.contains("No conversations yet"), "{html}");
     }
 
     /// The empty-state CTA used to be the only caller of `on_compose`, so the
@@ -333,12 +444,13 @@ mod tests {
         );
         let empty = &body[empty_at..];
         assert!(
-            empty.contains("Start a conversation"),
-            "empty state should still offer Start a conversation"
-        );
-        assert!(
             empty.contains("compose_from_empty.call"),
             "empty-state CTA should still open compose"
         );
+    }
+
+    #[test]
+    fn inbox_css_is_on_tokens() {
+        assert_sizes_from_tokens(CONVERSATION_LIST_CSS);
     }
 }
