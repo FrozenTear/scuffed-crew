@@ -324,11 +324,14 @@ pub(crate) mod test_route {
         });
         use_context_provider(|| auth);
         crate::state::provide_site_settings();
+        // Same providers as the app root in `main.rs`: pages may show a toast.
         rsx! {
             crate::theme::ThemeProvider {
-                dioxus::router::components::HistoryProvider {
-                    history: move |_| history.clone() as std::rc::Rc<dyn dioxus::history::History>,
-                    Router::<Route> {}
+                crate::components::ToastProvider {
+                    dioxus::router::components::HistoryProvider {
+                        history: move |_| history.clone() as std::rc::Rc<dyn dioxus::history::History>,
+                        Router::<Route> {}
+                    }
                 }
             }
         }

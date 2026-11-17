@@ -15,6 +15,7 @@ pub use button::BtnSize;
 #[allow(unused_imports)]
 pub use button::{BtnVariant, Button, btn_class};
 pub use card::Card;
+#[allow(unused_imports)]
 pub use feedback::EmptyState;
 #[allow(unused_imports)]
 pub use feedback::Spinner;

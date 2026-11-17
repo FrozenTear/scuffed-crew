@@ -1,4 +1,8 @@
-//! Main expandable chat widget: sidebar/panel layout.
+//! The live chat room: head bar, channel chips, message list and composer.
+//!
+//! On the `/chat` page it is `embedded`: the thread of the `d1-chat` frame,
+//! filling the height the page gives it. Without `embedded` it is a floating
+//! panel pinned to the bottom corner.
 //!
 //! Wires F-API-003/004: discovered `TeamChannel` group_ids, team (public)
 //! sends via `POST /api/chat/send-public`, and send-encrypted / decrypt on
@@ -14,6 +18,7 @@ use scuffed_types::{
 };
 
 use crate::components::chat::encrypted_chat::{EncryptedChat, KeyMode};
+use crate::components::ui::{ChipButton, ChipRow};
 use crate::components::{Toast, use_toast};
 use crate::state::RelayAvailability;
 use crate::state::nostr::{NostrRelayEvent, NostrRelayManager, RelayConnectionState};
@@ -22,183 +27,111 @@ use crate::state::use_relay_availability_state;
 use super::compose_box::{ComposeAttempt, ComposeBox};
 use super::message_list::MessageList;
 use super::relay_status::RelayStatus;
+use super::thread::{THREAD_CSS, THREAD_CSS_ID, ThreadHead, thread_label};
 
+/// The embedded room takes its column from `.chat-thread` (see `thread.rs`).
+/// The rules here are the parts both forms share, then the floating panel.
 const CHAT_WIDGET_CSS: &str = r#"
 .chat-widget {
-    position: fixed;
-    bottom: 0;
-    right: 0;
-    width: 360px;
-    max-height: 520px;
-    display: flex;
-    flex-direction: column;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-bottom: none;
-    border-radius: 12px 12px 0 0;
-    box-shadow: 0 -4px 24px var(--overlay);
-    z-index: 1000;
-    transition: transform 0.25s ease, opacity 0.2s ease;
-    overflow: hidden;
+  box-sizing: border-box;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
-
-.chat-widget--collapsed {
-    max-height: 44px;
-    cursor: pointer;
-}
-
-.chat-widget--collapsed .chat-widget__body {
-    display: none;
-}
-
-.chat-widget--embedded {
-    position: relative;
-    width: 100%;
-    max-height: none;
-    height: min(70vh, 640px);
-    border-radius: 12px;
-    border-bottom: 1px solid var(--border);
-    box-shadow: none;
-    z-index: auto;
-}
-
-.chat-widget__header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 10px 14px;
-    background: var(--surface-sunken);
-    border-bottom: 1px solid var(--border);
-    cursor: pointer;
-    user-select: none;
-    min-height: 44px;
-}
-
-.chat-widget--embedded .chat-widget__header {
-    cursor: default;
-}
-
-.chat-widget__header-left {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-
-.chat-widget__title {
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--text);
-}
-
-.chat-widget__header-right {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-}
-
-.chat-widget__toggle {
-    width: 24px;
-    height: 24px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border: none;
-    background: transparent;
-    color: var(--text-3);
-    cursor: pointer;
-    border-radius: 4px;
-    font-size: 16px;
-    transition: color 0.15s ease, background-color 0.15s ease;
-}
-
-.chat-widget__toggle:hover {
-    color: var(--text);
-    background: var(--surface-sunken);
-}
-
 .chat-widget__body {
-    display: flex;
-    flex-direction: column;
-    flex: 1;
-    min-height: 0;
-    height: 420px;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
-
-.chat-widget--embedded .chat-widget__body {
-    height: auto;
-}
-
 .chat-widget__channel-bar {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding: 6px 12px;
-    border-bottom: 1px solid var(--border);
-    overflow-x: auto;
-    scrollbar-width: none;
+  flex: 0 0 auto;
+  min-width: 0;
+  padding: var(--space-2) var(--space-card-pad);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+/* A failed send or a relay error. The words carry it, not the colour. */
+.chat-notice {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: var(--space-2) var(--space-card-pad);
+  border-bottom: 1px solid var(--border);
+  background: var(--loss-soft);
+  color: var(--loss);
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+  overflow-wrap: anywhere;
 }
 
-.chat-widget__channel-bar::-webkit-scrollbar {
-    display: none;
+.chat-widget--floating {
+  position: fixed;
+  bottom: 0;
+  right: 0;
+  z-index: 1000;
+  width: calc(var(--space-12) * 7.5);
+  max-width: 100%;
+  max-height: calc(var(--space-12) * 11);
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--font-body);
+  border: 1px solid var(--border);
+  border-bottom: 0;
+  border-radius: var(--radius-card) var(--radius-card) 0 0;
+  box-shadow: var(--shadow-overlay);
 }
-
-.chat-widget__channel {
-    padding: 4px 10px;
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    background: transparent;
-    color: var(--text-3);
-    font-size: 11px;
-    font-weight: 500;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: all 0.15s ease;
+.chat-widget--floating .chat-widget__body {
+  height: calc(var(--space-12) * 9);
 }
-
-.chat-widget__channel:hover {
-    border-color: var(--accent-solid);
-    color: var(--text);
+.chat-widget--collapsed .chat-widget__body {
+  display: none;
 }
-
-.chat-widget__channel--active {
-    background: var(--accent-soft);
-    border-color: var(--accent-solid);
-    color: var(--accent-text);
+.chat-widget__header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-height: var(--hit-target-min);
+  padding: 0 0 0 var(--space-3);
+  background: var(--surface-sunken);
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  user-select: none;
 }
-
-.chat-widget__error {
-    margin: 8px 12px 0;
-    padding: 8px 10px;
-    border-radius: 8px;
-    background: color-mix(in srgb, var(--loss) 8%, transparent);
-    border: 1px solid color-mix(in srgb, var(--loss) 40%, transparent);
-    color: var(--loss);
-    font-size: 12px;
-    line-height: 1.4;
+.chat-widget__header-left {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
 }
-
-.chat-widget__empty {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--text-subtle);
-    font-size: 13px;
-    padding: 2rem;
-    text-align: center;
+.chat-widget__title {
+  color: var(--text);
+  font-family: var(--font-head);
+  font-size: var(--text-sm);
+  font-weight: var(--font-label-weight);
 }
-
-@media (max-width: 480px) {
-    .chat-widget {
-        width: 100%;
-        border-radius: 0;
-        border: none;
-        border-top: 1px solid var(--border);
-    }
-    .chat-widget--embedded {
-        border: 1px solid var(--border);
-        border-radius: 12px;
-    }
+.chat-widget__toggle {
+  flex: 0 0 auto;
+  width: var(--hit-target-min);
+  height: var(--hit-target-min);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-3);
+  font-size: var(--text-md);
+  cursor: pointer;
+}
+.chat-widget__toggle:hover {
+  color: var(--text);
 }
 "#;
 
@@ -546,6 +479,36 @@ fn push_unique(messages: &mut Vec<ChatMessage>, msg: ChatMessage) {
     }
 }
 
+/// The banner between the head and the messages.
+///
+/// `status` is the text of the always-rendered `role="status"` line. During a
+/// rate-limit hold the visible line counts down once a second, so it is a
+/// plain line and the status line says the stable sentence once, off screen.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct ThreadNotice {
+    status: String,
+    status_visible: bool,
+    countdown: Option<String>,
+}
+
+fn thread_notice(is_officer: bool, wait_secs: u64, err: Option<&str>) -> ThreadNotice {
+    if !is_officer && wait_secs > 0 {
+        ThreadNotice {
+            status: RATE_LIMIT_LATER.to_string(),
+            status_visible: false,
+            countdown: Some(rate_limit_copy(wait_secs)),
+        }
+    } else if let Some(msg) = err {
+        ThreadNotice {
+            status: msg.to_string(),
+            status_visible: true,
+            countdown: None,
+        }
+    } else {
+        ThreadNotice::default()
+    }
+}
+
 fn key_mode_from_me(me: Option<&MeResponse>) -> KeyMode {
     match me
         .and_then(|m| m.member.as_ref())
@@ -567,6 +530,12 @@ pub fn ChatWidget(
     /// Page layout instead of the floating overlay.
     #[props(default = false)]
     embedded: bool,
+    /// Embedded only: the room name, rendered as the page's H1.
+    #[props(default)]
+    title: Option<String>,
+    /// Embedded only: controls at the end of the head bar (the team picker).
+    #[props(default)]
+    toolbar: Option<Element>,
 ) -> Element {
     let mut toast = use_toast();
     let mut expanded = use_signal(|| true);
@@ -801,49 +770,63 @@ pub fn ChatWidget(
         channels.iter().filter(|c| c.is_active).cloned().collect();
 
     let widget_class = if embedded {
-        "chat-widget chat-widget--embedded"
+        "chat-thread chat-widget chat-widget--embedded"
     } else if is_expanded {
-        "chat-widget"
+        "chat-widget chat-widget--floating"
     } else {
-        "chat-widget chat-widget--collapsed"
+        "chat-widget chat-widget--floating chat-widget--collapsed"
+    };
+    let heading = title.unwrap_or_else(|| "Chat".to_string());
+    let region = thread_label(&heading);
+    let own_member = me_data
+        .as_ref()
+        .and_then(|o| o.as_ref())
+        .and_then(|m| m.member.as_ref());
+    let own_pubkey = own_member.and_then(|m| m.nostr_pubkey.clone());
+    let own_name = own_member.map(|m| m.display_name.clone());
+    let notice = thread_notice(is_officer, public_send_wait, err.as_deref());
+    let status = rsx! {
+        RelayStatus {
+            state: conn,
+            on_retry: move |_| {
+                panel_error.set(None);
+                relay_retry.retry();
+            },
+        }
     };
 
     rsx! {
+        crate::styles::StyleOnce { id: THREAD_CSS_ID, css: THREAD_CSS }
         crate::styles::StyleOnce { id: "scuffed-css-components-chat-chat_widget-chat-widget-css", css: CHAT_WIDGET_CSS }
-        div { class: "{widget_class}",
+        section { class: "{widget_class}", aria_label: "{region}",
 
-            div {
-                class: "chat-widget__header",
-                onclick: move |_| {
-                    if !embedded {
-                        expanded.toggle();
-                    }
-                },
+            if embedded {
+                ThreadHead { title: heading, status, toolbar }
+            } else {
+                div {
+                    class: "chat-widget__header",
+                    onclick: move |_| expanded.toggle(),
 
-                div { class: "chat-widget__header-left",
-                    span { class: "chat-widget__title",
-                        if let Some(ch) = active.as_ref() {
-                            "{ch.group_type.label()} chat"
-                        } else {
-                            "Chat"
+                    div { class: "chat-widget__header-left",
+                        span { class: "chat-widget__title",
+                            if let Some(ch) = active.as_ref() {
+                                "{ch.group_type.label()} chat"
+                            } else {
+                                "Chat"
+                            }
                         }
+                        {status}
                     }
-                    RelayStatus {
-                        state: conn,
-                        on_retry: move |_| {
-                            panel_error.set(None);
-                            relay_retry.retry();
+                    button {
+                        r#type: "button",
+                        class: "chat-widget__toggle",
+                        aria_label: if is_expanded { "Collapse chat" } else { "Expand chat" },
+                        aria_expanded: if is_expanded { "true" } else { "false" },
+                        onclick: move |evt| {
+                            evt.stop_propagation();
+                            expanded.toggle();
                         },
-                    }
-                }
-                if !embedded {
-                    div { class: "chat-widget__header-right",
-                        button {
-                            class: "chat-widget__toggle",
-                            onclick: move |evt| {
-                                evt.stop_propagation();
-                                expanded.toggle();
-                            },
+                        span { aria_hidden: "true",
                             if is_expanded { "\u{25BC}" } else { "\u{25B2}" }
                         }
                     }
@@ -851,21 +834,24 @@ pub fn ChatWidget(
             }
 
             div { class: "chat-widget__body",
-                if !active_channels.is_empty() {
+                // One channel needs no picker; the frame draws none.
+                if active_channels.len() > 1 {
                     div { class: "chat-widget__channel-bar",
-                        for channel in active_channels.iter() {
-                            {
-                                let is_on = active_group.read().as_deref() == Some(channel.group_id.as_str());
-                                let group_id = channel.group_id.clone();
-                                let label = channel.group_type.label();
-                                rsx! {
-                                    button {
-                                        class: if is_on { "chat-widget__channel chat-widget__channel--active" } else { "chat-widget__channel" },
-                                        onclick: move |_| {
-                                            active_group.set(Some(group_id.clone()));
-                                            panel_error.set(None);
-                                        },
-                                        "{label}"
+                        ChipRow { label: "Channel", scroll: true,
+                            for channel in active_channels.iter() {
+                                {
+                                    let is_on = active_group.read().as_deref() == Some(channel.group_id.as_str());
+                                    let group_id = channel.group_id.clone();
+                                    rsx! {
+                                        ChipButton {
+                                            class: "chip",
+                                            label: channel.group_type.label(),
+                                            pressed: is_on,
+                                            onclick: move |_| {
+                                                active_group.set(Some(group_id.clone()));
+                                                panel_error.set(None);
+                                            },
+                                        }
                                     }
                                 }
                             }
@@ -873,21 +859,26 @@ pub fn ChatWidget(
                     }
                 }
 
-                if !is_officer && public_send_wait > 0 {
-                    div { class: "chat-widget__error", "{rate_limit_copy(public_send_wait)}" }
-                } else if let Some(msg) = err {
-                    div { class: "chat-widget__error", "{msg}" }
+                p {
+                    class: if notice.status_visible { "chat-notice" } else { "visually-hidden" },
+                    role: "status",
+                    "{notice.status}"
+                }
+                if let Some(countdown) = notice.countdown.as_ref() {
+                    p { class: "chat-notice", "{countdown}" }
                 }
 
                 if active_channels.is_empty() {
-                    div { class: "chat-widget__empty",
-                        "No active chat channels for this team."
+                    div { class: "chat-thread__body",
+                        p { class: "chat-thread__note", "No active chat channels for this team." }
                     }
                 } else if is_officer {
                     EncryptedChat {
                         messages: visible,
                         key_mode: key_mode,
                         loading: is_loading,
+                        own_pubkey: own_pubkey.clone(),
+                        own_name: own_name.clone(),
                         on_send: move |attempt: ComposeAttempt| {
                             if sending() {
                                 attempt.fail();
@@ -937,6 +928,8 @@ pub fn ChatWidget(
                     MessageList {
                         messages: visible,
                         loading: is_loading,
+                        own_pubkey: own_pubkey.clone(),
+                        own_name: own_name.clone(),
                     }
                     ComposeBox {
                         on_send: move |attempt: ComposeAttempt| {
@@ -993,7 +986,6 @@ pub fn ChatWidget(
                             });
                         },
                         send_locked: public_send_wait > 0,
-                        placeholder: "Type a message...".to_string(),
                     }
                 }
             }
@@ -1254,5 +1246,75 @@ mod tests {
         push_unique(&mut messages, sent);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].content, "hello team");
+    }
+
+    #[test]
+    fn notice_keeps_one_status_line_and_a_plain_countdown() {
+        assert_eq!(thread_notice(false, 0, None), ThreadNotice::default());
+        assert_eq!(thread_notice(false, 0, None).status, "");
+        assert!(!thread_notice(false, 0, None).status_visible);
+
+        let failed = thread_notice(false, 0, Some("Channel not found."));
+        assert_eq!(failed.status, "Channel not found.");
+        assert!(failed.status_visible);
+        assert_eq!(failed.countdown, None);
+
+        let held = thread_notice(false, 12, Some("Channel not found."));
+        assert_eq!(held.status, RATE_LIMIT_LATER);
+        assert!(
+            !held.status_visible,
+            "the live line does not repeat every second"
+        );
+        assert_eq!(
+            held.countdown.as_deref(),
+            Some("Too many messages. Try again in 12 seconds.")
+        );
+
+        let officer = thread_notice(true, 12, Some("Relay said no."));
+        assert_eq!(officer.status, "Relay said no.");
+        assert!(officer.status_visible);
+        assert_eq!(officer.countdown, None);
+    }
+
+    #[test]
+    fn room_markup_follows_the_frame() {
+        let src = include_str!("chat_widget.rs");
+        let prod = src.split("mod tests").next().expect("production source");
+        assert!(prod.contains("section { class: \"{widget_class}\", aria_label: \"{region}\""));
+        assert!(prod.contains("ThreadHead { title: heading, status, toolbar }"));
+        assert!(prod.contains("ChipRow { label: \"Channel\""));
+        assert!(prod.contains("role: \"status\""));
+        assert!(!prod.contains("main {"), "the shell owns the main landmark");
+        assert!(!prod.contains("h1 {"), "the H1 comes from PageHeader");
+        assert!(
+            prod.contains(
+                "aria_label: if is_expanded { \"Collapse chat\" } else { \"Expand chat\" }"
+            ),
+            "the floating toggle has a name"
+        );
+    }
+
+    #[test]
+    fn widget_css_is_on_tokens() {
+        use crate::components::ui::test_support::{
+            assert_ink_clears_aa, assert_sizes_from_tokens, css_rule, has_decl,
+        };
+
+        assert_sizes_from_tokens(CHAT_WIDGET_CSS);
+        assert!(!CHAT_WIDGET_CSS.contains("color-mix"));
+        let body = css_rule(CHAT_WIDGET_CSS, ".chat-widget__body {");
+        for decl in ["flex: 1 1 auto", "min-height: 0", "flex-direction: column"] {
+            assert!(has_decl(&body, decl), "missing {decl}: {body}");
+        }
+        let toggle = css_rule(CHAT_WIDGET_CSS, ".chat-widget__toggle {");
+        assert!(
+            has_decl(&toggle, "width: var(--hit-target-min)"),
+            "{toggle}"
+        );
+        assert!(
+            has_decl(&toggle, "height: var(--hit-target-min)"),
+            "{toggle}"
+        );
+        assert_ink_clears_aa("--loss", "--loss-soft", 4.5);
     }
 }
