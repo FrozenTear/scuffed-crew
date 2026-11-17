@@ -10768,6 +10768,7 @@ dependencies = [
  "serde-wasm-bindgen",
  "serde_json",
  "tokio",
+ "toml 1.1.6+spec-1.1.0",
  "tracing",
  "url",
  "uuid",
