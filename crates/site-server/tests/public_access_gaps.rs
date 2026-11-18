@@ -752,7 +752,7 @@ async fn l3_my_application_omits_officer_review_fields() {
             Some(json!({
                 "preferred_games": [],
                 "preferred_roles": ["flex"],
-                "message": "hello"
+                "message": "I would like to join the crew"
             })),
         ))
         .await
@@ -788,7 +788,7 @@ async fn l3_my_application_omits_officer_review_fields() {
     assert_eq!(resp.status(), StatusCode::OK);
     let mine = body_json(resp).await;
     assert_eq!(mine["status"], "trial");
-    assert_eq!(mine["message"], "hello");
+    assert_eq!(mine["message"], "I would like to join the crew");
     assert!(
         mine.get("review_notes").is_none(),
         "mine leaked notes: {mine}"
