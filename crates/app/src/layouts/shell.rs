@@ -405,19 +405,10 @@ fn strategies_enabled_or_default(settings: Option<&SiteSettings>) -> bool {
     settings.map(|s| s.strategies_enabled).unwrap_or(true)
 }
 
-/// Two characters for the avatar when there is no picture.
+/// Two characters for the avatar when there is no picture, by the shared
+/// rule (`components::ui::avatar::name_initials`): "Player01" is "P1".
 fn user_initials(username: &str) -> String {
-    let initials: String = username
-        .chars()
-        .filter(|c| c.is_alphanumeric())
-        .take(2)
-        .flat_map(char::to_uppercase)
-        .collect();
-    if initials.is_empty() {
-        "?".to_string()
-    } else {
-        initials
-    }
+    crate::components::ui::avatar::name_initials(username)
 }
 
 /// Only same-site paths and https pictures reach the `src` attribute.
@@ -1786,6 +1777,33 @@ mod tests {
             .any(|part| part.lines().any(|line| line.trim() == decl))
     }
 
+    /// Vision S4 on PR 706: `--tab-bar-height` must live on the root, the
+    /// element that declares `scroll-padding-bottom`; a value set on
+    /// `.site-app` would never reach `html`. One declaration, inside the
+    /// phone block, on `html`.
+    #[test]
+    fn the_tab_bar_height_is_declared_once_on_the_root_in_the_phone_block() {
+        assert_eq!(SHELL_CSS.matches("--tab-bar-height:").count(), 1);
+        let at = SHELL_CSS.find("--tab-bar-height:").unwrap();
+        let before = &SHELL_CSS[..at];
+        let media = before.rfind("@media (max-width: 820px) {").unwrap();
+        // Two blocks open at the declaration: the phone query and `html`.
+        let open = before.matches('{').count() - before.matches('}').count();
+        assert_eq!(open, 2);
+        let inside = &before[media..];
+        assert_eq!(
+            inside.matches('{').count() - inside.matches('}').count(),
+            2,
+            "the declaration is not inside the phone block"
+        );
+        let selector = before[..before.rfind('{').unwrap()]
+            .rsplit(['}', '{'])
+            .next()
+            .unwrap()
+            .trim();
+        assert_eq!(selector, "html");
+    }
+
     /// QA 696 nit 2 (WCAG 2.4.11): Tab and the skip link scroll the page,
     /// so the page scroller keeps focus clear of the sticky top bar at every
     /// width and of the fixed tab bar on phone, from the shell's own height
@@ -1983,7 +2001,7 @@ mod tests {
         );
         assert!(bar.contains("class=\"theme-toggle\""), "{bar}");
         // Initials when there is no picture, hidden from the name.
-        assert!(bar.contains("aria-hidden=\"true\">PL<"), "{bar}");
+        assert!(bar.contains("aria-hidden=\"true\">P1<"), "{bar}");
 
         let open = render(Who::Member, "/", Some(Disclosure::Account));
         let toggle = tag_with_id(&open, ACCOUNT_TOGGLE_ID);
@@ -2523,36 +2541,53 @@ mod tests {
     }
 
     /// QA blocking 1: `/admin/relay` was 518px wide at 390. Wide admin
-    /// content scrolls inside the admin area, and the relay tables sit in
-    /// the shared table scroller.
+    /// content is clipped by the admin area (`overflow-x: clip`, which makes
+    /// no scroll container, so the sticky settings save bar still sticks;
+    /// Vision blocking 2 on PR 706) and wide tables scroll on their own. The redesigned relay page has
+    /// no tables: its facts are a two-column list whose values may shrink
+    /// and break long URLs, so nothing on it is wider than the column.
     #[test]
     fn wide_admin_content_scrolls_inside_the_admin_area() {
         let admin = include_str!("admin.rs");
         let rule = css_rule(admin, ".admin-main {");
-        assert!(has_decl(&rule, "overflow-y: auto"), "{rule}");
+        assert!(has_decl(&rule, "overflow-x: clip"), "{rule}");
         assert!(has_decl(&rule, "min-width: 0"), "{rule}");
+        // `auto`, `scroll` or `hidden` on either axis would make the admin
+        // area the sticky bar's scroll container, and it would sit at the
+        // end of the page instead of the bottom of the viewport.
+        for scroller in [
+            "overflow-y: auto",
+            "overflow: auto",
+            "overflow-x: auto",
+            "overflow: hidden",
+            "overflow-y: scroll",
+        ] {
+            assert!(!has_decl(&rule, scroller), "{scroller} in {rule}");
+        }
+        let bar = css_rule(crate::styles::admin::CSS, ".settings-save-bar {");
+        assert!(has_decl(&bar, "position: sticky"), "{bar}");
+        let pad = css_rule(crate::styles::admin::CSS, "html:has(.settings-save-bar) {");
+        assert!(
+            pad.contains("scroll-padding-bottom: calc(var(--tab-bar-height, 0%) +"),
+            "{pad}"
+        );
         let main = css_rule(SHELL_CSS, ".site-main {");
         assert!(has_decl(&main, "min-width: 0"), "{main}");
 
         let scroller = css_rule(crate::styles::admin::CSS, ".data-table-scroll {");
         assert!(has_decl(&scroller, "overflow-x: auto"), "{scroller}");
         let relay = include_str!("../pages/admin/relay.rs");
-        let tables = relay.matches("table { class: \"data-table\",").count();
-        assert_eq!(tables, 2, "relay tables");
-        assert_eq!(
-            relay
-                .matches("div { class: \"data-table-scroll\",\n")
-                .count(),
-            tables,
-            "every relay table sits in its own scroller"
+        assert!(!relay.contains("table {"), "no relay table to overflow");
+        let facts = css_rule(relay, ".admin-relay-page .relay-facts {");
+        assert!(
+            has_decl(&facts, "grid-template-columns: max-content minmax(0, 1fr)"),
+            "{facts}"
         );
-        for (at, _) in relay.match_indices("table { class: \"data-table\",") {
-            let before = relay[..at].trim_end();
-            assert!(
-                before.ends_with("div { class: \"data-table-scroll\","),
-                "a relay table is outside the scroller"
-            );
-        }
+        let value = css_rule(relay, ".admin-relay-page .relay-facts dd {");
+        assert!(has_decl(&value, "min-width: 0"), "{value}");
+        assert!(has_decl(&value, "overflow-wrap: anywhere"), "{value}");
+        let urls = css_rule(relay, ".admin-relay-page .relay-facts code {");
+        assert!(has_decl(&urls, "overflow-wrap: anywhere"), "{urls}");
     }
 
     /// QA nit 8: Firefox made the scrolling sub-nav a Tab stop of its own.
@@ -2870,7 +2905,7 @@ mod tests {
 
     #[test]
     fn initials_and_avatar_sources() {
-        assert_eq!(user_initials("Player01"), "PL");
+        assert_eq!(user_initials("Player01"), "P1");
         assert_eq!(user_initials("x"), "X");
         assert_eq!(user_initials("_-"), "?");
         assert_eq!(user_initials(""), "?");
@@ -2941,6 +2976,11 @@ mod tests {
         assert!(has_decl(&app, "min-height: 100vh"), "{app}");
         let bar = css_rule(SHELL_CSS, ".d1-top {");
         assert!(has_decl(&bar, "position: sticky"), "{bar}");
+        let pad = css_rule(crate::styles::admin::CSS, "html:has(.settings-save-bar) {");
+        assert!(
+            pad.contains("scroll-padding-bottom: calc(var(--tab-bar-height, 0%) +"),
+            "{pad}"
+        );
         assert!(has_decl(&bar, "background: var(--bg)"), "{bar}");
     }
 

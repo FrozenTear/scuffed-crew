@@ -8,7 +8,8 @@
     "seed": "node seed-all.mjs",
     "keys": "node keys.mjs",
     "fix2": "node fix2.mjs",
-    "overflow": "node overflow.mjs"
+    "overflow": "node overflow.mjs",
+    "focus": "node focus.mjs"
   },
   "dependencies": {
     "playwright": "1.65.1"

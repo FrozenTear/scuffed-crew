@@ -672,7 +672,7 @@ mod tests {
         assert_eq!(html.matches("<h1").count(), 1, "{html}");
         assert!(html.contains("<h1>Tank basics</h1>"), "{html}");
         assert!(
-            html.contains("<span class=\"article-avatar\" aria-hidden=\"true\">PL</span>"),
+            html.contains("<span class=\"article-avatar\" aria-hidden=\"true\">P3</span>"),
             "{html}"
         );
         assert!(

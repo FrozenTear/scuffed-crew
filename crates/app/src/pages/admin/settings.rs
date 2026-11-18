@@ -9,8 +9,8 @@ use crate::theme::tokens::BG_DARK;
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::UpdateSettingsRequest;
 use scuffed_types::{
-    ContentAlign, HomeShell, HomeSkin, HomepageContent, NavConfig, NavPlacement, PublicLayout,
-    SiteSettings, homepage_preset_by_id, homepage_presets,
+    ContentAlign, HomeShell, HomeSkin, HomepageContent, PublicLayout, SiteSettings,
+    homepage_preset_by_id, homepage_presets,
 };
 
 /// Two pages send `PUT /api/settings`, both admin-only: this one and brand
@@ -27,6 +27,84 @@ fn admin_settings_officers_flag(enabled: bool) -> Option<bool> {
 fn officers_can_edit_teams_hint() -> &'static str {
     "On: Officers can edit a team's name, game, color, and division in Admin → Teams. Lore quote is not on that form, so this switch does not change it. Creating teams stays admin-only. Off (default): those edits stay admin-only. Roster changes are not affected."
 }
+
+/// The Save bar, by the class it renders with.
+const SAVE_BAR_SELECTOR: &str = ".settings-save-bar";
+
+/// Custom property on the root that holds the Save bar's measured height.
+/// The page's `scroll-padding-bottom` reserves the tab bar plus this, so
+/// the strip the browser keeps clear is always as tall as the bar really
+/// is, also when a failed save adds a line to it (QA 706 fix4).
+const SAVE_BAR_HEIGHT_VAR: &str = "--settings-save-bar-height";
+
+/// Keep [`SAVE_BAR_HEIGHT_VAR`] equal to the bar's border-box height
+/// (`onresize`, a ResizeObserver, runs on mount and on every change), and
+/// remove it when the page goes (`None`).
+#[cfg(target_arch = "wasm32")]
+fn sync_save_bar_height(height: Option<f64>) {
+    use wasm_bindgen::JsCast;
+    let Some(root) = web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.document_element())
+        .and_then(|root| root.dyn_into::<web_sys::HtmlElement>().ok())
+    else {
+        return;
+    };
+    let style = root.style();
+    match height.filter(|height| height.is_finite() && *height > 0.0) {
+        Some(height) => {
+            let _ = style.set_property(SAVE_BAR_HEIGHT_VAR, &format!("{}px", height.ceil()));
+        }
+        None => {
+            let _ = style.remove_property(SAVE_BAR_HEIGHT_VAR);
+        }
+    }
+}
+
+/// Outside the browser there is no page to scroll.
+#[cfg(not(target_arch = "wasm32"))]
+fn sync_save_bar_height(_height: Option<f64>) {}
+
+/// Firefox scrolls a newly focused control into view only when none of it
+/// is inside the scroll-padded view. A control that straddles the padding
+/// line (the top of the stuck Save bar) stays where it is, behind the bar.
+/// Chromium scrolls it fully clear. So, after a keyboard focus move in the
+/// form, a focused control that reaches below the top of the bar is scrolled
+/// up until its bottom is on the bar's top, measured against the bar's live
+/// box, so a bar that has just grown is cleared too.
+///
+/// Only keyboard focus (`:focus-visible`): a mouse press focuses on
+/// `mousedown`, and a scroll then would move the control out from under
+/// the pointer. Controls inside the bar itself are left alone.
+#[cfg(target_arch = "wasm32")]
+fn keep_focus_above_save_bar() {
+    use crate::layouts::focus_reveal::{TOP_BAR_SELECTOR, scroll_focus_into_band};
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return;
+    };
+    let Some(focused) = document.active_element() else {
+        return;
+    };
+    if !focused.matches(":focus-visible").unwrap_or(false) {
+        return;
+    }
+    let Some(bar) = document.query_selector(SAVE_BAR_SELECTOR).ok().flatten() else {
+        return;
+    };
+    if bar.contains(Some(&focused)) {
+        return;
+    }
+    let clear_top = document
+        .query_selector(TOP_BAR_SELECTOR)
+        .ok()
+        .flatten()
+        .map_or(0.0, |top| top.get_bounding_client_rect().bottom().max(0.0));
+    scroll_focus_into_band(&focused, clear_top, bar.get_bounding_client_rect().top());
+}
+
+/// Outside the browser there is no page to scroll.
+#[cfg(not(target_arch = "wasm32"))]
+fn keep_focus_above_save_bar() {}
 
 /// The accents the last applied identity pack suggests.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -149,7 +227,7 @@ fn PackBrandStatus(note: String) -> Element {
 fn BrandSettingsLink() -> Element {
     rsx! {
         Link {
-            class: "btn-ghost",
+            class: "btn is-ghost",
             to: Route::AdminBrandSettings {},
             "aria-describedby": "admin-settings-brand-link-warning",
             "Open brand settings"
@@ -157,7 +235,6 @@ fn BrandSettingsLink() -> Element {
         p {
             class: "settings-hint",
             id: "admin-settings-brand-link-warning",
-            style: "margin-top:0.4rem;",
             "{BRAND_LINK_WARNING}"
         }
     }
@@ -198,6 +275,12 @@ fn toggles_shown_after_save(
     }
 }
 
+/// The Strategies switch. The nav shows the Strategy group on its own; there
+/// is no placement to set any more.
+fn strategies_hint() -> &'static str {
+    "On (default): the Strategy group is in the site nav. Off: it is hidden from the nav and /strategy pages are blocked. Existing plans are not deleted. Public Patch Notes (/patch-notes) are unchanged."
+}
+
 #[component]
 pub fn AdminSettings() -> Element {
     let auth = use_auth();
@@ -206,6 +289,10 @@ pub fn AdminSettings() -> Element {
     let mut loaded = use_signal(|| false);
     let mut load_error = use_signal(|| Option::<String>::None);
     let mut reload_tick = use_signal(|| 0u32);
+    // The save line under the form: always rendered, only its text changes.
+    let mut save_state = use_signal(crate::components::SaveState::default);
+    // The reserved strip under the form follows the bar; it goes with the page.
+    use_drop(|| sync_save_bar_height(None));
     // APP3: the shared settings context feeds nav, brand accent, org name and
     // the strategies gate. `try_` so a mount without `App` still renders.
     let site_settings = try_use_context::<SiteSettingsState>();
@@ -222,7 +309,6 @@ pub fn AdminSettings() -> Element {
     let mut home_skin = use_signal(|| HomeSkin::Clean);
     let mut content_align = use_signal(|| ContentAlign::Left);
     let mut homepage = use_signal(HomepageContent::default);
-    let mut nav = use_signal(NavConfig::default);
     let mut page_bg_color = use_signal(String::new);
     let mut page_bg_image_url = use_signal(String::new);
     // Brand accents an identity pack suggested, and the box that decides
@@ -262,11 +348,6 @@ pub fn AdminSettings() -> Element {
                     home_skin.set(s.home_skin);
                     content_align.set(s.homepage.content_align);
                     homepage.set(s.homepage);
-                    let mut n = s.nav;
-                    // Keep GET payload rows (e.g. live Contabo `patch_notes`).
-                    // `normalize()` would drop ids this WASM catalog does not know.
-                    n.prepare_for_editor();
-                    nav.set(n);
                     page_bg_color.set(s.page_bg_color);
                     page_bg_image_url.set(s.page_bg_image_url);
                     pack_brand.write().clear();
@@ -285,13 +366,11 @@ pub fn AdminSettings() -> Element {
         }
     });
 
-    let on_save = move |_| {
+    let mut on_save = move |_: MouseEvent| {
         let age: u32 = min_age().trim().parse().unwrap_or(16);
         // Merge alignment from its own signal so nested write() can't get lost.
         let mut hp = homepage();
         hp.content_align = content_align();
-        let mut n = nav();
-        n.normalize();
         // Dual-write layout from shell (no separate layout control).
         let shell = home_shell();
         let (brand_accent_dark, brand_accent_light) = pack_brand.read().save_accents();
@@ -309,7 +388,9 @@ pub fn AdminSettings() -> Element {
             home_skin: Some(home_skin()),
             public_layout: Some(shell.to_public_layout()),
             homepage: Some(hp.clone()),
-            nav: Some(n),
+            // This page no longer edits nav placement. Leaving the key out
+            // keeps the stored nav config exactly as it is.
+            nav: None,
             page_bg_color: Some(page_bg_color().trim().to_string()),
             page_bg_image_url: Some(page_bg_image_url().trim().to_string()),
             brand_accent_dark,
@@ -317,6 +398,7 @@ pub fn AdminSettings() -> Element {
         };
 
         saving.set(true);
+        save_state.set(crate::components::SaveState::Saving);
         spawn(async move {
             match ApiClient::web()
                 .put_json::<_, SiteSettings>("/api/settings", &body)
@@ -333,9 +415,6 @@ pub fn AdminSettings() -> Element {
                     home_skin.set(s.home_skin);
                     content_align.set(s.homepage.content_align);
                     homepage.set(s.homepage);
-                    let mut n = s.nav;
-                    n.prepare_for_editor();
-                    nav.set(n);
                     page_bg_color.set(s.page_bg_color);
                     page_bg_image_url.set(s.page_bg_image_url);
                     pack_brand.write().clear();
@@ -344,6 +423,9 @@ pub fn AdminSettings() -> Element {
                     recruitment_open.set(s.recruitment_open);
                     committed_toggles.set(Some(committed));
                     toast.show(Toast::success("Settings saved."));
+                    save_state.set(crate::components::SaveState::Saved(
+                        "Settings saved.".to_string(),
+                    ));
                 }
                 Err(e) => {
                     if let Some(committed) = committed_toggles() {
@@ -360,6 +442,15 @@ pub fn AdminSettings() -> Element {
                         homepage.with_mut(|hp| hp.sections = shown.sections);
                     }
                     toast.show(Toast::error(format!("Failed to save settings: {e}")));
+                    // The reason stays on the page after the toast is gone.
+                    // A network failure reads as one short sentence there;
+                    // the browser's raw error (a whole stack in Chromium) is
+                    // for the console only (QA 706 FIX5).
+                    crate::util::log_client_error("settings save", &e);
+                    save_state.set(crate::components::SaveState::failed(
+                        "Could not save settings",
+                        crate::client_error::user_message(&e),
+                    ));
                 }
             }
             saving.set(false);
@@ -372,31 +463,39 @@ pub fn AdminSettings() -> Element {
         };
     }
 
+    let can_save = loaded() && !saving();
+    let load_failed = load_error().map(|err| crate::components::load_error_text("settings", &err));
+
+    // The blocks below keep their old indent on purpose: two open pull
+    // requests edit them, and a re-indent would conflict with every hunk.
     rsx! {
-        div { class: "admin-toolbar sticky-actions",
-            h1 { "Settings" }
-            div { style: "display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center;",
+        crate::components::ui::PageShell {
+            width: crate::components::ui::PageWidth::Narrow,
+            class: "admin-settings-page",
+        crate::components::ui::PageHeader {
+            title: "Settings",
+            lead: "Organization, homepage, appearance, recruitment, features and forum. Nothing changes on the site until you save.",
+            actions: rsx! {
                 a {
-                    class: "btn-ghost",
+                    class: "btn is-ghost",
                     href: "/",
                     target: "_blank",
                     rel: "noopener",
                     "View homepage"
+                    span { class: "visually-hidden", " (opens in a new tab)" }
                 }
-                button {
-                    class: "btn-add",
-                    disabled: saving() || !loaded(),
-                    onclick: on_save,
-                    if saving() { "Saving..." } else { "Save Settings" }
-                }
-            }
+            },
         }
 
-        if let Some(err) = load_error() {
-            div { style: "padding:1rem;border:1px solid var(--loss);border-radius:8px;background:color-mix(in srgb, var(--loss) 12%, transparent);margin-bottom:1rem;",
-                p { style: "color:var(--loss);margin:0 0 0.75rem;", "Failed to load settings: {err}" }
+        // The form and its Save row, one field step apart. A control that
+        // takes focus is kept clear of the stuck Save bar (WCAG 2.4.11).
+        div { class: "form-stack",
+            onfocusin: move |_| keep_focus_above_save_bar(),
+        if let Some(message) = load_failed {
+            div { class: "fetch-error-wrap", role: "alert",
+                p { class: "fetch-error", "{message}" }
                 button {
-                    class: "btn-add",
+                    class: "fetch-error__retry",
                     r#type: "button",
                     onclick: move |_| {
                         load_error.set(None);
@@ -406,7 +505,10 @@ pub fn AdminSettings() -> Element {
                 }
             }
         } else if !loaded() {
-            p { style: "color: var(--text-subtle);", "Loading settings…" }
+            div { class: "admin-pending",
+                p { class: "admin-pending-text", role: "status", "Loading settings..." }
+                crate::components::ui::SkeletonBars { rows: 4 }
+            }
         } else {
             div { class: "settings-page",
             div { class: "form-section",
@@ -417,18 +519,19 @@ pub fn AdminSettings() -> Element {
                 div { class: "form-section-card",
                     div { class: "form-grid",
                         div { class: "form-field span-full",
-                            label { class: "form-label", "Organization name" }
+                            label { class: "field-label", r#for: "settings-org-name", "Organization name" }
                             input {
-                                class: "form-input",
+                                class: "field-input",
+                                id: "settings-org-name",
                                 value: "{org_name}",
                                 oninput: move |e| org_name.set(e.value()),
                             }
                         }
                         div { class: "form-field span-full",
-                            label { class: "form-label", "Site description" }
+                            label { class: "field-label", r#for: "settings-site-description", "Site description" }
                             textarea {
-                                class: "form-textarea",
-                                style: "min-height:4rem;",
+                                class: "field-input",
+                                id: "settings-site-description",
                                 value: "{site_description}",
                                 oninput: move |e| site_description.set(e.value()),
                             }
@@ -444,10 +547,10 @@ pub fn AdminSettings() -> Element {
                     "Start from a pack, then tune shell, skin, and sections. Apply pack fills copy. Save to persist."
                 }
                 div { class: "form-section-card",
-                    label { class: "form-label", style: "margin-bottom:0.5rem;", "Identity pack" }
-                    div { class: "pack-grid",
+                    h3 { class: "settings-subhead", id: "settings-pack-label", "Identity pack" }
+                    div { class: "pack-grid", role: "group", aria_labelledby: "settings-pack-label",
                         for p in homepage_presets() {
-                            {
+                            Fragment { key: "{p.id}", {
                                 let id = p.id.to_string();
                                 let selected = homepage_preset_id() == p.id;
                                 let card_class = if selected {
@@ -461,13 +564,14 @@ pub fn AdminSettings() -> Element {
                                     button {
                                         class: "{card_class}",
                                         r#type: "button",
+                                        aria_pressed: if selected { "true" } else { "false" },
                                         onclick: move |_| homepage_preset_id.set(id.clone()),
                                         span { class: "pack-card-name", "{p.name}" }
                                         span { class: "pack-card-desc", "{p.description}" }
                                         span { class: "pack-card-meta", "{shell} · {skin}" }
                                     }
                                 }
-                            }
+                            } }
                         }
                     }
                     div { class: "pack-actions",
@@ -513,9 +617,9 @@ pub fn AdminSettings() -> Element {
                     PackBrandStatus { note: pack_brand.read().note() }
                 }
 
-                div { class: "form-section-card", style: "margin-top:0.85rem;",
-                    label { class: "form-label", style: "margin-bottom:0.55rem;", "Shell" }
-                    div { class: "option-tiles", style: "margin-bottom:1rem;",
+                div { class: "form-section-card",
+                    h3 { class: "settings-subhead", id: "settings-shell-label", "Shell" }
+                    div { class: "option-tiles", role: "group", aria_labelledby: "settings-shell-label",
                         {
                             let shells = [
                                 (HomeShell::OpsHub, "Ops hub", "Dense board. Schedule, roster table."),
@@ -525,13 +629,14 @@ pub fn AdminSettings() -> Element {
                             ];
                             rsx! {
                                 for (shell, title, blurb) in shells {
-                                    {
+                                    Fragment { key: "{title}", {
                                         let selected = home_shell() == shell;
                                         let cls = if selected { "option-tile is-selected" } else { "option-tile" };
                                         rsx! {
                                             button {
                                                 class: "{cls}",
                                                 r#type: "button",
+                                                aria_pressed: if selected { "true" } else { "false" },
                                                 onclick: move |_| {
                                                     home_shell.set(shell);
                                                     public_layout.set(shell.to_public_layout());
@@ -540,13 +645,13 @@ pub fn AdminSettings() -> Element {
                                                 div { class: "option-tile-blurb", "{blurb}" }
                                             }
                                         }
-                                    }
+                                    } }
                                 }
                             }
                         }
                     }
-                    label { class: "form-label", style: "margin-bottom:0.55rem;", "Skin" }
-                    div { class: "option-tiles", style: "margin-bottom:1rem;",
+                    h3 { class: "settings-subhead", id: "settings-skin-label", "Skin" }
+                    div { class: "option-tiles", role: "group", aria_labelledby: "settings-skin-label",
                         {
                             let skins = [
                                 (HomeSkin::Clean, "Clean", "Sentence-case headings. Default for most packs."),
@@ -554,27 +659,30 @@ pub fn AdminSettings() -> Element {
                             ];
                             rsx! {
                                 for (skin, title, blurb) in skins {
-                                    {
+                                    Fragment { key: "{title}", {
                                         let selected = home_skin() == skin;
                                         let cls = if selected { "option-tile is-selected" } else { "option-tile" };
                                         rsx! {
                                             button {
                                                 class: "{cls}",
                                                 r#type: "button",
+                                                aria_pressed: if selected { "true" } else { "false" },
                                                 onclick: move |_| home_skin.set(skin),
                                                 div { class: "option-tile-title", "{title}" }
                                                 div { class: "option-tile-blurb", "{blurb}" }
                                             }
                                         }
-                                    }
+                                    } }
                                 }
                             }
                         }
                     }
-                    div { class: "form-field", style: "max-width:16rem;",
-                        label { class: "form-label", "Hero text alignment" }
+                    div { class: "form-field",
+                        label { class: "field-label", r#for: "settings-hero-align", "Hero text alignment" }
                         select {
-                            class: "form-input",
+                            class: "field-input",
+                            id: "settings-hero-align",
+                            aria_describedby: "settings-hero-align-hint",
                             value: "{content_align().as_str()}",
                             onchange: move |e| {
                                 content_align.set(ContentAlign::from_str_lossy(&e.value()));
@@ -582,55 +690,50 @@ pub fn AdminSettings() -> Element {
                             option { value: "left", "Left" }
                             option { value: "center", "Center" }
                         }
-                        p { class: "settings-hint", "Hero only. Body blocks stay left." }
+                        p { class: "settings-hint", id: "settings-hero-align-hint",
+                            "Hero only. Body blocks stay left."
+                        }
                     }
                 }
 
-                div { class: "form-section-card", style: "margin-top:0.85rem;",
-                    label { class: "form-label", style: "margin-bottom:0.35rem;", "Visible sections" }
-                    p { class: "settings-hint", style: "margin-bottom:0.65rem;",
-                        "Hero is always on. Empty data may still hide some blocks depending on shell."
-                    }
-                    {
-                        let sections = [
-                            ("ethos", "About / ethos", homepage().sections.ethos),
-                            ("schedule", "Schedule", homepage().sections.schedule),
-                            ("tournaments", "Tournaments", homepage().sections.tournaments),
-                            ("teams", "Teams", homepage().sections.teams),
-                            ("news", "Announcements", homepage().sections.news),
-                            ("recruit", "Recruiting", homepage().sections.recruit),
-                        ];
-                        rsx! {
-                            div { class: "section-chips",
+                div { class: "form-section-card",
+                    fieldset { class: "admin-check-group", aria_describedby: "settings-sections-hint",
+                        // A sub-group like Identity pack, Shell and Skin: same level.
+                        legend { class: "settings-subhead", "Visible sections" }
+                        p { class: "settings-hint", id: "settings-sections-hint",
+                            "Hero is always on. Empty data may still hide some blocks depending on shell."
+                        }
+                        {
+                            let sections = [
+                                ("ethos", "About / ethos", homepage().sections.ethos),
+                                ("schedule", "Schedule", homepage().sections.schedule),
+                                ("tournaments", "Tournaments", homepage().sections.tournaments),
+                                ("teams", "Teams", homepage().sections.teams),
+                                ("news", "Announcements", homepage().sections.news),
+                                ("recruit", "Recruiting", homepage().sections.recruit),
+                            ];
+                            rsx! {
                                 for (key, label, checked) in sections {
-                                    {
-                                        let chip_class = if checked {
-                                            "section-chip is-on"
-                                        } else {
-                                            "section-chip"
-                                        };
-                                        rsx! {
-                                            label { class: "{chip_class}",
-                                                input {
-                                                    r#type: "checkbox",
-                                                    checked: checked,
-                                                    onchange: move |e| {
-                                                        let on = e.checked();
-                                                        let mut hp = homepage.write();
-                                                        match key {
-                                                            "ethos" => hp.sections.ethos = on,
-                                                            "schedule" => hp.sections.schedule = on,
-                                                            "tournaments" => hp.sections.tournaments = on,
-                                                            "teams" => hp.sections.teams = on,
-                                                            "news" => hp.sections.news = on,
-                                                            "recruit" => hp.sections.recruit = on,
-                                                            _ => {}
-                                                        }
-                                                    },
+                                    label { class: "admin-check-row",
+                                        input {
+                                            r#type: "checkbox",
+                                            id: "settings-section-{key}",
+                                            checked: checked,
+                                            onchange: move |e| {
+                                                let on = e.checked();
+                                                let mut hp = homepage.write();
+                                                match key {
+                                                    "ethos" => hp.sections.ethos = on,
+                                                    "schedule" => hp.sections.schedule = on,
+                                                    "tournaments" => hp.sections.tournaments = on,
+                                                    "teams" => hp.sections.teams = on,
+                                                    "news" => hp.sections.news = on,
+                                                    "recruit" => hp.sections.recruit = on,
+                                                    _ => {}
                                                 }
-                                                "{label}"
-                                            }
+                                            },
                                         }
+                                        "{label}"
                                     }
                                 }
                             }
@@ -645,19 +748,20 @@ pub fn AdminSettings() -> Element {
                     "Page background. The brand accent and the display font have their own page."
                 }
                 div { class: "form-section-card",
-                    div { class: "settings-subhead", "Brand" }
-                    p { class: "settings-hint", style: "margin-bottom:0.65rem;",
+                    h3 { class: "settings-subhead", "Brand" }
+                    p { class: "settings-hint",
                         "One accent for both themes, with a live preview and a contrast check."
                     }
                     BrandSettingsLink {}
                     div { class: "settings-divider" }
-                    div { class: "settings-subhead", "Page background" }
-                    div { class: "color-row", style: "margin-bottom:0.85rem;",
-                        div { class: "color-field", style: "max-width:18rem;flex:1 1 14rem;",
-                            label { class: "form-label", "Background color" }
+                    h3 { class: "settings-subhead", "Page background" }
+                    div { class: "color-row",
+                        div { class: "color-field",
+                            label { class: "field-label", r#for: "settings-bg-color", "Background color" }
                             div { class: "swatch-row",
                                 input {
                                     r#type: "color",
+                                    aria_label: "Background color picker",
                                     value: {
                                         let c = page_bg_color();
                                         if c.len() == 7 && c.starts_with('#') {
@@ -669,36 +773,42 @@ pub fn AdminSettings() -> Element {
                                     oninput: move |e| page_bg_color.set(e.value()),
                                 }
                                 input {
-                                    class: "form-input",
-                                    placeholder: "empty = theme default",
+                                    class: "field-input",
+                                    id: "settings-bg-color",
+                                    placeholder: "Theme default",
+                                    aria_describedby: "settings-bg-color-hint",
                                     value: "{page_bg_color}",
                                     oninput: move |e| page_bg_color.set(e.value()),
                                 }
                             }
+                            p { class: "settings-hint", id: "settings-bg-color-hint",
+                                "Leave empty to use the theme's own background."
+                            }
                         }
                         button {
-                            class: "btn-ghost",
+                            class: "btn is-ghost",
                             r#type: "button",
                             onclick: move |_| page_bg_color.set(String::new()),
                             "Clear color"
                         }
                     }
                     div { class: "form-field",
-                        label { class: "form-label", "Background image URL" }
-                        p { class: "settings-hint", style: "margin-bottom:0.4rem;",
-                            "https://… or /uploads/bg.jpg"
+                        label { class: "field-label", r#for: "settings-bg-image", "Background image URL" }
+                        p { class: "settings-hint", id: "settings-bg-image-hint",
+                            "A full https address, or a path such as /uploads/bg.jpg"
                         }
-                        div { style: "display:flex;align-items:center;gap:0.65rem;flex-wrap:wrap;",
+                        div { class: "settings-inline-row",
                             input {
-                                class: "form-input",
-                                style: "flex:1;min-width:12rem;max-width:28rem;",
-                                placeholder: "https://… or /uploads/…",
+                                class: "field-input",
+                                id: "settings-bg-image",
+                                aria_describedby: "settings-bg-image-hint",
                                 value: "{page_bg_image_url}",
                                 oninput: move |e| page_bg_image_url.set(e.value()),
                             }
                             button {
-                                class: "btn-ghost",
+                                class: "btn is-ghost",
                                 r#type: "button",
+                                aria_label: "Clear background image",
                                 onclick: move |_| page_bg_image_url.set(String::new()),
                                 "Clear"
                             }
@@ -711,29 +821,30 @@ pub fn AdminSettings() -> Element {
                 h2 { "Recruitment" }
                 p { class: "form-section-lead", "Public apply pipeline and age gate." }
                 div { class: "form-section-card",
-                    label {
-                        class: if recruitment_open() { "section-chip is-on" } else { "section-chip" },
-                        style: "margin-bottom:0.85rem;",
+                    label { class: "admin-check-row",
                         input {
                             r#type: "checkbox",
+                            id: "settings-recruitment-open",
                             checked: recruitment_open(),
                             onchange: move |e| recruitment_open.set(e.checked()),
                         }
-                        "Recruitment open"
+                        "Recruitment is open"
                     }
                     div { class: "form-grid",
                         div { class: "form-field span-full",
-                            label { class: "form-label", "Message when closed" }
+                            label { class: "field-label", r#for: "settings-recruitment-message", "Message when closed" }
                             textarea {
-                                class: "form-textarea",
+                                class: "field-input",
+                                id: "settings-recruitment-message",
                                 value: "{recruitment_message}",
                                 oninput: move |e| recruitment_message.set(e.value()),
                             }
                         }
                         div { class: "form-field",
-                            label { class: "form-label", "Minimum age" }
+                            label { class: "field-label", r#for: "settings-min-age", "Minimum age" }
                             input {
-                                class: "form-input",
+                                class: "field-input",
+                                id: "settings-min-age",
                                 r#type: "number",
                                 min: "0",
                                 value: "{min_age}",
@@ -750,44 +861,30 @@ pub fn AdminSettings() -> Element {
                     "Turn product areas on or off for this clan. Off hides them from the public site. Patch Notes stay available."
                 }
                 div { class: "form-section-card",
-                    {
-                        let chip_class = if strategies_enabled() {
-                            "section-chip is-on"
-                        } else {
-                            "section-chip"
-                        };
-                        rsx! {
-                            label { class: "{chip_class}", style: "margin-bottom:0.65rem;",
-                                input {
-                                    r#type: "checkbox",
-                                    checked: strategies_enabled(),
-                                    onchange: move |e| strategies_enabled.set(e.checked()),
-                                }
-                                "Strategies"
-                            }
+                    label { class: "admin-check-row",
+                        input {
+                            r#type: "checkbox",
+                            id: "settings-strategies-enabled",
+                            aria_describedby: "settings-strategies-hint",
+                            checked: strategies_enabled(),
+                            onchange: move |e| strategies_enabled.set(e.checked()),
                         }
+                        "Strategies"
                     }
-                    p { class: "settings-hint",
-                        "On (default): Strategies stays in Primary/More if you placed it there. Off: hide it from the public nav and block /strategy pages. Existing plans are not deleted. Public Patch Notes (/patch-notes) are unchanged."
+                    p { class: "settings-hint", id: "settings-strategies-hint",
+                        "{strategies_hint()}"
                     }
-                    {
-                        let chip_class = if officers_can_edit_teams() {
-                            "section-chip is-on"
-                        } else {
-                            "section-chip"
-                        };
-                        rsx! {
-                            label { class: "{chip_class}", style: "margin:0.85rem 0 0.65rem;",
-                                input {
-                                    r#type: "checkbox",
-                                    checked: officers_can_edit_teams(),
-                                    onchange: move |e| officers_can_edit_teams.set(e.checked()),
-                                }
-                                "Officers can edit teams"
-                            }
+                    label { class: "admin-check-row",
+                        input {
+                            r#type: "checkbox",
+                            id: "settings-officers-edit-teams",
+                            aria_describedby: "settings-officers-edit-teams-hint",
+                            checked: officers_can_edit_teams(),
+                            onchange: move |e| officers_can_edit_teams.set(e.checked()),
                         }
+                        "Officers can edit teams"
                     }
-                    p { class: "settings-hint",
+                    p { class: "settings-hint", id: "settings-officers-edit-teams-hint",
                         "{officers_can_edit_teams_hint()}"
                     }
                 }
@@ -804,15 +901,15 @@ pub fn AdminSettings() -> Element {
                         title: "Hero",
                         open_copy: open_copy,
                         div { class: "form-grid",
-                            StrField { label: "Badge", value: homepage().hero_badge.clone(), on_change: move |v| homepage.write().hero_badge = v }
-                            StrField { label: "Primary CTA", value: homepage().cta_primary.clone(), on_change: move |v| homepage.write().cta_primary = v }
-                            StrField { label: "Title", value: homepage().hero_title.clone(), on_change: move |v| homepage.write().hero_title = v }
-                            StrField { label: "Title accent", value: homepage().hero_title_accent.clone(), on_change: move |v| homepage.write().hero_title_accent = v }
+                            StrField { id: "settings-hp-hero-badge", label: "Badge", value: homepage().hero_badge.clone(), on_change: move |v| homepage.write().hero_badge = v }
+                            StrField { id: "settings-hp-cta-primary", label: "Primary CTA", value: homepage().cta_primary.clone(), on_change: move |v| homepage.write().cta_primary = v }
+                            StrField { id: "settings-hp-hero-title", label: "Title", value: homepage().hero_title.clone(), on_change: move |v| homepage.write().hero_title = v }
+                            StrField { id: "settings-hp-hero-title-accent", label: "Title accent", value: homepage().hero_title_accent.clone(), on_change: move |v| homepage.write().hero_title_accent = v }
                             div { class: "span-full",
-                                AreaField { label: "Subtitle", value: homepage().hero_sub.clone(), on_change: move |v| homepage.write().hero_sub = v }
+                                AreaField { id: "settings-hp-hero-sub", label: "Subtitle", value: homepage().hero_sub.clone(), on_change: move |v| homepage.write().hero_sub = v }
                             }
                             div { class: "span-full",
-                                StrField { label: "Secondary CTA", value: homepage().cta_secondary.clone(), on_change: move |v| homepage.write().cta_secondary = v }
+                                StrField { id: "settings-hp-cta-secondary", label: "Secondary CTA", value: homepage().cta_secondary.clone(), on_change: move |v| homepage.write().cta_secondary = v }
                             }
                         }
                     }
@@ -821,13 +918,13 @@ pub fn AdminSettings() -> Element {
                         title: "Ethos",
                         open_copy: open_copy,
                         div { class: "form-grid",
-                            StrField { label: "Kicker", value: homepage().ethos_kicker.clone(), on_change: move |v| homepage.write().ethos_kicker = v }
-                            StrField { label: "Title", value: homepage().ethos_title.clone(), on_change: move |v| homepage.write().ethos_title = v }
+                            StrField { id: "settings-hp-ethos-kicker", label: "Kicker", value: homepage().ethos_kicker.clone(), on_change: move |v| homepage.write().ethos_kicker = v }
+                            StrField { id: "settings-hp-ethos-title", label: "Title", value: homepage().ethos_title.clone(), on_change: move |v| homepage.write().ethos_title = v }
                             div { class: "span-full",
-                                AreaField { label: "Body", value: homepage().ethos_body.clone(), on_change: move |v| homepage.write().ethos_body = v }
+                                AreaField { id: "settings-hp-ethos-body", label: "Body", value: homepage().ethos_body.clone(), on_change: move |v| homepage.write().ethos_body = v }
                             }
                             div { class: "span-full",
-                                LinesField { label: "Rules", value: homepage().ethos_rules.clone(), on_change: move |v| homepage.write().ethos_rules = v }
+                                LinesField { id: "settings-hp-ethos-rules", label: "Rules", value: homepage().ethos_rules.clone(), on_change: move |v| homepage.write().ethos_rules = v }
                             }
                         }
                     }
@@ -836,10 +933,10 @@ pub fn AdminSettings() -> Element {
                         title: "Squads",
                         open_copy: open_copy,
                         div { class: "form-grid",
-                            StrField { label: "Kicker", value: homepage().teams_kicker.clone(), on_change: move |v| homepage.write().teams_kicker = v }
-                            StrField { label: "Title", value: homepage().teams_title.clone(), on_change: move |v| homepage.write().teams_title = v }
+                            StrField { id: "settings-hp-teams-kicker", label: "Kicker", value: homepage().teams_kicker.clone(), on_change: move |v| homepage.write().teams_kicker = v }
+                            StrField { id: "settings-hp-teams-title", label: "Title", value: homepage().teams_title.clone(), on_change: move |v| homepage.write().teams_title = v }
                             div { class: "span-full",
-                                StrField { label: "Empty", value: homepage().teams_empty.clone(), on_change: move |v| homepage.write().teams_empty = v }
+                                StrField { id: "settings-hp-teams-empty", label: "Empty", value: homepage().teams_empty.clone(), on_change: move |v| homepage.write().teams_empty = v }
                             }
                         }
                     }
@@ -848,10 +945,10 @@ pub fn AdminSettings() -> Element {
                         title: "Announcements",
                         open_copy: open_copy,
                         div { class: "form-grid",
-                            StrField { label: "Kicker", value: homepage().news_kicker.clone(), on_change: move |v| homepage.write().news_kicker = v }
-                            StrField { label: "Title", value: homepage().news_title.clone(), on_change: move |v| homepage.write().news_title = v }
-                            StrField { label: "Empty", value: homepage().news_empty.clone(), on_change: move |v| homepage.write().news_empty = v }
-                            StrField { label: "View all", value: homepage().news_view_all.clone(), on_change: move |v| homepage.write().news_view_all = v }
+                            StrField { id: "settings-hp-news-kicker", label: "Kicker", value: homepage().news_kicker.clone(), on_change: move |v| homepage.write().news_kicker = v }
+                            StrField { id: "settings-hp-news-title", label: "Title", value: homepage().news_title.clone(), on_change: move |v| homepage.write().news_title = v }
+                            StrField { id: "settings-hp-news-empty", label: "Empty", value: homepage().news_empty.clone(), on_change: move |v| homepage.write().news_empty = v }
+                            StrField { id: "settings-hp-news-view-all", label: "View all", value: homepage().news_view_all.clone(), on_change: move |v| homepage.write().news_view_all = v }
                         }
                     }
                     CopyPanel {
@@ -859,10 +956,10 @@ pub fn AdminSettings() -> Element {
                         title: "Tournaments",
                         open_copy: open_copy,
                         div { class: "form-grid",
-                            StrField { label: "Kicker", value: homepage().tournaments_kicker.clone(), on_change: move |v| homepage.write().tournaments_kicker = v }
-                            StrField { label: "Title", value: homepage().tournaments_title.clone(), on_change: move |v| homepage.write().tournaments_title = v }
-                            StrField { label: "Empty", value: homepage().tournaments_empty.clone(), on_change: move |v| homepage.write().tournaments_empty = v }
-                            StrField { label: "View all", value: homepage().tournaments_view_all.clone(), on_change: move |v| homepage.write().tournaments_view_all = v }
+                            StrField { id: "settings-hp-tournaments-kicker", label: "Kicker", value: homepage().tournaments_kicker.clone(), on_change: move |v| homepage.write().tournaments_kicker = v }
+                            StrField { id: "settings-hp-tournaments-title", label: "Title", value: homepage().tournaments_title.clone(), on_change: move |v| homepage.write().tournaments_title = v }
+                            StrField { id: "settings-hp-tournaments-empty", label: "Empty", value: homepage().tournaments_empty.clone(), on_change: move |v| homepage.write().tournaments_empty = v }
+                            StrField { id: "settings-hp-tournaments-view-all", label: "View all", value: homepage().tournaments_view_all.clone(), on_change: move |v| homepage.write().tournaments_view_all = v }
                         }
                     }
                     CopyPanel {
@@ -870,10 +967,10 @@ pub fn AdminSettings() -> Element {
                         title: "Schedule",
                         open_copy: open_copy,
                         div { class: "form-grid",
-                            StrField { label: "Kicker", value: homepage().schedule_kicker.clone(), on_change: move |v| homepage.write().schedule_kicker = v }
-                            StrField { label: "Title", value: homepage().schedule_title.clone(), on_change: move |v| homepage.write().schedule_title = v }
-                            StrField { label: "Empty", value: homepage().schedule_empty.clone(), on_change: move |v| homepage.write().schedule_empty = v }
-                            StrField { label: "Calendar CTA", value: homepage().calendar_cta.clone(), on_change: move |v| homepage.write().calendar_cta = v }
+                            StrField { id: "settings-hp-schedule-kicker", label: "Kicker", value: homepage().schedule_kicker.clone(), on_change: move |v| homepage.write().schedule_kicker = v }
+                            StrField { id: "settings-hp-schedule-title", label: "Title", value: homepage().schedule_title.clone(), on_change: move |v| homepage.write().schedule_title = v }
+                            StrField { id: "settings-hp-schedule-empty", label: "Empty", value: homepage().schedule_empty.clone(), on_change: move |v| homepage.write().schedule_empty = v }
+                            StrField { id: "settings-hp-calendar-cta", label: "Calendar CTA", value: homepage().calendar_cta.clone(), on_change: move |v| homepage.write().calendar_cta = v }
                         }
                     }
                     CopyPanel {
@@ -881,23 +978,23 @@ pub fn AdminSettings() -> Element {
                         title: "Recruiting",
                         open_copy: open_copy,
                         div { class: "form-grid",
-                            StrField { label: "Kicker", value: homepage().recruit_kicker.clone(), on_change: move |v| homepage.write().recruit_kicker = v }
-                            StrField { label: "Title", value: homepage().recruit_title.clone(), on_change: move |v| homepage.write().recruit_title = v }
+                            StrField { id: "settings-hp-recruit-kicker", label: "Kicker", value: homepage().recruit_kicker.clone(), on_change: move |v| homepage.write().recruit_kicker = v }
+                            StrField { id: "settings-hp-recruit-title", label: "Title", value: homepage().recruit_title.clone(), on_change: move |v| homepage.write().recruit_title = v }
                             div { class: "span-full",
-                                AreaField { label: "Body", value: homepage().recruit_body.clone(), on_change: move |v| homepage.write().recruit_body = v }
+                                AreaField { id: "settings-hp-recruit-body", label: "Body", value: homepage().recruit_body.clone(), on_change: move |v| homepage.write().recruit_body = v }
                             }
-                            StrField { label: "CTA", value: homepage().recruit_cta.clone(), on_change: move |v| homepage.write().recruit_cta = v }
-                            StrField { label: "Expectations title", value: homepage().recruit_expectations_title.clone(), on_change: move |v| homepage.write().recruit_expectations_title = v }
+                            StrField { id: "settings-hp-recruit-cta", label: "CTA", value: homepage().recruit_cta.clone(), on_change: move |v| homepage.write().recruit_cta = v }
+                            StrField { id: "settings-hp-recruit-expectations-title", label: "Expectations title", value: homepage().recruit_expectations_title.clone(), on_change: move |v| homepage.write().recruit_expectations_title = v }
                             div { class: "span-full",
-                                LinesField { label: "Expectations", value: homepage().recruit_expectations.clone(), on_change: move |v| homepage.write().recruit_expectations = v }
+                                LinesField { id: "settings-hp-recruit-expectations", label: "Expectations", value: homepage().recruit_expectations.clone(), on_change: move |v| homepage.write().recruit_expectations = v }
                             }
-                            StrField { label: "Never-ask title", value: homepage().never_ask_title.clone(), on_change: move |v| homepage.write().never_ask_title = v }
-                            StrField { label: "Seeking label", value: homepage().seeking_label.clone(), on_change: move |v| homepage.write().seeking_label = v }
+                            StrField { id: "settings-hp-never-ask-title", label: "Never-ask title", value: homepage().never_ask_title.clone(), on_change: move |v| homepage.write().never_ask_title = v }
+                            StrField { id: "settings-hp-seeking-label", label: "Seeking label", value: homepage().seeking_label.clone(), on_change: move |v| homepage.write().seeking_label = v }
                             div { class: "span-full",
-                                AreaField { label: "Never-ask body", value: homepage().never_ask_body.clone(), on_change: move |v| homepage.write().never_ask_body = v }
+                                AreaField { id: "settings-hp-never-ask-body", label: "Never-ask body", value: homepage().never_ask_body.clone(), on_change: move |v| homepage.write().never_ask_body = v }
                             }
                             div { class: "span-full",
-                                LinesField { label: "Seeking tags", value: homepage().seeking_tags.clone(), on_change: move |v| homepage.write().seeking_tags = v }
+                                LinesField { id: "settings-hp-seeking-tags", label: "Seeking tags", value: homepage().seeking_tags.clone(), on_change: move |v| homepage.write().seeking_tags = v }
                             }
                         }
                     }
@@ -905,50 +1002,8 @@ pub fn AdminSettings() -> Element {
                         id: "footer",
                         title: "Footer",
                         open_copy: open_copy,
-                        StrField { label: "Footer note", value: homepage().footer_note.clone(), on_change: move |v| homepage.write().footer_note = v }
+                        StrField { id: "settings-hp-footer-note", label: "Footer note", value: homepage().footer_note.clone(), on_change: move |v| homepage.write().footer_note = v }
                     }
-                }
-            }
-
-            div { class: "form-section",
-                div { style: "display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:0.75rem;margin-bottom:0.35rem;",
-                    h2 { style: "margin:0;", "Navigation" }
-                    button {
-                        class: "btn-ghost",
-                        r#type: "button",
-                        onclick: move |_| {
-                            nav.set(NavConfig::default());
-                            toast.show(Toast::success(
-                                "Nav reset to small-org defaults. Click Save to persist.",
-                            ));
-                        },
-                        "Reset defaults"
-                    }
-                }
-                p { class: "form-section-lead",
-                    if strategies_enabled() {
-                        "Primary bar, More menu, or hidden. Small-org default: Members, Forum, Events, Stats primary; Tournaments / Scrims / Strategy under More. Hidden routes still work via URL."
-                    } else {
-                        "Primary bar, More menu, or hidden. Strategies is off under Features. It will not appear in Primary or More even if placed here, and /strategy URLs are blocked. Patch Notes stay available."
-                    }
-                }
-                NavColumn {
-                    title: "Primary bar",
-                    hint: "Shown across the top next to the logo.",
-                    placement: NavPlacement::Primary,
-                    nav: nav,
-                }
-                NavColumn {
-                    title: "More menu",
-                    hint: "Overflow dropdown. Hidden entirely if empty.",
-                    placement: NavPlacement::More,
-                    nav: nav,
-                }
-                NavColumn {
-                    title: "Hidden",
-                    hint: "Not in the nav. Promote when you need them.",
-                    placement: NavPlacement::Hidden,
-                    nav: nav,
                 }
             }
 
@@ -957,104 +1012,62 @@ pub fn AdminSettings() -> Element {
                 p { class: "form-section-lead", "Where forum threads live and optional extra Nostr relays." }
                 div { class: "form-section-card",
                     div { class: "form-field",
-                        label { class: "form-label", "Forum backend" }
+                        label { class: "field-label", r#for: "settings-forum-backend", "Forum backend" }
                         select {
-                            class: "form-input",
+                            class: "field-input",
+                            id: "settings-forum-backend",
+                            aria_describedby: "settings-forum-backend-hint",
                             value: "{forum_backend}",
                             onchange: move |e| forum_backend.set(e.value()),
                             option { value: "local", "Local (SurrealDB)" }
                             option { value: "nostr", "Nostr (Relay)" }
                         }
-                        p { class: "settings-hint",
+                        p { class: "settings-hint", id: "settings-forum-backend-hint",
                             "Local uses the database. Nostr uses the relay (requires relay setup)."
                         }
                     }
-                    div { class: "form-field", style: "margin-top:0.85rem;",
-                        label { class: "form-label", "Extra relay URLs" }
+                    div { class: "form-field",
+                        label { class: "field-label", r#for: "settings-extra-relays", "Extra relay URLs" }
                         textarea {
-                            class: "form-textarea",
-                            placeholder: "ws://relay2:7777\nwss://relay.example.com",
+                            class: "field-input",
+                            id: "settings-extra-relays",
+                            aria_describedby: "settings-extra-relays-hint",
                             value: "{extra_relay_urls}",
                             oninput: move |e| extra_relay_urls.set(e.value()),
                         }
-                        p { class: "settings-hint",
-                            "One per line. Published to primary relay (NOSTR_RELAY_URL) plus these."
+                        p { class: "settings-hint", id: "settings-extra-relays-hint",
+                            "One per line, for example wss://relay.example.com. Published to primary relay (NOSTR_RELAY_URL) plus these."
                         }
                     }
                 }
             }
             }
         }
-    }
-}
 
-#[component]
-fn NavColumn(
-    title: &'static str,
-    hint: &'static str,
-    placement: NavPlacement,
-    mut nav: Signal<NavConfig>,
-) -> Element {
-    let items: Vec<(String, String)> = {
-        let cfg = nav();
-        cfg.editor_items(placement)
-            .into_iter()
-            .map(|row| (row.id, row.label))
-            .collect()
-    };
-
-    rsx! {
-        div { class: "nav-column",
-            h3 { "{title}" }
-            p { class: "nav-hint", "{hint}" }
-            if items.is_empty() {
-                p { style: "color:var(--text-subtle);font-size:0.85rem;margin:0;", "None" }
-            } else {
-                ul { style: "list-style:none;margin:0;padding:0;display:flex;flex-direction:column;",
-                    for (id, label) in items {
-                        li {
-                            key: "nav-item-{id}",
-                            class: "nav-row",
-                            span { class: "nav-row-label", title: "{id}", "{label}" }
-                            span { class: "nav-row-id", "{id}" }
-                            select {
-                                class: "form-input",
-                                value: "{placement.as_str()}",
-                                onchange: {
-                                    let id = id.clone();
-                                    move |e| {
-                                        let p = NavPlacement::from_str_lossy(&e.value());
-                                        nav.write().set_placement(&id, p);
-                                    }
-                                },
-                                option { value: "primary", "Primary" }
-                                option { value: "more", "More" }
-                                option { value: "hidden", "Hidden" }
-                            }
-                            button {
-                                class: "row-btn",
-                                r#type: "button",
-                                title: "Move up",
-                                onclick: {
-                                    let id = id.clone();
-                                    move |_| nav.write().move_item(&id, -1)
-                                },
-                                "↑"
-                            }
-                            button {
-                                class: "row-btn",
-                                r#type: "button",
-                                title: "Move down",
-                                onclick: {
-                                    let id = id.clone();
-                                    move |_| nav.write().move_item(&id, 1)
-                                },
-                                "↓"
-                            }
-                        }
+        // Save sits under the form, with its live line. Both are rendered in
+        // every state; while the settings load, Save does nothing. The bar
+        // sticks to the bottom of the view (above the phone tab bar), so Save
+        // and a failure are in sight anywhere on this long page.
+        div { class: "admin-form-actions settings-save-bar",
+            onresize: move |evt: Event<ResizeData>| {
+                sync_save_bar_height(evt.data().get_border_box_size().ok().map(|size| size.height));
+            },
+            button {
+                class: "btn is-primary",
+                r#type: "button",
+                id: "settings-save",
+                aria_disabled: if !can_save { "true" },
+                aria_describedby: "settings-save-status",
+                onclick: move |evt| {
+                    if can_save {
+                        on_save(evt);
                     }
-                }
+                },
+                if saving() { "Saving..." } else { "Save settings" }
             }
+            crate::components::FormStatus { state: save_state(), id: "settings-save-status" }
+        }
+        }
         }
     }
 }
@@ -1072,37 +1085,51 @@ fn CopyPanel(
     } else {
         "copy-panel"
     };
+    let body_id = format!("settings-copy-{id}");
     rsx! {
         div { class: "{panel_class}",
-            button {
-                class: "copy-panel-head",
-                r#type: "button",
-                onclick: move |_| {
-                    let mut set = open_copy();
-                    if set.contains(id) {
-                        set.remove(id);
-                    } else {
-                        set.insert(id.to_string());
-                    }
-                    open_copy.set(set);
-                },
-                span { class: "copy-panel-title", "{title}" }
-                span { class: "copy-panel-chevron", if is_open { "▼" } else { "▶" } }
+            h3 { class: "copy-panel-heading",
+                button {
+                    class: "copy-panel-head",
+                    r#type: "button",
+                    id: "settings-copy-{id}-toggle",
+                    aria_expanded: if is_open { "true" } else { "false" },
+                    // The body is in the tree only while the panel is open.
+                    aria_controls: is_open.then(|| body_id.clone()),
+                    onclick: move |_| {
+                        let mut set = open_copy();
+                        if set.contains(id) {
+                            set.remove(id);
+                        } else {
+                            set.insert(id.to_string());
+                        }
+                        open_copy.set(set);
+                    },
+                    span { class: "copy-panel-title", "{title}" }
+                    span { class: "copy-panel-chevron", aria_hidden: "true" }
+                }
             }
             if is_open {
-                div { class: "copy-panel-body", {children} }
+                div { class: "copy-panel-body", id: "{body_id}", {children} }
             }
         }
     }
 }
 
+/// One line of homepage copy. `id` is page-unique (the content field's name).
 #[component]
-fn StrField(label: &'static str, value: String, on_change: EventHandler<String>) -> Element {
+fn StrField(
+    id: &'static str,
+    label: &'static str,
+    value: String,
+    on_change: EventHandler<String>,
+) -> Element {
     rsx! {
         div { class: "form-field",
-            label { class: "form-label", "{label}" }
+            label { class: "field-label", r#for: id, "{label}" }
             input {
-                class: "form-input",
+                class: "field-input",
+                id,
                 value: "{value}",
                 oninput: move |e| on_change.call(e.value()),
             }
@@ -1111,12 +1138,18 @@ fn StrField(label: &'static str, value: String, on_change: EventHandler<String>)
 }
 
 #[component]
-fn AreaField(label: &'static str, value: String, on_change: EventHandler<String>) -> Element {
+fn AreaField(
+    id: &'static str,
+    label: &'static str,
+    value: String,
+    on_change: EventHandler<String>,
+) -> Element {
     rsx! {
         div { class: "form-field",
-            label { class: "form-label", "{label}" }
+            label { class: "field-label", r#for: id, "{label}" }
             textarea {
-                class: "form-textarea",
+                class: "field-input",
+                id,
                 value: "{value}",
                 oninput: move |e| on_change.call(e.value()),
             }
@@ -1126,6 +1159,7 @@ fn AreaField(label: &'static str, value: String, on_change: EventHandler<String>
 
 #[component]
 fn LinesField(
+    id: &'static str,
     label: &'static str,
     value: Vec<String>,
     on_change: EventHandler<Vec<String>>,
@@ -1133,10 +1167,10 @@ fn LinesField(
     let joined = value.join("\n");
     rsx! {
         div { class: "form-field",
-            label { class: "form-label", "{label} (one per line)" }
+            label { class: "field-label", r#for: id, "{label} (one per line)" }
             textarea {
-                class: "form-textarea",
-                style: "min-height:5.5rem;",
+                class: "field-input",
+                id,
                 value: "{joined}",
                 oninput: move |e| {
                     let lines = e
@@ -1185,6 +1219,143 @@ mod tests {
 
     /// APP3: without this the public nav, accent, org name and the strategies
     /// gate keep the old values until a reload.
+    #[test]
+    fn appearance_subheads_are_headings_like_their_siblings() {
+        // Vision nit 13 on PR 706: "Brand" and "Page background" were plain
+        // divs while the sibling subheads are h3.
+        let src = include_str!("settings.rs");
+        let prod = src.split("mod tests").next().expect("production half");
+        assert!(prod.contains("h3 { class: \"settings-subhead\", \"Brand\" }"));
+        assert!(prod.contains("h3 { class: \"settings-subhead\", \"Page background\" }"));
+        assert!(!prod.contains("div { class: \"settings-subhead\""));
+    }
+
+    /// QA 706 nit 1 (WCAG 2.4.11): Firefox leaves a focused control that
+    /// straddles the top of the stuck Save bar behind it. The form wrapper
+    /// that holds the bar runs the clear-the-bar check on every focus move,
+    /// and the check looks up the bar by the class the bar really has.
+    #[test]
+    fn focus_moves_in_the_form_keep_the_control_above_the_save_bar() {
+        let src = include_str!("settings.rs");
+        let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let stack = prod
+            .find("div { class: \"form-stack\",")
+            .expect("form wrapper");
+        let wrapper = &prod[stack..];
+        let handler = wrapper
+            .find("onfocusin: move |_| keep_focus_above_save_bar(),")
+            .expect("focus handler on the form wrapper");
+        // The handler is the wrapper's first attribute, before any child.
+        assert!(!wrapper[..handler].contains('}'), "{}", &wrapper[..handler]);
+        // The bar is inside the wrapper the handler listens on.
+        assert!(wrapper.contains("div { class: \"admin-form-actions settings-save-bar\","));
+        assert!(prod.contains("const SAVE_BAR_SELECTOR: &str = \".settings-save-bar\";"));
+        let check = prod
+            .split("#[cfg(target_arch = \"wasm32\")]\nfn keep_focus_above_save_bar() {")
+            .nth(1)
+            .expect("check fn");
+        let check = check.split("\n}\n").next().unwrap();
+        assert!(check.contains(".query_selector(SAVE_BAR_SELECTOR)"));
+        assert!(check.contains("bar.contains(Some(&focused))"));
+        // Positioned against the bar's live box, not the reserved strip.
+        assert!(check.contains(
+            "scroll_focus_into_band(&focused, clear_top, bar.get_bounding_client_rect().top())"
+        ));
+    }
+
+    /// Vision note on PR 706: a mouse press focuses a control on
+    /// `mousedown`; a scroll then would move it out from under the pointer.
+    /// The check returns before it measures anything unless the focus is
+    /// keyboard focus (`:focus-visible`). browser-checks/focus.mjs clicks a
+    /// checkbox that straddles the bar and checks the page did not move.
+    #[test]
+    fn only_keyboard_focus_is_moved_clear_of_the_save_bar() {
+        let src = include_str!("settings.rs");
+        let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let check = prod
+            .split("#[cfg(target_arch = \"wasm32\")]\nfn keep_focus_above_save_bar() {")
+            .nth(1)
+            .expect("check fn");
+        let gate = check
+            .find("if !focused.matches(\":focus-visible\").unwrap_or(false) {\n        return;\n    }")
+            .expect(":focus-visible gate");
+        let measure = check.find("get_bounding_client_rect").expect("measure");
+        let scroll = check.find("scroll_focus_into_band(").expect("scroll");
+        assert!(gate < measure && gate < scroll, "{check}");
+    }
+
+    /// QA 706 fix4: a failed save adds a line to the bar, so the strip the
+    /// page reserves under the form follows the bar's measured height. The
+    /// bar reports every size change (`onresize`) into the custom property
+    /// that `scroll-padding-bottom` reads, and the page removes it on drop.
+    #[test]
+    fn the_reserved_strip_follows_the_save_bar_height() {
+        let src = include_str!("settings.rs");
+        let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        assert!(prod.contains("const SAVE_BAR_HEIGHT_VAR: &str = \"--settings-save-bar-height\";"));
+        let bar = prod
+            .split("div { class: \"admin-form-actions settings-save-bar\",")
+            .nth(1)
+            .expect("bar");
+        assert!(bar.trim_start().starts_with(
+            "onresize: move |evt: Event<ResizeData>| {\n                sync_save_bar_height(evt.data().get_border_box_size().ok().map(|size| size.height));"
+        ), "{}", &bar[..200]);
+        assert!(prod.contains("use_drop(|| sync_save_bar_height(None));"));
+        let sync = prod
+            .split(
+                "#[cfg(target_arch = \"wasm32\")]\nfn sync_save_bar_height(height: Option<f64>) {",
+            )
+            .nth(1)
+            .expect("sync fn");
+        assert!(sync.contains(".style()"));
+        assert!(sync.contains("style.set_property(SAVE_BAR_HEIGHT_VAR,"));
+        assert!(sync.contains("style.remove_property(SAVE_BAR_HEIGHT_VAR)"));
+
+        let css = crate::styles::admin::CSS;
+        let rule = css
+            .split("html:has(.settings-save-bar) {")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .expect("padding rule");
+        assert!(
+            rule.contains(
+                "scroll-padding-bottom: calc(var(--tab-bar-height, 0%) + var(--settings-save-bar-height, "
+            ),
+            "{rule}"
+        );
+    }
+
+    /// QA 706 FIX5: the Save bar's live line is clamped to three lines, so
+    /// a long failure reason can never make the bar huge. The text is
+    /// clipped, not removed, so a screen reader still gets all of it.
+    #[test]
+    fn the_save_bar_line_is_clamped_to_three_lines() {
+        let css = crate::styles::admin::CSS;
+        let rule = css
+            .split(".settings-save-bar .admin-form-status:not(:empty) {")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .expect("clamp rule");
+        for decl in [
+            "display: -webkit-box;",
+            "-webkit-box-orient: vertical;",
+            "-webkit-line-clamp: 3;",
+            "line-clamp: 3;",
+            "overflow: hidden;",
+            "overflow-wrap: anywhere;",
+            "min-width: 0;",
+        ] {
+            assert!(rule.contains(decl), "{decl} missing in {rule}");
+        }
+        // Clipped, not hidden: no display: none, no aria-hidden on the line.
+        assert!(!rule.contains("display: none"));
+        let src = include_str!("settings.rs");
+        let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        assert!(prod.contains(
+            "crate::components::FormStatus { state: save_state(), id: \"settings-save-status\" }"
+        ));
+    }
+
     #[test]
     fn a_successful_save_updates_the_shared_settings() {
         let src = include_str!("settings.rs");
@@ -1437,13 +1608,18 @@ mod tests {
 
         let css = crate::styles::admin::CSS;
         let hint = css.find(".settings-hint {").expect("hint rule");
+        // The line is a direct child of the section card, so the empty rule
+        // must also come after the card's hint spacing to win the tie.
+        let card_hint = css
+            .find(".form-section-card > .settings-hint {")
+            .expect("card hint rule");
         let spaced = css
-            .find(".pack-brand-status { margin-top: 0.65rem; }")
+            .find(".pack-brand-status { margin-top: var(--space-2); }")
             .expect("spacing rule");
         let empty_rule = css
             .find(".pack-brand-status:empty { margin: 0; }")
             .expect("the empty line gives its margin back");
-        assert!(hint < spaced && spaced < empty_rule);
+        assert!(hint < spaced && card_hint < spaced && spaced < empty_rule);
     }
 
     /// The page shows the state through these calls. Behaviour is covered
@@ -1556,6 +1732,9 @@ mod tests {
             "{tag}"
         );
         assert!(rest.starts_with("Open brand settings</a>"), "{rest}");
+        // The shared button recipe, not the legacy `btn-ghost` (Vision nit 3
+        // on PR 706).
+        assert!(tag.contains("class=\"btn is-ghost\""), "{tag}");
         // The id the link points at is the visible warning, once.
         assert_eq!(
             html.matches("id=\"admin-settings-brand-link-warning\"")
@@ -1679,5 +1858,132 @@ mod tests {
             ],
             "only the two admin settings pages build a settings PUT, so officers never send this key"
         );
+    }
+
+    fn prod_source() -> &'static str {
+        include_str!("settings.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("page source")
+    }
+
+    /// The nav placement editor is gone from admin. The save leaves the key
+    /// out, so the server keeps the stored nav config as it is: nothing a
+    /// stale bundle does not know can be dropped by a settings save.
+    #[test]
+    fn save_leaves_the_stored_nav_config_alone() {
+        let prod = prod_source();
+        let save = prod
+            .split("let body = UpdateSettingsRequest")
+            .nth(1)
+            .expect("save body");
+        let body_src = &save[..save.find("};").expect("end of save body")];
+        assert!(body_src.contains("nav: None,"), "{body_src}");
+        let omitted = serde_json::to_value(UpdateSettingsRequest::default()).expect("serialize");
+        assert!(
+            omitted.get("nav").is_none(),
+            "an omitted nav key must not reach the server as null"
+        );
+        for gone in [
+            "NavPlacement",
+            "NavColumn",
+            "editor_items",
+            "set_placement",
+            "move_item",
+            "prepare_for_editor",
+            "\"Navigation\"",
+        ] {
+            assert!(!prod.contains(gone), "{gone} is still on the settings page");
+        }
+        assert!(!crate::styles::admin::CSS.contains(".nav-column"));
+        assert!(!crate::styles::admin::CSS.contains(".nav-row"));
+    }
+
+    /// Every field label on this page is tied to its control by id. (S4d
+    /// allowed the two accent labels; S3 moved the accents to brand
+    /// settings, so none is left untied.)
+    #[test]
+    fn field_labels_are_tied_by_id_and_nothing_is_styled_inline() {
+        let prod = prod_source();
+        let untied: Vec<&str> = prod
+            .lines()
+            .filter(|line| {
+                line.contains("label { class: \"field-label\"")
+                    || line.contains("label { class: \"form-label\"")
+            })
+            .filter(|line| !line.contains("r#for:"))
+            .map(str::trim)
+            .collect();
+        assert!(untied.is_empty(), "labels without a for: {untied:?}");
+        // Ids are fixed, page-unique names.
+        let mut ids: Vec<&str> = prod
+            .split("id: \"settings-")
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next())
+            .collect();
+        let count = ids.len();
+        assert!(count > 40, "{count}");
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), count, "a settings id is used twice");
+        assert!(
+            !prod.contains("style:"),
+            "spacing comes from the shared classes"
+        );
+    }
+
+    #[test]
+    fn page_is_narrow_with_one_h1_and_an_always_rendered_save_line() {
+        use crate::components::admin_shared::test_page::render_admin_route;
+        use scuffed_types::OrgRole;
+
+        let html = render_admin_route("/admin/settings", Some(OrgRole::Admin));
+        assert!(
+            html.contains("class=\"ui-shell ui-shell--narrow admin-settings-page\""),
+            "{html}"
+        );
+        assert_eq!(html.matches("<h1").count(), 1, "{html}");
+        assert!(html.contains("<h1>Settings</h1>"), "{html}");
+        assert_eq!(html.matches("<main").count(), 1, "{html}");
+        // Nothing has loaded: a labelled wait, and Save does nothing yet.
+        assert!(
+            html.contains("role=\"status\">Loading settings...</p>"),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                "id=\"settings-save\" aria-disabled=\"true\" aria-describedby=\"settings-save-status\""
+            ),
+            "{html}"
+        );
+        assert!(html.contains(">Save settings</button>"), "{html}");
+        // The save line is in the tree before anything is saved.
+        assert!(
+            html.contains(
+                "<p id=\"settings-save-status\" class=\"admin-form-status\" role=\"status\"></p>"
+            ),
+            "{html}"
+        );
+
+        // An officer gets the no-access page, with its own single H1.
+        let denied = render_admin_route("/admin/settings", Some(OrgRole::Officer));
+        assert_eq!(denied.matches("<h1").count(), 1, "{denied}");
+        assert!(
+            denied.contains("<h1>You do not have access</h1>"),
+            "{denied}"
+        );
+        assert!(
+            denied.contains("You need admin permissions to view settings."),
+            "{denied}"
+        );
+        assert!(!denied.contains("id=\"settings-save\""), "{denied}");
+    }
+
+    #[test]
+    fn strategies_hint_no_longer_talks_about_nav_placement() {
+        let hint = strategies_hint();
+        assert!(!hint.contains("Primary"), "{hint}");
+        assert!(!hint.contains("More"), "{hint}");
+        assert!(hint.contains("/strategy pages are blocked"), "{hint}");
     }
 }

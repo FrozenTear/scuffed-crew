@@ -318,7 +318,7 @@ fn ThreadView(
                             aria_labelledby: REPLIES_HEADING_ID,
                             h2 { id: REPLIES_HEADING_ID, class: "visually-hidden", "Replies" }
                             for r in resp.replies.iter() {
-                                {render_reply(r, names.as_ref())}
+                                Fragment { key: "{r.id}", {render_reply(r, names.as_ref())} }
                             }
                             if resp.reply_count == 0 {
                                 p { class: "forum-note", "No replies yet." }
@@ -569,7 +569,7 @@ mod tests {
         // The starter is in the header line, with the reply count.
         assert!(
             html.contains(
-                "<p class=\"article-byline\"><span class=\"article-avatar\" aria-hidden=\"true\">PL</span><span class=\"entry-author\">Player02</span>"
+                "<p class=\"article-byline\"><span class=\"article-avatar\" aria-hidden=\"true\">P2</span><span class=\"entry-author\">Player02</span>"
             ),
             "{html}"
         );

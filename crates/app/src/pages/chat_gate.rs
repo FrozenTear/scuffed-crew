@@ -222,8 +222,11 @@ mod tests {
             assert!(body.contains(CHAT_OFF_LEAD), "{path} {body}");
             assert!(body.contains(">Return home</a>"), "{path} {body}");
             assert!(!body.contains("<button"), "{path} {body}");
+            // The DM login wall's own title (Vision nit 7 on PR 706: this
+            // checked copy that no longer exists anywhere, so it could not
+            // fail).
             assert!(
-                !html.contains("You must be signed in"),
+                !html.contains("Log in to read your messages"),
                 "{path} must not fall through to the DM login wall: {html}"
             );
         }
@@ -295,7 +298,7 @@ mod tests {
     fn configured_relay_keeps_today_dm_and_chat_entry() {
         let dm = render_route("/dm", RelayAvailability::On);
         assert!(
-            dm.contains("You must be signed in"),
+            dm.contains("Log in to read your messages"),
             "logged-out DMs stay the login wall when a relay is configured: {dm}"
         );
         assert!(!shows_unavailable(&dm), "{dm}");

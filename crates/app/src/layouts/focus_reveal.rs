@@ -32,6 +32,52 @@ pub(crate) fn focus_needs_reveal(top: f64, bottom: f64, clear_top: f64, clear_bo
     top < clear_top - EDGE_SLACK_PX || bottom > clear_bottom + EDGE_SLACK_PX
 }
 
+/// How far the page must scroll (viewport px, positive is down) so that a
+/// focused box (`top`..`bottom`) sits inside the band
+/// `clear_top`..`clear_bottom`, or `None` when it already does or can never
+/// fit. The box then ends exactly on the edge it crossed. Whole pixels,
+/// rounded away from the edge, so sub-pixel layout cannot leave it a
+/// fraction under a bar.
+pub(crate) fn reveal_scroll_delta(
+    top: f64,
+    bottom: f64,
+    clear_top: f64,
+    clear_bottom: f64,
+) -> Option<f64> {
+    if !focus_needs_reveal(top, bottom, clear_top, clear_bottom) {
+        return None;
+    }
+    if bottom > clear_bottom + EDGE_SLACK_PX {
+        Some((bottom - clear_bottom).ceil())
+    } else {
+        Some((top - clear_top).floor())
+    }
+}
+
+/// Scroll the page by [`reveal_scroll_delta`], measured against the bars'
+/// live boxes rather than the scroller's `scroll-padding`: a bar that grows
+/// (the settings Save bar with its error line) is cleared at once, even
+/// before any reserved space has caught up. Returns whether it scrolled.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn scroll_focus_into_band(
+    focused: &web_sys::Element,
+    clear_top: f64,
+    clear_bottom: f64,
+) -> bool {
+    let rect = focused.get_bounding_client_rect();
+    let Some(delta) = reveal_scroll_delta(rect.top(), rect.bottom(), clear_top, clear_bottom)
+    else {
+        return false;
+    };
+    match web_sys::window() {
+        Some(window) => {
+            window.scroll_by_with_x_and_y(0.0, delta);
+            true
+        }
+        None => false,
+    }
+}
+
 /// Scroll `focused` the least distance (`block: "nearest"`) when it is not
 /// fully inside the band `clear_top`..`clear_bottom` (viewport px). Returns
 /// whether it asked for a scroll.
@@ -116,7 +162,7 @@ pub(crate) fn keep_focus_clear_of_bars(evt: &web_sys::Event) {
 /// Where a focus stop is part of the scrolling page, not of the chrome.
 const PAGE_CONTENT_SELECTOR: &str = "main#main, footer.site-footer";
 /// The sticky top bar.
-const TOP_BAR_SELECTOR: &str = "header.d1-top";
+pub(crate) const TOP_BAR_SELECTOR: &str = "header.d1-top";
 /// The fixed tab bar, shown on phone only.
 const TAB_BAR_SELECTOR: &str = "nav.site-tab-bar";
 
@@ -153,6 +199,24 @@ mod tests {
         // A whole tab panel or `main`: it cannot fit, so no scroll.
         assert!(!focus_needs_reveal(300.0, 1500.0, 64.0, 799.0));
         assert!(!focus_needs_reveal(-200.0, 900.0, 64.0, 799.0));
+    }
+
+    /// QA 706 fix4, with QA's numbers: after a failed save the Save bar's
+    /// top is at 699 at 390x844 (101px bar over the 45px tab bar), and the
+    /// "About / ethos" box was left at 712-730. It moves up by exactly the
+    /// part under the bar, so its bottom lands on the bar's top.
+    #[test]
+    fn the_scroll_delta_lands_the_box_on_the_edge_it_crossed() {
+        assert_eq!(reveal_scroll_delta(712.0, 730.0, 64.0, 699.0), Some(31.0));
+        // Sub-pixel: rounded away from the bar, never short of it.
+        assert_eq!(reveal_scroll_delta(712.0, 729.6, 64.0, 699.0), Some(31.0));
+        // Fully hidden under the bar (Firefox leaves it there).
+        assert_eq!(reveal_scroll_delta(730.0, 748.0, 64.0, 699.0), Some(49.0));
+        // Under the top bar: up, so its top lands on the bar's bottom.
+        assert_eq!(reveal_scroll_delta(50.5, 94.0, 64.0, 699.0), Some(-14.0));
+        // Inside the band, or too tall to fit: no scroll.
+        assert_eq!(reveal_scroll_delta(400.0, 699.0, 64.0, 699.0), None);
+        assert_eq!(reveal_scroll_delta(0.0, 900.0, 64.0, 699.0), None);
     }
 
     /// The guard measures the real bars by the classes they render with,

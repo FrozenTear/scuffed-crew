@@ -552,7 +552,7 @@ fn MembersIndex(
                         }
                         div { class: "member-grid",
                             for m in page_slice(&visible, page, MEMBERS_PAGE_SIZE).iter().copied() {
-                                {render_member_card(m, hero.as_deref())}
+                                Fragment { key: "{m.id}", {render_member_card(m, hero.as_deref())} }
                             }
                         }
                     },
@@ -813,7 +813,12 @@ mod tests {
         let html = render(view(Load::Ready(roster(vec![admin, member(2, None)]))));
         assert_eq!(html.matches("<article class=\"member-card\">").count(), 2);
         assert!(
-            html.contains("<div class=\"member-tile\" aria-hidden=\"true\">PL</div>"),
+            html.contains("<div class=\"member-tile\" aria-hidden=\"true\">P1</div>"),
+            "{html}"
+        );
+        // Player01 and Player02 get different tiles (the shared avatar rule).
+        assert!(
+            html.contains("<div class=\"member-tile\" aria-hidden=\"true\">P2</div>"),
             "{html}"
         );
         assert!(
