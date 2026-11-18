@@ -23,6 +23,7 @@ Digit training crops now wait for a Tab where your damage, healing or mitigation
 
 - A short game that never reaches 1000 in damage, healing or mitigation still records as before. It just sends no digit set.
 - A Tab under 1000 does not use up the game's digit set, so a later Tab of the same game can still send one. A game sends one set, though restarting the tracker mid game can let it send another.
+- A game continued after a crash or rejoin, where your board in Overwatch starts again from zero, sends no digit set at all, even once a stat passes 1000 again. It still records as before.
 - The second map banner of a game, a nearly identical crop taken a minute after the first, is kept only in the local debug folder and is no longer sent for training.
 
 ## 0.6.0-alpha.4

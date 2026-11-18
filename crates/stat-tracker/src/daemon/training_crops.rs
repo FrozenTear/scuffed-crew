@@ -31,7 +31,10 @@
 //!   zeros. Only this Tab's own sure read that the gate stored counts
 //!   ([`sure_accepted_big_stats`]), never a held total from an earlier
 //!   Tab. A Tab under it is not marked offered: a later Tab of the same
-//!   game retries, and a game that never reaches it keeps no set.
+//!   game retries, and a game that never reaches it keeps no set. A game a
+//!   rejoin continued after a crash keeps no set at all, from the board
+//!   that continued it to the game's end, whatever its columns read
+//!   ([`digit_gate_big_stats`]).
 //!   ocr-v1 has no own row verdict (its row is a name match or the brightest
 //!   row, which a hover or a party tint can light on another player's row),
 //!   so it offers none.
@@ -79,9 +82,10 @@ pub(crate) struct TabCropSource<'a> {
     pub(crate) hero: Option<&'a str>,
     /// Damage, healing and mitigation for the [`STAT_DIGITS_MIN_BIG_STAT`]
     /// gate: this Tab's own sure read that the capture gate accepted and
-    /// stored ([`sure_accepted_big_stats`]). `None` when the cell was not
-    /// read for sure on this Tab, or was held or refused by the gate; that
-    /// does not meet the gate. `Some(0)` is a sure read of zero.
+    /// stored ([`digit_gate_big_stats`]). `None` when the cell was not
+    /// read for sure on this Tab, or was held or refused by the gate, and
+    /// in every column on any Tab of a game a rejoin continued; that does
+    /// not meet the gate. `Some(0)` is a sure read of zero.
     pub(crate) damage: Option<u32>,
     pub(crate) healing: Option<u32>,
     pub(crate) mitigation: Option<u32>,
@@ -207,6 +211,25 @@ pub(crate) fn sure_accepted_big_stats(reads: &TabReads, stored: &[u32; 6]) -> [O
             .filter(|read| !read.unsure && read.value == Some(stored[col]))
             .map(|_| stored[col])
     })
+}
+
+/// The big stats [`TabCropSource`] carries for the
+/// [`STAT_DIGITS_MIN_BIG_STAT`] gate: [`sure_accepted_big_stats`], except
+/// on a game a rejoin continued (`rejoined`: the game's `rejoin_carry` is
+/// set, from the zero board that continued it on), where every column is
+/// `None` for the rest of the game. Such a game saves no `stat_digits`
+/// set at all: its stored totals add the pre-crash carry to what the
+/// screen shows, and a column whose carry is 0 (or one that grew past
+/// 1000 after the rejoin) would otherwise still qualify.
+pub(crate) fn digit_gate_big_stats(
+    reads: &TabReads,
+    stored: &[u32; 6],
+    rejoined: bool,
+) -> [Option<u32>; 3] {
+    if rejoined {
+        return [None; 3];
+    }
+    sure_accepted_big_stats(reads, stored)
 }
 
 /// Whether a Tab's own `damage`, `healing` or `mitigation` reaches

@@ -415,3 +415,63 @@ async fn a_rejoin_zero_board_with_held_pre_crash_totals_saves_no_digit_set() {
         "no set from the zero board"
     );
 }
+
+// ---- a game a rejoin continued saves no set
+
+/// The sure Tabs after the rejoin: elims, damage and healing climb, and
+/// healing passes 1000 on screen.
+const AFTER_REJOIN: [(u32, u32, u32); 3] = [(2, 400, 600), (4, 900, 1200), (6, 1500, 2500)];
+
+/// Plays `pre_crash` on `session_id`, then (when `rejoin`) a restart and a
+/// sure zero board that continues the game as a rejoin, then the
+/// [`AFTER_REJOIN`] Tabs, with stat_digits consent on from the restart.
+/// Returns the digit cells queued for the game.
+async fn digits_after(session_id: &str, pre_crash: [u32; 6], rejoin: bool) -> usize {
+    let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = o8_ctx(dir.path(), true).await;
+    let mut now = test_now();
+    let mut st = open_game(session_id, now);
+    set_consent(dir.path(), false, false);
+    let before = o10_board(pre_crash.map(sure));
+    assert!(next_tab(&ctx, &mut st, &mut now, before).await);
+    set_consent(dir.path(), false, true);
+    if rejoin {
+        mark_restart_recovered(&mut st, now);
+        let zeros = o10_board([sure(0); 6]);
+        assert!(next_tab(&ctx, &mut st, &mut now, zeros).await);
+        let carry = st.active_game.as_ref().unwrap().rejoin_carry;
+        assert!(carry.is_some(), "the zero board continued the game");
+        assert_eq!(settled_digits(dir.path()).await, 0, "zero board");
+    }
+    for (e, d, h) in AFTER_REJOIN {
+        let board = o10_board([sure(e), sure(1), sure(1), sure(d), sure(h), sure(0)]);
+        assert!(next_tab(&ctx, &mut st, &mut now, board).await, "{d}/{h}");
+        let carry = st.active_game.as_ref().unwrap().rejoin_carry;
+        assert_eq!(carry.is_some(), rejoin, "{d}/{h}");
+    }
+    settled_digits(dir.path()).await
+}
+
+/// After a rejoin the game saves no digit set at all. A DPS: the pre-crash
+/// healing is 0, so the healing column's carry is 0 and the stored healing
+/// follows the screen past 1000.
+#[tokio::test]
+async fn a_rejoin_game_saves_no_digit_set_with_a_zero_healing_carry() {
+    let digits = digits_after("dt-rejoin-zero", [12, 5, 3, 4200, 0, 0], true).await;
+    assert_eq!(digits, 0, "a game a rejoin continued saves no digit set");
+}
+
+/// Same with a carry in every big column.
+#[tokio::test]
+async fn a_rejoin_game_saves_no_digit_set_with_a_nonzero_carry() {
+    let digits = digits_after("dt-rejoin-carry", [12, 5, 3, 4200, 300, 200], true).await;
+    assert_eq!(digits, 0, "a game a rejoin continued saves no digit set");
+}
+
+/// Control: the same Tabs on a game no rejoin continued save one set.
+#[tokio::test]
+async fn the_same_tabs_without_a_rejoin_save_one_digit_set() {
+    let digits = digits_after("dt-no-rejoin", [1, 0, 0, 300, 0, 0], false).await;
+    assert_eq!(digits, 6, "one set from the first Tab past 1000");
+}

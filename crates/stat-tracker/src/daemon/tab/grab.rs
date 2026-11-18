@@ -1210,7 +1210,7 @@ pub(crate) async fn handle_capture(
                     parsed.healing,
                     parsed.mitigation,
                 ];
-                big_reads = sure_accepted_big_stats(&tab, &stored);
+                big_reads = digit_gate_big_stats(&tab, &stored, rejoin.carry.is_some());
                 let read = [
                     &mut ocr_parsed.elims,
                     &mut ocr_parsed.assists,
@@ -1304,7 +1304,7 @@ pub(crate) async fn handle_capture(
             // Stat digits only from the new reader's own row verdict when it
             // names this row and is confirmed (Trust::Sure), and with this Tab's own hero
             // read: a held hero can be the last game's. The 1000 gate counts
-            // only this Tab's sure accepted reads, never a held total.
+            // only this Tab's sure accepted reads, never on a rejoined game.
             let crop_source = TabCropSource {
                 panel: career_portrait.as_ref(),
                 pack_hero: pack_hero.as_deref(),
