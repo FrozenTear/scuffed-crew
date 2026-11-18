@@ -88,7 +88,7 @@ const CSS: &str = r#"
 
 #[component]
 pub fn TrainingCropSettings(member_id: String) -> Element {
-    // Consent for the three kinds.
+    // Consent for the four kinds.
     let mut consent = use_signal(|| None::<CropConsent>);
     let mut consent_failed = use_signal(|| false);
     let mut consent_status = use_signal(|| crops::LOADING.to_string());
@@ -165,7 +165,7 @@ pub fn TrainingCropSettings(member_id: String) -> Element {
 
     // Show the change at once, send only the kind that changed (the server
     // keeps the others, so a stale tab cannot turn a kind back on), then take
-    // all three values from the server's answer. On failure the switch goes
+    // all four values from the server's answer. On failure the switch goes
     // back.
     let save_consent = {
         let member_id = member_id.clone();
@@ -604,9 +604,9 @@ mod tests {
     }
 
     #[test]
-    fn three_switches_named_by_their_own_labels() {
+    fn four_switches_named_by_their_own_labels() {
         let html = render(section);
-        assert_eq!(html.matches("role=\"switch\"").count(), 3, "{html}");
+        assert_eq!(html.matches("role=\"switch\"").count(), 4, "{html}");
         for kind in ConsentKind::ALL {
             let switch = crops::switch_id("m1", kind);
             let label = crops::label_id("m1", kind);
@@ -630,7 +630,7 @@ mod tests {
     #[test]
     fn switches_are_off_and_disabled_while_loading() {
         let html = render(section);
-        assert_eq!(html.matches("aria-checked=\"false\"").count(), 3, "{html}");
+        assert_eq!(html.matches("aria-checked=\"false\"").count(), 4, "{html}");
         assert!(!html.contains("aria-checked=\"true\""), "{html}");
         for kind in ConsentKind::ALL {
             let switch = crops::switch_id("m1", kind);
