@@ -81,7 +81,9 @@ pub async fn submit_application(
     // Input check first: no DB read or write for a body that cannot be stored.
     // `preferred_roles` may be empty.
     if !application_message_is_long_enough(body.message.as_deref()) {
-        return Err(bad_request("Message must be at least 10 characters"));
+        return Err(bad_request(&format!(
+            "Message must be at least {MIN_APPLICATION_MESSAGE_CHARS} characters"
+        )));
     }
 
     let recruitment = match state.db.get_settings().await {
@@ -1232,6 +1234,37 @@ mod tests {
         )));
     }
 
+    #[test]
+    fn message_length_trims_unicode_whitespace_padding() {
+        // U+3000 and U+00A0 are Unicode White_Space, so `trim` removes them.
+        // Padding to 10+ chars with them does not count.
+        let ideographic = "\u{3000}123456789\u{3000}";
+        assert!(ideographic.chars().count() >= 10);
+        assert!(!application_message_is_long_enough(Some(ideographic)));
+        let no_break = "\u{00A0}123456789\u{00A0}";
+        assert!(no_break.chars().count() >= 10);
+        assert!(!application_message_is_long_enough(Some(no_break)));
+        // Exactly 10 chars, one of them the padding.
+        assert!(!application_message_is_long_enough(Some(
+            "\u{3000}123456789"
+        )));
+        assert!(!application_message_is_long_enough(Some(
+            "123456789\u{00A0}"
+        )));
+    }
+
+    #[test]
+    fn message_length_counts_combining_marks_and_skin_tone_modifiers_as_chars() {
+        // 5 graphemes, 10 chars: base letter + U+0301 combining acute accent.
+        let combining = "e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}";
+        assert_eq!(combining.chars().count(), 10);
+        assert!(application_message_is_long_enough(Some(combining)));
+        // 5 graphemes, 10 chars: thumbs up + U+1F3FD skin-tone modifier.
+        let skin_tone = "\u{1F44D}\u{1F3FD}".repeat(5);
+        assert_eq!(skin_tone.chars().count(), 10);
+        assert!(application_message_is_long_enough(Some(&skin_tone)));
+    }
+
     /// Submit as a fresh non-member account with the given roles and message.
     async fn submit_as(
         state: &AppState,
@@ -1264,7 +1297,10 @@ mod tests {
             "short message must fail",
         );
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(body.error, "Message must be at least 10 characters");
+        assert_eq!(
+            body.error,
+            format!("Message must be at least {MIN_APPLICATION_MESSAGE_CHARS} characters")
+        );
         assert!(
             state
                 .db
@@ -1294,6 +1330,35 @@ mod tests {
         let state = test_state().await;
         assert_short_message_refused(&state, "ninemb", Some("æøåæøåæøå")).await;
         assert_short_message_refused(&state, "nineemoji", Some("🎮🎮🎮🎮🎮🎮🎮🎮🎮")).await;
+    }
+
+    #[tokio::test]
+    async fn submit_refuses_unicode_space_padded_message() {
+        let state = test_state().await;
+        assert_short_message_refused(&state, "ideopad", Some("\u{3000}123456789\u{3000}")).await;
+        assert_short_message_refused(&state, "nbsppad", Some("\u{00A0}123456789\u{00A0}")).await;
+    }
+
+    #[tokio::test]
+    async fn submit_accepts_combining_marks_and_skin_tone_modifiers() {
+        let state = test_state().await;
+        let (status, _) = must_ok(
+            submit_as(
+                &state,
+                "combining",
+                vec![],
+                Some("e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}"),
+            )
+            .await,
+            "10 chars with combining marks",
+        );
+        assert_eq!(status, StatusCode::CREATED);
+        let skin_tone = "\u{1F44D}\u{1F3FD}".repeat(5);
+        let (status, _) = must_ok(
+            submit_as(&state, "skintone", vec![], Some(&skin_tone)).await,
+            "10 chars with skin-tone modifiers",
+        );
+        assert_eq!(status, StatusCode::CREATED);
     }
 
     #[tokio::test]
