@@ -1,14 +1,18 @@
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::components::ui::{BtnVariant, Button, Card, InlineConfirm, Pill, PillTone, Textarea};
-use crate::components::{Toast, list_cap_notice, retry_label, use_toast};
-use crate::hooks::{use_api, use_api_list};
+use crate::components::ui::inline_confirm::{focus_element_by_id_soon, focus_field_by_id};
+use crate::components::ui::{
+    Card, ChipButton, FieldError, InlineConfirm, PageHeader, PageShell, PageWidth, Pill, PillTone,
+    btn_class,
+};
+use crate::components::{Toast, is_http_status, list_cap_notice, retry_label, use_toast};
+use crate::hooks::{use_api_list, use_api_when};
 use crate::routes::Route;
-use crate::state::auth::use_auth;
+use crate::state::auth::{AuthState, use_auth};
 use crate::state::{loaded_site_settings, use_site_settings};
-use crate::util::{FetchClass, classify_fetch};
-use scuffed_api_client::ApiClient;
+use crate::util::{FetchClass, classify_fetch, log_client_error};
+use scuffed_api_client::{ApiClient, ClientError};
 use scuffed_types::Game;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,12 +76,13 @@ fn already_member(is_member: bool, mine: MineView, status: Option<&str>) -> bool
     }
 }
 
-/// Pill tone and label for an application status. A turned down application
-/// is a neutral "Not accepted", not a red alarm.
+/// Pill tone and label for an application status, in the shared badge tones
+/// (pending is warn, trial is info). A turned down application is a neutral
+/// "Not accepted", not a red alarm.
 fn status_pill(status: &str) -> (PillTone, String) {
     match status {
         "pending" => (PillTone::Warn, "Pending Review".to_string()),
-        "trial" => (PillTone::Accent, "Trial Period".to_string()),
+        "trial" => (PillTone::Info, "Trial Period".to_string()),
         "accepted" => (PillTone::Ok, "Accepted".to_string()),
         "rejected" => (PillTone::Neutral, "Not accepted".to_string()),
         "withdrawn" => (PillTone::Neutral, "Withdrawn".to_string()),
@@ -156,20 +161,28 @@ fn retry_control(failed: bool, pending: bool, retrying: bool) -> Option<bool> {
     }
 }
 
-/// Text of the always-mounted "your application" status line and its Retry.
-/// `body` is `None` until the Ready screen has settings, so the line is empty
-/// on Loading and on the settings error screen.
+/// Text of the always-mounted page status line and the Retry for the
+/// application fetch. The line carries every wait and failure of the page
+/// itself: the settings load, a failed settings load, then the logged-in
+/// application fetch. `body` is `None` until the Ready screen has settings.
+/// The settings Retry is its own button on the error screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct MineSlot {
     text: &'static str,
     retry: Option<bool>,
 }
 
-fn mine_slot(body: Option<ApplyBodyView>, retrying: bool) -> MineSlot {
+fn mine_slot(screen: ApplyScreen, body: Option<ApplyBodyView>, retrying: bool) -> MineSlot {
+    let idle = |text| MineSlot { text, retry: None };
+    match screen {
+        ApplyScreen::Loading => return idle("Loading the page"),
+        ApplyScreen::Error => return idle("Couldn't load site settings."),
+        ApplyScreen::Ready => {}
+    }
     let pending = body == Some(ApplyBodyView::MinePending);
     let failed = body == Some(ApplyBodyView::MineFailed);
     let text = if pending {
-        "Loading..."
+        "Loading your application"
     } else if failed {
         "Couldn't load your application."
     } else {
@@ -193,7 +206,7 @@ fn games_slot(form: bool, phase: SlotPhase, retrying: bool) -> MineSlot {
         };
     }
     let text = match phase {
-        SlotPhase::Loading => "Loading games...",
+        SlotPhase::Loading => "Loading games",
         SlotPhase::Failed => "Couldn't load games.",
         SlotPhase::Ready => "",
     };
@@ -259,8 +272,8 @@ fn retry_button(
     }
 }
 
-/// Always-mounted status line for the logged-in application fetch. Only its
-/// text changes; Retry sits after it, outside the region.
+/// Always-mounted page status line (see [`mine_slot`]). Only its text
+/// changes; Retry sits after it, outside the region.
 #[component]
 fn MineStatus(slot: MineSlot, on_retry: EventHandler<()>) -> Element {
     rsx! {
@@ -291,38 +304,66 @@ fn GamesStatus(slot: MineSlot, on_retry: EventHandler<()>) -> Element {
     }
 }
 
+/// DOM id of the "choose at least one" hint under the Games legend.
+const GAMES_HINT_ID: &str = "apply-games-hint";
+
+/// Ids that describe the Games group: its hint, the page-level status line
+/// and, after a failed submit, its error message.
+fn games_describedby(invalid: bool) -> String {
+    let mut ids = vec![GAMES_HINT_ID, GAMES_STATUS_ID];
+    if invalid {
+        ids.push(ApplyField::Games.error_id());
+    }
+    ids.join(" ")
+}
+
 /// Games picker: a named group of toggle buttons. Its loading and error text
 /// live in the page-level [`GamesStatus`] (mounted from first paint), which
 /// the group references with `aria-describedby`. `games` is `(id, name)`
 /// pairs. `children` follows the grid.
+///
+/// A group cannot carry `required` or `aria-invalid`, so the requirement is a
+/// visible hint and the error is a described-by message. The group takes
+/// focus from the error summary link.
 #[component]
 fn GamesField(
     phase: SlotPhase,
     games: Vec<(String, String)>,
     selected: Vec<String>,
+    #[props(default = false)] invalid: bool,
     on_toggle: EventHandler<String>,
     children: Element,
 ) -> Element {
     rsx! {
         fieldset {
-            class: "apply-field apply-fieldset",
-            aria_describedby: GAMES_STATUS_ID,
-            legend { class: "apply-label", "Games" }
+            class: if invalid { "apply-field apply-fieldset is-error" } else { "apply-field apply-fieldset" },
+            id: ApplyField::Games.id(),
+            tabindex: "-1",
+            aria_describedby: games_describedby(invalid),
+            legend { class: "field-label",
+                "{ApplyField::Games.label()}"
+                {required_mark()}
+            }
+            p { class: "field-hint", id: GAMES_HINT_ID, "Choose at least one." }
             if phase == SlotPhase::Ready {
-                div { class: "apply-game-grid",
+                // The fieldset is the named group, so this row is a plain box.
+                div { class: "chip-row",
                     for (id, name, is_selected) in game_items(games, &selected) {
-                        button {
+                        ChipButton {
                             key: "{id}",
-                            r#type: "button",
-                            class: if is_selected { "apply-game-btn selected" } else { "apply-game-btn" },
-                            aria_pressed: if is_selected { "true" } else { "false" },
+                            class: "chip",
+                            label: name,
+                            pressed: is_selected,
+                            id: "apply-game-{id}",
                             onclick: move |_| on_toggle.call(id.clone()),
-                            "{name}"
                         }
                     }
                 }
             }
             {children}
+            if invalid {
+                {field_error(ApplyField::Games)}
+            }
         }
     }
 }
@@ -343,30 +384,483 @@ struct ApplyBody {
     message: Option<String>,
 }
 
+/// Main role choices. The role is optional: a picked one is sent as the one
+/// entry of `preferred_roles`, no pick sends an empty list. The label is the
+/// value, because the admin review page prints the stored text.
+const MAIN_ROLES: [&str; 4] = ["Tank", "Damage", "Support", "Flex"];
+
+/// DOM id of the optional main role select.
+const ROLE_ID: &str = "apply-role";
+
+/// Shortest "Why you want to join" text the form sends. A short message is
+/// enough; the rule only stops an empty or one-word answer. The server runs
+/// the same check (`message.trim().chars().count() < 10` is a 400), so the
+/// count here must stay [`message_chars`].
+const MIN_MESSAGE_CHARS: usize = 10;
+
+/// Characters of the message as the server counts them: trimmed, then
+/// counted in `char`s (code points), not bytes.
+fn message_chars(message: &str) -> usize {
+    message.trim().chars().count()
+}
+
+/// The body `POST /api/applications` gets. The one builder the submit
+/// handler and the tests share.
+fn apply_body(games: Vec<String>, role: &str, message: String) -> ApplyBody {
+    let preferred_roles = if MAIN_ROLES.contains(&role) {
+        vec![role.to_string()]
+    } else {
+        Vec::new()
+    };
+    ApplyBody {
+        preferred_games: games,
+        preferred_roles,
+        message: if message.trim().is_empty() {
+            None
+        } else {
+            Some(message)
+        },
+    }
+}
+
+/// DOM id of the error summary, focused after a failed submit.
+const SUMMARY_ID: &str = "apply-error-summary";
+/// DOM id of the summary heading, which names the summary when it takes focus.
+const SUMMARY_HEADING_ID: &str = "apply-error-summary-title";
+/// DOM id of the "Log in to apply" heading, focused when the session ended
+/// under the page (a withdrawn trial).
+const SIGN_IN_HEADING_ID: &str = "apply-sign-in-heading";
+/// DOM id of the status card heading, focused after a successful submit.
+const STATUS_HEADING_ID: &str = "apply-status-heading";
+/// DOM id of the always-rendered hint under "Why you want to join".
+const MESSAGE_HINT_ID: &str = "apply-message-hint";
+/// DOM id of the form's send status line, where a refused send (400) shows
+/// the server's reason.
+const SEND_STATUS_ID: &str = "apply-send-status";
+/// Id stem of the withdraw confirm strip; its trigger is `{stem}-trigger`.
+const WITHDRAW_ID: &str = "withdraw-application";
+const WITHDRAW_TRIGGER_ID: &str = "withdraw-application-trigger";
+
+/// A required field of the form. One value gives the control id, the error
+/// message id, the label and the error text, so the summary link, the
+/// `aria-describedby` target and the inline message cannot drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApplyField {
+    Games,
+    Message,
+}
+
+impl ApplyField {
+    /// Id of the control a summary link moves focus to.
+    const fn id(self) -> &'static str {
+        match self {
+            ApplyField::Games => "apply-games",
+            ApplyField::Message => "apply-message",
+        }
+    }
+
+    /// Id of the inline error message.
+    const fn error_id(self) -> &'static str {
+        match self {
+            ApplyField::Games => "apply-games-err",
+            ApplyField::Message => "apply-message-err",
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            ApplyField::Games => "Games",
+            ApplyField::Message => "Why you want to join",
+        }
+    }
+
+    const fn error(self) -> &'static str {
+        match self {
+            ApplyField::Games => "Choose at least one game.",
+            ApplyField::Message => "Write at least 10 characters so we know why you want to join.",
+        }
+    }
+}
+
+/// Invalid fields in form order. Empty means the form can be sent. The main
+/// role is optional, so it is never invalid.
+fn validate(games: &[String], message: &str) -> Vec<ApplyField> {
+    let mut invalid = Vec::new();
+    if games.is_empty() {
+        invalid.push(ApplyField::Games);
+    }
+    if message_chars(message) < MIN_MESSAGE_CHARS {
+        invalid.push(ApplyField::Message);
+    }
+    invalid
+}
+
+/// The errors of the last submit that still stand. A field drops out as soon
+/// as its value is valid again, so `aria-invalid`, the inline message and the
+/// summary row never outlive the mistake. A change never adds an error: new
+/// ones only appear on the next submit.
+fn remaining_errors(errors: &[ApplyField], games: &[String], message: &str) -> Vec<ApplyField> {
+    let invalid = validate(games, message);
+    errors
+        .iter()
+        .copied()
+        .filter(|field| invalid.contains(field))
+        .collect()
+}
+
+/// Ids that describe the message field: its hint and, after a failed submit,
+/// its error message.
+fn message_describedby(invalid: bool) -> String {
+    if invalid {
+        format!("{MESSAGE_HINT_ID} {}", ApplyField::Message.error_id())
+    } else {
+        MESSAGE_HINT_ID.to_string()
+    }
+}
+
+/// Where the wait for the status card stands after a send or a withdraw.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatusFocus {
+    Idle,
+    /// The refetch has been asked for but has not started. The old value is
+    /// still in the slot, so it must not be taken for the new one.
+    AfterRefetch,
+    /// The refetch is running; focus the heading when it lands.
+    WhenLoaded,
+}
+
+/// One step of that wait: the next state, and whether to focus the status
+/// heading now. A refetch that settles with no application ends the wait.
+fn status_focus_step(wait: StatusFocus, pending: bool, has_app: bool) -> (StatusFocus, bool) {
+    match wait {
+        StatusFocus::Idle => (StatusFocus::Idle, false),
+        StatusFocus::AfterRefetch if pending => (StatusFocus::WhenLoaded, false),
+        StatusFocus::AfterRefetch => (StatusFocus::AfterRefetch, false),
+        StatusFocus::WhenLoaded if pending => (StatusFocus::WhenLoaded, false),
+        StatusFocus::WhenLoaded => (StatusFocus::Idle, has_app),
+    }
+}
+
+/// The `error` text of a JSON error body, trimmed. `None` when the server
+/// sent no reason.
+fn server_reason(err: &ClientError) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(err.http_body()?).ok()?;
+    let reason = value.get("error")?.as_str()?.trim();
+    (!reason.is_empty()).then(|| reason.to_string())
+}
+
+/// Toast for a failed send or withdraw. `what` is the opening clause with no
+/// full stop ("Couldn't send the application").
+///
+/// "Try again" is only said when trying again can work. A 403 (recruitment
+/// closed, banned) or a 409 (already applied, already a member) comes back
+/// the same on every retry, so the toast gives the server's reason instead.
+/// A 401 means the session ended, and no answer at all is a network failure.
+fn action_failure_text(what: &str, err: &ClientError) -> String {
+    match err.http_status() {
+        Some(400 | 403 | 404 | 409) => match server_reason(err) {
+            Some(reason) => {
+                let stop = if reason.ends_with(['.', '!', '?']) {
+                    ""
+                } else {
+                    "."
+                };
+                format!("{what}: {reason}{stop}")
+            }
+            None => format!("{what}. The server refused it."),
+        },
+        Some(401) => format!("{what}. Your session has ended. Log in again."),
+        Some(_) => format!("{what}. Try again."),
+        None => format!("{what}. Check your connection and try again."),
+    }
+}
+
+/// Where a failed send is reported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SendFailure {
+    /// A 400: the server refused the content (the message rule). Its reason
+    /// goes in the form's send status line, next to the button.
+    Inline(String),
+    /// Anything else stays a toast.
+    Toast(String),
+}
+
+fn send_failure(err: &ClientError) -> SendFailure {
+    let text = action_failure_text("Couldn't send the application", err);
+    if err.http_status() == Some(400) {
+        SendFailure::Inline(text)
+    } else {
+        SendFailure::Toast(text)
+    }
+}
+
+/// True when the application fetch failed because the session is gone. A
+/// trial applicant who withdraws is logged out by the server, so the refetch
+/// that follows comes back 401 and a Retry could never work.
+fn session_ended(logged_in: bool, mine_error: Option<&str>) -> bool {
+    logged_in && mine_error.is_some_and(|err| is_http_status(err, 401))
+}
+
+/// Body of the withdraw confirm. Withdrawing during a trial also ends the
+/// trial and logs the applicant out, so the strip says so before the click.
+fn withdraw_confirm_body(status: &str) -> &'static str {
+    if status == "trial" {
+        "This ends your trial and logs you out. You can apply again later if recruitment is open."
+    } else {
+        "You can apply again later if recruitment is open."
+    }
+}
+
+/// Second line of the error summary.
+fn summary_count_text(count: usize) -> String {
+    if count == 1 {
+        "Fix the 1 item below, then send it again.".to_string()
+    } else {
+        format!("Fix the {count} items below, then send it again.")
+    }
+}
+
+/// Page title. The organisation name comes from site settings, so the title
+/// is the short form until they load.
+fn page_title(org_name: Option<&str>) -> String {
+    match org_name.map(str::trim).filter(|name| !name.is_empty()) {
+        Some(name) => format!("Apply to {name}"),
+        None => "Apply".to_string(),
+    }
+}
+
+/// Heading of the status card. Right after a send it is the confirmation.
+fn status_heading(just_sent: bool, status: &str) -> &'static str {
+    if just_sent && status == "pending" {
+        "Application received"
+    } else {
+        "Application status"
+    }
+}
+
+/// Games and the message are required and the main role is optional, so the
+/// lead says so in words. The asterisks and the "* Required" key are the
+/// visual form of the same fact.
+const FORM_LEAD: &str = "Tell us what you play and why you want to join. Games and the message are required; your main role is optional.";
+
+/// Page layout. Fields, labels, hints, error lines and buttons are the shared
+/// ones from `components/ui`.
 const APPLY_CSS: &str = r#"
-    .apply-page { min-height: 100vh; padding: 2rem; max-width: 600px; margin: 0 auto; }
-    .apply-title { font-family: var(--font-head); font-size: 2.5rem; color: var(--text); letter-spacing: 3px; text-align: center; margin-bottom: 2rem; }
-    .apply-card-title { font-family: var(--font-head); font-weight: 700; font-size: 1.3rem; color: var(--text); margin: 0 0 0.5rem; }
-    .apply-card-desc { color: var(--text-3); font-size: 0.9rem; line-height: 1.6; }
-    .apply-auth-buttons { margin-top: 1.5rem; display: flex; gap: 0.75rem; flex-wrap: wrap; }
-    .apply-status-row { margin: 1rem 0; }
-    .apply-field { margin-top: 1.5rem; }
-    .apply-label { font-family: var(--font-head); font-weight: 600; font-size: 0.85rem; color: var(--text); text-transform: uppercase; letter-spacing: 0.04em; display: block; margin-bottom: 0.5rem; }
-    .apply-game-grid { display: flex; gap: 0.5rem; flex-wrap: wrap; }
-    .apply-game-btn { padding: 0.4rem 1rem; border-radius: 6px; border: 1px solid var(--border); background: var(--surface); color: var(--text-3); font-size: 0.85rem; cursor: pointer; transition: all 0.15s; }
-    .apply-game-btn:hover { border-color: var(--accent-soft); color: var(--text); }
-    .apply-game-btn.selected { background: var(--accent-solid); color: var(--on-accent); border-color: var(--accent-solid); }
-    .apply-actions { margin-top: 1.5rem; }
-    .apply-fieldset { border: 0; padding: 0; margin-inline: 0; min-width: 0; }
-    .apply-fieldset > legend { padding: 0; }
-    .apply-status { color: var(--text-subtle); font-size: 0.88rem; margin: 0; }
-    .apply-status:not(:empty) { margin: 0.5rem 0; }
-    .apply-loading { color: var(--text-subtle); text-align: center; padding: 2rem; }
+    .apply-body { min-width: 0; }
+    .apply-page .ui-card { padding: var(--space-section); }
+    .apply-card-title { margin: 0 0 var(--space-2); font-family: var(--font-head); font-weight: var(--font-head-weight); font-size: var(--text-xl); line-height: var(--leading-display); color: var(--text); }
+    .apply-card-desc { margin: 0; color: var(--text-3); font-size: var(--text-md); line-height: var(--leading-body); }
+    .apply-status-row { margin: var(--space-3) 0; }
+    .apply-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); margin-top: var(--space-5); }
+    .apply-page .inline-confirm { margin-top: var(--space-5); }
+    /* The confirm strip's two buttons take the page's button type and sit
+       where the page's other actions do, so the strip reads as part of the
+       card it opens in. */
+    .apply-page .inline-confirm__actions { justify-content: flex-start; }
+    .apply-page .inline-confirm__hint { text-align: left; }
+    .apply-page .inline-confirm__cancel,
+    .apply-page .inline-confirm__go { min-height: var(--hit-target-min); padding: var(--space-2) var(--button-pad-x); font-family: var(--button-font); font-size: var(--button-font-size); font-weight: var(--button-font-weight); letter-spacing: var(--font-head-tracking); line-height: var(--leading-ui); border-radius: var(--button-radius); }
+    .apply-page .inline-confirm__cancel { border-color: var(--border-strong); }
+    .apply-page .inline-confirm__cancel:hover { border-color: var(--text); }
+    .apply-status { margin: 0; color: var(--text-3); font-size: var(--text-sm); line-height: var(--leading-body); }
+    .apply-status:not(:empty) { margin: 0 0 var(--space-3); }
+    /* The send line only ever holds a refusal, so it takes the error ink the
+       field errors use, not the muted status grey. */
+    .apply-send-status { color: var(--loss); }
+
+    .apply-form { margin: 0; }
+    .apply-summary { margin: 0 0 var(--space-5); padding: var(--space-4); border: 1px solid var(--loss); border-radius: var(--radius-card); background: var(--loss-soft); color: var(--text); }
+    .apply-summary h2 { margin: 0 0 var(--space-2); font-family: var(--font-head); font-size: var(--text-md); font-weight: var(--font-label-weight); line-height: var(--leading-ui); color: var(--loss); }
+    .apply-summary p { margin: 0 0 var(--space-3); font-size: var(--text-md); line-height: var(--leading-body); }
+    .apply-summary ul { margin: 0; padding-inline-start: var(--space-5); list-style: disc; }
+    .apply-summary li { font-size: var(--text-md); line-height: var(--leading-body); }
+    .apply-summary li + li { margin-top: var(--space-2); }
+    .apply-summary a { color: var(--accent-text); text-decoration: underline; }
+    .apply-legend { margin: 0 0 var(--space-5); color: var(--text-3); font-size: var(--text-sm); }
+    .apply-req { color: var(--loss); font-weight: var(--font-label-weight); margin-inline-start: var(--space-1); }
+    .apply-legend .apply-req { margin-inline-start: 0; }
+
+    .apply-field { display: flex; flex-direction: column; gap: var(--space-2); margin: 0; min-width: 0; }
+    .apply-field + .apply-field,
+    .apply-field + .apply-actions { margin-top: var(--space-5); }
+    .apply-fieldset { border: 0; padding: 0; }
+    .apply-fieldset > legend { padding: 0; margin-bottom: var(--space-2); }
+    .apply-fieldset.is-error .chip:not([aria-pressed="true"]) { border-color: var(--loss); }
+    .apply-fieldset:focus-visible { outline: var(--focus-ring-width) solid var(--focus-ring); outline-offset: var(--focus-ring-offset); }
+
+    @media (max-width: 820px) {
+        .apply-form .apply-actions { flex-direction: column; align-items: stretch; }
+        .apply-form .apply-actions .btn { width: 100%; }
+        .apply-page .inline-confirm__actions { flex-direction: column; align-items: stretch; }
+        /* 44px targets from block padding, not a min-height: a link that
+           wraps to two lines keeps the same space around it as a short one,
+           so neighbours never run together. */
+        .apply-summary li + li { margin-top: 0; }
+        .apply-summary a { display: block; padding-block: var(--space-3); }
+    }
 "#;
+
+/// Inline error under a field: the shared icon-then-text line.
+fn field_error(field: ApplyField) -> Element {
+    rsx! { FieldError { id: field.error_id(), text: field.error() } }
+}
+
+/// The asterisk next to a required label. Hidden from assistive tech, which
+/// gets `required` from the control.
+fn required_mark() -> Element {
+    rsx! { span { class: "apply-req", aria_hidden: "true", "*" } }
+}
+
+/// The application form. `errors` is the result of the last submit, empty
+/// until one fails, so the first paint shows no errors and no summary.
+/// The submit button is never natively disabled: after errors the form can be
+/// corrected and sent again, and while sending it keeps focus.
+/// `children` goes after the submit button (the Cancel link).
+#[component]
+fn ApplyForm(
+    games_phase: SlotPhase,
+    games: Vec<(String, String)>,
+    selected: Vec<String>,
+    role: String,
+    message: String,
+    errors: Vec<ApplyField>,
+    submitting: bool,
+    /// Text of the send status line: the server's reason after a 400, empty
+    /// otherwise. The line is always rendered; only this text changes.
+    #[props(default)]
+    send_status: String,
+    on_toggle: EventHandler<String>,
+    on_role: EventHandler<String>,
+    on_message: EventHandler<String>,
+    on_submit: EventHandler<()>,
+    /// Shown under the games grid (the "Load more" notice).
+    #[props(default)]
+    games_notice: Option<Element>,
+    children: Element,
+) -> Element {
+    let message_invalid = errors.contains(&ApplyField::Message);
+    rsx! {
+        form {
+            class: "ui-card apply-form",
+            novalidate: true,
+            onsubmit: move |e: FormEvent| {
+                e.prevent_default();
+                on_submit.call(());
+            },
+            if !errors.is_empty() {
+                // Not a live region: a failed submit moves focus here, which
+                // reads it once. As `role="alert"` it would be read a second
+                // time, and again each time a corrected field shortens it.
+                div {
+                    class: "apply-summary",
+                    id: SUMMARY_ID,
+                    role: "group",
+                    tabindex: "-1",
+                    aria_labelledby: SUMMARY_HEADING_ID,
+                    h2 { id: SUMMARY_HEADING_ID, "The application could not be sent" }
+                    p { "{summary_count_text(errors.len())}" }
+                    ul {
+                        for field in errors.iter().copied() {
+                            li { key: "{field.id()}",
+                                a {
+                                    href: "#{field.id()}",
+                                    onclick: move |e: MouseEvent| {
+                                        e.prevent_default();
+                                        // Focus the control and show the whole
+                                        // field, error line included.
+                                        focus_field_by_id(field.id(), ".apply-field");
+                                    },
+                                    "{field.label()}: {field.error()}"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // A visual key for the asterisks. Assistive tech gets `required`
+            // from each control and the lead's own words, so the key is hidden.
+            p { class: "apply-legend", aria_hidden: "true",
+                span { class: "apply-req", "*" }
+                " Required"
+            }
+
+            // Games loading / error text lives in `GamesStatus` above the form.
+            GamesField {
+                phase: games_phase,
+                games,
+                selected,
+                invalid: errors.contains(&ApplyField::Games),
+                on_toggle,
+                {games_notice}
+            }
+
+            // Optional: no asterisk, no `required`, never an error. The
+            // label says so in words.
+            div { class: "apply-field",
+                label { class: "field-label", r#for: ROLE_ID, "Main role (optional)" }
+                select {
+                    class: "field-input",
+                    id: ROLE_ID,
+                    name: "role",
+                    onchange: move |e: FormEvent| on_role.call(e.value()),
+                    option { value: "", selected: role.is_empty(), "No main role" }
+                    for name in MAIN_ROLES {
+                        option { key: "{name}", value: name, selected: role == name, "{name}" }
+                    }
+                }
+            }
+
+            div { class: "apply-field",
+                label { class: "field-label", r#for: ApplyField::Message.id(),
+                    "{ApplyField::Message.label()}"
+                    {required_mark()}
+                }
+                // The minimum is said before the first submit, not only after
+                // a failed one.
+                p { class: "field-hint", id: MESSAGE_HINT_ID,
+                    "At least {MIN_MESSAGE_CHARS} characters."
+                }
+                textarea {
+                    class: "field-input",
+                    id: ApplyField::Message.id(),
+                    name: "message",
+                    required: true,
+                    aria_required: "true",
+                    aria_invalid: if message_invalid { "true" },
+                    aria_describedby: message_describedby(message_invalid),
+                    value: "{message}",
+                    oninput: move |e: FormEvent| on_message.call(e.value()),
+                }
+                if message_invalid {
+                    {field_error(ApplyField::Message)}
+                }
+            }
+
+            // Always rendered with the form, so a refused send is announced
+            // as a text change. Empty until the server refuses one.
+            p { class: "apply-status apply-send-status", id: SEND_STATUS_ID, role: "status", "{send_status}" }
+
+            div { class: "apply-actions",
+                button {
+                    r#type: "submit",
+                    class: btn_class(true),
+                    aria_busy: if submitting { "true" },
+                    aria_disabled: if submitting { "true" },
+                    if submitting {
+                        "Sending..."
+                    } else {
+                        "Send application"
+                    }
+                }
+                {children}
+            }
+        }
+    }
+}
 
 #[component]
 pub fn Apply() -> Element {
-    let auth = use_auth();
+    let mut auth = use_auth();
     let mut toast = use_toast();
 
     let mut settings = use_site_settings();
@@ -374,11 +868,25 @@ pub fn Apply() -> Element {
     let settings_phase = classify_fetch(resolved.as_ref());
     let s = loaded_site_settings(resolved.as_ref());
     let mut games = use_api_list::<Game>("/api/games");
-    let mut my_app = use_api::<Option<Application>>("/api/applications/mine");
+    // Only a signed-in viewer has an application to ask for. A guest gets the
+    // "Log in to apply" card and sends no request.
+    let mut my_app = use_api_when::<Option<Application>>("/api/applications/mine", move || {
+        auth().is_logged_in()
+    });
 
     let mut selected_games = use_signal(Vec::<String>::new);
+    let mut role = use_signal(String::new);
     let mut message = use_signal(String::new);
+    // Result of the last submit. Empty until a submit fails validation.
+    let mut errors = use_signal(Vec::<ApplyField>::new);
+    // The server's reason for the last refused (400) send. Empty otherwise.
+    let mut send_status = use_signal(String::new);
     let mut submitting = use_signal(|| false);
+    // True from a successful send until the application changes again.
+    let mut just_sent = use_signal(|| false);
+    // A send or a withdraw succeeded and the status card has not taken focus
+    // yet.
+    let mut focus_status = use_signal(|| StatusFocus::Idle);
     let mut confirm_withdraw = use_signal(|| false);
     // Set by a Retry click; cleared once that refetch settles.
     let mut mine_retrying = use_signal(|| false);
@@ -391,6 +899,35 @@ pub fn Apply() -> Element {
     use_effect(move || {
         if games.data.state()() != UseResourceState::Pending {
             games_retrying.set(false);
+        }
+    });
+    // A send or a withdraw refetches the application, and the form or the
+    // status card unmounts while that runs. Once the new application is on
+    // screen, move focus to its heading so it does not stay on the page body.
+    use_effect(move || {
+        let pending = my_app.data.state()() == UseResourceState::Pending;
+        let has_app = matches!(my_app.data.read().as_ref(), Some(Some(Some(_))));
+        let (next, focus_now) = status_focus_step(focus_status(), pending, has_app);
+        if next != focus_status() {
+            focus_status.set(next);
+        }
+        if focus_now {
+            focus_element_by_id_soon(STATUS_HEADING_ID.to_string());
+        }
+    });
+
+    // The server ended the session (a withdrawn trial): drop the stale login
+    // so the page shows "Log in to apply" instead of a Retry that cannot
+    // work, and put focus on that card.
+    use_effect(move || {
+        let logged_in = auth().is_logged_in();
+        if session_ended(logged_in, my_app.error.read().as_deref()) {
+            auth.set(AuthState {
+                user: None,
+                loading: false,
+            });
+            focus_status.set(StatusFocus::Idle);
+            focus_element_by_id_soon(SIGN_IN_HEADING_ID.to_string());
         }
     });
 
@@ -429,7 +966,7 @@ pub fn Apply() -> Element {
                 mine,
             )
         });
-    let slot = mine_slot(body_view, mine_retrying());
+    let slot = mine_slot(screen, body_view, mine_retrying());
     let games_data = games.data.read();
     let games_phase = apply_fetch_phase(
         games.data.state()(),
@@ -447,18 +984,14 @@ pub fn Apply() -> Element {
         games_phase,
         games_retrying(),
     );
+    let lead = (body_view == Some(ApplyBodyView::Form)).then(|| FORM_LEAD.to_string());
 
     rsx! {
         crate::styles::StyleOnce { id: "scuffed-css-pages-apply-apply-css", css: APPLY_CSS }
-        div { class: "apply-page",
-            h1 { class: "apply-title",
-                if let Some(name) = org_name {
-                    "Join {name}"
-                } else {
-                    "Join"
-                }
-            }
+        PageShell { width: PageWidth::Narrow, class: "apply-page",
+            PageHeader { title: page_title(org_name.as_deref()), lead }
 
+            div { class: "apply-body",
             // Mounted on every screen (Loading, Error, Ready) so a failed
             // application fetch is announced as a text change. Empty when idle.
             MineStatus {
@@ -478,30 +1011,33 @@ pub fn Apply() -> Element {
                 },
             }
 
-            if screen == ApplyScreen::Loading {
-                p { class: "apply-loading", "Loading..." }
-            } else if let (Some(s), Some(view)) = (s, body_view) {
+            // The Loading screen is the status line above; nothing else shows.
+            if let (Some(s), Some(view)) = (s, body_view) {
                 {
                     let org_name = s.org_name.clone();
                     match (view, status_app.clone()) {
                         (ApplyBodyView::Closed, _) => rsx! {
                             Card {
-                                h2 { class: "apply-card-title", "Recruitment Closed" }
+                                h2 { class: "apply-card-title", "Recruitment closed" }
                                 p { class: "apply-card-desc", "{s.recruitment_message}" }
                             }
                         },
                         (ApplyBodyView::SignIn, _) => rsx! {
                             Card {
-                                h2 { class: "apply-card-title", "Log In to Apply" }
-                                p { class: "apply-card-desc", "You need to sign in before submitting an application." }
-                                div { class: "apply-auth-buttons",
-                                    Link { to: Route::Login {}, class: "ui-btn ui-btn--primary ui-btn--md", "Sign in" }
+                                h2 {
+                                    class: "apply-card-title",
+                                    id: SIGN_IN_HEADING_ID,
+                                    tabindex: "-1",
+                                    "Log in to apply"
+                                }
+                                p { class: "apply-card-desc", "Log in before you send an application." }
+                                div { class: "apply-actions",
+                                    Link { to: Route::Login {}, class: btn_class(true), "Log in" }
                                     // Only in debug builds: route is not registered in production
                                     if cfg!(debug_assertions) {
                                         a {
                                             href: "/api/dev/login",
-                                            class: "ui-btn ui-btn--md",
-                                            style: "background: var(--surface); border: 1px solid var(--border); color: var(--text);",
+                                            class: btn_class(false),
                                             "Dev login"
                                         }
                                     }
@@ -512,9 +1048,9 @@ pub fn Apply() -> Element {
                             Card {
                                 h2 { class: "apply-card-title", "You are already in {org_name}" }
                                 p { class: "apply-card-desc", "Your membership is active, so there is nothing to apply for." }
-                                div { class: "apply-auth-buttons",
-                                    Link { to: Route::ProfileSettings {}, class: "ui-btn ui-btn--primary ui-btn--md", "Open your profile" }
-                                    Link { to: Route::Members {}, class: "ui-btn ui-btn--md", "See the crew" }
+                                div { class: "apply-actions",
+                                    Link { to: Route::ProfileSettings {}, class: btn_class(true), "Open your profile" }
+                                    Link { to: Route::Members {}, class: btn_class(false), "See the crew" }
                                 }
                             }
                         },
@@ -541,23 +1077,35 @@ pub fn Apply() -> Element {
                                 _ => String::new(),
                             };
                             let can_withdraw = app.status == "pending" || app.status == "trial";
+                            let heading = status_heading(just_sent(), app.status.as_str());
+                            let withdraw_label = if submitting() { "Withdrawing..." } else { "Withdraw" };
                             rsx! {
                                 Card {
-                                    h2 { class: "apply-card-title", "Application Status" }
+                                    h2 {
+                                        class: "apply-card-title",
+                                        id: STATUS_HEADING_ID,
+                                        tabindex: "-1",
+                                        "{heading}"
+                                    }
                                     div { class: "apply-status-row",
                                         Pill { tone: status_tone, "{status_label}" }
                                     }
                                     p { class: "apply-card-desc", "{desc}" }
                                     if can_withdraw {
                                         if confirm_withdraw() {
+                                            // The strip stays up, busy, until the request
+                                            // settles: closing it on click would unmount the
+                                            // focused button and drop focus to the page.
                                             InlineConfirm {
-                                                id: "withdraw-application".to_string(),
+                                                id: WITHDRAW_ID.to_string(),
                                                 title: "Withdraw your application?".to_string(),
-                                                body: "You can apply again later if recruitment is open.".to_string(),
-                                                confirm_label: "Withdraw".to_string(),
+                                                body: withdraw_confirm_body(app.status.as_str()).to_string(),
+                                                confirm_label: withdraw_label.to_string(),
                                                 busy: submitting(),
                                                 on_confirm: move |_| {
-                                                    confirm_withdraw.set(false);
+                                                    if submitting() {
+                                                        return;
+                                                    }
                                                     submitting.set(true);
                                                     spawn(async move {
                                                         match ApiClient::web()
@@ -569,12 +1117,28 @@ pub fn Apply() -> Element {
                                                         {
                                                             Ok(_) => {
                                                                 toast.show(Toast::success("Application withdrawn"));
+                                                                just_sent.set(false);
+                                                                // The card comes back without Withdraw;
+                                                                // its heading takes focus then.
+                                                                focus_status.set(StatusFocus::AfterRefetch);
                                                                 my_app.refresh += 1;
                                                             }
                                                             Err(e) => {
-                                                                toast.show(Toast::error(format!("Failed: {e}")));
+                                                                log_client_error("withdraw application", &e);
+                                                                toast.show(Toast::error(action_failure_text(
+                                                                    "Couldn't withdraw the application",
+                                                                    &e,
+                                                                )));
+                                                                // A refused withdraw means the status on
+                                                                // screen is stale: show the current one.
+                                                                if matches!(e.http_status(), Some(400 | 401 | 403 | 404 | 409)) {
+                                                                    my_app.refresh += 1;
+                                                                }
+                                                                // Back to the button that opened the strip.
+                                                                focus_element_by_id_soon(WITHDRAW_TRIGGER_ID.to_string());
                                                             }
                                                         }
+                                                        confirm_withdraw.set(false);
                                                         submitting.set(false);
                                                     });
                                                 },
@@ -582,16 +1146,12 @@ pub fn Apply() -> Element {
                                             }
                                         } else {
                                             div { class: "apply-actions",
-                                                Button {
-                                                    id: "withdraw-application-trigger".to_string(),
-                                                    variant: BtnVariant::Ghost,
-                                                    disabled: submitting(),
+                                                button {
+                                                    r#type: "button",
+                                                    id: WITHDRAW_TRIGGER_ID,
+                                                    class: btn_class(false),
                                                     onclick: move |_| confirm_withdraw.set(true),
-                                                    if submitting() {
-                                                        "Withdrawing..."
-                                                    } else {
-                                                        "Withdraw application"
-                                                    }
+                                                    "Withdraw application"
                                                 }
                                             }
                                         }
@@ -604,83 +1164,86 @@ pub fn Apply() -> Element {
                         | (ApplyBodyView::MinePending | ApplyBodyView::MineFailed, _) => rsx! {},
                         (ApplyBodyView::Form, _) => {
                             rsx! {
-                                Card {
-                                    h2 { class: "apply-card-title", "Apply" }
-                                    p { class: "apply-card-desc", "Tell us which games you play and a bit about yourself." }
-
-                                    // Games loading / error text lives in `GamesStatus` above.
-                                    GamesField {
-                                        phase: games_phase,
-                                        games: game_list,
-                                        selected: selected_games(),
-                                        on_toggle: move |id: String| toggle_game(&mut selected_games.write(), &id),
-                                        {list_cap_notice(&games, "games")}
-                                    }
-
-                                    div { class: "apply-field",
-                                        label { class: "apply-label", r#for: "apply-message", "Message (optional)" }
-                                        Textarea {
-                                            id: "apply-message".to_string(),
-                                            name: "apply-message".to_string(),
-                                            value: message(),
-                                            placeholder: "Tell us about yourself, your experience, what you're looking for...",
-                                            oninput: move |e: FormEvent| message.set(e.value()),
+                                ApplyForm {
+                                    games_phase,
+                                    games: game_list,
+                                    selected: selected_games(),
+                                    role: role(),
+                                    message: message(),
+                                    errors: errors(),
+                                    submitting: submitting(),
+                                    send_status: send_status(),
+                                    // A corrected field loses its error at once, not
+                                    // on the next submit.
+                                    on_toggle: move |id: String| {
+                                        toggle_game(&mut selected_games.write(), &id);
+                                        let left = remaining_errors(&errors(), &selected_games(), &message());
+                                        errors.set(left);
+                                    },
+                                    // The role is optional and has no error to clear.
+                                    on_role: move |value: String| role.set(value),
+                                    on_message: move |value: String| {
+                                        message.set(value);
+                                        let left = remaining_errors(&errors(), &selected_games(), &message());
+                                        errors.set(left);
+                                    },
+                                    on_submit: move |_| {
+                                        // The button stays focusable while a send runs.
+                                        if submitting() {
+                                            return;
                                         }
-                                    }
-
-                                    div { class: "apply-actions",
-                                        Button {
-                                            variant: BtnVariant::Primary,
-                                            disabled: submitting(),
-                                            onclick: move |_| {
-                                                let games = selected_games();
-                                                let msg = message();
-                                                if games.is_empty() {
-                                                    toast.show(Toast::error("Select at least one game"));
-                                                    return;
+                                        let games = selected_games();
+                                        let main_role = role();
+                                        let msg = message();
+                                        let invalid = validate(&games, &msg);
+                                        let failed = !invalid.is_empty();
+                                        errors.set(invalid);
+                                        if failed {
+                                            focus_element_by_id_soon(SUMMARY_ID.to_string());
+                                            return;
+                                        }
+                                        submitting.set(true);
+                                        send_status.set(String::new());
+                                        spawn(async move {
+                                            let body = apply_body(games, &main_role, msg);
+                                            match ApiClient::web().post_json_empty("/api/applications", &body).await {
+                                                Ok(_) => {
+                                                    toast.show(Toast::success("Application received"));
+                                                    just_sent.set(true);
+                                                    focus_status.set(StatusFocus::AfterRefetch);
+                                                    my_app.refresh += 1;
                                                 }
-                                                submitting.set(true);
-                                                spawn(async move {
-                                                    let body = ApplyBody {
-                                                        preferred_games: games,
-                                                        preferred_roles: vec![],
-                                                        message: if msg.trim().is_empty() { None } else { Some(msg) },
-                                                    };
-                                                    match ApiClient::web().post_json_empty("/api/applications", &body).await {
-                                                        Ok(_) => {
-                                                            toast.show(Toast::success("Application submitted!"));
-                                                            my_app.refresh += 1;
-                                                        }
-                                                        Err(e) => {
-                                                            toast.show(Toast::error(format!("Failed: {e}")));
-                                                        }
+                                                Err(e) => {
+                                                    log_client_error("send application", &e);
+                                                    match send_failure(&e) {
+                                                        SendFailure::Inline(text) => send_status.set(text),
+                                                        SendFailure::Toast(text) => toast.show(Toast::error(text)),
                                                     }
-                                                    submitting.set(false);
-                                                });
-                                            },
-                                            if submitting() {
-                                                "Submitting..."
-                                            } else {
-                                                "Submit Application"
+                                                }
                                             }
-                                        }
-                                    }
+                                            submitting.set(false);
+                                        });
+                                    },
+                                    games_notice: list_cap_notice(&games, "games"),
+                                    Link { to: Route::Home {}, class: btn_class(false), "Cancel" }
                                 }
                             }
                         }
                     }
                 }
-            } else {
-                div { class: "fetch-error-wrap", role: "alert",
-                    p { class: "fetch-error", "Couldn't load site settings." }
+            } else if screen == ApplyScreen::Error {
+                // Settings failed. The words are the status line above; Retry
+                // sits outside any live region.
+                div { class: "fetch-error-wrap",
                     button {
                         r#type: "button",
                         class: "fetch-error__retry",
-                        aria_label: "Retry loading site settings",
+                        aria_label: retry_aria_label("site settings", false),
                         onclick: move |_| settings.refresh += 1,
-                        "Retry"
+                        "{retry_label(false)}"
                     }
                 }
+            }
             }
         }
     }
@@ -831,24 +1394,27 @@ mod tests {
     #[test]
     fn mine_slot_text_only_shows_for_the_application_fetch() {
         use ApplyBodyView as V;
-        // Loading and error screens: mounted but empty, no Retry.
-        assert_eq!(
-            mine_slot(None, false),
-            MineSlot {
-                text: "",
-                retry: None
-            }
-        );
-        assert_eq!(
-            mine_slot(None, true),
-            MineSlot {
-                text: "",
-                retry: None
-            }
-        );
+        // Loading and settings-error screens speak through the same line.
+        // Their Retry is not the application one.
+        for retrying in [false, true] {
+            assert_eq!(
+                mine_slot(ApplyScreen::Loading, None, retrying),
+                MineSlot {
+                    text: "Loading the page",
+                    retry: None
+                }
+            );
+            assert_eq!(
+                mine_slot(ApplyScreen::Error, None, retrying),
+                MineSlot {
+                    text: "Couldn't load site settings.",
+                    retry: None
+                }
+            );
+        }
         for view in [V::Closed, V::SignIn, V::Member, V::Status, V::Form] {
             assert_eq!(
-                mine_slot(Some(view), false),
+                mine_slot(ApplyScreen::Ready, Some(view), false),
                 MineSlot {
                     text: "",
                     retry: None
@@ -856,14 +1422,14 @@ mod tests {
             );
         }
         assert_eq!(
-            mine_slot(Some(V::MinePending), false),
+            mine_slot(ApplyScreen::Ready, Some(V::MinePending), false),
             MineSlot {
-                text: "Loading...",
+                text: "Loading your application",
                 retry: None
             }
         );
         assert_eq!(
-            mine_slot(Some(V::MineFailed), false),
+            mine_slot(ApplyScreen::Ready, Some(V::MineFailed), false),
             MineSlot {
                 text: "Couldn't load your application.",
                 retry: Some(false)
@@ -871,9 +1437,9 @@ mod tests {
         );
         // A Retry click keeps the button mounted and aria-disabled while in flight.
         assert_eq!(
-            mine_slot(Some(V::MinePending), true),
+            mine_slot(ApplyScreen::Ready, Some(V::MinePending), true),
             MineSlot {
-                text: "Loading...",
+                text: "Loading your application",
                 retry: Some(true)
             }
         );
@@ -932,7 +1498,7 @@ mod tests {
         assert_eq!(
             games_slot(true, SlotPhase::Loading, false),
             MineSlot {
-                text: "Loading games...",
+                text: "Loading games",
                 retry: None
             }
         );
@@ -946,7 +1512,7 @@ mod tests {
         assert_eq!(
             games_slot(true, SlotPhase::Loading, true),
             MineSlot {
-                text: "Loading games...",
+                text: "Loading games",
                 retry: Some(true)
             }
         );
@@ -999,32 +1565,44 @@ mod tests {
     #[test]
     fn mine_status_is_one_text_region_with_retry_outside() {
         fn loading() -> Element {
-            rsx! { MineStatus { slot: mine_slot(None, false), on_retry: |_| {} } }
+            let slot = mine_slot(ApplyScreen::Loading, None, false);
+            rsx! { MineStatus { slot, on_retry: |_| {} } }
+        }
+        fn settings_failed() -> Element {
+            let slot = mine_slot(ApplyScreen::Error, None, false);
+            rsx! { MineStatus { slot, on_retry: |_| {} } }
         }
         fn pending() -> Element {
-            let slot = mine_slot(Some(ApplyBodyView::MinePending), false);
+            let slot = mine_slot(ApplyScreen::Ready, Some(ApplyBodyView::MinePending), false);
             rsx! { MineStatus { slot, on_retry: |_| {} } }
         }
         fn failed() -> Element {
-            let slot = mine_slot(Some(ApplyBodyView::MineFailed), false);
+            let slot = mine_slot(ApplyScreen::Ready, Some(ApplyBodyView::MineFailed), false);
             rsx! { MineStatus { slot, on_retry: |_| {} } }
         }
         fn retrying() -> Element {
-            let slot = mine_slot(Some(ApplyBodyView::MinePending), true);
+            let slot = mine_slot(ApplyScreen::Ready, Some(ApplyBodyView::MinePending), true);
             rsx! { MineStatus { slot, on_retry: |_| {} } }
         }
         fn ready() -> Element {
-            let slot = mine_slot(Some(ApplyBodyView::Form), false);
+            let slot = mine_slot(ApplyScreen::Ready, Some(ApplyBodyView::Form), false);
             rsx! { MineStatus { slot, on_retry: |_| {} } }
         }
 
-        for idle in [html_of(loading), html_of(ready)] {
-            assert_one_status(&idle, "");
-            assert!(!idle.contains("<button"), "{idle}");
-        }
+        let idle = html_of(ready);
+        assert_one_status(&idle, "");
+        assert!(!idle.contains("<button"), "{idle}");
+
+        // The page-level wait and the settings failure use this same line.
+        let html = html_of(loading);
+        assert_one_status(&html, "Loading the page");
+        assert!(!html.contains("<button"), "{html}");
+        let html = html_of(settings_failed);
+        assert_one_status(&html, "Couldn't load site settings.");
+        assert!(!html.contains("<button"), "{html}");
 
         let html = html_of(pending);
-        assert_one_status(&html, "Loading...");
+        assert_one_status(&html, "Loading your application");
         assert!(!html.contains("<button"), "{html}");
 
         let html = html_of(failed);
@@ -1034,7 +1612,7 @@ mod tests {
         assert!(!html.contains("disabled"), "{html}");
 
         let html = html_of(retrying);
-        assert_one_status(&html, "Loading...");
+        assert_one_status(&html, "Loading your application");
         assert!(html.contains(">Retrying...</button>"), "{html}");
         assert_retry_label_in_name(&html, "Retrying...", "Retrying... loading your application");
         assert!(!html.contains("Retry loading"), "{html}");
@@ -1087,7 +1665,7 @@ mod tests {
         }
 
         let html = html_of(loading);
-        assert_one_status(&html, "Loading games...");
+        assert_one_status(&html, "Loading games");
         assert!(!html.contains("<button"), "{html}");
 
         let html = html_of(failed);
@@ -1097,7 +1675,7 @@ mod tests {
         assert!(!html.contains("disabled"), "{html}");
 
         let html = html_of(retrying);
-        assert_one_status(&html, "Loading games...");
+        assert_one_status(&html, "Loading games");
         assert!(html.contains(">Retrying...</button>"), "{html}");
         assert_retry_label_in_name(&html, "Retrying...", "Retrying... loading games");
         assert!(!html.contains("Retry loading"), "{html}");
@@ -1131,16 +1709,19 @@ mod tests {
         assert!(!html.contains(r#"role="status""#), "{html}");
         assert!(!html.contains("<button"), "{html}");
         assert!(
-            html.contains(r#"aria-describedby="apply-games-status""#),
+            html.contains(r#"aria-describedby="apply-games-hint apply-games-status""#),
             "{html}"
         );
 
         let html = html_of(ready);
         assert!(!html.contains(r#"role="status""#), "{html}");
         assert!(html.contains("<fieldset"), "{html}");
-        assert!(html.contains(">Games</legend>"), "{html}");
         assert!(
-            html.contains(r#"aria-describedby="apply-games-status""#),
+            html.contains(r#"<legend class="field-label">Games<span"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"aria-describedby="apply-games-hint apply-games-status""#),
             "{html}"
         );
         assert!(!html.contains("<label"), "{html}");
@@ -1173,5 +1754,815 @@ mod tests {
         assert!(tone == PillTone::Neutral);
         assert!(status_pill("pending").0 == PillTone::Warn);
         assert_eq!(status_pill("pending").1, "Pending Review");
+    }
+
+    #[test]
+    fn trial_and_pending_use_the_shared_badge_tones() {
+        assert!(status_pill("trial").0 == PillTone::Info);
+        assert_eq!(status_pill("trial").1, "Trial Period");
+        assert!(status_pill("pending").0 == PillTone::Warn);
+        assert!(status_pill("withdrawn").0 == PillTone::Neutral);
+    }
+
+    const LONG_MESSAGE: &str = "I play support most evenings and want a steady team.";
+
+    #[test]
+    fn validate_lists_invalid_fields_in_form_order() {
+        let ow = vec!["game-ow".to_string()];
+        assert!(LONG_MESSAGE.chars().count() >= MIN_MESSAGE_CHARS);
+        assert_eq!(validate(&ow, LONG_MESSAGE), []);
+        assert_eq!(
+            validate(&[], "Hi"),
+            [ApplyField::Games, ApplyField::Message]
+        );
+        assert_eq!(validate(&[], LONG_MESSAGE), [ApplyField::Games]);
+        // Padding does not reach the minimum, and the count is characters.
+        let padded = format!("Hi{}", " ".repeat(60));
+        assert_eq!(validate(&ow, &padded), [ApplyField::Message]);
+        assert_eq!(MIN_MESSAGE_CHARS, 10);
+        assert_eq!(validate(&ow, &"a".repeat(9)), [ApplyField::Message]);
+        assert_eq!(validate(&ow, &"a".repeat(10)), []);
+        // Two bytes each: 5 of them are 10 bytes but only 5 characters.
+        assert_eq!(validate(&ow, &"å".repeat(5)), [ApplyField::Message]);
+        assert_eq!(validate(&ow, &"å".repeat(10)), []);
+        // A short real answer passes; the old 40 character floor is gone.
+        assert_eq!(validate(&ow, "I main Ana."), []);
+        assert_eq!(validate(&ow, &"a".repeat(39)), []);
+    }
+
+    #[test]
+    fn the_message_rule_is_the_servers_trim_then_count_chars() {
+        let ow = vec!["game-ow".to_string()];
+        // 9 characters once trimmed: refused, however much padding (spaces,
+        // tabs, newlines) brings the raw length to 10 or more.
+        for nine in [
+            "  123456789  ",
+            "\n\t123456789\n",
+            " Hi I heal ",
+            "ålesund99 ",
+        ] {
+            assert_eq!(message_chars(nine), 9, "{nine:?}");
+            assert_eq!(validate(&ow, nine), [ApplyField::Message], "{nine:?}");
+        }
+        // Inner spaces count, like on the server.
+        assert_eq!(message_chars("Hi, I heal"), 10);
+        assert_eq!(validate(&ow, "Hi, I heal"), []);
+        // 10 characters with multibyte letters is accepted: 10 chars, more
+        // than 10 bytes. A byte count would pass 9 of them too, so check that
+        // 9 such characters (still over 10 bytes) is refused.
+        for ten in [
+            "æøåÆØÅéüñß",
+            " Smørbrødet ",
+            "ゲームが好きです。!",
+            "🎮🎮🎮🎮🎮 heal",
+        ] {
+            assert_eq!(message_chars(ten), 10, "{ten:?}");
+            assert!(ten.trim().len() > 10, "{ten:?}");
+            assert_eq!(validate(&ow, ten), [], "{ten:?}");
+        }
+        let nine_multibyte = "æøåÆØÅéüñ";
+        assert!(nine_multibyte.len() > 10);
+        assert_eq!(validate(&ow, nine_multibyte), [ApplyField::Message]);
+    }
+
+    #[test]
+    fn the_main_role_is_optional() {
+        let ow = vec!["game-ow".to_string()];
+        // No role, or a value that is not a listed role, is not an error:
+        // validation does not look at the role at all.
+        assert_eq!(validate(&ow, LONG_MESSAGE), []);
+        // The error summary can only name games and the message.
+        let fields = [ApplyField::Games, ApplyField::Message];
+        assert!(fields.iter().all(|f| f.id() != ROLE_ID));
+        assert!(
+            !FORM_LEAD.contains("Every field is required"),
+            "{FORM_LEAD}"
+        );
+        assert!(FORM_LEAD.contains("main role is optional"), "{FORM_LEAD}");
+    }
+
+    #[test]
+    fn field_ids_are_distinct_and_the_message_names_the_minimum() {
+        let fields = [ApplyField::Games, ApplyField::Message];
+        let mut ids: Vec<&str> = fields
+            .iter()
+            .flat_map(|f| [f.id(), f.error_id()])
+            .chain([
+                ROLE_ID,
+                SEND_STATUS_ID,
+                SUMMARY_ID,
+                STATUS_HEADING_ID,
+                GAMES_STATUS_ID,
+                GAMES_HINT_ID,
+                MESSAGE_HINT_ID,
+                WITHDRAW_TRIGGER_ID,
+                SUMMARY_HEADING_ID,
+                SIGN_IN_HEADING_ID,
+            ])
+            .collect();
+        let count = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), count);
+        assert!(
+            ApplyField::Message
+                .error()
+                .contains(&MIN_MESSAGE_CHARS.to_string())
+        );
+    }
+
+    #[test]
+    fn the_send_body_carries_the_main_role_as_the_one_preferred_role() {
+        // `POST /api/applications` takes `preferred_roles: Vec<String>` and
+        // stores it as sent. A chosen main role is the one entry; the rest of
+        // the body is as before. Built by the submit handler's own builder.
+        let body = apply_body(
+            vec!["game-ow".to_string()],
+            "Support",
+            "I main Ana.".to_string(),
+        );
+        assert_eq!(
+            serde_json::to_value(&body).unwrap(),
+            serde_json::json!({
+                "preferred_games": ["game-ow"],
+                "preferred_roles": ["Support"],
+                "message": "I main Ana.",
+            })
+        );
+    }
+
+    #[test]
+    fn no_main_role_sends_an_empty_preferred_roles_list() {
+        // Nothing picked (the "No main role" option has the empty value):
+        // the list is empty, not `[""]`, and the key is still sent.
+        let body = apply_body(vec!["game-ow".to_string()], "", "Hi, I heal".to_string());
+        assert_eq!(
+            serde_json::to_value(&body).unwrap(),
+            serde_json::json!({
+                "preferred_games": ["game-ow"],
+                "preferred_roles": [],
+                "message": "Hi, I heal",
+            })
+        );
+        // A value that is not a listed role is not sent either.
+        assert!(
+            apply_body(vec![], "Healer", String::new())
+                .preferred_roles
+                .is_empty()
+        );
+        for role in MAIN_ROLES {
+            assert_eq!(
+                apply_body(vec![], role, String::new()).preferred_roles,
+                [role]
+            );
+        }
+    }
+
+    #[test]
+    fn a_400_on_send_shows_the_servers_text_in_the_form() {
+        let short = ClientError::http(
+            400,
+            r#"{"error":"Message must be at least 10 characters"}"#,
+            None,
+        );
+        assert_eq!(
+            send_failure(&short),
+            SendFailure::Inline(
+                "Couldn't send the application: Message must be at least 10 characters."
+                    .to_string()
+            )
+        );
+        // A 400 with no usable reason still goes inline, without "try again".
+        assert_eq!(
+            send_failure(&ClientError::http(400, "", None)),
+            SendFailure::Inline(
+                "Couldn't send the application. The server refused it.".to_string()
+            )
+        );
+        // Every other failure stays a toast, with the same words as before.
+        for err in [
+            ClientError::http(403, r#"{"error":"recruitment is currently closed"}"#, None),
+            ClientError::http(
+                409,
+                r#"{"error":"You already have an open application (pending)"}"#,
+                None,
+            ),
+            ClientError::http(401, "", None),
+            ClientError::http(500, "", None),
+            ClientError::Network("failed to fetch".to_string()),
+        ] {
+            assert_eq!(
+                send_failure(&err),
+                SendFailure::Toast(action_failure_text("Couldn't send the application", &err)),
+                "{err:?}"
+            );
+        }
+    }
+
+    fn form_refused() -> Element {
+        rsx! {
+            ApplyForm {
+                games_phase: SlotPhase::Ready,
+                games: games(),
+                selected: vec!["game-ow".to_string()],
+                role: String::new(),
+                message: "Hi, I heal".to_string(),
+                errors: vec![],
+                submitting: false,
+                send_status: "Couldn't send the application: Message must be at least 10 characters.".to_string(),
+                on_toggle: |_| {},
+                on_role: |_| {},
+                on_message: |_| {},
+                on_submit: |_| {},
+            }
+        }
+    }
+
+    #[test]
+    fn the_send_status_line_is_always_there_and_only_its_text_changes() {
+        // Before any send: mounted, empty.
+        let idle = html_of(form_empty);
+        assert!(
+            idle.contains(
+                r#"<p class="apply-status apply-send-status" id="apply-send-status" role="status"></p>"#
+            ),
+            "{idle}"
+        );
+        // After a 400: the same element, now with the server's text, before
+        // the submit button. No alert and no error summary.
+        let html = html_of(form_refused);
+        let line = r#"<p class="apply-status apply-send-status" id="apply-send-status" role="status">Couldn&#39;t send the application: Message must be at least 10 characters.</p>"#;
+        let at = html
+            .find(line)
+            .unwrap_or_else(|| panic!("{line} in {html}"));
+        assert!(
+            at < html.find(">Send application</button>").unwrap(),
+            "{html}"
+        );
+        assert_eq!(html.matches(r#"role="status""#).count(), 1, "{html}");
+        assert!(!html.contains(r#"role="alert""#), "{html}");
+        assert!(!html.contains(SUMMARY_ID), "{html}");
+    }
+
+    #[test]
+    fn a_refused_send_shows_the_servers_reason_and_no_try_again() {
+        let send = "Couldn't send the application";
+        // 403: recruitment closed. A retry gets the same answer.
+        let closed = ClientError::http(403, r#"{"error":"recruitment is currently closed"}"#, None);
+        assert_eq!(
+            action_failure_text(send, &closed),
+            "Couldn't send the application: recruitment is currently closed."
+        );
+        // 409: already applied.
+        let dup = ClientError::http(
+            409,
+            r#"{"error":"You already have an open application (pending)"}"#,
+            None,
+        );
+        assert_eq!(
+            action_failure_text(send, &dup),
+            "Couldn't send the application: You already have an open application (pending)."
+        );
+        // A reason that already ends a sentence is not given a second stop.
+        let stopped = ClientError::http(409, r#"{"error":"Already withdrawn."}"#, None);
+        assert_eq!(
+            action_failure_text("Couldn't withdraw the application", &stopped),
+            "Couldn't withdraw the application: Already withdrawn."
+        );
+        // No usable reason: still no "try again".
+        for body in ["", "<html>", r#"{"error":"  "}"#, r#"{"error":7}"#] {
+            let bare = ClientError::http(403, body, None);
+            assert_eq!(
+                action_failure_text(send, &bare),
+                "Couldn't send the application. The server refused it.",
+                "{body}"
+            );
+        }
+        for status in [400, 401, 403, 404, 409] {
+            let err = ClientError::http(status, r#"{"error":"nope"}"#, None);
+            let text = action_failure_text(send, &err).to_lowercase();
+            assert!(!text.contains("try again"), "{status}: {text}");
+            assert!(!text.contains("connection"), "{status}: {text}");
+        }
+        assert_eq!(
+            action_failure_text(send, &ClientError::http(401, "", None)),
+            "Couldn't send the application. Your session has ended. Log in again."
+        );
+    }
+
+    #[test]
+    fn only_failures_a_retry_can_fix_say_try_again() {
+        let send = "Couldn't send the application";
+        // The server's text for a 500 is not shown; a retry may work.
+        let down = ClientError::http(500, r#"{"error":"Internal server error"}"#, None);
+        assert_eq!(
+            action_failure_text(send, &down),
+            "Couldn't send the application. Try again."
+        );
+        // No answer from the server is the only case that names the connection.
+        let offline = ClientError::Network("failed to fetch".to_string());
+        assert_eq!(
+            action_failure_text(send, &offline),
+            "Couldn't send the application. Check your connection and try again."
+        );
+    }
+
+    #[test]
+    fn a_401_on_the_application_fetch_ends_the_session() {
+        // Only for a viewer the page still takes as logged in, so the effect
+        // that clears the login runs once.
+        assert!(session_ended(true, Some("HTTP error 401: Unauthorized")));
+        assert!(session_ended(true, Some("HTTP error: 401")));
+        assert!(!session_ended(false, Some("HTTP error 401: Unauthorized")));
+        assert!(!session_ended(
+            true,
+            Some("HTTP error 500: Internal server error")
+        ));
+        assert!(!session_ended(true, Some("Network error: failed to fetch")));
+        assert!(!session_ended(true, None));
+    }
+
+    #[test]
+    fn the_trial_withdraw_confirm_says_it_ends_the_trial() {
+        let trial = withdraw_confirm_body("trial");
+        assert!(trial.contains("ends your trial"), "{trial}");
+        assert!(trial.contains("logs you out"), "{trial}");
+        let pending = withdraw_confirm_body("pending");
+        assert!(!pending.contains("trial"), "{pending}");
+        assert_eq!(pending, "You can apply again later if recruitment is open.");
+    }
+
+    #[test]
+    fn summary_count_is_singular_for_one_item() {
+        assert_eq!(
+            summary_count_text(1),
+            "Fix the 1 item below, then send it again."
+        );
+        assert_eq!(
+            summary_count_text(2),
+            "Fix the 2 items below, then send it again."
+        );
+    }
+
+    #[test]
+    fn title_uses_the_org_name_once_it_loads() {
+        assert_eq!(page_title(None), "Apply");
+        assert_eq!(page_title(Some("  ")), "Apply");
+        assert_eq!(page_title(Some("Test Org")), "Apply to Test Org");
+    }
+
+    #[test]
+    fn a_fresh_send_is_confirmed_as_received() {
+        assert_eq!(status_heading(true, "pending"), "Application received");
+        assert_eq!(status_heading(false, "pending"), "Application status");
+        // Only the pending application that was just sent is a confirmation.
+        assert_eq!(status_heading(true, "withdrawn"), "Application status");
+        assert_eq!(status_heading(true, "trial"), "Application status");
+    }
+
+    /// Opening tag of the element with this id.
+    fn tag_with_id<'a>(html: &'a str, id: &str) -> &'a str {
+        let at = html
+            .find(&format!(r#"id="{id}""#))
+            .unwrap_or_else(|| panic!("#{id} in {html}"));
+        let start = html[..at].rfind('<').unwrap();
+        let end = at + html[at..].find('>').unwrap();
+        &html[start..=end]
+    }
+
+    fn form_empty() -> Element {
+        rsx! {
+            ApplyForm {
+                games_phase: SlotPhase::Ready,
+                games: games(),
+                selected: vec![],
+                role: String::new(),
+                message: String::new(),
+                errors: vec![],
+                submitting: false,
+                on_toggle: |_| {},
+                on_role: |_| {},
+                on_message: |_| {},
+                on_submit: |_| {},
+                a { href: "/", "Cancel" }
+            }
+        }
+    }
+
+    fn form_failed() -> Element {
+        rsx! {
+            ApplyForm {
+                games_phase: SlotPhase::Ready,
+                games: games(),
+                selected: vec![],
+                role: String::new(),
+                message: "Hi".to_string(),
+                errors: vec![ApplyField::Games, ApplyField::Message],
+                submitting: false,
+                on_toggle: |_| {},
+                on_role: |_| {},
+                on_message: |_| {},
+                on_submit: |_| {},
+                a { href: "/", "Cancel" }
+            }
+        }
+    }
+
+    fn form_message_failed() -> Element {
+        rsx! {
+            ApplyForm {
+                games_phase: SlotPhase::Ready,
+                games: games(),
+                selected: vec!["game-ow".to_string()],
+                role: String::new(),
+                message: "123456789".to_string(),
+                errors: vec![ApplyField::Message],
+                submitting: false,
+                on_toggle: |_| {},
+                on_role: |_| {},
+                on_message: |_| {},
+                on_submit: |_| {},
+            }
+        }
+    }
+
+    fn form_all_failed() -> Element {
+        rsx! {
+            ApplyForm {
+                games_phase: SlotPhase::Ready,
+                games: games(),
+                selected: vec![],
+                role: "Tank".to_string(),
+                message: LONG_MESSAGE.to_string(),
+                errors: vec![ApplyField::Games],
+                submitting: false,
+                on_toggle: |_| {},
+                on_role: |_| {},
+                on_message: |_| {},
+                on_submit: |_| {},
+            }
+        }
+    }
+
+    fn form_sending() -> Element {
+        rsx! {
+            ApplyForm {
+                games_phase: SlotPhase::Ready,
+                games: games(),
+                selected: vec!["game-ow".to_string()],
+                role: "Support".to_string(),
+                message: LONG_MESSAGE.to_string(),
+                errors: vec![],
+                submitting: true,
+                on_toggle: |_| {},
+                on_role: |_| {},
+                on_message: |_| {},
+                on_submit: |_| {},
+            }
+        }
+    }
+
+    #[test]
+    fn empty_form_shows_required_fields_and_no_errors() {
+        let html = html_of(form_empty);
+        // No errors and no summary before the first submit.
+        assert!(!html.contains(r#"role="alert""#), "{html}");
+        assert!(!html.contains("aria-invalid"), "{html}");
+        assert!(!html.contains("field-error"), "{html}");
+        assert!(!html.contains("is-error"), "{html}");
+        // The form does its own validation and never nests a heading level 1.
+        assert!(
+            tag_with_id(&html, "apply-role").starts_with("<select"),
+            "{html}"
+        );
+        assert!(html.contains("<form"), "{html}");
+        assert!(html.contains("novalidate"), "{html}");
+        assert!(!html.contains("<h1"), "{html}");
+        assert!(!html.contains("<main"), "{html}");
+        // "* Required" is a visual key for the asterisks. The whole line is
+        // hidden from assistive tech, which gets `required` from each control.
+        assert!(
+            html.contains(
+                r#"<p class="apply-legend" aria-hidden="true"><span class="apply-req">*</span> Required</p>"#
+            ),
+            "{html}"
+        );
+        // Two required fields (games, message), each with a visible
+        // asterisk, plus the key's own.
+        assert_eq!(html.matches(r#"class="apply-req""#).count(), 3, "{html}");
+        let message = tag_with_id(&html, "apply-message");
+        assert!(message.contains("required"), "{message}");
+        assert!(message.contains(r#"aria-required="true""#), "{message}");
+        assert!(message.contains(r#"class="field-input""#), "{message}");
+        assert!(html.contains(r#"for="apply-message""#), "{html}");
+        // The main role is optional: labelled so in words, no asterisk, not
+        // required, nothing describing an error.
+        let role = tag_with_id(&html, "apply-role");
+        assert!(role.contains(r#"class="field-input""#), "{role}");
+        assert!(!role.contains("required"), "{role}");
+        assert!(!role.contains("aria-describedby"), "{role}");
+        assert!(
+            html.contains(
+                r#"<label class="field-label" for="apply-role">Main role (optional)</label>"#
+            ),
+            "{html}"
+        );
+        assert!(!html.contains("apply-role-err"), "{html}");
+        // The 10 character minimum is said before the first submit: a hint
+        // that is always there and always describes the field.
+        assert!(
+            html.contains(
+                r#"<p class="field-hint" id="apply-message-hint">At least 10 characters.</p>"#
+            ),
+            "{html}"
+        );
+        assert!(
+            tag_with_id(&html, "apply-message")
+                .contains(r#"aria-describedby="apply-message-hint""#),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                r#"<p class="field-hint" id="apply-games-hint">Choose at least one.</p>"#
+            ),
+            "{html}"
+        );
+        // Role choices, with the empty "No main role" choice selected.
+        for role in MAIN_ROLES {
+            assert!(html.contains(&format!(">{role}</option>")), "{html}");
+        }
+        let none = html.find(">No main role</option>").expect("empty choice");
+        let option = &html[html[..none].rfind("<option").unwrap()..none];
+        assert!(option.contains(r#"value="""#), "{option}");
+        assert!(option.contains("selected"), "{option}");
+        // Game buttons take ids from the game id, not a counter.
+        assert!(html.contains(r#"id="apply-game-game-ow""#), "{html}");
+        assert!(html.contains(r#"id="apply-game-game-val""#), "{html}");
+        // A submit button that is not disabled, then the Cancel link.
+        let submit = html.find(">Send application</button>").expect("submit");
+        let tag = &html[html[..submit].rfind("<button").unwrap()..submit];
+        assert!(tag.contains(r#"type="submit""#), "{tag}");
+        assert!(!tag.contains("disabled"), "{tag}");
+        assert!(html[submit..].contains(">Cancel</a>"), "{html}");
+        assert!(!html.contains("Europe/Oslo"), "{html}");
+    }
+
+    #[test]
+    fn failed_submit_marks_each_field_and_links_the_summary() {
+        let html = html_of(form_failed);
+        // One summary, at the top of the form, with a heading and a count.
+        // It takes focus on a failed submit, so it is not a live region: as
+        // an alert it would be read twice, and again as the list shrinks.
+        assert!(!html.contains(r#"role="alert""#), "{html}");
+        assert!(!html.contains("aria-live"), "{html}");
+        assert_eq!(
+            html.matches(r#"class="apply-summary""#).count(),
+            1,
+            "{html}"
+        );
+        let summary = tag_with_id(&html, SUMMARY_ID);
+        assert!(summary.starts_with("<div"), "{summary}");
+        assert!(summary.contains(r#"role="group""#), "{summary}");
+        assert!(summary.contains(r#"tabindex="-1""#), "{summary}");
+        assert!(
+            summary.contains(r#"aria-labelledby="apply-error-summary-title""#),
+            "{summary}"
+        );
+        assert!(
+            html.contains(
+                r#"<h2 id="apply-error-summary-title">The application could not be sent</h2>"#
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains("<p>Fix the 2 items below, then send it again.</p>"),
+            "{html}"
+        );
+        assert!(html.find(SUMMARY_ID).unwrap() < html.find("apply-legend").unwrap());
+        // Summary links point at the invalid controls, in form order. The
+        // optional role never has one.
+        let games_link = html
+            .find(r##"<a href="#apply-games">Games: Choose at least one game.</a>"##)
+            .unwrap_or_else(|| panic!("games link in {html}"));
+        let message_link = html
+            .find(
+                r##"<a href="#apply-message">Why you want to join: Write at least 10 characters so we know why you want to join.</a>"##,
+            )
+            .unwrap_or_else(|| panic!("message link in {html}"));
+        assert!(games_link < message_link);
+        assert_eq!(html.matches("<li>").count(), 2, "{html}");
+        assert!(!html.contains(r##"href="#apply-role""##), "{html}");
+        // The invalid message control is marked and described by its hint
+        // (kept next to the error) and its message.
+        let field = ApplyField::Message;
+        let tag = tag_with_id(&html, field.id());
+        assert!(tag.contains(r#"aria-invalid="true""#), "{tag}");
+        assert!(
+            tag.contains(r#"aria-describedby="apply-message-hint apply-message-err""#),
+            "{tag}"
+        );
+        // The message is an icon, then text.
+        let message = format!(
+            r#"<p class="field-error" id="{}"><span class="field-error-icon" aria-hidden="true"></span>{}</p>"#,
+            field.error_id(),
+            field.error()
+        );
+        assert!(html.contains(&message), "{message} in {html}");
+        // The invalid Games group carries its message too.
+        assert!(
+            html.contains(&format!(
+                r#"<p class="field-error" id="apply-games-err"><span class="field-error-icon" aria-hidden="true"></span>{}</p>"#,
+                ApplyField::Games.error()
+            )),
+            "{html}"
+        );
+        // The empty, optional role is left alone.
+        let role = tag_with_id(&html, "apply-role");
+        assert!(!role.contains("aria-invalid"), "{role}");
+        assert!(!html.contains("apply-role-err"), "{html}");
+        // With a game picked, only the message fails: the valid Games group
+        // and the empty role are left alone.
+        let one = html_of(form_message_failed);
+        assert!(!one.contains("apply-games-err"), "{one}");
+        assert!(!one.contains("is-error"), "{one}");
+        assert!(!tag_with_id(&one, "apply-role").contains("aria-invalid"));
+        assert!(
+            one.contains("<p>Fix the 1 item below, then send it again.</p>"),
+            "{one}"
+        );
+        assert_eq!(one.matches("<li>").count(), 1, "{one}");
+        // Typed text is kept, and the button stays active for another try.
+        assert!(
+            html.contains(">Hi</textarea>") || html.contains(r#"value="Hi""#),
+            "{html}"
+        );
+        let submit = html.find(">Send application</button>").expect("submit");
+        let tag = &html[html[..submit].rfind("<button").unwrap()..submit];
+        assert!(!tag.contains("disabled"), "{tag}");
+    }
+
+    #[test]
+    fn games_error_is_described_and_the_group_takes_focus() {
+        let html = html_of(form_all_failed);
+        let group = tag_with_id(&html, "apply-games");
+        assert!(group.starts_with("<fieldset"), "{group}");
+        assert!(group.contains("is-error"), "{group}");
+        assert!(group.contains(r#"tabindex="-1""#), "{group}");
+        // A group has no aria-invalid; the error is a described-by message.
+        assert!(!group.contains("aria-invalid"), "{group}");
+        assert!(
+            group.contains(
+                r#"aria-describedby="apply-games-hint apply-games-status apply-games-err""#
+            ),
+            "{group}"
+        );
+        assert!(
+            html.contains(r##"<a href="#apply-games">Games: Choose at least one game.</a>"##),
+            "{html}"
+        );
+        assert!(
+            html.contains("<p>Fix the 1 item below, then send it again.</p>"),
+            "{html}"
+        );
+        assert!(html.contains(r#"id="apply-games-err""#), "{html}");
+        // The chosen role is the selected option.
+        let tank = html.find(">Tank</option>").unwrap();
+        let option = &html[html[..tank].rfind("<option").unwrap()..tank];
+        assert!(option.contains("selected"), "{option}");
+        assert!(!tag_with_id(&html, "apply-role").contains("aria-invalid"));
+    }
+
+    #[test]
+    fn sending_keeps_the_submit_button_focusable() {
+        let html = html_of(form_sending);
+        let submit = html.find(">Sending...</button>").expect("submit");
+        let tag = &html[html[..submit].rfind("<button").unwrap()..submit];
+        assert!(tag.contains(r#"aria-busy="true""#), "{tag}");
+        assert_keeps_focus_while_busy(tag);
+        assert!(!html.contains("Send application"), "{html}");
+        assert!(!html.contains(r#"role="alert""#), "{html}");
+    }
+
+    #[test]
+    fn a_corrected_field_loses_its_error_before_the_next_submit() {
+        let all = [ApplyField::Games, ApplyField::Message];
+        let ow = vec!["game-ow".to_string()];
+        // Nothing fixed yet: every error stands.
+        assert_eq!(remaining_errors(&all, &[], "Hi"), all);
+        // Picking a game clears the group's error.
+        assert_eq!(remaining_errors(&all, &ow, "Hi"), [ApplyField::Message]);
+        // A long enough message clears only the message error.
+        assert_eq!(
+            remaining_errors(&all, &[], LONG_MESSAGE),
+            [ApplyField::Games]
+        );
+        assert_eq!(remaining_errors(&all, &ow, LONG_MESSAGE), []);
+        // A change never adds an error the last submit did not report.
+        assert_eq!(remaining_errors(&[], &[], ""), []);
+        assert_eq!(
+            remaining_errors(&[ApplyField::Message], &[], LONG_MESSAGE),
+            []
+        );
+    }
+
+    /// After a send or a withdraw the heading takes focus only once the
+    /// refetched application is on screen, never on the value from before.
+    #[test]
+    fn status_heading_takes_focus_only_after_the_refetch_lands() {
+        use StatusFocus::{AfterRefetch, Idle, WhenLoaded};
+        assert_eq!(status_focus_step(Idle, false, true), (Idle, false));
+        assert_eq!(status_focus_step(Idle, true, true), (Idle, false));
+        // Withdraw: the old application is still in the slot. Not yet.
+        assert_eq!(
+            status_focus_step(AfterRefetch, false, true),
+            (AfterRefetch, false)
+        );
+        assert_eq!(
+            status_focus_step(AfterRefetch, true, true),
+            (WhenLoaded, false)
+        );
+        assert_eq!(
+            status_focus_step(WhenLoaded, true, true),
+            (WhenLoaded, false)
+        );
+        assert_eq!(status_focus_step(WhenLoaded, false, true), (Idle, true));
+        // The refetch failed or found nothing: the wait ends without a jump.
+        assert_eq!(status_focus_step(WhenLoaded, false, false), (Idle, false));
+    }
+
+    #[test]
+    fn message_is_described_by_its_hint_and_then_its_error() {
+        assert_eq!(message_describedby(false), "apply-message-hint");
+        assert_eq!(
+            message_describedby(true),
+            "apply-message-hint apply-message-err"
+        );
+        assert!(FORM_LEAD.contains("Games and the message are required"));
+        assert!(!FORM_LEAD.contains("asterisk"));
+    }
+
+    #[test]
+    fn page_css_uses_tokens_and_keeps_targets_at_44() {
+        use crate::components::ui::test_support::{
+            assert_ink_clears_aa, assert_sizes_from_tokens, css_rule, has_decl,
+        };
+        assert_sizes_from_tokens(APPLY_CSS);
+        // Fields, buttons, Retry and Load more are the shared 44px ones, so
+        // the page carries no copy of them.
+        for gone in [
+            ".ui-btn",
+            ".ui-field",
+            ".apply-label",
+            ".apply-error",
+            "fetch-error__retry",
+            "list-cap-notice__more",
+        ] {
+            assert!(!APPLY_CSS.contains(gone), "{gone} is shared now");
+        }
+        // Groups sit one small step under their label, a larger step apart.
+        let field = css_rule(APPLY_CSS, ".apply-field {");
+        assert!(has_decl(&field, "gap: var(--space-2)"), "{field}");
+        assert!(
+            APPLY_CSS.contains(".apply-field + .apply-actions { margin-top: var(--space-5); }")
+        );
+        // Phone: the primary button fills the row.
+        let phone = APPLY_CSS
+            .split_once("@media (max-width: 820px) {")
+            .expect("phone block")
+            .1;
+        assert!(
+            has_decl(
+                &css_rule(phone, ".apply-form .apply-actions .btn {"),
+                "width: 100%"
+            ),
+            "{phone}"
+        );
+        // An invalid games group marks its unpressed chips.
+        assert!(APPLY_CSS.contains(".apply-fieldset.is-error .chip:not([aria-pressed=\"true\"])"));
+        // Text contrast in dark and light.
+        assert_ink_clears_aa("--loss", "--surface", 4.5);
+        assert_ink_clears_aa("--loss", "--loss-soft", 4.5);
+        assert_ink_clears_aa("--accent-text", "--loss-soft", 4.5);
+        assert_ink_clears_aa("--text", "--loss-soft", 4.5);
+        assert_ink_clears_aa("--on-loss", "--loss", 4.5);
+        assert_ink_clears_aa("--text-3", "--surface", 4.5);
+    }
+
+    /// Vision nit 5 on 696: the send line only holds a refusal, so it uses the
+    /// field-error ink (`--loss`), not the muted `.apply-status` grey. The
+    /// other status lines stay muted.
+    #[test]
+    fn the_send_refusal_line_uses_the_error_ink() {
+        use crate::components::ui::test_support::{assert_ink_clears_aa, css_rule, has_decl};
+        let send = css_rule(APPLY_CSS, ".apply-send-status {");
+        assert!(has_decl(&send, "color: var(--loss)"), "{send}");
+        let status = css_rule(APPLY_CSS, ".apply-status {");
+        assert!(has_decl(&status, "color: var(--text-3)"), "{status}");
+        // Later in the sheet than the shared rule, same specificity, so it wins.
+        assert!(
+            APPLY_CSS.find(".apply-send-status {").unwrap()
+                > APPLY_CSS.find(".apply-status {").unwrap()
+        );
+        assert_ink_clears_aa("--loss", "--surface", 4.5);
     }
 }

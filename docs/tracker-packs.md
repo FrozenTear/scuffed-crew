@@ -10,6 +10,10 @@ release, a PR, or a comment. Do not put them in fixtures or under
 `crates/stat-tracker/test-data/`. They live in two places only: the build
 folder on the machine that made them, and `PACKS_DIR` on the server.
 
+The one approved exception is the nine rank emblems in
+`crates/app/assets/rank-icons`, which the site's rank chart needs at build
+time. They are not a pack; see `crates/app/assets/rank-icons/LICENCE-NOTE.md`.
+
 To change a pack on your own PC, see
 [Hand-edit a reader pack](hand-edit-reader-packs.md).
 

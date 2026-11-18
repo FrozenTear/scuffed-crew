@@ -10,60 +10,85 @@
 
 use dioxus::prelude::*;
 
+use crate::components::admin_shared::focus_after_delete_soon;
+
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::MyHeroIcons;
 
+use crate::components::ui::InlineConfirm;
 use crate::components::ui::inline_confirm::{
     focus_element_by_id, focus_element_by_id_soon, key_cancels,
 };
-use crate::components::ui::{BtnVariant, Button, InlineConfirm};
 use crate::hero_icons_ui::{self as text, OptOutChoice};
 use crate::training_crops_ui::{self as crops, ConsentKind, CropConsent};
 
+/// The section sits under the profile form as its own titled card
+/// (`account-section` / `account-card` from profile_settings.rs). Switches are
+/// 44px rows; the track and thumb are drawn from the spacing tokens.
 const CSS: &str = r#"
-    .training-crops__group { border: 0; margin: 0 0 var(--space-2); padding: 0; min-width: 0;
+    .training-crops__group { border: 0; margin: 0; padding: 0; min-width: 0;
         display: flex; flex-direction: column; gap: var(--space-3); }
-    .training-crops__group legend { font-size: var(--text-sm); font-weight: 600; color: var(--text);
-        padding: 0; margin-bottom: var(--space-2); }
-    .training-crops__item { min-width: 0; }
-    .training-crops__item .profile-edit-hint { margin: var(--space-1) 0 0; }
+    .training-crops__group legend { font-family: var(--font-head); font-size: var(--text-sm);
+        font-weight: var(--font-label-weight); line-height: var(--leading-ui); color: var(--text);
+        padding: 0; margin: 0 0 var(--space-2); }
+    .training-crops__item { min-width: 0; display: flex; flex-direction: column; gap: var(--space-1); }
     .training-crops__name { min-width: 0; overflow-wrap: anywhere; }
-    .hero-icons__intro { color: var(--text-3); font-size: var(--text-sm); line-height: 1.5; margin: 0 0 var(--space-4); }
-    .hero-icons__switch { max-width: 100%; display: inline-flex; align-items: center; gap: var(--space-3);
-        background: transparent; border: 0; padding: var(--space-1) 0; color: var(--text);
-        font-family: var(--font-body); font-size: var(--text-md); font-weight: 600; cursor: pointer;
-        text-align: left; }
-    .hero-icons__switch:disabled { opacity: .5; cursor: not-allowed; }
-    .hero-icons__switch:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 3px; border-radius: var(--radius-control); }
-    .hero-icons__track { flex: none; width: 2.5rem; height: 1.4rem; border-radius: 999px;
-        background: var(--surface-sunken); border: 1px solid var(--border); position: relative;
-        transition: background .12s; }
-    .hero-icons__thumb { position: absolute; top: 2px; left: 2px; width: calc(1.4rem - 6px);
-        height: calc(1.4rem - 6px); border-radius: 50%; background: var(--text-3); transition: left .12s; }
-    .hero-icons__switch[aria-checked="true"] .hero-icons__track { background: var(--accent-solid); border-color: var(--accent-solid); }
-    .hero-icons__switch[aria-checked="true"] .hero-icons__thumb { left: calc(100% - 1.4rem + 4px); background: var(--on-accent); }
-    .hero-icons__ask { margin: var(--space-3) 0; padding: var(--space-3); border: 1px solid var(--border);
-        border-radius: var(--radius-control); display: flex; flex-direction: column; gap: var(--space-2); }
-    .hero-icons__ask legend { font-size: var(--text-sm); font-weight: 600; color: var(--text); padding: 0 var(--space-1); }
-    .hero-icons__choice { display: flex; align-items: flex-start; gap: var(--space-2); font-size: var(--text-sm); color: var(--text); }
-    .hero-icons__choice input { margin-top: .2rem; }
-    .hero-icons__actions { display: flex; flex-wrap: wrap; gap: var(--space-2); justify-content: flex-end; }
-    .hero-icons__sent { margin: var(--space-4) 0 var(--space-2); font-size: var(--text-sm); font-weight: 600; color: var(--text); }
-    .hero-icons__grid { list-style: none; margin: 0 0 var(--space-4); padding: 0; display: grid;
-        grid-template-columns: repeat(auto-fill, minmax(5rem, 1fr)); gap: var(--space-2); }
+    .hero-icons__switch { box-sizing: border-box; max-width: 100%; min-height: var(--hit-target-min);
+        display: inline-flex; align-items: center; gap: var(--space-3);
+        background: transparent; border: 0; padding: 0; margin: 0; color: var(--text);
+        font-family: var(--font-body); font-size: var(--text-md); font-weight: var(--font-label-weight);
+        line-height: var(--leading-body); cursor: pointer; text-align: left; }
+    .hero-icons__switch:disabled { opacity: 0.6; cursor: progress; }
+    .hero-icons__switch:focus-visible { outline: var(--focus-ring-width) solid var(--focus-ring);
+        outline-offset: var(--focus-ring-offset); border-radius: var(--radius-control); }
+    .hero-icons__track { box-sizing: border-box; flex: none; position: relative;
+        width: var(--space-10); height: var(--space-6); border-radius: var(--radius-pill);
+        background: var(--surface-sunken); border: 1px solid var(--border-strong); }
+    .hero-icons__thumb { position: absolute; top: 50%; left: var(--space-1);
+        width: var(--space-4); height: var(--space-4); transform: translateY(-50%);
+        border-radius: var(--radius-pill); background: var(--text-3); }
+    .hero-icons__switch[aria-checked="true"] .hero-icons__track { background: var(--accent-solid);
+        border-color: var(--accent-solid); }
+    .hero-icons__switch[aria-checked="true"] .hero-icons__thumb {
+        left: calc(100% - var(--space-4) - var(--space-1)); background: var(--on-accent); }
+    .hero-icons__ask { margin: 0; padding: var(--space-4); border: 1px solid var(--border-strong);
+        border-radius: var(--radius-control); display: flex; flex-direction: column; gap: var(--space-3);
+        min-width: 0; }
+    .hero-icons__ask legend { font-family: var(--font-head); font-size: var(--text-sm);
+        font-weight: var(--font-label-weight); color: var(--text); padding: 0 var(--space-1); }
+    .hero-icons__choice { display: flex; align-items: center; gap: var(--space-3);
+        min-height: var(--hit-target-min); font-size: var(--text-md); line-height: var(--leading-body);
+        color: var(--text); }
+    .hero-icons__choice input { flex: 0 0 auto; margin: 0; accent-color: var(--accent-solid);
+        width: calc(var(--space-4) + var(--space-1) / 2); height: calc(var(--space-4) + var(--space-1) / 2); }
+    .hero-icons__sent { font-family: var(--font-head); font-size: var(--text-md);
+        font-weight: var(--font-label-weight); line-height: var(--leading-ui); color: var(--text); }
+    .hero-icons__grid { list-style: none; padding: 0; display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(calc(var(--space-10) * 2), 1fr)); gap: var(--space-2); }
     .hero-icons__tile { display: flex; flex-direction: column; align-items: center; gap: var(--space-1);
         background: var(--surface-sunken); border: 1px solid var(--border); border-radius: var(--radius-control);
         padding: var(--space-2); min-width: 0; }
-    .hero-icons__tile img { width: 4rem; height: 4rem; object-fit: contain; image-rendering: pixelated; }
+    .hero-icons__tile img { width: calc(var(--space-12) + var(--space-4));
+        height: calc(var(--space-12) + var(--space-4)); object-fit: contain; image-rendering: pixelated; }
     .hero-icons__tile span { font-size: var(--text-xs); color: var(--text-3); max-width: 100%;
         overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .hero-icons__status { min-height: 1.5em; margin: var(--space-3) 0 0; font-size: var(--text-sm); color: var(--text-3); }
-    .hero-icons__retry { margin-top: var(--space-2); }
+    /* Forced colours drop the fills, so the knob would vanish. It keeps
+       system colours, and On also fills the track edge with Highlight, so
+       the state shows by position and by colour. */
+    @media (forced-colors: active) {
+        .hero-icons__track { border-color: ButtonText; }
+        .hero-icons__thumb { forced-color-adjust: none; background: ButtonText; }
+        .hero-icons__switch[aria-checked="true"] .hero-icons__track {
+            border-color: Highlight;
+            border-width: var(--focus-ring-width);
+        }
+        .hero-icons__switch[aria-checked="true"] .hero-icons__thumb { background: Highlight; }
+    }
 "#;
 
 #[component]
 pub fn TrainingCropSettings(member_id: String) -> Element {
-    // Consent for the three kinds.
+    // Consent for the four kinds.
     let mut consent = use_signal(|| None::<CropConsent>);
     let mut consent_failed = use_signal(|| false);
     let mut consent_status = use_signal(|| crops::LOADING.to_string());
@@ -140,7 +165,7 @@ pub fn TrainingCropSettings(member_id: String) -> Element {
 
     // Show the change at once, send only the kind that changed (the server
     // keeps the others, so a stale tab cannot turn a kind back on), then take
-    // all three values from the server's answer. On failure the switch goes
+    // all four values from the server's answer. On failure the switch goes
     // back.
     let save_consent = {
         let member_id = member_id.clone();
@@ -250,14 +275,29 @@ pub fn TrainingCropSettings(member_id: String) -> Element {
     let cancel_ask = {
         let target = hero_switch_id.clone();
         move |_| {
+            if saving() || busy() {
+                return;
+            }
             asking.set(false);
             focus_element_by_id(&target);
         }
     };
 
+    let delete_prefix = text::delete_all_prefix(&member_id);
+    let delete_trigger = format!("{delete_prefix}-trigger");
+    let delete_prefix_for_focus = delete_prefix.clone();
+    let delete_trigger_for_focus = delete_trigger.clone();
     let delete_all = move |_| {
+        if busy() {
+            return;
+        }
         busy.set(true);
         let before = count;
+        // B9: the confirm strip, and the focus in it, goes when the delete
+        // ends. Focus comes back to Delete all my icons, which says there is
+        // nothing left to delete, next to the status line.
+        let strip_cancel = format!("{delete_prefix_for_focus}-cancel");
+        let back_to = vec![delete_trigger_for_focus.clone()];
         spawn(async move {
             match ApiClient::web().delete("/api/hero-icons/mine").await {
                 Ok(()) => {
@@ -272,6 +312,7 @@ pub fn TrainingCropSettings(member_id: String) -> Element {
                 Err(e) => status.set(text::failure_text("Deleting your icons", &e)),
             }
             confirming_delete.set(false);
+            focus_after_delete_soon(strip_cancel, back_to);
             busy.set(false);
             refresh += 1;
         });
@@ -284,206 +325,221 @@ pub fn TrainingCropSettings(member_id: String) -> Element {
     let question_id = text::question_id(&member_id);
     let keep_id = text::choice_id(&member_id, OptOutChoice::Keep);
     let delete_id = text::choice_id(&member_id, OptOutChoice::Delete);
-    let delete_prefix = text::delete_all_prefix(&member_id);
-    let delete_trigger = format!("{delete_prefix}-trigger");
     let ask_go_id = format!("{question_id}-go");
     let ask_cancel_id = format!("{question_id}-cancel");
     let esc_target = hero_switch_id.clone();
     let list = mine.read().clone();
 
+    let ask_busy = saving() || busy();
+    let can_delete = move |count: u32| !(busy() || saving() || count == 0 || asking());
+
     rsx! {
+        crate::styles::StyleOnce { id: super::profile_settings::ACCOUNT_CSS_ID, css: super::profile_settings::ACCOUNT_CSS }
         crate::styles::StyleOnce { id: "scuffed-css-pages-hero_icon_settings-css", css: CSS }
 
         section {
             id: "{section_id}",
-            class: "profile-edit-section",
+            class: "account-section training-crops",
             "aria-labelledby": "{heading_id}",
-            h2 { id: "{heading_id}", "{crops::HEADING}" }
-            p { class: "hero-icons__intro", "{crops::INTRO}" }
-            p { class: "hero-icons__intro", "{crops::WHO_SEES}" }
+            h2 { id: "{heading_id}", class: "ui-section-title", "{crops::HEADING}" }
+            div { class: "account-card",
+                p { class: "account-lead", "{crops::INTRO}" }
+                p { class: "account-lead", "{crops::WHO_SEES}" }
 
-            fieldset { class: "training-crops__group",
-                legend { "{crops::GROUP_LEGEND}" }
-                for kind in ConsentKind::ALL {
-                    div { class: "training-crops__item", key: "{kind.key()}",
-                        button {
-                            id: "{crops::switch_id(&member_id, kind)}",
-                            class: "hero-icons__switch",
-                            r#type: "button",
-                            role: "switch",
-                            "aria-checked": if current.is_some_and(|c| c.get(kind)) { "true" } else { "false" },
-                            "aria-labelledby": "{crops::label_id(&member_id, kind)}",
-                            "aria-describedby": "{crops::hint_id(&member_id, kind)}",
-                            disabled: switches_disabled,
-                            onclick: move |_| on_switch.call(kind),
-                            span { class: "hero-icons__track", "aria-hidden": "true",
-                                span { class: "hero-icons__thumb" }
-                            }
-                            span {
-                                id: "{crops::label_id(&member_id, kind)}",
-                                class: "training-crops__name",
-                                "{kind.label()}"
-                            }
-                        }
-                        p { id: "{crops::hint_id(&member_id, kind)}", class: "profile-edit-hint",
-                            "{kind.hint()}"
-                        }
-                    }
-                }
-            }
-
-            if asking() {
-                fieldset {
-                    id: "{question_id}",
-                    class: "hero-icons__ask",
-                    onkeydown: move |e| {
-                        if key_cancels(&e.key()) {
-                            e.stop_propagation();
-                            asking.set(false);
-                            focus_element_by_id(&esc_target);
-                        }
-                    },
-                    legend { "{text::opt_out_question(count)}" }
-                    div { class: "hero-icons__choice",
-                        input {
-                            id: "{keep_id}",
-                            r#type: "radio",
-                            name: "{question_id}",
-                            value: "keep",
-                            checked: choice() == OptOutChoice::Keep,
-                            onchange: move |_| choice.set(OptOutChoice::Keep),
-                        }
-                        label { r#for: "{keep_id}", "{text::KEEP_LABEL}" }
-                    }
-                    div { class: "hero-icons__choice",
-                        input {
-                            id: "{delete_id}",
-                            r#type: "radio",
-                            name: "{question_id}",
-                            value: "delete",
-                            checked: choice() == OptOutChoice::Delete,
-                            onchange: move |_| choice.set(OptOutChoice::Delete),
-                        }
-                        label { r#for: "{delete_id}", "{text::DELETE_LABEL}" }
-                    }
-                    div { class: "hero-icons__actions",
-                        button {
-                            id: "{ask_cancel_id}",
-                            class: "inline-confirm__cancel",
-                            r#type: "button",
-                            disabled: saving() || busy(),
-                            onclick: cancel_ask,
-                            "Cancel"
-                        }
-                        button {
-                            id: "{ask_go_id}",
-                            class: "inline-confirm__go",
-                            r#type: "button",
-                            disabled: saving() || busy(),
-                            onclick: move |_| {
-                                save_consent.call((ConsentKind::HeroIcon, false, choice()))
-                            },
-                            "Turn off hero icons"
-                        }
-                    }
-                }
-            }
-
-            if consent_failed() && current.is_none() {
-                div { class: "hero-icons__retry",
-                    Button {
-                        id: "{section_id}-consent-retry",
-                        variant: BtnVariant::Ghost,
-                        onclick: move |_| {
-                            consent_status.set(crops::LOADING.to_string());
-                            consent_refresh += 1;
-                        },
-                        "Retry loading your choices"
-                    }
-                }
-            }
-
-            p {
-                id: "{consent_status_id}",
-                class: "hero-icons__status",
-                role: "status",
-                "{consent_status}"
-            }
-
-            if store_off() {
-                p { class: "profile-edit-hint", "{text::STORE_DISABLED}" }
-            } else if let Some(list) = list {
-                if !hero_on && list.count > 0 {
-                    p { class: "profile-edit-hint", "{text::KEPT_HIDDEN_NOTE}" }
-                }
-
-                h3 { class: "hero-icons__sent",
-                    "Hero icons you have sent: {list.count} of {list.max_icons}"
-                }
-                if list.icons.is_empty() {
-                    p { class: "profile-edit-hint", "{text::NONE_SENT}" }
-                } else {
-                    ul { class: "hero-icons__grid",
-                        for icon in list.icons.iter() {
-                            li { class: "hero-icons__tile", key: "{icon.id}",
-                                img {
-                                    id: "{text::thumb_id(&icon.id)}",
-                                    src: "{icon.thumbnail_url}",
-                                    alt: "{text::icon_alt(&icon.hero, &icon.uploaded_at)}",
-                                    width: "64",
-                                    height: "64",
-                                    loading: "lazy",
+                fieldset { class: "training-crops__group",
+                    legend { "{crops::GROUP_LEGEND}" }
+                    for kind in ConsentKind::ALL {
+                        div { class: "training-crops__item", key: "{kind.key()}",
+                            button {
+                                id: "{crops::switch_id(&member_id, kind)}",
+                                class: "hero-icons__switch",
+                                r#type: "button",
+                                role: "switch",
+                                "aria-checked": if current.is_some_and(|c| c.get(kind)) { "true" } else { "false" },
+                                "aria-labelledby": "{crops::label_id(&member_id, kind)}",
+                                "aria-describedby": "{crops::hint_id(&member_id, kind)}",
+                                disabled: switches_disabled,
+                                onclick: move |_| on_switch.call(kind),
+                                span { class: "hero-icons__track", "aria-hidden": "true",
+                                    span { class: "hero-icons__thumb" }
                                 }
-                                span { "aria-hidden": "true", "{icon.hero}" }
+                                span {
+                                    id: "{crops::label_id(&member_id, kind)}",
+                                    class: "training-crops__name",
+                                    "{kind.label()}"
+                                }
+                            }
+                            p { id: "{crops::hint_id(&member_id, kind)}", class: "field-hint",
+                                "{kind.hint()}"
                             }
                         }
                     }
                 }
 
-                if confirming_delete() {
-                    InlineConfirm {
-                        id: delete_prefix.clone(),
-                        title: text::delete_all_title(list.count),
-                        body: text::DELETE_ALL_BODY.to_string(),
-                        confirm_label: "Delete all".to_string(),
-                        busy: busy(),
-                        on_confirm: delete_all,
-                        on_cancel: {
-                            let trigger = delete_trigger.clone();
-                            move |_| {
-                                confirming_delete.set(false);
-                                text::focus_when_rendered(trigger.clone());
+                if asking() {
+                    fieldset {
+                        id: "{question_id}",
+                        class: "hero-icons__ask",
+                        onkeydown: move |e| {
+                            if key_cancels(&e.key()) {
+                                e.stop_propagation();
+                                asking.set(false);
+                                focus_element_by_id(&esc_target);
                             }
                         },
-                    }
-                } else {
-                    Button {
-                        id: delete_trigger.clone(),
-                        variant: BtnVariant::Danger,
-                        disabled: busy() || saving() || list.count == 0 || asking(),
-                        onclick: move |_| confirming_delete.set(true),
-                        "Delete all my icons"
+                        legend { "{text::opt_out_question(count)}" }
+                        label { class: "hero-icons__choice", r#for: "{keep_id}",
+                            input {
+                                id: "{keep_id}",
+                                r#type: "radio",
+                                name: "{question_id}",
+                                value: "keep",
+                                checked: choice() == OptOutChoice::Keep,
+                                onchange: move |_| choice.set(OptOutChoice::Keep),
+                            }
+                            "{text::KEEP_LABEL}"
+                        }
+                        label { class: "hero-icons__choice", r#for: "{delete_id}",
+                            input {
+                                id: "{delete_id}",
+                                r#type: "radio",
+                                name: "{question_id}",
+                                value: "delete",
+                                checked: choice() == OptOutChoice::Delete,
+                                onchange: move |_| choice.set(OptOutChoice::Delete),
+                            }
+                            "{text::DELETE_LABEL}"
+                        }
+                        div { class: "account-actions",
+                            button {
+                                id: "{ask_go_id}",
+                                class: "btn is-primary",
+                                r#type: "button",
+                                aria_disabled: if ask_busy { "true" },
+                                onclick: move |_| {
+                                    if !(saving() || busy()) {
+                                        save_consent.call((ConsentKind::HeroIcon, false, choice()))
+                                    }
+                                },
+                                "Turn off hero icons"
+                            }
+                            button {
+                                id: "{ask_cancel_id}",
+                                class: "btn is-ghost",
+                                r#type: "button",
+                                aria_disabled: if ask_busy { "true" },
+                                onclick: cancel_ask,
+                                "Cancel"
+                            }
+                        }
                     }
                 }
-            } else if load_failed() {
-                div { class: "hero-icons__retry",
-                    Button {
-                        id: "{section_id}-retry",
-                        variant: BtnVariant::Ghost,
-                        onclick: move |_| {
-                            status.set(text::LOADING.to_string());
-                            refresh += 1;
-                        },
-                        "Retry loading hero icons"
-                    }
-                }
-            }
 
-            p {
-                id: "{status_id}",
-                class: "hero-icons__status",
-                role: "status",
-                "{status}"
+                if consent_failed() && current.is_none() {
+                    div { class: "account-actions",
+                        button {
+                            id: "{section_id}-consent-retry",
+                            r#type: "button",
+                            class: "btn is-ghost",
+                            onclick: move |_| {
+                                consent_status.set(crops::LOADING.to_string());
+                                consent_refresh += 1;
+                            },
+                            "Retry loading your choices"
+                        }
+                    }
+                }
+
+                p {
+                    id: "{consent_status_id}",
+                    class: if consent_failed() { "account-status is-error" } else { "account-status" },
+                    role: "status",
+                    "{consent_status}"
+                }
+
+                if store_off() {
+                    p { class: "field-hint", "{text::STORE_DISABLED}" }
+                } else if let Some(list) = list {
+                    if !hero_on && list.count > 0 {
+                        p { class: "field-hint", "{text::KEPT_HIDDEN_NOTE}" }
+                    }
+
+                    h3 { class: "hero-icons__sent",
+                        "Hero icons you have sent: {list.count} of {list.max_icons}"
+                    }
+                    if list.icons.is_empty() {
+                        p { class: "field-hint", "{text::NONE_SENT}" }
+                    } else {
+                        ul { class: "hero-icons__grid",
+                            for icon in list.icons.iter() {
+                                li { class: "hero-icons__tile", key: "{icon.id}",
+                                    img {
+                                        id: "{text::thumb_id(&icon.id)}",
+                                        src: "{icon.thumbnail_url}",
+                                        alt: "{text::icon_alt(&icon.hero, &icon.uploaded_at)}",
+                                        width: "64",
+                                        height: "64",
+                                        loading: "lazy",
+                                    }
+                                    span { "aria-hidden": "true", "{icon.hero}" }
+                                }
+                            }
+                        }
+                    }
+
+                    if confirming_delete() {
+                        InlineConfirm {
+                            id: delete_prefix.clone(),
+                            title: text::delete_all_title(list.count),
+                            body: text::DELETE_ALL_BODY.to_string(),
+                            confirm_label: "Delete all".to_string(),
+                            busy: busy(),
+                            on_confirm: delete_all,
+                            on_cancel: {
+                                let trigger = delete_trigger.clone();
+                                move |_| {
+                                    confirming_delete.set(false);
+                                    text::focus_when_rendered(trigger.clone());
+                                }
+                            },
+                        }
+                    } else {
+                        div { class: "account-actions",
+                            button {
+                                id: delete_trigger.clone(),
+                                r#type: "button",
+                                class: "btn is-danger",
+                                aria_disabled: if !can_delete(list.count) { "true" },
+                                onclick: move |_| {
+                                    if can_delete(count) {
+                                        confirming_delete.set(true);
+                                    }
+                                },
+                                "Delete all my icons"
+                            }
+                        }
+                    }
+                } else if load_failed() {
+                    div { class: "account-actions",
+                        button {
+                            id: "{section_id}-retry",
+                            r#type: "button",
+                            class: "btn is-ghost",
+                            onclick: move |_| {
+                                status.set(text::LOADING.to_string());
+                                refresh += 1;
+                            },
+                            "Retry loading hero icons"
+                        }
+                    }
+                }
+
+                p {
+                    id: "{status_id}",
+                    class: if load_failed() { "account-status is-error" } else { "account-status" },
+                    role: "status",
+                    "{status}"
+                }
             }
         }
     }
@@ -501,6 +557,25 @@ mod tests {
 
     fn section() -> Element {
         rsx! { TrainingCropSettings { member_id: "m1".to_string() } }
+    }
+
+    #[test]
+    fn switch_state_survives_forced_colours() {
+        // Vision nit 15 on PR 706: state was fill and knob only, and the
+        // knob is a fill.
+        use crate::components::ui::test_support::media_block;
+        let forced = media_block(CSS, "@media (forced-colors: active)");
+        assert!(
+            forced.contains(
+                ".hero-icons__thumb { forced-color-adjust: none; background: ButtonText; }"
+            ),
+            "{forced}"
+        );
+        assert!(
+            forced.contains(".hero-icons__switch[aria-checked=\"true\"] .hero-icons__thumb { background: Highlight; }"),
+            "{forced}"
+        );
+        assert!(forced.contains("border-color: Highlight;"), "{forced}");
     }
 
     #[test]
@@ -529,9 +604,9 @@ mod tests {
     }
 
     #[test]
-    fn three_switches_named_by_their_own_labels() {
+    fn four_switches_named_by_their_own_labels() {
         let html = render(section);
-        assert_eq!(html.matches("role=\"switch\"").count(), 3, "{html}");
+        assert_eq!(html.matches("role=\"switch\"").count(), 4, "{html}");
         for kind in ConsentKind::ALL {
             let switch = crops::switch_id("m1", kind);
             let label = crops::label_id("m1", kind);
@@ -555,7 +630,7 @@ mod tests {
     #[test]
     fn switches_are_off_and_disabled_while_loading() {
         let html = render(section);
-        assert_eq!(html.matches("aria-checked=\"false\"").count(), 3, "{html}");
+        assert_eq!(html.matches("aria-checked=\"false\"").count(), 4, "{html}");
         assert!(!html.contains("aria-checked=\"true\""), "{html}");
         for kind in ConsentKind::ALL {
             let switch = crops::switch_id("m1", kind);
@@ -571,5 +646,38 @@ mod tests {
     fn nothing_is_a_button_inside_a_link() {
         let html = render(section);
         assert!(!html.contains("<a "), "{html}");
+    }
+
+    #[test]
+    fn section_is_a_titled_account_card() {
+        let html = render(section);
+        assert!(
+            html.contains("class=\"account-section training-crops\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("<h2 id=\"training-crops-m1-heading\" class=\"ui-section-title\">"),
+            "{html}"
+        );
+        assert!(html.contains("class=\"account-card\""), "{html}");
+        assert!(!html.contains("<h1"), "the page owns the H1: {html}");
+        assert!(!html.contains("profile-edit-hint"), "{html}");
+    }
+
+    #[test]
+    fn css_uses_tokens_and_switches_are_44px() {
+        use crate::components::ui::test_support::{assert_sizes_from_tokens, css_rule, has_decl};
+        assert_sizes_from_tokens(CSS);
+        let switch = css_rule(CSS, ".hero-icons__switch {");
+        assert!(
+            has_decl(&switch, "min-height: var(--hit-target-min)"),
+            "{switch}"
+        );
+        let choice = css_rule(CSS, ".hero-icons__choice {");
+        assert!(
+            has_decl(&choice, "min-height: var(--hit-target-min)"),
+            "{choice}"
+        );
+        assert!(!CSS.contains("999px"));
     }
 }

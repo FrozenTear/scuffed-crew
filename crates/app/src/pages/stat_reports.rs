@@ -43,7 +43,7 @@ pub(crate) const COPY_LOADING_MINE: &str = "Loading your reports.";
 pub(crate) const COPY_ERROR_MINE: &str =
     "Something went wrong loading your reports. Try again in a moment.";
 pub(crate) const COPY_EMPTY_MINE: &str = "You have no reports.";
-pub(crate) const COPY_SIGN_IN: &str = "Sign in to view your reports.";
+pub(crate) const COPY_SIGN_IN: &str = "Log in to view your reports.";
 pub(crate) const COPY_MEMBERSHIP: &str = "You need to be an org member to view your reports.";
 pub(crate) const COPY_INACTIVE: &str =
     "Your membership is not active, so your reports are not available.";
@@ -562,21 +562,20 @@ const REPORT_MONTHS: [&str; 12] = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
 
-/// Short stamp in a fixed offset from UTC.
-///
-/// Same year as `now_year` is `Nov 8, 15:30`. Any other year is
-/// `Nov 8, 2025, 15:30`. `minutes_east` is local time minus UTC (`-300` is
-/// five hours behind). My reports passes the browser offset and the viewer
-/// year. Native tests pass `0` and an explicit year.
-pub(crate) fn format_report_local(at: DateTime<Utc>, minutes_east: i32, now_year: i32) -> String {
+/// Short stamp in a fixed offset from UTC: `8 Nov 2026, 15:30`, the admin
+/// date (`AdminDate`, day first, always with the year) plus the clock.
+/// `minutes_east` is local time minus UTC (`-300` is five hours behind).
+/// My reports passes the browser offset. Native tests pass `0`.
+pub(crate) fn format_report_local(at: DateTime<Utc>, minutes_east: i32) -> String {
     let local = at + chrono::Duration::minutes(i64::from(minutes_east));
     let month = REPORT_MONTHS[local.month0() as usize];
-    let clock = format!("{:02}:{:02}", local.hour(), local.minute());
-    if local.year() == now_year {
-        format!("{month} {}, {clock}", local.day())
-    } else {
-        format!("{month} {}, {}, {clock}", local.day(), local.year())
-    }
+    format!(
+        "{} {month} {}, {:02}:{:02}",
+        local.day(),
+        local.year(),
+        local.hour(),
+        local.minute()
+    )
 }
 
 /// Sent and delete dates on `/reports`, in the viewer zone.
@@ -584,18 +583,7 @@ pub(crate) fn format_report_local(at: DateTime<Utc>, minutes_east: i32, now_year
 /// Wasm reads the offset and the current year from the browser. Native builds
 /// (unit tests) use UTC with the same short layout, and do not append `UTC`.
 pub(crate) fn format_report_when_local(at: DateTime<Utc>) -> String {
-    format_report_local(at, viewer_minutes_east(at), viewer_now_year())
-}
-
-fn viewer_now_year() -> i32 {
-    #[cfg(all(feature = "web", target_arch = "wasm32"))]
-    {
-        let year = js_sys::Date::new_0().get_full_year();
-        if let Ok(year) = i32::try_from(year) {
-            return year;
-        }
-    }
-    Utc::now().year()
+    format_report_local(at, viewer_minutes_east(at))
 }
 
 fn viewer_minutes_east(at: DateTime<Utc>) -> i32 {
@@ -1008,62 +996,168 @@ pub(crate) fn MyReportsBody(
     #[props(default)] on_confirm: EventHandler<()>,
     #[props(default)] on_cancel: EventHandler<()>,
 ) -> Element {
+    use super::my_reports::{MY_REPORTS_CSS, MY_REPORTS_LIST_ID, MY_REPORTS_PAGE_SIZE};
+    use crate::components::member_gate::Wall;
+    use crate::components::ui::{
+        EmptyCard, PageShell, PageWidth, Pager, SkeletonBars, btn_class, page_slice, show_list_top,
+    };
+    use crate::routes::Route;
+
+    let mut page = use_signal(|| 1usize);
     let show_dialog = screen == MemberScreen::Ready && pending.is_some();
+    // The page's status line: rendered in every state, visible only while
+    // the list loads. The cards say the rest.
+    let (status_text, status_class) = match screen {
+        MemberScreen::Loading => (COPY_LOADING_MINE, "my-reports-wait"),
+        _ => ("", "visually-hidden"),
+    };
+    let total = rows.len();
+    let shown = page_slice(&rows, page(), MY_REPORTS_PAGE_SIZE).to_vec();
+    // Plain links: this body is also rendered on its own in tests, with no
+    // router above it.
+    let home_href = Route::Home {}.to_string();
+    let apply_href = Route::Apply {}.to_string();
+    let profile_href = Route::ProfileSettings {}.to_string();
+    let link_href = Route::LinkDevice {}.to_string();
+    let home = rsx! {
+        a { href: "{home_href}", class: btn_class(false), "Return home" }
+    };
     rsx! {
         crate::styles::StyleOnce { id: "scuffed-css-pages-stat_reports-reports-css", css: REPORTS_CSS }
-        main { class: "reports-page",
-            h1 { id: MY_REPORTS_HEADING_ID, tabindex: "-1", "My reports" }
-            if screen != MemberScreen::Disabled {
-                p { class: "reports-intro",
-                    "{COPY_INTRO_MINE}"
-                    br {}
-                    "{copy_daily_cap()}"
+        crate::styles::StyleOnce { id: super::profile_settings::ACCOUNT_CSS_ID, css: super::profile_settings::ACCOUNT_CSS }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-my_reports-css", css: MY_REPORTS_CSS }
+        PageShell { width: PageWidth::Wide, class: "my-reports-page",
+            // The shared page header, with an id on the H1 so focus can land
+            // on it after a report is deleted.
+            header { class: "page-header",
+                h1 { id: MY_REPORTS_HEADING_ID, tabindex: "-1", "My reports" }
+                if screen != MemberScreen::Disabled {
+                    p { class: "page-lead",
+                        "{COPY_INTRO_MINE} {copy_daily_cap()}"
+                    }
                 }
             }
+            p { class: status_class, role: "status", "{status_text}" }
             match screen {
-                MemberScreen::Loading => rsx! { p { class: "reports-status", "{COPY_LOADING_MINE}" } },
+                MemberScreen::Loading => rsx! { SkeletonBars { rows: 4 } },
                 MemberScreen::SignIn => rsx! {
-                    p { class: "reports-status", "{COPY_SIGN_IN}" }
-                    a {
-                        href: "{login_return_href(MY_REPORTS_PATH)}",
-                        class: "report-btn",
-                        onclick: move |_| remember_login_return(MY_REPORTS_PATH),
-                        "Sign in"
+                    Wall {
+                        title: "Log in required",
+                        lead: COPY_SIGN_IN,
+                        actions: rsx! {
+                            a {
+                                href: "{login_return_href(MY_REPORTS_PATH)}",
+                                class: btn_class(true),
+                                onclick: move |_| remember_login_return(MY_REPORTS_PATH),
+                                "Log in"
+                            }
+                            {home}
+                        },
                     }
                 },
                 MemberScreen::Membership => rsx! {
-                    p { class: "reports-status", "{COPY_MEMBERSHIP}" }
-                    a { href: "/apply", class: "report-btn", "Apply" }
+                    Wall {
+                        title: "Membership required",
+                        lead: COPY_MEMBERSHIP,
+                        actions: rsx! {
+                            a { href: "{apply_href}", class: btn_class(true), "Apply" }
+                            {home}
+                        },
+                    }
                 },
-                MemberScreen::Inactive => rsx! { p { class: "reports-status", "{COPY_INACTIVE}" } },
+                MemberScreen::Inactive => rsx! {
+                    Wall {
+                        title: "Membership inactive",
+                        lead: COPY_INACTIVE,
+                        actions: rsx! {
+                            a { href: "{home_href}", class: btn_class(true), "Return home" }
+                            a { href: "{profile_href}", class: btn_class(false), "Open your profile" }
+                        },
+                    }
+                },
                 MemberScreen::Error => rsx! {
-                    p { class: "reports-status reports-error", "{visible_load_error(COPY_ERROR_MINE, http_status, &error_body, retry_after_seconds)}" }
-                    {retry_button(MY_REPORTS_RETRY_ID, on_retry)}
-                },
-                MemberScreen::Empty => rsx! { p { class: "reports-status", "{COPY_EMPTY_MINE}" } },
-                MemberScreen::Disabled => rsx! { p { class: "reports-status", "{COPY_DISABLED}" } },
-                MemberScreen::Ready => rsx! {
-                    div { class: "reports-scroll", inert: reports_scroll_inert(show_dialog),
-                        table { class: "reports-table",
-                            thead {
-                                tr {
-                                    th { "Date" }
-                                    th { "Size" }
-                                    th { "Status" }
-                                    th { "Training consent" }
-                                    th { "Expiry" }
-                                    th { "Actions" }
+                    Wall {
+                        title: "Couldn't load your reports",
+                        lead: visible_load_error(COPY_ERROR_MINE, http_status, &error_body, retry_after_seconds),
+                        actions: rsx! {
+                            span { class: "reports-actions",
+                                label { r#for: MY_REPORTS_RETRY_ID, class: "report-control-label", "{COPY_TRY_AGAIN}" }
+                                button {
+                                    r#type: "button",
+                                    id: MY_REPORTS_RETRY_ID,
+                                    name: "retry",
+                                    class: btn_class(true),
+                                    onclick: move |_| on_retry.call(()),
+                                    "{COPY_TRY_AGAIN}"
                                 }
                             }
-                            tbody {
-                                for row in rows.iter() {
-                                    {member_row(row, busy, on_arm_delete, on_arm_withdraw)}
+                            {home}
+                        },
+                    }
+                },
+                MemberScreen::Empty => rsx! {
+                    EmptyCard {
+                        title: "No reports yet",
+                        message: format!("{COPY_EMPTY_MINE} Send one from the stat tracker when a game reads wrong, and it shows up here."),
+                        actions: rsx! {
+                            a { href: "{link_href}", class: btn_class(false), "Link the stat tracker" }
+                        },
+                    }
+                },
+                MemberScreen::Disabled => rsx! {
+                    EmptyCard {
+                        title: "Reports are off",
+                        message: COPY_DISABLED,
+                        actions: rsx! { {home} },
+                    }
+                },
+                MemberScreen::Ready => rsx! {
+                    section {
+                        id: MY_REPORTS_LIST_ID,
+                        class: "my-reports-list pager-target",
+                        tabindex: "-1",
+                        aria_label: "Your reports",
+                        div { class: "my-reports-scroll", inert: reports_scroll_inert(show_dialog),
+                            table { class: "my-reports-table",
+                                thead {
+                                    tr {
+                                        th { scope: "col", "Date" }
+                                        th { scope: "col", "Size" }
+                                        th { scope: "col", "Status" }
+                                        th { scope: "col", "Training consent" }
+                                        th { scope: "col", "Expiry" }
+                                        th { scope: "col", "Actions" }
+                                    }
+                                }
+                                tbody {
+                                    for row in shown.iter() {
+                                        MemberReportRow {
+                                            key: "{row.id}",
+                                            row: row.clone(),
+                                            busy,
+                                            on_arm_delete,
+                                            on_arm_withdraw,
+                                        }
+                                    }
                                 }
                             }
                         }
+                        Pager {
+                            id: "my-reports-pager",
+                            page: page(),
+                            total,
+                            page_size: MY_REPORTS_PAGE_SIZE,
+                            noun: "reports",
+                            noun_singular: "report".to_string(),
+                            label: "Report pages".to_string(),
+                            on_change: move |next| {
+                                page.set(next);
+                                show_list_top(MY_REPORTS_LIST_ID);
+                            },
+                        }
                     }
                     if truncated {
-                        p { class: "reports-sub", "{COPY_TRUNCATED}" }
+                        p { class: "my-reports-note", "{COPY_TRUNCATED}" }
                     }
                 },
             }
@@ -1076,8 +1170,11 @@ pub(crate) fn MyReportsBody(
     }
 }
 
-fn member_row(
-    row: &StatReportListItem,
+/// One of the member's own reports. A component, so the loop keys it by
+/// the report id (a key inside a returned `rsx!` does not key the loop).
+#[component]
+fn MemberReportRow(
+    row: StatReportListItem,
     busy: bool,
     on_arm_delete: EventHandler<String>,
     on_arm_withdraw: EventHandler<String>,
@@ -1091,8 +1188,9 @@ fn member_row(
     let usable = is_report_id(&row.id);
     let delete_id = control_id("delete", &row.id);
     let withdraw_id = control_id("withdraw", &row.id);
-    let delete_label = format!("Delete report {}", row.id);
-    let withdraw_label = format!("Withdraw training consent for report {}", row.id);
+    // Named by what the member can see (date and size), not the record id.
+    let delete_label = format!("Delete report from {when}, {size}");
+    let withdraw_label = format!("Withdraw training consent for the report from {when}, {size}");
     let delete_report_id = row.id.clone();
     let withdraw_report_id = row.id.clone();
     let training = row.training_consent;
@@ -1108,7 +1206,14 @@ fn member_row(
             }
             td {
                 span { class: "report-card-label", "Status" }
-                "{status}"
+                crate::components::ui::Pill {
+                    tone: if training {
+                        crate::components::ui::PillTone::Neutral
+                    } else {
+                        crate::components::ui::PillTone::Warn
+                    },
+                    "{status}"
+                }
             }
             td {
                 span { class: "report-card-label", "Training consent" }
@@ -1119,18 +1224,22 @@ fn member_row(
                 span { class: "report-card-label", "Expiry" }
                 "{expiry}"
             }
-            td {
+            td { class: "my-reports-actions-cell",
                 span { class: "report-card-label", "Actions" }
                 if usable {
-                    div { class: "reports-actions",
+                    div { class: "reports-actions my-reports-actions",
                         {labeled_control(&delete_id, &delete_label, rsx! {
                             button {
                                 r#type: "button",
                                 id: "{delete_id}",
                                 name: "delete-report",
-                                class: "report-btn report-btn-danger",
-                                disabled: busy,
-                                onclick: move |_| on_arm_delete.call(delete_report_id.clone()),
+                                class: "btn is-danger",
+                                aria_disabled: if busy { "true" },
+                                onclick: move |_| {
+                                    if !busy {
+                                        on_arm_delete.call(delete_report_id.clone());
+                                    }
+                                },
                                 "Delete"
                             }
                         })}
@@ -1140,9 +1249,13 @@ fn member_row(
                                     r#type: "button",
                                     id: "{withdraw_id}",
                                     name: "withdraw-training",
-                                    class: "report-btn",
-                                    disabled: busy,
-                                    onclick: move |_| on_arm_withdraw.call(withdraw_report_id.clone()),
+                                    class: "btn is-ghost",
+                                    aria_disabled: if busy { "true" },
+                                    onclick: move |_| {
+                                        if !busy {
+                                            on_arm_withdraw.call(withdraw_report_id.clone());
+                                        }
+                                    },
                                     "Withdraw consent"
                                 }
                             })}
@@ -1242,6 +1355,10 @@ pub(crate) fn OfficerReportsBody(
     display_names: Vec<Option<String>>,
     #[props(default)] truncated: bool,
     #[props(default)] on_retry: EventHandler<()>,
+    /// The H1 and the intro. The admin route says both in its own
+    /// `PageHeader`, so it turns them off here.
+    #[props(default = true)]
+    heading: bool,
 ) -> Element {
     rsx! {
         crate::styles::StyleOnce { id: "scuffed-css-pages-stat_reports-reports-css", css: REPORTS_CSS }
@@ -1252,21 +1369,21 @@ pub(crate) fn OfficerReportsBody(
             },
             OfficerScreen::Loading => rsx! {
                 div { class: "reports-page",
-                    h1 { "Reports" }
+                    if heading { h1 { "Reports" } }
                     p { class: "reports-status", "{COPY_LOADING_ALL}" }
                 }
             },
             OfficerScreen::Error => rsx! {
                 div { class: "reports-page",
-                    h1 { "Reports" }
-                    p { class: "reports-intro", "{COPY_INTRO_ALL}" }
+                    if heading { h1 { "Reports" } }
+                    if heading { p { class: "reports-intro", "{COPY_INTRO_ALL}" } }
                     p { class: "reports-status reports-error", "{visible_load_error(COPY_ERROR_ALL, http_status, &error_body, retry_after_seconds)}" }
                     {retry_button(OFFICER_REPORTS_RETRY_ID, on_retry)}
                 }
             },
             OfficerScreen::SignIn => rsx! {
                 div { class: "reports-page",
-                    h1 { "Reports" }
+                    if heading { h1 { "Reports" } }
                     p { class: "reports-status", "{COPY_OFFICER_SIGN_IN}" }
                     a {
                         href: "{login_return_href(OFFICER_REPORTS_PATH)}",
@@ -1278,21 +1395,21 @@ pub(crate) fn OfficerReportsBody(
             },
             OfficerScreen::Empty => rsx! {
                 div { class: "reports-page",
-                    h1 { "Reports" }
-                    p { class: "reports-intro", "{COPY_INTRO_ALL}" }
+                    if heading { h1 { "Reports" } }
+                    if heading { p { class: "reports-intro", "{COPY_INTRO_ALL}" } }
                     p { class: "reports-status", "{COPY_EMPTY_ALL}" }
                 }
             },
             OfficerScreen::Disabled => rsx! {
                 div { class: "reports-page",
-                    h1 { "Reports" }
+                    if heading { h1 { "Reports" } }
                     p { class: "reports-status", "{COPY_DISABLED}" }
                 }
             },
             OfficerScreen::Ready => rsx! {
                 div { class: "reports-page",
-                    h1 { "Reports" }
-                    p { class: "reports-intro", "{COPY_INTRO_ALL}" }
+                    if heading { h1 { "Reports" } }
+                    if heading { p { class: "reports-intro", "{COPY_INTRO_ALL}" } }
                     div { class: "reports-scroll",
                         table { class: "reports-table reports-table-officer",
                             thead {
@@ -1308,10 +1425,10 @@ pub(crate) fn OfficerReportsBody(
                             }
                             tbody {
                                 for (index, row) in rows.iter().enumerate() {
-                                    {officer_row(
+                                    Fragment { key: "{row.id}", {officer_row(
                                         row,
                                         display_names.get(index).and_then(|name| name.as_deref()),
-                                    )}
+                                    )} }
                                 }
                             }
                         }
@@ -1604,6 +1721,18 @@ mod tests {
     }
 
     #[test]
+    fn own_report_rows_are_keyed_by_the_loop() {
+        // Vision nit 6 on PR 706: `{member_row(..)}` in the loop body left
+        // the rows unkeyed.
+        let src = include_str!("stat_reports.rs");
+        let prod = src.split("mod tests").next().expect("production half");
+        assert!(prod.contains(
+            "MemberReportRow {\n                                            key: \"{row.id}\","
+        ));
+        assert!(!prod.contains("{member_row("));
+    }
+
+    #[test]
     fn copy_has_no_em_or_en_dash() {
         for line in static_copy() {
             assert_plain(line);
@@ -1741,30 +1870,32 @@ mod tests {
     #[test]
     fn format_report_local_uses_the_viewer_offset_and_year() {
         let noon = at(2026, 11, 8, 15, 30);
-        assert_eq!(format_report_local(noon, 0, 2026), "Nov 8, 15:30");
-        assert_eq!(format_report_local(noon, -300, 2026), "Nov 8, 10:30");
-        assert_eq!(format_report_local(noon, 330, 2026), "Nov 8, 21:00");
+        assert_eq!(format_report_local(noon, 0), "8 Nov 2026, 15:30");
+        assert_eq!(format_report_local(noon, -300), "8 Nov 2026, 10:30");
+        assert_eq!(format_report_local(noon, 330), "8 Nov 2026, 21:00");
         assert_eq!(
-            format_report_local(at(2026, 11, 8, 2, 15), -300, 2026),
-            "Nov 7, 21:15"
+            format_report_local(at(2026, 11, 8, 2, 15), -300),
+            "7 Nov 2026, 21:15"
         );
         assert_eq!(
-            format_report_local(at(2026, 1, 1, 0, 30), -120, 2026),
-            "Dec 31, 2025, 22:30"
+            format_report_local(at(2026, 1, 1, 0, 30), -120),
+            "31 Dec 2025, 22:30"
         );
         assert_eq!(
-            format_report_local(at(2025, 11, 8, 15, 30), 0, 2026),
-            "Nov 8, 2025, 15:30"
+            format_report_local(at(2027, 1, 2, 3, 4), 0),
+            "2 Jan 2027, 03:04"
         );
-        assert_eq!(
-            format_report_local(at(2027, 1, 2, 3, 4), 0, 2026),
-            "Jan 2, 2027, 03:04"
-        );
-        let shown = format_report_local(noon, -300, 2026);
+        // The same day first, year always, as AdminDate.
+        let shown = format_report_local(noon, -300);
         assert!(!shown.contains("UTC"), "{shown}");
-        assert!(!shown.contains("2026"), "{shown}");
+        assert!(
+            shown.starts_with(
+                &crate::components::admin_shared::admin_short_date("2026-11-08")
+                    .unwrap()
+                    .1
+            )
+        );
         assert_plain(&shown);
-        assert_plain("Nov 8, 2025, 15:30");
         assert!(
             REPORTS_CSS.contains(".report-when { white-space: nowrap;"),
             "narrow screens keep the date on one line"
@@ -1881,11 +2012,7 @@ mod tests {
             scheduled,
             format!("Deleted on {}", format_report_when_local(when))
         );
-        if Utc::now().year() == 2026 {
-            assert_eq!(scheduled, "Deleted on Nov 8, 15:30");
-        } else {
-            assert!(scheduled.contains("2026"), "{scheduled}");
-        }
+        assert_eq!(scheduled, "Deleted on 8 Nov 2026, 15:30");
         assert_plain(&scheduled);
         let kept = expiry_text(true, Some(when));
         assert_eq!(kept, "No deletion date");

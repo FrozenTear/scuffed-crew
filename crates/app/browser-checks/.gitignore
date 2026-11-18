@@ -1,4 +1,5 @@
 node_modules/
+node_modules
 # Written by the seed scripts and the checks, per local stack.
 .state/
 reports/

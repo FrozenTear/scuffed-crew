@@ -2,17 +2,102 @@
 //!
 //! Non-officers hit the same officer check as the admin layout. Download
 //! fetches the zip and saves it as a file. The zip is not rendered here.
+//!
+//! The list body (its H1, table and states) is `OfficerReportsBody` in
+//! `pages/stat_reports.rs`, shared with that page's tests. This route puts it
+//! in the wide admin column and answers the no-access and session-check
+//! states itself, so the no-access page is not nested inside the column.
 
 use chrono::Utc;
 use dioxus::prelude::*;
 
 use scuffed_api_client::{ApiClient, ClientError};
 
+use crate::components::AccessDenied;
+use crate::components::ui::{PageHeader, PageShell, PageWidth, SkeletonBars};
 use crate::state::use_auth;
 
 use super::super::stat_reports::{
-    ListedError, OfficerReportsBody, officer_screen, parse_officer_reports, report_is_current,
+    COPY_CHECKING, COPY_FORBIDDEN, COPY_INTRO_ALL, ListedError, OfficerReportsBody, OfficerScreen,
+    officer_screen, parse_officer_reports, report_is_current,
 };
+
+/// The shared reports body in the admin column, on the admin list pattern:
+/// no column of its own (the `PageShell` is the column), the `PageHeader`
+/// as its H1, `DataTable` header and cell type, 12px floor, 44px Download,
+/// notes that wrap instead of an ellipsis, and the member id only as a
+/// tooltip once a name is known.
+const ADMIN_REPORTS_CSS: &str = r#"
+.admin-reports-page .reports-page {
+    max-width: none;
+    margin: 0;
+    padding: 0;
+}
+.admin-reports-page .reports-status {
+    margin: 0;
+    padding: 0;
+    color: var(--text-3);
+    font-size: var(--text-md);
+    line-height: var(--leading-body);
+}
+.admin-reports-page .reports-table th {
+    font-family: var(--font-head);
+    font-size: var(--text-xs);
+    font-weight: var(--table-header-weight);
+    letter-spacing: var(--font-head-tracking);
+    color: var(--table-header-fg);
+}
+.admin-reports-page .reports-table th,
+.admin-reports-page .reports-table td {
+    padding: var(--space-3) var(--table-pad-x);
+    border-bottom-color: var(--table-row-border);
+}
+.admin-reports-page .reports-table td {
+    font-size: var(--text-sm);
+    line-height: var(--leading-body);
+    color: var(--table-row-fg);
+}
+.admin-reports-page .reports-sub,
+.admin-reports-page .report-member-id,
+.admin-reports-page .report-note-more summary {
+    font-size: var(--text-xs);
+    margin-top: var(--space-1);
+}
+.admin-reports-page .report-member-id-sub { display: none; }
+.admin-reports-page td.report-note { overflow: visible; }
+.admin-reports-page .report-note-preview {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
+}
+.admin-reports-page .report-btn {
+    box-sizing: border-box;
+    min-height: var(--hit-target-min);
+    padding: var(--space-2) var(--button-pad-x);
+    font-family: var(--button-font);
+    font-size: var(--button-font-size);
+    font-weight: var(--button-font-weight);
+    border-radius: var(--button-radius);
+}
+@media (max-width: 760px) {
+    .admin-reports-page .reports-table tr {
+        padding: var(--space-3);
+        margin: 0 0 var(--space-3);
+        border-color: var(--card-border);
+        border-radius: var(--card-radius);
+        background: var(--card-bg);
+    }
+    .admin-reports-page .reports-table td { padding: var(--space-1) 0; }
+    .admin-reports-page .report-card-label {
+        font-family: var(--font-head);
+        font-size: var(--text-xs);
+        letter-spacing: var(--font-head-tracking);
+        color: var(--table-header-fg);
+        margin-bottom: var(--space-1);
+    }
+}
+"#;
 
 #[component]
 pub fn AdminReports() -> Element {
@@ -65,21 +150,65 @@ pub fn AdminReports() -> Element {
     let row_count = list.as_ref().map(|_| rows.len());
     let screen = officer_screen(&auth_now, failure.as_ref(), row_count);
 
-    rsx! {
-        OfficerReportsBody {
-            screen,
-            http_status: failure.as_ref().and_then(|err| err.status),
-            error_body: failure
-                .as_ref()
-                .map(|err| err.body.clone())
-                .unwrap_or_default(),
-            retry_after_seconds: failure.as_ref().and_then(|err| err.header_seconds),
-            rows,
-            display_names,
-            truncated: list.as_ref().is_some_and(|list| list.truncated),
-            on_retry: move |_| {
-                refresh += 1;
-            },
-        }
+    match screen {
+        OfficerScreen::Forbidden => rsx! {
+            AccessDenied { message: COPY_FORBIDDEN.to_string() }
+        },
+        OfficerScreen::Checking => rsx! {
+            PageShell { width: PageWidth::Wide, class: "admin-reports-page",
+                PageHeader { title: "Reports" }
+                div { class: "admin-pending",
+                    p { class: "admin-pending-text", role: "status", "{COPY_CHECKING}" }
+                    SkeletonBars { rows: 3 }
+                }
+            }
+        },
+        _ => rsx! {
+            crate::styles::StyleOnce { id: "scuffed-css-pages-admin-reports-css", css: ADMIN_REPORTS_CSS }
+            PageShell { width: PageWidth::Wide, class: "admin-reports-page",
+                PageHeader { title: "Reports", lead: COPY_INTRO_ALL }
+                OfficerReportsBody {
+                    heading: false,
+                    screen,
+                    http_status: failure.as_ref().and_then(|err| err.status),
+                    error_body: failure
+                        .as_ref()
+                        .map(|err| err.body.clone())
+                        .unwrap_or_default(),
+                    retry_after_seconds: failure.as_ref().and_then(|err| err.header_seconds),
+                    rows,
+                    display_names,
+                    truncated: list.as_ref().is_some_and(|list| list.truncated),
+                    on_retry: move |_| {
+                        refresh += 1;
+                    },
+                }
+            }
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::components::admin_shared::test_page::render_admin_route;
+    use scuffed_types::OrgRole;
+
+    #[test]
+    fn reports_sit_in_the_wide_column_with_one_h1() {
+        let html = render_admin_route("/admin/reports", Some(OrgRole::Officer));
+        assert!(
+            html.contains("class=\"ui-shell ui-shell--wide admin-reports-page\""),
+            "{html}"
+        );
+        assert_eq!(html.matches("<h1").count(), 1, "{html}");
+        assert!(html.contains("<h1>Reports</h1>"), "{html}");
+        assert_eq!(html.matches("<main").count(), 1, "{html}");
+        assert!(!html.contains("ui-shell--narrow"), "{html}");
+    }
+
+    #[test]
+    fn admin_reports_css_is_on_tokens() {
+        crate::components::ui::test_support::assert_sizes_from_tokens(super::ADMIN_REPORTS_CSS);
+        assert!(super::ADMIN_REPORTS_CSS.contains("min-height: var(--hit-target-min)"));
     }
 }

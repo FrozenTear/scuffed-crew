@@ -231,56 +231,47 @@ pub(super) fn group_title_id(match_id: &str, group: &str) -> String {
 }
 
 pub(super) const BANS_PICKS_CSS: &str = r#"
-    .game-bans-picks {
-        margin-top: 1rem;
-        padding: 1rem 1.25rem;
-        background: var(--surface);
-        border: 1px solid var(--border);
-        border-radius: 10px;
-    }
-    .game-bans-picks .game-bp-heading {
-        margin: 0 0 0.75rem;
-        font-family: var(--font-head);
-        font-size: 1rem;
-        color: var(--text);
-    }
-    .game-bp-groups {
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-        gap: 0.9rem 1.25rem;
-    }
-    .game-bp-group { min-width: 0; }
-    .game-bp-group .game-bp-title {
-        margin: 0 0 0.4rem;
-        font-size: 0.75rem;
-        font-weight: 600;
-        letter-spacing: 0.04em;
-        text-transform: uppercase;
-        color: var(--text-subtle);
-    }
-    .game-bp-list {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.4rem;
-        margin: 0;
-        padding: 0;
-        list-style: none;
-    }
-    .game-bp-item {
-        max-width: 100%;
-        padding: 0.3rem 0.65rem;
-        background: var(--surface-sunken);
-        border: 1px solid var(--border);
-        border-radius: 999px;
-        font-size: 0.9rem;
-        color: var(--text);
-        overflow-wrap: anywhere;
-    }
-    .game-bp-item-muted { color: var(--text-subtle); }
+.game-bp-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(calc(var(--space-12) * 4), 1fr));
+  gap: var(--space-4) var(--space-5);
+}
+.game-bp-group { min-width: 0; }
+.game-bp-group .game-bp-title {
+  margin: 0 0 var(--space-2);
+  font-family: var(--font-head);
+  font-size: var(--text-xs);
+  font-weight: var(--font-label-weight);
+  letter-spacing: var(--font-head-tracking);
+  text-transform: uppercase;
+  color: var(--text-subtle);
+}
+.game-bp-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.game-bp-item {
+  max-width: 100%;
+  padding: var(--space-1) var(--space-3);
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  font-size: var(--text-sm);
+  line-height: var(--leading-ui);
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.game-bp-item-muted { color: var(--text-subtle); }
 "#;
 
 /// The section for one game. Renders nothing when the field is absent, empty,
-/// or has no readable slot, so an older game looks exactly as before.
+/// or has no readable slot, so an older game looks exactly as before. The
+/// title is a section title in the shared step, and the lists sit in one card
+/// under it, as the Maps section of the match frame does.
 pub(super) fn bans_picks_section(match_id: &str, field: Option<&BansPicks>) -> Element {
     let groups = field.map(BansPicksGroups::groups).unwrap_or_default();
     if groups.is_empty() {
@@ -289,11 +280,11 @@ pub(super) fn bans_picks_section(match_id: &str, field: Option<&BansPicks>) -> E
     let heading = heading_id(match_id);
     let section_id = format!("bans-picks-{}", id_part(match_id));
     rsx! {
-        section { class: "game-bans-picks", id: "{section_id}", aria_labelledby: "{heading}",
-            h2 { class: "game-bp-heading", id: "{heading}", "{SECTION_TITLE}" }
-            div { class: "game-bp-groups",
+        section { class: "ui-stack game-bans-picks", id: "{section_id}", aria_labelledby: "{heading}",
+            h2 { class: "ui-section-title game-bp-heading", id: "{heading}", "{SECTION_TITLE}" }
+            div { class: "stats-view-card game-bp-groups",
                 for g in groups {
-                    {
+                    Fragment { key: "{g.key}", {
                         let title_id = group_title_id(match_id, g.key);
                         rsx! {
                             div { class: "game-bp-group", key: "{g.key}",
@@ -309,7 +300,7 @@ pub(super) fn bans_picks_section(match_id: &str, field: Option<&BansPicks>) -> E
                                 }
                             }
                         }
-                    }
+                    } }
                 }
             }
         }
@@ -348,50 +339,50 @@ pub(super) fn card_groups(field: Option<&BansPicks>) -> Vec<(&'static str, Vec<S
 }
 
 pub(super) const BANS_PICKS_CARD_CSS: &str = r#"
-    .match-card .match-bp {
-        grid-column: 1 / -1;
-        display: flex;
-        flex-wrap: wrap;
-        align-items: baseline;
-        gap: 0.2rem 0.9rem;
-        min-width: 0;
-        margin: 0;
-        padding: 0;
-        list-style: none;
-        font-size: 0.75rem;
-        color: var(--text-3);
-    }
-    .match-card .match-bp-group {
-        display: flex;
-        flex-wrap: wrap;
-        align-items: baseline;
-        gap: 0.2rem 0.3rem;
-        min-width: 0;
-    }
-    .match-card .match-bp-label {
-        color: var(--text-subtle);
-        white-space: nowrap;
-    }
-    .match-card .match-bp-pills {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.2rem;
-        min-width: 0;
-        margin: 0;
-        padding: 0;
-        list-style: none;
-    }
-    .match-card .match-bp-pill {
-        max-width: 100%;
-        padding: 0 0.45rem;
-        background: var(--surface-sunken);
-        border: 1px solid var(--border);
-        border-radius: 999px;
-        color: var(--text);
-        overflow-wrap: anywhere;
-    }
-    .match-card:hover .match-bp-pill { background: var(--surface); }
-    .match-card .match-bp-pill-muted { color: var(--text-subtle); }
+.match-card .match-bp {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-3);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--text-xs);
+  color: var(--text-3);
+}
+.match-card .match-bp-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.match-card .match-bp-label {
+  color: var(--text-subtle);
+  white-space: nowrap;
+}
+.match-card .match-bp-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.match-card .match-bp-pill {
+  max-width: 100%;
+  padding: 0 var(--space-2);
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.match-card:hover .match-bp-pill { background: var(--surface); }
+.match-card .match-bp-pill-muted { color: var(--text-subtle); }
 "#;
 
 /// A compact read-only line for a match list card. Renders nothing when the

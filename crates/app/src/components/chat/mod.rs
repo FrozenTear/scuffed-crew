@@ -7,7 +7,9 @@ pub mod message_list;
 pub mod reaction_bar;
 #[cfg(feature = "web")]
 pub mod relay_status;
+pub mod thread;
 
 #[cfg(feature = "web")]
 pub use chat_widget::ChatWidget;
 pub use reaction_bar::{ReactionBar, ReactionCount};
+pub use thread::ThreadHead;

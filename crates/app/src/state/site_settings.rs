@@ -400,7 +400,11 @@ mod tests {
         let html = mount_seeded_home();
         assert!(html.contains("Play"), "{html}");
         assert!(html.contains("data-home-shell=\"manifesto\""), "{html}");
-        assert!(html.contains(">SO</div>"), "{html}");
+        // The seeded initials show in the top bar mark.
+        assert!(
+            html.contains("class=\"d1-mark\" aria-hidden=\"true\">SO</span>"),
+            "{html}"
+        );
         assert!(html.contains("Seeded Org"), "{html}");
         assert!(html.contains("© Seeded Org · desc"), "{html}");
         assert!(

@@ -1,5 +1,5 @@
 // No horizontal page overflow on every page, per role and width, and the
-// /admin/relay tables scroll inside their own wrappers (QA 1 on PR 693).
+// long /admin/relay URLs stay inside the admin area (QA 1 on PR 693).
 import { launch, makeContext, open, readState, reporter, settled } from './lib.mjs';
 
 const { rec, finish } = reporter('overflow');
@@ -29,11 +29,28 @@ for (const [role, widths, paths] of [['admin', [1440, 390, 360], [...PUBLIC, ...
     rec(`${role} ${width}: no page is left on a loading marker that reports an error`, errored.length === 0, errored.join(' | '));
     if (role === 'admin') {
       await open(page, '/admin/relay');
-      // The tables arrive with /api/nostr/health: wait for them, do not count once.
-      const arrived = await page.waitForFunction(() => document.querySelectorAll('table.data-table').length >= 2, null, { timeout: 10000 }).then(() => true, () => false);
-      rec(`admin ${width}: /admin/relay shows its 2 tables within 10 s`, arrived);
-      const r = await page.evaluate(() => ({ tables: document.querySelectorAll('table.data-table').length, wrapped: [...document.querySelectorAll('table.data-table')].every(t => t.parentElement.classList.contains('data-table-scroll')), sw: document.documentElement.scrollWidth, iw: innerWidth, main: getComputedStyle(document.querySelector('.admin-main')).overflowX }));
-      rec(`admin ${width}: /admin/relay has its 2 tables, each in its own scroller, page ${r.sw} <= ${r.iw}`, r.tables === 2 && r.wrapped && r.sw <= r.iw && r.main === 'auto', JSON.stringify(r));
+      // The facts arrive with /api/nostr/health: wait for them, do not count once.
+      const arrived = await page.waitForFunction(() => document.querySelector('.admin-relay-page .relay-facts'), null, { timeout: 10000 }).then(() => true, () => false);
+      rec(`admin ${width}: /admin/relay shows its relay facts within 10 s`, arrived);
+      // S4d shows the relays as a definition list and a list, not tables:
+      // long relay URLs wrap inside the admin area. That area clips
+      // (overflow-x clip, S4d FIX2: not a scroll container, so the settings
+      // save bar sticks to the viewport), so a page width check alone would
+      // miss text cut off by the clip. Every URL box must fit inside it.
+      const r = await page.evaluate(() => {
+        const main = document.querySelector('.admin-main');
+        const box = main.getBoundingClientRect();
+        const codes = [...document.querySelectorAll('.admin-relay-page code')];
+        return {
+          urls: codes.length,
+          // Every line box of the (inline) code, so a wrapped URL is checked per line.
+          cut: codes.filter(c => [...c.getClientRects()].some(b => b.right > box.right + 0.5 || b.left < box.left - 0.5)).map(c => c.textContent.slice(0, 40)),
+          sw: document.documentElement.scrollWidth,
+          iw: innerWidth,
+          main: getComputedStyle(main).overflowX,
+        };
+      });
+      rec(`admin ${width}: /admin/relay wraps its ${r.urls} relay URLs inside the admin area, which clips, page ${r.sw} <= ${r.iw}`, r.urls >= 3 && r.cut.length === 0 && r.sw <= r.iw && r.main === 'clip', JSON.stringify(r));
     }
     await ctx.close();
   }

@@ -14,8 +14,9 @@ pub fn retry_label(retrying: bool) -> &'static str {
 }
 
 /// [`fetch_error`] with the in-flight state. `refresh: None` hides Retry for
-/// failures a retry cannot fix; `retrying` disables the button and marks the
-/// block busy until the refetch resolves.
+/// failures a retry cannot fix; `retrying` marks the block busy until the
+/// refetch resolves. The busy button is `aria-disabled` and ignores clicks: a
+/// natively disabled button is blurred, which drops focus to the page body.
 pub fn fetch_error_state(message: &str, refresh: Option<Signal<u32>>, retrying: bool) -> Element {
     let message = message.to_string();
     let label = retry_label(retrying);
@@ -29,8 +30,12 @@ pub fn fetch_error_state(message: &str, refresh: Option<Signal<u32>>, retrying: 
                 button {
                     r#type: "button",
                     class: "fetch-error__retry",
-                    disabled: retrying,
-                    onclick: move |_| refresh += 1,
+                    aria_disabled: if retrying { "true" },
+                    onclick: move |_| {
+                        if !retrying {
+                            refresh += 1;
+                        }
+                    },
                     "{label}"
                 }
             }
@@ -79,7 +84,9 @@ mod tests {
 
         let busy = render(Busy);
         assert!(busy.contains("Retrying..."), "{busy}");
-        assert!(busy.contains("disabled"), "{busy}");
+        // Busy, but still focusable: never the native attribute.
+        assert!(busy.contains(r#"aria-disabled="true""#), "{busy}");
+        assert!(!busy.contains(" disabled"), "{busy}");
         assert!(busy.contains(r#"aria-busy="true""#), "{busy}");
     }
 

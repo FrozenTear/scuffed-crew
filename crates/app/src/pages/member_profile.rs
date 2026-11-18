@@ -314,7 +314,8 @@ pub fn MemberProfile(id: String) -> Element {
     rsx! {
         crate::styles::StyleOnce { id: "scuffed-css-pages-member_profile-page-css", css: PAGE_CSS }
 
-        main { class: "profile-page",
+        // The shell already renders the page's one `main`.
+        div { class: "profile-page",
             {
                 let data = profile.read();
                 match data.as_ref() {
@@ -615,5 +616,19 @@ mod tests {
         assert_eq!(record(hero(5, 2, 0)), "5W-2L");
         assert_eq!(record(hero(0, 0, 0)), "0W-0L");
         assert_eq!(record(hero(0, 0, 2)), "0W-0L-2D");
+    }
+
+    /// QA 706 nit 3: the site shell renders the page's `main`, so the
+    /// profile body must not add a second one.
+    #[test]
+    fn the_profile_body_adds_no_second_main() {
+        let src = include_str!("member_profile.rs");
+        let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        assert!(
+            !prod
+                .lines()
+                .any(|line| line.trim_start().starts_with("main {"))
+        );
+        assert!(prod.contains("div { class: \"profile-page\","));
     }
 }

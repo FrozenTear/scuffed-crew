@@ -36,13 +36,13 @@ Best mobile Nostr client with full NIP-29 group support, push notifications, and
 
 If you already have a Nostr identity, link it to your clan account.
 
-Most members start with a server-managed key, and `/identity` offers **Link & Verify** only when no key is linked and a NIP-07 extension is installed. So with a server-managed key, unlink it first:
+Most members start with a server-managed key, and `/identity` offers **Link and verify** only when no key is linked and a NIP-07 extension is installed. So with a server-managed key, unlink it first:
 
 1. Install a NIP-07 browser extension (nos2x, Alby, or similar)
 2. Go to `/identity` on the clan site
 3. If **Key mode** shows **Server-managed**, back the key up first if you want to keep it (see below). Then open **Advanced**, click **Unlink key** and confirm. Chat and direct messages stop working until a key is linked again
-4. Under **Link a key**, click **Detect** to read your public key from the extension (or paste it)
-5. Click **Link & Verify** and approve the signing request in your extension
+4. Under **Link a key**, click **Detect from extension** to read your public key from the extension (or paste it)
+5. Click **Link and verify** and approve the signing request in your extension
 6. Your Nostr pubkey is now linked, and you're the same identity everywhere
 
 ## Backing Up Your Server-Managed Key
@@ -51,7 +51,7 @@ If you started with a server-managed key, you can export an encrypted backup of 
 
 1. Go to `/identity` on the clan site
 2. Under **Back up your key**, enter a backup password (12 characters or more)
-3. Click **Export Backup**
+3. Click **Export backup**
 4. Copy the backup (`ncryptsec1...`) right away. It is shown only once
 5. Store the backup and its password securely. You need both to use the key
 
