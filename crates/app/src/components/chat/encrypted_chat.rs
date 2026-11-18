@@ -74,9 +74,6 @@ pub fn EncryptedChat(
     /// The viewer's own key, passed on to the message list.
     #[props(default)]
     own_pubkey: Option<String>,
-    /// The viewer's display name, passed on to the message list.
-    #[props(default)]
-    own_name: Option<String>,
 ) -> Element {
     rsx! {
         crate::styles::StyleOnce { id: "scuffed-css-components-chat-encrypted_chat-encrypted-chat-css", css: ENCRYPTED_CHAT_CSS }
@@ -106,7 +103,6 @@ pub fn EncryptedChat(
                         messages: messages,
                         loading: loading,
                         own_pubkey: own_pubkey,
-                        own_name: own_name,
                     }
                     ComposeBox {
                         on_send: move |attempt: ComposeAttempt| on_send.call(attempt),

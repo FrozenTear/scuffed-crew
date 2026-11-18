@@ -2,8 +2,8 @@
 //!
 //! Follows `.msg-list` and `.msg` of the `d1-chat` frame: each message is a
 //! small card with the sender and the time above the text. The viewer's own
-//! messages sit at the end of the row on the soft accent fill, under the
-//! viewer's own name as the frame draws it ("You" when it is not known).
+//! messages sit at the end of the row on the soft accent fill, labelled
+//! "You" (never the viewer's own name).
 
 use dioxus::prelude::*;
 
@@ -121,9 +121,6 @@ pub fn MessageList(
     /// The viewer's own key. Their messages sit at the end.
     #[props(default)]
     own_pubkey: Option<String>,
-    /// The viewer's display name, shown on their own messages.
-    #[props(default)]
-    own_name: Option<String>,
 ) -> Element {
     let now = now_secs();
     rsx! {
@@ -144,7 +141,6 @@ pub fn MessageList(
                         key: "{msg.id}",
                         message: msg.clone(),
                         mine: is_own(own_pubkey.as_deref(), &msg.pubkey),
-                        own_name: own_name.clone(),
                         now,
                     }
                 }
@@ -158,12 +154,15 @@ fn is_own(own_pubkey: Option<&str>, pubkey: &str) -> bool {
     !pubkey.is_empty() && own_pubkey == Some(pubkey)
 }
 
-/// Name above a message. Pubkeys are usually 64 hex chars, but a short or
+/// Label on the viewer's own messages.
+const OWN_LABEL: &str = "You";
+
+/// Name above a message. The viewer's own messages read "You", whatever name
+/// the message carries. Pubkeys are usually 64 hex chars, but a short or
 /// empty sender id must not panic on a fixed byte slice.
-fn sender_name(message: &ChatMessage, mine: bool, own_name: Option<&str>) -> String {
+fn sender_name(message: &ChatMessage, mine: bool) -> String {
     if mine {
-        let own = own_name.map(str::trim).filter(|name| !name.is_empty());
-        return own.unwrap_or("You").to_string();
+        return OWN_LABEL.to_string();
     }
     match message.display_name.as_deref() {
         Some(name) => name.to_string(),
@@ -173,8 +172,8 @@ fn sender_name(message: &ChatMessage, mine: bool, own_name: Option<&str>) -> Str
 
 /// A single message card.
 #[component]
-fn MessageBubble(message: ChatMessage, mine: bool, own_name: Option<String>, now: u64) -> Element {
-    let name = sender_name(&message, mine, own_name.as_deref());
+fn MessageBubble(message: ChatMessage, mine: bool, now: u64) -> Element {
+    let name = sender_name(&message, mine);
     let time_str = format_relative_time(now, message.created_at);
     let stamp = iso_timestamp(message.created_at);
     let sealed = message.encrypted && message.content.is_empty();
@@ -258,7 +257,6 @@ mod tests {
     struct ProbeProps {
         messages: Vec<ChatMessage>,
         loading: bool,
-        own_name: Option<String>,
     }
 
     #[allow(non_snake_case)]
@@ -268,21 +266,12 @@ mod tests {
                 messages: props.messages,
                 loading: props.loading,
                 own_pubkey: Some(ME.to_string()),
-                own_name: props.own_name,
             }
         }
     }
 
     fn render(messages: Vec<ChatMessage>, loading: bool) -> String {
-        render_as(messages, loading, Some("Player01"))
-    }
-
-    fn render_as(messages: Vec<ChatMessage>, loading: bool, own_name: Option<&str>) -> String {
-        let props = ProbeProps {
-            messages,
-            loading,
-            own_name: own_name.map(str::to_string),
-        };
+        let props = ProbeProps { messages, loading };
         let mut dom = VirtualDom::new_with_props(Probe, props);
         dom.rebuild_in_place();
         dioxus_ssr::render(&dom)
@@ -337,33 +326,34 @@ mod tests {
     }
 
     #[test]
-    fn own_messages_carry_the_viewer_name_and_sit_at_the_end() {
+    fn own_messages_read_you_and_sit_at_the_end() {
         let html = render(
             vec![
                 message("1", OTHER, None, "First"),
                 message("2", ME, None, "Works for me."),
+                message("3", ME, Some("Player01"), "On my way."),
             ],
             false,
         );
-        assert!(
-            html.contains("<div class=\"chat-msg chat-msg--me\">"),
+        assert_eq!(
+            html.matches("<div class=\"chat-msg chat-msg--me\">")
+                .count(),
+            2,
             "{html}"
         );
-        assert!(
-            html.contains("<span class=\"chat-msg__author\">Player01</span>"),
-            "the frame names the viewer on their own messages: {html}"
+        assert_eq!(
+            html.matches("<span class=\"chat-msg__author\">You</span>")
+                .count(),
+            2,
+            "own messages read You, with or without a name on them: {html}"
         );
-        for unknown in [None, Some("  ")] {
-            let anon = render_as(
-                vec![message("2", ME, None, "Works for me.")],
-                false,
-                unknown,
-            );
-            assert!(
-                anon.contains("<span class=\"chat-msg__author\">You</span>"),
-                "{anon}"
-            );
-        }
+        assert!(
+            !html.contains("Player01"),
+            "the viewer's own name is never the label: {html}"
+        );
+        let mine = message("3", ME, Some("Player01"), "x");
+        assert_eq!(sender_name(&mine, true), "You");
+        assert_eq!(sender_name(&mine, false), "Player01");
         assert!(
             html.contains("<span class=\"chat-msg__author\">ff00ee11</span>"),
             "a sender with no name falls back to the key prefix: {html}"
