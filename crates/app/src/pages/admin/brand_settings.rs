@@ -236,7 +236,7 @@ async fn load_brand_settings() -> Result<SiteSettings, String> {
     ApiClient::web()
         .fetch::<SiteSettings>("/api/settings")
         .await
-        .map_err(|err| err.to_string())
+        .map_err(|err| crate::client_error::logged_message("brand settings load", &err))
 }
 
 #[component]
@@ -262,7 +262,7 @@ pub fn AdminBrandSettings() -> Element {
     let loaded = settings.read().clone();
     let status = match &loaded {
         None => "Loading brand settings...".to_string(),
-        Some(Err(err)) => format!("Failed to load brand settings: {err}"),
+        Some(Err(reason)) => format!("Failed to load brand settings: {reason}"),
         Some(Ok(_)) => String::new(),
     };
     let failed = matches!(loaded, Some(Err(_)));
@@ -334,7 +334,7 @@ fn BrandSettingsForm(saved: SavedBrand) -> Element {
                     toast.show(Toast::success("Brand saved."));
                 }
                 Err(e) => {
-                    toast.show(Toast::error(format!("Failed to save brand: {e}")));
+                    toast.show(Toast::error_from("Failed to save brand", &e));
                 }
             }
             saving.set(false);

@@ -144,7 +144,7 @@ pub fn Wiki() -> Element {
                                 .map(WikiEntry::from)
                                 .collect::<Vec<_>>()
                         })
-                        .map_err(|e| e.to_string())
+                        .map_err(|e| crate::client_error::logged_message("wiki list", &e))
                 }
             })
             .await?;

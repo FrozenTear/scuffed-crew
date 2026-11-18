@@ -160,7 +160,7 @@ pub fn Tournament(id: String) -> Element {
             ApiClient::web()
                 .fetch::<BracketData>(&format!("/api/tournaments/{id}/bracket"))
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(|e| crate::client_error::logged_message("tournament bracket", &e))
         }
     });
 
@@ -178,7 +178,7 @@ pub fn Tournament(id: String) -> Element {
             ApiClient::web()
                 .fetch::<Vec<SwissStanding>>(&format!("/api/tournaments/{id}/standings"))
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(|e| crate::client_error::logged_message("tournament standings", &e))
         }
     });
 

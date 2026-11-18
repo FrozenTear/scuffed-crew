@@ -180,7 +180,7 @@ async fn provision_auth_token(relay_url: &str) -> Result<AuthTokenResponse, Stri
                 body,
                 retry_after: _,
             } => chat_api_error_copy(status, &body),
-            other => other.to_string(),
+            other => crate::client_error::user_message(&other),
         })
 }
 
@@ -219,7 +219,7 @@ async fn send_officer_message(
                     body,
                     retry_after: _,
                 }) => Err(chat_api_error_copy(status, &body)),
-                Err(e) => Err(e.to_string()),
+                Err(e) => Err(crate::client_error::user_message(&e)),
             }
         }
         Err(ClientError::Http {
@@ -227,7 +227,7 @@ async fn send_officer_message(
             body,
             retry_after: _,
         }) => Err(chat_api_error_copy(status, &body)),
-        Err(e) => Err(e.to_string()),
+        Err(e) => Err(crate::client_error::user_message(&e)),
     }
 }
 
@@ -259,7 +259,7 @@ async fn decrypt_gift_wrap(event: &NostrEvent, relay_url: &str) -> Result<ChatMe
                         body,
                         retry_after: _,
                     } => chat_api_error_copy(status, &body),
-                    other => other.to_string(),
+                    other => crate::client_error::user_message(&other),
                 })?
         }
         Err(ClientError::Http {
@@ -267,7 +267,7 @@ async fn decrypt_gift_wrap(event: &NostrEvent, relay_url: &str) -> Result<ChatMe
             body,
             retry_after: _,
         }) => return Err(chat_api_error_copy(status, &body)),
-        Err(e) => return Err(e.to_string()),
+        Err(e) => return Err(crate::client_error::user_message(&e)),
     };
     let group_id = resp
         .tags

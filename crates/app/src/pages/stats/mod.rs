@@ -1439,7 +1439,7 @@ pub fn Stats() -> Element {
                 .await
             {
                 Ok(_) => toast.show(Toast::success("Settings saved.")),
-                Err(e) => toast.show(Toast::error(format!("Save failed: {e}"))),
+                Err(e) => toast.show(Toast::error_from("Save failed", &e)),
             }
             settings_saving.set(false);
         });

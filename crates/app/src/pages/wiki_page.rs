@@ -225,7 +225,7 @@ pub fn WikiPage(topic: String) -> Element {
             ApiClient::web()
                 .fetch::<WikiPageData>(&wiki_api_path(&t))
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(|e| crate::client_error::logged_message("wiki page", &e))
         }
     });
 
@@ -244,7 +244,7 @@ pub fn WikiPage(topic: String) -> Element {
                 .fetch::<WikiRevisionsResponse>(&format!("{}/revisions", wiki_api_path(&t)))
                 .await
                 .map(Some)
-                .map_err(|e| e.to_string())
+                .map_err(|e| crate::client_error::logged_message("wiki revisions", &e))
         }
     });
 

@@ -327,7 +327,7 @@ pub fn Forum() -> Element {
             ApiClient::web()
                 .fetch::<Vec<ForumCategoryNode>>("/api/forum/tree")
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(|e| crate::client_error::logged_message("forum tree", &e))
         }
     });
     let load = forum_load(tree.read().as_ref());
@@ -533,7 +533,7 @@ pub fn ForumBoardPage(slug: String) -> Element {
             ApiClient::web()
                 .fetch::<ThreadListResponse>(&url)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(|e| crate::client_error::logged_message("forum threads", &e))
         }
     }));
     // Names for the starters of the threads on screen only.

@@ -225,7 +225,7 @@ async fn load_relay_health() -> Result<RelayHealthSnapshot, String> {
             Err(err) => {
                 failed_attempts += 1;
                 let Some(delay_ms) = health_retry_delay_ms(&err, failed_attempts) else {
-                    return Err(err.to_string());
+                    return Err(crate::client_error::logged_message("relay health", &err));
                 };
                 pause_health_retry(delay_ms).await;
             }

@@ -214,7 +214,7 @@ pub fn AdminForum() -> Element {
                 }
                 Err(e) => {
                     cat_state.set(SaveState::failed("Could not create the category", &e));
-                    toast.show(Toast::error(e.to_string()));
+                    toast.show(Toast::error(crate::client_error::user_message(&e)));
                 }
             }
         });
@@ -262,7 +262,7 @@ pub fn AdminForum() -> Element {
                 }
                 Err(e) => {
                     board_state.set(SaveState::failed("Could not create the board", &e));
-                    toast.show(Toast::error(e.to_string()));
+                    toast.show(Toast::error(crate::client_error::user_message(&e)));
                 }
             }
         });

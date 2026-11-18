@@ -309,7 +309,7 @@ pub fn StrategyMy() -> Element {
                         delete_target.set(None);
                         strategies.refresh += 1;
                     }
-                    Err(e) => toast.show(Toast::error(format!("Delete failed: {e}"))),
+                    Err(e) => toast.show(Toast::error_from("Delete failed", &e)),
                 }
                 deleting.set(false);
             });

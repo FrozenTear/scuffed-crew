@@ -193,7 +193,7 @@ pub fn Setup() -> Element {
                     if let Some(message) = settled.error {
                         name_error.set(Some(message.to_string()));
                     } else if settled.keep_existing_failure {
-                        error.set(Some(e.to_string()));
+                        error.set(Some(crate::client_error::user_message(&e)));
                     }
                     submitting.set(false);
                 }
@@ -209,8 +209,8 @@ pub fn Setup() -> Element {
                 p { class: "lead",
                     "First-time setup for your clan platform. Create the admin account, name the org, and pick a homepage starter."
                 }
-                if let Some(err) = error() {
-                    p { class: "setup-error", "{err}" }
+                if let Some(message) = error() {
+                    p { class: "setup-error", "{message}" }
                 }
                 form { onsubmit: on_submit,
                     div { class: "setup-field",

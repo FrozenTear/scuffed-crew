@@ -206,10 +206,7 @@ pub fn Community() -> Element {
                 .fetch::<PublicOverview>("/api/public/overview")
                 .await
                 .map(Counts::from)
-                .map_err(|e| {
-                    log_client_error("community overview", &e);
-                    e.to_string()
-                })
+                .map_err(|e| crate::client_error::logged_message("community overview", &e))
         }
     });
 

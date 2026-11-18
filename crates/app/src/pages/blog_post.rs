@@ -41,7 +41,7 @@ pub fn BlogPost(slug: String) -> Element {
             ApiClient::web()
                 .fetch::<FullArticle>(&article_api_path(&s))
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(|e| crate::client_error::logged_message("blog article", &e))
         }
     });
     // Articles carry only the author id; resolve it once the article loads.

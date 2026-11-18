@@ -150,7 +150,7 @@ pub fn Tournaments() -> Element {
                 .fetch::<CursorPage<Tournament>>("/api/tournaments")
                 .await
                 .map(|page| (page.data, page.next_cursor.is_some()))
-                .map_err(|e| e.to_string())
+                .map_err(|e| crate::client_error::logged_message("tournaments", &e))
         }
     });
 

@@ -30,6 +30,11 @@ impl Toast {
             level: ToastLevel::Error,
         }
     }
+    /// An error toast for a failed request: `lead` then the short text from
+    /// [`crate::client_error::user_message`], never the raw error.
+    pub fn error_from(lead: &str, err: &scuffed_api_client::ClientError) -> Self {
+        Self::error(crate::client_error::with_lead(lead, err))
+    }
     pub fn info(msg: impl Into<String>) -> Self {
         Self {
             id: 0,

@@ -353,7 +353,10 @@ pub fn AdminTournaments() -> Element {
                 .await
             {
                 Ok(t) => detail_tournament.set(Some(t)),
-                Err(e) => detail_error.set(Some(e.to_string())),
+                Err(e) => detail_error.set(Some(crate::client_error::logged_message(
+                    "tournament detail",
+                    &e,
+                ))),
             }
             match ApiClient::web()
                 .fetch::<BracketData>(&format!("/api/tournaments/{id}/bracket"))
@@ -362,7 +365,10 @@ pub fn AdminTournaments() -> Element {
                 Ok(b) => bracket_data.set(Some(b)),
                 Err(e) => {
                     if detail_error.peek().is_none() {
-                        detail_error.set(Some(e.to_string()));
+                        detail_error.set(Some(crate::client_error::logged_message(
+                            "tournament bracket",
+                            &e,
+                        )));
                     }
                 }
             }
@@ -470,7 +476,7 @@ pub fn AdminTournaments() -> Element {
                     save_error.set(Some(
                         SaveState::failed("Could not save the tournament", &e).text(),
                     ));
-                    toast.show(Toast::error(format!("Failed to save: {e}")));
+                    toast.show(Toast::error_from("Failed to save", &e));
                 }
             }
         });
@@ -527,7 +533,7 @@ pub fn AdminTournaments() -> Element {
                         members.refresh += 1;
                         detail_id.set(None);
                     }
-                    Err(e) => toast.show(Toast::error(format!("Archive failed: {e}"))),
+                    Err(e) => toast.show(Toast::error_from("Archive failed", &e)),
                 }
             });
         }
@@ -565,7 +571,7 @@ pub fn AdminTournaments() -> Element {
                     members.refresh += 1;
                     detail_refresh += 1;
                 }
-                Err(e) => toast.show(Toast::error(format!("Status change failed: {e}"))),
+                Err(e) => toast.show(Toast::error_from("Status change failed", &e)),
             }
         });
     };
@@ -621,7 +627,7 @@ pub fn AdminTournaments() -> Element {
                         add_part_error.set(Some(
                             SaveState::failed("Could not add the participant", &e).text(),
                         ));
-                        toast.show(Toast::error(format!("Failed: {e}")));
+                        toast.show(Toast::error_from("Failed", &e));
                     }
                 }
             });
@@ -661,7 +667,7 @@ pub fn AdminTournaments() -> Element {
                         detail_refresh += 1;
                         focus_after_delete_soon(remove_participant_id(&pid), focus_next);
                     }
-                    Err(e) => toast.show(Toast::error(format!("Remove failed: {e}"))),
+                    Err(e) => toast.show(Toast::error_from("Remove failed", &e)),
                 }
             });
         }
@@ -682,7 +688,7 @@ pub fn AdminTournaments() -> Element {
                         toast.show(Toast::success("Bracket generated."));
                         detail_refresh += 1;
                     }
-                    Err(e) => toast.show(Toast::error(format!("Generate failed: {e}"))),
+                    Err(e) => toast.show(Toast::error_from("Generate failed", &e)),
                 }
             });
         }
@@ -699,7 +705,7 @@ pub fn AdminTournaments() -> Element {
                         toast.show(Toast::success("Next Swiss round generated."));
                         detail_refresh += 1;
                     }
-                    Err(e) => toast.show(Toast::error(format!("Failed: {e}"))),
+                    Err(e) => toast.show(Toast::error_from("Failed", &e)),
                 }
             });
         }
@@ -778,7 +784,7 @@ pub fn AdminTournaments() -> Element {
                         match_error.set(Some(
                             SaveState::failed("Could not save the result", &e).text(),
                         ));
-                        toast.show(Toast::error(format!("Failed: {e}")));
+                        toast.show(Toast::error_from("Failed", &e));
                     }
                 }
             });

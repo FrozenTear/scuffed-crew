@@ -110,7 +110,7 @@ pub fn ForumThread(id: String) -> Element {
                     thread_api_path(&tid)
                 ))
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(|e| crate::client_error::logged_message("forum thread", &e))
         }
     }));
     // Posts carry only the author id; resolve the ones on screen.

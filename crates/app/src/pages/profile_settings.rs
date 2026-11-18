@@ -363,11 +363,11 @@ pub(crate) fn account_view_from_auth(auth: &AuthState) -> Option<AccountView> {
 
 /// The view for a failed load: a 401 is the sign-in wall, anything else the
 /// failure card with the server's reason.
-pub(crate) fn account_view_from_error(err: &str) -> AccountView {
-    if is_http_status(err, 401) {
+pub(crate) fn account_view_from_error(reason: &str) -> AccountView {
+    if is_http_status(reason, 401) {
         AccountView::SignIn
     } else {
-        AccountView::Failed(err.to_string())
+        AccountView::Failed(reason.to_string())
     }
 }
 
@@ -523,7 +523,10 @@ pub fn ProfileSettings() -> Element {
                 stats_failed.set(None);
                 stats_visibility.set(Some(s.stats_visibility));
             }
-            Err(e) => stats_failed.set(Some(e.to_string())),
+            Err(e) => stats_failed.set(Some(crate::client_error::logged_message(
+                "stats settings",
+                &e,
+            ))),
         }
     });
 
@@ -532,7 +535,10 @@ pub fn ProfileSettings() -> Element {
         let me = match ApiClient::web().fetch::<MeResponse>("/api/auth/me").await {
             Ok(me) => me,
             Err(e) => {
-                load.set(ProfileLoad::Failed(e.to_string()));
+                load.set(ProfileLoad::Failed(crate::client_error::logged_message(
+                    "profile me",
+                    &e,
+                )));
                 return;
             }
         };
@@ -566,7 +572,10 @@ pub fn ProfileSettings() -> Element {
                 );
                 load.set(ProfileLoad::Ready);
             }
-            Err(e) => load.set(ProfileLoad::Failed(e.to_string())),
+            Err(e) => load.set(ProfileLoad::Failed(crate::client_error::logged_message(
+                "profile load",
+                &e,
+            ))),
         }
     });
 
@@ -615,7 +624,7 @@ pub fn ProfileSettings() -> Element {
                     name_error.set(settled.error.map(str::to_string));
                     save_state.set(SaveState::failed("Could not save your profile", &e));
                     if settled.keep_existing_failure {
-                        toast.show(Toast::error(format!("Save failed: {e}")));
+                        toast.show(Toast::error_from("Save failed", &e));
                     }
                 }
             }
@@ -713,7 +722,7 @@ pub fn ProfileSettings() -> Element {
                         game_id,
                         SaveState::failed("Could not save the game account", &e),
                     )));
-                    toast.show(Toast::error(format!("Save failed: {e}")));
+                    toast.show(Toast::error_from("Save failed", &e));
                 }
             }
             account_saving.set(false);
@@ -1135,7 +1144,33 @@ mod tests {
             rsx! { AccountStatus { id: "x-status", state: SaveState::Idle } }
         }
         fn failed() -> Element {
-            rsx! { AccountStatus { id: "x-status", state: SaveState::failed("Could not save your profile", "HTTP error 409: taken") } }
+            rsx! {
+                AccountStatus {
+                    id: "x-status",
+                    state: SaveState::failed(
+                        "Could not save your profile",
+                        &scuffed_api_client::ClientError::http(409, r#"{"error":"taken"}"#, None),
+                    ),
+                }
+            }
+        }
+        // Issue 728: the server is down. Chromium's raw error is the whole
+        // wasm stack; the line says one short sentence instead.
+        fn offline() -> Element {
+            let raw = format!(
+                "JsValue(TypeError: Failed to fetch\nTypeError: Failed to fetch\n{})",
+                "    at imports.wbg.__wbg_fetch_f1 (http://127.0.0.1:3815/assets/scuffed-app-dxh1.js:1:61234)\n"
+                    .repeat(12)
+            );
+            rsx! {
+                AccountStatus {
+                    id: "x-status",
+                    state: SaveState::failed(
+                        "Could not save your profile",
+                        &scuffed_api_client::ClientError::Network(raw),
+                    ),
+                }
+            }
         }
         let html = crate::components::ui::test_support::render(idle);
         assert_eq!(
@@ -1145,6 +1180,28 @@ mod tests {
         let html = crate::components::ui::test_support::render(failed);
         assert!(html.contains("account-status is-error"), "{html}");
         assert!(html.contains("HTTP error 409: taken"), "{html}");
+
+        let html = crate::components::ui::test_support::render(offline);
+        assert_eq!(
+            html,
+            "<p id=\"x-status\" class=\"account-status is-error\" role=\"status\">Could not save your profile. Could not reach the server. Check your connection and try again.</p>"
+        );
+        for leak in ["JsValue", "TypeError", "Failed to fetch", "http://", ".js:"] {
+            assert!(!html.contains(leak), "{leak} in {html}");
+        }
+
+        // The save handler builds the line and the toast from the error
+        // itself, so neither can show the raw text.
+        let prod = include_str!("profile_settings.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("prod part");
+        assert!(
+            prod.contains(
+                "save_state.set(SaveState::failed(\"Could not save your profile\", &e));"
+            )
+        );
+        assert!(!prod.contains("Save failed: {e}"));
     }
 
     #[test]

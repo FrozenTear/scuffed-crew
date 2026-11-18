@@ -45,7 +45,7 @@ pub fn Blog() -> Element {
             ApiClient::web()
                 .fetch::<Vec<BlogArticle>>(&list_url(offset))
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(|e| crate::client_error::logged_message("blog list", &e))
         })
     });
     // Names for the authors of the page on screen only.

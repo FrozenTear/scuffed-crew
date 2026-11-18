@@ -4,7 +4,7 @@ use super::article_author::{ARTICLE_CSS, ARTICLE_CSS_ID, Load, is_retrying};
 use crate::components::post::{FeedPost, PostCard, PostCompose};
 use crate::components::ui::inline_confirm::focus_element_by_id_soon;
 use crate::components::ui::{EmptyCard, LoadError, PageHeader, PageShell, PageWidth, SkeletonBars};
-use crate::util::{log_client_error, pluralize};
+use crate::util::pluralize;
 
 /// The post list. "Clear tag filter" removes itself, so focus moves here.
 const FEED_LIST_ID: &str = "feed-list";
@@ -69,10 +69,7 @@ pub fn Feed() -> Element {
             ApiClient::web()
                 .fetch::<Vec<FeedPost>>("/api/nostr/feed")
                 .await
-                .map_err(|e| {
-                    log_client_error("feed", &e);
-                    e.to_string()
-                })
+                .map_err(|e| crate::client_error::logged_message("feed", &e))
         }
     });
 

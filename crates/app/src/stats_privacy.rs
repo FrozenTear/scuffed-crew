@@ -67,7 +67,7 @@ pub fn settings_body(
 pub fn save_error(err: &ClientError) -> String {
     match err.http_status() {
         Some(400) => "That option isn't valid. Reload the page and try again.".to_string(),
-        _ => format!("Save failed: {err}"),
+        _ => crate::client_error::with_lead("Save failed", err),
     }
 }
 

@@ -207,7 +207,7 @@ pub fn PollCreate(on_created: EventHandler<()>) -> Element {
                             on_created.call(());
                         }
                         Err(e) => {
-                            toasts.show(Toast::error(format!("Failed to create poll: {e}")));
+                            toasts.show(Toast::error_from("Failed to create poll", &e));
                         }
                     }
                     submitting.set(false);

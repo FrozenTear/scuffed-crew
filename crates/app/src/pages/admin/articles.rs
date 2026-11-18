@@ -407,7 +407,7 @@ pub fn AdminArticles() -> Element {
                     articles.refresh += 1;
                 }
                 Err(e) => {
-                    let message = format!("Could not save the article. {e}");
+                    let message = crate::client_error::with_lead("Could not save the article.", &e);
                     form_error.set(Some(message.clone()));
                     toast.show(Toast::error(message));
                 }
@@ -441,7 +441,7 @@ pub fn AdminArticles() -> Element {
                     focus_after_delete_soon(edit_button_id(&id), focus_next);
                 }
                 Err(e) => {
-                    toast.show(Toast::error(format!("Could not delete the article. {e}")));
+                    toast.show(Toast::error_from("Could not delete the article.", &e));
                 }
             }
         });
@@ -470,7 +470,10 @@ pub fn AdminArticles() -> Element {
                     }));
                     articles.refresh += 1;
                 }
-                Err(e) => toast.show(Toast::error(format!("Could not {action} the article. {e}"))),
+                Err(e) => toast.show(Toast::error_from(
+                    &format!("Could not {action} the article."),
+                    &e,
+                )),
             }
         });
     };

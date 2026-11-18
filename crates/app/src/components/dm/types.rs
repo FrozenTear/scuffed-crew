@@ -37,7 +37,7 @@ pub fn classify_dm_client_error(err: &ClientError) -> DmLoadFailure {
         ClientError::Http { status: 412, .. } => DmLoadFailure::IdentitySettings,
         ClientError::Http { status: 403, .. } => DmLoadFailure::Membership,
         ClientError::Http { status: 503, .. } => DmLoadFailure::RelayConfig,
-        other => DmLoadFailure::Other(other.to_string()),
+        other => DmLoadFailure::Other(crate::client_error::user_message(other)),
     }
 }
 
@@ -300,7 +300,7 @@ mod tests {
         let network = classify_dm_client_error(&ClientError::Network("offline".into()));
         assert_eq!(
             network,
-            DmLoadFailure::Other("Network error: offline".into())
+            DmLoadFailure::Other(crate::client_error::NETWORK_ERROR_MESSAGE.into())
         );
     }
 }

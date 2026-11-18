@@ -272,7 +272,7 @@ pub fn StrategyBrowse() -> Element {
             ApiClient::web()
                 .fetch::<ListResponse>(&path)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(|e| crate::client_error::logged_message("strategy list", &e))
         }
     });
 

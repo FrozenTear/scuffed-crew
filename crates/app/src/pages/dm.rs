@@ -427,7 +427,7 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
                 }
                 Err(e) => {
                     sync_notice.set(Some(sync_failed_notice(&e)));
-                    toast.show(Toast::error(format!("Sync failed: {e}")));
+                    toast.show(Toast::error_from("Sync failed", &e));
                 }
             }
             syncing.set(false);

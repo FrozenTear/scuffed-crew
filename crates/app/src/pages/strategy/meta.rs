@@ -358,7 +358,7 @@ pub fn StrategyMeta() -> Element {
             ApiClient::web()
                 .fetch::<MetaResponse>("/api/strategy/meta")
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(|e| crate::client_error::logged_message("strategy meta", &e))
         }
     });
 

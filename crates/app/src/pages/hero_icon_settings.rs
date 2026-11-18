@@ -20,7 +20,7 @@ use crate::components::ui::inline_confirm::{
     focus_element_by_id, focus_element_by_id_soon, key_cancels,
 };
 use crate::hero_icons_ui::{self as text, OptOutChoice};
-use crate::training_crops_ui::{self as crops, ConsentKind, CropConsent};
+use crate::training_crops_ui::{self as crops, ConsentKind, ConsentLine, CropConsent};
 
 /// The section sits under the profile form as its own titled card
 /// (`account-section` / `account-card` from profile_settings.rs). Switches are
@@ -61,6 +61,9 @@ const CSS: &str = r#"
         color: var(--text); }
     .hero-icons__choice input { flex: 0 0 auto; margin: 0; accent-color: var(--accent-solid);
         width: calc(var(--space-4) + var(--space-1) / 2); height: calc(var(--space-4) + var(--space-1) / 2); }
+    /* A failed load or save (issue 729): the field error pattern, an icon
+       then the text in the error colour, so it does not rest on colour. */
+    .training-crops__status.is-error { display: flex; align-items: flex-start; gap: var(--space-2); }
     .hero-icons__sent { font-family: var(--font-head); font-size: var(--text-md);
         font-weight: var(--font-label-weight); line-height: var(--leading-ui); color: var(--text); }
     .hero-icons__grid { list-style: none; padding: 0; display: grid;
@@ -86,12 +89,28 @@ const CSS: &str = r#"
     }
 "#;
 
+/// The consent live line. The `role="status"` paragraph is always rendered;
+/// only its class, its text and the decorative icon of a failure change, so
+/// every change is announced.
+#[component]
+fn ConsentStatus(id: String, line: ConsentLine) -> Element {
+    let class = line.class();
+    rsx! {
+        p { id, class, role: "status",
+            if line.failed {
+                span { class: "field-error-icon", aria_hidden: "true" }
+            }
+            "{line.text}"
+        }
+    }
+}
+
 #[component]
 pub fn TrainingCropSettings(member_id: String) -> Element {
     // Consent for the four kinds.
     let mut consent = use_signal(|| None::<CropConsent>);
     let mut consent_failed = use_signal(|| false);
-    let mut consent_status = use_signal(|| crops::LOADING.to_string());
+    let mut consent_status = use_signal(|| ConsentLine::note(crops::LOADING));
     let mut saving = use_signal(|| false);
     let mut consent_refresh = use_signal(|| 0u64);
 
@@ -115,11 +134,14 @@ pub fn TrainingCropSettings(member_id: String) -> Element {
             Ok(loaded) => {
                 consent.set(Some(loaded));
                 consent_failed.set(false);
-                consent_status.set(String::new());
+                consent_status.set(ConsentLine::default());
             }
             Err(e) => {
                 consent_failed.set(true);
-                consent_status.set(crops::consent_failure_text("Loading your choices", &e));
+                consent_status.set(ConsentLine::failure(crops::consent_failure_text(
+                    "Loading your choices",
+                    &e,
+                )));
             }
         }
     });
@@ -178,7 +200,7 @@ pub fn TrainingCropSettings(member_id: String) -> Element {
                 let next = before.with(kind, on);
                 consent.set(Some(next));
                 saving.set(true);
-                consent_status.set(crops::saving_status(kind));
+                consent_status.set(ConsentLine::note(crops::saving_status(kind)));
                 spawn(async move {
                     let saved = ApiClient::web()
                         .put_json::<_, CropConsent>(
@@ -224,19 +246,19 @@ pub fn TrainingCropSettings(member_id: String) -> Element {
                                     detail = text::opt_out_detail(OptOutChoice::Keep, stored);
                                 }
                             }
-                            consent_status.set(crops::saved_status(
+                            consent_status.set(ConsentLine::note(crops::saved_status(
                                 kind,
                                 now_on,
                                 detail.as_deref(),
-                            ));
+                            )));
                         }
                         Err(e) => {
                             consent.set(Some(before));
                             let what = format!("Saving {}", kind.noun().to_lowercase());
-                            consent_status.set(crops::failed_status(
+                            consent_status.set(ConsentLine::failure(crops::failed_status(
                                 kind,
                                 &crops::consent_failure_text(&what, &e),
-                            ));
+                            )));
                         }
                     }
                     if kind == ConsentKind::HeroIcon {
@@ -442,7 +464,7 @@ pub fn TrainingCropSettings(member_id: String) -> Element {
                             r#type: "button",
                             class: "btn is-ghost",
                             onclick: move |_| {
-                                consent_status.set(crops::LOADING.to_string());
+                                consent_status.set(ConsentLine::note(crops::LOADING));
                                 consent_refresh += 1;
                             },
                             "Retry loading your choices"
@@ -450,12 +472,7 @@ pub fn TrainingCropSettings(member_id: String) -> Element {
                     }
                 }
 
-                p {
-                    id: "{consent_status_id}",
-                    class: if consent_failed() { "account-status is-error" } else { "account-status" },
-                    role: "status",
-                    "{consent_status}"
-                }
+                ConsentStatus { id: consent_status_id.clone(), line: consent_status() }
 
                 if store_off() {
                     p { class: "field-hint", "{text::STORE_DISABLED}" }
@@ -576,6 +593,93 @@ mod tests {
             "{forced}"
         );
         assert!(forced.contains("border-color: Highlight;"), "{forced}");
+    }
+
+    /// Issue 729: a failed save reads as an error (the field error icon and
+    /// the error class); saving and saved stay the muted note. The live
+    /// region is the same `role="status"` paragraph in every state.
+    #[test]
+    fn a_failed_save_reads_as_an_error_and_a_save_does_not() {
+        fn failed() -> Element {
+            let failure = crops::consent_failure_text(
+                "Saving rank screen crops",
+                &scuffed_api_client::ClientError::Network("offline".into()),
+            );
+            rsx! {
+                ConsentStatus {
+                    id: "s".to_string(),
+                    line: ConsentLine::failure(crops::failed_status(ConsentKind::Rank, &failure)),
+                }
+            }
+        }
+        fn saving() -> Element {
+            rsx! {
+                ConsentStatus {
+                    id: "s".to_string(),
+                    line: ConsentLine::note(crops::saving_status(ConsentKind::Rank)),
+                }
+            }
+        }
+        fn saved() -> Element {
+            rsx! {
+                ConsentStatus {
+                    id: "s".to_string(),
+                    line: ConsentLine::note(crops::saved_status(ConsentKind::Rank, true, None)),
+                }
+            }
+        }
+        fn idle() -> Element {
+            rsx! { ConsentStatus { id: "s".to_string(), line: ConsentLine::default() } }
+        }
+
+        let html = render(failed);
+        assert!(
+            html.starts_with(
+                "<p id=\"s\" class=\"account-status training-crops__status is-error\" role=\"status\"><span class=\"field-error-icon\" aria-hidden=\"true\"></span>Saving rank screen crops failed."
+            ),
+            "{html}"
+        );
+        assert!(html.contains("are back to how they were."), "{html}");
+
+        for (state, html) in [("saving", render(saving)), ("saved", render(saved))] {
+            assert!(
+                html.starts_with(
+                    "<p id=\"s\" class=\"account-status training-crops__status\" role=\"status\">"
+                ),
+                "{state}: {html}"
+            );
+            assert!(!html.contains("is-error"), "{state}: {html}");
+            assert!(!html.contains("field-error-icon"), "{state}: {html}");
+        }
+        assert_eq!(
+            render(idle),
+            "<p id=\"s\" class=\"account-status training-crops__status\" role=\"status\"></p>"
+        );
+
+        // The error layout is the field error one, on tokens; the colour is
+        // the shared `.account-status.is-error` (the error token).
+        let rule = crate::components::ui::test_support::css_rule(
+            CSS,
+            ".training-crops__status.is-error {",
+        );
+        assert!(rule.contains("display: flex;"), "{rule}");
+        assert!(rule.contains("gap: var(--space-2);"), "{rule}");
+        assert!(
+            super::super::profile_settings::ACCOUNT_CSS
+                .contains(".account-status.is-error { color: var(--loss); }")
+        );
+
+        // The page renders the line through `ConsentStatus` from one state.
+        let prod = include_str!("hero_icon_settings.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("prod part");
+        assert!(
+            prod.contains(
+                "ConsentStatus { id: consent_status_id.clone(), line: consent_status() }"
+            )
+        );
+        assert!(!prod.contains("consent_status.set(crops::failed_status("));
     }
 
     #[test]

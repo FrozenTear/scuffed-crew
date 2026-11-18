@@ -183,6 +183,44 @@ pub fn failed_status(kind: ConsentKind, failure: &str) -> String {
     format!("{failure} {} are back to how they were.", kind.noun())
 }
 
+/// The consent live line shared by the four switches: its text, and whether
+/// it reports a failure (a failed load or save). A failure reads as an error
+/// (icon and error colour, issue 729); loading, saving and saved stay a
+/// muted note.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ConsentLine {
+    pub text: String,
+    pub failed: bool,
+}
+
+impl ConsentLine {
+    /// Loading, saving or saved.
+    pub fn note(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            failed: false,
+        }
+    }
+
+    /// A load or save that failed.
+    pub fn failure(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            failed: true,
+        }
+    }
+
+    /// The line's class: the account status note, plus the error modifier
+    /// on a failure.
+    pub fn class(&self) -> &'static str {
+        if self.failed {
+            "account-status training-crops__status is-error"
+        } else {
+            "account-status training-crops__status"
+        }
+    }
+}
+
 // Ids.
 
 pub fn section_id(member_id: &str) -> String {

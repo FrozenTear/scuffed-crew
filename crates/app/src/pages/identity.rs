@@ -254,7 +254,7 @@ fn identity_view(auth: &AuthState, me: Option<&Result<MeResponse, ClientError>>)
     }
     match me {
         None => AccountView::Loading,
-        Some(Err(e)) => account_view_from_error(&e.to_string()),
+        Some(Err(e)) => account_view_from_error(&crate::client_error::user_message(e)),
         Some(Ok(me)) if me.member.is_none() => AccountView::Apply,
         Some(Ok(_)) => AccountView::Ready,
     }
@@ -291,9 +291,10 @@ pub fn IdentitySettings() -> Element {
         spawn(async move {
             match get_pubkey_from_extension().await {
                 Ok(pk) => pubkey_input.set(pk),
-                Err(e) => {
-                    link_state.set(SaveState::Failed(format!("Extension error: {e}")));
-                    toast.show(Toast::error(format!("Extension error: {e}")));
+                Err(reason) => {
+                    // The extension's own words (a String), not a request error.
+                    link_state.set(SaveState::Failed(format!("Extension error: {reason}")));
+                    toast.show(Toast::error(format!("Extension error: {reason}")));
                 }
             }
         });
@@ -321,9 +322,11 @@ pub fn IdentitySettings() -> Element {
                     refresh += 1;
                     pubkey_input.set(String::new());
                 }
-                Err(e) => {
-                    link_state.set(SaveState::failed("Could not link the key", &e));
-                    toast.show(Toast::error(format!("Link failed: {e}")));
+                Err(reason) => {
+                    // `link_nostr_identity` already maps its request errors
+                    // through `user_message`; the rest is extension text.
+                    link_state.set(SaveState::failed_text("Could not link the key", &reason));
+                    toast.show(Toast::error(format!("Link failed: {reason}")));
                 }
             }
             working.set(false);
@@ -360,7 +363,7 @@ pub fn IdentitySettings() -> Element {
                 }
                 Err(e) => {
                     backup_state.set(SaveState::failed("Could not export the backup", &e));
-                    toast.show(Toast::error(format!("Export failed: {e}")));
+                    toast.show(Toast::error_from("Export failed", &e));
                 }
             }
             working.set(false);
@@ -418,7 +421,7 @@ pub fn IdentitySettings() -> Element {
                 }
                 Err(e) => {
                     import_state.set(SaveState::failed("Could not import the key", &e));
-                    toast.show(Toast::error(format!("Import failed: {e}")));
+                    toast.show(Toast::error_from("Import failed", &e));
                 }
             }
             working.set(false);
@@ -448,7 +451,7 @@ pub fn IdentitySettings() -> Element {
                 }
                 Err(e) => {
                     unlink_state.set(SaveState::failed("Could not unlink the key", &e));
-                    toast.show(Toast::error(format!("Unlink failed: {e}")));
+                    toast.show(Toast::error_from("Unlink failed", &e));
                     // The confirm strip closed with focus in it: back to
                     // Unlink key.
                     focus_after_delete_soon(
@@ -810,7 +813,7 @@ async fn link_nostr_identity(pubkey: &str) -> Result<(), String> {
             },
         )
         .await
-        .map_err(|e| format!("Challenge request failed: {e}"))?;
+        .map_err(|e| crate::client_error::with_lead("Challenge request failed", &e))?;
 
     // 2. Build unsigned event for NIP-07 to sign
     let window = web_sys::window().ok_or("No window")?;
@@ -873,7 +876,7 @@ async fn link_nostr_identity(pubkey: &str) -> Result<(), String> {
     client
         .post_json::<_, serde_json::Value>("/api/nostr/verify", &body)
         .await
-        .map_err(|e| format!("Verification failed: {e}"))?;
+        .map_err(|e| crate::client_error::with_lead("Verification failed", &e))?;
 
     Ok(())
 }

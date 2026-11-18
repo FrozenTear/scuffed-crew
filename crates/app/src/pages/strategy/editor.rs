@@ -530,7 +530,7 @@ pub fn StrategyEditor(id: String) -> Element {
             ApiClient::web()
                 .fetch::<Strategy>(&format!("/api/strategy/strategies/{id}"))
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(|e| crate::client_error::logged_message("strategy load", &e))
         }
     });
 
@@ -1575,8 +1575,8 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                             }
                         }
                         div { class: "map-picker-content",
-                            if let Some(err) = map_picker_error.read().as_ref() {
-                                p { class: "map-picker-error", "{err}" }
+                            if let Some(message) = map_picker_error.read().as_ref() {
+                                p { class: "map-picker-error", "{message}" }
                             }
                             for mode in PICKER_MODE_ORDER {
                                 {
@@ -1784,7 +1784,7 @@ fn save_strategy(ctx: SaveContext) {
             }
             Err(e) => {
                 tracing::error!("Failed to save strategy: {e}");
-                toast.show(Toast::error(format!("Failed to save strategy: {e}")));
+                toast.show(Toast::error_from("Failed to save strategy", &e));
             }
         }
         save_in_progress.set(false);

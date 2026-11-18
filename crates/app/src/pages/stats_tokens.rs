@@ -398,7 +398,7 @@ pub fn StatsTokens() -> Element {
                     tokens.refresh += 1;
                 }
                 Err(e) => {
-                    toast.show(Toast::error(format!("Failed: {e}")));
+                    toast.show(Toast::error_from("Failed", &e));
                 }
             }
         });
@@ -442,7 +442,7 @@ pub fn StatsTokens() -> Element {
                 }
                 Err(e) => {
                     // The strip stays open, focus stays on its Revoke.
-                    toast.show(Toast::error(format!("Failed: {e}")));
+                    toast.show(Toast::error_from("Failed", &e));
                 }
             }
         });

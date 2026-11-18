@@ -38,7 +38,7 @@ pub fn StrategyHeroes() -> Element {
                 .fetch::<ListResponse>("/api/strategy/heroes")
                 .await
                 .map(|resp| resp.data)
-                .map_err(|e| e.to_string())
+                .map_err(|e| crate::client_error::logged_message("hero list", &e))
         }
     });
 

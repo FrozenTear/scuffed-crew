@@ -235,7 +235,7 @@ fn nostr_verify_failure_message(err: &scuffed_api_client::ClientError) -> String
             "Registration is currently closed".to_string()
         }
         other => client_rate_limit_message(other)
-            .unwrap_or_else(|| format!("Verification failed: {other}")),
+            .unwrap_or_else(|| crate::client_error::with_lead("Verification failed", other)),
     }
 }
 
@@ -773,8 +773,8 @@ pub fn Login() -> Element {
                         "Sign in to continue."
                     }
                 }
-                if let Some(err) = error() {
-                    p { class: "login-error", "{err}" }
+                if let Some(message) = error() {
+                    p { class: "login-error", "{message}" }
                 }
                 if registering() && show_register {
                     form { onsubmit: on_register,
@@ -941,7 +941,7 @@ async fn nostr_login_flow() -> Result<(), String> {
         .await
         .map_err(|e| {
             client_rate_limit_message(&e)
-                .unwrap_or_else(|| format!("Challenge request failed: {e}"))
+                .unwrap_or_else(|| crate::client_error::with_lead("Challenge request failed", &e))
         })?;
 
     let window = web_sys::window().ok_or("No window")?;

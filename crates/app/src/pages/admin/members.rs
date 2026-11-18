@@ -409,7 +409,7 @@ fn profile_edit_failure(prefix: &str, err: &ClientError) -> String {
     if err.http_status() == Some(403) && err.to_string().contains(OFFICER_RANK_ERROR) {
         return OFFICER_RANK_COPY.to_string();
     }
-    format!("{prefix}: {err}")
+    format!("{prefix}: {}", crate::client_error::user_message(err))
 }
 
 /// Toast copy when the avatar upload is rejected. 403 and 404 come from the
@@ -1138,7 +1138,10 @@ pub fn AdminMembers() -> Element {
                 .await
             {
                 Ok(list) => accts_data.set(list),
-                Err(e) => accts_error.set(Some(e.to_string())),
+                Err(e) => accts_error.set(Some(crate::client_error::logged_message(
+                    "game accounts",
+                    &e,
+                ))),
             }
             accts_loading.set(false);
         }
@@ -1191,7 +1194,7 @@ pub fn AdminMembers() -> Element {
                         pw_modal.close();
                     }
                     Err(e) => {
-                        let message = format!("Reset failed: {e}");
+                        let message = crate::client_error::with_lead("Reset failed", &e);
                         pw_error.set(Some(message.clone()));
                         toast.show(Toast::error(message));
                     }
@@ -1241,7 +1244,7 @@ pub fn AdminMembers() -> Element {
                         games.refresh += 1;
                     }
                     Err(e) => {
-                        let message = format!("Failed to change role: {e}");
+                        let message = crate::client_error::with_lead("Failed to change role", &e);
                         role_error.set(Some(message.clone()));
                         toast.show(Toast::error(message));
                     }
@@ -1309,7 +1312,10 @@ pub fn AdminMembers() -> Element {
                 .await
             {
                 Ok(list) => mod_data.set(list),
-                Err(e) => mod_error.set(Some(e.to_string())),
+                Err(e) => mod_error.set(Some(crate::client_error::logged_message(
+                    "moderation history",
+                    &e,
+                ))),
             }
             mod_loading.set(false);
         });
@@ -1512,7 +1518,10 @@ pub fn AdminMembers() -> Element {
                             members.refresh += 1;
                             None
                         }
-                        Err(e) => Some(format!("Failed to update profile: {e}")),
+                        Err(e) => Some(crate::client_error::with_lead(
+                            "Failed to update profile",
+                            &e,
+                        )),
                     }
                 }
                 Err(UploadFailure::Status(status)) => Some(avatar_upload_failure_message(status)),
@@ -1636,7 +1645,11 @@ pub fn AdminMembers() -> Element {
                 {
                     Ok(_) => done += 1,
                     Err(e) => {
-                        failures.push(format!("{}: {e}.", member.display_name));
+                        failures.push(format!(
+                            "{}: {}.",
+                            member.display_name,
+                            crate::client_error::user_message(&e)
+                        ));
                         failed_ids.push(member.id.clone());
                     }
                 }
@@ -2017,9 +2030,9 @@ pub fn AdminMembers() -> Element {
                 on_close: move |_| on_mod_close(()),
                 if mod_loading() {
                     p { class: "member-dialog-loading", role: "status", "Loading moderation history..." }
-                } else if let Some(err) = mod_error() {
+                } else if let Some(reason) = mod_error() {
                     p { class: "fetch-error", role: "alert",
-                        "Could not load the moderation history. {err}"
+                        "Could not load the moderation history. {reason}"
                     }
                 } else if mod_data.read().is_empty() {
                     p { class: "member-dialog-empty", "No moderation history for this member." }
@@ -2109,8 +2122,8 @@ pub fn AdminMembers() -> Element {
                     on_submit: on_add_acct,
                     if accts_loading() {
                         p { class: "member-dialog-loading", role: "status", "Loading game accounts..." }
-                    } else if let Some(err) = accts_error() {
-                        p { class: "fetch-error", role: "alert", "Could not load game accounts. {err}" }
+                    } else if let Some(reason) = accts_error() {
+                        p { class: "fetch-error", role: "alert", "Could not load game accounts. {reason}" }
                     } else if accts_data.read().is_empty() {
                         p { class: "member-dialog-empty", "No game accounts linked yet. Add one below." }
                     } else {
