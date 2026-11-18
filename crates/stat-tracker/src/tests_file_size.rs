@@ -48,7 +48,7 @@ const CAPS: &[(&str, usize)] = &[
     ("stat-tracker/src/report/scrub.rs", 2292),
     ("stat-tracker/src/report/tests.rs", 1653),
     ("stat-tracker/src/shadow/banner.rs", 2680),
-    ("stat-tracker/src/shadow/digits.rs", 2826),
+    ("stat-tracker/src/shadow/digits.rs", 2806),
     ("stat-tracker/src/shadow/heroes.rs", 2538),
     ("stat-tracker/src/shadow/reader.rs", 2576),
     ("stat-tracker/src/shadow/result.rs", 4141),

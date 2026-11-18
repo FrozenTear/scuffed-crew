@@ -783,4 +783,8 @@ pub fn primary_hero_role(segments: &[HeroSegment]) -> Option<(&str, &str)> {
 ///   now stores the reader's unsure read, flagged, when the capture gate
 ///   would take that read, instead of the game's older accepted value
 ///   (report a6f3). Stored stats can differ from `cv-v7` rows.
-pub const RECOGNIZER_ID: &str = "cv-v8";
+/// * `cv-v9`: a pair check for 3 vs 8 can lift the glyph margin of a 3 in a
+///   bright cell that sits below the suspect line (a correct 33 elims cell
+///   at 1440 was flagged). Values are the same as `cv-v8`; confidences and
+///   suspect flags can differ.
+pub const RECOGNIZER_ID: &str = "cv-v9";
