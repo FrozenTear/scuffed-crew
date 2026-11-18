@@ -1,9 +1,19 @@
 use dioxus::prelude::*;
+
+use crate::components::admin_shared::{after_delete_focus_ids, focus_after_delete_soon};
 use serde::{Deserialize, Serialize};
 
+use crate::components::ui::inline_confirm::{
+    focus_element_by_id, focus_element_by_id_soon, key_cancels,
+};
+use crate::components::ui::{
+    ChipButton, ChipRow, EmptyCard, PageHeader, PageShell, PageWidth, Pager, Pill, PillTone,
+    page_slice, show_list_top,
+};
 use crate::components::{
-    ConfirmDialog, DataTable, FormModal, RolePill, StatusPill, SummaryCard, Toast, admin_pending,
-    list_cap_notice, use_toast,
+    ADMIN_PAGE_SIZE, AdminDate, ConfirmDialog, DataTable, FormModal, FormStatus, RolePill,
+    RowActions, SaveState, SummaryCard, Toast, admin_list_pending, list_cap_notice,
+    row_menu_toggle_id, status_label, use_toast,
 };
 use crate::hooks::{ModalController, use_api_list, use_api_list_prefer};
 use crate::routes::Route;
@@ -17,7 +27,7 @@ use scuffed_types::{AttendanceStats, OrgRole, UserInfo};
 // These local types have API-enriched fields (joined names, computed stats)
 // that differ from the base org types in scuffed_types.
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 struct Member {
     id: String,
     /// Login user of this member. Matches `UserInfo::id`, so an officer's own row is known.
@@ -29,7 +39,7 @@ struct Member {
     joined_at: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 struct GameAccount {
     id: String,
     game_id: String,
@@ -37,18 +47,21 @@ struct GameAccount {
     account_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 struct Game {
     id: String,
     name: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 struct ModerationAction {
     id: String,
     action_type: String,
     reason: String,
     is_active: bool,
+    /// End of a timed action, RFC 3339. `None` for a permanent one.
+    #[serde(default)]
+    expires_at: Option<String>,
     created_at: String,
 }
 
@@ -58,6 +71,26 @@ struct UpdateAvatarBody {
 }
 
 const ROLES: [&str; 4] = ["recruit", "member", "officer", "admin"];
+
+/// Role chips: the stored role (empty for all) and the chip's word.
+const ROLE_FILTERS: [(&str, &str); 5] = [
+    ("", "All roles"),
+    ("member", "Member"),
+    ("officer", "Officer"),
+    ("recruit", "Recruit"),
+    ("admin", "Admin"),
+];
+
+/// The list region: the pager's focus target after a page change.
+const LIST_ID: &str = "admin-members-list";
+const SEARCH_ID: &str = "members-search";
+const SELECT_PAGE_ID: &str = "members-select-page";
+const BULK_COUNT_ID: &str = "members-bulk-count";
+const BULK_STATUS_ID: &str = "members-bulk-status";
+const BULK_ROLE_OPEN_ID: &str = "members-bulk-role-open";
+const BULK_DEACTIVATE_OPEN_ID: &str = "members-bulk-deactivate-open";
+const BULK_ROLE_FIELD_ID: &str = "members-bulk-role";
+const AVATAR_INPUT_ID: &str = "member-avatar-file";
 
 /// Active-only list: any org member. Do not put `include_inactive` here.
 const ADMIN_MEMBERS_ACTIVE_ONLY: &str = "/api/members";
@@ -116,6 +149,231 @@ fn session_inactive_not_in_list(recent: &[Member], listed_ids: &[String]) -> Vec
         .collect()
 }
 
+/// Id of a role chip, from its role.
+fn role_filter_id(role: &str) -> String {
+    let name = if role.is_empty() { "all" } else { role };
+    format!("members-filter-{name}")
+}
+
+/// The members a role chip and the search keep. The empty role keeps all
+/// roles; the search matches the display name, ignoring case.
+fn filter_members(list: &[Member], role: &str, query: &str) -> Vec<Member> {
+    let query = query.trim().to_lowercase();
+    list.iter()
+        .filter(|m| role.is_empty() || m.org_role == role)
+        .filter(|m| query.is_empty() || m.display_name.to_lowercase().contains(&query))
+        .cloned()
+        .collect()
+}
+
+/// Id stem of a member's row actions.
+fn member_actions_id(member_id: &str) -> String {
+    format!("member-actions-{member_id}")
+}
+
+/// The "Actions" button of a member's row: where focus goes back when a
+/// dialog opened from that row closes.
+fn member_actions_toggle_id(member_id: &str) -> String {
+    row_menu_toggle_id(&member_actions_id(member_id))
+}
+
+/// After a role change: when the active role chip no longer keeps the row,
+/// wait for its "Actions" button to leave the page, then focus the next
+/// row's, else the previous row's, else the chip. `None` when the row stays
+/// (no chip, or the chip is the new role): the dialog's own focus return to
+/// the row's "Actions" holds. `keys` is the filtered list in order.
+fn after_role_change_focus(
+    keys: &[String],
+    member_id: &str,
+    filter: &str,
+    new_role: &str,
+) -> Option<(String, Vec<String>)> {
+    if filter.is_empty() || filter == new_role {
+        return None;
+    }
+    let chip = role_filter_id(filter);
+    Some((
+        member_actions_toggle_id(member_id),
+        after_delete_focus_ids(
+            keys,
+            member_id,
+            |k| vec![member_actions_toggle_id(k)],
+            &[&chip],
+        ),
+    ))
+}
+
+/// Id of the hidden note that says why a row action is locked.
+fn member_lock_note_id(member_id: &str) -> String {
+    format!("member-lock-{member_id}")
+}
+
+/// "Deactivated 2 members." or, when some failed, the count that went
+/// through plus each failure with the server's reason. `skipped` are the
+/// sentences for rows the action left out on purpose, by name.
+fn bulk_result(
+    verb: &str,
+    done: usize,
+    attempted: usize,
+    failures: &[String],
+    skipped: &[String],
+) -> SaveState {
+    let noun = if attempted == 1 { "member" } else { "members" };
+    let mut text = if failures.is_empty() {
+        format!("{verb} {done} {noun}.")
+    } else {
+        format!(
+            "{verb} {done} of {attempted} {noun}. {}",
+            failures.join(" ")
+        )
+    };
+    for line in skipped {
+        text.push(' ');
+        text.push_str(line);
+    }
+    if failures.is_empty() {
+        SaveState::Saved(text)
+    } else {
+        SaveState::Failed(text)
+    }
+}
+
+/// The rows a bulk action sends, and a sentence for each row it leaves out
+/// on purpose (by name), so nothing is skipped silently.
+#[derive(Debug, Default, PartialEq)]
+struct BulkTargets {
+    targets: Vec<Member>,
+    skipped: Vec<String>,
+}
+
+/// True when `member` is the signed-in account's own row.
+fn is_own_row(user: Option<&UserInfo>, member: &Member) -> bool {
+    user.is_some_and(|user| user.id == member.user_id)
+}
+
+/// Targets of the bulk role change. Rows that already have `role` are left
+/// out quietly. The caller's own row is always left out and named: the server
+/// lets an admin demote themselves while another admin exists, and the rest
+/// of the batch would then fail with 403 while the page still shows admin
+/// controls.
+fn bulk_role_targets(selected: Vec<Member>, role: &str, user: Option<&UserInfo>) -> BulkTargets {
+    let mut out = BulkTargets::default();
+    for member in selected {
+        if member.org_role == role {
+            continue;
+        }
+        if is_own_row(user, &member) {
+            out.skipped.push(format!(
+                "Left out {} (your own account): change your own role from its row.",
+                member.display_name
+            ));
+            continue;
+        }
+        out.targets.push(member);
+    }
+    out
+}
+
+/// Targets of the bulk deactivate. Inactive rows are left out quietly. The
+/// caller's own row (the server never lets anyone change their own active
+/// status) and, for an officer, admin and officer rows are left out and named.
+fn bulk_deactivate_targets(selected: Vec<Member>, user: Option<&UserInfo>) -> BulkTargets {
+    let mut out = BulkTargets::default();
+    for member in selected {
+        if !member.is_active {
+            continue;
+        }
+        if is_own_row(user, &member) {
+            out.skipped.push(format!(
+                "Left out {} (your own account): you cannot deactivate yourself.",
+                member.display_name
+            ));
+            continue;
+        }
+        if officer_locked_out(user, &member) {
+            out.skipped.push(format!(
+                "Left out {}: officers cannot deactivate admins or other officers.",
+                member.display_name
+            ));
+            continue;
+        }
+        out.targets.push(member);
+    }
+    out
+}
+
+/// The state of one moderation action in the member dialog, as on the
+/// Moderation page: the server clears `is_active` only on Lift, and an action
+/// past its end date stays `is_active` but has ended.
+fn moderation_state(
+    action: &ModerationAction,
+    now: chrono::DateTime<chrono::Utc>,
+) -> (&'static str, PillTone) {
+    let ended = action
+        .expires_at
+        .as_deref()
+        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        .is_some_and(|end| end.with_timezone(&chrono::Utc) <= now);
+    if !action.is_active {
+        ("Lifted", PillTone::Neutral)
+    } else if ended {
+        ("Ended", PillTone::Neutral)
+    } else {
+        ("Active", PillTone::Info)
+    }
+}
+
+/// Question of the bulk deactivate dialog: the count that will be sent, then
+/// each row left out by name, so the admin confirms what will happen.
+fn bulk_deactivate_message(plan: &BulkTargets) -> String {
+    let n = plan.targets.len();
+    let mut text = match n {
+        0 => "None of the selected members can be deactivated.".to_string(),
+        1 => {
+            "Deactivate 1 member? They lose access until someone activates them again.".to_string()
+        }
+        n => {
+            format!("Deactivate {n} members? They lose access until someone activates them again.")
+        }
+    };
+    for line in &plan.skipped {
+        text.push(' ');
+        text.push_str(line);
+    }
+    text
+}
+
+/// Note in the bulk role dialog when the caller's own row is selected.
+fn bulk_role_own_note(selected: &[Member], user: Option<&UserInfo>) -> Option<String> {
+    selected.iter().find(|m| is_own_row(user, m)).map(|m| {
+        format!(
+            "Your own account, {}, is left out. Change your own role from its row.",
+            m.display_name
+        )
+    })
+}
+
+/// One failure sentence of a bulk action: always starts with the member's
+/// name, then the plain reason (the officer rank refusal) or the server text.
+fn bulk_failure(member: &Member, err: &ClientError) -> String {
+    let reason = profile_edit_failure(&member.display_name, err);
+    let reason = reason.trim_end_matches('.');
+    if reason.starts_with(&member.display_name) {
+        format!("{reason}.")
+    } else {
+        format!("{}: {reason}.", member.display_name)
+    }
+}
+
+/// "2 selected", or nothing when no row is selected.
+fn selection_text(count: usize) -> String {
+    if count == 0 {
+        String::new()
+    } else {
+        format!("{count} selected")
+    }
+}
+
 /// Officer avatar upload for one member on the admin list.
 ///
 /// `member_id` is the same record key `PUT /api/members/{mid}` already uses.
@@ -130,7 +388,7 @@ fn admin_avatar_upload_url(member_id: &str) -> String {
 /// What the server answers when an officer edits an admin or another officer.
 const OFFICER_RANK_ERROR: &str = "Officers cannot edit the profile of admins or other officers";
 
-/// Shown on a disabled control and in a toast for that refusal.
+/// Shown beside a locked control and in a toast for that refusal.
 const OFFICER_RANK_COPY: &str =
     "Officers cannot edit the profile of admins or other officers. Ask an admin.";
 
@@ -201,11 +459,588 @@ fn attendance_retry_after_message(seconds: u64) -> String {
 #[component]
 fn AttendanceStatsError(message: String) -> Element {
     rsx! {
-        p {
-            class: "empty-state",
-            role: "alert",
-            style: "color: var(--loss);",
-            "{message}"
+        p { class: "fetch-error", role: "alert", "{message}" }
+    }
+}
+
+const MEMBERS_CSS: &str = r#"
+    /* Selection bar: the select-all box, the live count, then the bulk
+       actions once a row is selected. */
+    .members-bulk-bar {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: var(--space-2) var(--space-4);
+        padding: var(--space-3) var(--space-card-pad);
+        background: var(--card-bg);
+        color: var(--card-fg);
+        border: 1px solid var(--card-border);
+        border-radius: var(--card-radius);
+    }
+    .members-bulk-bar.has-selection {
+        background: var(--accent-soft);
+        border-color: var(--accent-soft);
+    }
+    .members-bulk-bar > .admin-check-row { width: auto; }
+    .members-bulk-count {
+        margin: 0;
+        color: var(--text);
+        font-family: var(--font-head);
+        font-size: var(--text-md);
+        font-weight: var(--font-head-weight);
+    }
+    /* No text: out of the layout, still in the tree (a live line
+       that is display: none drops out of what screen readers track). */
+    .members-bulk-count:empty {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+    }
+    .members-bulk-actions {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: var(--space-2);
+    }
+    .members-bulk-bar > .admin-form-status { flex: 1 1 100%; }
+    /* The row checkbox: a 44px box around the 18px control. */
+    .member-select.admin-check-row {
+        width: var(--hit-target-min);
+        justify-content: center;
+    }
+    .admin-members-page .data-table td.cell-select { width: var(--hit-target-min); }
+    /* In a phone card the box sits on the card's left text edge, in line
+       with the pill and meta lines under it; the 44px target runs right. */
+    .admin-members-page .is-cards .data-table td.cell-select .member-select.admin-check-row {
+        justify-content: flex-start;
+    }
+    .members-inactive {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-stack);
+        min-width: 0;
+    }
+    .members-inactive > p {
+        margin: 0;
+        color: var(--text-3);
+        font-size: var(--text-sm);
+        line-height: var(--leading-body);
+    }
+    /* Read-only member dialogs (moderation history, attendance). */
+    .member-dialog-loading {
+        margin: 0;
+        color: var(--text-3);
+        font-size: var(--text-md);
+    }
+    .member-dialog-empty {
+        margin: 0;
+        color: var(--text-3);
+        font-size: var(--text-md);
+    }
+    .member-attendance-rate {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: var(--space-1);
+        margin: 0;
+    }
+    .member-attendance-rate .value {
+        color: var(--accent-text);
+        font-family: var(--font-head);
+        font-size: var(--text-xl);
+        font-weight: var(--font-head-weight);
+        font-variant-numeric: tabular-nums;
+    }
+    .member-attendance-rate .label {
+        color: var(--text-3);
+        font-size: var(--text-xs);
+        font-weight: var(--font-label-weight);
+        letter-spacing: var(--tracking-caps);
+        text-transform: uppercase;
+    }
+    .member-accounts-add {
+        padding-top: var(--space-5);
+        border-top: 1px solid var(--card-border);
+    }
+    .member-accounts-add > h3 {
+        margin: 0 0 var(--space-4);
+        color: var(--text);
+        font-family: var(--font-head);
+        font-size: var(--text-md);
+        font-weight: var(--font-head-weight);
+    }
+"#;
+
+/// Fixed ids of the read-only member dialog. One is open at a time.
+const MEMBER_DIALOG_ID: &str = "member-dialog";
+const MEMBER_DIALOG_TITLE_ID: &str = "member-dialog-title";
+const MEMBER_DIALOG_CLOSE_ID: &str = "member-dialog-close";
+
+/// A read-only dialog (moderation history, attendance): the title takes
+/// focus on open, Close is the one tab stop (Tab and Shift+Tab stay on it), Escape and the overlay close it, and
+/// focus goes back to `restore_focus_id`.
+#[component]
+fn MemberDialog(
+    title: String,
+    restore_focus_id: String,
+    on_close: EventHandler<()>,
+    #[props(default = false)] wide: bool,
+    children: Element,
+) -> Element {
+    use_effect(|| focus_element_by_id(MEMBER_DIALOG_TITLE_ID));
+    let close = use_callback(move |_: ()| {
+        on_close.call(());
+        focus_element_by_id_soon(restore_focus_id.clone());
+    });
+    rsx! {
+        div {
+            class: "form-modal-overlay",
+            onclick: move |_| close.call(()),
+            onkeydown: move |evt| {
+                if key_cancels(&evt.key()) {
+                    evt.stop_propagation();
+                    close.call(());
+                } else if evt.key() == Key::Tab {
+                    // Close is the only tab stop, so Tab and Shift+Tab stay on it.
+                    evt.prevent_default();
+                    focus_element_by_id(MEMBER_DIALOG_CLOSE_ID);
+                }
+            },
+            div {
+                class: if wide { "form-modal wide" } else { "form-modal" },
+                id: MEMBER_DIALOG_ID,
+                role: "dialog",
+                aria_modal: "true",
+                aria_labelledby: MEMBER_DIALOG_TITLE_ID,
+                onclick: move |e| e.stop_propagation(),
+                h2 {
+                    id: MEMBER_DIALOG_TITLE_ID,
+                    class: "form-modal-header",
+                    tabindex: "-1",
+                    "{title}"
+                }
+                div { class: "form-modal-body", {children} }
+                div { class: "form-modal-footer",
+                    button {
+                        id: MEMBER_DIALOG_CLOSE_ID,
+                        class: "btn is-ghost",
+                        r#type: "button",
+                        onclick: move |_| close.call(()),
+                        "Close"
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A row action, chosen from a member's "Actions" group.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MemberAction {
+    Role,
+    Toggle,
+    Password,
+    Moderation,
+    Attendance,
+    Accounts,
+    Avatar,
+}
+
+/// The table of one page of members. On phone every row is a card: the
+/// select box, the name and "Actions" on the top line, then role, status
+/// and join date on one line. Every action sits in the "Actions" group, on
+/// desktop too (eight actions do not fit a row).
+#[component]
+fn MembersTable(
+    rows: Vec<Member>,
+    selected: Vec<String>,
+    is_admin: bool,
+    me: Option<UserInfo>,
+    on_select: EventHandler<(String, bool)>,
+    on_action: EventHandler<(MemberAction, Member)>,
+) -> Element {
+    rsx! {
+        DataTable {
+            headers: vec!["Select", "Name", "Role", "Status", "Joined", "Actions"],
+            num_cols: vec![4],
+            cards: true,
+            label: "Members",
+            for member in rows.iter() {
+                Fragment { key: "{member.id}", {
+                    let id = member.id.clone();
+                    let name = member.display_name.clone();
+                    let checked = selected.contains(&member.id);
+                    let select_id = member.id.clone();
+                    let locked = officer_locked_out(me.as_ref(), member);
+                    let lock_note = member_lock_note_id(&member.id);
+                    let locked_by = locked.then(|| lock_note.clone());
+                    let status = if member.is_active { "active" } else { "inactive" };
+                    let status_word = status_label(status);
+                    let toggle_word = if member.is_active { "Deactivate" } else { "Activate" };
+                    let toggle_class = if member.is_active { "btn is-danger" } else { "btn is-ghost" };
+                    let m_role = member.clone();
+                    let m_toggle = member.clone();
+                    let m_pw = member.clone();
+                    let m_mod = member.clone();
+                    let m_stats = member.clone();
+                    let m_accts = member.clone();
+                    let m_avatar = member.clone();
+                    let more = rsx! {
+                        if locked {
+                            span { id: "{lock_note}", class: "visually-hidden", "{OFFICER_RANK_COPY}" }
+                        }
+                        if is_admin {
+                            button {
+                                r#type: "button",
+                                class: "btn is-ghost",
+                                aria_label: "Change role for {name}",
+                                onclick: move |_| on_action.call((MemberAction::Role, m_role.clone())),
+                                "Change role"
+                            }
+                        }
+                        button {
+                            r#type: "button",
+                            class: toggle_class,
+                            aria_label: "{toggle_word} {name}",
+                            aria_disabled: if locked { "true" },
+                            aria_describedby: locked_by.clone(),
+                            title: if locked { OFFICER_RANK_COPY },
+                            onclick: move |_| {
+                                if !locked {
+                                    on_action.call((MemberAction::Toggle, m_toggle.clone()));
+                                }
+                            },
+                            "{toggle_word}"
+                        }
+                        if is_admin {
+                            button {
+                                r#type: "button",
+                                class: "btn is-ghost",
+                                aria_label: "Reset password for {name}",
+                                onclick: move |_| on_action.call((MemberAction::Password, m_pw.clone())),
+                                "Reset password"
+                            }
+                        }
+                        button {
+                            r#type: "button",
+                            class: "btn is-ghost",
+                            aria_label: "Moderation history for {name}",
+                            onclick: move |_| on_action.call((MemberAction::Moderation, m_mod.clone())),
+                            "Moderation"
+                        }
+                        button {
+                            r#type: "button",
+                            class: "btn is-ghost",
+                            aria_label: "Attendance for {name}",
+                            onclick: move |_| on_action.call((MemberAction::Attendance, m_stats.clone())),
+                            "Attendance"
+                        }
+                        Link {
+                            class: "btn is-ghost",
+                            to: Route::AdminMemberMatches { id: member.id.clone() },
+                            aria_label: "Matches for {name}",
+                            "Matches"
+                        }
+                        button {
+                            r#type: "button",
+                            class: "btn is-ghost",
+                            aria_label: "Game accounts for {name}",
+                            aria_disabled: if locked { "true" },
+                            aria_describedby: locked_by.clone(),
+                            title: if locked { OFFICER_RANK_COPY },
+                            onclick: move |_| {
+                                if !locked {
+                                    on_action.call((MemberAction::Accounts, m_accts.clone()));
+                                }
+                            },
+                            "Game accounts"
+                        }
+                        button {
+                            r#type: "button",
+                            class: "btn is-ghost",
+                            aria_label: "Avatar for {name}",
+                            aria_disabled: if locked { "true" },
+                            aria_describedby: locked_by.clone(),
+                            title: if locked { OFFICER_RANK_COPY },
+                            onclick: move |_| {
+                                if !locked {
+                                    on_action.call((MemberAction::Avatar, m_avatar.clone()));
+                                }
+                            },
+                            "Avatar"
+                        }
+                    };
+                    rsx! {
+                        tr { key: "{id}", class: member_row_class(member.is_active),
+                            td { class: "cell-select",
+                                label { class: "admin-check-row member-select",
+                                    input {
+                                        r#type: "checkbox",
+                                        id: "member-select-{id}",
+                                        aria_label: "Select {name}",
+                                        checked,
+                                        onchange: move |e| on_select.call((select_id.clone(), e.checked())),
+                                    }
+                                }
+                            }
+                            td { class: "cell-who", "{name}" }
+                            td { class: "cell-meta", RolePill { role: member.org_role.clone() } }
+                            td { class: "cell-meta", "{status_word}" }
+                            td { class: "cell-meta num", AdminDate { iso: member.joined_at.clone() } }
+                            td { class: "cell-actions",
+                                RowActions {
+                                    id: member_actions_id(&member.id),
+                                    label: "Actions for {name}",
+                                    more: Some(more),
+                                }
+                            }
+                        }
+                    }
+                } }
+            }
+        }
+    }
+}
+
+/// The selection bar above the table. The count line is always rendered
+/// (`role="status"`), so a new selection is announced; the bulk result line
+/// is a [`FormStatus`] that keeps the server's reason.
+#[component]
+fn BulkBar(
+    count: usize,
+    page_selected: bool,
+    page_has_rows: bool,
+    is_admin: bool,
+    busy: bool,
+    state: SaveState,
+    on_toggle_page: EventHandler<bool>,
+    on_role: EventHandler<()>,
+    on_deactivate: EventHandler<()>,
+    on_clear: EventHandler<()>,
+) -> Element {
+    let text = selection_text(count);
+    rsx! {
+        div {
+            class: if count > 0 { "members-bulk-bar has-selection" } else { "members-bulk-bar" },
+            role: "group",
+            aria_label: "Bulk actions",
+            if page_has_rows {
+                label { class: "admin-check-row", r#for: SELECT_PAGE_ID,
+                    input {
+                        r#type: "checkbox",
+                        id: SELECT_PAGE_ID,
+                        checked: page_selected,
+                        onchange: move |e| on_toggle_page.call(e.checked()),
+                    }
+                    "Select all on this page"
+                }
+            }
+            p { id: BULK_COUNT_ID, class: "members-bulk-count", role: "status", "{text}" }
+            if count > 0 {
+                div { class: "members-bulk-actions",
+                    if is_admin {
+                        button {
+                            r#type: "button",
+                            id: BULK_ROLE_OPEN_ID,
+                            class: "btn is-ghost",
+                            aria_disabled: if busy { "true" },
+                            onclick: move |_| {
+                                if !busy {
+                                    on_role.call(());
+                                }
+                            },
+                            "Change role"
+                        }
+                    }
+                    button {
+                        r#type: "button",
+                        id: BULK_DEACTIVATE_OPEN_ID,
+                        class: "btn is-danger",
+                        aria_disabled: if busy { "true" },
+                        onclick: move |_| {
+                            if !busy {
+                                on_deactivate.call(());
+                            }
+                        },
+                        "Deactivate"
+                    }
+                    button {
+                        r#type: "button",
+                        class: "btn is-ghost",
+                        onclick: move |_| on_clear.call(()),
+                        "Clear selection"
+                    }
+                }
+            }
+            FormStatus { state, id: Some(BULK_STATUS_ID.to_string()), focusable: true }
+        }
+    }
+}
+
+/// Columns of the linked game accounts table, in cell order. The first cell
+/// is the account name (`cell-who`, the card title on a phone), then the game.
+const GAME_ACCOUNT_HEADERS: [&str; 4] = ["Account name", "Game", "Account ID", "Actions"];
+
+/// The member's linked game accounts. One keyed row per account; the game
+/// cell shows the game's name, or its id when the game is gone.
+#[component]
+fn GameAccountsTable(
+    accounts: Vec<GameAccount>,
+    games: Vec<Game>,
+    on_remove: EventHandler<GameAccount>,
+) -> Element {
+    rsx! {
+        DataTable {
+            headers: GAME_ACCOUNT_HEADERS.to_vec(),
+            cards: true,
+            label: "Linked game accounts",
+            for acct in accounts {
+                tr { key: "{acct.id}",
+                    td { class: "cell-who", "{acct.account_name}" }
+                    td { class: "cell-meta",
+                        {
+                            games
+                                .iter()
+                                .find(|g| g.id == acct.game_id)
+                                .map(|g| g.name.clone())
+                                .unwrap_or_else(|| acct.game_id.clone())
+                        }
+                    }
+                    td { "data-label": "Account ID",
+                        {acct.account_id.clone().unwrap_or_else(|| "None".into())}
+                    }
+                    td { class: "cell-actions",
+                        RowActions {
+                            button {
+                                r#type: "button",
+                                id: account_remove_id(&acct.id),
+                                class: "btn is-danger",
+                                aria_label: "Remove {acct.account_name}",
+                                onclick: {
+                                    let acct = acct.clone();
+                                    move |_| on_remove.call(acct.clone())
+                                },
+                                "Remove"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Role select of the role dialogs. `id` is the record id plus the field
+/// name, or a fixed page-unique name for the bulk dialog.
+#[component]
+fn RoleField(id: String, value: String, on_change: EventHandler<String>) -> Element {
+    rsx! {
+        div { class: "form-field",
+            label { class: "field-label", r#for: "{id}", "Role" }
+            select {
+                class: "field-input",
+                id: "{id}",
+                value: "{value}",
+                onchange: move |e| on_change.call(e.value()),
+                for role in ROLES.iter() {
+                    option { value: "{role}", selected: value == *role, "{status_label(role)}" }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn PasswordField(member_id: String, value: String, on_input: EventHandler<String>) -> Element {
+    let field = format!("member-{member_id}-new-password");
+    let hint = format!("{field}-hint");
+    rsx! {
+        div { class: "form-field",
+            label { class: "field-label", r#for: "{field}", "New temporary password" }
+            input {
+                class: "field-input",
+                id: "{field}",
+                r#type: "text",
+                autocomplete: "off",
+                value: "{value}",
+                aria_describedby: "{hint}",
+                oninput: move |e| on_input.call(e.value()),
+            }
+            p { class: "field-hint", id: "{hint}",
+                "At least 12 characters. Only works for local (username and password) accounts. The member should change it after signing in."
+            }
+        }
+    }
+}
+
+/// Id of a linked account's Remove button.
+fn account_remove_id(account_id: &str) -> String {
+    format!("member-account-remove-{account_id}")
+}
+
+/// The game accounts dialog's draft: only its add form. Removals in the
+/// table save right away, and an add that went through clears the form.
+fn account_draft_unsaved(game_id: &str, name: &str, account_id: &str) -> bool {
+    [game_id, name, account_id]
+        .iter()
+        .any(|field| !field.trim().is_empty())
+}
+
+/// The add form of the game accounts dialog.
+#[component]
+fn AddAccountFields(
+    member_id: String,
+    games: Vec<Game>,
+    game_id: String,
+    name: String,
+    account_id: String,
+    on_game: EventHandler<String>,
+    on_name: EventHandler<String>,
+    on_account_id: EventHandler<String>,
+) -> Element {
+    let stem = format!("member-{member_id}-account");
+    rsx! {
+        div { class: "form-grid",
+            div { class: "form-field span-full",
+                label { class: "field-label", r#for: "{stem}-game", "Game" }
+                select {
+                    class: "field-input",
+                    id: "{stem}-game",
+                    value: "{game_id}",
+                    onchange: move |e| on_game.call(e.value()),
+                    option { value: "", selected: game_id.is_empty(), "Choose a game" }
+                    for game in games.iter() {
+                        option { value: "{game.id}", selected: game.id == game_id, "{game.name}" }
+                    }
+                }
+            }
+            div { class: "form-field",
+                label { class: "field-label", r#for: "{stem}-name", "Account name" }
+                input {
+                    class: "field-input",
+                    id: "{stem}-name",
+                    r#type: "text",
+                    placeholder: "Player01 BattleTag",
+                    value: "{name}",
+                    oninput: move |e| on_name.call(e.value()),
+                }
+            }
+            div { class: "form-field",
+                label { class: "field-label", r#for: "{stem}-id", "Account ID (optional)" }
+                input {
+                    class: "field-input",
+                    id: "{stem}-id",
+                    r#type: "text",
+                    value: "{account_id}",
+                    oninput: move |e| on_account_id.call(e.value()),
+                }
+            }
         }
     }
 }
@@ -226,9 +1061,21 @@ pub fn AdminMembers() -> Element {
     let mut recently_inactive: Signal<Vec<Member>> = use_signal(Vec::new);
     let list_mode = members_list_mode(auth().is_officer_or_above(), include_inactive_fell_back());
 
+    // Role chip, search, page and selection. All live in memory.
+    let mut role_filter = use_signal(|| "");
+    let mut search = use_signal(String::new);
+    let mut page = use_signal(|| 1usize);
+    let mut selected: Signal<Vec<String>> = use_signal(Vec::new);
+    let mut bulk_state = use_signal(SaveState::default);
+    let mut bulk_busy = use_signal(|| false);
+    let mut bulk_role_open = use_signal(|| false);
+    let mut bulk_role_value = use_signal(|| "member".to_string());
+    let mut bulk_deactivate_open = use_signal(|| false);
+
     // Role change modal
     let mut role_modal = ModalController::<Member>::new();
     let mut role_value = use_signal(String::new);
+    let mut role_error: Signal<Option<String>> = use_signal(|| None);
 
     // Toggle active confirm
     let mut toggle_modal = ModalController::<Member>::new();
@@ -263,6 +1110,7 @@ pub fn AdminMembers() -> Element {
     let mut add_acct_name = use_signal(String::new);
     let mut add_acct_id = use_signal(String::new);
     let mut add_acct_submitting = use_signal(|| false);
+    let mut add_acct_error: Signal<Option<String>> = use_signal(|| None);
 
     // Delete game account confirm
     let mut del_acct_modal = ModalController::<GameAccount>::new();
@@ -270,11 +1118,13 @@ pub fn AdminMembers() -> Element {
     // Local password reset modal (admin recovery path; local accounts have no email)
     let mut pw_modal = ModalController::<Member>::new();
     let mut pw_new = use_signal(String::new);
+    let mut pw_error: Signal<Option<String>> = use_signal(|| None);
 
     // Avatar upload modal
     let mut avatar_modal = ModalController::<Member>::new();
     let mut avatar_file: Signal<Option<web_sys::File>> = use_signal(|| None);
     let mut avatar_uploading = use_signal(|| false);
+    let mut avatar_error: Signal<Option<String>> = use_signal(|| None);
 
     // --- Fetch helpers for sub-modals ---
 
@@ -298,6 +1148,7 @@ pub fn AdminMembers() -> Element {
 
     let mut open_role = move |member: Member| {
         role_value.set(member.org_role.clone());
+        role_error.set(None);
         role_modal.show(member);
     };
 
@@ -307,6 +1158,7 @@ pub fn AdminMembers() -> Element {
 
     let on_pw_close = move |_| {
         pw_new.set(String::new());
+        pw_error.set(None);
         pw_modal.close();
     };
 
@@ -315,9 +1167,12 @@ pub fn AdminMembers() -> Element {
             let id = member.id.clone();
             let new_password = pw_new();
             if new_password.len() < 12 {
-                toast.show(Toast::error("Password must be at least 12 characters."));
+                let message = "Password must be at least 12 characters.";
+                pw_error.set(Some(message.to_string()));
+                toast.show(Toast::error(message));
                 return;
             }
+            pw_error.set(None);
             pw_modal.start_submit();
             spawn(async move {
                 let result = ApiClient::web()
@@ -335,7 +1190,11 @@ pub fn AdminMembers() -> Element {
                         pw_new.set(String::new());
                         pw_modal.close();
                     }
-                    Err(e) => toast.show(Toast::error(format!("Reset failed: {e}"))),
+                    Err(e) => {
+                        let message = format!("Reset failed: {e}");
+                        pw_error.set(Some(message.clone()));
+                        toast.show(Toast::error(message));
+                    }
                 }
             });
         }
@@ -350,6 +1209,21 @@ pub fn AdminMembers() -> Element {
             }
             let id = member.id.clone();
             let body = ChangeRoleRequest { role: role_value() };
+            // A role chip may drop the row once the list refreshes.
+            let keys: Vec<String> = members
+                .data
+                .peek()
+                .as_ref()
+                .and_then(|d| d.as_ref())
+                .map(|all| {
+                    filter_members(all, *role_filter.peek(), &search.peek())
+                        .into_iter()
+                        .map(|m| m.id)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let leaves = after_role_change_focus(&keys, &id, *role_filter.peek(), &body.role);
+            role_error.set(None);
             role_modal.start_submit();
             spawn(async move {
                 let result = ApiClient::web()
@@ -361,9 +1235,16 @@ pub fn AdminMembers() -> Element {
                         toast.show(Toast::success("Role updated."));
                         role_modal.close();
                         members.refresh += 1;
+                        if let Some((gone, ids)) = leaves {
+                            focus_after_delete_soon(gone, ids);
+                        }
                         games.refresh += 1;
                     }
-                    Err(e) => toast.show(Toast::error(format!("Failed to change role: {e}"))),
+                    Err(e) => {
+                        let message = format!("Failed to change role: {e}");
+                        role_error.set(Some(message.clone()));
+                        toast.show(Toast::error(message));
+                    }
                 }
             });
         }
@@ -383,6 +1264,8 @@ pub fn AdminMembers() -> Element {
                 is_active: Some(new_active),
             };
             toggle_modal.close();
+            // The row's "Actions" group closed when the action was chosen.
+            focus_element_by_id_soon(member_actions_toggle_id(&id));
             spawn(async move {
                 let result = ApiClient::web()
                     .put_json_empty(&format!("/api/members/{id}"), &body)
@@ -474,19 +1357,25 @@ pub fn AdminMembers() -> Element {
         add_acct_game_id.set(String::new());
         add_acct_name.set(String::new());
         add_acct_id.set(String::new());
+        add_acct_error.set(None);
         accts_refresh += 1;
         accts_modal.show(member);
     };
 
-    let mut on_accts_close = move |_| {
+    let on_accts_close = move |_| {
         accts_modal.close();
     };
 
     let on_add_acct = move |_| {
+        if add_acct_submitting() {
+            return;
+        }
         let game_id = add_acct_game_id().trim().to_string();
         let acct_name = add_acct_name().trim().to_string();
         if game_id.is_empty() || acct_name.is_empty() {
-            toast.show(Toast::error("Game and account name are required."));
+            let message = "Game and account name are required.";
+            add_acct_error.set(Some(message.to_string()));
+            toast.show(Toast::error(message));
             return;
         }
         let acct_id_raw = add_acct_id().trim().to_string();
@@ -501,6 +1390,7 @@ pub fn AdminMembers() -> Element {
         };
         if let Some(member) = accts_modal.get_target() {
             let mid = member.id.clone();
+            add_acct_error.set(None);
             add_acct_submitting.set(true);
             spawn(async move {
                 let result = ApiClient::web()
@@ -515,10 +1405,11 @@ pub fn AdminMembers() -> Element {
                         add_acct_id.set(String::new());
                         accts_refresh += 1;
                     }
-                    Err(e) => toast.show(Toast::error(profile_edit_failure(
-                        "Failed to add account",
-                        &e,
-                    ))),
+                    Err(e) => {
+                        let message = profile_edit_failure("Failed to add account", &e);
+                        add_acct_error.set(Some(message.clone()));
+                        toast.show(Toast::error(message));
+                    }
                 }
             });
         }
@@ -534,6 +1425,16 @@ pub fn AdminMembers() -> Element {
         {
             let mid = member.id.clone();
             let aid = acct.id.clone();
+            // B9: the removed row's button leaves the dialog. Once it is
+            // gone, focus the next account's Remove, else the previous one's,
+            // else the dialog title.
+            let keys: Vec<String> = accts_data.peek().iter().map(|a| a.id.clone()).collect();
+            let focus_next = after_delete_focus_ids(
+                &keys,
+                &aid,
+                |k| vec![account_remove_id(k)],
+                &["form-modal-title"],
+            );
             del_acct_modal.close();
             spawn(async move {
                 match ApiClient::web()
@@ -543,6 +1444,7 @@ pub fn AdminMembers() -> Element {
                     Ok(_) => {
                         toast.show(Toast::success("Game account removed."));
                         accts_refresh += 1;
+                        focus_after_delete_soon(account_remove_id(&aid), focus_next);
                     }
                     Err(e) => toast.show(Toast::error(profile_edit_failure("Delete failed", &e))),
                 }
@@ -558,35 +1460,44 @@ pub fn AdminMembers() -> Element {
 
     let mut open_avatar = move |member: Member| {
         avatar_file.set(None);
+        avatar_error.set(None);
         avatar_modal.show(member);
     };
 
-    let mut on_avatar_close = move |_| {
+    let on_avatar_close = move |_| {
         avatar_modal.close();
     };
 
     let on_avatar_file_change = move |_e: Event<FormData>| {
-        if let Some(file) = crate::upload::selected_file("avatar-file-input") {
+        if let Some(file) = crate::upload::selected_file(AVATAR_INPUT_ID) {
+            avatar_error.set(None);
             avatar_file.set(Some(file));
         }
     };
 
     let on_avatar_submit = move |_| {
         let Some(file) = avatar_file() else {
-            toast.show(Toast::error("Select a file first."));
+            let message = "Select a file first.";
+            avatar_error.set(Some(message.to_string()));
+            toast.show(Toast::error(message));
             return;
         };
         if file.size() > 2_000_000.0 {
-            toast.show(Toast::error("File must be under 2MB."));
+            let message = "File must be under 2MB.";
+            avatar_error.set(Some(message.to_string()));
+            toast.show(Toast::error(message));
             return;
         }
         let Some(member) = avatar_modal.get_target() else {
             return;
         };
         let mid = member.id.clone();
+        avatar_error.set(None);
         avatar_uploading.set(true);
         spawn(async move {
-            match crate::upload::post_file(&admin_avatar_upload_url(&mid), &file).await {
+            let failure = match crate::upload::post_file(&admin_avatar_upload_url(&mid), &file)
+                .await
+            {
                 Ok(url) => {
                     let body = UpdateAvatarBody {
                         avatar_url: Some(url),
@@ -599,313 +1510,537 @@ pub fn AdminMembers() -> Element {
                             toast.show(Toast::success("Avatar updated."));
                             avatar_modal.close();
                             members.refresh += 1;
+                            None
                         }
-                        Err(e) => {
-                            toast.show(Toast::error(format!("Failed to update profile: {e}")))
-                        }
+                        Err(e) => Some(format!("Failed to update profile: {e}")),
                     }
                 }
-                Err(UploadFailure::Status(status)) => {
-                    toast.show(Toast::error(avatar_upload_failure_message(status)))
-                }
-                Err(UploadFailure::Message(msg)) => toast.show(Toast::error(msg)),
+                Err(UploadFailure::Status(status)) => Some(avatar_upload_failure_message(status)),
+                Err(UploadFailure::Message(msg)) => Some(msg.to_string()),
+            };
+            if let Some(message) = failure {
+                avatar_error.set(Some(message.clone()));
+                toast.show(Toast::error(message));
             }
             avatar_uploading.set(false);
         });
     };
 
+    // --- Bulk handlers ---
+
+    // The selected members, from the loaded list.
+    let selected_members = move || -> Vec<Member> {
+        let ids = selected();
+        members
+            .data
+            .read()
+            .as_ref()
+            .and_then(|d| d.as_ref())
+            .map(|list| {
+                list.iter()
+                    .filter(|m| ids.contains(&m.id))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    let on_bulk_deactivate = move |_| {
+        bulk_deactivate_open.set(false);
+        let BulkTargets { targets, skipped } =
+            bulk_deactivate_targets(selected_members(), auth().user.as_ref());
+        if targets.is_empty() {
+            let text = if skipped.is_empty() {
+                "The selected members are already inactive.".to_string()
+            } else {
+                format!("No member was deactivated. {}", skipped.join(" "))
+            };
+            bulk_state.set(SaveState::Saved(text));
+            focus_element_by_id_soon(BULK_STATUS_ID.to_string());
+            return;
+        }
+        bulk_busy.set(true);
+        bulk_state.set(SaveState::Saving);
+        spawn(async move {
+            let attempted = targets.len();
+            let mut done = 0;
+            let mut failures = Vec::new();
+            let mut failed_ids = Vec::new();
+            for member in targets {
+                let body = ToggleActiveRequest {
+                    is_active: Some(false),
+                };
+                match ApiClient::web()
+                    .put_json_empty(&format!("/api/members/{}", member.id), &body)
+                    .await
+                {
+                    Ok(_) => {
+                        done += 1;
+                        let mut row = member.clone();
+                        row.is_active = false;
+                        recently_inactive.write().retain(|m| m.id != member.id);
+                        recently_inactive.write().push(row);
+                    }
+                    Err(e) => {
+                        failures.push(bulk_failure(&member, &e));
+                        failed_ids.push(member.id.clone());
+                    }
+                }
+            }
+            let result = bulk_result("Deactivated", done, attempted, &failures, &skipped);
+            if result.is_error() {
+                toast.show(Toast::error(result.text()));
+            } else {
+                toast.show(Toast::success(result.text()));
+            }
+            bulk_state.set(result);
+            bulk_busy.set(false);
+            // Failed rows stay selected, so the admin can retry them.
+            selected.set(failed_ids);
+            members.refresh += 1;
+            games.refresh += 1;
+            focus_element_by_id_soon(BULK_STATUS_ID.to_string());
+        });
+    };
+
+    let on_bulk_role_submit = move |_| {
+        let role = bulk_role_value();
+        let BulkTargets { targets, skipped } =
+            bulk_role_targets(selected_members(), &role, auth().user.as_ref());
+        bulk_role_open.set(false);
+        if targets.is_empty() {
+            let text = if skipped.is_empty() {
+                format!(
+                    "The selected members already have the {} role.",
+                    status_label(&role)
+                )
+            } else {
+                format!("No role was changed. {}", skipped.join(" "))
+            };
+            bulk_state.set(SaveState::Saved(text));
+            focus_element_by_id_soon(BULK_STATUS_ID.to_string());
+            return;
+        }
+        bulk_busy.set(true);
+        bulk_state.set(SaveState::Saving);
+        spawn(async move {
+            let attempted = targets.len();
+            let mut done = 0;
+            let mut failures = Vec::new();
+            let mut failed_ids = Vec::new();
+            for member in targets {
+                let body = ChangeRoleRequest { role: role.clone() };
+                match ApiClient::web()
+                    .patch_json_empty(&format!("/api/members/{}/role", member.id), &body)
+                    .await
+                {
+                    Ok(_) => done += 1,
+                    Err(e) => {
+                        failures.push(format!("{}: {e}.", member.display_name));
+                        failed_ids.push(member.id.clone());
+                    }
+                }
+            }
+            let result = bulk_result("Changed the role of", done, attempted, &failures, &skipped);
+            if result.is_error() {
+                toast.show(Toast::error(result.text()));
+            } else {
+                toast.show(Toast::success(result.text()));
+            }
+            bulk_state.set(result);
+            bulk_busy.set(false);
+            selected.set(failed_ids);
+            members.refresh += 1;
+            games.refresh += 1;
+            focus_element_by_id_soon(BULK_STATUS_ID.to_string());
+        });
+    };
+
+    let on_action = move |(action, member): (MemberAction, Member)| match action {
+        MemberAction::Role => open_role(member),
+        MemberAction::Toggle => open_toggle(member),
+        MemberAction::Password => {
+            pw_new.set(String::new());
+            pw_error.set(None);
+            pw_modal.show(member);
+        }
+        MemberAction::Moderation => open_mod_history(member),
+        MemberAction::Attendance => open_stats(member),
+        MemberAction::Accounts => open_accounts(member),
+        MemberAction::Avatar => open_avatar(member),
+    };
+
     // --- Render ---
 
     let me = auth().user;
+    let all: Option<Vec<Member>> = members.data.read().as_ref().and_then(|d| d.clone());
+    let shown = all
+        .as_deref()
+        .map(|list| filter_members(list, role_filter(), &search()))
+        .unwrap_or_default();
+    let total = shown.len();
+    let rows: Vec<Member> = page_slice(&shown, page(), ADMIN_PAGE_SIZE).to_vec();
+    let page_ids: Vec<String> = rows.iter().map(|m| m.id.clone()).collect();
+    let selected_now = selected();
+    let page_has_rows = !page_ids.is_empty();
+    let page_selected = page_has_rows && page_ids.iter().all(|id| selected_now.contains(id));
+    let games_list: Vec<Game> = games
+        .data
+        .read()
+        .as_ref()
+        .and_then(|d| d.clone())
+        .unwrap_or_default();
 
-    rsx! {
-
-        div { class: "admin-toolbar",
-            h1 { "Members" }
-        }
-        p { class: "empty-state", style: "text-align:left;padding:0 0 1rem;margin:0;",
-            "{list_intro_copy(list_mode)}"
-        }
-
-        // Members table
-        {
-            let data = members.data.read();
-            let data = data.as_ref().and_then(|d| d.as_ref());
-            match data {
-                None => admin_pending(&members, "members"),
-                Some(list) if list.is_empty() => rsx! {
-                    p { class: "empty-state", "No members yet." }
-                },
-                Some(list) => rsx! {
-                    DataTable { headers: vec!["Name", "Role", "Status", "Joined", "Actions"],
-                        for member in list.iter() {
-                            {
-                                let m_role = member.clone();
-                                let m_toggle = member.clone();
-                                let m_mod = member.clone();
-                                let m_stats = member.clone();
-                                let m_accts = member.clone();
-                                let m_avatar = member.clone();
-                                let m_pw = member.clone();
-                                let locked = officer_locked_out(me.as_ref(), member);
-                                let lock_title = if locked { OFFICER_RANK_COPY } else { "" };
-                                let status_str = if member.is_active { "active" } else { "inactive" };
-                                let joined = crate::util::format_datetime(&member.joined_at);
-                                let row_class = member_row_class(member.is_active);
-                                rsx! {
-                                    tr { key: "{member.id}", class: "{row_class}",
-                                        td { "{member.display_name}" }
-                                        td { RolePill { role: member.org_role.clone() } }
-                                        td { StatusPill { status: status_str.to_string() } }
-                                        td { "{joined}" }
-                                        td {
-                                            div { class: "row-actions",
-                                                if is_admin {
-                                                    button {
-                                                        class: "row-btn",
-                                                        onclick: move |_| open_role(m_role.clone()),
-                                                        "Role"
-                                                    }
-                                                }
-                                                if member.is_active {
-                                                    button {
-                                                        class: "row-btn danger",
-                                                        disabled: locked,
-                                                        title: lock_title,
-                                                        onclick: move |_| open_toggle(m_toggle.clone()),
-                                                        "Deactivate"
-                                                    }
-                                                } else {
-                                                    button {
-                                                        class: "row-btn",
-                                                        disabled: locked,
-                                                        title: lock_title,
-                                                        onclick: move |_| open_toggle(m_toggle.clone()),
-                                                        "Activate"
-                                                    }
-                                                }
-                                                if is_admin {
-                                                    button {
-                                                        class: "row-btn",
-                                                        onclick: move |_| { pw_new.set(String::new()); pw_modal.show(m_pw.clone()); },
-                                                        "PW"
-                                                    }
-                                                }
-                                                button {
-                                                    class: "row-btn",
-                                                    onclick: move |_| open_mod_history(m_mod.clone()),
-                                                    "Mod"
-                                                }
-                                                button {
-                                                    class: "row-btn",
-                                                    onclick: move |_| open_stats(m_stats.clone()),
-                                                    "Stats"
-                                                }
-                                                Link {
-                                                    class: "row-btn row-btn-link",
-                                                    to: Route::AdminMemberMatches { id: member.id.clone() },
-                                                    aria_label: "View matches for {member.display_name}",
-                                                    "Matches"
-                                                }
-                                                button {
-                                                    class: "row-btn",
-                                                    disabled: locked,
-                                                    title: lock_title,
-                                                    onclick: move |_| open_accounts(m_accts.clone()),
-                                                    "Accounts"
-                                                }
-                                                button {
-                                                    class: "row-btn",
-                                                    disabled: locked,
-                                                    title: lock_title,
-                                                    onclick: move |_| open_avatar(m_avatar.clone()),
-                                                    "Avatar"
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+    let list = match all.as_ref() {
+        None => admin_list_pending(&members, "members"),
+        Some(all) => rsx! {
+            if all.is_empty() {
+                EmptyCard {
+                    title: "No members yet",
+                    message: "Members show up here once an application is accepted. Review open applications to add someone.",
+                    actions: rsx! {
+                        Link { to: Route::AdminApplications {}, class: "btn is-ghost", "Open applications" }
+                    },
+                }
+            } else if rows.is_empty() {
+                EmptyCard {
+                    title: "No members match these filters",
+                    message: "Clear the role filter and the search to see the full roster.",
+                    actions: rsx! {
+                        button {
+                            r#type: "button",
+                            class: "btn is-ghost",
+                            onclick: move |_| {
+                                role_filter.set("");
+                                search.set(String::new());
+                                selected.set(Vec::new());
+                                page.set(1);
+                            },
+                            "Clear filters"
                         }
-                    }
+                    },
+                }
+            } else {
+                MembersTable {
+                    rows: rows.clone(),
+                    selected: selected_now.clone(),
+                    is_admin,
+                    me: me.clone(),
+                    on_select: move |(id, on): (String, bool)| {
+                        let mut list = selected.write();
+                        list.retain(|s| s != &id);
+                        if on {
+                            list.push(id);
+                        }
+                    },
+                    on_action,
+                }
+            }
+            // Always rendered: its count line is the list's live line.
+            Pager {
+                id: "members-pager",
+                page: page(),
+                total,
+                page_size: ADMIN_PAGE_SIZE,
+                noun: "members",
+                noun_singular: "member",
+                show_page_count: true,
+                on_change: move |next| {
+                    page.set(next);
+                    show_list_top(LIST_ID);
                 },
             }
-        }
+        },
+    };
 
-        {
-            let listed_ids: Vec<String> = members
-                .data
-                .read()
-                .as_ref()
-                .and_then(|d| d.as_ref())
-                .map(|list| list.iter().map(|m| m.id.clone()).collect())
-                .unwrap_or_default();
-            let recent = recently_inactive();
-            let inactive = session_inactive_not_in_list(&recent, &listed_ids);
-            if inactive.is_empty() {
-                rsx! {}
-            } else {
-                rsx! {
-                    h2 {
-                        style: "font-family:var(--font-head);font-size:0.95rem;color:var(--text);margin:1.5rem 0 0.75rem;",
+    let inactive = {
+        let listed_ids: Vec<String> = all
+            .as_ref()
+            .map(|list| list.iter().map(|m| m.id.clone()).collect())
+            .unwrap_or_default();
+        session_inactive_not_in_list(&recently_inactive(), &listed_ids)
+    };
+
+    rsx! {
+        crate::styles::StyleOnce { id: "scuffed-css-pages-admin-members-css", css: MEMBERS_CSS }
+        PageShell { width: PageWidth::Wide, class: "admin-members-page",
+            PageHeader { title: "Members", lead: list_intro_copy(list_mode).to_string() }
+
+            div { class: "admin-toolbar",
+                ChipRow { label: "Filter by role", scroll: true,
+                    for (role, word) in ROLE_FILTERS {
+                        ChipButton {
+                            key: "{word}",
+                            class: "chip",
+                            id: role_filter_id(role),
+                            label: word,
+                            pressed: role_filter() == role,
+                            onclick: move |_| {
+                                role_filter.set(role);
+                                selected.set(Vec::new());
+                                page.set(1);
+                            },
+                        }
+                    }
+                }
+                div { class: "admin-toolbar-search",
+                    input {
+                        class: "field-input",
+                        id: SEARCH_ID,
+                        r#type: "search",
+                        aria_label: "Search members",
+                        placeholder: "Search members",
+                        value: "{search}",
+                        oninput: move |e| {
+                            search.set(e.value());
+                            selected.set(Vec::new());
+                            page.set(1);
+                        },
+                    }
+                }
+            }
+
+            BulkBar {
+                count: selected_now.len(),
+                page_selected,
+                page_has_rows,
+                is_admin,
+                busy: bulk_busy(),
+                state: bulk_state(),
+                on_toggle_page: move |on: bool| {
+                    let mut list = selected.write();
+                    list.retain(|id| !page_ids.contains(id));
+                    if on {
+                        list.extend(page_ids.iter().cloned());
+                    }
+                },
+                on_role: move |_| {
+                    bulk_role_value.set("member".to_string());
+                    bulk_role_open.set(true);
+                },
+                on_deactivate: move |_| bulk_deactivate_open.set(true),
+                on_clear: move |_| {
+                    selected.set(Vec::new());
+                    focus_element_by_id_soon(SEARCH_ID.to_string());
+                },
+            }
+
+            section {
+                id: LIST_ID,
+                class: "admin-list pager-target",
+                tabindex: "-1",
+                aria_label: "Members",
+                {list}
+            }
+
+            if !inactive.is_empty() {
+                section { class: "members-inactive", aria_labelledby: "members-inactive-title",
+                    h2 { id: "members-inactive-title", class: "ui-section-title",
                         "Recently deactivated (this session)"
                     }
-                    p { class: "empty-state", style: "text-align:left;padding:0 0 0.75rem;margin:0;",
-                        "{session_inactive_note()}"
-                    }
-                    DataTable { headers: vec!["Name", "Role", "Status", "Actions"],
+                    p { "{session_inactive_note()}" }
+                    DataTable {
+                        headers: vec!["Name", "Role", "Status", "Actions"],
+                        cards: true,
+                        label: "Recently deactivated members",
                         for member in inactive.iter() {
-                            {
+                            Fragment { key: "{member.id}", {
                                 let m_toggle = member.clone();
                                 let locked = officer_locked_out(me.as_ref(), member);
-                                let lock_title = if locked { OFFICER_RANK_COPY } else { "" };
+                                let lock_note = format!("member-inactive-lock-{}", member.id);
                                 rsx! {
                                     tr { key: "inactive-{member.id}", class: "is-inactive",
-                                        td { "{member.display_name}" }
-                                        td { RolePill { role: member.org_role.clone() } }
-                                        td { StatusPill { status: "inactive".to_string() } }
-                                        td {
-                                            button {
-                                                class: "row-btn",
-                                                disabled: locked,
-                                                title: lock_title,
-                                                onclick: move |_| open_toggle(m_toggle.clone()),
-                                                "Activate"
+                                        td { class: "cell-who", "{member.display_name}" }
+                                        td { class: "cell-meta", RolePill { role: member.org_role.clone() } }
+                                        td { class: "cell-meta", "Inactive" }
+                                        td { class: "cell-actions",
+                                            RowActions {
+                                                if locked {
+                                                    span { id: "{lock_note}", class: "visually-hidden", "{OFFICER_RANK_COPY}" }
+                                                }
+                                                button {
+                                                    r#type: "button",
+                                                    id: "member-activate-{member.id}",
+                                                    class: "btn is-ghost",
+                                                    aria_label: "Activate {member.display_name}",
+                                                    aria_disabled: if locked { "true" },
+                                                    aria_describedby: locked.then(|| lock_note.clone()),
+                                                    title: if locked { OFFICER_RANK_COPY },
+                                                    onclick: move |_| {
+                                                        if !locked {
+                                                            open_toggle(m_toggle.clone());
+                                                        }
+                                                    },
+                                                    "Activate"
+                                                }
                                             }
                                         }
                                     }
                                 }
-                            }
+                            } }
                         }
+                    }
+                }
+            }
+
+            {list_cap_notice(&members, "members")}
+            {list_cap_notice(&games, "games")}
+        }
+
+        // Role change modal
+        {
+            let target = role_modal.get_target();
+            let member_id = target.as_ref().map(|m| m.id.clone()).unwrap_or_default();
+            rsx! {
+                FormModal {
+                    title: format!(
+                        "Change role: {}",
+                        target.as_ref().map(|m| m.display_name.clone()).unwrap_or_default()
+                    ),
+                    open: role_modal.is_open(),
+                    submitting: role_modal.is_submitting(),
+                    error: role_error(),
+                    restore_focus_id: Some(member_actions_toggle_id(&member_id)),
+                    on_close: on_role_close,
+                    on_submit: on_role_submit,
+                    RoleField {
+                        id: format!("member-{member_id}-role"),
+                        value: role_value(),
+                        on_change: move |v| role_value.set(v),
                     }
                 }
             }
         }
 
-        {list_cap_notice(&members, "members")}
-        {list_cap_notice(&games, "games")}
-
-        // Role change modal
+        // Bulk role change
         FormModal {
-            title: format!(
-                "Change Role: {}",
-                role_modal.get_target().map(|m| m.display_name).unwrap_or_default()
-            ),
-            open: role_modal.is_open(),
-            submitting: role_modal.is_submitting(),
-            on_close: on_role_close,
-            on_submit: on_role_submit,
+            title: format!("Change role: {}", selection_text(selected_now.len())),
+            open: bulk_role_open(),
+            submitting: false,
+            submit_label: Some("Change role".to_string()),
+            restore_focus_id: Some(BULK_ROLE_OPEN_ID.to_string()),
+            on_close: move |_| bulk_role_open.set(false),
+            on_submit: on_bulk_role_submit,
+            RoleField {
+                id: BULK_ROLE_FIELD_ID.to_string(),
+                value: bulk_role_value(),
+                on_change: move |v| bulk_role_value.set(v),
+            }
+            if let Some(note) = bulk_role_own_note(&selected_members(), me.as_ref()) {
+                p { class: "field-hint", "{note}" }
+            }
+        }
 
-            div { class: "form-field",
-                label { class: "form-label", "Role" }
-                select {
-                    class: "form-select",
-                    value: "{role_value}",
-                    onchange: move |e| role_value.set(e.value()),
-                    for role in ROLES.iter() {
-                        option { value: "{role}", "{role}" }
-                    }
+        // Bulk deactivate. The plan is built once per render.
+        {
+            let plan = bulk_deactivate_targets(selected_members(), me.as_ref());
+            let sends_any = !plan.targets.is_empty();
+            rsx! {
+                ConfirmDialog {
+                    title: "Deactivate members".to_string(),
+                    message: bulk_deactivate_message(&plan),
+                    open: bulk_deactivate_open(),
+                    // Nothing to send: no danger button, just OK (it writes the
+                    // status line naming what was left out).
+                    danger: sends_any,
+                    confirm_label: if sends_any { "Deactivate".to_string() } else { "OK".to_string() },
+                    restore_focus_id: Some(BULK_DEACTIVATE_OPEN_ID.to_string()),
+                    on_confirm: on_bulk_deactivate,
+                    on_cancel: move |_| bulk_deactivate_open.set(false),
                 }
             }
         }
 
         // Local password reset modal
-        FormModal {
-            title: format!(
-                "Reset Password: {}",
-                pw_modal.get_target().map(|m| m.display_name).unwrap_or_default()
-            ),
-            open: pw_modal.is_open(),
-            submitting: pw_modal.is_submitting(),
-            on_close: on_pw_close,
-            on_submit: on_pw_submit,
-
-            div { class: "form-field",
-                label { class: "form-label", "New temporary password" }
-                input {
-                    class: "form-input",
-                    r#type: "text",
-                    value: "{pw_new}",
-                    placeholder: "min 12 characters. Member should change it after login",
-                    oninput: move |e| pw_new.set(e.value()),
+        {
+            let target = pw_modal.get_target();
+            let member_id = target.as_ref().map(|m| m.id.clone()).unwrap_or_default();
+            rsx! {
+                FormModal {
+                    title: format!(
+                        "Reset password: {}",
+                        target.as_ref().map(|m| m.display_name.clone()).unwrap_or_default()
+                    ),
+                    open: pw_modal.is_open(),
+                    submitting: pw_modal.is_submitting(),
+                    submit_label: Some("Reset password".to_string()),
+                    error: pw_error(),
+                    restore_focus_id: Some(member_actions_toggle_id(&member_id)),
+                    on_close: on_pw_close,
+                    on_submit: on_pw_submit,
+                    PasswordField {
+                        member_id,
+                        value: pw_new(),
+                        on_input: move |v| pw_new.set(v),
+                    }
                 }
-                p { class: "form-hint", "Only works for local (username/password) accounts." }
             }
         }
 
         // Toggle active confirm
-        ConfirmDialog {
-            title: if toggle_modal.get_target().map(|m| m.is_active).unwrap_or(false) {
-                "Deactivate Member".to_string()
-            } else {
-                "Activate Member".to_string()
-            },
-            message: format!(
-                "{} \"{}\"?",
-                if toggle_modal.get_target().map(|m| m.is_active).unwrap_or(false) { "Deactivate" } else { "Activate" },
-                toggle_modal.get_target().map(|m| m.display_name).unwrap_or_default()
-            ),
-            open: toggle_modal.is_open(),
-            danger: toggle_modal.get_target().map(|m| m.is_active).unwrap_or(false),
-            on_confirm: on_toggle_confirm,
-            on_cancel: on_toggle_cancel,
+        {
+            let target = toggle_modal.get_target();
+            let active = target.as_ref().map(|m| m.is_active).unwrap_or(false);
+            let verb = if active { "Deactivate" } else { "Activate" };
+            let name = target.as_ref().map(|m| m.display_name.clone()).unwrap_or_default();
+            // From the list the dialog was opened through "Actions"; from the
+            // recently deactivated list, through the row's Activate button.
+            let opener = target.as_ref().map(|m| {
+                if recently_inactive().iter().any(|r| r.id == m.id)
+                    && !all.as_ref().is_some_and(|l| l.iter().any(|r| r.id == m.id))
+                {
+                    format!("member-activate-{}", m.id)
+                } else {
+                    member_actions_toggle_id(&m.id)
+                }
+            });
+            rsx! {
+                ConfirmDialog {
+                    title: format!("{verb} member"),
+                    message: format!("{verb} \"{name}\"?"),
+                    open: toggle_modal.is_open(),
+                    danger: active,
+                    confirm_label: verb.to_string(),
+                    restore_focus_id: opener,
+                    on_confirm: on_toggle_confirm,
+                    on_cancel: on_toggle_cancel,
+                }
+            }
         }
 
         // Mod history modal
-        if mod_modal.is_open() {
-            div {
-                class: "form-modal-overlay",
-                onclick: move |_| on_mod_close(()),
-                div {
-                    class: "form-modal",
-                    style: "max-width:700px;",
-                    onclick: move |e| e.stop_propagation(),
-                    div { class: "form-modal-header",
-                        "Moderation: {mod_modal.get_target().map(|m| m.display_name).unwrap_or_default()}"
+        if let Some(target) = mod_modal.get_target().filter(|_| mod_modal.is_open()) {
+            MemberDialog {
+                title: format!("Moderation: {}", target.display_name),
+                restore_focus_id: member_actions_toggle_id(&target.id),
+                wide: true,
+                on_close: move |_| on_mod_close(()),
+                if mod_loading() {
+                    p { class: "member-dialog-loading", role: "status", "Loading moderation history..." }
+                } else if let Some(err) = mod_error() {
+                    p { class: "fetch-error", role: "alert",
+                        "Could not load the moderation history. {err}"
                     }
-                    div { class: "form-modal-body",
-                        if mod_loading() {
-                            p { class: "admin-loading", "Loading..." }
-                        } else if let Some(err) = mod_error() {
-                            p { class: "empty-state", style: "color: var(--loss);",
-                                "Failed to load moderation history: {err}"
-                            }
-                        } else if mod_data.read().is_empty() {
-                            p { class: "empty-state", "No moderation history." }
-                        } else {
-                            table { class: "data-table",
-                                thead {
-                                    tr {
-                                        th { "Action" }
-                                        th { "Reason" }
-                                        th { "Active" }
-                                        th { "Date" }
+                } else if mod_data.read().is_empty() {
+                    p { class: "member-dialog-empty", "No moderation history for this member." }
+                } else {
+                    DataTable {
+                        headers: vec!["Action", "Reason", "Status", "Date"],
+                        num_cols: vec![3],
+                        cards: true,
+                        label: "Moderation history",
+                        for action in mod_data.read().iter() {
+                            Fragment { key: "{action.id}", {
+                                let (state, tone) = moderation_state(action, chrono::Utc::now());
+                                rsx! {
+                                    tr { key: "{action.id}",
+                                        td { class: "cell-who", "{status_label(&action.action_type)}" }
+                                        td { "data-label": "Reason", "{action.reason}" }
+                                        td { class: "cell-badge", Pill { tone, "{state}" } }
+                                        td { class: "cell-meta num", AdminDate { iso: action.created_at.clone() } }
                                     }
                                 }
-                                tbody {
-                                    for action in mod_data.read().iter() {
-                                        {
-                                            let active_str = if action.is_active { "active" } else { "inactive" };
-                                            let created = crate::util::format_datetime(&action.created_at);
-                                            rsx! {
-                                                tr { key: "{action.id}",
-                                                    td { "{action.action_type}" }
-                                                    td { "{action.reason}" }
-                                                    td { StatusPill { status: active_str.to_string() } }
-                                                    td { "{created}" }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    div { class: "form-modal-footer",
-                        button {
-                            class: "btn-cancel",
-                            onclick: move |_| on_mod_close(()),
-                            "Close"
+                            } }
                         }
                     }
                 }
@@ -913,186 +2048,89 @@ pub fn AdminMembers() -> Element {
         }
 
         // Attendance stats modal
-        if stats_modal.is_open() {
-            div {
-                class: "form-modal-overlay",
-                onclick: move |_| on_stats_close(()),
-                div {
-                    class: "form-modal",
-                    style: "max-width:550px;",
-                    onclick: move |e| e.stop_propagation(),
-                    div { class: "form-modal-header",
-                        "Attendance: {stats_modal.get_target().map(|m| m.display_name).unwrap_or_default()}"
-                    }
-                    div { class: "form-modal-body",
-                        if stats_loading() {
-                            p { class: "admin-loading", "Loading..." }
-                        } else if let Some(err) = stats_error() {
-                            AttendanceStatsError { message: err }
-                        } else if let Some(stats) = stats_data() {
-                            {
-                                let total = stats.total.to_string();
-                                let attended = stats.attended.to_string();
-                                let absent = stats.no_show.to_string();
-                                let excused = stats.excused.to_string();
-                                let rate = format!("{:.1}%", stats.attendance_rate());
-                                let no_events = stats.total == 0;
-                                rsx! {
-                                    div { class: "summary-cards",
-                                        SummaryCard { value: total, label: "Total Events" }
-                                        SummaryCard { value: attended, label: "Attended" }
-                                        SummaryCard { value: absent, label: "Absent" }
-                                        SummaryCard { value: excused, label: "Excused" }
-                                    }
-                                    if no_events {
-                                        p { class: "empty-state", "No events recorded for this member." }
-                                    }
-                                    div {
-                                        style: "text-align:center;margin-top:1rem;",
-                                        span {
-                                            style: "font-family:var(--font-head);font-size:2.5rem;color:var(--accent-text);",
-                                            "{rate}"
-                                        }
-                                        div {
-                                            style: "font-size:0.75rem;color:var(--text-subtle);text-transform:uppercase;letter-spacing:0.05em;",
-                                            "Attendance Rate"
-                                        }
-                                    }
-                                }
+        if let Some(target) = stats_modal.get_target().filter(|_| stats_modal.is_open()) {
+            MemberDialog {
+                title: format!("Attendance: {}", target.display_name),
+                restore_focus_id: member_actions_toggle_id(&target.id),
+                on_close: move |_| on_stats_close(()),
+                if stats_loading() {
+                    p { class: "member-dialog-loading", role: "status", "Loading attendance..." }
+                } else if let Some(err) = stats_error() {
+                    AttendanceStatsError { message: err }
+                } else if let Some(stats) = stats_data() {
+                    {
+                        let total = stats.total.to_string();
+                        let attended = stats.attended.to_string();
+                        let absent = stats.no_show.to_string();
+                        let excused = stats.excused.to_string();
+                        let rate = format!("{:.1}%", stats.attendance_rate());
+                        let no_events = stats.total == 0;
+                        rsx! {
+                            div { class: "summary-cards",
+                                SummaryCard { value: total, label: "Total events" }
+                                SummaryCard { value: attended, label: "Attended" }
+                                SummaryCard { value: absent, label: "Absent" }
+                                SummaryCard { value: excused, label: "Excused" }
                             }
-                        } else {
-                            p { class: "empty-state", "No attendance data." }
+                            if no_events {
+                                p { class: "member-dialog-empty", "No events recorded for this member." }
+                            }
+                            p { class: "member-attendance-rate",
+                                span { class: "value", "{rate}" }
+                                span { class: "label", "Attendance rate" }
+                            }
                         }
                     }
-                    div { class: "form-modal-footer",
-                        button {
-                            class: "btn-cancel",
-                            onclick: move |_| on_stats_close(()),
-                            "Close"
-                        }
-                    }
+                } else {
+                    p { class: "member-dialog-empty", "No attendance data." }
                 }
             }
         }
 
-        // Game accounts modal
-        if accts_modal.is_open() {
-            div {
-                class: "form-modal-overlay",
-                onclick: move |_| on_accts_close(()),
-                div {
-                    class: "form-modal",
-                    style: "max-width:700px;",
-                    onclick: move |e| e.stop_propagation(),
-                    div { class: "form-modal-header",
-                        "Game Accounts: {accts_modal.get_target().map(|m| m.display_name).unwrap_or_default()}"
-                    }
-                    div { class: "form-modal-body",
-                        if accts_loading() {
-                            p { class: "admin-loading", "Loading..." }
-                        } else if let Some(err) = accts_error() {
-                            p { class: "empty-state", style: "color: var(--loss);",
-                                "Failed to load game accounts: {err}"
-                            }
-                        } else if accts_data.read().is_empty() {
-                            p { class: "empty-state", "No game accounts linked." }
-                        } else {
-                            table { class: "data-table",
-                                thead {
-                                    tr {
-                                        th { "Game" }
-                                        th { "Account Name" }
-                                        th { "Account ID" }
-                                        th { "Actions" }
-                                    }
-                                }
-                                tbody {
-                                    for acct in accts_data.read().iter() {
-                                        {
-                                            let a_del = acct.clone();
-                                            let acct_id_display = acct.account_id.clone().unwrap_or_else(|| "-".into());
-                                            rsx! {
-                                                tr { key: "{acct.id}",
-                                                    td { "{acct.game_id}" }
-                                                    td { "{acct.account_name}" }
-                                                    td { "{acct_id_display}" }
-                                                    td {
-                                                        button {
-                                                            class: "row-btn danger",
-                                                            onclick: move |_| open_del_acct(a_del.clone()),
-                                                            "Remove"
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Add account form
-                        div {
-                            style: "border-top:1px solid var(--border);padding-top:1rem;margin-top:1rem;",
-                            h3 {
-                                style: "font-family:var(--font-head);font-size:0.9rem;font-weight:700;color:var(--text);text-transform:uppercase;margin-bottom:0.75rem;",
-                                "Add Account"
-                            }
-                            div { style: "display:flex;gap:0.5rem;flex-wrap:wrap;align-items:flex-end;",
-                                div { class: "form-field", style: "min-width:120px;",
-                                    label { class: "form-label", "Game" }
-                                    select {
-                                        class: "form-select",
-                                        value: "{add_acct_game_id}",
-                                        onchange: move |e| add_acct_game_id.set(e.value()),
-                                        option { value: "", "-- Select --" }
-                                        {
-                                            let g = games.data.read();
-                                            let g = g.as_ref().and_then(|d| d.as_ref());
-                                            match g {
-                                                Some(list) => rsx! {
-                                                    for game in list.iter() {
-                                                        option { value: "{game.id}", "{game.name}" }
-                                                    }
-                                                },
-                                                None => rsx! {},
-                                            }
-                                        }
-                                    }
-                                }
-                                div { class: "form-field", style: "flex:1;min-width:120px;",
-                                    label { class: "form-label", "Account Name" }
-                                    input {
-                                        class: "form-input",
-                                        r#type: "text",
-                                        placeholder: "e.g. Player#TAG",
-                                        value: "{add_acct_name}",
-                                        oninput: move |e| add_acct_name.set(e.value()),
-                                    }
-                                }
-                                div { class: "form-field", style: "flex:1;min-width:100px;",
-                                    label { class: "form-label", "Account ID (optional)" }
-                                    input {
-                                        class: "form-input",
-                                        r#type: "text",
-                                        value: "{add_acct_id}",
-                                        oninput: move |e| add_acct_id.set(e.value()),
-                                    }
-                                }
-                                button {
-                                    class: "btn-save",
-                                    disabled: add_acct_submitting(),
-                                    onclick: on_add_acct,
-                                    if add_acct_submitting() { "Adding..." } else { "Add" }
-                                }
-                            }
+        // Game accounts modal: the linked accounts, then the add form. Save
+        // adds the account in the form.
+        {
+            let target = accts_modal.get_target();
+            let member_id = target.as_ref().map(|m| m.id.clone()).unwrap_or_default();
+            rsx! {
+                FormModal {
+                    title: format!(
+                        "Game accounts: {}",
+                        target.as_ref().map(|m| m.display_name.clone()).unwrap_or_default()
+                    ),
+                    open: accts_modal.is_open(),
+                    submitting: add_acct_submitting(),
+                    wide: true,
+                    submit_label: Some("Add account".to_string()),
+                    error: add_acct_error(),
+                    restore_focus_id: Some(member_actions_toggle_id(&member_id)),
+                    dirty: Some(account_draft_unsaved(&add_acct_game_id(), &add_acct_name(), &add_acct_id())),
+                    on_close: on_accts_close,
+                    on_submit: on_add_acct,
+                    if accts_loading() {
+                        p { class: "member-dialog-loading", role: "status", "Loading game accounts..." }
+                    } else if let Some(err) = accts_error() {
+                        p { class: "fetch-error", role: "alert", "Could not load game accounts. {err}" }
+                    } else if accts_data.read().is_empty() {
+                        p { class: "member-dialog-empty", "No game accounts linked yet. Add one below." }
+                    } else {
+                        GameAccountsTable {
+                            accounts: accts_data.read().clone(),
+                            games: games_list.clone(),
+                            on_remove: move |acct: GameAccount| open_del_acct(acct),
                         }
                     }
-                    div { class: "form-modal-footer",
-                        button {
-                            class: "btn-cancel",
-                            onclick: move |_| on_accts_close(()),
-                            "Close"
+                    div { class: "member-accounts-add",
+                        h3 { "Add an account" }
+                        AddAccountFields {
+                            member_id,
+                            games: games_list.clone(),
+                            game_id: add_acct_game_id(),
+                            name: add_acct_name(),
+                            account_id: add_acct_id(),
+                            on_game: move |v| add_acct_game_id.set(v),
+                            on_name: move |v| add_acct_name.set(v),
+                            on_account_id: move |v| add_acct_id.set(v),
                         }
                     }
                 }
@@ -1100,78 +2138,72 @@ pub fn AdminMembers() -> Element {
         }
 
         // Delete game account confirm
-        ConfirmDialog {
-            title: "Remove Game Account".to_string(),
-            message: format!(
-                "Remove account \"{}\"?",
-                del_acct_modal.get_target().map(|a| a.account_name).unwrap_or_default()
-            ),
-            open: del_acct_modal.is_open(),
-            danger: true,
-            on_confirm: on_del_acct_confirm,
-            on_cancel: on_del_acct_cancel,
+        {
+            let target = del_acct_modal.get_target();
+            rsx! {
+                ConfirmDialog {
+                    title: "Remove game account".to_string(),
+                    message: format!(
+                        "Remove account \"{}\"?",
+                        target.as_ref().map(|a| a.account_name.clone()).unwrap_or_default()
+                    ),
+                    open: del_acct_modal.is_open(),
+                    danger: true,
+                    confirm_label: "Remove".to_string(),
+                    restore_focus_id: target.as_ref().map(|a| account_remove_id(&a.id)),
+                    on_confirm: on_del_acct_confirm,
+                    on_cancel: on_del_acct_cancel,
+                }
+            }
         }
 
         // Avatar upload modal
-        if avatar_modal.is_open() {
-            div {
-                class: "form-modal-overlay",
-                onclick: move |_| on_avatar_close(()),
-                div {
-                    class: "form-modal",
-                    style: "max-width:450px;",
-                    onclick: move |e| e.stop_propagation(),
-                    div { class: "form-modal-header",
-                        "Avatar: {avatar_modal.get_target().map(|m| m.display_name).unwrap_or_default()}"
-                    }
-                    div { class: "form-modal-body",
-                        div { class: "form-field",
-                            label { class: "form-label", "Profile photo" }
-                            p { style: "color:var(--text-subtle);font-size:0.8rem;margin:0 0 0.65rem;",
-                                "PNG, JPEG, WebP, GIF, or AVIF, max 2 MB. Click the area below to choose a file."
-                            }
-                            {
-                                let file_label = match avatar_file() {
-                                    Some(f) => format!(
-                                        "{} ({:.1} KB)",
-                                        f.name(),
-                                        f.size() / 1024.0
-                                    ),
-                                    None => "No file selected yet. Click here.".to_string(),
-                                };
-                                rsx! {
-                                    label {
-                                        r#for: "avatar-file-input",
-                                        style: "display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0.5rem;min-height:7.5rem;padding:1.25rem;border:2px dashed var(--border);border-radius:10px;background:var(--surface-sunken);cursor:pointer;text-align:center;position:relative;",
-                                        span { style: "font-weight:600;color:var(--text);", "Choose image" }
-                                        span { style: "font-size:0.8rem;color:var(--text-subtle);", "{file_label}" }
-                                        input {
-                                            id: "avatar-file-input",
-                                            r#type: "file",
-                                            accept: crate::upload::IMAGE_UPLOAD_ACCEPT,
-                                            style: "position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer;",
-                                            onchange: on_avatar_file_change,
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    div { class: "form-modal-footer",
-                        button {
-                            class: "btn-cancel",
-                            onclick: move |_| on_avatar_close(()),
-                            "Cancel"
-                        }
-                        button {
-                            class: "btn-save",
-                            disabled: avatar_uploading() || avatar_file().is_none(),
-                            onclick: on_avatar_submit,
-                            if avatar_uploading() { "Uploading..." } else { "Upload" }
-                        }
-                    }
+        {
+            let target = avatar_modal.get_target();
+            let member_id = target.as_ref().map(|m| m.id.clone()).unwrap_or_default();
+            let file_label = match avatar_file() {
+                Some(f) => format!("Selected: {} ({:.1} KB)", f.name(), f.size() / 1024.0),
+                None => "No file selected yet.".to_string(),
+            };
+            rsx! {
+                FormModal {
+                    title: format!(
+                        "Avatar: {}",
+                        target.as_ref().map(|m| m.display_name.clone()).unwrap_or_default()
+                    ),
+                    open: avatar_modal.is_open(),
+                    submitting: avatar_uploading(),
+                    submit_label: Some("Upload".to_string()),
+                    error: avatar_error(),
+                    restore_focus_id: Some(member_actions_toggle_id(&member_id)),
+                    on_close: on_avatar_close,
+                    on_submit: on_avatar_submit,
+                    AvatarField { file_label, on_change: on_avatar_file_change }
                 }
             }
+        }
+    }
+}
+
+/// The avatar file field: a visible label, the accepted types as a hint, and
+/// the chosen file named in a live line.
+#[component]
+fn AvatarField(file_label: String, on_change: EventHandler<Event<FormData>>) -> Element {
+    rsx! {
+        div { class: "form-field",
+            label { class: "field-label", r#for: AVATAR_INPUT_ID, "Profile photo" }
+            input {
+                class: "field-input",
+                id: AVATAR_INPUT_ID,
+                r#type: "file",
+                accept: crate::upload::IMAGE_UPLOAD_ACCEPT,
+                aria_describedby: "{AVATAR_INPUT_ID}-hint {AVATAR_INPUT_ID}-chosen",
+                onchange: move |e| on_change.call(e),
+            }
+            p { class: "field-hint", id: "{AVATAR_INPUT_ID}-hint",
+                "PNG, JPEG, WebP, GIF or AVIF, up to 2 MB."
+            }
+            p { class: "field-hint", id: "{AVATAR_INPUT_ID}-chosen", role: "status", "{file_label}" }
         }
     }
 }
@@ -1179,6 +2211,57 @@ pub fn AdminMembers() -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_game_accounts_dialog_asks_only_about_its_add_form() {
+        // Vision S4 on PR 706: an add or a removal that saved still left the
+        // dialog asking about unsaved changes on close.
+        assert!(!account_draft_unsaved("", "", ""));
+        assert!(!account_draft_unsaved(" ", "", "  "));
+        assert!(account_draft_unsaved("ow", "", ""));
+        assert!(account_draft_unsaved("", "Player01", ""));
+        assert!(account_draft_unsaved("", "", "1234"));
+        let src = include_str!("members.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(prod.contains(
+            "dirty: Some(account_draft_unsaved(&add_acct_game_id(), &add_acct_name(), &add_acct_id())),"
+        ));
+        // A successful add clears all three fields: back to the baseline.
+        let ok = prod
+            .split("toast.show(Toast::success(\"Game account added.\"));")
+            .nth(1)
+            .and_then(|rest| rest.split("Err(e)").next())
+            .unwrap();
+        for field in ["add_acct_game_id", "add_acct_name", "add_acct_id"] {
+            assert!(
+                ok.contains(&format!("{field}.set(String::new());")),
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn removing_a_game_account_waits_for_the_row_before_moving_focus() {
+        // B9: focus used to jump to the dialog title before the request ran.
+        let src = include_str!("members.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let confirm = prod
+            .split("let on_del_acct_confirm = move |_| {")
+            .nth(1)
+            .and_then(|rest| rest.split("let on_del_acct_cancel").next())
+            .unwrap();
+        assert!(!confirm.contains("focus_element_by_id_soon"), "{confirm}");
+        assert!(
+            confirm.contains("|k| vec![account_remove_id(k)],"),
+            "{confirm}"
+        );
+        assert!(confirm.contains("&[\"form-modal-title\"],"), "{confirm}");
+        assert!(
+            confirm.contains("focus_after_delete_soon(account_remove_id(&aid), focus_next);"),
+            "{confirm}"
+        );
+        assert_eq!(account_remove_id("a1"), "member-account-remove-a1");
+    }
 
     fn member(id: &str, active: bool) -> Member {
         Member {
@@ -1205,6 +2288,15 @@ mod tests {
             org_role: role.into(),
             ..member(id, true)
         }
+    }
+
+    #[test]
+    fn empty_status_line_stays_in_the_tree() {
+        // Vision nit 5 on PR 706: `display: none` dropped the live line.
+        crate::styles::admin::assert_live_line_kept(
+            super::MEMBERS_CSS,
+            ".members-bulk-count:empty {",
+        );
     }
 
     #[test]
@@ -1493,23 +2585,639 @@ mod tests {
     }
 
     #[test]
-    fn matches_link_is_centered_like_the_buttons_beside_it() {
-        let css = crate::styles::admin::CSS;
-        let start = css
-            .find(".row-btn.row-btn-link {")
-            .expect("row-btn-link rule");
-        let block = &css[start..start + css[start..].find('}').unwrap()];
-        for decl in [
-            "display: inline-flex",
-            "align-items: center",
-            "justify-content: center",
-        ] {
-            assert!(block.contains(decl), "{decl} in {block}");
-        }
-        let source = include_str!("members.rs");
+    fn page_has_one_h1_role_chips_search_and_a_labelled_wait() {
+        use crate::components::admin_shared::test_page::render_admin_route;
+        let html = render_admin_route("/admin/members", Some(OrgRole::Admin));
         assert!(
-            source.contains("class: \"row-btn row-btn-link\""),
-            "the Matches link uses the centered modifier"
+            html.contains("class=\"ui-shell ui-shell--wide admin-members-page\""),
+            "{html}"
+        );
+        assert_eq!(html.matches("<h1").count(), 1, "{html}");
+        assert!(html.contains("<h1>Members</h1>"), "{html}");
+        assert_eq!(html.matches("<main").count(), 1, "{html}");
+        assert!(
+            html.contains(
+                "<div class=\"chip-row is-scroll\" role=\"group\" aria-label=\"Filter by role\">"
+            ),
+            "{html}"
+        );
+        assert_eq!(html.matches("id=\"members-filter-").count(), 5, "{html}");
+        assert!(
+            html.contains("id=\"members-filter-all\" aria-pressed=\"true\""),
+            "{html}"
+        );
+        assert!(html.contains(">All roles</button>"), "{html}");
+        let search = &html[html.find("id=\"members-search\"").expect("search")..];
+        let search = &search[..search.find('>').unwrap()];
+        assert!(search.contains("type=\"search\""), "{search}");
+        assert!(search.contains("aria-label=\"Search members\""), "{search}");
+        assert!(
+            html.contains(
+                "<section id=\"admin-members-list\" class=\"admin-list pager-target\" tabindex=\"-1\" aria-label=\"Members\">"
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains("role=\"status\">Loading members...</p>"),
+            "{html}"
+        );
+        // The selection count and the bulk result are live lines that exist
+        // before anything is selected.
+        assert!(
+            html.contains(
+                "<p id=\"members-bulk-count\" class=\"members-bulk-count\" role=\"status\"></p>"
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                "<p id=\"members-bulk-status\" class=\"admin-form-status\" role=\"status\" tabindex=\"-1\"></p>"
+            ),
+            "{html}"
+        );
+        assert!(!html.contains('\u{2014}'), "{html}");
+    }
+
+    fn named(id: &str, name: &str, role: &str, active: bool) -> Member {
+        Member {
+            display_name: name.into(),
+            org_role: role.into(),
+            ..member(id, active)
+        }
+    }
+
+    #[test]
+    fn rows_are_cards_with_a_select_box_and_every_action_behind_actions() {
+        let html = crate::components::ui::test_support::render_routed(|| {
+            rsx! {
+                MembersTable {
+                    rows: vec![
+                        named("m1", "Player01", "admin", true),
+                        named("m2", "Player02", "member", false),
+                    ],
+                    selected: vec!["m1".to_string()],
+                    is_admin: false,
+                    me: Some(user("user-me", OrgRole::Officer)),
+                    on_select: |_| {},
+                    on_action: |_| {},
+                }
+            }
+        });
+        assert!(html.contains("data-table-scroll is-cards"), "{html}");
+        assert!(
+            html.contains("<th scope=\"col\" class=\"num\">Joined</th>"),
+            "{html}"
+        );
+        let (first, second) = html
+            .split_once("</tr><tr")
+            .map(|(a, b)| (a.rsplit("<tr").next().unwrap().to_string(), b.to_string()))
+            .expect("two body rows");
+        // Select box first, then the name, the meta line and the actions.
+        let select = first.find("class=\"cell-select\"").expect("select");
+        let who = first.find("class=\"cell-who\"").expect("who");
+        let meta = first.find("class=\"cell-meta\"").expect("meta");
+        let actions = first.find("class=\"cell-actions\"").expect("actions");
+        assert!(select < who && who < meta && meta < actions, "{first}");
+        assert!(first.contains("id=\"member-select-m1\""), "{first}");
+        assert!(first.contains("aria-label=\"Select Player01\""), "{first}");
+        assert!(first.contains("checked"), "{first}");
+        assert!(first.contains(">Player01</td>"), "{first}");
+        assert!(first.contains(">Admin</span>"), "{first}");
+        assert!(first.contains(">Active</td>"), "{first}");
+        assert!(
+            first.contains("<time class=\"date\" datetime=\"2026-09-02\">2 Sep 2026</time>"),
+            "{first}"
+        );
+        // Eight actions do not fit a row: "Actions" on every width.
+        assert!(first.contains("class=\"row-actions\""), "{first}");
+        assert!(!first.contains("is-inline-desktop"), "{first}");
+        assert!(
+            first.contains(
+                "aria-controls=\"member-actions-m1-more\" aria-label=\"Actions for Player01\""
+            ),
+            "{first}"
+        );
+        let group = &first[first.find("class=\"row-menu-group\"").expect("group")..];
+        for word in [
+            "Deactivate",
+            "Moderation",
+            "Attendance",
+            "Game accounts",
+            "Avatar",
+        ] {
+            assert!(
+                group.contains(&format!(">{word}</button>")),
+                "{word}: {group}"
+            );
+        }
+        assert!(group.contains(">Matches</a>"), "{group}");
+        assert!(
+            group.contains("aria-label=\"Matches for Player01\""),
+            "{group}"
+        );
+        // Officers do not see the admin-only actions.
+        assert!(!group.contains("Change role"), "{group}");
+        assert!(!group.contains("Reset password"), "{group}");
+        // An officer cannot edit an admin: the edits stay focusable, say why
+        // and do nothing.
+        assert!(
+            group.contains(&format!(
+                "<span id=\"member-lock-m1\" class=\"visually-hidden\">{OFFICER_RANK_COPY}</span>"
+            )),
+            "{group}"
+        );
+        assert_eq!(
+            group.matches("aria-describedby=\"member-lock-m1\"").count(),
+            3,
+            "{group}"
+        );
+        assert!(!group.contains(" disabled"), "{group}");
+        // A member row: inactive fill, the word, and nothing locked.
+        assert!(second.starts_with(" class=\"is-inactive\""), "{second}");
+        assert!(second.contains(">Inactive</td>"), "{second}");
+        assert!(second.contains(">Activate</button>"), "{second}");
+        assert!(!second.contains("aria-disabled"), "{second}");
+        assert!(!second.contains("member-lock-"), "{second}");
+        assert!(!html.contains("style="), "{html}");
+    }
+
+    #[test]
+    fn admins_get_role_and_password_actions() {
+        let html = crate::components::ui::test_support::render_routed(|| {
+            rsx! {
+                MembersTable {
+                    rows: vec![named("m1", "Player01", "member", true)],
+                    selected: vec![],
+                    is_admin: true,
+                    me: Some(user("user-admin", OrgRole::Admin)),
+                    on_select: |_| {},
+                    on_action: |_| {},
+                }
+            }
+        });
+        assert!(html.contains(">Change role</button>"), "{html}");
+        assert!(html.contains(">Reset password</button>"), "{html}");
+        assert!(
+            html.contains("aria-label=\"Change role for Player01\""),
+            "{html}"
+        );
+        assert!(!html.contains("aria-disabled"), "{html}");
+    }
+
+    /// Every `for` names an element id in the same markup, and every field
+    /// control has a label.
+    fn assert_labels_tied(html: &str, controls: usize) {
+        let fors: Vec<&str> = html
+            .split("for=\"")
+            .skip(1)
+            .map(|rest| rest.split('"').next().unwrap())
+            .collect();
+        assert_eq!(fors.len(), controls, "{html}");
+        for id in fors {
+            assert!(!id.is_empty(), "{html}");
+            assert_eq!(
+                html.matches(&format!(" id=\"{id}\"")).count(),
+                1,
+                "label for {id} must name one control: {html}"
+            );
+        }
+    }
+
+    #[test]
+    fn dialog_fields_have_labels_tied_by_ids_from_data() {
+        let role = render(|| {
+            rsx! { RoleField { id: "member-m1-role".to_string(), value: "officer".to_string(), on_change: |_| {} } }
+        });
+        assert_labels_tied(&role, 1);
+        assert!(role.contains("id=\"member-m1-role\""), "{role}");
+        assert!(role.contains(">Officer</option>"), "{role}");
+
+        let password = render(|| {
+            rsx! { PasswordField { member_id: "m1".to_string(), value: String::new(), on_input: |_| {} } }
+        });
+        assert_labels_tied(&password, 1);
+        assert!(
+            password.contains("aria-describedby=\"member-m1-new-password-hint\""),
+            "{password}"
+        );
+
+        let accounts = render(|| {
+            rsx! {
+                AddAccountFields {
+                    member_id: "m1".to_string(),
+                    games: vec![Game { id: "g1".into(), name: "Overwatch".into() }],
+                    game_id: String::new(),
+                    name: String::new(),
+                    account_id: String::new(),
+                    on_game: |_| {},
+                    on_name: |_| {},
+                    on_account_id: |_| {},
+                }
+            }
+        });
+        assert_labels_tied(&accounts, 3);
+        for id in [
+            "member-m1-account-game",
+            "member-m1-account-name",
+            "member-m1-account-id",
+        ] {
+            assert!(
+                accounts.contains(&format!("id=\"{id}\"")),
+                "{id}: {accounts}"
+            );
+        }
+        assert!(accounts.contains(">Overwatch</option>"), "{accounts}");
+
+        let avatar = render(|| {
+            rsx! { AvatarField { file_label: "No file selected yet.".to_string(), on_change: |_| {} } }
+        });
+        assert_labels_tied(&avatar, 1);
+        assert!(
+            avatar.contains("role=\"status\">No file selected yet.</p>"),
+            "{avatar}"
+        );
+        for html in [&role, &password, &accounts, &avatar] {
+            assert!(!html.contains("style="), "{html}");
+        }
+    }
+
+    #[test]
+    fn bulk_bar_keeps_its_live_lines_and_shows_actions_once_rows_are_selected() {
+        let idle = render(|| {
+            rsx! {
+                BulkBar {
+                    count: 0,
+                    page_selected: false,
+                    page_has_rows: true,
+                    is_admin: true,
+                    busy: false,
+                    state: SaveState::Idle,
+                    on_toggle_page: |_| {},
+                    on_role: |_| {},
+                    on_deactivate: |_| {},
+                    on_clear: |_| {},
+                }
+            }
+        });
+        assert!(
+            idle.contains(
+                "<p id=\"members-bulk-count\" class=\"members-bulk-count\" role=\"status\"></p>"
+            ),
+            "{idle}"
+        );
+        assert!(idle.contains("id=\"members-bulk-status\""), "{idle}");
+        // Focus moves to the result line after a bulk action, so it must be
+        // focusable or focus falls to the body.
+        assert!(
+            idle.contains(
+                "<p id=\"members-bulk-status\" class=\"admin-form-status\" role=\"status\" tabindex=\"-1\">"
+            ),
+            "{idle}"
+        );
+        assert!(!idle.contains(">Deactivate</button>"), "{idle}");
+        assert_labels_tied(&idle, 1);
+        assert!(idle.contains(">Select all on this page</label>"), "{idle}");
+
+        let busy = render(|| {
+            rsx! {
+                BulkBar {
+                    count: 2,
+                    page_selected: true,
+                    page_has_rows: true,
+                    is_admin: true,
+                    busy: false,
+                    state: SaveState::Failed("Deactivated 1 of 2 members. Player03: HTTP error 409: last admin.".to_string()),
+                    on_toggle_page: |_| {},
+                    on_role: |_| {},
+                    on_deactivate: |_| {},
+                    on_clear: |_| {},
+                }
+            }
+        });
+        assert!(busy.contains("members-bulk-bar has-selection"), "{busy}");
+        assert!(busy.contains("role=\"status\">2 selected</p>"), "{busy}");
+        assert!(busy.contains(">Change role</button>"), "{busy}");
+        assert!(busy.contains(">Deactivate</button>"), "{busy}");
+        assert!(busy.contains("HTTP error 409: last admin."), "{busy}");
+    }
+
+    fn bulk_row(id: &str, role: &str, active: bool) -> Member {
+        Member {
+            org_role: role.into(),
+            display_name: format!("Player{id}"),
+            ..member(id, active)
+        }
+    }
+
+    #[test]
+    fn bulk_role_change_leaves_out_and_names_the_callers_own_row() {
+        let me = user("user-01", OrgRole::Admin);
+        let selected = vec![
+            bulk_row("01", "admin", true),
+            bulk_row("02", "member", true),
+            bulk_row("03", "officer", true),
+        ];
+        let plan = bulk_role_targets(selected.clone(), "officer", Some(&me));
+        let ids: Vec<&str> = plan.targets.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["02"]);
+        assert_eq!(
+            plan.skipped,
+            ["Left out Player01 (your own account): change your own role from its row."]
+        );
+        assert_eq!(
+            bulk_role_own_note(&selected, Some(&me)).as_deref(),
+            Some("Your own account, Player01, is left out. Change your own role from its row.")
+        );
+        assert_eq!(bulk_role_own_note(&selected[1..], Some(&me)), None);
+        // The skipped line reaches the result.
+        assert_eq!(
+            bulk_result("Changed the role of", 1, 1, &[], &plan.skipped).text(),
+            "Changed the role of 1 member. Left out Player01 (your own account): change your own role from its row."
+        );
+    }
+
+    /// True when the bulk deactivate plan has at least one member to send,
+    /// as the page reads it off the plan it builds once.
+    fn bulk_deactivate_sends_any(selected: &[Member], user: Option<&UserInfo>) -> bool {
+        !bulk_deactivate_targets(selected.to_vec(), user)
+            .targets
+            .is_empty()
+    }
+
+    #[test]
+    fn a_bulk_deactivate_with_nothing_to_send_has_no_danger_button() {
+        let officer = user("user-01", OrgRole::Officer);
+        let own_and_admin = vec![
+            bulk_row("01", "officer", true),
+            bulk_row("03", "admin", true),
+        ];
+        assert!(!bulk_deactivate_sends_any(&own_and_admin, Some(&officer)));
+        assert!(!bulk_deactivate_sends_any(
+            &[bulk_row("04", "recruit", false)],
+            Some(&officer)
+        ));
+        assert!(bulk_deactivate_sends_any(
+            &[bulk_row("02", "member", true)],
+            Some(&officer)
+        ));
+        let src = include_str!("members.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let dialog = &prod[prod.find("// Bulk deactivate.").unwrap()..];
+        let dialog = &dialog[..dialog.find("on_confirm").unwrap()];
+        // Vision nit 4 on PR 706 round 4: the plan is built once per render.
+        assert_eq!(
+            dialog.matches("bulk_deactivate_targets(").count(),
+            1,
+            "{dialog}"
+        );
+        assert!(
+            dialog.contains("let sends_any = !plan.targets.is_empty();"),
+            "{dialog}"
+        );
+        assert!(dialog.contains("danger: sends_any,"), "{dialog}");
+        assert!(dialog.contains("\"OK\".to_string()"), "{dialog}");
+    }
+
+    #[test]
+    fn moderation_history_reads_lifted_ended_or_active() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-11-17T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let action = |is_active: bool, expires_at: Option<&str>| ModerationAction {
+            id: "a".into(),
+            action_type: "suspension".into(),
+            reason: "r".into(),
+            is_active,
+            expires_at: expires_at.map(str::to_string),
+            created_at: "2026-11-01T00:00:00Z".into(),
+        };
+        // The server clears `is_active` only on Lift.
+        assert_eq!(moderation_state(&action(false, None), now).0, "Lifted");
+        assert_eq!(
+            moderation_state(&action(true, Some("2026-11-10T00:00:00Z")), now).0,
+            "Ended",
+            "past its end date, still is_active"
+        );
+        assert_eq!(
+            moderation_state(&action(true, Some("2026-12-01T00:00:00Z")), now).0,
+            "Active"
+        );
+        assert_eq!(moderation_state(&action(true, None), now).0, "Active");
+    }
+
+    #[test]
+    fn bulk_deactivate_skips_own_and_locked_rows_by_name() {
+        let officer = user("user-01", OrgRole::Officer);
+        let selected = vec![
+            bulk_row("01", "officer", true),
+            bulk_row("02", "member", true),
+            bulk_row("03", "admin", true),
+            bulk_row("04", "recruit", false),
+            bulk_row("05", "recruit", true),
+        ];
+        let plan = bulk_deactivate_targets(selected.clone(), Some(&officer));
+        let ids: Vec<&str> = plan.targets.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["02", "05"]);
+        assert_eq!(
+            plan.skipped,
+            [
+                "Left out Player01 (your own account): you cannot deactivate yourself.",
+                "Left out Player03: officers cannot deactivate admins or other officers.",
+            ]
+        );
+        assert_eq!(
+            bulk_deactivate_message(&plan),
+            "Deactivate 2 members? They lose access until someone activates them again. Left out Player01 (your own account): you cannot deactivate yourself. Left out Player03: officers cannot deactivate admins or other officers."
+        );
+        // An admin may deactivate the admin row; only their own is left out.
+        let admin = user("user-01", OrgRole::Admin);
+        let plan = bulk_deactivate_targets(selected, Some(&admin));
+        let ids: Vec<&str> = plan.targets.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["02", "03", "05"]);
+        assert_eq!(plan.skipped.len(), 1);
+        assert_eq!(
+            bulk_deactivate_message(&BulkTargets::default()),
+            "None of the selected members can be deactivated."
+        );
+    }
+
+    #[test]
+    fn bulk_failures_always_name_the_member() {
+        let target = bulk_row("03", "admin", true);
+        let rank = ClientError::http(403, format!(r#"{{"error":"{OFFICER_RANK_ERROR}"}}"#), None);
+        assert_eq!(
+            bulk_failure(&target, &rank),
+            format!("Player03: {OFFICER_RANK_COPY}")
+        );
+        let other = ClientError::http(409, r#"{"error":"last admin"}"#, None);
+        let text = bulk_failure(&target, &other);
+        assert!(text.starts_with("Player03: "), "{text}");
+        assert!(text.ends_with('.'), "{text}");
+        assert!(!text.contains(".."), "{text}");
+    }
+
+    #[test]
+    fn game_accounts_headers_match_the_cells_and_rows_are_keyed() {
+        fn view() -> Element {
+            rsx! {
+                GameAccountsTable {
+                    accounts: vec![
+                        GameAccount {
+                            id: "acct-1".into(),
+                            game_id: "game-ow".into(),
+                            account_name: "Player01 EU".into(),
+                            account_id: None,
+                        },
+                        GameAccount {
+                            id: "acct-2".into(),
+                            game_id: "game-gone".into(),
+                            account_name: "Player02 NA".into(),
+                            account_id: Some("42".into()),
+                        },
+                    ],
+                    games: vec![Game { id: "game-ow".into(), name: "Overwatch".into() }],
+                    on_remove: |_| {},
+                }
+            }
+        }
+        let html = render(view);
+        // Header order is the cell order: account name, then game.
+        let head = html.split("<tbody>").next().unwrap();
+        let name_at = head.find(">Account name</th>").expect(&html);
+        let game_at = head.find(">Game</th>").expect(&html);
+        assert!(name_at < game_at, "{html}");
+        assert!(
+            html.contains(
+                "<td class=\"cell-who\">Player01 EU</td><td class=\"cell-meta\">Overwatch</td>"
+            ),
+            "{html}"
+        );
+        // A game that is gone shows its id.
+        assert!(
+            html.contains("<td class=\"cell-meta\">game-gone</td>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<td data-label=\"Account ID\">42</td>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("id=\"member-account-remove-acct-2\""),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn bulk_result_counts_and_keeps_the_server_reason() {
+        assert_eq!(
+            bulk_result("Deactivated", 2, 2, &[], &[]),
+            SaveState::Saved("Deactivated 2 members.".to_string())
+        );
+        assert_eq!(
+            bulk_result("Deactivated", 1, 1, &[], &[]),
+            SaveState::Saved("Deactivated 1 member.".to_string())
+        );
+        let failed = bulk_result(
+            "Deactivated",
+            1,
+            2,
+            &["Player03: HTTP error 409: last admin.".to_string()],
+            &[],
+        );
+        assert!(failed.is_error());
+        assert_eq!(
+            failed.text(),
+            "Deactivated 1 of 2 members. Player03: HTTP error 409: last admin."
+        );
+        assert_eq!(selection_text(0), "");
+        assert_eq!(selection_text(3), "3 selected");
+    }
+
+    #[test]
+    fn role_chips_and_search_filter_the_roster() {
+        let list = vec![
+            named("a", "Player01", "member", true),
+            named("b", "Player02", "officer", true),
+            named("c", "Sample12", "member", false),
+        ];
+        assert_eq!(filter_members(&list, "", "").len(), 3);
+        assert_eq!(filter_members(&list, "member", "").len(), 2);
+        let found = filter_members(&list, "", "  player0 ");
+        assert_eq!(found.len(), 2);
+        assert_eq!(filter_members(&list, "officer", "sample").len(), 0);
+        assert_eq!(role_filter_id(""), "members-filter-all");
+        assert_eq!(role_filter_id("recruit"), "members-filter-recruit");
+        let words: Vec<&str> = ROLE_FILTERS.iter().map(|(_, w)| *w).collect();
+        assert_eq!(
+            words,
+            ["All roles", "Member", "Officer", "Recruit", "Admin"]
+        );
+        assert_eq!(member_actions_toggle_id("m1"), "member-actions-m1-toggle");
+    }
+
+    #[test]
+    fn read_only_dialog_is_labelled_and_focuses_its_title() {
+        let html = render(|| {
+            rsx! {
+                MemberDialog {
+                    title: "Moderation: Player01".to_string(),
+                    restore_focus_id: "member-actions-m1-toggle".to_string(),
+                    on_close: |_| {},
+                    p { "body" }
+                }
+            }
+        });
+        assert!(html.contains("role=\"dialog\""), "{html}");
+        assert!(html.contains("aria-modal=\"true\""), "{html}");
+        assert!(
+            html.contains("aria-labelledby=\"member-dialog-title\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("<h2 id=\"member-dialog-title\" class=\"form-modal-header\" tabindex=\"-1\">Moderation: Player01</h2>"),
+            "{html}"
+        );
+        assert!(html.contains("id=\"member-dialog-close\""), "{html}");
+        assert!(!html.contains("style="), "{html}");
+    }
+
+    #[test]
+    fn page_css_is_on_tokens_and_markup_has_no_inline_style() {
+        crate::components::ui::test_support::assert_sizes_from_tokens(MEMBERS_CSS);
+        let src = include_str!("members.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(!prod.contains("style: \""), "no inline styles");
+        assert!(!prod.contains('\u{2014}'), "no em dashes");
+    }
+
+    #[test]
+    fn a_role_change_under_a_role_chip_hands_focus_on() {
+        // Vision nit 3 on PR 706 round 4: under a role chip, Change role
+        // moved the row out of view and focus fell to the body.
+        let keys: Vec<String> = ["a", "b", "c"].iter().map(|k| k.to_string()).collect();
+        let t = member_actions_toggle_id;
+        // No chip, or the chip is the new role: the row stays.
+        assert_eq!(after_role_change_focus(&keys, "b", "", "officer"), None);
+        assert_eq!(
+            after_role_change_focus(&keys, "b", "officer", "officer"),
+            None
+        );
+        // The row leaves: next, previous, then the chip.
+        assert_eq!(
+            after_role_change_focus(&keys, "b", "member", "officer"),
+            Some((t("b"), vec![t("c"), t("a"), role_filter_id("member")]))
+        );
+        assert_eq!(
+            after_role_change_focus(&["only".to_string()], "only", "member", "officer"),
+            Some((t("only"), vec![role_filter_id("member")]))
+        );
+        let src = include_str!("members.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let submit = &prod[prod.find("let on_role_submit = move |_| {").unwrap()..];
+        let submit = &submit[..submit.find("// --- Toggle active handlers ---").unwrap()];
+        assert!(
+            submit.contains("if let Some((gone, ids)) = leaves {\n                            focus_after_delete_soon(gone, ids);"),
+            "{submit}"
         );
     }
 }

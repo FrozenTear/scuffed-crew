@@ -4,6 +4,9 @@
    typography, layout, density remap, and the customisable override surface. */
 
 :root {
+  /* Native controls (checkboxes, select arrows, scrollbars) follow the
+     theme: dark here, light under [data-theme="light"]. */
+  color-scheme: dark;
   /* -----------------------------------------------------------------------
      Override surface
      Change these three, then re-derive accent roles (see tokens.md and
@@ -180,6 +183,7 @@
 /* Light-theme soft fills: same recipe at 8% status/neutral and 10%
    accent, pre-composited on A --surface #ffffff. */
 [data-theme="light"] {
+  color-scheme: light;
   --win-soft: #ebf4f1;
   --loss-soft: #fbeded;
   --warn-soft: #f7f2eb;

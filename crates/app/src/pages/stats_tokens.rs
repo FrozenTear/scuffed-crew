@@ -7,7 +7,6 @@ use scuffed_api_client::ApiClient;
 use scuffed_types::api::{CreateDaemonTokenRequest, CreateDaemonTokenResponse};
 
 use super::stats_member::{Col, STATS_VIEWS_CSS, STATS_VIEWS_CSS_ID, StatsTable};
-use crate::components::ui::inline_confirm::{focus_element_by_id_soon, key_cancels};
 use crate::components::ui::{
     EmptyCard, FieldError, InlineConfirm, PageHeader, PageShell, PageWidth,
 };
@@ -97,8 +96,6 @@ const TOKENS_CSS: &str = r#"
    every other control on the page has, phone widths included. */
 .tokens-page .token-revoke-confirm .inline-confirm__cancel,
 .tokens-page .token-revoke-confirm .inline-confirm__go { min-height: var(--hit-target-min); }
-/* Catches Esc from anywhere in the New token form; adds no box. */
-.tokens-page .token-form-keys { display: contents; }
 /* The dialog may render outside the page container. */
 .token-form-field {
   display: flex;
@@ -158,7 +155,7 @@ const TOKENS_LIST_TITLE_ID: &str = "tokens-list-title";
 const LABEL_INPUT_ID: &str = "daemon-token-label";
 const LABEL_ERROR_ID: &str = "daemon-token-label-err";
 /// The two buttons that open the New token form: the header's, and the
-/// empty list's. Esc or Cancel gives focus back to the one that opened it.
+/// empty list's. The form gives focus back to the one that opened it.
 const NEW_TOKEN_BUTTON_ID: &str = "tokens-new";
 const NEW_TOKEN_EMPTY_BUTTON_ID: &str = "tokens-new-empty";
 
@@ -367,17 +364,14 @@ pub fn StatsTokens() -> Element {
         form_error.set(String::new());
         form_opener.set(opener);
         modal.show_empty();
-        // Into the form, so Esc and Tab act on it rather than on the page.
-        focus_element_by_id_soon(LABEL_INPUT_ID.to_string());
     };
 
-    // Cancel, a click outside, or Esc: close and return focus to the opener.
-    let mut close_form = move || {
+    // Cancel, a click outside or Esc. The shared dialog handles Esc itself
+    // (it asks first once the label changed) and gives focus back to
+    // `restore_focus_id`, the button that opened it.
+    let on_close = move |_| {
         modal.close();
-        focus_element_by_id_soon(form_opener().to_string());
     };
-
-    let on_close = move |_| close_form();
 
     let on_submit = move |_| {
         let label = form_label().trim().to_string();
@@ -553,43 +547,33 @@ pub fn StatsTokens() -> Element {
                 }
             }
 
-            // FormModal has no Esc of its own; this page's form closes on Esc
-            // like the Revoke strip does.
-            div {
-                class: "token-form-keys",
-                onkeydown: move |e| {
-                    if modal.is_open() && key_cancels(&e.key()) {
-                        e.stop_propagation();
-                        close_form();
-                    }
-                },
-                FormModal {
-                    title: "Create tracker token".to_string(),
-                    open: modal.is_open(),
-                    submitting: modal.is_submitting(),
-                    on_close: on_close,
-                    on_submit: on_submit,
+            FormModal {
+                title: "Create tracker token".to_string(),
+                open: modal.is_open(),
+                submitting: modal.is_submitting(),
+                on_close: on_close,
+                on_submit: on_submit,
+                restore_focus_id: Some(form_opener().to_string()),
 
-                    div { class: "token-form-field",
-                        label { class: "field-label", r#for: LABEL_INPUT_ID, "Label" }
-                        input {
-                            id: LABEL_INPUT_ID,
-                            name: LABEL_INPUT_ID,
-                            class: "field-input",
-                            r#type: "text",
-                            placeholder: "For example my-desktop",
-                            aria_invalid: if !form_error().is_empty() { "true" },
-                            aria_describedby: LABEL_ERROR_ID,
-                            value: "{form_label}",
-                            oninput: move |e| {
-                                form_label.set(e.value());
-                                if !form_error.peek().is_empty() && label_error(&e.value()).is_none() {
-                                    form_error.set(String::new());
-                                }
-                            },
-                        }
-                        FieldError { id: LABEL_ERROR_ID, text: form_error(), role: "status" }
+                div { class: "token-form-field",
+                    label { class: "field-label", r#for: LABEL_INPUT_ID, "Label" }
+                    input {
+                        id: LABEL_INPUT_ID,
+                        name: LABEL_INPUT_ID,
+                        class: "field-input",
+                        r#type: "text",
+                        placeholder: "For example my-desktop",
+                        aria_invalid: if !form_error().is_empty() { "true" },
+                        aria_describedby: LABEL_ERROR_ID,
+                        value: "{form_label}",
+                        oninput: move |e| {
+                            form_label.set(e.value());
+                            if !form_error.peek().is_empty() && label_error(&e.value()).is_none() {
+                                form_error.set(String::new());
+                            }
+                        },
                     }
+                    FieldError { id: LABEL_ERROR_ID, text: form_error(), role: "status" }
                 }
             }
         }
@@ -872,49 +856,46 @@ mod tests {
     }
 
     /// QA 705 nit 2: Esc closes the New token form, as it closes the Revoke
-    /// strip, and focus goes back to the button that opened the form.
+    /// strip, and focus goes back to the button that opened the form. Here
+    /// the shared dialog does both (S4d): Esc closes it (asking first once
+    /// the label changed) and `restore_focus_id` names the opener.
     #[test]
     fn esc_closes_the_new_token_form_and_returns_focus_to_its_opener() {
-        assert!(key_cancels(&Key::Escape));
-        assert!(!key_cancels(&Key::Enter));
         let prod = prod_src();
-        // Opening records which button opened it and moves focus into the
-        // form, so Esc reaches the form's key handler.
         let open = &prod[prod
             .find("let mut open_create = move |opener: &'static str| {")
             .unwrap()..];
         let open = &open[..open.find("\n    };\n").unwrap()];
         assert!(open.contains("form_opener.set(opener);"), "{open}");
         assert!(open.contains("modal.show_empty();"), "{open}");
-        assert!(
-            open.contains("focus_element_by_id_soon(LABEL_INPUT_ID.to_string());"),
-            "{open}"
-        );
+        // The dialog puts focus on its own title; the page does not move it.
+        assert!(!open.contains("focus_element"), "{open}");
         assert!(prod.contains("onclick: move |_| open_create(NEW_TOKEN_BUTTON_ID),"));
         assert!(prod.contains("onclick: move |_| open_create(NEW_TOKEN_EMPTY_BUTTON_ID),"));
         assert!(prod.contains("id: NEW_TOKEN_BUTTON_ID,"));
         assert!(prod.contains("id: NEW_TOKEN_EMPTY_BUTTON_ID,"));
-        // Closing gives focus back to that button.
-        let close = &prod[prod.find("let mut close_form = move || {").unwrap()..];
-        let close = &close[..close.find("\n    };\n").unwrap()];
-        assert!(close.contains("modal.close();"), "{close}");
+        let form = &prod[prod
+            .find("FormModal {\n                title: \"Create tracker token\"")
+            .unwrap()..];
+        let form = &form[..form.find("div { class: \"token-form-field\",").unwrap()];
         assert!(
-            close.contains("focus_element_by_id_soon(form_opener().to_string());"),
-            "{close}"
+            form.contains("restore_focus_id: Some(form_opener().to_string()),"),
+            "{form}"
         );
-        // Esc anywhere in the form closes it; Cancel and a click outside
-        // take the same path.
-        let keys = &prod[prod.find("class: \"token-form-keys\",").unwrap()..];
-        let keys = &keys[..keys.find("FormModal {").unwrap()];
+        assert!(form.contains("on_close: on_close,"), "{form}");
+        // No second Esc handler around the dialog: the shared one stops the
+        // key, and a wrapper would never see it.
+        assert!(!prod.contains("token-form-keys"));
+        assert!(!TOKENS_CSS.contains("token-form-keys"));
+        // The shared dialog: Esc on the overlay closes it through the same
+        // request as Cancel, and focus goes back on any close.
+        let shared = include_str!("../components/admin_shared.rs");
+        let shared = &shared[shared.find("fn FormModalOpen(").unwrap()..];
+        assert!(shared.contains("if key_cancels(&evt.key()) {"));
+        assert!(shared.contains("request_close.call(());"));
         assert!(
-            keys.contains("if modal.is_open() && key_cancels(&e.key()) {"),
-            "{keys}"
+            shared.contains("use_drop(move || restore_focus_if_lost_soon(restore_focus.clone()));")
         );
-        assert!(keys.contains("close_form();"), "{keys}");
-        assert!(prod.contains("let on_close = move |_| close_form();"));
-        assert!(prod.contains("on_close: on_close,"));
-        // The wrapper adds no box to the page.
-        assert!(TOKENS_CSS.contains(".tokens-page .token-form-keys { display: contents; }"));
     }
 
     /// Row actions that do nothing, with the strip open for `confirming`.
@@ -1044,7 +1025,7 @@ mod tests {
         // Unconditional: not inside an `if`, so the region never comes and goes.
         assert!(
             field.contains(
-                "}\n                        FieldError { id: LABEL_ERROR_ID, text: form_error(), role: \"status\" }"
+                "}\n                    FieldError { id: LABEL_ERROR_ID, text: form_error(), role: \"status\" }"
             ),
             "{field}"
         );

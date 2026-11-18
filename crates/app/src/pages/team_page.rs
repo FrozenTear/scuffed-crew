@@ -618,10 +618,15 @@ mod tests {
         // Roster: initials tile hidden from assistive tech, display name as
         // the link to the profile, role as a badge word.
         assert_eq!(html.matches("class=\"team-member\"").count(), 3, "{html}");
-        assert!(
-            html.contains("<span class=\"team-tile\" aria-hidden=\"true\">PL</span>"),
-            "{html}"
-        );
+        // One tile per member, told apart by the shared avatar rule.
+        for tile in ["P1", "P3", "P7"] {
+            assert!(
+                html.contains(&format!(
+                    "<span class=\"team-tile\" aria-hidden=\"true\">{tile}</span>"
+                )),
+                "{tile}: {html}"
+            );
+        }
         assert!(html.contains("href=\"/members/member:r1x\""), "{html}");
         assert!(html.contains(">Player01</a>"), "{html}");
         for role in ["Captain", "Player", "Substitute"] {

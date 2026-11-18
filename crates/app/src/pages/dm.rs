@@ -1,73 +1,128 @@
 use dioxus::prelude::*;
 
-use scuffed_api_client::ApiClient;
+use scuffed_api_client::{ApiClient, ClientError};
 use scuffed_types::MeResponse;
 
 use crate::components::dm::{
-    ConversationList, ConversationListState, ConversationSummary, DmComposeModal, DmFailureNotice,
-    DmLoadFailure, MessageThread, SyncResponse, classify_dm_client_error,
+    ConversationList, ConversationListState, ConversationSummary, DmComposeModal, DmLoadFailure,
+    DmMember, DmMemberPage, MessageThread, SyncResponse, classify_dm_client_error, peer_label,
 };
+use crate::components::member_gate::Wall;
+use crate::components::ui::{PageHeader, PageShell, PageWidth, SkeletonBars, btn_class};
 use crate::components::{Toast, use_toast};
+use crate::head::use_page_title;
 use crate::pages::chat_gate::ChatGateNotice;
 use crate::routes::Route;
 use crate::state::auth::use_auth;
 use crate::state::relay::dm_may_sync;
 use crate::state::use_relay_availability_state;
 
+/// The full-height tool of the `d1-dm` frames. The shell hides the footer on
+/// this route and sets `--shell-chrome-height` (the top bar, plus the tab bar
+/// on phone), so the page takes exactly the rest of the viewport: the inbox
+/// column and the thread side by side on desktop, one at a time on phone
+/// (the list on `/dm`, the thread with Back on `/dm/:peer`), the composer
+/// pinned at the bottom, just above the tab bar on phone.
 const PAGE_CSS: &str = r#"
 .dm-page {
-    padding: 2rem;
-    max-width: 1100px;
-    margin: 0 auto;
     box-sizing: border-box;
+    width: 100%;
+    max-width: var(--content-max-full);
+    height: calc(100vh - var(--shell-chrome-height));
+    height: calc(100dvh - var(--shell-chrome-height));
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
 }
-.dm-page-title {
-    font-family: var(--font-head);
-    font-size: 2.25rem;
-    color: var(--text);
-    letter-spacing: 3px;
-    margin: 0 0 1.25rem;
-}
-.dm-page-grid {
+.dm-layout {
+    flex: 1 1 auto;
+    min-height: 0;
     display: grid;
-    grid-template-columns: 320px 1fr;
-    gap: 1rem;
-    height: calc(100vh - 220px);
-    min-height: 480px;
+    grid-template-columns: calc(var(--space-8) * 10) minmax(0, 1fr);
 }
-.dm-page-empty {
+.dm-inbox,
+.dm-thread-pane {
+    position: relative;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--surface);
+}
+.dm-inbox { border-right: 1px solid var(--border); }
+.dm-pane-head {
+    box-sizing: border-box;
+    flex: 0 0 auto;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-3);
+    min-height: var(--hit-target-min);
+    padding: var(--space-2) var(--space-4);
+    border-bottom: 1px solid var(--border);
+}
+.dm-pane-title {
+    margin: 0;
+    min-width: 0;
+    font-family: var(--font-head);
+    font-size: var(--text-lg);
+    font-weight: var(--font-head-weight);
+    letter-spacing: var(--font-head-tracking);
+    line-height: var(--leading-ui);
+    color: var(--text);
+}
+.dm-avatar {
+    box-sizing: border-box;
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: var(--control-size-sm);
+    height: var(--control-size-sm);
+    border-radius: var(--radius-pill);
+    border: 1px solid var(--border-strong);
+    background: var(--surface);
+    color: var(--text);
+    font-family: var(--font-head);
+    font-weight: var(--font-head-weight);
+    font-size: var(--text-xs);
+}
+.dm-thread-empty {
+    flex: 1 1 auto;
     display: flex;
     align-items: center;
     justify-content: center;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    color: var(--text-subtle);
-    font-size: 0.95rem;
-    text-align: center;
-    padding: 2rem;
-}
-.dm-loading {
-    color: var(--text-subtle);
-    text-align: center;
-    padding: 3rem 0;
-    font-size: 0.9rem;
-}
-.dm-login-needed {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 2.5rem 2rem;
-    text-align: center;
+    margin: 0;
+    padding: var(--space-section);
+    background: var(--bg);
     color: var(--text-3);
+    font-size: var(--text-md);
+    line-height: var(--leading-body);
+    text-align: center;
 }
-@media (max-width: 720px) {
-    .dm-page-grid {
-        grid-template-columns: 1fr;
-        height: auto;
+.dm-wait-status {
+    margin: 0;
+    color: var(--text-3);
+    font-size: var(--text-md);
+}
+@media (max-width: 820px) {
+    .dm-layout { grid-template-columns: minmax(0, 1fr); }
+    .dm-inbox { border-right: 0; }
+    .dm-page.is-thread .dm-inbox { display: none; }
+    .dm-page.is-inbox .dm-thread-pane { display: none; }
+    .dm-page .dm-thread-head .dm-thread-back { display: inline-flex; }
+    .dm-avatar {
+        width: var(--hit-target-min);
+        height: var(--hit-target-min);
+        font-size: var(--text-sm);
     }
 }
 "#;
+
+const PAGE_CSS_ID: &str = "scuffed-css-pages-dm-page-css";
+
+/// Pages of `/api/members` read for names. The server caps a page at 100.
+const MEMBER_PAGES_MAX: usize = 10;
 
 #[derive(Clone, PartialEq)]
 enum LoadState {
@@ -84,17 +139,118 @@ fn list_state(state: &LoadState) -> ConversationListState {
     }
 }
 
-/// Right-pane copy. A load failure is omitted: `DmFailureNotice` above the
-/// grid is the only error line.
+/// Thread-pane copy when no conversation is open (desktop only; phone shows
+/// the list). Loading, failure and an empty inbox are said once, in the
+/// inbox column (its empty card already says how to start one).
 fn inbox_pane_message(state: &LoadState, conversation_count: usize) -> Option<&'static str> {
     match state {
-        LoadState::Loading => Some("Loading…"),
-        LoadState::Error(_) => None,
-        LoadState::Ready if conversation_count == 0 => {
-            Some("Select a conversation to start reading.")
-        }
-        LoadState::Ready => Some("Select a conversation from the left."),
+        LoadState::Loading | LoadState::Error(_) => None,
+        LoadState::Ready if conversation_count == 0 => None,
+        LoadState::Ready => Some("Pick a conversation to read it."),
     }
+}
+
+/// The Refresh toast, or none when nothing new arrived.
+fn synced_toast(stored: u64) -> Option<String> {
+    match stored {
+        0 => None,
+        1 => Some("1 new message.".to_string()),
+        n => Some(format!("{n} new messages.")),
+    }
+}
+
+/// Said under the inbox head when the background sync failed: why, in plain
+/// words, then that the list is what the server already has. Only a network
+/// failure, 502 or 504 is "could not reach the relay"; a 412 is the account's
+/// key mode (DMs need a server-managed key), not the relay.
+fn sync_failed_notice(err: &ClientError) -> String {
+    let why = match err {
+        ClientError::Network(_)
+        | ClientError::Http {
+            status: 502 | 504, ..
+        } => "Could not reach the relay.",
+        ClientError::Http { status: 412, .. } => {
+            "New messages need a server-managed key. Check Account keys."
+        }
+        // 503 is the relay or the encryption service not configured.
+        ClientError::Http { status: 503, .. } => "Messaging is not set up on this site.",
+        ClientError::Http { status: 429, .. } => "Too many syncs. Try again in a minute.",
+        ClientError::Http { .. } | ClientError::Deserialize(_) => "Could not sync messages.",
+    };
+    format!("{why} Showing saved messages.")
+}
+
+/// The conversation to show on `/dm` without a click: the only one, on a
+/// wide screen. On phone the list comes first, so nothing opens (and nothing
+/// is marked read unseen).
+fn auto_open_peer(conversations: &[ConversationSummary], wide: bool) -> Option<String> {
+    match conversations {
+        [only] if wide => Some(only.peer_pubkey.clone()),
+        _ => None,
+    }
+}
+
+/// The thread shown on the page: the route's peer, else the one auto-opened
+/// once the list was ready. The auto-opened peer is kept (`kept`) while the
+/// list reloads (Refresh, Retry, a sync that brought new messages), so its
+/// thread and reply draft are not torn down.
+fn shown_peer(selected: Option<String>, kept: Option<String>) -> Option<String> {
+    selected.or(kept)
+}
+
+/// The auto-opened peer to keep after a list load: a new pick replaces it,
+/// and a list where nothing auto-opens keeps the one already open.
+fn keep_auto_peer(
+    kept: Option<String>,
+    conversations: &[ConversationSummary],
+    wide: bool,
+) -> Option<String> {
+    auto_open_peer(conversations, wide).or(kept)
+}
+
+/// True when the inbox and the thread sit side by side (above the shell's
+/// 820px phone break).
+fn wide_viewport() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window()
+            .and_then(|w| w.match_media("(min-width: 821px)").ok().flatten())
+            .is_some_and(|mql| mql.matches())
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        false
+    }
+}
+
+/// Crew members with their Nostr keys, to show peers by name. A failed read
+/// keeps what it has: names fall back to short npub labels.
+async fn fetch_members() -> Vec<DmMember> {
+    let mut out = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..MEMBER_PAGES_MAX {
+        let url = match &cursor {
+            Some(c) => format!(
+                "/api/members?limit=100&cursor={}",
+                crate::util::encode_query(c)
+            ),
+            None => "/api/members?limit=100".to_string(),
+        };
+        match ApiClient::web().fetch::<DmMemberPage>(&url).await {
+            Ok(page) => {
+                out.extend(page.data);
+                match page.next_cursor {
+                    Some(next) => cursor = Some(next),
+                    None => break,
+                }
+            }
+            Err(err) => {
+                crate::util::log_client_error("DM member names", &err);
+                break;
+            }
+        }
+    }
+    out
 }
 
 #[component]
@@ -121,6 +277,9 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
     let mut load_state = use_signal(|| LoadState::Loading);
     let mut conversations = use_signal::<Vec<ConversationSummary>>(Vec::new);
     let mut compose_open = use_signal(|| false);
+    let mut sync_notice = use_signal(|| None::<String>);
+    // The conversation auto-opened on a wide `/dm`, kept across list reloads.
+    let mut auto_peer = use_signal(|| None::<String>);
     let navigator = use_navigator();
 
     let me = use_resource(move || async move {
@@ -129,6 +288,13 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
             return None;
         }
         ApiClient::web().get_me().await.ok()
+    });
+
+    let members = use_resource(move || async move {
+        if !dm_may_sync(relay.current(), auth().is_logged_in()) {
+            return Vec::new();
+        }
+        fetch_members().await
     });
 
     let _load_conversations = use_resource(move || async move {
@@ -145,10 +311,32 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
 
         // Sync hits the relay and can hang. Do not await it before the list;
         // a stuck sync used to leave the inbox on the empty/in-flight state forever.
+        // When it lands: new messages reload the list (without another sync,
+        // so this never loops), and a failure is said, not hidden behind
+        // "No conversations yet".
         spawn(async move {
-            let _ = ApiClient::web()
+            match ApiClient::web()
                 .post_json::<_, SyncResponse>("/api/nostr/dm/sync", &serde_json::json!({}))
-                .await;
+                .await
+            {
+                Ok(resp) => {
+                    sync_notice.set(None);
+                    if resp.stored > 0
+                        && let Ok(list) = ApiClient::web()
+                            .fetch::<Vec<ConversationSummary>>("/api/nostr/dm/conversations")
+                            .await
+                    {
+                        let keep = keep_auto_peer(auto_peer.peek().clone(), &list, wide_viewport());
+                        auto_peer.set(keep);
+                        conversations.set(list);
+                        load_state.set(LoadState::Ready);
+                    }
+                }
+                Err(err) => {
+                    crate::util::log_client_error("DM sync", &err);
+                    sync_notice.set(Some(sync_failed_notice(&err)));
+                }
+            }
         });
 
         match ApiClient::web()
@@ -156,6 +344,8 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
             .await
         {
             Ok(list) => {
+                let keep = keep_auto_peer(auto_peer.peek().clone(), &list, wide_viewport());
+                auto_peer.set(keep);
                 conversations.set(list);
                 load_state.set(LoadState::Ready);
             }
@@ -164,6 +354,21 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
             }
         }
     });
+
+    let member_list: Vec<DmMember> = members.read().as_ref().cloned().unwrap_or_default();
+    let convs = conversations();
+    let label_for = |pk: &str| {
+        let server_name = convs
+            .iter()
+            .find(|c| c.peer_pubkey == pk)
+            .and_then(|c| c.peer_display_name.clone());
+        peer_label(pk, server_name.as_deref(), &member_list)
+    };
+    let route_peer_label = selected_peer.as_deref().map(&label_for);
+    // No label of its own: the route's title ("Messages", "Message") never
+    // names the peer. Titles land in browser history, and who someone
+    // messages is private (Vision nit 12 on PR 706).
+    use_page_title(None);
 
     if !availability.allows_connection() {
         return rsx! {
@@ -176,21 +381,26 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
 
     if auth().loading {
         return rsx! {
-            crate::styles::StyleOnce { id: "scuffed-css-pages-dm-page-css", css: PAGE_CSS }
-            main { class: "dm-page",
-                h1 { class: "dm-page-title", "Direct Messages" }
-                p { class: "dm-loading", "Checking session…" }
+            PageShell { width: PageWidth::Narrow, class: "dm-wait",
+                PageHeader { title: "Messages" }
+                p { class: "dm-wait-status", role: "status", "Checking your session..." }
+                SkeletonBars { rows: 3 }
             }
+            crate::styles::StyleOnce { id: PAGE_CSS_ID, css: PAGE_CSS }
         };
     }
 
     if !auth().is_logged_in() {
         return rsx! {
-            crate::styles::StyleOnce { id: "scuffed-css-pages-dm-page-css", css: PAGE_CSS }
-            main { class: "dm-page",
-                h1 { class: "dm-page-title", "Direct Messages" }
-                div { class: "dm-login-needed",
-                    "You must be signed in to view direct messages."
+            PageShell { width: PageWidth::Narrow, class: "dm-signed-out",
+                Wall {
+                    page_title: true,
+                    title: "Log in to read your messages",
+                    lead: "Direct messages are private to crew members. Log in to see your conversations and send new ones.",
+                    actions: rsx! {
+                        Link { to: Route::Login {}, class: btn_class(true), "Log in" }
+                        Link { to: Route::Home {}, class: btn_class(false), "Return home" }
+                    },
                 }
             }
         };
@@ -210,14 +420,15 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
                 .await
             {
                 Ok(resp) => {
-                    if resp.fetched > 0 {
-                        toast.show(Toast::success(format!(
-                            "Synced {} new message(s)",
-                            resp.stored
-                        )));
+                    sync_notice.set(None);
+                    if let Some(text) = synced_toast(resp.stored) {
+                        toast.show(Toast::success(text));
                     }
                 }
-                Err(e) => toast.show(Toast::error(format!("Sync failed: {e}"))),
+                Err(e) => {
+                    sync_notice.set(Some(sync_failed_notice(&e)));
+                    toast.show(Toast::error(format!("Sync failed: {e}")));
+                }
             }
             syncing.set(false);
             refresh += 1;
@@ -245,67 +456,86 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
         });
     };
 
+    // The open thread is read: clear its row's count here too, so it stays
+    // clear after the thread is closed, without a refetch.
+    let on_read = move |peer: String| {
+        conversations.with_mut(|list| {
+            for c in list.iter_mut().filter(|c| c.peer_pubkey == peer) {
+                c.unread_count = 0;
+            }
+        });
+    };
+
     let me_data = me.read();
-    let self_pubkey = me_data
+    let me_member = me_data
         .as_ref()
         .and_then(|o| o.as_ref())
-        .and_then(|me: &MeResponse| me.member.as_ref())
-        .and_then(|m| m.nostr_pubkey.clone());
+        .and_then(|me: &MeResponse| me.member.as_ref());
+    let self_pubkey = me_member.and_then(|m| m.nostr_pubkey.clone());
+    let self_label = me_member.map(|m| m.display_name.clone());
 
-    let convs = conversations();
-    let selected_summary = selected_peer
-        .as_ref()
-        .and_then(|pk| convs.iter().find(|c| c.peer_pubkey == *pk).cloned());
+    let state = load_state();
+    let failure = match &state {
+        LoadState::Error(failure) => Some(failure.clone()),
+        _ => None,
+    };
+    let on_thread_route = selected_peer.is_some();
+    let open_peer = shown_peer(selected_peer.clone(), auto_peer());
+    let page_class = if on_thread_route {
+        "dm-page is-thread"
+    } else {
+        "dm-page is-inbox"
+    };
 
     rsx! {
-        crate::styles::StyleOnce { id: "scuffed-css-pages-dm-page-css", css: PAGE_CSS }
-        main { class: "dm-page",
-            h1 { class: "dm-page-title", "Direct Messages" }
-
-            if let LoadState::Error(failure) = load_state() {
-                DmFailureNotice { failure }
-            }
-
-            div { class: "dm-page-grid",
-                ConversationList {
-                    conversations: convs.clone(),
-                    load_state: list_state(&load_state()),
-                    selected_peer: selected_peer.clone(),
-                    refreshing: syncing(),
-                    on_refresh: on_refresh,
-                    on_compose: on_compose,
+        crate::styles::StyleOnce { id: PAGE_CSS_ID, css: PAGE_CSS }
+        div { class: page_class,
+            div { class: "dm-layout",
+                aside { class: "dm-inbox", aria_label: "Conversations",
+                    ConversationList {
+                        conversations: convs.clone(),
+                        load_state: list_state(&state),
+                        members: member_list.clone(),
+                        selected_peer: open_peer.clone(),
+                        title_is_h1: !on_thread_route,
+                        failure,
+                        on_retry: move |_| refresh += 1,
+                        refreshing: syncing(),
+                        notice: sync_notice(),
+                        on_refresh: on_refresh,
+                        on_compose: on_compose,
+                    }
                 }
-                {match selected_peer.as_ref() {
-                    None => {
-                        if let Some(msg) = inbox_pane_message(&load_state(), convs.len()) {
-                            rsx! {
-                                div { class: "dm-page-empty", "{msg}" }
-                            }
-                        } else {
-                            rsx! {
-                                div { class: "dm-page-empty", aria_hidden: "true" }
+                div { class: "dm-thread-pane",
+                    {match open_peer.as_ref() {
+                        None => {
+                            match inbox_pane_message(&state, convs.len()) {
+                                Some(msg) => rsx! { p { class: "dm-thread-empty", "{msg}" } },
+                                None => rsx! { div { class: "dm-thread-empty", aria_hidden: "true" } },
                             }
                         }
-                    }
-                    Some(peer) => {
-                        let display_name = selected_summary
-                            .as_ref()
-                            .and_then(|s| s.peer_display_name.clone());
-                        rsx! {
-                            MessageThread {
-                                key: "{peer}",
-                                peer_pubkey: peer.clone(),
-                                peer_display_name: display_name,
-                                self_pubkey: self_pubkey.clone(),
+                        Some(peer) => {
+                            let label = route_peer_label.clone().unwrap_or_else(|| label_for(peer));
+                            rsx! {
+                                MessageThread {
+                                    key: "{peer}",
+                                    peer_pubkey: peer.clone(),
+                                    peer_label: label,
+                                    self_label: self_label.clone(),
+                                    self_pubkey: self_pubkey.clone(),
+                                    heading_is_h1: on_thread_route,
+                                    on_read: on_read,
+                                }
                             }
                         }
-                    }
-                }}
+                    }}
+                }
             }
 
             DmComposeModal {
                 open: compose_open(),
                 self_pubkey: self_pubkey.clone(),
+                members: member_list.clone(),
                 on_close: on_compose_close,
                 on_sent: on_compose_sent,
             }
@@ -316,6 +546,29 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::components::admin_shared::test_page::render_admin_route;
+    use crate::components::ui::test_support::assert_sizes_from_tokens;
+    use crate::state::{RelayAvailability, set_test_relay_availability};
+    use scuffed_types::OrgRole;
+
+    struct ClearRelay;
+    impl Drop for ClearRelay {
+        fn drop(&mut self) {
+            set_test_relay_availability(None);
+        }
+    }
+
+    fn render(path: &str, role: Option<OrgRole>) -> String {
+        let _clear = ClearRelay;
+        set_test_relay_availability(Some(RelayAvailability::On));
+        render_admin_route(path, role)
+    }
+
+    fn main_of(html: &str) -> &str {
+        let start = html.find("<main").expect("main landmark");
+        let end = html[start..].find("</main>").expect("main end") + start;
+        &html[start..end]
+    }
 
     /// Source-order guard: auth/session flips must not change the hook count.
     /// The old `if !auth().is_logged_in() { return }` sat *before* `use_signal` /
@@ -334,6 +587,7 @@ mod tests {
             "use_signal",
             "use_navigator()",
             "use_resource",
+            "use_page_title(",
         ] {
             let pos = body
                 .find(hook)
@@ -347,7 +601,7 @@ mod tests {
 
     #[test]
     fn inbox_pane_hides_empty_copy_until_ready() {
-        assert_eq!(inbox_pane_message(&LoadState::Loading, 0), Some("Loading…"));
+        assert_eq!(inbox_pane_message(&LoadState::Loading, 0), None);
         assert_eq!(
             inbox_pane_message(&LoadState::Error(DmLoadFailure::Membership), 0),
             None
@@ -356,14 +610,114 @@ mod tests {
             inbox_pane_message(&LoadState::Error(DmLoadFailure::RelayConfig), 3),
             None
         );
-        assert_eq!(
-            inbox_pane_message(&LoadState::Ready, 0),
-            Some("Select a conversation to start reading.")
-        );
+        // The inbox's empty card says it; the pane does not repeat it.
+        assert_eq!(inbox_pane_message(&LoadState::Ready, 0), None);
         assert_eq!(
             inbox_pane_message(&LoadState::Ready, 2),
-            Some("Select a conversation from the left.")
+            Some("Pick a conversation to read it.")
         );
+    }
+
+    #[test]
+    fn refresh_toast_counts_stored_messages_in_words() {
+        assert_eq!(synced_toast(0), None);
+        assert_eq!(synced_toast(1).as_deref(), Some("1 new message."));
+        assert_eq!(synced_toast(3).as_deref(), Some("3 new messages."));
+    }
+
+    fn convo(pk: &str) -> ConversationSummary {
+        ConversationSummary {
+            peer_pubkey: pk.to_string(),
+            peer_display_name: None,
+            last_message_preview: String::new(),
+            last_message_at: "2026-11-10T19:00:00Z".to_string(),
+            last_sender_pubkey: String::new(),
+            unread_count: 1,
+        }
+    }
+
+    #[test]
+    fn the_only_conversation_opens_on_desktop_only() {
+        let one = vec![convo(&"ab".repeat(32))];
+        assert_eq!(auto_open_peer(&one, true), Some("ab".repeat(32)));
+        assert_eq!(auto_open_peer(&one, false), None);
+        let two = vec![convo(&"ab".repeat(32)), convo(&"cd".repeat(32))];
+        assert_eq!(auto_open_peer(&two, true), None);
+        assert_eq!(auto_open_peer(&[], true), None);
+    }
+
+    #[test]
+    fn the_tab_title_never_names_the_peer() {
+        let src = include_str!("dm.rs");
+        let prod = src.split("mod tests").next().expect("production half");
+        assert!(!prod.contains("Messages with"));
+        assert_eq!(prod.matches("use_page_title(").count(), 1);
+        assert!(prod.contains("use_page_title(None);"));
+    }
+
+    #[test]
+    fn sync_failures_say_why_and_only_network_is_the_relay() {
+        // Vision blocking 7 on PR 706: a 412 (no server-managed key) said
+        // "Could not reach the relay."
+        let relay = "Could not reach the relay. Showing saved messages.";
+        assert_eq!(
+            sync_failed_notice(&ClientError::Network("offline".into())),
+            relay
+        );
+        for status in [502, 504] {
+            assert_eq!(
+                sync_failed_notice(&ClientError::http(status, "", None)),
+                relay
+            );
+        }
+        let key = sync_failed_notice(&ClientError::http(
+            412,
+            r#"{"error":"Server-managed Nostr key required for DMs"}"#,
+            None,
+        ));
+        assert_eq!(
+            key,
+            "New messages need a server-managed key. Check Account keys. Showing saved messages."
+        );
+        for status in [400, 412, 429, 500, 503] {
+            let text = sync_failed_notice(&ClientError::http(status, "", None));
+            assert!(!text.contains("reach the relay"), "{status}: {text}");
+            assert!(text.ends_with(" Showing saved messages."), "{text}");
+        }
+        // 503 is the relay or the encryption service, so it names neither.
+        assert_eq!(
+            sync_failed_notice(&ClientError::http(503, "", None)),
+            "Messaging is not set up on this site. Showing saved messages."
+        );
+        assert_eq!(
+            sync_failed_notice(&ClientError::Deserialize("x".into())),
+            "Could not sync messages. Showing saved messages."
+        );
+    }
+
+    #[test]
+    fn the_auto_opened_thread_survives_a_list_reload() {
+        // Vision blocking 6 on PR 706: Refresh and Retry set the list to
+        // Loading, which tore the auto-opened thread (and its draft) down.
+        let a = "ab".repeat(32);
+        let one = vec![convo(&a)];
+        let kept = keep_auto_peer(None, &one, true);
+        assert_eq!(kept.as_deref(), Some(a.as_str()));
+        // While the list loads, the kept peer is still shown.
+        assert_eq!(shown_peer(None, kept.clone()), kept);
+        // A reload that brings a second conversation keeps the open thread.
+        let two = vec![convo(&a), convo(&"cd".repeat(32))];
+        assert_eq!(keep_auto_peer(kept.clone(), &two, true), kept);
+        // The route's peer wins, and phone never auto-opens.
+        assert_eq!(
+            shown_peer(Some("ef".repeat(32)), kept).as_deref(),
+            Some("ef".repeat(32).as_str())
+        );
+        assert_eq!(keep_auto_peer(None, &one, false), None);
+        // The page reads the kept signal, not the list state.
+        let src = include_str!("dm.rs");
+        let prod = src.split("mod tests").next().expect("production half");
+        assert!(prod.contains("let open_peer = shown_peer(selected_peer.clone(), auto_peer());"));
     }
 
     #[test]
@@ -416,5 +770,65 @@ mod tests {
             sync_at > spawn_at,
             "sync must run inside the spawn, not as an await before the list fetch"
         );
+    }
+
+    #[test]
+    fn inbox_is_a_full_height_tool_with_one_h1_and_a_labelled_wait() {
+        let html = render("/dm", Some(OrgRole::Member));
+        assert_eq!(html.matches("<main").count(), 1, "{html}");
+        assert!(
+            !html.contains("site-footer"),
+            "full-height tools have no footer: {html}"
+        );
+        let main = main_of(&html);
+        assert_eq!(main.matches("<h1").count(), 1, "{main}");
+        assert!(main.contains(">Messages</h1>"), "{main}");
+        assert!(main.contains("class=\"dm-page is-inbox\""), "{main}");
+        assert!(
+            main.contains("role=\"status\">Loading conversations...</p>"),
+            "{main}"
+        );
+        assert!(main.contains("aria-label=\"New message\""), "{main}");
+    }
+
+    #[test]
+    fn thread_route_names_the_peer_in_the_h1() {
+        let pk = "ab".repeat(32);
+        let html = render(&format!("/dm/{pk}"), Some(OrgRole::Member));
+        let main = main_of(&html);
+        assert_eq!(main.matches("<h1").count(), 1, "{main}");
+        assert!(main.contains("class=\"dm-page is-thread\""), "{main}");
+        assert!(main.contains(">Messages</h2>"), "{main}");
+        assert!(main.contains("dm-thread-peer"), "{main}");
+        assert!(main.contains("Back to conversations"), "{main}");
+        assert!(
+            main.contains("role=\"status\">Loading messages...</p>"),
+            "{main}"
+        );
+        // The composer's field is labelled and its status line is rendered.
+        assert!(main.contains("for=\"dm-reply-input\""), "{main}");
+        assert!(main.contains("id=\"dm-reply-status\""), "{main}");
+    }
+
+    #[test]
+    fn guests_get_a_log_in_wall_inside_the_shell() {
+        let html = render("/dm", None);
+        let main = main_of(&html);
+        assert_eq!(main.matches("<h1").count(), 1, "{main}");
+        assert!(main.contains("Log in to read your messages"), "{main}");
+        assert!(main.contains(">Log in</a>"), "{main}");
+    }
+
+    #[test]
+    fn page_css_is_on_tokens_and_full_height() {
+        assert_sizes_from_tokens(PAGE_CSS);
+        assert!(PAGE_CSS.contains("height: calc(100dvh - var(--shell-chrome-height));"));
+        assert!(PAGE_CSS.contains("max-width: var(--content-max-full);"));
+        let phone = PAGE_CSS
+            .split("@media (max-width: 820px)")
+            .nth(1)
+            .expect("phone block");
+        assert!(phone.contains(".dm-page.is-thread .dm-inbox { display: none; }"));
+        assert!(phone.contains(".dm-page.is-inbox .dm-thread-pane { display: none; }"));
     }
 }
