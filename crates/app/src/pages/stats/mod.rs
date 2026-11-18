@@ -1088,6 +1088,26 @@ const STATS_CSS: &str = r#"
         .role-row .role-name { grid-column: 1 / -1; }
         .form-row { grid-template-columns: minmax(0, 1fr); }
         .overview-grid { grid-template-columns: minmax(0, 1fr); }
+        /* Issue 725 (WCAG 2.4.11): the tabpanel is a Tab stop, and a panel
+           taller than the band between the top bar and the phone tab bar
+           cannot be scrolled clear of them (focus_reveal.rs leaves a box
+           that can never fit where it is), so it sat partly under the tab
+           bar. Capped at that band (the viewport less the shell chrome and
+           the page's two scroll-padding gaps, on the small viewport so it
+           fits with the browser toolbar shown), it always fits and scrolls
+           inside itself, which its tabindex already lets keyboard users do.
+           The padding keeps the focus rings of the controls at its edges
+           inside the scroller; the negative inline margin keeps the content
+           on the page's left edge. */
+        .my-stats .stats-panel {
+            box-sizing: border-box;
+            --stats-panel-ring-room: calc(var(--focus-ring-width) + var(--focus-ring-offset));
+            max-height: calc(100vh - var(--shell-chrome-height) - 2 * var(--space-2));
+            max-height: calc(100svh - var(--shell-chrome-height) - 2 * var(--space-2));
+            overflow-y: auto;
+            padding: var(--stats-panel-ring-room);
+            margin-inline: calc(var(--stats-panel-ring-room) * -1);
+        }
     }
 
     /* Stat tracker block, under the stats. Members with matches get one slim
@@ -3096,6 +3116,69 @@ mod shell_tests {
         }
     }
 
+    /// Issue 725 (WCAG 2.4.11): at 390 the tabpanel, a Tab stop taller than
+    /// the band between the top bar and the phone tab bar, sat partly under
+    /// the tab bar when focused. On phone it is capped at that band, from
+    /// the shell's own chrome height and the page's scroll-padding gaps on
+    /// the small viewport, and scrolls inside itself, so the focused panel
+    /// always fits clear of both bars. Its padding is the focus ring's room,
+    /// so the scroller does not clip the rings of the controls at its edges.
+    #[test]
+    fn the_tabpanel_fits_between_the_phone_bars() {
+        let phone = &STATS_CSS[STATS_CSS
+            .find("@media (max-width: 820px)")
+            .expect("phone block")..];
+        let phone = &phone[..phone.find("\n    }\n").expect("phone block ends")];
+        let panel = css_rule(phone, ".my-stats .stats-panel {");
+        assert!(
+            has_decl(
+                &panel,
+                "max-height: calc(100svh - var(--shell-chrome-height) - 2 * var(--space-2))"
+            ),
+            "{panel}"
+        );
+        // The vh line is the fallback, so it comes first.
+        assert!(
+            panel.find("max-height: calc(100vh -").expect("vh fallback")
+                < panel.find("max-height: calc(100svh -").unwrap(),
+            "{panel}"
+        );
+        assert!(has_decl(&panel, "overflow-y: auto"), "{panel}");
+        assert!(has_decl(&panel, "box-sizing: border-box"), "{panel}");
+        assert!(
+            has_decl(
+                &panel,
+                "--stats-panel-ring-room: calc(var(--focus-ring-width) + var(--focus-ring-offset))"
+            ),
+            "{panel}"
+        );
+        assert!(
+            has_decl(&panel, "padding: var(--stats-panel-ring-room)"),
+            "{panel}"
+        );
+        assert!(
+            has_decl(
+                &panel,
+                "margin-inline: calc(var(--stats-panel-ring-room) * -1)"
+            ),
+            "{panel}"
+        );
+        // The cap is the band the shell keeps focus in: the same gap the
+        // page's scroll-padding leaves at each bar.
+        let shell = include_str!("../../layouts/shell.rs");
+        assert!(
+            shell.contains("scroll-padding-top: calc(var(--nav-height-used) + var(--space-2))")
+        );
+        assert!(
+            shell.contains("scroll-padding-bottom: calc(var(--tab-bar-height) + var(--space-2))")
+        );
+        assert!(shell.contains(
+            "--shell-chrome-height: calc(var(--nav-height-used) + var(--tab-bar-height))"
+        ));
+        // It is still a Tab stop, so keyboard users can scroll it (the
+        // markup is pinned in `member_gets_your_stats_with_one_h1_tabs_and_one_panel`).
+    }
+
     #[test]
     fn tiles_stay_three_up_on_phone_and_badges_hug_their_word() {
         let tiles = css_rule(STATS_CSS, ".my-stats .stats-tiles {");
@@ -3147,6 +3230,7 @@ mod shell_tests {
             ".stats-header {",
             ".stats-header-actions {",
             ".stats-panel {",
+            ".my-stats .stats-panel {",
             ".stats-card {",
             ".stats-state {",
             ".my-stats .stats-visibility-note {",

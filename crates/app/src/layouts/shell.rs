@@ -1086,9 +1086,14 @@ const SHELL_CSS: &str = r#"
             --shell-chrome-height: calc(var(--nav-height-used) + var(--tab-bar-height));
             padding-bottom: var(--tab-bar-height);
         }
+        /* Issue 734: each tab grows from its label's width by an equal
+           share of the rest of the bar, so every label gets the same space
+           on each side and the gaps between labels are even. Flex, not
+           grid: a grid track starts from its hit-target floor, so short
+           labels (Home, Menu) got wider gaps; a flex item grows from its
+           label and only then meets `min-width`. */
         .site-tab-bar {
-            display: grid;
-            grid-template-columns: repeat(5, minmax(0, 1fr));
+            display: flex;
             position: fixed;
             left: 0;
             right: 0;
@@ -1099,13 +1104,18 @@ const SHELL_CSS: &str = r#"
             min-height: var(--hit-target-min);
             padding-bottom: env(safe-area-inset-bottom, 0px);
         }
+        .site-tab-bar a,
+        .site-tab-bar button {
+            flex: 1 1 auto;
+        }
         .footer-inner {
             grid-template-columns: 1fr 1fr;
             gap: var(--space-4);
         }
     }
-    /* Narrow phones: five tabs in 360px leave 72px each, and "Community" at
-       the nav size is wider than that in Firefox. */
+    /* Narrow phones: at the nav size the five labels together are too wide
+       for 360px in Firefox ("Community" alone was 74px), so the label size
+       steps down and the side padding goes. */
     @media (max-width: 380px) {
         .site-tab-bar a,
         .site-tab-bar button {
@@ -2600,6 +2610,43 @@ mod tests {
         let links = section(&html, "class=\"admin-subnav\"", "</nav>");
         assert!(links.matches("<a ").count() >= 19, "{links}");
         assert!(!links.contains("<a tabindex"), "{links}");
+    }
+
+    /// Issue 734 part 2: five equal `1fr` columns left short labels (Home,
+    /// Menu) with wide gaps and long ones (Community, Strategy) with narrow
+    /// ones. Each tab now grows from its label's width by an equal share of
+    /// the bar, never under one hit target, so the gaps between labels are
+    /// even and the tabs still fill the bar. (A grid with
+    /// `minmax(hit target, auto)` columns left a 7px spread at 360: a track
+    /// grows from its floor, not from its label.)
+    #[test]
+    fn tabs_fit_their_labels_and_fill_the_bar() {
+        let phone = SHELL_CSS
+            .split("@media (max-width: 820px) {")
+            .nth(1)
+            .expect("phone rules");
+        let bar = css_rule(phone, ".site-tab-bar {");
+        assert!(has_decl(&bar, "display: flex"), "{bar}");
+        assert!(!bar.contains("grid-template-columns"), "no columns: {bar}");
+        // The free space goes to the tabs, not between them.
+        assert!(!bar.contains("justify-content"), "{bar}");
+        assert!(!bar.contains("gap:"), "{bar}");
+        // Each tab grows from its label's width (`auto` basis) by an equal
+        // share (the same grow factor on all five).
+        let grow = css_rule(phone, ".site-tab-bar a,\n        .site-tab-bar button {");
+        assert!(has_decl(&grow, "flex: 1 1 auto"), "{grow}");
+        assert!(has_decl(&bar, "left: 0"), "{bar}");
+        assert!(has_decl(&bar, "right: 0"), "{bar}");
+        // One tab per column.
+        let html = render(Who::Member, "/", None);
+        let tabs = section(&html, "class=\"site-tab-bar\"", "</nav>");
+        assert_eq!(
+            tabs.matches("<a ").count() + tabs.matches("<button").count(),
+            5,
+            "{tabs}"
+        );
+        let tab = css_rule(SHELL_CSS, ".site-tab-bar a,\n    .site-tab-bar button {");
+        assert!(has_decl(&tab, "min-width: var(--hit-target-min)"), "{tab}");
     }
 
     /// QA nit 7: "Community" was 74px in a 72px column at 360 in Firefox.
