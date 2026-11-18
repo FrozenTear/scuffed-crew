@@ -28,42 +28,83 @@ fn officers_can_edit_teams_hint() -> &'static str {
     "On: Officers can edit a team's name, game, color, and division in Admin → Teams. Lore quote is not on that form, so this switch does not change it. Creating teams stays admin-only. Off (default): those edits stay admin-only. Roster changes are not affected."
 }
 
-/// Firefox scrolls a newly focused control into view only when none of it
-/// is inside the scroll-padded view. A control that straddles the padding
-/// line (the top of the stuck Save bar) stays where it is, behind the bar.
-/// Chromium scrolls it fully clear. So, after any focus move in the form,
-/// a focused control that reaches below the top of the bar is scrolled to
-/// the nearest edge, which `scroll-padding-bottom` puts just above the bar.
-/// Controls inside the bar itself are left alone.
-fn keep_focus_above_save_bar() {
-    #[cfg(target_arch = "wasm32")]
-    {
-        use wasm_bindgen::JsCast;
-        let Some(document) = web_sys::window().and_then(|window| window.document()) else {
-            return;
-        };
-        let Some(focused) = document.active_element() else {
-            return;
-        };
-        let Some(bar) = document.query_selector(".settings-save-bar").ok().flatten() else {
-            return;
-        };
-        if bar.contains(Some(&focused))
-            || focused.get_bounding_client_rect().bottom() <= bar.get_bounding_client_rect().top()
-        {
-            return;
+/// The Save bar, by the class it renders with.
+const SAVE_BAR_SELECTOR: &str = ".settings-save-bar";
+
+/// Custom property on the root that holds the Save bar's measured height.
+/// The page's `scroll-padding-bottom` reserves the tab bar plus this, so
+/// the strip the browser keeps clear is always as tall as the bar really
+/// is, also when a failed save adds a line to it (QA 706 fix4).
+const SAVE_BAR_HEIGHT_VAR: &str = "--settings-save-bar-height";
+
+/// Keep [`SAVE_BAR_HEIGHT_VAR`] equal to the bar's border-box height
+/// (`onresize`, a ResizeObserver, runs on mount and on every change), and
+/// remove it when the page goes (`None`).
+#[cfg(target_arch = "wasm32")]
+fn sync_save_bar_height(height: Option<f64>) {
+    use wasm_bindgen::JsCast;
+    let Some(root) = web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.document_element())
+        .and_then(|root| root.dyn_into::<web_sys::HtmlElement>().ok())
+    else {
+        return;
+    };
+    let style = root.style();
+    match height.filter(|height| height.is_finite() && *height > 0.0) {
+        Some(height) => {
+            let _ = style.set_property(SAVE_BAR_HEIGHT_VAR, &format!("{}px", height.ceil()));
         }
-        let options = js_sys::Object::new();
-        let _ = js_sys::Reflect::set(&options, &"block".into(), &"nearest".into());
-        let scroll = js_sys::Reflect::get(&focused, &"scrollIntoView".into()).ok();
-        if let Some(scroll) = scroll
-            .as_ref()
-            .and_then(|f| f.dyn_ref::<js_sys::Function>())
-        {
-            let _ = scroll.call1(&focused, &options);
+        None => {
+            let _ = style.remove_property(SAVE_BAR_HEIGHT_VAR);
         }
     }
 }
+
+/// Outside the browser there is no page to scroll.
+#[cfg(not(target_arch = "wasm32"))]
+fn sync_save_bar_height(_height: Option<f64>) {}
+
+/// Firefox scrolls a newly focused control into view only when none of it
+/// is inside the scroll-padded view. A control that straddles the padding
+/// line (the top of the stuck Save bar) stays where it is, behind the bar.
+/// Chromium scrolls it fully clear. So, after a keyboard focus move in the
+/// form, a focused control that reaches below the top of the bar is scrolled
+/// up until its bottom is on the bar's top, measured against the bar's live
+/// box, so a bar that has just grown is cleared too.
+///
+/// Only keyboard focus (`:focus-visible`): a mouse press focuses on
+/// `mousedown`, and a scroll then would move the control out from under
+/// the pointer. Controls inside the bar itself are left alone.
+#[cfg(target_arch = "wasm32")]
+fn keep_focus_above_save_bar() {
+    use crate::layouts::focus_reveal::{TOP_BAR_SELECTOR, scroll_focus_into_band};
+    let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        return;
+    };
+    let Some(focused) = document.active_element() else {
+        return;
+    };
+    if !focused.matches(":focus-visible").unwrap_or(false) {
+        return;
+    }
+    let Some(bar) = document.query_selector(SAVE_BAR_SELECTOR).ok().flatten() else {
+        return;
+    };
+    if bar.contains(Some(&focused)) {
+        return;
+    }
+    let clear_top = document
+        .query_selector(TOP_BAR_SELECTOR)
+        .ok()
+        .flatten()
+        .map_or(0.0, |top| top.get_bounding_client_rect().bottom().max(0.0));
+    scroll_focus_into_band(&focused, clear_top, bar.get_bounding_client_rect().top());
+}
+
+/// Outside the browser there is no page to scroll.
+#[cfg(not(target_arch = "wasm32"))]
+fn keep_focus_above_save_bar() {}
 
 /// The accents the last applied identity pack suggests.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -250,6 +291,8 @@ pub fn AdminSettings() -> Element {
     let mut reload_tick = use_signal(|| 0u32);
     // The save line under the form: always rendered, only its text changes.
     let mut save_state = use_signal(crate::components::SaveState::default);
+    // The reserved strip under the form follows the bar; it goes with the page.
+    use_drop(|| sync_save_bar_height(None));
     // APP3: the shared settings context feeds nav, brand accent, org name and
     // the strategies gate. `try_` so a mount without `App` still renders.
     let site_settings = try_use_context::<SiteSettingsState>();
@@ -1002,6 +1045,9 @@ pub fn AdminSettings() -> Element {
         // sticks to the bottom of the view (above the phone tab bar), so Save
         // and a failure are in sight anywhere on this long page.
         div { class: "admin-form-actions settings-save-bar",
+            onresize: move |evt: Event<ResizeData>| {
+                sync_save_bar_height(evt.data().get_border_box_size().ok().map(|size| size.height));
+            },
             button {
                 class: "btn is-primary",
                 r#type: "button",
@@ -1199,13 +1245,80 @@ mod tests {
         assert!(!wrapper[..handler].contains('}'), "{}", &wrapper[..handler]);
         // The bar is inside the wrapper the handler listens on.
         assert!(wrapper.contains("div { class: \"admin-form-actions settings-save-bar\","));
+        assert!(prod.contains("const SAVE_BAR_SELECTOR: &str = \".settings-save-bar\";"));
         let check = prod
-            .split("fn keep_focus_above_save_bar() {")
+            .split("#[cfg(target_arch = \"wasm32\")]\nfn keep_focus_above_save_bar() {")
             .nth(1)
             .expect("check fn");
-        assert!(check.contains(".query_selector(\".settings-save-bar\")"));
+        let check = check.split("\n}\n").next().unwrap();
+        assert!(check.contains(".query_selector(SAVE_BAR_SELECTOR)"));
         assert!(check.contains("bar.contains(Some(&focused))"));
-        assert!(check.contains("\"nearest\""));
+        // Positioned against the bar's live box, not the reserved strip.
+        assert!(check.contains(
+            "scroll_focus_into_band(&focused, clear_top, bar.get_bounding_client_rect().top())"
+        ));
+    }
+
+    /// Vision note on PR 706: a mouse press focuses a control on
+    /// `mousedown`; a scroll then would move it out from under the pointer.
+    /// The check returns before it measures anything unless the focus is
+    /// keyboard focus (`:focus-visible`). browser-checks/focus.mjs clicks a
+    /// checkbox that straddles the bar and checks the page did not move.
+    #[test]
+    fn only_keyboard_focus_is_moved_clear_of_the_save_bar() {
+        let src = include_str!("settings.rs");
+        let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let check = prod
+            .split("#[cfg(target_arch = \"wasm32\")]\nfn keep_focus_above_save_bar() {")
+            .nth(1)
+            .expect("check fn");
+        let gate = check
+            .find("if !focused.matches(\":focus-visible\").unwrap_or(false) {\n        return;\n    }")
+            .expect(":focus-visible gate");
+        let measure = check.find("get_bounding_client_rect").expect("measure");
+        let scroll = check.find("scroll_focus_into_band(").expect("scroll");
+        assert!(gate < measure && gate < scroll, "{check}");
+    }
+
+    /// QA 706 fix4: a failed save adds a line to the bar, so the strip the
+    /// page reserves under the form follows the bar's measured height. The
+    /// bar reports every size change (`onresize`) into the custom property
+    /// that `scroll-padding-bottom` reads, and the page removes it on drop.
+    #[test]
+    fn the_reserved_strip_follows_the_save_bar_height() {
+        let src = include_str!("settings.rs");
+        let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        assert!(prod.contains("const SAVE_BAR_HEIGHT_VAR: &str = \"--settings-save-bar-height\";"));
+        let bar = prod
+            .split("div { class: \"admin-form-actions settings-save-bar\",")
+            .nth(1)
+            .expect("bar");
+        assert!(bar.trim_start().starts_with(
+            "onresize: move |evt: Event<ResizeData>| {\n                sync_save_bar_height(evt.data().get_border_box_size().ok().map(|size| size.height));"
+        ), "{}", &bar[..200]);
+        assert!(prod.contains("use_drop(|| sync_save_bar_height(None));"));
+        let sync = prod
+            .split(
+                "#[cfg(target_arch = \"wasm32\")]\nfn sync_save_bar_height(height: Option<f64>) {",
+            )
+            .nth(1)
+            .expect("sync fn");
+        assert!(sync.contains(".style()"));
+        assert!(sync.contains("style.set_property(SAVE_BAR_HEIGHT_VAR,"));
+        assert!(sync.contains("style.remove_property(SAVE_BAR_HEIGHT_VAR)"));
+
+        let css = crate::styles::admin::CSS;
+        let rule = css
+            .split("html:has(.settings-save-bar) {")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .expect("padding rule");
+        assert!(
+            rule.contains(
+                "scroll-padding-bottom: calc(var(--tab-bar-height, 0%) + var(--settings-save-bar-height, "
+            ),
+            "{rule}"
+        );
     }
 
     #[test]

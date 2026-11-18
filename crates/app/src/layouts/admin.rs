@@ -159,46 +159,48 @@ const SUBNAV_ID: &str = "admin-subnav";
 /// Scroll the sub-nav sideways (only sideways) so the tab that matches
 /// `selector` (the current tab, or the focused one) is in view and clear of
 /// the edge fades.
+#[cfg(target_arch = "wasm32")]
 fn reveal_subnav_tab(selector: &str) {
-    #[cfg(target_arch = "wasm32")]
-    {
-        let Some(nav) = web_sys::window()
-            .and_then(|w| w.document())
-            .and_then(|d| d.get_element_by_id(SUBNAV_ID))
-        else {
-            return;
-        };
-        let Some(link) = nav.query_selector(selector).ok().flatten() else {
-            return;
-        };
-        let (nav_box, link_box) = (
-            nav.get_bounding_client_rect(),
-            link.get_bounding_client_rect(),
-        );
-        let current = f64::from(nav.scroll_left());
-        // Where the tab starts and ends inside the scrolled strip.
-        let start = link_box.left() - nav_box.left() + current;
-        let end = start + link_box.width();
-        let view = f64::from(nav.client_width());
-        let margin = view / 4.0;
-        // A tab under an edge fade (`--space-10` wide, see ADMIN_CSS) is not
-        // in view either. Unreadable, the fade counts as none.
-        let fade = web_sys::window()
-            .and_then(|w| w.get_computed_style(&nav).ok().flatten())
-            .and_then(|style| style.get_property_value("--space-10").ok())
-            .and_then(|v| v.trim().trim_end_matches("px").parse::<f64>().ok())
-            .unwrap_or(0.0)
-            .min(margin);
-        let next = if start < current + fade {
-            (start - margin).max(0.0)
-        } else if end > current + view - fade {
-            end - view + margin
-        } else {
-            return;
-        };
-        nav.set_scroll_left(next.round() as i32);
-    }
+    let Some(nav) = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.get_element_by_id(SUBNAV_ID))
+    else {
+        return;
+    };
+    let Some(link) = nav.query_selector(selector).ok().flatten() else {
+        return;
+    };
+    let (nav_box, link_box) = (
+        nav.get_bounding_client_rect(),
+        link.get_bounding_client_rect(),
+    );
+    let current = f64::from(nav.scroll_left());
+    // Where the tab starts and ends inside the scrolled strip.
+    let start = link_box.left() - nav_box.left() + current;
+    let end = start + link_box.width();
+    let view = f64::from(nav.client_width());
+    let margin = view / 4.0;
+    // A tab under an edge fade (`--space-10` wide, see ADMIN_CSS) is not
+    // in view either. Unreadable, the fade counts as none.
+    let fade = web_sys::window()
+        .and_then(|w| w.get_computed_style(&nav).ok().flatten())
+        .and_then(|style| style.get_property_value("--space-10").ok())
+        .and_then(|v| v.trim().trim_end_matches("px").parse::<f64>().ok())
+        .unwrap_or(0.0)
+        .min(margin);
+    let next = if start < current + fade {
+        (start - margin).max(0.0)
+    } else if end > current + view - fade {
+        end - view + margin
+    } else {
+        return;
+    };
+    nav.set_scroll_left(next.round() as i32);
 }
+
+/// Outside the browser there is no strip to scroll.
+#[cfg(not(target_arch = "wasm32"))]
+fn reveal_subnav_tab(_selector: &str) {}
 
 /// (more tabs before the left edge, more after the right edge).
 fn subnav_edges() -> (bool, bool) {
@@ -430,6 +432,16 @@ mod tests {
             .nth(1)
             .expect("reveal fn");
         assert!(reveal.contains(".get_property_value(\"--space-10\")"));
+        // The browser-only body is cfg'd as a whole, with a no-op twin
+        // outside the browser, so a native build has no unused selector.
+        assert!(
+            prod.contains(
+                "#[cfg(target_arch = \"wasm32\")]\nfn reveal_subnav_tab(selector: &str) {"
+            )
+        );
+        assert!(prod.contains(
+            "#[cfg(not(target_arch = \"wasm32\"))]\nfn reveal_subnav_tab(_selector: &str) {}"
+        ));
         assert!(reveal.contains("start < current + fade"));
         assert!(reveal.contains("end > current + view - fade"));
         let fade = super::ADMIN_CSS

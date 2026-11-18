@@ -894,10 +894,13 @@ pub const CSS: &str = r#"
         line-height: var(--leading-ui);
     }
     /* Fields scrolled into view (focus, find) stop above the stuck bar:
-       its 44px button, its padding and the phone tab bar. The fallback is
-       `0%`, not `0`: a unitless zero makes the whole calc() invalid. */
+       the phone tab bar plus the bar's measured height, which the page
+       keeps in `--settings-save-bar-height` (it grows with an error line).
+       Until it is measured: its 44px button, its padding and its border.
+       The tab bar fallback is `0%`, not `0`: a unitless zero makes the
+       whole calc() invalid. */
     html:has(.settings-save-bar) {
-        scroll-padding-bottom: calc(var(--tab-bar-height, 0%) + var(--hit-target-min) + var(--space-6) + 1px);
+        scroll-padding-bottom: calc(var(--tab-bar-height, 0%) + var(--settings-save-bar-height, calc(var(--hit-target-min) + var(--space-6) + 1px)));
     }
     .settings-save-bar {
         position: sticky;
