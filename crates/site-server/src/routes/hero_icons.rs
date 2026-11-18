@@ -461,7 +461,8 @@ pub(crate) fn clean_png_within(
 /// test asserts the accepted rank crop under 20 MiB, the refused rank crop
 /// under 16 MiB and the refused hero icon under 1.2 MiB. No accepted size
 /// reaches this cap; the test `the_decode_backstop_refuses_a_pixel_buffer_over_32_mib`
-/// reaches it with bounds wider than any kind's.
+/// reaches it with bounds wider than any kind's. Avatar and image uploads
+/// read their headers under the same cap ([`decode_limits`], #691).
 pub(crate) const PNG_DECODE_MAX_ALLOC: u64 = 32 * 1024 * 1024;
 
 /// The chunks the decoder needs for the pixels. Other ancillary chunks are
@@ -524,13 +525,22 @@ fn png_pixel_chunks(data: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     Some((width, height, out))
 }
 
-/// A PNG reader over `data` with [`PNG_DECODE_MAX_ALLOC`] as its memory
-/// limit. Give it the output of [`png_pixel_chunks`].
-fn png_reader(data: &[u8]) -> image::ImageReader<Cursor<&[u8]>> {
-    let mut reader = image::ImageReader::with_format(Cursor::new(data), ImageFormat::Png);
+/// Decoder limits for every server-side image decode or header read: the
+/// image crate's defaults with `max_alloc` cut from 512 MiB to
+/// [`PNG_DECODE_MAX_ALLOC`]. For a PNG this also bounds what the header
+/// read may inflate from `iCCP`, `zTXt` and `iTXt` chunks before the first
+/// `IDAT`.
+pub(crate) fn decode_limits() -> image::Limits {
     let mut limits = image::Limits::default();
     limits.max_alloc = Some(PNG_DECODE_MAX_ALLOC);
-    reader.limits(limits);
+    limits
+}
+
+/// A PNG reader over `data` with [`decode_limits`] as its memory limit.
+/// Give it the output of [`png_pixel_chunks`].
+fn png_reader(data: &[u8]) -> image::ImageReader<Cursor<&[u8]>> {
+    let mut reader = image::ImageReader::with_format(Cursor::new(data), ImageFormat::Png);
+    reader.limits(decode_limits());
     reader
 }
 
@@ -1217,7 +1227,7 @@ pub async fn delete_member_hero_icons(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::test_support::{must_err, must_ok, test_state};
 
@@ -1230,7 +1240,7 @@ mod tests {
 
     /// A `width` x `height` RGB PNG whose `iCCP` chunk inflates to
     /// `profile_bytes` zeros (a few KiB compressed per MiB).
-    fn iccp_png(width: u32, height: u32, profile_bytes: usize) -> Vec<u8> {
+    pub(crate) fn iccp_png(width: u32, height: u32, profile_bytes: usize) -> Vec<u8> {
         use std::io::Write;
         let plain = encode(DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
             width,
@@ -1787,7 +1797,7 @@ mod tests {
 
     /// Heap bytes allocated by this thread: now and the peak since
     /// [`reset_peak`]. Counted by [`PeakAlloc`] in this test binary only.
-    mod heap {
+    pub(crate) mod heap {
         use std::alloc::{GlobalAlloc, Layout, System};
         use std::cell::Cell;
 
@@ -1839,7 +1849,7 @@ mod tests {
         static ALLOC: PeakAlloc = PeakAlloc;
 
         /// Peak heap growth on this thread while `run` runs, in bytes.
-        pub(super) fn peak_during<T>(run: impl FnOnce() -> T) -> (T, usize) {
+        pub(crate) fn peak_during<T>(run: impl FnOnce() -> T) -> (T, usize) {
             let start = NOW.with(Cell::get);
             PEAK.with(|peak| peak.set(start));
             let out = run();
