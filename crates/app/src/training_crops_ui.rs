@@ -4,17 +4,17 @@
 //! `docs/api/training-crops.md`). The site is the only place a member changes
 //! consent. The tracker shows it read-only and links here.
 //!
-//! Only three kinds exist on this screen: `hero_icon`, `stat_digits` and
-//! `map_name`. `hero_icon` consent is the existing hero icon opt-in. The site
-//! never shows or sends any other kind. The consent shape is a local struct
-//! with exactly those three fields, so the switch helpers can work on
+//! Only four kinds exist on this screen: `hero_icon`, `stat_digits`,
+//! `map_name` and `rank`. `hero_icon` consent is the existing hero icon
+//! opt-in. The site never shows or sends any other kind. The consent shape is
+//! a local struct with exactly those four fields, so the switch helpers can work on
 //! [`ConsentKind`] alone. Tests pin it to the shared
 //! `scuffed_types::api::TrainingCropConsent`, so a change on the server side
 //! fails here.
 //!
 //! A save sends only the kind that changed ([`consent_update`]). The server
 //! keeps the kinds left out, so a stale second tab can never switch a kind
-//! back on that was turned off elsewhere. The page then takes all three
+//! back on that was turned off elsewhere. The page then takes all four
 //! values from the server's answer.
 //!
 //! Every element id is built from the member id plus the kind's wire name, so
@@ -33,14 +33,16 @@ pub enum ConsentKind {
     HeroIcon,
     StatDigits,
     MapName,
+    Rank,
 }
 
 impl ConsentKind {
     /// Every kind, in screen order.
-    pub const ALL: [ConsentKind; 3] = [
+    pub const ALL: [ConsentKind; 4] = [
         ConsentKind::HeroIcon,
         ConsentKind::StatDigits,
         ConsentKind::MapName,
+        ConsentKind::Rank,
     ];
 
     /// The wire name, also used in element ids.
@@ -49,6 +51,7 @@ impl ConsentKind {
             ConsentKind::HeroIcon => "hero_icon",
             ConsentKind::StatDigits => "stat_digits",
             ConsentKind::MapName => "map_name",
+            ConsentKind::Rank => "rank",
         }
     }
 
@@ -58,6 +61,7 @@ impl ConsentKind {
             ConsentKind::HeroIcon => "Share hero icons",
             ConsentKind::StatDigits => "Share stat digit crops",
             ConsentKind::MapName => "Share map name banners",
+            ConsentKind::Rank => "Share rank screen crops",
         }
     }
 
@@ -67,6 +71,7 @@ impl ConsentKind {
             ConsentKind::HeroIcon => "Hero icons",
             ConsentKind::StatDigits => "Stat digit crops",
             ConsentKind::MapName => "Map name banners",
+            ConsentKind::Rank => "Rank screen crops",
         }
     }
 
@@ -82,18 +87,24 @@ impl ConsentKind {
             ConsentKind::MapName => {
                 "The map name banner the tracker read at the start of a game. Off by default."
             }
+            ConsentKind::Rank => {
+                "The rank panel crop (role, tier, SR and percentile), to help train rank recognition. Off by default."
+            }
         }
     }
 }
 
-/// `GET` and `PUT` answer for consent: always all three kinds as stored.
-/// Unknown keys in an answer are ignored. This is never sent; a save sends
+/// `GET` and `PUT` answer for consent: all four kinds as stored. `rank` is
+/// absent in answers from servers before that kind and reads as false, the
+/// same as the shared type. Unknown keys in an answer are ignored. This is never sent; a save sends
 /// [`consent_update`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CropConsent {
     pub hero_icon: bool,
     pub stat_digits: bool,
     pub map_name: bool,
+    #[serde(default)]
+    pub rank: bool,
 }
 
 impl CropConsent {
@@ -102,6 +113,7 @@ impl CropConsent {
             ConsentKind::HeroIcon => self.hero_icon,
             ConsentKind::StatDigits => self.stat_digits,
             ConsentKind::MapName => self.map_name,
+            ConsentKind::Rank => self.rank,
         }
     }
 
@@ -111,6 +123,7 @@ impl CropConsent {
             ConsentKind::HeroIcon => self.hero_icon = on,
             ConsentKind::StatDigits => self.stat_digits = on,
             ConsentKind::MapName => self.map_name = on,
+            ConsentKind::Rank => self.rank = on,
         }
         self
     }
@@ -124,6 +137,7 @@ pub fn consent_update(kind: ConsentKind, on: bool) -> TrainingCropConsentUpdate 
         ConsentKind::HeroIcon => update.hero_icon = Some(on),
         ConsentKind::StatDigits => update.stat_digits = Some(on),
         ConsentKind::MapName => update.map_name = Some(on),
+        ConsentKind::Rank => update.rank = Some(on),
     }
     update
 }
@@ -202,35 +216,60 @@ mod tests {
     }
 
     #[test]
-    fn answer_shape_has_exactly_the_three_kinds() {
+    fn answer_shape_has_exactly_the_four_kinds() {
         let body = CropConsent {
             hero_icon: true,
             stat_digits: false,
             map_name: true,
+            rank: true,
         };
         let value = serde_json::to_value(body).unwrap();
-        assert_eq!(keys(&value), ["hero_icon", "map_name", "stat_digits"]);
+        assert_eq!(
+            keys(&value),
+            ["hero_icon", "map_name", "rank", "stat_digits"]
+        );
         assert_eq!(
             value,
-            serde_json::json!({"hero_icon": true, "stat_digits": false, "map_name": true})
+            serde_json::json!({"hero_icon": true, "stat_digits": false, "map_name": true, "rank": true})
         );
         let text = serde_json::to_string(&CropConsent::default()).unwrap();
         assert!(!text.contains("full_screen"), "{text}");
     }
 
     #[test]
-    fn answer_with_three_kinds_parses() {
-        let parsed: CropConsent =
-            serde_json::from_str(r#"{"hero_icon":false,"stat_digits":true,"map_name":false}"#)
-                .unwrap();
+    fn answer_with_four_kinds_parses() {
+        let parsed: CropConsent = serde_json::from_str(
+            r#"{"hero_icon":false,"stat_digits":true,"map_name":false,"rank":true}"#,
+        )
+        .unwrap();
         assert_eq!(
             parsed,
             CropConsent {
                 hero_icon: false,
                 stat_digits: true,
                 map_name: false,
+                rank: true,
             }
         );
+    }
+
+    #[test]
+    fn rank_round_trips_and_defaults_false() {
+        assert!(!CropConsent::default().rank);
+        for on in [true, false] {
+            let body = CropConsent::default().with(ConsentKind::Rank, on);
+            let text = serde_json::to_string(&body).unwrap();
+            let back: CropConsent = serde_json::from_str(&text).unwrap();
+            assert_eq!(back, body);
+            assert_eq!(back.rank, on);
+            assert_eq!(back.get(ConsentKind::Rank), on);
+        }
+        // A server from before the rank kind leaves it out: it reads as off.
+        let old: CropConsent =
+            serde_json::from_str(r#"{"hero_icon":true,"stat_digits":true,"map_name":true}"#)
+                .unwrap();
+        assert!(!old.rank);
+        assert!(!old.get(ConsentKind::Rank));
     }
 
     #[test]
@@ -241,7 +280,10 @@ mod tests {
         .unwrap();
         assert!(parsed.hero_icon);
         let value = serde_json::to_value(parsed).unwrap();
-        assert_eq!(keys(&value), ["hero_icon", "map_name", "stat_digits"]);
+        assert_eq!(
+            keys(&value),
+            ["hero_icon", "map_name", "rank", "stat_digits"]
+        );
     }
 
     #[test]
@@ -252,6 +294,10 @@ mod tests {
             r#"{"hero_icon":"yes","stat_digits":false,"map_name":false}"#,
         );
         assert!(parsed.is_err());
+        let parsed = serde_json::from_str::<CropConsent>(
+            r#"{"hero_icon":true,"stat_digits":false,"map_name":false,"rank":"yes"}"#,
+        );
+        assert!(parsed.is_err());
     }
 
     #[test]
@@ -260,7 +306,7 @@ mod tests {
             hero_icon: true,
             stat_digits: false,
             map_name: true,
-            rank: false,
+            rank: true,
         };
         let parsed: CropConsent =
             serde_json::from_value(serde_json::to_value(shared).unwrap()).unwrap();
@@ -270,8 +316,15 @@ mod tests {
                 hero_icon: true,
                 stat_digits: false,
                 map_name: true,
+                rank: true,
             }
         );
+        // And back: the local shape parses into the shared one.
+        let local = CropConsent::default().with(ConsentKind::Rank, true);
+        let shared: scuffed_types::api::TrainingCropConsent =
+            serde_json::from_value(serde_json::to_value(local).unwrap()).unwrap();
+        assert!(shared.rank);
+        assert!(!shared.hero_icon && !shared.stat_digits && !shared.map_name);
     }
 
     #[test]
@@ -292,7 +345,12 @@ mod tests {
         for kind in ConsentKind::ALL {
             let text = serde_json::to_string(&consent_update(kind, true)).unwrap();
             let update: TrainingCropConsentUpdate = serde_json::from_str(&text).unwrap();
-            let set = [update.hero_icon, update.stat_digits, update.map_name];
+            let set = [
+                update.hero_icon,
+                update.stat_digits,
+                update.map_name,
+                update.rank,
+            ];
             assert_eq!(set.iter().filter(|v| v.is_some()).count(), 1, "{text}");
             assert_eq!(update, consent_update(kind, true));
         }
@@ -358,7 +416,7 @@ mod tests {
     #[test]
     fn kinds_use_the_wire_names_and_no_full_screen() {
         let names: Vec<&str> = ConsentKind::ALL.iter().map(|k| k.key()).collect();
-        assert_eq!(names, ["hero_icon", "stat_digits", "map_name"]);
+        assert_eq!(names, ["hero_icon", "stat_digits", "map_name", "rank"]);
         for kind in ConsentKind::ALL {
             let value = serde_json::to_value(CropConsent::default().with(kind, true)).unwrap();
             assert_eq!(value[kind.key()], serde_json::Value::Bool(true));
@@ -382,6 +440,11 @@ mod tests {
         assert_ne!(
             switch_id("m1", ConsentKind::HeroIcon),
             switch_id("m2", ConsentKind::HeroIcon)
+        );
+        assert_eq!(switch_id("m1", ConsentKind::Rank), "training-crops-m1-rank");
+        assert_eq!(
+            label_id("m1", ConsentKind::Rank),
+            "training-crops-m1-rank-label"
         );
         assert_eq!(consent_status_id("m1"), "training-crops-m1-consent-status");
         assert_eq!(section_id("m1"), "training-crops-m1");
@@ -409,6 +472,14 @@ mod tests {
             failed_status(ConsentKind::HeroIcon, "Saving failed. Try again."),
             "Saving failed. Try again. Hero icons are back to how they were."
         );
+        assert_eq!(
+            saving_status(ConsentKind::Rank),
+            "Saving rank screen crops..."
+        );
+        assert_eq!(
+            saved_status(ConsentKind::Rank, false, None),
+            "Saved. Rank screen crops off."
+        );
     }
 
     #[test]
@@ -419,6 +490,18 @@ mod tests {
         assert!(INTRO.contains("off by default"));
         for kind in ConsentKind::ALL {
             assert!(kind.hint().ends_with("Off by default."), "{kind:?}");
+        }
+        assert_eq!(ConsentKind::Rank.label(), "Share rank screen crops");
+        let rank = ConsentKind::Rank.hint();
+        for part in [
+            "rank panel",
+            "role",
+            "tier",
+            "SR",
+            "percentile",
+            "recognition",
+        ] {
+            assert!(rank.contains(part), "{rank}");
         }
     }
 
