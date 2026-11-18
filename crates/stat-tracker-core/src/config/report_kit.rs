@@ -2,8 +2,10 @@
 
 use super::Config;
 
-/// Games kept by default. Config: `report_kit_max_games`.
-pub const DEFAULT_MAX_GAMES: usize = 50;
+/// Games kept by default. Config: `report_kit_max_games`. High enough that
+/// the 14 day age limit (`report::kit::MAX_AGE`) is what normally decides: a
+/// kit is about 400 KB, so 300 games is about 120 MB, under `DEFAULT_MAX_MB`.
+pub const DEFAULT_MAX_GAMES: usize = 300;
 /// Total size cap by default, in MB. Config: `report_kit_max_mb`.
 pub const DEFAULT_MAX_MB: u64 = 500;
 

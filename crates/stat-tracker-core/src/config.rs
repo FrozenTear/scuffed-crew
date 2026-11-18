@@ -121,7 +121,7 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub debug_save_pregame_screens: bool,
     /// Most games whose report pictures are kept in `report-kit/`. Missing
-    /// means [`DEFAULT_MAX_GAMES`] (50). Oldest go first.
+    /// means [`DEFAULT_MAX_GAMES`] (300). Oldest go first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report_kit_max_games: Option<usize>,
     /// Total size cap of `report-kit/` in MB. Missing means

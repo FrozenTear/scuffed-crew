@@ -75,6 +75,7 @@ mod overview_main;
 mod overview_page;
 mod overview_side;
 pub mod report;
+mod report_choices;
 pub mod restart_prompt;
 pub mod seasons;
 pub mod seasons_tab;
