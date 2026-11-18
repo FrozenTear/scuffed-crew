@@ -187,6 +187,43 @@ fn revoke_confirm_title(label: &str) -> String {
 
 const REVOKE_CONFIRM_BODY: &str = "The tracker using it stops uploading. This cannot be undone.";
 
+/// After the strip renders, scroll all of it into view. Focus lands on
+/// Cancel, which only brings Cancel into the table's sideways scroller; on
+/// a phone the strip's Revoke would stay past the scroller's edge.
+fn reveal_revoke_confirm_soon(prefix: String) {
+    dioxus::core::spawn_forever(async move {
+        #[cfg(feature = "web")]
+        {
+            gloo_timers::future::TimeoutFuture::new(0).await;
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            use wasm_bindgen::JsCast;
+            let Some(strip) = web_sys::window()
+                .and_then(|window| window.document())
+                .and_then(|document| document.get_element_by_id(&format!("{prefix}-title")))
+                .and_then(|title| title.closest(".inline-confirm").ok().flatten())
+            else {
+                return;
+            };
+            let options = js_sys::Object::new();
+            let _ = js_sys::Reflect::set(&options, &"block".into(), &"nearest".into());
+            let _ = js_sys::Reflect::set(&options, &"inline".into(), &"nearest".into());
+            let scroll = js_sys::Reflect::get(&strip, &"scrollIntoView".into()).ok();
+            if let Some(scroll) = scroll
+                .as_ref()
+                .and_then(|f| f.dyn_ref::<js_sys::Function>())
+            {
+                let _ = scroll.call1(&strip, &options);
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = prefix;
+        }
+    });
+}
+
 /// What the row's Actions cell shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RevokeCell {
@@ -397,7 +434,10 @@ pub fn StatsTokens() -> Element {
     let actions = RevokeActions {
         confirming: confirming.read().clone(),
         busy: revoking(),
-        on_ask: EventHandler::new(move |token_id: String| confirming.set(Some(token_id))),
+        on_ask: EventHandler::new(move |token_id: String| {
+            reveal_revoke_confirm_soon(revoke_confirm_id(&token_id));
+            confirming.set(Some(token_id));
+        }),
         on_confirm: EventHandler::new(on_revoke),
         on_cancel: EventHandler::new(move |_: ()| confirming.set(None)),
     };
@@ -973,9 +1013,17 @@ mod tests {
 
         let prod = prod_src();
         // Revoke only opens the strip.
-        assert!(prod.contains(
-            "on_ask: EventHandler::new(move |token_id: String| confirming.set(Some(token_id))),"
-        ));
+        let ask = prod
+            .split("on_ask: EventHandler::new(move |token_id: String| {")
+            .nth(1)
+            .expect("ask handler");
+        let ask = &ask[..ask.find("}),").expect("ask end")];
+        assert!(ask.contains("confirming.set(Some(token_id));"), "{ask}");
+        assert!(
+            ask.contains("reveal_revoke_confirm_soon(revoke_confirm_id(&token_id));"),
+            "the whole strip is scrolled into view, not only Cancel: {ask}"
+        );
+        assert!(!ask.contains("delete"), "{ask}");
         assert!(prod.contains("onclick: move |_| on_ask.call(tid.clone()),"));
         // The strip's Revoke sends the DELETE; success closes it and moves focus.
         assert!(prod.contains("on_confirm: EventHandler::new(on_revoke),"));
