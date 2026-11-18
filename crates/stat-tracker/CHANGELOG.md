@@ -15,7 +15,7 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
-## Unreleased
+## 0.6.0-rc.1
 
 Digit training crops now wait for a Tab where your damage, healing or mitigation in Overwatch has reached 1000, instead of saving the first spawn board, which is mostly zeros. Training now keeps only the first map banner of a game.
 
