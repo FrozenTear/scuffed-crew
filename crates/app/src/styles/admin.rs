@@ -1231,6 +1231,59 @@ mod tests {
         }
     }
 
+    /// QA 696 nit 2 (measured on 696's settings page, before this
+    /// redesign): the Apply pack ring was 2.88 to 2.93:1 and an option tile
+    /// blurb 4.36:1 in dark. Here the ring is `--focus-ring` drawn
+    /// `--focus-ring-offset` outside the button, so it sits on the card, and
+    /// tile and pack text are `--text-3` on `--surface` (`--accent-soft`
+    /// when selected, pinned above). Both hold for every swept accent in
+    /// both themes: ring 3:1 on the card, text 4.5:1 on the tile.
+    #[test]
+    fn apply_pack_ring_and_tile_blurbs_clear_their_bars() {
+        let ring = css_rule(
+            CSS,
+            ".row-btn:focus-visible,\n    .btn-add:focus-visible,\n    .btn-ghost:focus-visible,\n    .btn-cancel:focus-visible,\n    .btn-save:focus-visible {",
+        );
+        assert!(
+            has_decl(
+                &ring,
+                "outline: var(--focus-ring-width) solid var(--focus-ring)"
+            ),
+            "{ring}"
+        );
+        assert!(
+            has_decl(&ring, "outline-offset: var(--focus-ring-offset)"),
+            "{ring}"
+        );
+        let card = css_rule(CSS, ".form-section-card {");
+        assert!(has_decl(&card, "background: var(--card-bg)"), "{card}");
+        let tile = css_rule(CSS, ".pack-card,\n    .option-tile {");
+        assert!(has_decl(&tile, "background: var(--surface)"), "{tile}");
+        let desc = css_rule(CSS, ".pack-card-desc,\n    .option-tile-blurb {");
+        assert!(has_decl(&desc, "color: var(--text-3)"), "{desc}");
+
+        for accent in TEST_SWEEP_ACCENTS {
+            let css = theme_css(&BrandConfig::from_settings(accent, accent));
+            for theme in ["dark", "light"] {
+                let tokens = resolved_tokens(&css, theme);
+                // The offset leaves a gap, so the ring's neighbour is the card.
+                assert_ne!(tokens["--focus-ring-offset"], "0");
+                let (ring, card) = (&tokens["--focus-ring"], &tokens["--card-bg"]);
+                let ratio = contrast_ratio(ring, card);
+                assert!(
+                    ratio >= 3.0,
+                    "{theme} {accent}: ring {ring} on card {card} = {ratio:.2}"
+                );
+                let (ink, fill) = (&tokens["--text-3"], &tokens["--surface"]);
+                let ratio = contrast_ratio(ink, fill);
+                assert!(
+                    ratio >= 4.5,
+                    "{theme} {accent}: blurb {ink} on tile {fill} = {ratio:.2}"
+                );
+            }
+        }
+    }
+
     /// Type on the `--text-*` tokens (12px floor), no rem, px only for
     /// hairlines.
     #[test]
