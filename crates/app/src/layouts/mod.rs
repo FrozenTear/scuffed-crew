@@ -1,4 +1,6 @@
 mod admin;
+/// Shared: a page with its own bar can call `reveal_focus_between`.
+pub(crate) mod focus_reveal;
 mod nav;
 mod public;
 mod shell;

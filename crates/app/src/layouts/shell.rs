@@ -356,7 +356,7 @@ fn use_shell_state() -> ShellState {
     });
     let state = ShellState { open, refocus };
 
-    // Off wasm these two listeners are not installed (see `use_dom_listener`).
+    // Off wasm these listeners are not installed (see `use_dom_listener`).
     #[cfg(target_arch = "wasm32")]
     {
         use wasm_bindgen::JsCast;
@@ -373,6 +373,11 @@ fn use_shell_state() -> ShellState {
                 // the main landmark instead of falling to the body.
                 state.close_to(MAIN_ID);
             }
+        });
+        // Firefox leaves a partly visible focus target under a bar; this
+        // keeps every keyboard stop in the page clear of both bars.
+        use_dom_listener(document_target, "focusin", move |evt| {
+            super::focus_reveal::keep_focus_clear_of_bars(&evt);
         });
         use_dom_listener(document_target, "focusin", move |evt| {
             let Some(current) = *state.open.peek() else {

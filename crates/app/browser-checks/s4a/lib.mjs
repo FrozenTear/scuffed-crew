@@ -8,7 +8,8 @@
 //   REPORT_DIR JSON reports            (default ./reports)
 //   SHOTS_DIR  screenshots             (default ./shots)
 //   HEADED=1   show the browser
-import { chromium } from 'playwright';
+//   BROWSER    chromium (default) or firefox, for the scripts that run in both
+import { chromium, firefox } from 'playwright';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,7 +27,7 @@ export const PW = 'Test-password-12345';
 // member = Player01 (active member), visitor = Visitor01 (account, no application: the
 // only viewer who gets the Apply form), applicant = Applicant01 (pending application).
 export const USERS = { member: 'Player01', admin: 'TestAdmin', visitor: 'Visitor01', applicant: 'Applicant01' };
-export const VIEW = { 1440: { width: 1440, height: 900 }, 390: { width: 390, height: 844 } };
+export const VIEW = { 1440: { width: 1440, height: 900 }, 390: { width: 390, height: 844 }, 360: { width: 360, height: 844 } };
 export const sleep = ms => new Promise(r => setTimeout(r, ms));
 export const EVENT = { title: 'Scrim night', day_of_week: 2, time: '19:30', timezone: 'Europe/Stockholm', duration_minutes: 120, is_recurring: true, is_public: true };
 
@@ -42,18 +43,24 @@ export class Jar {
     if (!this.quiet) console.log(method, path, r.status, (typeof j === 'string' ? j : JSON.stringify(j)).slice(0, 160));
     return { status: r.status, j };
   }
-  // A fresh stack rate-limits logins (the S2 seed logs in just before): on
-  // a 429, wait the server's `retry_after` (1 to 10 s) and try again, at
-  // most 3 times, the same as the S2 Jar. Any other status fails at once.
-  async login(name) {
+  // A fresh stack rate-limits the auth routes (the S2 seed logs in just
+  // before): on a 429, wait the server's `retry_after` (1 to 10 s) and send
+  // again, at most 3 times, the same as the S2 Jar. Any other status is
+  // returned as it is.
+  async reqRetry(method, path, body) {
     for (let attempt = 0; ; attempt++) {
-      const r = await this.req('POST', '/api/auth/local/login', { username: name, password: PW });
-      if (r.status === 200) return this;
-      if (r.status !== 429 || attempt >= 3) throw new Error('login ' + name + ' ' + r.status);
+      const r = await this.req(method, path, body);
+      if (r.status !== 429 || attempt >= 3) return r;
       const wait = Math.min(Math.max(Number(r.j && r.j.retry_after) || 1, 1), 10);
-      console.log(`login ${name}: 429, retrying in ${wait} s`);
+      console.log(`${method} ${path}: 429, retrying in ${wait} s`);
       await sleep(wait * 1000);
     }
+  }
+  // Log in, waiting out a 429 (see `reqRetry`). Any other failure throws.
+  async login(name) {
+    const r = await this.reqRetry('POST', '/api/auth/local/login', { username: name, password: PW });
+    if (r.status === 200) return this;
+    throw new Error('login ' + name + ' ' + r.status);
   }
 }
 export const rows = j => Array.isArray(j) ? j : (j && (j.data || j.items)) || [];
@@ -64,7 +71,9 @@ export async function ensureEvent(admin) {
   if (!have.some(e => e.title === EVENT.title)) await admin.req('POST', '/api/events', EVENT);
 }
 
-export async function launch() { return chromium.launch({ headless: process.env.HEADED !== '1' }); }
+export const ENGINE = process.env.BROWSER || 'chromium';
+if (!['chromium', 'firefox'].includes(ENGINE)) throw new Error(`BROWSER must be chromium or firefox, not ${ENGINE}`);
+export async function launch() { return (ENGINE === 'firefox' ? firefox : chromium).launch({ headless: process.env.HEADED !== '1' }); }
 export async function ready(page) {
   await page.waitForSelector('.d1-top', { timeout: 30000 });
   await page.waitForFunction(() => !document.querySelector('.d1-session-pending'), null, { timeout: 15000 });
@@ -77,7 +86,7 @@ export async function ready(page) {
 export async function open(page, path) { await page.goto(B + path, { waitUntil: 'load' }); await ready(page); }
 export async function makeContext(browser, role, width, theme) {
   const statePath = path.join(STATE_DIR, 'session-' + role + '.json');
-  const opts = { viewport: VIEW[width], deviceScaleFactor: 2, colorScheme: theme, hasTouch: width === 390 };
+  const opts = { viewport: VIEW[width], deviceScaleFactor: 2, colorScheme: theme, hasTouch: width <= 390 };
   if (role !== 'guest' && fs.existsSync(statePath)) opts.storageState = statePath;
   const ctx = await browser.newContext(opts);
   await ctx.addInitScript(t => { try { localStorage.setItem('sc-theme', t); } catch {} }, theme);

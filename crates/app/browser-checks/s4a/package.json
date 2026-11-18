@@ -9,6 +9,7 @@
     "reapply": "node reapply.mjs",
     "fix1": "node fix1.mjs",
     "keys": "node keys.mjs",
+    "bars": "node bars.mjs",
     "shots": "node shots.mjs",
     "summary": "node summary.mjs",
     "test": "node --test host-guard.test.mjs"
