@@ -320,12 +320,7 @@ fn mode_label(game_mode: &str, map_name: &str) -> String {
 /// time, on the viewer's own clock. The day is the one History, Recent form
 /// and the chart show for the same game; the offset says which clock.
 fn game_time(played_at: &DateTime<Utc>) -> String {
-    let local = super::local_time(*played_at);
-    format!(
-        "{} {}",
-        local.format("%-d %b %Y, %H:%M"),
-        super::utc_offset_label(local.offset())
-    )
+    super::local_date_time(played_at)
 }
 
 /// The game body. No Link inside, so tests can render it without a router.
