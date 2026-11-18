@@ -2,6 +2,7 @@ use axum::{Json, extract::State, http::StatusCode};
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{AuditAction, AuditTargetType, OrgRole};
 use scuffed_types::api::UpdateSettingsRequest;
+use scuffed_types::brand::{AccentCheck, BrandConfig};
 use scuffed_types::{HomeShell, HomeSkin, HomepageContent, NavConfig, PublicLayout, SiteSettings};
 
 use crate::extractors::OfficerUser;
@@ -86,6 +87,35 @@ fn sanitize_brand_accent(raw: &str) -> Result<String, String> {
     } else {
         Err("Brand accent must be a hex color like #8f73ff (or empty for default)".into())
     }
+}
+
+/// The brand settings contrast lock, run on the accents a save would leave
+/// stored. `dark` and `light` are the sanitized accents in the request
+/// (`None` when absent); `stored_*` fill in the absent side. Only the theme
+/// scopes the request changes are checked, so an accent already stored that
+/// fails the lock does not block a save of the other theme.
+fn brand_contrast_error(
+    dark: Option<&str>,
+    light: Option<&str>,
+    stored_dark: &str,
+    stored_light: &str,
+) -> Option<String> {
+    if dark.is_none() && light.is_none() {
+        return None;
+    }
+    let eff_dark = dark.unwrap_or(stored_dark);
+    let eff_light = light.unwrap_or(stored_light);
+    let check = AccentCheck::for_brand(&BrandConfig::from_settings(eff_dark, eff_light));
+    // An empty light accent follows the dark one, so a dark save moves both.
+    let light_changed = light.is_some() || (dark.is_some() && eff_light.trim().is_empty());
+    let dark_reason = dark.and_then(|_| check.dark.fail_reason());
+    dark_reason.or_else(|| {
+        if light_changed {
+            check.light.fail_reason()
+        } else {
+            None
+        }
+    })
 }
 
 /// Accept https URLs, site-relative paths, or empty. Reject quotes / CSS injection.
@@ -263,6 +293,36 @@ pub async fn update_settings(
         None => None,
     };
 
+    // Same lock as the brand settings page; refuse before anything is written.
+    if brand_accent_dark.is_some() || brand_accent_light.is_some() {
+        let (stored_dark, stored_light) =
+            if brand_accent_dark.is_some() && brand_accent_light.is_some() {
+                (String::new(), String::new())
+            } else {
+                let stored = state.db.get_settings().await.map_err(|e| {
+                    tracing::error!(error = %e, "PUT /api/settings: read stored accents failed");
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: "Internal error".into(),
+                        }),
+                    )
+                })?;
+                (stored.brand_accent_dark, stored.brand_accent_light)
+            };
+        if let Some(reason) = brand_contrast_error(
+            brand_accent_dark.as_deref(),
+            brand_accent_light.as_deref(),
+            &stored_dark,
+            &stored_light,
+        ) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse { error: reason }),
+            ));
+        }
+    }
+
     let written = state
         .db
         .update_settings(
@@ -382,5 +442,54 @@ mod officer_settings_gate_tests {
             ..Default::default()
         };
         assert!(officer_has_admin_only_fields(&body));
+    }
+}
+
+#[cfg(test)]
+mod brand_contrast_tests {
+    use super::brand_contrast_error;
+
+    /// Blocked by the client lock: no ink reaches 4.5:1 on it in dark.
+    const BLOCKED: &str = "#d35400";
+
+    #[test]
+    fn no_accent_in_the_request_is_not_checked() {
+        assert!(brand_contrast_error(None, None, BLOCKED, BLOCKED).is_none());
+    }
+
+    #[test]
+    fn product_default_and_empty_pass() {
+        assert!(brand_contrast_error(Some("#8f73ff"), Some("#6d4aff"), "", "").is_none());
+        assert!(brand_contrast_error(Some(""), Some(""), "", "").is_none());
+    }
+
+    #[test]
+    fn blocked_accent_fails_with_the_client_reason() {
+        assert_eq!(
+            brand_contrast_error(Some(BLOCKED), Some(BLOCKED), "", "").as_deref(),
+            Some("Ink on this accent does not reach 4.5:1 in the dark theme.")
+        );
+    }
+
+    #[test]
+    fn edgeless_accent_fails_the_fill_pair() {
+        let reason = brand_contrast_error(Some("#000000"), Some("#000000"), "", "");
+        assert_eq!(
+            reason.as_deref(),
+            Some(
+                "Buttons in this accent do not reach 3:1 against the dark page and cards, so they lose their edge."
+            )
+        );
+    }
+
+    #[test]
+    fn dark_only_save_checks_dark_against_the_stored_light() {
+        assert!(brand_contrast_error(Some(BLOCKED), None, "", "#6d4aff").is_some());
+        assert!(brand_contrast_error(Some("#46d8a4"), None, BLOCKED, "#6d4aff").is_none());
+    }
+
+    #[test]
+    fn stored_failing_dark_does_not_block_a_light_save() {
+        assert!(brand_contrast_error(None, Some("#6d4aff"), BLOCKED, "").is_none());
     }
 }

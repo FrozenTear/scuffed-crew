@@ -1,5 +1,6 @@
 pub mod api;
 pub mod auth;
+pub mod brand;
 pub mod hero_icons;
 pub mod heroes;
 pub mod nostr;
