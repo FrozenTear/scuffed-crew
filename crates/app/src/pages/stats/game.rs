@@ -394,7 +394,12 @@ pub fn StatsMatch(id: String) -> Element {
                 ],
             }
         },
-        GameView::Pending => member_pending(&auth(), &game, "this game"),
+        // The gate's card is an H2. The game is not known yet, so the page's
+        // one H1 names the page by its kind.
+        GameView::Pending => rsx! {
+            h1 { class: "game-title", "Game" }
+            {member_pending(&auth(), &game, "this game")}
+        },
     };
 
     rsx! {

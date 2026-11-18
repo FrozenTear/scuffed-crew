@@ -356,7 +356,7 @@ fn use_shell_state() -> ShellState {
     });
     let state = ShellState { open, refocus };
 
-    // Off wasm these two listeners are not installed (see `use_dom_listener`).
+    // Off wasm these listeners are not installed (see `use_dom_listener`).
     #[cfg(target_arch = "wasm32")]
     {
         use wasm_bindgen::JsCast;
@@ -373,6 +373,11 @@ fn use_shell_state() -> ShellState {
                 // the main landmark instead of falling to the body.
                 state.close_to(MAIN_ID);
             }
+        });
+        // Firefox leaves a partly visible focus target under a bar; this
+        // keeps every keyboard stop in the page clear of both bars.
+        use_dom_listener(document_target, "focusin", move |evt| {
+            super::focus_reveal::keep_focus_clear_of_bars(&evt);
         });
         use_dom_listener(document_target, "focusin", move |evt| {
             let Some(current) = *state.open.peek() else {
@@ -442,6 +447,12 @@ fn entry_class(entry: &NavEntry, current: &Route) -> &'static str {
 }
 
 const SHELL_CSS: &str = r#"
+    /* WCAG 2.4.11: Tab, the skip link and in-page jumps scroll the page, so
+       the page keeps a focused control clear of the sticky top bar (and of
+       the phone tab bar below). Fixed on the page scroller once, for every page. */
+    html {
+        scroll-padding-top: calc(var(--nav-height-used) + var(--space-2));
+    }
     .skip-link {
         position: fixed;
         top: var(--space-2);
@@ -1074,9 +1085,13 @@ const SHELL_CSS: &str = r#"
         .admin-subnav {
             padding: 0 var(--space-2);
         }
-        .site-app {
-            /* The tab bar is one hit target plus its 1px top border. */
+        html {
+            /* The tab bar is one hit target plus its 1px top border. Set on
+               the root so the page scroller and the shell read one value. */
             --tab-bar-height: calc(var(--hit-target-min) + 1px + env(safe-area-inset-bottom, 0px));
+            scroll-padding-bottom: calc(var(--tab-bar-height) + var(--space-2));
+        }
+        .site-app {
             --shell-chrome-height: calc(var(--nav-height-used) + var(--tab-bar-height));
             padding-bottom: var(--tab-bar-height);
         }
@@ -1771,6 +1786,53 @@ mod tests {
             .any(|part| part.lines().any(|line| line.trim() == decl))
     }
 
+    /// QA 696 nit 2 (WCAG 2.4.11): Tab and the skip link scroll the page,
+    /// so the page scroller keeps focus clear of the sticky top bar at every
+    /// width and of the fixed tab bar on phone, from the shell's own height
+    /// tokens, never a fixed length.
+    #[test]
+    fn focus_scrolling_clears_the_top_bar_and_the_phone_tab_bar() {
+        let (wide, phone) = SHELL_CSS
+            .split_once("@media (max-width: 820px) {")
+            .expect("phone block");
+        let root = css_rule(wide, "\n    html {");
+        assert!(
+            has_decl(
+                &root,
+                "scroll-padding-top: calc(var(--nav-height-used) + var(--space-2))"
+            ),
+            "{root}"
+        );
+        let phone_root = css_rule(phone, "\n        html {");
+        assert!(
+            has_decl(
+                &phone_root,
+                "--tab-bar-height: calc(var(--hit-target-min) + 1px + env(safe-area-inset-bottom, 0px))"
+            ),
+            "{phone_root}"
+        );
+        assert!(
+            has_decl(
+                &phone_root,
+                "scroll-padding-bottom: calc(var(--tab-bar-height) + var(--space-2))"
+            ),
+            "{phone_root}"
+        );
+        // The shell's padding and chrome height read the same root value.
+        let app = css_rule(phone, ".site-app {");
+        assert!(
+            has_decl(&app, "padding-bottom: var(--tab-bar-height)"),
+            "{app}"
+        );
+        // The tab bar is exactly that tall: one hit target plus its border.
+        let bar = css_rule(phone, ".site-tab-bar {");
+        assert!(has_decl(&bar, "min-height: var(--hit-target-min)"), "{bar}");
+        assert!(
+            has_decl(&bar, "border-top: 1px solid var(--border-strong)"),
+            "{bar}"
+        );
+    }
+
     #[test]
     fn a_toggle_opens_its_panel_and_closes_it_again() {
         assert_eq!(toggled(None, COMMUNITY), Some(COMMUNITY));
@@ -2009,7 +2071,8 @@ mod tests {
         assert_eq!(html.matches("<h1").count(), 1, "{html}");
 
         let guest = render(Who::Guest, "/admin", None);
-        assert!(guest.contains(">Sign in<"), "{guest}");
+        let wall = section(&guest, "<main", "</main>");
+        assert!(wall.contains(">Log in<"), "{wall}");
         assert!(!guest.contains("admin-subnav\""), "{guest}");
     }
 
@@ -2710,30 +2773,29 @@ mod tests {
         );
     }
 
-    /// QA nit 13: the patch notes table of contents sticks under the top bar
-    /// and the toolbar, so its height has to subtract the same offset.
+    /// QA nit 13: what sticks on the patch notes page sits under the top bar
+    /// by the bar's real height (`--nav-height-used`), never a fixed length.
+    /// The redesigned page has no table of contents column; its sticky parts
+    /// are the controls and the shared scroll offset, so those are pinned.
     #[test]
-    fn patch_notes_toc_height_matches_its_sticky_offset() {
+    fn patch_notes_sticky_offsets_follow_the_top_bar() {
         let notes = include_str!("../pages/strategy/patch_notes.rs");
-        let toc = css_rule(notes, "\n    .patch-hero-toc {");
+        let controls = css_rule(notes, "\n    .pn-controls {");
+        assert!(has_decl(&controls, "position: sticky"), "{controls}");
         assert!(
-            has_decl(&toc, "top: calc(var(--nav-height-used) + 5.5rem)"),
-            "{toc}"
+            has_decl(&controls, "top: var(--nav-height-used)"),
+            "{controls}"
         );
-        // Vision nit 11: between 721 and 820px the phone tab bar is on
-        // screen too, so the height subtracts the whole shell chrome (top
-        // bar plus tab bar on phone, the top bar alone on desktop).
+        let page = css_rule(notes, "\n    .patch-page {");
         assert!(
-            has_decl(
-                &toc,
-                "max-height: calc(100vh - var(--shell-chrome-height, var(--nav-height-used)) - 5.5rem)"
-            ),
-            "{toc}"
+            page.contains("--pn-sticky-offset: calc(")
+                && page.contains("var(--nav-height-used) + var(--hit-target-min) * 2"),
+            "{page}"
         );
-        assert!(!has_decl(
-            &toc,
-            "max-height: calc(100vh - var(--nav-height-used) - 5.5rem)"
-        ));
+        // Vision nit 11 (PR 693): on phone the shell chrome is the top bar
+        // plus the tab bar. The page's sticky parts sit at the top, so they
+        // only need the top bar; the chrome height stays pinned for the
+        // rules that fill the viewport.
         let phone = SHELL_CSS
             .split("@media (max-width: 820px) {")
             .nth(1)
@@ -2741,8 +2803,22 @@ mod tests {
         assert!(phone.contains(
             "--shell-chrome-height: calc(var(--nav-height-used) + var(--tab-bar-height))"
         ));
+        // Every sticky or viewport-height rule on the page uses the bar's
+        // height; the old fixed offsets are gone with the old column.
         let old = ["100vh - 8.5", "rem"].concat();
         assert!(!notes.contains(&old), "the old fixed offset is gone");
+        let css = notes
+            .split("const PAGE_CSS: &str = r#\"")
+            .nth(1)
+            .and_then(|rest| rest.split("\"#;").next())
+            .expect("PAGE_CSS");
+        for line in css.lines() {
+            let line = line.trim();
+            if line.starts_with("top:") || line.contains("100vh") {
+                assert!(line.contains("var(--nav-height-used)"), "{line}");
+            }
+        }
+        assert!(!css.contains(".patch-hero-toc"), "the old column is gone");
     }
 
     fn settings_json() -> String {

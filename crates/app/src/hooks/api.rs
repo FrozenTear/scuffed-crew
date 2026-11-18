@@ -53,6 +53,45 @@ pub fn use_api<T: DeserializeOwned + 'static>(url: &'static str) -> ApiResource<
     }
 }
 
+/// [`use_api`] that only sends the request while `enabled()` is true. While
+/// it is false the resource holds `T::default()` with no error, and it
+/// fetches as soon as `enabled()` turns true. For endpoints that only answer
+/// a signed-in viewer: a guest page load no longer sends a request that can
+/// only come back 401.
+pub fn use_api_when<T: DeserializeOwned + Default + 'static>(
+    url: &'static str,
+    enabled: impl Fn() -> bool + Copy + 'static,
+) -> ApiResource<T> {
+    let refresh = use_signal(|| 0u64);
+    let mut error = use_signal(|| Option::<String>::None);
+    let (truncated, shown, page_budget) = use_list_cap();
+    // A memo, so the fetch reruns when the answer changes, not on every
+    // write to whatever `enabled` reads.
+    let enabled = use_memo(enabled);
+    let data = use_resource(move || async move {
+        let _ = refresh();
+        error.set(None);
+        if !enabled() {
+            return Some(T::default());
+        }
+        match ApiClient::web().fetch::<T>(url).await {
+            Ok(v) => Some(v),
+            Err(e) => {
+                error.set(Some(e.to_string()));
+                None
+            }
+        }
+    });
+    ApiResource {
+        data,
+        refresh,
+        error,
+        truncated,
+        shown,
+        page_budget,
+    }
+}
+
 /// Wrapper for cursor-paginated list responses from the server.
 #[derive(Deserialize)]
 pub struct CursorPage<T> {

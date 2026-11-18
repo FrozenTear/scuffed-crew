@@ -1,0 +1,102 @@
+// Shared settings for the S4a browser checks. Everything points at a local
+// stack with fake data only (see README.md). Override with environment
+// variables:
+//   BASE       site URL                (default http://127.0.0.1:3031;
+//              loopback hosts only, see host-guard.mjs)
+//   ALLOW_REMOTE=1 accept a BASE that is not loopback
+//   STATE_DIR  seed output, sessions   (default ./.state)
+//   REPORT_DIR JSON reports            (default ./reports)
+//   SHOTS_DIR  screenshots             (default ./shots)
+//   HEADED=1   show the browser
+//   BROWSER    chromium (default) or firefox, for the scripts that run in both
+import { chromium, firefox } from 'playwright';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { checkedBase } from './host-guard.mjs';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+export const B = checkedBase(process.env.BASE, process.env.ALLOW_REMOTE);
+export const STATE_DIR = path.resolve(process.env.STATE_DIR || path.join(HERE, '.state'));
+export const REPORT_DIR = path.resolve(process.env.REPORT_DIR || path.join(HERE, 'reports'));
+export const SHOTS = path.resolve(process.env.SHOTS_DIR || path.join(HERE, 'shots'));
+fs.mkdirSync(STATE_DIR, { recursive: true });
+fs.mkdirSync(REPORT_DIR, { recursive: true });
+// Fake accounts created by seed.mjs. The password is test data, not a secret.
+export const PW = 'Test-password-12345';
+// member = Player01 (active member), visitor = Visitor01 (account, no application: the
+// only viewer who gets the Apply form), applicant = Applicant01 (pending application).
+export const USERS = { member: 'Player01', admin: 'TestAdmin', visitor: 'Visitor01', applicant: 'Applicant01' };
+export const VIEW = { 1440: { width: 1440, height: 900 }, 390: { width: 390, height: 844 }, 360: { width: 360, height: 844 } };
+export const sleep = ms => new Promise(r => setTimeout(r, ms));
+export const EVENT = { title: 'Scrim night', day_of_week: 2, time: '19:30', timezone: 'Europe/Stockholm', duration_minutes: 120, is_recurring: true, is_public: true };
+
+// Cookie jar over fetch, for seeding through the app's own API.
+export class Jar {
+  constructor(quiet = false) { this.c = {}; this.quiet = quiet; }
+  async req(method, path, body, raw) {
+    const h = { Origin: B, Cookie: Object.entries(this.c).map(([k, v]) => `${k}=${v}`).join('; ') };
+    if (!raw) h['Content-Type'] = 'application/json';
+    const r = await fetch(B + path, { method, headers: h, body: raw ?? (body === undefined ? undefined : JSON.stringify(body)) });
+    for (const sc of r.headers.getSetCookie()) { const [kv] = sc.split(';'); const i = kv.indexOf('='); this.c[kv.slice(0, i)] = kv.slice(i + 1); }
+    const t = await r.text(); let j; try { j = JSON.parse(t); } catch { j = t; }
+    if (!this.quiet) console.log(method, path, r.status, (typeof j === 'string' ? j : JSON.stringify(j)).slice(0, 160));
+    return { status: r.status, j };
+  }
+  // A fresh stack rate-limits the auth routes (the S2 seed logs in just
+  // before): on a 429, wait the server's `retry_after` (1 to 10 s) and send
+  // again, at most 3 times, the same as the S2 Jar. Any other status is
+  // returned as it is.
+  async reqRetry(method, path, body) {
+    for (let attempt = 0; ; attempt++) {
+      const r = await this.req(method, path, body);
+      if (r.status !== 429 || attempt >= 3) return r;
+      const wait = Math.min(Math.max(Number(r.j && r.j.retry_after) || 1, 1), 10);
+      console.log(`${method} ${path}: 429, retrying in ${wait} s`);
+      await sleep(wait * 1000);
+    }
+  }
+  // Log in, waiting out a 429 (see `reqRetry`). Any other failure throws.
+  async login(name) {
+    const r = await this.reqRetry('POST', '/api/auth/local/login', { username: name, password: PW });
+    if (r.status === 200) return this;
+    throw new Error('login ' + name + ' ' + r.status);
+  }
+}
+export const rows = j => Array.isArray(j) ? j : (j && (j.data || j.items)) || [];
+export async function adminJar(quiet = true) { return new Jar(quiet).login('TestAdmin'); }
+export async function deleteEvents(admin) { for (const e of rows((await admin.req('GET', '/api/events')).j)) await admin.req('DELETE', '/api/events/' + e.id); }
+export async function ensureEvent(admin) {
+  const have = rows((await admin.req('GET', '/api/events')).j);
+  if (!have.some(e => e.title === EVENT.title)) await admin.req('POST', '/api/events', EVENT);
+}
+
+export const ENGINE = process.env.BROWSER || 'chromium';
+if (!['chromium', 'firefox'].includes(ENGINE)) throw new Error(`BROWSER must be chromium or firefox, not ${ENGINE}`);
+export async function launch() { return (ENGINE === 'firefox' ? firefox : chromium).launch({ headless: process.env.HEADED !== '1' }); }
+export async function ready(page) {
+  await page.waitForSelector('.d1-top', { timeout: 30000 });
+  await page.waitForFunction(() => !document.querySelector('.d1-session-pending'), null, { timeout: 15000 });
+  // Data loaded: no skeleton bars or rows left in the page.
+  await page.waitForFunction(() => !document.querySelector('.ui-skel-list, .ui-skel-row, .home-skel, [aria-busy="true"]'), null, { timeout: 15000 }).catch(() => {});
+  await page.evaluate(() => document.fonts.ready);
+  await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
+  await page.waitForTimeout(500);
+}
+export async function open(page, path) { await page.goto(B + path, { waitUntil: 'load' }); await ready(page); }
+export async function makeContext(browser, role, width, theme) {
+  const statePath = path.join(STATE_DIR, 'session-' + role + '.json');
+  const opts = { viewport: VIEW[width], deviceScaleFactor: 2, colorScheme: theme, hasTouch: width <= 390 };
+  if (role !== 'guest' && fs.existsSync(statePath)) opts.storageState = statePath;
+  const ctx = await browser.newContext(opts);
+  await ctx.addInitScript(t => { try { localStorage.setItem('sc-theme', t); } catch {} }, theme);
+  if (role !== 'guest' && !fs.existsSync(statePath)) {
+    const p = await ctx.newPage();
+    await p.goto(B + '/', { waitUntil: 'load' });
+    const st = await p.evaluate(async ([u, pw]) => (await fetch('/api/auth/local/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: u, password: pw }) })).status, [USERS[role], PW]);
+    if (st !== 200) throw new Error('login ' + role + ' ' + st);
+    await ctx.storageState({ path: statePath });
+    await p.close();
+  }
+  return ctx;
+}

@@ -2,6 +2,8 @@ use dioxus::prelude::*;
 
 use super::nav::{NavContext, admin_entries, aria_current, is_current};
 use super::shell::SiteShell;
+use crate::components::member_gate::Wall;
+use crate::components::ui::{PageShell, PageWidth, btn_class};
 use crate::routes::Route;
 use crate::state::use_auth;
 
@@ -26,32 +28,17 @@ const ADMIN_CSS: &str = r#"
         text-transform: uppercase;
         letter-spacing: 0.04em;
     }
+    /* The session check. It sits outside `.admin-main`. */
     .admin-gate {
         display: flex;
-        flex-direction: column;
         align-items: center;
         justify-content: center;
-        gap: var(--space-2);
         min-height: 50vh;
+        margin: 0;
+        padding: var(--space-section) var(--space-page);
         text-align: center;
         color: var(--text-3);
-    }
-    .admin-gate p {
-        margin: 0;
-        max-width: var(--content-max-narrow);
-    }
-    .admin-gate-actions {
-        display: flex;
-        flex-wrap: wrap;
-        justify-content: center;
-        gap: var(--space-2) var(--space-4);
-        margin-top: var(--space-3);
-    }
-    .admin-gate-actions a {
-        display: inline-flex;
-        align-items: center;
-        min-height: var(--hit-target-min);
-        color: var(--accent-text);
+        font-size: var(--text-md);
     }
     @media (max-width: 768px) {
         .admin-main {
@@ -112,44 +99,170 @@ pub fn AdminLayout() -> Element {
         crate::styles::StyleOnce { id: "scuffed-css-layouts-admin-admin-css", css: ADMIN_CSS }
         crate::styles::StyleOnce { id: "scuffed-css-admin-shared", css: crate::styles::admin::CSS }
         SiteShell { subnav,
-            div { class: "admin-layout",
-                div { class: "admin-main",
-                    if session.loading {
-                        // Wait for /api/auth/me so a refresh does not flash the no-access page.
-                        div { class: "admin-gate",
-                            p { "Checking session…" }
-                        }
-                    } else if !allowed {
-                        div { class: "admin-gate",
-                            h1 { "You do not have access" }
-                            if signed_in {
-                                p {
-                                    "Admin is limited to officers and admins. You are signed in as {username}, and this page is not part of your role."
-                                }
-                            } else {
-                                p { "Admin is limited to officers and admins. Sign in with an account that has that role." }
-                            }
-                            div { class: "admin-gate-actions",
-                                Link { to: Route::Home {}, "Return home" }
-                                if signed_in {
-                                    Link { to: Route::ProfileSettings {}, "Open your profile" }
-                                } else {
-                                    Link {
-                                        to: Route::Login {},
-                                        onclick: move |_| crate::pages::remember_login_return(&return_path),
-                                        "Sign in"
-                                    }
-                                    if cfg!(debug_assertions) {
-                                        a { href: "/api/dev/login", "Dev login (in-memory only)" }
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        Outlet::<Route> {}
-                    }
+            {admin_body(session.loading, allowed, signed_in, username, return_path)}
+        }
+    }
+}
+
+/// Text of the session status line. It is always rendered; only this changes.
+fn gate_status(loading: bool) -> &'static str {
+    if loading { "Checking session" } else { "" }
+}
+
+/// What sits inside the site shell: the session check, the no-access card, or
+/// the admin pages. The status line is one node in every state, so the wait
+/// and its end are announced as a text change. It is the visible content while
+/// the session loads and only speaks afterwards.
+fn admin_body(
+    loading: bool,
+    allowed: bool,
+    signed_in: bool,
+    username: String,
+    return_path: String,
+) -> Element {
+    let status = gate_status(loading);
+    rsx! {
+        if loading {
+            // Wait for /api/auth/me so a refresh does not flash the no-access
+            // page. The page has no title yet, so it is named "Admin".
+            h1 { class: "visually-hidden", "Admin" }
+        }
+        p {
+            class: if loading { "admin-gate" } else { "visually-hidden" },
+            role: "status",
+            "{status}"
+        }
+        if !loading {
+            if !allowed {
+                AdminNoAccess { signed_in, username, return_path }
+            } else {
+                div { class: "admin-layout",
+                    div { class: "admin-main", Outlet::<Route> {} }
                 }
             }
         }
+    }
+}
+
+/// The no-access state (`d1-no-permission` frame): the wall card in the
+/// narrow page container, as the frame draws it. A signed-in member is never sent to sign in; a
+/// guest gets the sign-in link, and it returns to this page afterwards.
+#[component]
+fn AdminNoAccess(signed_in: bool, username: String, return_path: String) -> Element {
+    let lead = if signed_in {
+        format!(
+            "Admin is limited to officers and admins. You are signed in as {username}, and this page is not part of your role."
+        )
+    } else {
+        "Admin is limited to officers and admins. Log in with an account that has that role."
+            .to_string()
+    };
+    // The tab says what the page shows, not the admin page that was asked for.
+    crate::head::use_page_title(Some("No access".to_string()));
+    rsx! {
+        PageShell { width: PageWidth::Narrow, class: "admin-no-access",
+            Wall {
+                title: "You do not have access",
+                lead,
+                page_title: true,
+                actions: rsx! {
+                    if signed_in {
+                        Link { to: Route::Home {}, class: btn_class(true), "Return home" }
+                        Link {
+                            to: Route::ProfileSettings {},
+                            class: btn_class(false),
+                            "Open your profile"
+                        }
+                    } else {
+                        Link {
+                            to: Route::Login {},
+                            class: btn_class(true),
+                            onclick: move |_| crate::pages::remember_login_return(&return_path),
+                            "Log in"
+                        }
+                        Link { to: Route::Home {}, class: btn_class(false), "Return home" }
+                        if cfg!(debug_assertions) {
+                            a { class: btn_class(false), href: "/api/dev/login",
+                                "Dev login (in-memory only)"
+                            }
+                        }
+                    }
+                },
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::components::member_gate::test_route::{render_route, wall};
+    use scuffed_types::OrgRole;
+
+    #[test]
+    fn member_without_access_gets_the_wall_card_and_no_sign_in_link() {
+        let html = render_route("/admin", Some(OrgRole::Member));
+        assert!(
+            html.contains("class=\"ui-shell ui-shell--narrow admin-no-access\""),
+            "{html}"
+        );
+        assert_eq!(html.matches("<h1").count(), 1, "{html}");
+        assert_eq!(html.matches("<main").count(), 1, "{html}");
+        assert!(!html.contains("class=\"admin-main\""), "{html}");
+        let wall = wall(&html);
+        assert!(wall.contains("<h1>You do not have access</h1>"), "{wall}");
+        assert!(wall.contains("signed in as Player01"), "{wall}");
+        assert!(!wall.contains("href=\"/login\""), "{wall}");
+        assert!(!wall.contains("/api/dev/login"), "{wall}");
+        let actions = &wall[wall.find("wall-actions").expect("actions")..];
+        assert_eq!(actions.matches("<a ").count(), 2, "{actions}");
+        assert!(!actions.contains("<button"), "{actions}");
+        let home = actions.find(">Return home<").expect("home");
+        let profile = actions.find(">Open your profile<").expect("profile");
+        assert!(home < profile, "{actions}");
+        assert_eq!(actions.matches("is-primary").count(), 1, "{actions}");
+        // The session status line stays in the tree, with nothing to say.
+        assert!(
+            html.contains("<p class=\"visually-hidden\" role=\"status\"></p>"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn session_check_has_an_h1_and_a_status_line_outside_admin_main() {
+        fn loading() -> dioxus::prelude::Element {
+            super::admin_body(true, false, false, String::new(), "/admin".to_string())
+        }
+        let mut dom = dioxus::prelude::VirtualDom::new(loading);
+        dom.rebuild_in_place();
+        let html = dioxus_ssr::render(&dom);
+        assert_eq!(
+            html,
+            "<h1 class=\"visually-hidden\">Admin</h1>\
+             <p class=\"admin-gate\" role=\"status\">Checking session</p>"
+        );
+        assert_eq!(super::gate_status(false), "");
+    }
+
+    #[test]
+    fn guest_gets_sign_in_first_then_return_home() {
+        let html = render_route("/admin", None);
+        assert_eq!(html.matches("<h1").count(), 1, "{html}");
+        let wall = wall(&html);
+        assert!(!wall.contains("signed in as"), "{wall}");
+        let actions = &wall[wall.find("wall-actions").expect("actions")..];
+        let sign_in = actions.find(">Log in<").expect("sign in");
+        let home = actions.find(">Return home<").expect("home");
+        assert!(sign_in < home, "{actions}");
+        assert!(actions.contains("href=\"/login\""), "{actions}");
+        assert!(!actions.contains(">Open your profile<"), "{actions}");
+        assert_eq!(actions.matches("is-primary").count(), 1, "{actions}");
+    }
+
+    #[test]
+    fn officers_get_the_admin_pages_not_the_wall() {
+        let html = render_route("/admin", Some(OrgRole::Officer));
+        assert!(html.contains("class=\"admin-main\""), "{html}");
+        assert!(!html.contains("admin-no-access"), "{html}");
+        assert!(!html.contains("You do not have access"), "{html}");
     }
 }
