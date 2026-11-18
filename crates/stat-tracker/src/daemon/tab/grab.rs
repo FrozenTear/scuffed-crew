@@ -1139,6 +1139,8 @@ pub(crate) async fn handle_capture(
             let mut raw_guess: Option<[u32; capture_gate::GATE_COLS]> = None;
             // The reader's confidences, for the report kit (empty under ocr-v1).
             let mut kit_confidences = std::collections::BTreeMap::new();
+            // This Tab's sure accepted damage, healing and mitigation (none under ocr-v1).
+            let mut big_reads = [None; 3];
             if let Some(board) = new_board {
                 let guesses = reader_apply::own_row_guesses(&board, board_row);
                 offer_own_name_seed(
@@ -1208,6 +1210,7 @@ pub(crate) async fn handle_capture(
                     parsed.healing,
                     parsed.mitigation,
                 ];
+                big_reads = sure_accepted_big_stats(&tab, &stored);
                 let read = [
                     &mut ocr_parsed.elims,
                     &mut ocr_parsed.assists,
@@ -1300,7 +1303,8 @@ pub(crate) async fn handle_capture(
             // Hero icon and stat digit training crops, only from a stored Tab.
             // Stat digits only from the new reader's own row verdict when it
             // names this row and is confirmed (Trust::Sure), and with this Tab's own hero
-            // read: a held hero can be the last game's.
+            // read: a held hero can be the last game's. The 1000 gate counts
+            // only this Tab's sure accepted reads, never a held total.
             let crop_source = TabCropSource {
                 panel: career_portrait.as_ref(),
                 pack_hero: pack_hero.as_deref(),
@@ -1308,9 +1312,9 @@ pub(crate) async fn handle_capture(
                 own_row,
                 team_size,
                 hero: source.is_authority().then_some(parsed.hero.as_str()),
-                damage: Some(parsed.damage),
-                healing: Some(parsed.healing),
-                mitigation: Some(parsed.mitigation),
+                damage: big_reads[0],
+                healing: big_reads[1],
+                mitigation: big_reads[2],
             };
             archive_tab_training_crops(data_dir, &target_session, &frame_img, crop_source);
 

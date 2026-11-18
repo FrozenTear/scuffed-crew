@@ -28,7 +28,9 @@
 //!   chat stack walk and the reach rule show no chat line can reach the row.
 //!   Only from a Tab whose own damage, healing or mitigation has reached
 //!   [`STAT_DIGITS_MIN_BIG_STAT`], so the set is not the spawn board of
-//!   zeros. A Tab under it is not marked offered: a later Tab of the same
+//!   zeros. Only this Tab's own sure read that the gate stored counts
+//!   ([`sure_accepted_big_stats`]), never a held total from an earlier
+//!   Tab. A Tab under it is not marked offered: a later Tab of the same
 //!   game retries, and a game that never reaches it keeps no set.
 //!   ocr-v1 has no own row verdict (its row is a name match or the brightest
 //!   row, which a hover or a party tint can light on another player's row),
@@ -55,6 +57,7 @@ use std::sync::Mutex;
 
 use crate::*;
 use stat_tracker::detect::own_row::{OwnRow, Trust};
+use stat_tracker::games::stat_reads::TabReads;
 use stat_tracker::ocr::preprocess::StatColumns;
 use stat_tracker::report::blank::{Chat, chat_over_board};
 use stat_tracker::shadow::heroes::PanelRead;
@@ -74,9 +77,11 @@ pub(crate) struct TabCropSource<'a> {
     /// `None` when this Tab's hero authority abstained: the stored hero is
     /// then a held one, which a split can carry over from the last game.
     pub(crate) hero: Option<&'a str>,
-    /// The stored row's damage, healing and mitigation (after the capture
-    /// gate), for the [`STAT_DIGITS_MIN_BIG_STAT`] gate. `None` for a value
-    /// not read, which does not meet the gate; `Some(0)` is a read of zero.
+    /// Damage, healing and mitigation for the [`STAT_DIGITS_MIN_BIG_STAT`]
+    /// gate: this Tab's own sure read that the capture gate accepted and
+    /// stored ([`sure_accepted_big_stats`]). `None` when the cell was not
+    /// read for sure on this Tab, or was held or refused by the gate; that
+    /// does not meet the gate. `Some(0)` is a sure read of zero.
     pub(crate) damage: Option<u32>,
     pub(crate) healing: Option<u32>,
     pub(crate) mitigation: Option<u32>,
@@ -187,6 +192,22 @@ pub(crate) fn stat_digit_row(row: Option<usize>, own_row: Option<OwnRow>) -> Opt
 /// benchmark. A Tab below it is not marked offered, so a later Tab of the
 /// same game can retry; a game that never reaches it saves no set.
 pub(crate) const STAT_DIGITS_MIN_BIG_STAT: u32 = 1000;
+
+/// This Tab's own damage, healing and mitigation for the
+/// [`STAT_DIGITS_MIN_BIG_STAT`] gate, from its stat reads after
+/// `mark_gate` and the `stored` row (gate order, E A D DMG H MIT). A cell
+/// counts only when this Tab read it for sure and the gate stored that
+/// read. A held, gate held, unsure or unread cell is `None`, and so is a
+/// sure read the gate refused (the stored value differs): a held total,
+/// such as the pre-crash one on a rejoin's zero board, is not on screen.
+pub(crate) fn sure_accepted_big_stats(reads: &TabReads, stored: &[u32; 6]) -> [Option<u32>; 3] {
+    std::array::from_fn(|i| {
+        let col = 3 + i;
+        reads[col]
+            .filter(|read| !read.unsure && read.value == Some(stored[col]))
+            .map(|_| stored[col])
+    })
+}
 
 /// Whether a Tab's own `damage`, `healing` or `mitigation` reaches
 /// [`STAT_DIGITS_MIN_BIG_STAT`]. A value not read (`None`) does not.
