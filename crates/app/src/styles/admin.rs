@@ -910,6 +910,21 @@ pub const CSS: &str = r#"
         background: var(--bg);
         border-top: 1px solid var(--border);
     }
+    /* The bar's live line stops at three lines, so no failure reason can
+       make the bar tall (QA 706 FIX5). The clipped text stays in the tree,
+       so assistive tech still reads all of it, and a long unbroken word (a
+       URL) wraps instead of widening the bar. The bar's measured height,
+       and so the reserved strip above, follows the clamped box. */
+    .settings-save-bar .admin-form-status:not(:empty) {
+        display: -webkit-box;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 3;
+        line-clamp: 3;
+        overflow: hidden;
+        overflow-wrap: anywhere;
+        min-width: 0;
+        max-width: 100%;
+    }
     .settings-divider {
         height: 1px;
         margin: var(--space-5) 0;

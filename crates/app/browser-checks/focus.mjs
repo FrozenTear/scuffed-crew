@@ -7,6 +7,11 @@
 // on phone and check that each focused link is fully inside the sub-nav and
 // clear of its edge fade. Last, a mouse click on a checkbox that straddles
 // the bar must not scroll the page (only keyboard focus is moved clear).
+// QA 706 FIX5: a save that cannot reach the server (the `PUT` is aborted, as
+// a stopped server does) must show one short sentence, never the browser's
+// raw error (Chromium put a 1,106 character stack in the bar), and leave every
+// focused control clear; a very long server reason is clamped to three lines
+// with the full text still in the line.
 // Run once per engine: BROWSER=chromium and BROWSER=firefox.
 import { BROWSER, launch, makeContext, open, reporter, settled } from './lib.mjs';
 
@@ -66,19 +71,31 @@ async function walk(page, key, startSel, endSel) {
 }
 
 // Make Save fail (any 4xx/5xx or network error takes the same path), press it
-// from the keyboard and wait for the error line in the bar.
-async function failSave(page) {
-  await page.route('**/api/settings', route => route.request().method() === 'PUT'
-    ? route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'Stubbed failure for the focus check: the settings could not be stored' }) })
-    : route.continue());
+// from the keyboard and wait for the error line in the bar. `fail` answers
+// the PUT; `expect` is a part of the line that shows once it has failed.
+const STUB_500 = route => route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: 'Stubbed failure for the focus check: the settings could not be stored' }) });
+async function failSave(page, fail = STUB_500, expect = 'Stubbed failure') {
+  await page.unroute('**/api/settings');
+  await page.route('**/api/settings', route => route.request().method() === 'PUT' ? fail(route) : route.continue());
   await page.focus('#settings-save');
   await page.keyboard.press('Enter');
-  await page.waitForFunction(() => {
+  await page.waitForFunction(want => {
     const s = document.querySelector('#settings-save-status');
-    return s && s.classList.contains('is-error') && s.textContent.trim().length > 0;
-  }, null, { timeout: 10000 });
+    return s && s.classList.contains('is-error') && s.textContent.includes(want);
+  }, expect, { timeout: 10000 });
   await page.waitForTimeout(300);
 }
+
+// The bar's live line: its text, and its box against its own line height.
+const statusLine = () => {
+  const s = document.querySelector('#settings-save-status');
+  const cs = getComputedStyle(s);
+  const lh = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.5;
+  return { text: s.textContent, height: Math.round(s.getBoundingClientRect().height), lines: s.getBoundingClientRect().height / lh, lh, clipped: s.scrollHeight > s.clientHeight + 1 };
+};
+
+const NETWORK_LINE = 'Could not save settings. Could not reach the server. Check your connection and try again.';
+const RAW_BITS = ['JsValue', 'TypeError', 'Failed to fetch', 'NetworkError', 'http://', '.js:', 'Network error'];
 
 // The page's scroll-padding-bottom against the stuck bar's real top: the
 // reserved strip must end exactly where the bar starts. The computed value
@@ -155,6 +172,52 @@ for (const [width, height] of SIZES) {
     rec(`${BROWSER} ${width}x${height}: each focused admin sub-nav link is fully in view (${navStops} links)`, navStops > 5 && cut.length === 0, cut.join(' | '));
     await ctx2.close();
   }
+}
+
+// QA 706 FIX5: the server cannot be reached. The PUT is aborted (what a
+// stopped server or a dropped connection gives the page), then the walks
+// run with the bar showing that failure. Last, a 400 with a 1,200 character
+// reason with no spaces: the line stops at three lines, all text kept.
+for (const [width, height] of SIZES) {
+  const ctx = await makeContext(browser, 'admin', width);
+  const page = await ctx.newPage();
+  await page.setViewportSize({ width, height });
+  await open(page, '/admin/settings');
+  await settled(page);
+  await page.waitForSelector('#settings-save');
+  const normalBar = await page.evaluate(() => Math.round(document.querySelector('.settings-save-bar').getBoundingClientRect().height));
+
+  await failSave(page, route => route.abort('failed'), 'Could not save settings');
+  const line = await page.evaluate(statusLine);
+  const res = await page.evaluate(reserved);
+  const leaks = RAW_BITS.filter(bit => line.text.includes(bit));
+  console.log(`  ${BROWSER} ${width}x${height} unreachable: "${line.text}" (${line.text.length} chars), bar ${res.barHeight}px (was ${normalBar}), line ${res.padLine} vs bar ${res.barTop}`);
+  rec(`${BROWSER} ${width}x${height}: server unreachable, the Save bar reads the short message (${line.text.length} chars)`,
+    line.text === NETWORK_LINE && leaks.length === 0, `got "${line.text.slice(0, 200)}" leaks ${leaks.join(',')}`);
+  rec(`${BROWSER} ${width}x${height}: server unreachable, the bar stays small (${normalBar} -> ${res.barHeight}px, line ${line.lines.toFixed(2)} lines) and scroll-padding-bottom ends at its top (line ${res.padLine}, bar ${res.barTop})`,
+    line.lines <= 3.05 && res.barHeight <= normalBar + 3 * line.lh + 2 && Math.abs(res.padLine - res.barTop) <= 1);
+  const down = await walk(page, 'Tab', FIRST_STOP, '#settings-save');
+  console.log(`  ${BROWSER} ${width}x${height} unreachable, Tab: ${down.stops} stops, ${down.t}`);
+  rec(`${BROWSER} ${width}x${height}: server unreachable, Tab: no focused control under the Save bar or tab bar (${down.stops} stops; ${down.t})`,
+    down.reached && down.stops > 20 && down.covered.length === 0, (down.reached ? '' : 'Save never took focus | ') + down.covered.join(' | '));
+  const up = await walk(page, 'Shift+Tab', '#settings-save', FIRST_STOP);
+  console.log(`  ${BROWSER} ${width}x${height} unreachable, Shift+Tab: ${up.stops} stops, ${up.t}`);
+  rec(`${BROWSER} ${width}x${height}: server unreachable, Shift+Tab: no focused control under the Save bar or tab bar (${up.stops} stops; ${up.t})`,
+    up.reached && up.stops > 20 && up.covered.length === 0, (up.reached ? '' : 'the header link never took focus | ') + up.covered.join(' | '));
+
+  // A very long server reason: clamped to three lines, the text all there.
+  const reason = 'LongReason' + 'x'.repeat(1190);
+  await failSave(page, route => route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: reason }) }), 'LongReason');
+  const long = await page.evaluate(statusLine);
+  const lres = await page.evaluate(reserved);
+  console.log(`  ${BROWSER} ${width}x${height} long reason: ${long.text.length} chars, ${long.lines.toFixed(2)} lines shown, clipped ${long.clipped}, bar ${lres.barHeight}px`);
+  rec(`${BROWSER} ${width}x${height}: a 1,200 character reason is clamped to 3 lines, full text kept (${long.lines.toFixed(2)} lines, bar ${lres.barHeight}px)`,
+    long.lines <= 3.05 && long.clipped && long.text.includes(reason) && Math.abs(lres.padLine - lres.barTop) <= 1,
+    `lines ${long.lines} clipped ${long.clipped} len ${long.text.length} line ${lres.padLine} bar ${lres.barTop}`);
+  const ldown = await walk(page, 'Tab', FIRST_STOP, '#settings-save');
+  rec(`${BROWSER} ${width}x${height}: long reason, Tab: no focused control under the Save bar or tab bar (${ldown.stops} stops; ${ldown.t})`,
+    ldown.reached && ldown.stops > 20 && ldown.covered.length === 0, (ldown.reached ? '' : 'Save never took focus | ') + ldown.covered.join(' | '));
+  await ctx.close();
 }
 
 // A mouse click on a checkbox that straddles the bar's top: the press

@@ -443,9 +443,13 @@ pub fn AdminSettings() -> Element {
                     }
                     toast.show(Toast::error(format!("Failed to save settings: {e}")));
                     // The reason stays on the page after the toast is gone.
+                    // A network failure reads as one short sentence there;
+                    // the browser's raw error (a whole stack in Chromium) is
+                    // for the console only (QA 706 FIX5).
+                    crate::util::log_client_error("settings save", &e);
                     save_state.set(crate::components::SaveState::failed(
                         "Could not save settings",
-                        &e,
+                        crate::client_error::user_message(&e),
                     ));
                 }
             }
@@ -1319,6 +1323,37 @@ mod tests {
             ),
             "{rule}"
         );
+    }
+
+    /// QA 706 FIX5: the Save bar's live line is clamped to three lines, so
+    /// a long failure reason can never make the bar huge. The text is
+    /// clipped, not removed, so a screen reader still gets all of it.
+    #[test]
+    fn the_save_bar_line_is_clamped_to_three_lines() {
+        let css = crate::styles::admin::CSS;
+        let rule = css
+            .split(".settings-save-bar .admin-form-status:not(:empty) {")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .expect("clamp rule");
+        for decl in [
+            "display: -webkit-box;",
+            "-webkit-box-orient: vertical;",
+            "-webkit-line-clamp: 3;",
+            "line-clamp: 3;",
+            "overflow: hidden;",
+            "overflow-wrap: anywhere;",
+            "min-width: 0;",
+        ] {
+            assert!(rule.contains(decl), "{decl} missing in {rule}");
+        }
+        // Clipped, not hidden: no display: none, no aria-hidden on the line.
+        assert!(!rule.contains("display: none"));
+        let src = include_str!("settings.rs");
+        let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        assert!(prod.contains(
+            "crate::components::FormStatus { state: save_state(), id: \"settings-save-status\" }"
+        ));
     }
 
     #[test]
