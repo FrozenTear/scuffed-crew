@@ -422,6 +422,10 @@ pub const TEST_OTHER_ACCENT: &str = "#ff5fa2";
 /// primary button in it has no edge, so the fill pair blocks it.
 #[cfg(test)]
 pub const TEST_EDGELESS_ACCENT: &str = "#000000";
+/// The historical marketing purple: its text and ink pairs pass, but a
+/// button fill in it does not reach 3:1, so only the fill floor blocks it.
+#[cfg(test)]
+pub const TEST_FILL_ONLY_ACCENT: &str = "#7c3aed";
 /// Accents for contrast sweeps: the extremes, the page colours, and the
 /// accents QA 694 measured (pale yellow, sky, lilac, mint, the defaults).
 #[cfg(test)]

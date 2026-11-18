@@ -15,7 +15,7 @@ use scuffed_types::{
 
 /// Two pages send `PUT /api/settings`, both admin-only: this one and brand
 /// settings, whose body carries the accent pair (and `brand_font_display`
-/// once the server returns that key) and no other settings key. This page
+/// when the admin changed the font) and no other settings key. This page
 /// owns the officers flag, so it always sends the key. `None` would omit it
 /// (`skip_serializing_if`) and leave a stale flag on the server.
 fn admin_settings_officers_flag(enabled: bool) -> Option<bool> {
@@ -395,6 +395,8 @@ pub fn AdminSettings() -> Element {
             page_bg_image_url: Some(page_bg_image_url().trim().to_string()),
             brand_accent_dark,
             brand_accent_light,
+            // The display font is set on Brand settings: None keeps the stored value.
+            brand_font_display: None,
         };
 
         saving.set(true);

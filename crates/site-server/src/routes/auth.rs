@@ -808,6 +808,7 @@ pub async fn setup(
                     skin.as_deref(),
                     None,
                     None,
+                    None,
                 )
                 .await;
             #[cfg(test)]
@@ -1208,6 +1209,7 @@ mod oauth_recruitment_tests {
             None,
             None,
             Some(open),
+            None,
             None,
             None,
             None,

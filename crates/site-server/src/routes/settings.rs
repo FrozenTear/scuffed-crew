@@ -30,6 +30,7 @@ fn officer_has_admin_only_fields(body: &UpdateSettingsRequest) -> bool {
         page_bg_image_url,
         brand_accent_dark,
         brand_accent_light,
+        brand_font_display,
     } = body;
     org_name.is_some()
         || site_description.is_some()
@@ -48,6 +49,7 @@ fn officer_has_admin_only_fields(body: &UpdateSettingsRequest) -> bool {
         || page_bg_image_url.is_some()
         || brand_accent_dark.is_some()
         || brand_accent_light.is_some()
+        || brand_font_display.is_some()
 }
 
 /// Accept only safe hex colors (`#rgb`, `#rrggbb`, `#rrggbbaa`) or empty.
@@ -85,6 +87,17 @@ fn sanitize_brand_accent(raw: &str) -> Result<String, String> {
         Ok(format!("#{}", full.to_ascii_lowercase()))
     } else {
         Err("Brand accent must be a hex color like #8f73ff (or empty for default)".into())
+    }
+}
+
+/// Display font: one of `BRAND_FONT_DISPLAY_ALLOWED`, compared exactly.
+/// Never a free font name or URL, so nothing here is trimmed or normalized.
+/// See `docs/api/site-settings.md`.
+fn validate_brand_font_display(raw: &str) -> Result<String, String> {
+    if scuffed_types::is_allowed_brand_font_display(raw) {
+        Ok(raw.to_string())
+    } else {
+        Err("Display font must be urbanist or ibm-plex-sans (or empty for default)".into())
     }
 }
 
@@ -127,6 +140,7 @@ fn to_api_settings(db: scuffed_db::SiteSettings) -> SiteSettings {
         page_bg_image_url: db.page_bg_image_url,
         brand_accent_dark: db.brand_accent_dark,
         brand_accent_light: db.brand_accent_light,
+        brand_font_display: db.brand_font_display,
         updated_at: db.updated_at,
     }
 }
@@ -195,6 +209,9 @@ pub async fn get_settings(
 /// PUT /api/settings — Admin: full `UpdateSettingsRequest`.
 /// Officer: `strategies_enabled` only; any other set field, including
 /// `officers_can_edit_teams`, is 403.
+///
+/// `brand_font_display` (values, who may set it, every status code, upgrade
+/// and rollback): `docs/api/site-settings.md`.
 pub async fn update_settings(
     State(state): State<AppState>,
     officer: OfficerUser,
@@ -262,6 +279,13 @@ pub async fn update_settings(
         ),
         None => None,
     };
+    let brand_font_display = match body.brand_font_display.as_deref() {
+        Some(f) => Some(
+            validate_brand_font_display(f)
+                .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))?,
+        ),
+        None => None,
+    };
 
     let written = state
         .db
@@ -286,6 +310,7 @@ pub async fn update_settings(
             skin_str.as_deref(),
             body.strategies_enabled,
             body.officers_can_edit_teams,
+            brand_font_display.as_deref(),
         )
         .await;
     // After the write returns, still before this handler returns. The drop
@@ -372,6 +397,32 @@ mod officer_settings_gate_tests {
             ..Default::default()
         };
         assert!(officer_has_admin_only_fields(&body));
+    }
+
+    #[test]
+    fn officer_brand_font_display_is_admin_only() {
+        for value in ["", "urbanist", "ibm-plex-sans"] {
+            let body = UpdateSettingsRequest {
+                brand_font_display: Some(value.into()),
+                ..Default::default()
+            };
+            assert!(officer_has_admin_only_fields(&body), "{value:?}");
+        }
+    }
+
+    #[test]
+    fn brand_font_display_validation_is_exact() {
+        for ok in scuffed_types::BRAND_FONT_DISPLAY_ALLOWED {
+            assert_eq!(validate_brand_font_display(ok).as_deref(), Ok(*ok));
+        }
+        for bad in [
+            "comic-sans",
+            " urbanist",
+            "Urbanist",
+            "https://x.test/f.woff2",
+        ] {
+            assert!(validate_brand_font_display(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]
