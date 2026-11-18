@@ -2,6 +2,11 @@ use dioxus::prelude::*;
 use serde::Deserialize;
 
 use crate::components::ui::LoadError;
+use crate::layouts::focus_element;
+
+/// Id of the "Standings" heading. A page shows one Swiss bracket, so the id
+/// is fixed.
+pub(super) const STANDINGS_TITLE_ID: &str = "swiss-standings-title";
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct SwissStanding {
@@ -29,6 +34,25 @@ pub enum StandingsLoad {
     Ready(Vec<SwissStanding>),
 }
 
+impl StandingsLoad {
+    /// Where focus goes when a load that Retry started settles. On a
+    /// result the Retry button that held focus is gone (replaced by the
+    /// table or the note), so focus moves to the stable Standings heading
+    /// above it instead of falling to the body. Another failure keeps the
+    /// button, and focus stays on it.
+    fn focus_after_retry(&self) -> Option<&'static str> {
+        match self {
+            StandingsLoad::Ready(_) => Some(STANDINGS_TITLE_ID),
+            StandingsLoad::Loading | StandingsLoad::Failed | StandingsLoad::Retrying => None,
+        }
+    }
+
+    /// True while a fetch is in flight.
+    fn in_flight(&self) -> bool {
+        matches!(self, StandingsLoad::Loading | StandingsLoad::Retrying)
+    }
+}
+
 /// A short column head with its full name for assistive tech.
 #[component]
 pub(super) fn ShortHead(short: String, full: String) -> Element {
@@ -51,6 +75,29 @@ pub fn SwissStandings(
     #[props(default)]
     on_retry: Option<EventHandler<()>>,
 ) -> Element {
+    // Set by a Retry press, cleared once that load settles.
+    let mut retried = use_signal(|| false);
+    let target = standings.focus_after_retry();
+    let settled = !standings.in_flight();
+    use_effect(use_reactive(
+        (&target, &settled),
+        move |(target, settled)| {
+            if !settled || !*retried.peek() {
+                return;
+            }
+            retried.set(false);
+            if let Some(id) = target {
+                focus_element(id);
+            }
+        },
+    ));
+    let on_retry = on_retry.map(|retry| {
+        EventHandler::new(move |()| {
+            retried.set(true);
+            retry.call(());
+        })
+    });
+
     let standings = match standings {
         StandingsLoad::Loading => {
             return rsx! { p { class: "bracket-note", "Loading standings..." } };
@@ -214,6 +261,39 @@ mod tests {
         assert!(
             page.contains("UseResourceState::Pending => StandingsLoad::Retrying"),
             "tournament.rs"
+        );
+    }
+
+    /// QA 705 nit 1: after a Retry the button that held focus is replaced,
+    /// so focus goes to the Standings heading, which the Swiss view renders
+    /// focusable with that id. Another failure keeps focus on the button.
+    #[test]
+    fn a_settled_retry_moves_focus_to_the_standings_heading() {
+        assert_eq!(
+            StandingsLoad::Ready(vec![standing(1)]).focus_after_retry(),
+            Some(STANDINGS_TITLE_ID)
+        );
+        assert_eq!(
+            StandingsLoad::Ready(Vec::new()).focus_after_retry(),
+            Some(STANDINGS_TITLE_ID)
+        );
+        assert_eq!(StandingsLoad::Failed.focus_after_retry(), None);
+        assert!(StandingsLoad::Retrying.in_flight());
+        assert!(StandingsLoad::Loading.in_flight());
+        assert!(!StandingsLoad::Failed.in_flight());
+        assert!(!StandingsLoad::Ready(Vec::new()).in_flight());
+
+        let src = include_str!("swiss.rs");
+        let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        assert!(prod.contains("retried.set(true);\n            retry.call(());"));
+        assert!(prod.contains("focus_element(id);"));
+
+        let view = include_str!("bracket_view.rs");
+        assert!(
+            view.contains(
+                "h2 {\n                        id: STANDINGS_TITLE_ID,\n                        class: \"ui-section-title\",\n                        tabindex: \"-1\",\n                        \"Standings\""
+            ),
+            "the Standings heading must be a focus target"
         );
     }
 }

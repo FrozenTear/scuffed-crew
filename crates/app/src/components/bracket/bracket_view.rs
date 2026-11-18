@@ -7,7 +7,7 @@ use super::single_elim::{
     BracketColumns, BracketMatch, BracketRound, BracketSingleElim, HeadLevel, numbered_labels,
     stage_rounds,
 };
-use super::swiss::{StandingsLoad, SwissStandings};
+use super::swiss::{STANDINGS_TITLE_ID, StandingsLoad, SwissStandings};
 
 /// The bracket of one tournament, by format. `name` is the tournament name:
 /// it names the scrollers for assistive tech.
@@ -45,8 +45,14 @@ pub fn BracketView(
             let swiss_rounds = stage_rounds(&rounds, &["main", "winners"]);
             let labels = numbered_labels(swiss_rounds.len());
             rsx! {
-                section { class: "ui-stack",
-                    h2 { class: "ui-section-title", "Standings" }
+                section { class: "ui-stack", aria_labelledby: STANDINGS_TITLE_ID,
+                    // Focus lands here when a Retry of the standings settles.
+                    h2 {
+                        id: STANDINGS_TITLE_ID,
+                        class: "ui-section-title",
+                        tabindex: "-1",
+                        "Standings"
+                    }
                     SwissStandings {
                         name: name.clone(),
                         standings: swiss_standings,
