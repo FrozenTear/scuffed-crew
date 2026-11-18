@@ -7,9 +7,10 @@ use scuffed_api_client::ApiClient;
 use scuffed_types::api::{CreateDaemonTokenRequest, CreateDaemonTokenResponse};
 
 use super::stats_member::{Col, STATS_VIEWS_CSS, STATS_VIEWS_CSS_ID, StatsTable};
-use crate::components::ui::{EmptyCard, PageHeader, PageShell, PageWidth};
+use crate::components::ui::{EmptyCard, FieldError, PageHeader, PageShell, PageWidth};
 use crate::components::{FormModal, Toast, member_pending, use_toast};
 use crate::hooks::{ModalController, use_api};
+use crate::layouts::focus_element;
 use crate::state::use_auth;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -135,6 +136,22 @@ fn format_date(dt: &DateTime<Utc>) -> String {
     dt.format("%-d %b %Y, %H:%M UTC").to_string()
 }
 
+/// The "Your tokens" heading. After a Revoke, the row's button is gone, so
+/// focus moves here instead of falling to the body.
+const TOKENS_LIST_TITLE_ID: &str = "tokens-list-title";
+/// The label input in the New token form, and its error line.
+const LABEL_INPUT_ID: &str = "daemon-token-label";
+const LABEL_ERROR_ID: &str = "daemon-token-label-err";
+
+/// Why the New token form refuses a label, if it does. The server needs a
+/// label to tell tokens apart.
+fn label_error(label: &str) -> Option<&'static str> {
+    label
+        .trim()
+        .is_empty()
+        .then_some("Give the token a label, for example my-desktop.")
+}
+
 /// Id of a row's Revoke button: the token id plus the action, never a counter.
 fn revoke_button_id(token_id: &str) -> String {
     let safe: String = token_id
@@ -245,11 +262,15 @@ pub fn StatsTokens() -> Element {
 
     let mut modal = ModalController::<String>::new();
     let mut form_label = use_signal(|| "default".to_string());
+    // The label's error line. Always rendered with the form; only its text
+    // changes, so a new error is announced.
+    let mut form_error = use_signal(String::new);
 
     let mut revealed_token: Signal<Option<String>> = use_signal(|| None);
 
     let open_create = move |_| {
         form_label.set("default".to_string());
+        form_error.set(String::new());
         modal.show_empty();
     };
 
@@ -259,9 +280,12 @@ pub fn StatsTokens() -> Element {
 
     let on_submit = move |_| {
         let label = form_label().trim().to_string();
-        if label.is_empty() {
+        if let Some(error) = label_error(&label) {
+            form_error.set(error.to_string());
+            focus_element(LABEL_INPUT_ID);
             return;
         }
+        form_error.set(String::new());
 
         modal.start_submit();
         spawn(async move {
@@ -307,6 +331,7 @@ pub fn StatsTokens() -> Element {
             match result {
                 Ok(()) => {
                     toast.show(Toast::success("Token revoked."));
+                    focus_element(TOKENS_LIST_TITLE_ID);
                     tokens.refresh += 1;
                 }
                 Err(e) => {
@@ -358,8 +383,13 @@ pub fn StatsTokens() -> Element {
                 on_dismiss: on_dismiss,
             }
 
-            section { class: "ui-stack", aria_labelledby: "tokens-list-title",
-                h2 { id: "tokens-list-title", class: "ui-section-title", "Your tokens" }
+            section { class: "ui-stack", aria_labelledby: TOKENS_LIST_TITLE_ID,
+                h2 {
+                    id: TOKENS_LIST_TITLE_ID,
+                    class: "ui-section-title",
+                    tabindex: "-1",
+                    "Your tokens"
+                }
                 p { class: "visually-hidden", role: "status", "{status}" }
                 {
                     let data = tokens.data.read();
@@ -383,7 +413,7 @@ pub fn StatsTokens() -> Element {
                         },
                         Some(list) => rsx! {
                             StatsTable {
-                                labelled_by: "tokens-list-title",
+                                labelled_by: TOKENS_LIST_TITLE_ID,
                                 wide: true,
                                 cols: vec![
                                     Col::Text("Label"),
@@ -409,16 +439,24 @@ pub fn StatsTokens() -> Element {
                 on_submit: on_submit,
 
                 div { class: "token-form-field",
-                    label { class: "field-label", r#for: "daemon-token-label", "Label" }
+                    label { class: "field-label", r#for: LABEL_INPUT_ID, "Label" }
                     input {
-                        id: "daemon-token-label",
-                        name: "daemon-token-label",
+                        id: LABEL_INPUT_ID,
+                        name: LABEL_INPUT_ID,
                         class: "field-input",
                         r#type: "text",
                         placeholder: "For example my-desktop",
+                        aria_invalid: if !form_error().is_empty() { "true" },
+                        aria_describedby: LABEL_ERROR_ID,
                         value: "{form_label}",
-                        oninput: move |e| form_label.set(e.value()),
+                        oninput: move |e| {
+                            form_label.set(e.value());
+                            if !form_error.peek().is_empty() && label_error(&e.value()).is_none() {
+                                form_error.set(String::new());
+                            }
+                        },
                     }
+                    FieldError { id: LABEL_ERROR_ID, text: form_error(), role: "status" }
                 }
             }
         }
@@ -701,5 +739,69 @@ mod tests {
     fn copy_says_tracker_tokens() {
         let src = include_str!("stats_tokens.rs");
         assert!(!src.contains(&["Daemon", " Token"].concat()));
+    }
+
+    /// QA 705 nit 6: Save with an empty label says why, in the field's
+    /// error line. The line is always rendered with the form (only its text
+    /// changes), the input points at it, and focus goes back to the input.
+    #[test]
+    fn an_empty_label_is_refused_with_a_message() {
+        assert!(label_error("").is_some());
+        assert!(label_error("   \t").is_some());
+        assert_eq!(label_error(" my-desktop "), None);
+        let message = label_error("").unwrap();
+        assert!(!message.contains('\u{2014}'), "{message}");
+
+        let src = include_str!("stats_tokens.rs");
+        let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let submit = prod
+            .split("let on_submit = move |_| {")
+            .nth(1)
+            .expect("submit handler");
+        let refuse = &submit[..submit.find("modal.start_submit();").expect("submit")];
+        assert!(
+            refuse.contains("form_error.set(error.to_string());"),
+            "{refuse}"
+        );
+        assert!(
+            refuse.contains("focus_element(LABEL_INPUT_ID);"),
+            "{refuse}"
+        );
+        assert!(refuse.contains("return;"), "{refuse}");
+        let field = prod
+            .split("div { class: \"token-form-field\",")
+            .nth(1)
+            .expect("label field");
+        assert!(
+            field.contains("aria_describedby: LABEL_ERROR_ID,"),
+            "{field}"
+        );
+        // Unconditional: not inside an `if`, so the region never comes and goes.
+        assert!(
+            field.contains(
+                "}\n                    FieldError { id: LABEL_ERROR_ID, text: form_error(), role: \"status\" }"
+            ),
+            "{field}"
+        );
+    }
+
+    /// QA 705 nit 4: a successful Revoke removes the button that had focus,
+    /// so focus moves to the list heading, which can take it.
+    #[test]
+    fn revoke_moves_focus_to_the_list_heading() {
+        let src = include_str!("stats_tokens.rs");
+        let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let revoke = prod
+            .split("let on_revoke = move |token_id: String| {")
+            .nth(1)
+            .expect("revoke handler");
+        let ok_arm = &revoke[..revoke.find("Err(e) =>").expect("error arm")];
+        assert!(
+            ok_arm.contains("focus_element(TOKENS_LIST_TITLE_ID);"),
+            "{ok_arm}"
+        );
+        assert!(prod.contains(
+            "h2 {\n                    id: TOKENS_LIST_TITLE_ID,\n                    class: \"ui-section-title\",\n                    tabindex: \"-1\","
+        ));
     }
 }

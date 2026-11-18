@@ -9,12 +9,14 @@ const note = (what, r) => { if (r.status >= 300) notes.push(`${what}: ${r.status
 
 // --- accounts -------------------------------------------------------------
 const admin = new Jar();
-const st = (await admin.req('GET', '/api/auth/setup-status')).j;
+const setup = () => admin.reqRetry('POST', '/api/auth/setup', { username: 'TestAdmin', password: PW, org_name: 'Test Crew' });
+const st = (await admin.reqRetry('GET', '/api/auth/setup-status')).j;
 if (st && (st.needs_setup || st.setup_required || st.setup_needed)) {
-  note('setup', await admin.req('POST', '/api/auth/setup', { username: 'TestAdmin', password: PW, org_name: 'Test Crew' }));
+  note('setup', await setup());
 } else {
-  const l = await admin.req('POST', '/api/auth/local/login', { username: 'TestAdmin', password: PW });
-  if (l.status !== 200) note('setup', await admin.req('POST', '/api/auth/setup', { username: 'TestAdmin', password: PW, org_name: 'Test Crew' }));
+  // A login 429 is waited out, so only a real refusal falls through to setup.
+  const l = await admin.reqRetry('POST', '/api/auth/local/login', { username: 'TestAdmin', password: PW });
+  if (l.status !== 200) note('setup', await setup());
 }
 await admin.req('GET', '/api/auth/me');
 
@@ -29,10 +31,10 @@ const ow = games.find(g => g.name === 'Overwatch');
 const users = {};
 for (const name of ['Player01', 'Player02', 'Applicant01', 'Visitor01']) {
   const j = new Jar(); users[name] = j;
-  let r = await j.req('POST', '/api/auth/local/login', { username: name, password: PW });
+  let r = await j.reqRetry('POST', '/api/auth/local/login', { username: name, password: PW });
   if (r.status !== 200) {
     await sleep(2500);
-    note('register ' + name, await j.req('POST', '/api/auth/local/register', { username: name, password: PW, confirm_min_age: true }));
+    note('register ' + name, await j.reqRetry('POST', '/api/auth/local/register', { username: name, password: PW, confirm_min_age: true }));
   }
   const me = (await j.req('GET', '/api/auth/me')).j;
   if (name === 'Visitor01') continue; // account only, so the Apply form can be shot
@@ -328,3 +330,11 @@ const summary = {
 };
 fs.writeFileSync(STATE_DIR + '/seed.json', JSON.stringify(summary, null, 1));
 console.log('\nSEED SUMMARY\n' + JSON.stringify(summary, null, 1));
+// A 401 or 429 left in the notes means the admin session never started (or
+// a rate limit outlasted the retries), so most writes were refused: a thin
+// seed must not pass as a good one.
+const thin = notes.filter(n => /: (401|429) /.test(n));
+if (thin.length) {
+  console.error(`SEED FAILED: ${thin.length} request(s) refused with 401 or 429. Start again from an empty database.`);
+  process.exit(1);
+}

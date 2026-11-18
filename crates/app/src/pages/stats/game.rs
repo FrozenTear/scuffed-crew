@@ -316,9 +316,16 @@ fn mode_label(game_mode: &str, map_name: &str) -> String {
     }
 }
 
-/// "15 Mar 2026, 12:00 UTC": the date style of the frames, with the time.
+/// "16 Jul 2026, 00:30 UTC+2": the date style of the frames, with the
+/// time, on the viewer's own clock. The day is the one History, Recent form
+/// and the chart show for the same game; the offset says which clock.
 fn game_time(played_at: &DateTime<Utc>) -> String {
-    played_at.format("%-d %b %Y, %H:%M UTC").to_string()
+    let local = super::local_time(*played_at);
+    format!(
+        "{} {}",
+        local.format("%-d %b %Y, %H:%M"),
+        super::utc_offset_label(local.offset())
+    )
 }
 
 /// The game body. No Link inside, so tests can render it without a router.

@@ -424,10 +424,41 @@ pub fn season_url(path: &str, season: Option<&str>) -> String {
     }
 }
 
-/// A fetch the browser cancelled (`AbortError`): the page is being left, or
-/// the request was replaced. Not a failure, so it is never logged.
+/// A fetch the browser cancelled: the page is being left, or the request was
+/// replaced. Not a failure, so it is never logged.
 pub fn is_aborted_fetch(err: &dyn std::fmt::Display) -> bool {
-    err.to_string().contains("AbortError")
+    is_cancelled_fetch_text(&err.to_string(), page_is_leaving())
+}
+
+/// `AbortError` is always a cancel. Firefox also cancels the fetches of a
+/// page being left with a plain network `TypeError` ("NetworkError when
+/// attempting to fetch resource."), the same words a real network failure
+/// uses, so that counts as a cancel only while `leaving`.
+fn is_cancelled_fetch_text(text: &str, leaving: bool) -> bool {
+    if text.contains("AbortError") {
+        return true;
+    }
+    leaving
+        && text.contains("TypeError")
+        && ["NetworkError", "Failed to fetch", "Load failed"]
+            .iter()
+            .any(|words| text.contains(words))
+}
+
+/// A navigation away has started: `assets/boot-theme.js` marks the root
+/// with `data-sc-leaving` once `beforeunload` ran and nothing asked to stay.
+fn page_is_leaving() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.document_element())
+            .is_some_and(|root| root.has_attribute("data-sc-leaving"))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        false
+    }
 }
 
 /// Log a raw client error to the browser console. User-facing copy stays a
@@ -460,6 +491,17 @@ mod tests {
             "JsValue(TypeError: NetworkError when attempting to fetch resource.)".to_string()
         )));
         assert!(!is_aborted_fetch(&ClientError::http(500, "{}", None)));
+        // Firefox's cancel of a page being left: a cancel only while leaving.
+        let firefox = "JsValue(TypeError: NetworkError when attempting to fetch resource.)";
+        assert!(is_cancelled_fetch_text(firefox, true));
+        assert!(!is_cancelled_fetch_text(firefox, false));
+        assert!(is_cancelled_fetch_text("JsValue(AbortError: x)", false));
+        // A server answer or another TypeError is never a cancel.
+        assert!(!is_cancelled_fetch_text("HTTP 500: {}", true));
+        assert!(!is_cancelled_fetch_text(
+            "JsValue(TypeError: x is not a function)",
+            true
+        ));
         let src = include_str!("util.rs");
         let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap();
         let log = prod
@@ -470,8 +512,8 @@ mod tests {
         let warn = log.find("console::warn_1").expect("warn");
         assert!(guard < warn, "the abort check runs before the log");
 
-        // The page-level guard for the bundle's own fetch: only AbortError
-        // is marked handled.
+        // The page-level guard for the bundle's own fetch: only AbortError,
+        // or a fetch TypeError once the page is leaving, is marked handled.
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/boot-theme.js");
         let script = std::fs::read_to_string(path).expect("assets/boot-theme.js");
         assert_eq!(
@@ -483,11 +525,16 @@ mod tests {
         );
         assert!(
             script.contains(
-                "if (reason && reason.name === \"AbortError\") {\n    event.preventDefault();"
+                "var cancelled =\n      reason.name === \"AbortError\" ||\n      (reason.name === \"TypeError\" &&\n        root.hasAttribute(\"data-sc-leaving\") &&\n        FETCH_FAILED.test(String(reason.message)));\n    if (cancelled) {\n      event.preventDefault();"
             ),
             "{script}"
         );
         assert_eq!(script.matches("preventDefault()").count(), 1, "{script}");
+        // The marker is set when a navigation starts, dropped when a prompt
+        // kept the page, and read by `page_is_leaving` on this side.
+        assert!(script.contains("root.setAttribute(\"data-sc-leaving\", \"\");"));
+        assert!(script.contains("if (event.defaultPrevented) {\n        stay();"));
+        assert!(prod.contains(".is_some_and(|root| root.has_attribute(\"data-sc-leaving\"))"));
     }
 
     #[test]

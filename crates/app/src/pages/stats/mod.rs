@@ -276,6 +276,32 @@ pub(super) fn local_day(at: DateTime<Utc>) -> chrono::NaiveDate {
     day
 }
 
+/// The instant `at` on the viewer's clock in the browser (UTC in native
+/// tests), with the offset that applied at `at` itself. Its date is always
+/// [`local_day`].
+pub(super) fn local_time(at: DateTime<Utc>) -> DateTime<chrono::FixedOffset> {
+    #[cfg(target_arch = "wasm32")]
+    let local = at.with_timezone(&chrono::Local).fixed_offset();
+    #[cfg(not(target_arch = "wasm32"))]
+    let local = at.fixed_offset();
+    local
+}
+
+/// `UTC`, `UTC+2`, `UTC-5` or `UTC+5:30`: the offset a local time is in.
+pub(super) fn utc_offset_label(offset: &chrono::FixedOffset) -> String {
+    let east = offset.local_minus_utc() / 60;
+    if east == 0 {
+        return "UTC".to_string();
+    }
+    let sign = if east > 0 { '+' } else { '-' };
+    let (hours, minutes) = (east.abs() / 60, east.abs() % 60);
+    if minutes == 0 {
+        format!("UTC{sign}{hours}")
+    } else {
+        format!("UTC{sign}{hours}:{minutes:02}")
+    }
+}
+
 /// Shared map → game mode (used by maps tab + overview mode chips).
 /// Delegates to [`scuffed_types::MapName`] so accented/unaccented live names
 /// (Paraíso/Paraiso, Esperança/Esperanca, Watchpoint: Grímsvötn/Grimsvotn)
@@ -2693,6 +2719,24 @@ mod local_day_tests {
     }
 
     #[test]
+    fn offsets_are_labelled_from_utc() {
+        use chrono::FixedOffset;
+        let label = |secs| utc_offset_label(&FixedOffset::east_opt(secs).unwrap());
+        assert_eq!(label(0), "UTC");
+        assert_eq!(label(2 * 3600), "UTC+2");
+        assert_eq!(label(-5 * 3600), "UTC-5");
+        assert_eq!(label(5 * 3600 + 30 * 60), "UTC+5:30");
+        assert_eq!(label(-(3 * 3600 + 30 * 60)), "UTC-3:30");
+        // The local time and the local day are the same conversion.
+        let at = Utc.with_ymd_and_hms(2026, 7, 15, 22, 30, 0).unwrap();
+        assert_eq!(local_time(at).date_naive(), local_day(at));
+        let source = include_str!("mod.rs");
+        let body = &source[source.find("pub(super) fn local_time(").unwrap()..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        assert!(body.contains("at.with_timezone(&chrono::Local)"), "{body}");
+    }
+
+    #[test]
     fn local_day_converts_each_instant_not_todays_offset() {
         let source = include_str!("mod.rs");
         let body = &source[source.find("pub(super) fn local_day(").unwrap()..];
@@ -2722,6 +2766,13 @@ mod local_day_tests {
             assert!(body.contains("local_day("), "{name}");
         }
         // The Recent form row says the same thing in its markup.
+        // The game page names the same day, with the time and its offset.
+        let game = include_str!("game.rs");
+        let game = game.split("#[cfg(test)]").next().unwrap();
+        let time = &game[game.find("fn game_time(").unwrap()..];
+        let time = &time[..time.find("\n}\n").unwrap()];
+        assert!(time.contains("super::local_time(*played_at)"), "{time}");
+        assert!(!time.contains("played_at.format("), "{time}");
         let overview = include_str!("overview.rs");
         let form_row = &overview[overview.find("fn form_row(").unwrap()..];
         let form_row = &form_row[..form_row.find("rsx!").unwrap()];

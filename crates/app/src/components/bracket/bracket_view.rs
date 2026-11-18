@@ -7,7 +7,7 @@ use super::single_elim::{
     BracketColumns, BracketMatch, BracketRound, BracketSingleElim, HeadLevel, numbered_labels,
     stage_rounds,
 };
-use super::swiss::{StandingsLoad, SwissStandings};
+use super::swiss::{STANDINGS_TITLE_ID, StandingsLoad, SwissStandings};
 
 /// The bracket of one tournament, by format. `name` is the tournament name:
 /// it names the scrollers for assistive tech.
@@ -45,8 +45,14 @@ pub fn BracketView(
             let swiss_rounds = stage_rounds(&rounds, &["main", "winners"]);
             let labels = numbered_labels(swiss_rounds.len());
             rsx! {
-                section { class: "ui-stack",
-                    h2 { class: "ui-section-title", "Standings" }
+                section { class: "ui-stack", aria_labelledby: STANDINGS_TITLE_ID,
+                    // Focus lands here when a Retry of the standings settles.
+                    h2 {
+                        id: STANDINGS_TITLE_ID,
+                        class: "ui-section-title",
+                        tabindex: "-1",
+                        "Standings"
+                    }
                     SwissStandings {
                         name: name.clone(),
                         standings: swiss_standings,
@@ -97,8 +103,12 @@ mod tests {
     #[test]
     fn swiss_rounds_are_numbered_and_have_no_champion() {
         let html = render(swiss);
+        // The Standings heading names its section and takes focus after a
+        // Retry (QA 705 nit 1).
         assert!(
-            html.contains("<h2 class=\"ui-section-title\">Standings</h2>"),
+            html.contains(
+                "<section class=\"ui-stack\" aria-labelledby=\"swiss-standings-title\"><h2 id=\"swiss-standings-title\" class=\"ui-section-title\" tabindex=\"-1\">Standings</h2>"
+            ),
             "{html}"
         );
         assert!(
