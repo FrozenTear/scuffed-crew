@@ -958,9 +958,10 @@ pub(crate) async fn handle_capture(
             outcome_label = staged.outcome_label.clone();
             parsed.outcome = outcome_label.clone();
             let target_session = staged.target_session.clone();
-            // This board's session, including a split's new game. The first
-            // Tab that still has the map label wins; later Tabs no-op. It is
-            // written once the row is decided, below.
+            // This board's session, including a split's new game. Slot 1 and
+            // slot 2 (60 s or more later) both write to the local debug
+            // folder once the row is decided, below; only slot 1 is offered
+            // for training.
             let map_label_crop = prepare_map_label_crop(data_dir, &target_session, &frame_img);
             if split {
                 tracing::info!(
@@ -1138,6 +1139,8 @@ pub(crate) async fn handle_capture(
             let mut raw_guess: Option<[u32; capture_gate::GATE_COLS]> = None;
             // The reader's confidences, for the report kit (empty under ocr-v1).
             let mut kit_confidences = std::collections::BTreeMap::new();
+            // This Tab's sure accepted damage, healing and mitigation (none under ocr-v1).
+            let mut big_reads = [None; 3];
             if let Some(board) = new_board {
                 let guesses = reader_apply::own_row_guesses(&board, board_row);
                 offer_own_name_seed(
@@ -1207,6 +1210,7 @@ pub(crate) async fn handle_capture(
                     parsed.healing,
                     parsed.mitigation,
                 ];
+                big_reads = digit_gate_big_stats(&tab, &stored, rejoin.carry.is_some());
                 let read = [
                     &mut ocr_parsed.elims,
                     &mut ocr_parsed.assists,
@@ -1299,7 +1303,8 @@ pub(crate) async fn handle_capture(
             // Hero icon and stat digit training crops, only from a stored Tab.
             // Stat digits only from the new reader's own row verdict when it
             // names this row and is confirmed (Trust::Sure), and with this Tab's own hero
-            // read: a held hero can be the last game's.
+            // read: a held hero can be the last game's. The 1000 gate counts
+            // only this Tab's sure accepted reads, never on a rejoined game.
             let crop_source = TabCropSource {
                 panel: career_portrait.as_ref(),
                 pack_hero: pack_hero.as_deref(),
@@ -1307,6 +1312,9 @@ pub(crate) async fn handle_capture(
                 own_row,
                 team_size,
                 hero: source.is_authority().then_some(parsed.hero.as_str()),
+                damage: big_reads[0],
+                healing: big_reads[1],
+                mitigation: big_reads[2],
             };
             archive_tab_training_crops(data_dir, &target_session, &frame_img, crop_source);
 
