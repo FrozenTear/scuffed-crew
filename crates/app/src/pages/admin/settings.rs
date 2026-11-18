@@ -28,6 +28,43 @@ fn officers_can_edit_teams_hint() -> &'static str {
     "On: Officers can edit a team's name, game, color, and division in Admin → Teams. Lore quote is not on that form, so this switch does not change it. Creating teams stays admin-only. Off (default): those edits stay admin-only. Roster changes are not affected."
 }
 
+/// Firefox scrolls a newly focused control into view only when none of it
+/// is inside the scroll-padded view. A control that straddles the padding
+/// line (the top of the stuck Save bar) stays where it is, behind the bar.
+/// Chromium scrolls it fully clear. So, after any focus move in the form,
+/// a focused control that reaches below the top of the bar is scrolled to
+/// the nearest edge, which `scroll-padding-bottom` puts just above the bar.
+/// Controls inside the bar itself are left alone.
+fn keep_focus_above_save_bar() {
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen::JsCast;
+        let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+            return;
+        };
+        let Some(focused) = document.active_element() else {
+            return;
+        };
+        let Some(bar) = document.query_selector(".settings-save-bar").ok().flatten() else {
+            return;
+        };
+        if bar.contains(Some(&focused))
+            || focused.get_bounding_client_rect().bottom() <= bar.get_bounding_client_rect().top()
+        {
+            return;
+        }
+        let options = js_sys::Object::new();
+        let _ = js_sys::Reflect::set(&options, &"block".into(), &"nearest".into());
+        let scroll = js_sys::Reflect::get(&focused, &"scrollIntoView".into()).ok();
+        if let Some(scroll) = scroll
+            .as_ref()
+            .and_then(|f| f.dyn_ref::<js_sys::Function>())
+        {
+            let _ = scroll.call1(&focused, &options);
+        }
+    }
+}
+
 /// The accents the last applied identity pack suggests.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PackAccents {
@@ -403,8 +440,10 @@ pub fn AdminSettings() -> Element {
             },
         }
 
-        // The form and its Save row, one field step apart.
+        // The form and its Save row, one field step apart. A control that
+        // takes focus is kept clear of the stuck Save bar (WCAG 2.4.11).
         div { class: "form-stack",
+            onfocusin: move |_| keep_focus_above_save_bar(),
         if let Some(message) = load_failed {
             div { class: "fetch-error-wrap", role: "alert",
                 p { class: "fetch-error", "{message}" }
@@ -1139,6 +1178,34 @@ mod tests {
         assert!(prod.contains("h3 { class: \"settings-subhead\", \"Brand\" }"));
         assert!(prod.contains("h3 { class: \"settings-subhead\", \"Page background\" }"));
         assert!(!prod.contains("div { class: \"settings-subhead\""));
+    }
+
+    /// QA 706 nit 1 (WCAG 2.4.11): Firefox leaves a focused control that
+    /// straddles the top of the stuck Save bar behind it. The form wrapper
+    /// that holds the bar runs the clear-the-bar check on every focus move,
+    /// and the check looks up the bar by the class the bar really has.
+    #[test]
+    fn focus_moves_in_the_form_keep_the_control_above_the_save_bar() {
+        let src = include_str!("settings.rs");
+        let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let stack = prod
+            .find("div { class: \"form-stack\",")
+            .expect("form wrapper");
+        let wrapper = &prod[stack..];
+        let handler = wrapper
+            .find("onfocusin: move |_| keep_focus_above_save_bar(),")
+            .expect("focus handler on the form wrapper");
+        // The handler is the wrapper's first attribute, before any child.
+        assert!(!wrapper[..handler].contains('}'), "{}", &wrapper[..handler]);
+        // The bar is inside the wrapper the handler listens on.
+        assert!(wrapper.contains("div { class: \"admin-form-actions settings-save-bar\","));
+        let check = prod
+            .split("fn keep_focus_above_save_bar() {")
+            .nth(1)
+            .expect("check fn");
+        assert!(check.contains(".query_selector(\".settings-save-bar\")"));
+        assert!(check.contains("bar.contains(Some(&focused))"));
+        assert!(check.contains("\"nearest\""));
     }
 
     #[test]

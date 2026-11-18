@@ -107,7 +107,7 @@ pub fn AdminLayout() -> Element {
     let mut edges = use_signal(|| (false, false));
     let route_key = route.to_string();
     use_effect(use_reactive((&route_key, &allowed), move |(_, _)| {
-        reveal_active_subnav_tab();
+        reveal_subnav_tab("a.is-active");
         edges.set(subnav_edges());
     }));
     let (more_start, more_end) = edges();
@@ -129,6 +129,9 @@ pub fn AdminLayout() -> Element {
                 aria_label: "Admin",
                 tabindex: "-1",
                 onscroll: move |_| edges.set(subnav_edges()),
+                // Both engines leave a link that is partly in view where it
+                // is when it takes focus, cut off or under a fade.
+                onfocusin: move |_| reveal_subnav_tab("a:focus"),
                 for entry in entries.iter() {
                     Link {
                         key: "{entry.id}",
@@ -153,8 +156,10 @@ pub fn AdminLayout() -> Element {
 
 const SUBNAV_ID: &str = "admin-subnav";
 
-/// Scroll the sub-nav sideways (only sideways) so the current tab is in view.
-fn reveal_active_subnav_tab() {
+/// Scroll the sub-nav sideways (only sideways) so the tab that matches
+/// `selector` (the current tab, or the focused one) is in view and clear of
+/// the edge fades.
+fn reveal_subnav_tab(selector: &str) {
     #[cfg(target_arch = "wasm32")]
     {
         let Some(nav) = web_sys::window()
@@ -163,7 +168,7 @@ fn reveal_active_subnav_tab() {
         else {
             return;
         };
-        let Some(link) = nav.query_selector("a.is-active").ok().flatten() else {
+        let Some(link) = nav.query_selector(selector).ok().flatten() else {
             return;
         };
         let (nav_box, link_box) = (
@@ -176,9 +181,17 @@ fn reveal_active_subnav_tab() {
         let end = start + link_box.width();
         let view = f64::from(nav.client_width());
         let margin = view / 4.0;
-        let next = if start < current {
+        // A tab under an edge fade (`--space-10` wide, see ADMIN_CSS) is not
+        // in view either. Unreadable, the fade counts as none.
+        let fade = web_sys::window()
+            .and_then(|w| w.get_computed_style(&nav).ok().flatten())
+            .and_then(|style| style.get_property_value("--space-10").ok())
+            .and_then(|v| v.trim().trim_end_matches("px").parse::<f64>().ok())
+            .unwrap_or(0.0)
+            .min(margin);
+        let next = if start < current + fade {
             (start - margin).max(0.0)
-        } else if end > current + view {
+        } else if end > current + view - fade {
             end - view + margin
         } else {
             return;
@@ -395,5 +408,34 @@ mod tests {
         assert!(html.contains("class=\"admin-main\""), "{html}");
         assert!(!html.contains("admin-no-access"), "{html}");
         assert!(!html.contains("You do not have access"), "{html}");
+    }
+
+    /// QA 706 nit 2: a sub-nav link that takes focus while partly in view
+    /// (cut off at the edge or under a fade) is scrolled fully into view,
+    /// with the same sideways-only scroll as the current tab, and the fade
+    /// width it clears is the one the mask draws.
+    #[test]
+    fn a_focused_subnav_link_is_scrolled_clear_of_the_edge_and_its_fade() {
+        let src = include_str!("admin.rs");
+        let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let nav = &prod[prod.find("id: SUBNAV_ID,").expect("sub-nav")..];
+        let nav = &nav[..nav.find("for entry in").expect("links")];
+        assert!(
+            nav.contains("onfocusin: move |_| reveal_subnav_tab(\"a:focus\"),"),
+            "{nav}"
+        );
+        assert!(prod.contains("reveal_subnav_tab(\"a.is-active\");"));
+        let reveal = prod
+            .split("fn reveal_subnav_tab(selector: &str) {")
+            .nth(1)
+            .expect("reveal fn");
+        assert!(reveal.contains(".get_property_value(\"--space-10\")"));
+        assert!(reveal.contains("start < current + fade"));
+        assert!(reveal.contains("end > current + view - fade"));
+        let fade = super::ADMIN_CSS
+            .split("nav.admin-subnav.has-more-end {")
+            .nth(1)
+            .expect("end fade");
+        assert!(fade[..fade.find('}').unwrap()].contains("var(--space-10)"));
     }
 }
