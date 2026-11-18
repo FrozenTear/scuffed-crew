@@ -256,6 +256,10 @@ pub(crate) const STATS_VIEWS_CSS: &str = r#"
 }
 .stats-table-wrap {
   box-sizing: border-box;
+  /* The containing block of absolutely placed text in the cells (the
+     visually hidden "No actions"), so it is clipped here too and does not
+     widen the page in Chromium. */
+  position: relative;
   width: 100%;
   max-width: 100%;
   overflow-x: auto;
@@ -1205,6 +1209,16 @@ mod tests {
             .unwrap_or_else(|| panic!("missing rule {selector}"));
         let rest = &css[start..];
         &rest[..rest.find('}').unwrap()]
+    }
+
+    /// At 390 in Chromium the visually hidden "No actions" spans of
+    /// revoked token rows took a containing block outside the scroller and
+    /// let the whole page scroll sideways. The wrap holds them.
+    #[test]
+    fn the_table_scroller_contains_hidden_text_in_its_cells() {
+        let wrap = rule(STATS_VIEWS_CSS, ".stats-table-wrap {");
+        assert!(wrap.contains("overflow-x: auto;"), "{wrap}");
+        assert!(wrap.contains("position: relative;"), "{wrap}");
     }
 
     #[test]
