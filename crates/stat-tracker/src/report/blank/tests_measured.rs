@@ -2,7 +2,7 @@
 //! the committed vision-baseline boards. No member frames.
 
 use super::synth::{self, Layout};
-use super::{board, portrait};
+use super::{board, cells, portrait};
 
 const LAYOUTS: [Layout; 5] = [
     Layout::L1,
@@ -833,16 +833,21 @@ fn a_5v5_frame_gets_a_picture_with_every_name_filled() {
             }
         }
         if width == 2560 {
-            // the stats are kept as captured: E to MIT of every row
+            // the digits of E to MIT of every row are kept as captured, on
+            // one flat colour per row, and read back as drawn
             let src = synth::board_5v5(5);
             for i in 0..10 {
                 let (top, bot) = synth::row_span_5(i);
+                let flat = *out.image.get_pixel(560, top + 3);
                 for y in top + 3..bot - 3 {
                     for x in 560..1040 {
-                        assert_eq!(out.image.get_pixel(x, y), src.get_pixel(x, y), "({x}, {y})");
+                        let (o, s) = (*out.image.get_pixel(x, y), *src.get_pixel(x, y));
+                        assert!(o == s || o == flat, "({x}, {y}) {o:?}");
                     }
                 }
             }
+            let b = board::measure(&src, 5).unwrap();
+            assert_numbers_read(&out.image, &b, "output");
         }
     }
 }
@@ -917,6 +922,371 @@ fn write_synthetic_baseline_boards() {
     ] {
         img.save(baseline_path(name)).unwrap();
     }
+}
+
+/// A synthetic 5v5 board that is see-through like the real one: the world
+/// behind its rows (busy, with in-world nameplate text) shows through at
+/// 20% over the stats. Returns the crop and the nameplate boxes, which lie
+/// under the digits as on the real boards (2026-11-14 kits).
+fn see_through_5v5() -> (RgbImage, Vec<(u32, u32, u32, u32)>) {
+    let mut img = synth::board_5v5(5);
+    let mut plates = Vec::new();
+    for i in 0..10 {
+        let (top, bot) = synth::row_span_5(i);
+        // one nameplate across the E, A and D digits, one by H and MIT
+        let row_plates = [
+            (560, top + 30, 760, top + 50),
+            (840 + 10 * i as u32, top + 52, 1040, top + 70),
+        ];
+        for y in top + 2..bot - 2 {
+            for x in 400..1050 {
+                let on_plate = row_plates.iter().any(|&(x0, y0, x1, y1)| {
+                    (x0..x1).contains(&x) && (y0..y1).contains(&y) && (x - x0) % 14 < 4
+                });
+                let world = if on_plate {
+                    [255, 255, 255]
+                } else {
+                    let v = ((x * 37 + y * 91) % 97) as u8;
+                    [60 + v, 90 + v / 2, 40 + v]
+                };
+                let p = img.get_pixel_mut(x, y);
+                for (c, wv) in p.0.iter_mut().zip(world) {
+                    *c = ((u32::from(*c) * 8 + u32::from(wv) * 2) / 10) as u8;
+                }
+            }
+        }
+        plates.extend(row_plates);
+    }
+    (img, plates)
+}
+
+/// The 5v5 Tab board is see-through, and in-world nameplates behind it
+/// showed in the stat columns of `scoreboard.png` (2026-11-14 kits): the
+/// name-column fallback copied each row whole outside the name column. Now
+/// no pixel of a nameplate behind the board reaches the output, and the
+/// digits on top of it are still kept.
+#[test]
+fn nameplates_behind_a_see_through_5v5_board_are_not_kept() {
+    let (src, plates) = see_through_5v5();
+    let out = super::blank_crop(&src, Some(5), super::Chat::None);
+    assert_eq!(out.board, Ok(()));
+    assert!(out.has_picture());
+    assert_eq!(out.name_fill_rows, 10);
+    // a pixel of the clean board in its row tint is no digit: there only the
+    // nameplate and the world behind show, and the output is the flat colour
+    let clean = synth::board_5v5(5);
+    let mut plate_px = 0;
+    for (i, &(x0, y0, x1, y1)) in plates.iter().enumerate() {
+        let (top, _) = synth::row_span_5(i / 2);
+        let tint = if i / 2 >= 5 {
+            synth::TINT_T2
+        } else {
+            synth::TINT_T1
+        };
+        let flat = *out.image.get_pixel(560, top + 4);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                if *clean.get_pixel(x, y) == tint {
+                    let o = *out.image.get_pixel(x, y);
+                    assert_eq!(o, flat, "plate {i} ({x}, {y}): nameplate pixel kept");
+                    plate_px += 1;
+                }
+            }
+        }
+    }
+    assert!(plate_px > 20_000, "{plate_px} plate px checked");
+    // the digits drawn over the nameplates still read as drawn
+    let b = board::measure(&src, 5).unwrap();
+    assert_numbers_read(&out.image, &b, "output");
+}
+
+/// Every portrait cell stays fill on every board ([`super::COPY_PORTRAITS`]
+/// off), and the name-column fallback is no exception: a bright hero
+/// portrait (grey 200 to 249, light enough to pass as a digit) comes out as the
+/// row's flat colour across its whole cell, from `L` to the name column
+/// (QA on PR 702: v13 kept its light pixels as a white silhouette).
+#[test]
+fn a_bright_portrait_on_a_see_through_5v5_board_is_filled() {
+    let (mut src, _) = see_through_5v5();
+    let b = board::measure(&src, 5).unwrap();
+    let (c0, c1) = (b.l, b.name.0);
+    assert!(c1 > c0 + 40, "portrait cell {c0}..{c1}");
+    for i in 0..10 {
+        let (top, bot) = synth::row_span_5(i);
+        for y in top..bot {
+            for x in c0..c1 {
+                // a white silhouette with grey shading
+                let v = 200 + ((x * 7 + y * 3) % 50) as u8;
+                src.put_pixel(x, y, image::Rgb([v, v, v.saturating_sub(10)]));
+            }
+        }
+    }
+    let out = super::blank_crop(&src, Some(5), super::Chat::None);
+    assert_eq!(out.board, Ok(()));
+    assert_eq!(out.name_fill_rows, 10);
+    // no silhouette pixel is copied
+    for i in 0..10 {
+        let (top, bot) = synth::row_span_5(i);
+        for y in top..bot {
+            for x in c0..c1 {
+                let o = *out.image.get_pixel(x, y);
+                assert_ne!(o, *src.get_pixel(x, y), "({x}, {y}) kept {o:?}");
+            }
+        }
+    }
+    // every row's whole cell is its flat colour, the name column fill
+    for r in b.rows.iter().filter(|r| r.verified) {
+        let flat = *out.image.get_pixel(1045, r.top + 4);
+        for y in r.top..r.bot {
+            for x in c0..c1 {
+                let o = *out.image.get_pixel(x, y);
+                assert_eq!(o, flat, "row {}/{} ({x}, {y})", r.team, r.idx);
+            }
+            for x in c1..b.name.1 {
+                let o = *out.image.get_pixel(x, y);
+                assert_eq!(o, super::FILL, "row {}/{} ({x}, {y})", r.team, r.idx);
+            }
+        }
+    }
+}
+
+/// Fail safe: when the fallback cannot place the portrait cell (the name
+/// column does not sit inside the table), a row keeps nothing left of its
+/// first stat column, and still keeps its digits.
+#[test]
+fn a_fallback_row_with_no_portrait_cell_keeps_nothing_left_of_its_stats() {
+    let (src, _) = see_through_5v5();
+    let mut b = board::measure(&src, 5).unwrap();
+    let stat0 = b.wins[0].0 as u32;
+    b.name = (b.name.1, b.name.0);
+    let (w, h) = src.dimensions();
+    let mut out = super::BlankedBoard {
+        image: RgbImage::from_pixel(w, h, super::FILL),
+        board: Ok(()),
+        rows: Vec::new(),
+        name_fill_rows: 0,
+    };
+    super::name_column_fallback(&src, &b, super::Chat::None, &mut out);
+    assert_eq!(out.name_fill_rows, 10);
+    assert!(stat0 > b.name.0, "first stat column at {stat0}");
+    for r in b.rows.iter().filter(|r| r.verified) {
+        for y in r.top..r.bot {
+            for x in 0..stat0 {
+                let o = *out.image.get_pixel(x, y);
+                assert_eq!(o, super::FILL, "row {}/{} ({x}, {y})", r.team, r.idx);
+            }
+        }
+    }
+    // the digits are still kept
+    assert_numbers_read(&out.image, &b, "output");
+}
+
+/// Each verified row's six cells, read from `img` with the board's geometry.
+fn read_rows(img: &RgbImage, b: &board::Board) -> Vec<[Option<u32>; 6]> {
+    let n = cells::output_ink(img);
+    b.rows
+        .iter()
+        .filter(|r| r.verified)
+        .map(|r| cells::read_row(&n, b, r))
+        .collect()
+}
+
+/// The values [`synth::board_5v5`] draws, row by row.
+fn values_5v5() -> Vec<[Option<u32>; 6]> {
+    (0..10)
+        .map(|i| synth::VALUES[if i < 5 { i } else { i + 1 }].map(Some))
+        .collect()
+}
+
+/// A [`see_through_5v5`] board blanked by the fallback, with its geometry.
+fn fallback_5v5(src: &RgbImage) -> (super::BlankedBoard, board::Board) {
+    let b = board::measure(src, 5).unwrap();
+    let out = super::blank_crop(src, Some(5), super::Chat::None);
+    assert_eq!(out.board, Ok(()));
+    assert_eq!(out.name_fill_rows, 10);
+    (out, b)
+}
+
+/// Light text drawn over a row (a perk tooltip: Vision on PR 702, kit
+/// 5e4947db3a75b5fa) is kept by the fallback only where it falls inside a
+/// digit cell. Over the perk icons, above and below the digit band and
+/// past the MIT cell, the row is its flat colour or fill.
+#[test]
+fn light_text_over_a_fallback_row_is_kept_only_in_its_digit_cells() {
+    const TEXT: image::Rgb<u8> = image::Rgb([235, 235, 235]);
+    let (mut src, _) = see_through_5v5();
+    let b = board::measure(&src, 5).unwrap();
+    let (n1, r) = (b.name.1, b.r);
+    let mut drawn = Vec::new();
+    for i in 0..10 {
+        let (top, bot) = synth::row_span_5(i);
+        // a line of "text" across the whole row right of the name column,
+        // once over the digits and once in the row's top margin
+        for y in [top + 8, top + 9, top + 40, top + 41] {
+            for x in (n1..r).filter(|x| x % 5 < 3) {
+                src.put_pixel(x, y, TEXT);
+                drawn.push((i, x, y));
+            }
+        }
+        assert!(top + 41 < bot);
+    }
+    let (out, b) = fallback_5v5(&src);
+    let rows: Vec<&board::Row> = b.rows.iter().filter(|r| r.verified).collect();
+    let mut in_cells = 0;
+    for &(i, x, y) in &drawn {
+        let row = rows[i];
+        let (d0, d1) = cells::digit_band(row, b.s, src.height());
+        let in_cell = (d0..d1).contains(&(y as usize))
+            && b.wins.iter().any(|&(a, z)| (a..z).contains(&(x as usize)));
+        let o = *out.image.get_pixel(x, y);
+        if in_cell {
+            // the known limit: text over a digit cell passes as a digit
+            in_cells += 1;
+        } else {
+            assert_ne!(
+                o, TEXT,
+                "row {i} ({x}, {y}): text kept outside the digit cells"
+            );
+        }
+    }
+    assert!(
+        in_cells > 0 && in_cells < drawn.len() / 2,
+        "{in_cells} of {}",
+        drawn.len()
+    );
+}
+
+/// On 5v5 the rows end before the header strip does, and the world shows
+/// between the MIT cell and `R`. The fallback fills that strip, so even a
+/// bright world (grey 235 there) is not kept.
+#[test]
+fn the_strip_past_the_mit_cell_is_fill_on_a_fallback_row() {
+    const WORLD: image::Rgb<u8> = image::Rgb([235, 235, 235]);
+    let (mut src, _) = see_through_5v5();
+    let b = board::measure(&src, 5).unwrap();
+    let stat1 = b.wins[5].1 as u32;
+    assert!(stat1 < b.r, "MIT cell ends at {stat1}, R {}", b.r);
+    for i in 0..10 {
+        let (top, bot) = synth::row_span_5(i);
+        for y in top..bot {
+            for x in stat1..b.r {
+                src.put_pixel(x, y, WORLD);
+            }
+        }
+    }
+    let (out, b) = fallback_5v5(&src);
+    for r in b.rows.iter().filter(|r| r.verified) {
+        for y in r.top..r.bot {
+            for x in stat1..b.r {
+                let o = *out.image.get_pixel(x, y);
+                assert_eq!(o, super::FILL, "row {}/{} ({x}, {y})", r.team, r.idx);
+            }
+        }
+    }
+    assert_numbers_read(&out.image, &b, "output");
+}
+
+/// Every number of a fallback output reads back as drawn, on the plain and
+/// the see-through synthetic 5v5 board (Vision on PR 702).
+#[test]
+fn the_fallback_output_reads_back_like_its_source() {
+    for (name, src) in [
+        ("5v5", synth::board_5v5(5)),
+        ("see-through 5v5", see_through_5v5().0),
+    ] {
+        let (out, b) = fallback_5v5(&src);
+        assert_eq!(read_rows(&src, &b), values_5v5(), "{name} source");
+        assert_numbers_read(&out.image, &b, name);
+    }
+}
+
+/// Every number of [`synth::board_5v5`], grey zeros included, reads back
+/// from `img`. The board draws its zeros like real dim zeros (a flat stroke
+/// at the real grey, see `synth::Ink::Flat`), so they keep their ring under
+/// the light test as the real crops do in
+/// `real_grey_zeros_read_back_from_the_fallback`.
+fn assert_numbers_read(img: &RgbImage, b: &board::Board, what: &str) {
+    let got = read_rows(img, b);
+    let want = values_5v5();
+    assert_eq!(got.len(), want.len(), "{what}");
+    for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+        assert_eq!(g, w, "{what} row {i}");
+    }
+}
+
+/// Real grey zeros (crops of real 1440p frames, `test-data/vision-baseline`)
+/// keep their whole ring under the fallback's light test: pasted into the
+/// six cells of a row and blanked by the fallback, they still read as 0.
+#[test]
+fn real_grey_zeros_read_back_from_the_fallback() {
+    let files = [
+        "native_purple_deaths_dim0.png",
+        "native_purple_healing_dim0.png",
+        "native_yellow_mitigation_dim0.png",
+        "native_yellow_mitigation_dim0_wide_counter.png",
+    ];
+    let mut src = synth::board(Layout::L4);
+    let b = board::measure(&src, 6).unwrap();
+    let row = b.rows.iter().filter(|r| r.verified).nth(1).unwrap().clone();
+    let (d0, d1) = cells::digit_band(&row, b.s, src.height());
+    for k in 0..6 {
+        let cell = super::reader::tests::fixture(files[k % 4]).to_rgb8();
+        let (cw, ch) = cell.dimensions();
+        // the glyph's box: pixels with every channel at least 100
+        let pts: Vec<(u32, u32)> = (0..ch)
+            .flat_map(|y| (0..cw).map(move |x| (x, y)))
+            .filter(|&(x, y)| cell.get_pixel(x, y).0.iter().all(|&c| c >= 100))
+            .collect();
+        let gx0 = pts.iter().map(|p| p.0).min().unwrap();
+        let gx1 = pts.iter().map(|p| p.0).max().unwrap() + 1;
+        let gy0 = pts.iter().map(|p| p.1).min().unwrap();
+        let gy1 = pts.iter().map(|p| p.1).max().unwrap() + 1;
+        // erase the synthetic cell, then paste the real glyph with 3 px of
+        // its own background, centred on the column, top at row top + 30
+        let (w0, w1) = b.wins[k];
+        for y in d0..d1 {
+            for x in w0..w1 {
+                src.put_pixel(x as u32, y as u32, synth::TINT_T1);
+            }
+        }
+        let cx = b.cols[k].round() as i64 - i64::from(gx0 + gx1) / 2;
+        let cy = i64::from(row.top) + 30 - i64::from(gy0);
+        for y in gy0.saturating_sub(3)..(gy1 + 3).min(ch) {
+            for x in gx0.saturating_sub(3)..(gx1 + 3).min(cw) {
+                let (tx, ty) = ((cx + i64::from(x)) as u32, (cy + i64::from(y)) as u32);
+                src.put_pixel(tx, ty, *cell.get_pixel(x, y));
+            }
+        }
+    }
+    let (w, h) = src.dimensions();
+    let mut out = super::BlankedBoard {
+        image: RgbImage::from_pixel(w, h, super::FILL),
+        board: Ok(()),
+        rows: Vec::new(),
+        name_fill_rows: 0,
+    };
+    super::name_column_fallback(&src, &b, super::Chat::None, &mut out);
+    let read = |img: &RgbImage| cells::read_row(&cells::output_ink(img), &b, &row);
+    assert_eq!(read(&src), [Some(0); 6], "source");
+    assert_eq!(read(&out.image), [Some(0); 6], "output");
+}
+
+/// Fail safe: a see-through 5v5 board whose geometry cannot be measured
+/// (here the world behind breaks up its header strip) keeps no picture at
+/// all, so the kit saves the reads and no `scoreboard.png`.
+#[test]
+fn a_see_through_5v5_board_that_cannot_be_measured_keeps_no_picture() {
+    let (mut src, _) = see_through_5v5();
+    for y in 0..synth::T1_5 {
+        for x in (0..synth::R5).filter(|x| x % 9 < 4) {
+            let v = ((x * 37 + y * 91) % 97) as u8;
+            src.put_pixel(x, y, image::Rgb([60 + v, 90 + v / 2, 40 + v]));
+        }
+    }
+    let out = super::blank_crop(&src, Some(5), super::Chat::None);
+    assert!(out.board.is_err());
+    assert!(!out.has_picture());
+    assert!(out.image.pixels().all(|p| *p == super::FILL));
 }
 
 /// A half-drawn 5v5 board never shows a name, whatever it keeps.

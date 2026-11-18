@@ -137,6 +137,50 @@ pub fn truncate_pubkey(pubkey: &str) -> String {
     }
 }
 
+/// A crew member as `/api/members` returns them, reduced to what DMs need:
+/// the name to show and the Nostr key to match a conversation or a
+/// recipient against.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct DmMember {
+    pub id: String,
+    pub display_name: String,
+    #[serde(default)]
+    pub nostr_pubkey: Option<String>,
+}
+
+/// One page of `/api/members`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DmMemberPage {
+    pub data: Vec<DmMember>,
+    #[serde(default)]
+    pub next_cursor: Option<String>,
+}
+
+/// The name to show for a peer: the server's display name when it sends one,
+/// else the crew member whose Nostr key matches, else a short npub label.
+pub fn peer_label(pubkey: &str, server_name: Option<&str>, members: &[DmMember]) -> String {
+    if let Some(name) = server_name.map(str::trim).filter(|s| !s.is_empty()) {
+        return name.to_string();
+    }
+    members
+        .iter()
+        .find(|m| {
+            m.nostr_pubkey
+                .as_deref()
+                .is_some_and(|pk| pk.trim().eq_ignore_ascii_case(pubkey.trim()))
+        })
+        .map(|m| m.display_name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| truncate_pubkey(pubkey))
+}
+
+/// Up to two initials for an avatar: the shared rule
+/// (`components::ui::avatar::name_initials`) the account avatar and the
+/// article byline use too ("Player02" is "P2", "Player Two" is "PT").
+pub fn avatar_initials(name: &str) -> String {
+    crate::components::ui::avatar::name_initials(name)
+}
+
 /// Render an RFC3339 timestamp as a relative label ("2m", "3h", "5d").
 pub fn relative_time(rfc3339: &str) -> String {
     let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(rfc3339) else {
@@ -161,6 +205,43 @@ pub fn relative_time(rfc3339: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn member(name: &str, pk: Option<&str>) -> DmMember {
+        DmMember {
+            id: format!("member:{name}"),
+            display_name: name.to_string(),
+            nostr_pubkey: pk.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn peers_show_by_name_when_the_app_can_resolve_them() {
+        let pk = "ab".repeat(32);
+        let members = vec![member("Player02", Some(&pk)), member("Player03", None)];
+        // The server's name wins.
+        assert_eq!(peer_label(&pk, Some("Player09"), &members), "Player09");
+        // A blank server name falls back to the member list, any key case.
+        assert_eq!(peer_label(&pk, Some("  "), &members), "Player02");
+        assert_eq!(
+            peer_label(&pk.to_ascii_uppercase(), None, &members),
+            "Player02"
+        );
+        // Nobody matches: the short npub label, never the full key.
+        let stranger = "cd".repeat(32);
+        assert_eq!(
+            peer_label(&stranger, None, &members),
+            truncate_pubkey(&stranger)
+        );
+    }
+
+    #[test]
+    fn avatar_initials_take_two_characters() {
+        assert_eq!(avatar_initials("Player02"), "P2");
+        assert_eq!(avatar_initials("Player03"), "P3");
+        assert_eq!(avatar_initials("Player Two"), "PT");
+        assert_eq!(avatar_initials("npub1\u{2026}abcdef"), "N1");
+        assert_eq!(avatar_initials(""), "?");
+    }
 
     #[test]
     fn dm_errors_map_412_403_503_and_otherwise_keep_the_string() {

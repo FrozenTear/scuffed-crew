@@ -12,6 +12,7 @@ pub mod types;
 
 pub use compose::DmComposeModal;
 pub use conversation_list::{ConversationList, ConversationListState};
+#[allow(unused_imports)]
 pub use failure::DmFailureNotice;
 pub use message_thread::MessageThread;
 pub use types::*;

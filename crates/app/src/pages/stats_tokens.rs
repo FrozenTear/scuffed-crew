@@ -6,8 +6,13 @@ use serde::Deserialize;
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::{CreateDaemonTokenRequest, CreateDaemonTokenResponse};
 
-use crate::components::{DataTable, FormModal, Toast, member_pending, use_toast};
+use super::stats_member::{Col, STATS_VIEWS_CSS, STATS_VIEWS_CSS_ID, StatsTable};
+use crate::components::ui::{
+    EmptyCard, FieldError, InlineConfirm, PageHeader, PageShell, PageWidth,
+};
+use crate::components::{FormModal, Toast, member_pending, use_toast};
 use crate::hooks::{ModalController, use_api};
+use crate::layouts::focus_element;
 use crate::state::use_auth;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -22,65 +27,82 @@ struct DaemonToken {
 }
 
 const TOKENS_CSS: &str = r#"
-    .tokens-page {
-        max-width: 900px;
-        margin: 0 auto;
-        padding: 2rem 1.5rem;
-    }
-    .tokens-page h1 {
-        font-family: var(--font-head);
-        font-size: 1.8rem;
-        color: var(--text);
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-    }
-    .tracker-setup {
-        background: var(--surface);
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        padding: 1rem;
-        margin-bottom: 1.5rem;
-    }
-    .tracker-setup.has-token {
-        border-color: var(--accent-solid);
-    }
-    .tracker-setup h2 {
-        font-family: var(--font-head);
-        font-size: 1rem;
-        color: var(--text);
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-        margin: 0 0 0.5rem;
-    }
-    .tracker-setup p {
-        color: var(--text-3);
-        font-size: 0.85rem;
-        margin: 0 0 0.5rem;
-    }
-    .tracker-setup a {
-        color: var(--accent-text);
-        font-size: 0.85rem;
-    }
-    .tracker-setup code {
-        display: block;
-        background: var(--bg);
-        border: 1px solid var(--border);
-        border-radius: 4px;
-        padding: 0.6rem 0.75rem;
-        font-family: var(--font-mono);
-        font-size: 0.8rem;
-        color: var(--accent-text);
-        word-break: break-all;
-        margin: 0.5rem 0;
-        user-select: all;
-    }
-    .tracker-setup-actions {
-        display: flex;
-        gap: 0.5rem;
-        flex-wrap: wrap;
-        align-items: center;
-        margin-top: 0.75rem;
-    }
+.tokens-page .tracker-setup {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+  padding: var(--card-padding);
+  background: var(--card-bg);
+  color: var(--card-fg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--card-radius);
+  box-shadow: var(--card-shadow);
+}
+/* A new token is on show: a stronger border plus the words "Your new token". */
+.tokens-page .tracker-setup.has-token { border-color: var(--accent-solid); }
+/* The new token: its caption reads like the card's other lines. */
+.tokens-page .tracker-new-token {
+  display: grid;
+  gap: var(--space-3);
+  margin: 0;
+  min-width: 0;
+}
+.tokens-page .tracker-setup p,
+.tokens-page .tracker-new-token figcaption {
+  margin: 0;
+  max-width: var(--content-max-narrow);
+  color: var(--text-3);
+  font-family: var(--font-body);
+  font-size: var(--text-md);
+  line-height: var(--leading-body);
+}
+.tokens-page .tracker-setup a {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--hit-target-min);
+  color: var(--accent-text);
+  text-decoration: underline;
+}
+.tokens-page .tracker-setup a:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+.tokens-page .tracker-setup code {
+  display: block;
+  padding: var(--space-3);
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text);
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+.tokens-page .tracker-setup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+.tokens-page .token-date { white-space: nowrap; color: var(--table-row-muted); }
+/* The Revoke confirm strip sits in the Actions cell in place of the button.
+   The cell is nowrap; the strip wraps, and its title repeats the label. */
+.tokens-page .token-revoke-confirm { min-width: 15em; white-space: normal; text-align: start; }
+.tokens-page .token-revoke-confirm .inline-confirm__title { overflow-wrap: anywhere; }
+/* The shared strip's buttons are 38px tall; here they meet the 44px target
+   every other control on the page has, phone widths included. */
+.tokens-page .token-revoke-confirm .inline-confirm__cancel,
+.tokens-page .token-revoke-confirm .inline-confirm__go { min-height: var(--hit-target-min); }
+/* The dialog may render outside the page container. */
+.token-form-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
 "#;
 
 /// First-run sync setup is documented in the stat-tracker readme (Running).
@@ -119,8 +141,118 @@ fn dispatch_copy(token: &str, on_copy: EventHandler<String>) {
     on_copy.call(token_clipboard_text(token));
 }
 
+/// "12 Nov 2026, 21:00 UTC+1": the date style of the frames on the
+/// viewer's own clock, with its offset, as the stats match page shows a
+/// game's time.
 fn format_date(dt: &DateTime<Utc>) -> String {
-    dt.format("%b %d, %Y %H:%M").to_string()
+    super::stats::local_date_time(dt)
+}
+
+/// The "Your tokens" heading. After a Revoke, the row's button is gone, so
+/// focus moves here instead of falling to the body.
+const TOKENS_LIST_TITLE_ID: &str = "tokens-list-title";
+/// The label input in the New token form, and its error line.
+const LABEL_INPUT_ID: &str = "daemon-token-label";
+const LABEL_ERROR_ID: &str = "daemon-token-label-err";
+/// The two buttons that open the New token form: the header's, and the
+/// empty list's. The form gives focus back to the one that opened it.
+const NEW_TOKEN_BUTTON_ID: &str = "tokens-new";
+const NEW_TOKEN_EMPTY_BUTTON_ID: &str = "tokens-new-empty";
+
+/// Why the New token form refuses a label, if it does. The server needs a
+/// label to tell tokens apart.
+fn label_error(label: &str) -> Option<&'static str> {
+    label
+        .trim()
+        .is_empty()
+        .then_some("Give the token a label, for example my-desktop.")
+}
+
+/// Id prefix of a row's Revoke confirm strip: the token id plus the action,
+/// never a counter. The row's Revoke button is `{prefix}-trigger`, the id
+/// `InlineConfirm` gives focus back to on Cancel or Esc.
+fn revoke_confirm_id(token_id: &str) -> String {
+    let safe: String = token_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    format!("token-{safe}-revoke")
+}
+
+/// Id of a row's Revoke button.
+fn revoke_button_id(token_id: &str) -> String {
+    format!("{}-trigger", revoke_confirm_id(token_id))
+}
+
+/// The confirm strip's question, naming the token.
+fn revoke_confirm_title(label: &str) -> String {
+    format!("Revoke token {label}?")
+}
+
+const REVOKE_CONFIRM_BODY: &str = "The tracker using it stops uploading. This cannot be undone.";
+
+/// After the strip renders, scroll all of it into view. Focus lands on
+/// Cancel, which only brings Cancel into the table's sideways scroller; on
+/// a phone the strip's Revoke would stay past the scroller's edge.
+fn reveal_revoke_confirm_soon(prefix: String) {
+    dioxus::core::spawn_forever(async move {
+        #[cfg(feature = "web")]
+        {
+            gloo_timers::future::TimeoutFuture::new(0).await;
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            use wasm_bindgen::JsCast;
+            let Some(strip) = web_sys::window()
+                .and_then(|window| window.document())
+                .and_then(|document| document.get_element_by_id(&format!("{prefix}-title")))
+                .and_then(|title| title.closest(".inline-confirm").ok().flatten())
+            else {
+                return;
+            };
+            let options = js_sys::Object::new();
+            let _ = js_sys::Reflect::set(&options, &"block".into(), &"nearest".into());
+            let _ = js_sys::Reflect::set(&options, &"inline".into(), &"nearest".into());
+            let scroll = js_sys::Reflect::get(&strip, &"scrollIntoView".into()).ok();
+            if let Some(scroll) = scroll
+                .as_ref()
+                .and_then(|f| f.dyn_ref::<js_sys::Function>())
+            {
+                let _ = scroll.call1(&strip, &options);
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = prefix;
+        }
+    });
+}
+
+/// What the row's Actions cell shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RevokeCell {
+    /// A revoked token: nothing to do.
+    None,
+    /// The Revoke button.
+    Button,
+    /// The confirm strip in place of the button.
+    Confirm,
+}
+
+fn revoke_cell(token: &DaemonToken, confirming: Option<&str>) -> RevokeCell {
+    if !token.is_active {
+        RevokeCell::None
+    } else if confirming == Some(token.id.as_str()) {
+        RevokeCell::Confirm
+    } else {
+        RevokeCell::Button
+    }
 }
 
 async fn copy_daemon_token(text: &str) -> Result<(), &'static str> {
@@ -170,8 +302,8 @@ fn TrackerSetupBox(
         .map(|_| tracker_setup_body(&tracker_site_address()));
     let shown = token.clone();
     rsx! {
-        div { class: "{class}",
-            h2 { "{TRACKER_SETUP_TITLE}" }
+        section { class: "{class}", aria_labelledby: "tracker-setup-title",
+            h2 { id: "tracker-setup-title", class: "ui-section-title", "{TRACKER_SETUP_TITLE}" }
             if let Some(body) = setup_body {
                 p { "{body}" }
             }
@@ -181,19 +313,26 @@ fn TrackerSetupBox(
                     target: "_blank",
                     rel: "noopener noreferrer",
                     "Stat tracker setup"
+                    span { class: "visually-hidden", " (opens in a new tab)" }
                 }
             }
             if let Some(raw) = shown {
-                p { "Your new token:" }
-                code { "{raw}" }
+                // `aria-labelledby` does not name a `code` element, so the
+                // label and the token are one figure with a caption.
+                figure { class: "tracker-new-token",
+                    figcaption { "Your new token. Copy it now: it is shown only once." }
+                    code { "{raw}" }
+                }
                 div { class: "tracker-setup-actions",
                     button {
-                        class: "btn-add",
+                        r#type: "button",
+                        class: "btn is-primary",
                         onclick: move |_| dispatch_copy(&raw, on_copy),
                         "Copy token"
                     }
                     button {
-                        class: "btn-cancel",
+                        r#type: "button",
+                        class: "btn is-ghost",
                         onclick: move |evt| on_dismiss.call(evt),
                         "Dismiss"
                     }
@@ -211,23 +350,37 @@ pub fn StatsTokens() -> Element {
 
     let mut modal = ModalController::<String>::new();
     let mut form_label = use_signal(|| "default".to_string());
+    // The label's error line. Always rendered with the form; only its text
+    // changes, so a new error is announced.
+    let mut form_error = use_signal(String::new);
 
     let mut revealed_token: Signal<Option<String>> = use_signal(|| None);
 
-    let open_create = move |_| {
+    // The button that opened the form, so closing it can give focus back.
+    let mut form_opener = use_signal(|| NEW_TOKEN_BUTTON_ID);
+
+    let mut open_create = move |opener: &'static str| {
         form_label.set("default".to_string());
+        form_error.set(String::new());
+        form_opener.set(opener);
         modal.show_empty();
     };
 
+    // Cancel, a click outside or Esc. The shared dialog handles Esc itself
+    // (it asks first once the label changed) and gives focus back to
+    // `restore_focus_id`, the button that opened it.
     let on_close = move |_| {
         modal.close();
     };
 
     let on_submit = move |_| {
         let label = form_label().trim().to_string();
-        if label.is_empty() {
+        if let Some(error) = label_error(&label) {
+            form_error.set(error.to_string());
+            focus_element(LABEL_INPUT_ID);
             return;
         }
+        form_error.set(String::new());
 
         modal.start_submit();
         spawn(async move {
@@ -265,31 +418,79 @@ pub fn StatsTokens() -> Element {
         revealed_token.set(None);
     };
 
+    // The token whose Revoke confirm strip is open, and whether its DELETE
+    // is in flight. Revoke only opens the strip; the strip's Revoke sends.
+    let mut confirming: Signal<Option<String>> = use_signal(|| None);
+    let mut revoking = use_signal(|| false);
+
     let on_revoke = move |token_id: String| {
+        if revoking() {
+            return;
+        }
+        revoking.set(true);
         spawn(async move {
             let result = ApiClient::web()
                 .delete(&format!("/api/stats/tokens/{token_id}"))
                 .await;
+            revoking.set(false);
             match result {
                 Ok(()) => {
+                    confirming.set(None);
                     toast.show(Toast::success("Token revoked."));
+                    focus_element(TOKENS_LIST_TITLE_ID);
                     tokens.refresh += 1;
                 }
                 Err(e) => {
+                    // The strip stays open, focus stays on its Revoke.
                     toast.show(Toast::error(format!("Failed: {e}")));
                 }
             }
         });
     };
 
+    let actions = RevokeActions {
+        confirming: confirming.read().clone(),
+        busy: revoking(),
+        on_ask: EventHandler::new(move |token_id: String| {
+            reveal_revoke_confirm_soon(revoke_confirm_id(&token_id));
+            confirming.set(Some(token_id));
+        }),
+        on_confirm: EventHandler::new(on_revoke),
+        on_cancel: EventHandler::new(move |_: ()| confirming.set(None)),
+    };
+
+    // Read once here, so no read guard is held while the children render.
+    let token_count = tokens
+        .data
+        .read()
+        .as_ref()
+        .and_then(|d| d.as_ref())
+        .map(Vec::len);
+    let status = match token_count {
+        None => String::new(),
+        Some(0) => "No tracker tokens yet.".to_string(),
+        Some(1) => "1 tracker token.".to_string(),
+        Some(n) => format!("{n} tracker tokens."),
+    };
+
     rsx! {
+        crate::styles::StyleOnce { id: STATS_VIEWS_CSS_ID, css: STATS_VIEWS_CSS }
         crate::styles::StyleOnce { id: "scuffed-css-pages-stats_tokens-tokens-css", css: TOKENS_CSS }
         crate::styles::StyleOnce { id: "scuffed-css-admin-shared", css: crate::styles::admin::CSS }
 
-        div { class: "tokens-page",
-            div { class: "admin-toolbar",
-                h1 { "Tracker tokens" }
-                button { class: "btn-add", onclick: open_create, "+ New Token" }
+        PageShell { width: PageWidth::Default, class: "tokens-page",
+            PageHeader {
+                title: "Tracker tokens",
+                lead: "A token lets the stat tracker upload your games to this site. Revoke one and the tracker using it stops uploading.",
+                actions: rsx! {
+                    button {
+                        r#type: "button",
+                        id: NEW_TOKEN_BUTTON_ID,
+                        class: "btn is-primary",
+                        onclick: move |_| open_create(NEW_TOKEN_BUTTON_ID),
+                        "New token"
+                    }
+                },
             }
 
             TrackerSetupBox {
@@ -298,46 +499,51 @@ pub fn StatsTokens() -> Element {
                 on_dismiss: on_dismiss,
             }
 
-            {
-                let data = tokens.data.read();
-                let data = data.as_ref().and_then(|d| d.as_ref());
-                match data {
-                    None => member_pending(&auth(), &tokens, "tracker tokens"),
-                    Some(list) if list.is_empty() => rsx! {
-                        p { class: "empty-state", "No tracker tokens yet. Create one to start uploading stats." }
-                    },
-                    Some(list) => rsx! {
-                        DataTable { headers: vec!["Label", "Status", "Created", "Last Used", "Actions"],
-                            for token in list.iter() {
-                                {
-                                    let tid = token.id.clone();
-                                    let status = if token.is_active { "Active" } else { "Revoked" };
-                                    let status_class = if token.is_active { "status-pill active" } else { "status-pill inactive" };
-                                    let created = format_date(&token.created_at);
-                                    let used = token.last_used_at.as_ref().map(format_date).unwrap_or_else(|| "Never".into());
-                                    rsx! {
-                                        tr { key: "{token.id}",
-                                            td { "{token.label}" }
-                                            td { span { class: "{status_class}", "{status}" } }
-                                            td { "{created}" }
-                                            td { "{used}" }
-                                            td {
-                                                if token.is_active {
-                                                    div { class: "row-actions",
-                                                        button {
-                                                            class: "row-btn danger",
-                                                            onclick: move |_| on_revoke(tid.clone()),
-                                                            "Revoke"
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
+            section { class: "ui-stack", aria_labelledby: TOKENS_LIST_TITLE_ID,
+                h2 {
+                    id: TOKENS_LIST_TITLE_ID,
+                    class: "ui-section-title",
+                    tabindex: "-1",
+                    "Your tokens"
+                }
+                p { class: "visually-hidden", role: "status", "{status}" }
+                {
+                    let data = tokens.data.read();
+                    let data = data.as_ref().and_then(|d| d.as_ref());
+                    match data {
+                        None => member_pending(&auth(), &tokens, "tracker tokens"),
+                        Some(list) if list.is_empty() => rsx! {
+                            EmptyCard {
+                                title: "No tracker tokens yet",
+                                message: "Create a token, then paste it into the tracker to start uploading your games.",
+                                actions: rsx! {
+                                    button {
+                                        r#type: "button",
+                                        id: NEW_TOKEN_EMPTY_BUTTON_ID,
+                                        class: "btn is-primary",
+                                        onclick: move |_| open_create(NEW_TOKEN_EMPTY_BUTTON_ID),
+                                        "Create a token"
                                     }
+                                },
+                            }
+                        },
+                        Some(list) => rsx! {
+                            StatsTable {
+                                labelled_by: TOKENS_LIST_TITLE_ID,
+                                wide: true,
+                                cols: vec![
+                                    Col::Text("Label"),
+                                    Col::Text("Status"),
+                                    Col::Text("Created"),
+                                    Col::Text("Last used"),
+                                    Col::Actions("Actions"),
+                                ],
+                                for token in list.iter() {
+                                    Fragment { key: "{token.id}", {token_row(token, &actions)} }
                                 }
                             }
-                        }
-                    },
+                        },
+                    }
                 }
             }
 
@@ -347,18 +553,108 @@ pub fn StatsTokens() -> Element {
                 submitting: modal.is_submitting(),
                 on_close: on_close,
                 on_submit: on_submit,
+                restore_focus_id: Some(form_opener().to_string()),
 
-                div { class: "form-field",
-                    label { class: "form-label", r#for: "daemon-token-label", "Label" }
+                div { class: "token-form-field",
+                    label { class: "field-label", r#for: LABEL_INPUT_ID, "Label" }
                     input {
-                        id: "daemon-token-label",
-                        name: "daemon-token-label",
-                        class: "form-input",
+                        id: LABEL_INPUT_ID,
+                        name: LABEL_INPUT_ID,
+                        class: "field-input",
                         r#type: "text",
-                        placeholder: "e.g. my-desktop",
+                        placeholder: "For example my-desktop",
+                        aria_invalid: if !form_error().is_empty() { "true" },
+                        aria_describedby: LABEL_ERROR_ID,
                         value: "{form_label}",
-                        oninput: move |e| form_label.set(e.value()),
+                        oninput: move |e| {
+                            form_label.set(e.value());
+                            if !form_error.peek().is_empty() && label_error(&e.value()).is_none() {
+                                form_error.set(String::new());
+                            }
+                        },
                     }
+                    FieldError { id: LABEL_ERROR_ID, text: form_error(), role: "status" }
+                }
+            }
+        }
+    }
+}
+
+/// The Revoke state and handlers every row shares.
+#[derive(Clone)]
+struct RevokeActions {
+    /// Id of the token whose confirm strip is open.
+    confirming: Option<String>,
+    /// The confirmed DELETE is in flight.
+    busy: bool,
+    /// Revoke pressed: open the strip for this token.
+    on_ask: EventHandler<String>,
+    /// The strip's Revoke: send the DELETE for this token.
+    on_confirm: EventHandler<String>,
+    /// Cancel or Esc. `InlineConfirm` moves focus back to the Revoke button.
+    on_cancel: EventHandler<()>,
+}
+
+/// One token row. The status is a word on a soft fill, and the Revoke button
+/// names the token it acts on. Revoke opens a confirm strip in its place.
+fn token_row(token: &DaemonToken, actions: &RevokeActions) -> Element {
+    let tid = token.id.clone();
+    let confirm_tid = token.id.clone();
+    let on_ask = actions.on_ask;
+    let on_confirm = actions.on_confirm;
+    let on_cancel = actions.on_cancel;
+    let cell = revoke_cell(token, actions.confirming.as_deref());
+    let (status, status_class) = if token.is_active {
+        ("Active", "status-pill active")
+    } else {
+        ("Revoked", "status-pill inactive")
+    };
+    let created = format_date(&token.created_at);
+    let created_at = token.created_at.to_rfc3339();
+    let used = token.last_used_at.as_ref().map(format_date);
+    let used_at = token.last_used_at.as_ref().map(DateTime::to_rfc3339);
+    let revoke_id = revoke_button_id(&token.id);
+    let confirm_id = revoke_confirm_id(&token.id);
+    rsx! {
+        tr { key: "{token.id}",
+            th { scope: "row", "{token.label}" }
+            td { span { class: "{status_class}", "{status}" } }
+            td { class: "token-date", time { datetime: "{created_at}", "{created}" } }
+            td { class: "token-date",
+                if let (Some(used), Some(used_at)) = (used, used_at) {
+                    time { datetime: "{used_at}", "{used}" }
+                } else {
+                    "Never"
+                }
+            }
+            td { class: "stats-table-actions",
+                match cell {
+                    RevokeCell::Button => rsx! {
+                        button {
+                            r#type: "button",
+                            id: "{revoke_id}",
+                            class: "btn is-ghost",
+                            aria_label: "Revoke token {token.label}",
+                            onclick: move |_| on_ask.call(tid.clone()),
+                            "Revoke"
+                        }
+                    },
+                    RevokeCell::Confirm => rsx! {
+                        div { class: "token-revoke-confirm",
+                            InlineConfirm {
+                                id: confirm_id,
+                                title: revoke_confirm_title(&token.label),
+                                body: REVOKE_CONFIRM_BODY.to_string(),
+                                confirm_label: "Revoke".to_string(),
+                                busy: actions.busy,
+                                on_confirm: move |_| on_confirm.call(confirm_tid.clone()),
+                                on_cancel: move |_| on_cancel.call(()),
+                            }
+                        }
+                    },
+                    RevokeCell::None => rsx! {
+                        span { class: "visually-hidden", "No actions" }
+                    },
                 }
             }
         }
@@ -392,6 +688,27 @@ mod tests {
         assert!(
             tag.contains("noopener"),
             "readme link missing rel noopener: {tag}"
+        );
+    }
+
+    #[test]
+    fn the_new_token_is_named_by_a_caption_not_by_aria_on_code() {
+        let src = include_str!("stats_tokens.rs");
+        let body = &src[..src.find("#[cfg(test)]").unwrap()];
+        let at = body.find("code { \"{raw}\" }").expect("token");
+        let figure = &body[body[..at].rfind("figure {").expect("figure")..at];
+        assert!(figure.contains("figcaption {"), "{figure}");
+        assert!(
+            !body.contains("code { aria_labelledby"),
+            "no aria name on code"
+        );
+        let rule = crate::components::ui::test_support::css_rule(
+            TOKENS_CSS,
+            ".tokens-page .tracker-new-token {",
+        );
+        assert!(
+            crate::components::ui::test_support::has_decl(&rule, "margin: 0"),
+            "{rule}"
         );
     }
 
@@ -487,9 +804,362 @@ mod tests {
         assert_eq!(copied.as_deref(), Some(token));
     }
 
+    fn token(id: &str, active: bool, used: bool) -> DaemonToken {
+        use chrono::TimeZone;
+        let at = Utc.with_ymd_and_hms(2026, 11, 2, 20, 5, 0).unwrap();
+        DaemonToken {
+            id: id.to_string(),
+            member_id: "member:1".to_string(),
+            label: format!("pc-{id}"),
+            is_active: active,
+            created_at: at,
+            last_used_at: used.then_some(at),
+        }
+    }
+
+    #[test]
+    fn dates_read_like_the_frames() {
+        use chrono::TimeZone;
+        let at = Utc.with_ymd_and_hms(2026, 11, 2, 20, 5, 0).unwrap();
+        // Native tests run on UTC; the browser uses the viewer's clock.
+        assert_eq!(format_date(&at), "2 Nov 2026, 20:05 UTC");
+    }
+
+    /// QA 705 nit 3: Created and Last used are on the viewer's clock with
+    /// its offset, through the same helper as the stats match page, not a
+    /// fixed UTC format.
+    #[test]
+    fn token_dates_use_the_match_page_local_time() {
+        let prod = prod_src();
+        let body = &prod[prod.find("fn format_date(").unwrap()..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        assert!(body.contains("super::stats::local_date_time(dt)"), "{body}");
+        assert!(!prod.contains("UTC\")"), "no date is formatted in UTC here");
+        let game = include_str!("stats/game.rs");
+        assert!(game.contains("super::local_date_time(played_at)"));
+    }
+
+    /// QA 705 nit 1: the shared strip's buttons are 38px; on this page they
+    /// take the 44px hit target, scoped to the tokens strip only.
+    #[test]
+    fn the_revoke_strip_buttons_meet_the_hit_target() {
+        assert!(TOKENS_CSS.contains(
+            ".tokens-page .token-revoke-confirm .inline-confirm__cancel,\n.tokens-page .token-revoke-confirm .inline-confirm__go { min-height: var(--hit-target-min); }"
+        ));
+        // The shared component is left as it is.
+        assert!(
+            !crate::components::ui::inline_confirm::INLINE_CONFIRM_CSS.contains("hit-target-min")
+        );
+        assert!(prod_src().contains(
+            "div { class: \"token-revoke-confirm\",\n                            InlineConfirm {"
+        ));
+    }
+
+    /// QA 705 nit 2: Esc closes the New token form, as it closes the Revoke
+    /// strip, and focus goes back to the button that opened the form. Here
+    /// the shared dialog does both (S4d): Esc closes it (asking first once
+    /// the label changed) and `restore_focus_id` names the opener.
+    #[test]
+    fn esc_closes_the_new_token_form_and_returns_focus_to_its_opener() {
+        let prod = prod_src();
+        let open = &prod[prod
+            .find("let mut open_create = move |opener: &'static str| {")
+            .unwrap()..];
+        let open = &open[..open.find("\n    };\n").unwrap()];
+        assert!(open.contains("form_opener.set(opener);"), "{open}");
+        assert!(open.contains("modal.show_empty();"), "{open}");
+        // The dialog puts focus on its own title; the page does not move it.
+        assert!(!open.contains("focus_element"), "{open}");
+        assert!(prod.contains("onclick: move |_| open_create(NEW_TOKEN_BUTTON_ID),"));
+        assert!(prod.contains("onclick: move |_| open_create(NEW_TOKEN_EMPTY_BUTTON_ID),"));
+        assert!(prod.contains("id: NEW_TOKEN_BUTTON_ID,"));
+        assert!(prod.contains("id: NEW_TOKEN_EMPTY_BUTTON_ID,"));
+        let form = &prod[prod
+            .find("FormModal {\n                title: \"Create tracker token\"")
+            .unwrap()..];
+        let form = &form[..form.find("div { class: \"token-form-field\",").unwrap()];
+        assert!(
+            form.contains("restore_focus_id: Some(form_opener().to_string()),"),
+            "{form}"
+        );
+        assert!(form.contains("on_close: on_close,"), "{form}");
+        // No second Esc handler around the dialog: the shared one stops the
+        // key, and a wrapper would never see it.
+        assert!(!prod.contains("token-form-keys"));
+        assert!(!TOKENS_CSS.contains("token-form-keys"));
+        // The shared dialog: Esc on the overlay closes it through the same
+        // request as Cancel, and focus goes back on any close.
+        let shared = include_str!("../components/admin_shared.rs");
+        let shared = &shared[shared.find("fn FormModalOpen(").unwrap()..];
+        assert!(shared.contains("if key_cancels(&evt.key()) {"));
+        assert!(shared.contains("request_close.call(());"));
+        assert!(
+            shared.contains("use_drop(move || restore_focus_if_lost_soon(restore_focus.clone()));")
+        );
+    }
+
+    /// Row actions that do nothing, with the strip open for `confirming`.
+    fn noop_actions(confirming: Option<&str>) -> RevokeActions {
+        RevokeActions {
+            confirming: confirming.map(str::to_string),
+            busy: false,
+            on_ask: EventHandler::new(|_: String| {}),
+            on_confirm: EventHandler::new(|_: String| {}),
+            on_cancel: EventHandler::new(|_: ()| {}),
+        }
+    }
+
+    fn prod_src() -> &'static str {
+        include_str!("stats_tokens.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap()
+    }
+
+    #[test]
+    fn rows_say_the_status_in_words_and_name_the_revoke_button() {
+        fn view() -> Element {
+            rsx! {
+                h2 { id: "tokens-list-title", "Your tokens" }
+                StatsTable {
+                    labelled_by: "tokens-list-title",
+                    wide: true,
+                    cols: vec![Col::Text("Label"), Col::Text("Status"), Col::Text("Created"), Col::Text("Last used"), Col::Actions("Actions")],
+                    {token_row(&token("a:1", true, true), &noop_actions(None))}
+                    {token_row(&token("b2", false, false), &noop_actions(None))}
+                }
+            }
+        }
+        let html = render(view);
+        assert!(
+            html.contains("<span class=\"status-pill active\">Active</span>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<span class=\"status-pill inactive\">Revoked</span>"),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                "<time datetime=\"2026-11-02T20:05:00+00:00\">2 Nov 2026, 20:05 UTC</time>"
+            ),
+            "{html}"
+        );
+        assert!(html.contains("Never"), "{html}");
+        // Only the active token can be revoked. Its button id comes from the
+        // token id, and its name says which token it revokes.
+        assert_eq!(html.matches("<button").count(), 1, "{html}");
+        assert!(html.contains("id=\"token-a_1-revoke-trigger\""), "{html}");
+        assert!(
+            html.contains("aria-label=\"Revoke token pc-a:1\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("role=\"region\" aria-labelledby=\"tokens-list-title\" tabindex=\"0\""),
+            "{html}"
+        );
+        assert!(!html.contains("<a "), "no link wraps a button: {html}");
+        // The Actions header is right-aligned over the Revoke buttons.
+        assert!(
+            html.contains("class=\"stats-table-actions\">Actions</th>"),
+            "{html}"
+        );
+        assert_plain_copy(&html);
+    }
+
+    #[test]
+    fn page_css_uses_tokens_only() {
+        for line in TOKENS_CSS.lines() {
+            let decl = line.trim();
+            if decl.starts_with("/*") || !decl.contains(':') {
+                continue;
+            }
+            assert!(!decl.contains("rem") && !decl.contains('#'), "{decl}");
+            assert!(!decl.contains("px") || decl.contains("1px solid"), "{decl}");
+        }
+        let src = include_str!("stats_tokens.rs");
+        assert!(!src.contains(&["<", "main"].concat()) && !src.contains(&["main", " {"].concat()));
+    }
+
     #[test]
     fn copy_says_tracker_tokens() {
         let src = include_str!("stats_tokens.rs");
         assert!(!src.contains(&["Daemon", " Token"].concat()));
+    }
+
+    /// QA 705 nit 6: Save with an empty label says why, in the field's
+    /// error line. The line is always rendered with the form (only its text
+    /// changes), the input points at it, and focus goes back to the input.
+    #[test]
+    fn an_empty_label_is_refused_with_a_message() {
+        assert!(label_error("").is_some());
+        assert!(label_error("   \t").is_some());
+        assert_eq!(label_error(" my-desktop "), None);
+        let message = label_error("").unwrap();
+        assert!(!message.contains('\u{2014}'), "{message}");
+
+        let src = include_str!("stats_tokens.rs");
+        let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let submit = prod
+            .split("let on_submit = move |_| {")
+            .nth(1)
+            .expect("submit handler");
+        let refuse = &submit[..submit.find("modal.start_submit();").expect("submit")];
+        assert!(
+            refuse.contains("form_error.set(error.to_string());"),
+            "{refuse}"
+        );
+        assert!(
+            refuse.contains("focus_element(LABEL_INPUT_ID);"),
+            "{refuse}"
+        );
+        assert!(refuse.contains("return;"), "{refuse}");
+        let field = prod
+            .split("div { class: \"token-form-field\",")
+            .nth(1)
+            .expect("label field");
+        assert!(
+            field.contains("aria_describedby: LABEL_ERROR_ID,"),
+            "{field}"
+        );
+        // Unconditional: not inside an `if`, so the region never comes and goes.
+        assert!(
+            field.contains(
+                "}\n                    FieldError { id: LABEL_ERROR_ID, text: form_error(), role: \"status\" }"
+            ),
+            "{field}"
+        );
+    }
+
+    /// QA 705 nit 4: a successful Revoke removes the button that had focus,
+    /// so focus moves to the list heading, which can take it.
+    #[test]
+    fn revoke_moves_focus_to_the_list_heading() {
+        let src = include_str!("stats_tokens.rs");
+        let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let revoke = prod
+            .split("let on_revoke = move |token_id: String| {")
+            .nth(1)
+            .expect("revoke handler");
+        let ok_arm = &revoke[..revoke.find("Err(e) =>").expect("error arm")];
+        assert!(
+            ok_arm.contains("focus_element(TOKENS_LIST_TITLE_ID);"),
+            "{ok_arm}"
+        );
+        assert!(prod.contains(
+            "h2 {\n                    id: TOKENS_LIST_TITLE_ID,\n                    class: \"ui-section-title\",\n                    tabindex: \"-1\","
+        ));
+    }
+
+    /// FrozenTear: Revoke asks first. Pressing Revoke opens a confirm strip
+    /// in the row (in place of the button) and sends nothing; only the
+    /// strip's own Revoke sends the DELETE, and on success focus moves to
+    /// the "Your tokens" heading.
+    #[test]
+    fn revoke_asks_before_it_removes_the_token() {
+        let active = token("a:1", true, true);
+        let other = token("c3", true, false);
+        let revoked = token("b2", false, false);
+        assert_eq!(revoke_cell(&active, None), RevokeCell::Button);
+        assert_eq!(revoke_cell(&active, Some("a:1")), RevokeCell::Confirm);
+        assert_eq!(revoke_cell(&other, Some("a:1")), RevokeCell::Button);
+        assert_eq!(revoke_cell(&revoked, Some("b2")), RevokeCell::None);
+
+        fn view() -> Element {
+            rsx! {
+                StatsTable {
+                    labelled_by: "tokens-list-title",
+                    wide: true,
+                    cols: vec![Col::Text("Label"), Col::Text("Status"), Col::Text("Created"), Col::Text("Last used"), Col::Actions("Actions")],
+                    {token_row(&token("a:1", true, true), &noop_actions(Some("a:1")))}
+                    {token_row(&token("c3", true, false), &noop_actions(Some("a:1")))}
+                }
+            }
+        }
+        let html = render(view);
+        // The open row: a named group with Cancel and Revoke, no Revoke trigger.
+        assert!(!html.contains("id=\"token-a_1-revoke-trigger\""), "{html}");
+        assert!(
+            html.contains("role=\"group\" aria-labelledby=\"token-a_1-revoke-title\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("id=\"token-a_1-revoke-title\" class=\"inline-confirm__title\">Revoke token pc-a:1?</p>"),
+            "{html}"
+        );
+        assert!(html.contains(REVOKE_CONFIRM_BODY), "{html}");
+        assert!(
+            html.contains("id=\"token-a_1-revoke-cancel\" class=\"inline-confirm__cancel\" type=\"button\">Cancel</button>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("class=\"inline-confirm__go\" type=\"button\">Revoke</button>"),
+            "{html}"
+        );
+        assert!(html.contains("Esc cancels"), "{html}");
+        // The other row keeps its button.
+        assert!(html.contains("id=\"token-c3-revoke-trigger\""), "{html}");
+        assert_eq!(html.matches("role=\"group\"").count(), 1, "{html}");
+        assert!(!html.contains("<a "), "no link wraps a button: {html}");
+        assert!(!REVOKE_CONFIRM_BODY.contains('\u{2014}'));
+
+        let prod = prod_src();
+        // Revoke only opens the strip.
+        let ask = prod
+            .split("on_ask: EventHandler::new(move |token_id: String| {")
+            .nth(1)
+            .expect("ask handler");
+        let ask = &ask[..ask.find("}),").expect("ask end")];
+        assert!(ask.contains("confirming.set(Some(token_id));"), "{ask}");
+        assert!(
+            ask.contains("reveal_revoke_confirm_soon(revoke_confirm_id(&token_id));"),
+            "the whole strip is scrolled into view, not only Cancel: {ask}"
+        );
+        assert!(!ask.contains("delete"), "{ask}");
+        assert!(prod.contains("onclick: move |_| on_ask.call(tid.clone()),"));
+        // The strip's Revoke sends the DELETE; success closes it and moves focus.
+        assert!(prod.contains("on_confirm: EventHandler::new(on_revoke),"));
+        assert!(prod.contains("on_confirm: move |_| on_confirm.call(confirm_tid.clone()),"));
+        let revoke = prod
+            .split("let on_revoke = move |token_id: String| {")
+            .nth(1)
+            .expect("revoke handler");
+        let ok_arm = &revoke[..revoke.find("Err(e) =>").expect("error arm")];
+        assert!(ok_arm.contains(".delete(&format!(\"/api/stats/tokens/{token_id}\"))"));
+        assert!(ok_arm.contains("confirming.set(None);"), "{ok_arm}");
+        assert!(ok_arm.contains("revoking.set(true);"), "{ok_arm}");
+        assert!(
+            ok_arm.contains("if revoking() {\n            return;"),
+            "{ok_arm}"
+        );
+    }
+
+    /// Cancel (or Esc) closes the strip without a DELETE and gives focus
+    /// back to the row's Revoke button: `InlineConfirm` focuses
+    /// `{id}-trigger`, which is exactly the button's id.
+    #[test]
+    fn cancel_closes_the_strip_and_returns_focus_to_revoke() {
+        assert_eq!(
+            revoke_button_id("a:1"),
+            format!("{}-trigger", revoke_confirm_id("a:1"))
+        );
+        assert_eq!(revoke_button_id("a:1"), "token-a_1-revoke-trigger");
+        assert!(crate::components::ui::inline_confirm::key_cancels(
+            &Key::Escape
+        ));
+
+        let prod = prod_src();
+        assert!(prod.contains("on_cancel: EventHandler::new(move |_: ()| confirming.set(None)),"));
+        assert!(prod.contains("on_cancel: move |_| on_cancel.call(()),"));
+        assert!(prod.contains("id: confirm_id,"));
+        // The cancel path never touches the API.
+        let cancel_line = prod
+            .lines()
+            .find(|l| l.contains("on_cancel: EventHandler::new("))
+            .unwrap();
+        assert!(!cancel_line.contains("delete"), "{cancel_line}");
+        // Opening the strip does not unmount it on the next render: the row
+        // keys stay the token ids.
+        assert!(prod.contains("Fragment { key: \"{token.id}\", {token_row(token, &actions)} }"));
     }
 }

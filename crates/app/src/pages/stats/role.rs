@@ -180,6 +180,63 @@ pub(crate) fn role_aggs_from_rows(rows: &[RoleStats]) -> Vec<RoleAgg> {
     buckets.into_iter().collect()
 }
 
+/// Elims per death over every row from `/roles`: each row's averages are
+/// weighted by its games, so the result is total elims over total deaths.
+/// `None` with no games or no deaths, so the tile never shows a made-up 0.00.
+pub(crate) fn kd_ratio(rows: &[RoleStats]) -> Option<f64> {
+    let (elims, deaths) = rows.iter().fold((0.0, 0.0), |(elims, deaths), row| {
+        let weight = f64::from(row.matches);
+        (
+            elims + row.avg_elims * weight,
+            deaths + row.avg_deaths * weight,
+        )
+    });
+    (deaths > 0.0).then(|| elims / deaths)
+}
+
+/// One "Time on role" row: the role, its games and its whole percent of all
+/// games.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RoleShare {
+    pub name: &'static str,
+    pub matches: u32,
+    pub pct: u32,
+}
+
+/// Share of games per role, in the fixed Tank, Damage, Support order. Tank,
+/// Damage and Support always get a row once there is a game, so a role at 0%
+/// is stated. Unknown only gets one when it has games. The percents are
+/// whole numbers that add up to 100 (largest remainder), so three rows never
+/// read 33, 33, 33.
+pub(crate) fn role_shares(aggs: &[RoleAgg]) -> Vec<RoleShare> {
+    let total: u64 = aggs.iter().map(|agg| u64::from(agg.matches)).sum();
+    if total == 0 {
+        return Vec::new();
+    }
+    let mut shares: Vec<(RoleShare, u64)> = aggs
+        .iter()
+        .filter(|agg| agg.name != "Unknown" || agg.matches > 0)
+        .map(|agg| {
+            let scaled = u64::from(agg.matches) * 100;
+            (
+                RoleShare {
+                    name: agg.name,
+                    matches: agg.matches,
+                    pct: (scaled / total) as u32,
+                },
+                scaled % total,
+            )
+        })
+        .collect();
+    let given: u32 = shares.iter().map(|(share, _)| share.pct).sum();
+    let mut order: Vec<usize> = (0..shares.len()).collect();
+    order.sort_by(|&a, &b| shares[b].1.cmp(&shares[a].1).then(a.cmp(&b)));
+    for &index in order.iter().take(100u32.saturating_sub(given) as usize) {
+        shares[index].0.pct += 1;
+    }
+    shares.into_iter().map(|(share, _)| share).collect()
+}
+
 /// What `use_api_with::<Vec<RoleStats>>` produced. An error string is a
 /// failure. There is no catalog fallback.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -425,6 +482,70 @@ mod tests {
     fn rows_for_one_role_sum_their_results() {
         let rows = [row_wld("Damage", 3, 2, 0, 5), row_wld("damage", 4, 1, 0, 5)];
         assert_eq!(role_text(&rows, "Damage"), "70.0%");
+    }
+
+    #[test]
+    fn kd_is_total_elims_over_total_deaths() {
+        // 4 games at 12 elims and 3 deaths, 6 games at 6 elims and 3 deaths:
+        // 84 elims over 30 deaths.
+        let rows = [row("Damage", 4, 2, 12.0), row("Support", 6, 3, 6.0)];
+        let kd = kd_ratio(&rows).unwrap();
+        assert!((kd - 2.8).abs() < 1e-9, "{kd}");
+        assert_eq!(kd_ratio(&[]), None);
+        assert_eq!(kd_ratio(&[row("Tank", 0, 0, 5.0)]), None);
+        let no_deaths = RoleStats {
+            avg_deaths: 0.0,
+            ..row("Tank", 3, 3, 9.0)
+        };
+        assert_eq!(kd_ratio(&[no_deaths]), None);
+    }
+
+    #[test]
+    fn role_shares_are_whole_percents_that_add_up_to_100() {
+        let thirds = role_aggs_from_rows(&[
+            row("Tank", 1, 1, 1.0),
+            row("Damage", 1, 1, 1.0),
+            row("Support", 1, 1, 1.0),
+        ]);
+        let shares = role_shares(&thirds);
+        let names: Vec<&str> = shares.iter().map(|share| share.name).collect();
+        assert_eq!(names, ["Tank", "Damage", "Support"]);
+        let pcts: Vec<u32> = shares.iter().map(|share| share.pct).collect();
+        assert_eq!(pcts, [34, 33, 33]);
+
+        let frame = role_aggs_from_rows(&[
+            row("Tank", 8, 4, 1.0),
+            row("Damage", 5, 2, 1.0),
+            row("Support", 7, 4, 1.0),
+        ]);
+        let pcts: Vec<u32> = role_shares(&frame).iter().map(|share| share.pct).collect();
+        assert_eq!(pcts, [40, 25, 35]);
+    }
+
+    #[test]
+    fn role_shares_state_an_unplayed_role_and_hide_an_empty_unknown() {
+        let shares = role_shares(&role_aggs_from_rows(&[row("Support", 4, 2, 1.0)]));
+        assert_eq!(shares.len(), 3, "{shares:?}");
+        assert_eq!(
+            shares[0],
+            RoleShare {
+                name: "Tank",
+                matches: 0,
+                pct: 0
+            }
+        );
+        assert_eq!(shares[2].pct, 100);
+
+        let with_unknown = role_shares(&role_aggs_from_rows(&[
+            row("Support", 3, 2, 1.0),
+            row("flex", 1, 0, 1.0),
+        ]));
+        assert_eq!(with_unknown.len(), 4);
+        assert_eq!(with_unknown[3].name, "Unknown");
+        assert_eq!(with_unknown[3].pct, 25);
+        assert_eq!(with_unknown.iter().map(|share| share.pct).sum::<u32>(), 100);
+
+        assert!(role_shares(&role_aggs_from_rows(&[])).is_empty());
     }
 
     #[test]

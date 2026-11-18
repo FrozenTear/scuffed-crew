@@ -72,6 +72,8 @@ fn main() {
     // see `LoginBannerSlot`.
     // Untested call site: login tests cover the probe harness, not `main`.
     pages::capture_initial_login_banner();
+    // Same reason: `/blog?page=2` opened directly keeps its page.
+    components::ui::remember_landing_url();
     #[cfg(all(feature = "web", not(feature = "desktop")))]
     dioxus::LaunchBuilder::new()
         .with_cfg(dioxus::web::Config::new().rootname(APP_ROOT_ID))

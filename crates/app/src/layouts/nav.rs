@@ -189,6 +189,18 @@ pub(crate) fn guest_entries() -> Vec<NavEntry> {
     ]
 }
 
+/// "What's changed". Public, so it sits in the Account column of the footer
+/// and the Account group of the phone drawer for guests and members alike.
+pub(crate) fn changelog_entry() -> NavEntry {
+    entry(
+        "changelog",
+        "What's changed",
+        Route::Changelog {
+            tab: "site".to_string(),
+        },
+    )
+}
+
 /// The Admin entry is for people the admin section lets in, and nobody else.
 pub(crate) fn shows_admin_entry(ctx: NavContext) -> bool {
     ctx.signed_in && ctx.admin_access
@@ -270,7 +282,8 @@ pub(crate) enum Section {
     Group(NavGroupId),
     Account,
     Admin,
-    /// First-run setup and the not-found page sit outside every section.
+    /// First-run setup, the not-found page and the public changelog sit
+    /// outside every section.
     None,
 }
 
@@ -343,7 +356,9 @@ pub(crate) fn section_of(route: &Route) -> Section {
         | Route::AdminRelay {}
         | Route::AdminSettings {}
         | Route::AdminBrandSettings {} => Section::Admin,
-        Route::Setup {} | Route::NotFound { .. } => Section::None,
+        // The public changelog is linked from the footer and the drawer, not
+        // from a top bar group, so no group lights up for it.
+        Route::Setup {} | Route::NotFound { .. } | Route::Changelog { .. } => Section::None,
     }
 }
 
@@ -375,6 +390,7 @@ pub(crate) fn is_current(entry: &Route, current: &Route) -> bool {
             // The new-strategy editor has its own entry (members only).
             | (Route::StrategyBrowse {}, Route::StrategyEditor { .. })
             | (Route::DmInbox {}, Route::DmThread { .. })
+            | (Route::Changelog { .. }, Route::Changelog { .. })
     )
 }
 
@@ -792,6 +808,16 @@ mod tests {
             section_of(&Route::NotFound { segments: vec![] }),
             Section::None
         );
+        // `/changelog/:tab` is not a static route, so the reachability test
+        // skips it; pin its section here for both tabs.
+        for tab in ["site", "tracker"] {
+            assert_eq!(
+                section_of(&Route::Changelog { tab: tab.into() }),
+                Section::None,
+                "{tab}"
+            );
+        }
+        assert_eq!(section_of(&changelog_entry().route), Section::None);
     }
 
     #[test]

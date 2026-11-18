@@ -80,30 +80,98 @@ enum PageLabel {
     Named(String),
 }
 
+/// A label a page gives the document title once it knows more than its route
+/// does: the title of a loaded post, "Post not found", "No access". `owner`
+/// is the page instance that set it, so a page only ever clears its own.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PageTitle {
+    owner: u64,
+    label: String,
+}
+
+/// The current page's own title label, if it set one. Provided by
+/// [`HeadLayout`]; written through [`use_page_title`].
+#[derive(Clone, Copy)]
+struct PageTitleSlot(Signal<Option<PageTitle>>);
+
+static NEXT_TITLE_OWNER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Name this page in the document title in place of its route's default
+/// label ("Blog | some-slug"). `None` leaves the route's label. The label is
+/// dropped when the page unmounts. Without a [`HeadLayout`] above (unit
+/// tests) it does nothing.
+pub fn use_page_title(label: Option<String>) {
+    let slot = try_use_context::<PageTitleSlot>();
+    let owner = use_hook(|| NEXT_TITLE_OWNER.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+    use_effect(use_reactive((&label,), move |(label,)| {
+        let Some(PageTitleSlot(mut slot)) = slot else {
+            return;
+        };
+        let next = label.map(|label| PageTitle { owner, label });
+        let current = slot.peek().clone();
+        if let Some(write) = title_slot_write(current.as_ref(), next, owner) {
+            slot.set(write);
+        }
+    }));
+    use_drop(move || {
+        let Some(PageTitleSlot(mut slot)) = slot else {
+            return;
+        };
+        let current = slot.peek().clone();
+        if let Some(write) = title_slot_write(current.as_ref(), None, owner) {
+            slot.set(write);
+        }
+    });
+}
+
+/// What `owner` should write to the slot to make it `next`, or `None` to
+/// leave it. A page with nothing to say never clears another page's label,
+/// which may have been set first during a navigation.
+fn title_slot_write(
+    current: Option<&PageTitle>,
+    next: Option<PageTitle>,
+    owner: u64,
+) -> Option<Option<PageTitle>> {
+    let mine = current.is_none_or(|title| title.owner == owner);
+    ((next.is_some() || mine) && current != next.as_ref()).then_some(next)
+}
+
 #[component]
 pub fn HeadLayout() -> Element {
     let site_settings = use_site_settings();
+    let page_title = use_context_provider(|| PageTitleSlot(Signal::new(None)));
+    let label = move || page_title.0.read().as_ref().map(|t| t.label.clone());
     use_effect(move || {
         let route = router().current::<Route>();
-        let head = current_head(site_settings, &route);
+        let head = current_head(site_settings, &route, label().as_deref());
         install_document_head(&head);
     });
     let route = use_route::<Route>();
-    let head = current_head(site_settings, &route);
+    let head = current_head(site_settings, &route, label().as_deref());
     rsx! {
         {desktop_title_element(&head.title)}
         Outlet::<Route> {}
     }
 }
 
-fn current_head(site_settings: SiteSettingsState, route: &Route) -> DocumentHead {
+fn current_head(
+    site_settings: SiteSettingsState,
+    route: &Route,
+    label: Option<&str>,
+) -> DocumentHead {
     let resolved = site_settings.resolved.read();
     let loaded = loaded_site_settings(resolved.as_ref());
     let org = loaded.map(|settings| settings.org_name.as_str());
     let description = loaded
         .map(|settings| settings.site_description.as_str())
         .unwrap_or("");
-    document_head(route, org, description, configured_public_base().as_deref())
+    document_head_labelled(
+        route,
+        label,
+        org,
+        description,
+        configured_public_base().as_deref(),
+    )
 }
 
 /// Desktop window title. The web build sets `document.title` with `web_sys`
@@ -128,10 +196,27 @@ pub fn document_head(
     site_description: &str,
     public_base: Option<&str>,
 ) -> DocumentHead {
+    document_head_labelled(route, None, org_name, site_description, public_base)
+}
+
+/// [`document_head`] with the page's own label (see [`use_page_title`]) in
+/// place of the route's default one. A blank label is ignored.
+pub fn document_head_labelled(
+    route: &Route,
+    label: Option<&str>,
+    org_name: Option<&str>,
+    site_description: &str,
+    public_base: Option<&str>,
+) -> DocumentHead {
     let org = document_title(org_name);
     let base = sanitize_public_base(public_base);
-    let title = compose_title(route, &org);
-    let description = compose_description(route, site_description);
+    let own = label.map(str::trim).filter(|label| !label.is_empty());
+    let page = || match own {
+        Some(label) => named(label),
+        None => page_label(route),
+    };
+    let title = compose_title(page(), &org);
+    let description = compose_description(page(), site_description);
     let site_name = if org.is_empty() {
         SHELL_TITLE.to_string()
     } else {
@@ -268,8 +353,8 @@ fn is_public_host(host: &str) -> bool {
     !suffix.eq_ignore_ascii_case("local") && !suffix.eq_ignore_ascii_case("localhost")
 }
 
-fn compose_title(route: &Route, org: &str) -> String {
-    match page_label(route) {
+fn compose_title(page: PageLabel, org: &str) -> String {
+    match page {
         PageLabel::Home => {
             if org.is_empty() {
                 SHELL_TITLE.to_string()
@@ -287,9 +372,9 @@ fn compose_title(route: &Route, org: &str) -> String {
     }
 }
 
-fn compose_description(route: &Route, site_description: &str) -> String {
+fn compose_description(page: PageLabel, site_description: &str) -> String {
     let site = site_description.trim();
-    match page_label(route) {
+    match page {
         PageLabel::Home => {
             if site.is_empty() {
                 SHELL_DESCRIPTION.to_string()
@@ -346,6 +431,10 @@ fn page_label(route: &Route) -> PageLabel {
         Route::StatsMember { id } => named(format!("Player stats | {id}")),
         Route::StatsMatch { .. } => named("Match stats"),
         Route::PatchNotes {} => named("Patch notes"),
+        Route::Changelog { tab } => match crate::pages::ChangelogTab::from_slug(tab) {
+            Some(tab) => named(tab.page_label()),
+            None => named("Page not found"),
+        },
         Route::AdminDashboard {} => named("Admin dashboard"),
         Route::AdminMembers {} => named("Admin members"),
         Route::AdminMemberMatches { .. } => named("Admin member matches"),
@@ -383,6 +472,9 @@ fn named(label: impl Into<String>) -> PageLabel {
 }
 
 fn is_public_route(route: &Route) -> bool {
+    if let Route::Changelog { tab } = route {
+        return crate::pages::ChangelogTab::from_slug(tab).is_some();
+    }
     matches!(
         route,
         Route::Home {}
@@ -693,11 +785,46 @@ mod tests {
             Route::ForumThread { id: "42".into() },
             Route::Leaderboards {},
             Route::PatchNotes {},
+            Route::Changelog { tab: "site".into() },
+            Route::Changelog {
+                tab: "tracker".into(),
+            },
             Route::StrategyBrowse {},
             Route::StrategyHeroes {},
             Route::StrategyMeta {},
             Route::StrategyPatchNotes {},
         ]
+    }
+
+    #[test]
+    fn changelog_titles_name_the_active_tab() {
+        let site = document_head(
+            &Route::Changelog { tab: "site".into() },
+            Some("The Scuffed Crew"),
+            "",
+            None,
+        );
+        assert_eq!(site.title, "What's changed, Site | The Scuffed Crew");
+        assert_eq!(site.canonical.as_deref(), Some("/changelog/site"));
+        let tracker = document_head(
+            &Route::Changelog {
+                tab: "tracker".into(),
+            },
+            Some("The Scuffed Crew"),
+            "",
+            None,
+        );
+        assert_eq!(tracker.title, "What's changed, Tracker | The Scuffed Crew");
+        let unknown = document_head(
+            &Route::Changelog {
+                tab: "unknown".into(),
+            },
+            Some("The Scuffed Crew"),
+            "",
+            None,
+        );
+        assert_eq!(unknown.title, "Page not found | The Scuffed Crew");
+        assert_eq!(unknown.canonical, None);
     }
 
     #[test]
@@ -740,6 +867,49 @@ mod tests {
         unique.sort();
         unique.dedup();
         assert_eq!(unique.len(), titles.len(), "{titles:?}");
+    }
+
+    #[test]
+    fn a_page_label_replaces_the_route_label_and_keeps_the_rest() {
+        let route = Route::BlogPost {
+            slug: "scrim-review".to_string(),
+        };
+        let plain = document_head(&route, Some("Owls"), "Night games.", None);
+        assert_eq!(plain.title, "Blog | scrim-review | Owls");
+        let own = document_head_labelled(
+            &route,
+            Some(" Scrim review | Blog "),
+            Some("Owls"),
+            "Night games.",
+            None,
+        );
+        assert_eq!(own.title, "Scrim review | Blog | Owls");
+        assert_eq!(own.og_title, own.title);
+        assert_eq!(own.description, "Scrim review | Blog. Night games.");
+        assert_eq!(own.canonical, plain.canonical);
+        // A blank label falls back to the route.
+        let blank = document_head_labelled(&route, Some("  "), Some("Owls"), "Night games.", None);
+        assert_eq!(blank, plain);
+    }
+
+    #[test]
+    fn a_page_only_clears_its_own_title_label() {
+        let title = |owner, label: &str| PageTitle {
+            owner,
+            label: label.to_string(),
+        };
+        let a = title(1, "A");
+        // Setting always wins, also over another page's label.
+        assert_eq!(
+            title_slot_write(Some(&a), Some(title(2, "B")), 2),
+            Some(Some(title(2, "B")))
+        );
+        // Clearing: only the owner.
+        assert_eq!(title_slot_write(Some(&a), None, 1), Some(None));
+        assert_eq!(title_slot_write(Some(&a), None, 2), None);
+        // No write when nothing changes.
+        assert_eq!(title_slot_write(Some(&a), Some(title(1, "A")), 1), None);
+        assert_eq!(title_slot_write(None, None, 1), None);
     }
 
     #[test]

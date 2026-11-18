@@ -1,8 +1,9 @@
 mod appearance;
 mod apply;
-mod article_author;
+pub(crate) mod article_author;
 mod blog;
 mod blog_post;
+pub(crate) mod changelog;
 mod chat;
 mod chat_gate;
 mod community;
@@ -46,6 +47,7 @@ pub use appearance::AppearanceSettings;
 pub use apply::Apply;
 pub use blog::Blog;
 pub use blog_post::BlogPost;
+pub use changelog::{Changelog, Tab as ChangelogTab};
 pub use chat::TeamChat;
 pub use community::Community;
 pub use dm::{DmInbox, DmThread};

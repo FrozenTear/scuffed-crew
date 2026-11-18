@@ -1777,7 +1777,7 @@ mod tests {
             "{pending}"
         );
         assert!(!pending.contains("Save brand"), "{pending}");
-        assert!(!admin.contains("Access Denied"), "{admin}");
+        assert!(!admin.contains("You do not have access"), "{admin}");
         assert_eq!(admin.matches("<h1").count(), 1, "{admin}");
         assert!(admin.contains("Brand settings"), "{admin}");
         for control in BRAND_CONTROLS {
@@ -1796,7 +1796,14 @@ mod tests {
         ] {
             let (pending, loaded) = render_page(viewer);
             for html in [pending, loaded] {
-                assert!(html.contains("Access Denied"), "{viewer:?}: {html}");
+                assert!(
+                    html.contains("<h1>You do not have access</h1>"),
+                    "{viewer:?}: {html}"
+                );
+                assert!(
+                    html.contains("You need admin permissions to change the brand."),
+                    "{viewer:?}: {html}"
+                );
                 assert!(!html.contains("Brand settings"), "{viewer:?}: {html}");
                 for control in BRAND_CONTROLS {
                     assert!(!html.contains(control), "{viewer:?} sees {control}");

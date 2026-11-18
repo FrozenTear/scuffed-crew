@@ -10768,6 +10768,7 @@ dependencies = [
  "serde-wasm-bindgen",
  "serde_json",
  "tokio",
+ "toml 1.1.6+spec-1.1.0",
  "tracing",
  "url",
  "uuid",
@@ -10973,7 +10974,7 @@ dependencies = [
 
 [[package]]
 name = "scuffed-stat-tracker"
-version = "0.6.0-alpha.3.1"
+version = "0.6.0-alpha.4"
 dependencies = [
  "ab_glyph",
  "anyhow",
@@ -11010,7 +11011,7 @@ dependencies = [
 
 [[package]]
 name = "scuffed-stat-tracker-core"
-version = "0.6.0-alpha.3.1"
+version = "0.6.0-alpha.4"
 dependencies = [
  "anyhow",
  "chrono",

@@ -3,6 +3,10 @@
 use chrono::Utc;
 use dioxus::prelude::*;
 
+use crate::components::admin_shared::{
+    after_delete_focus_ids, focus_after_delete_soon, restore_focus_if_lost_soon,
+};
+
 use scuffed_api_client::{ApiClient, ClientError};
 
 use crate::components::{Toast, use_toast};
@@ -14,8 +18,157 @@ use super::stat_reports::{
     MY_REPORTS_HEADING_ID, MyReportsBody, PreparedRows, ReportIntent, StatReportList,
     StatReportWithdrawn, WithdrawTrainingBody, apply_own_filter, apply_reports_switch,
     confirm_escape_closes, is_reports_disabled, member_screen, mutation_failure_copy,
-    prepare_member_rows, without_expired,
+    opener_focus_id, prepare_member_rows, without_expired,
 };
+
+/// Id of the list region the pager scrolls back to.
+pub(crate) const MY_REPORTS_LIST_ID: &str = "my-reports-list";
+/// Reports per pager page.
+pub(crate) const MY_REPORTS_PAGE_SIZE: usize = 20;
+
+/// The wide list of the reports page: a table on the table tokens on
+/// desktop, one stacked card per report at phone width (the
+/// `d1-admin-applications` phone pattern), so no column is clipped and no
+/// cell wraps one word per line. Scoped to `.my-reports-page`; the officer
+/// list keeps its own sheet in stat_reports.rs.
+pub(crate) const MY_REPORTS_CSS: &str = r#"
+.my-reports-wait {
+    margin: 0;
+    color: var(--text-3);
+    font-family: var(--font-body);
+    font-size: var(--text-md);
+    line-height: var(--leading-body);
+}
+.my-reports-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-stack);
+    min-width: 0;
+}
+.my-reports-list:focus { outline: none; }
+.my-reports-scroll {
+    box-sizing: border-box;
+    min-width: 0;
+    max-width: 100%;
+    overflow-x: auto;
+    background: var(--table-row-bg);
+    border: 1px solid var(--card-border);
+    border-radius: var(--table-radius);
+}
+.my-reports-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: var(--table-font);
+    font-size: var(--text-sm);
+    color: var(--table-row-fg);
+}
+.my-reports-table th {
+    padding: var(--space-3) var(--table-pad-x);
+    text-align: left;
+    white-space: nowrap;
+    font-family: var(--font-head);
+    font-size: var(--text-xs);
+    font-weight: var(--table-header-weight);
+    text-transform: uppercase;
+    letter-spacing: var(--font-head-tracking);
+    color: var(--table-header-fg);
+    border-bottom: 1px solid var(--table-row-border);
+}
+.my-reports-table td {
+    height: var(--table-row-height);
+    padding: var(--space-3) var(--table-pad-x);
+    vertical-align: top;
+    line-height: var(--leading-body);
+    border-bottom: 1px solid var(--table-row-border);
+}
+.my-reports-table tbody tr:last-child td { border-bottom: 0; }
+.my-reports-table .report-when { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.my-reports-table .reports-sub {
+    display: block;
+    margin-top: var(--space-1);
+    color: var(--text-3);
+    font-size: var(--text-xs);
+    line-height: var(--leading-body);
+}
+.my-reports-table .report-card-label { display: none; }
+.my-reports-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+    position: relative;
+}
+.my-reports-actions .reports-actions { position: relative; }
+.my-reports-note {
+    margin: 0;
+    color: var(--text-3);
+    font-size: var(--text-sm);
+    line-height: var(--leading-body);
+}
+.my-reports-page .page-header h1:focus { outline: none; }
+.my-reports-page .page-header h1:focus-visible {
+    outline: var(--focus-ring-width) solid var(--focus-ring);
+    outline-offset: var(--focus-ring-offset);
+}
+@media (max-width: 820px) {
+    .my-reports-scroll {
+        overflow-x: visible;
+        background: transparent;
+        border: 0;
+        border-radius: 0;
+    }
+    .my-reports-table,
+    .my-reports-table tbody,
+    .my-reports-table tr,
+    .my-reports-table td { display: block; width: auto; min-width: 0; }
+    .my-reports-table thead {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+    }
+    .my-reports-table tr {
+        padding: var(--space-card-pad);
+        background: var(--card-bg);
+        border: 1px solid var(--card-border);
+        border-radius: var(--card-radius);
+    }
+    .my-reports-table tr + tr { margin-top: var(--space-3); }
+    .my-reports-table td {
+        height: auto;
+        padding: var(--space-1) 0;
+        border-bottom: 0;
+    }
+    .my-reports-table .report-when { white-space: normal; }
+    .my-reports-table .report-card-label {
+        display: block;
+        font-size: var(--text-xs);
+        font-weight: var(--font-label-weight);
+        text-transform: uppercase;
+        letter-spacing: var(--font-head-tracking);
+        color: var(--table-header-fg);
+    }
+    .my-reports-table .my-reports-actions-cell { padding-top: var(--space-3); }
+    .my-reports-table .my-reports-actions-cell > .report-card-label {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+    }
+    .my-reports-actions > .reports-actions { flex: 1 1 auto; display: flex; }
+    .my-reports-actions .btn { flex: 1 1 auto; }
+}
+"#;
 
 #[component]
 pub fn MyReports() -> Element {
@@ -25,6 +178,11 @@ pub fn MyReports() -> Element {
     let mut list_error = use_signal(|| None::<ClientError>);
     let reports = use_resource(move || async move {
         let _generation = refresh();
+        // A guest gets the sign-in wall; asking the API would only 401.
+        // Reading auth here reruns the fetch once the session is known.
+        if !auth.read().is_logged_in() {
+            return None;
+        }
         match ApiClient::web()
             .fetch::<StatReportList>("/api/stat-reports")
             .await
@@ -99,7 +257,7 @@ pub fn MyReports() -> Element {
             .map(|action| action.return_focus_id.clone());
         gate.write().cancel();
         if let Some(id) = return_id {
-            focus_element(&id);
+            restore_focus_if_lost_soon(dismiss_focus_ids(&id));
         }
     });
 
@@ -125,7 +283,7 @@ pub fn MyReports() -> Element {
             .map(|action| action.return_focus_id.clone());
         gate.write().cancel();
         if let Some(id) = return_id {
-            focus_element(&id);
+            restore_focus_if_lost_soon(dismiss_focus_ids(&id));
         }
     };
     let on_confirm = move |_| {
@@ -136,6 +294,31 @@ pub fn MyReports() -> Element {
             .read()
             .pending()
             .map(|action| action.return_focus_id.clone());
+        // B9: a removed row takes its buttons with it. Focus the next row's
+        // Delete, else the previous row's, else the page heading.
+        let removed_id = gate.read().pending().map(|action| action.report_id.clone());
+        let after_removal = removed_id.as_deref().map(|removed| {
+            let keys: Vec<String> = reports
+                .peek()
+                .as_ref()
+                .and_then(|list| list.as_ref())
+                .map(|list| list.reports.iter().map(|r| r.id.clone()).collect())
+                .unwrap_or_default();
+            (
+                opener_focus_id(ReportIntent::Delete, removed),
+                after_delete_focus_ids(
+                    &keys,
+                    removed,
+                    |k| vec![opener_focus_id(ReportIntent::Delete, k)],
+                    &[MY_REPORTS_HEADING_ID],
+                ),
+            )
+        });
+        // A kept (withdrawn) report loses its Withdraw button on the refresh.
+        let after_kept = removed_id
+            .as_deref()
+            .zip(return_id.as_deref())
+            .map(|(report, opener)| kept_withdraw_focus(report, opener));
         let Some(mutation) = gate.write().confirm() else {
             return;
         };
@@ -166,15 +349,22 @@ pub fn MyReports() -> Element {
                     toast.show(Toast::success(message));
                     // A deleted row and its button are gone after the refresh.
                     if removed {
-                        focus_element(MY_REPORTS_HEADING_ID);
-                    } else if let Some(id) = &return_id {
-                        focus_element(id);
+                        match after_removal {
+                            Some((gone, ids)) => focus_after_delete_soon(gone, ids),
+                            None => {
+                                focus_element(MY_REPORTS_HEADING_ID);
+                            }
+                        }
+                    } else if let Some((gone, ids)) = after_kept {
+                        focus_after_delete_soon(gone, ids);
                     }
                     refresh += 1;
                 }
                 Err(err) => {
+                    // The table is inert until the dialog closes, so focus
+                    // moves after the re-render, not now.
                     if let Some(id) = &return_id {
-                        focus_element(id);
+                        restore_focus_if_lost_soon(dismiss_focus_ids(id));
                     }
                     let body = err.http_body().unwrap_or("");
                     if is_reports_disabled(err.http_status(), body) {
@@ -216,5 +406,132 @@ pub fn MyReports() -> Element {
             on_confirm,
             on_cancel,
         }
+    }
+}
+
+/// Where focus goes after the confirm dialog closes without a removal
+/// (Cancel, Escape, a refused request): the button that opened it, else the
+/// page heading. The table is `inert` while the dialog is up, so this runs
+/// after the re-render through `restore_focus_if_lost_soon`.
+fn dismiss_focus_ids(opener: &str) -> Vec<String> {
+    vec![opener.to_string(), MY_REPORTS_HEADING_ID.to_string()]
+}
+
+/// After a Withdraw that kept the report: wait for its Withdraw button
+/// (`opener`) to leave the page, then focus the same row's Delete, else the
+/// page heading. The Withdraw button leads in case it stayed after all.
+fn kept_withdraw_focus(report: &str, opener: &str) -> (String, Vec<String>) {
+    (
+        opener.to_string(),
+        vec![
+            opener.to_string(),
+            opener_focus_id(ReportIntent::Delete, report),
+            MY_REPORTS_HEADING_ID.to_string(),
+        ],
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::components::admin_shared::test_page::render_admin_route as render_route;
+    use crate::components::member_gate::test_route::wall;
+    use crate::components::ui::test_support::{assert_sizes_from_tokens, css_rule, has_decl};
+    use scuffed_types::OrgRole;
+
+    #[test]
+    fn a_guest_gets_the_sign_in_wall_in_the_wide_page() {
+        let html = render_route("/reports", None);
+        assert_eq!(html.matches("<h1").count(), 1, "{html}");
+        assert_eq!(html.matches("<main").count(), 1, "{html}");
+        assert!(
+            html.contains("ui-shell ui-shell--wide my-reports-page"),
+            "{html}"
+        );
+        let card = wall(&html);
+        assert!(card.contains("Log in to view your reports."), "{card}");
+        assert!(card.contains("href=\"/login?return=/reports\""), "{card}");
+    }
+
+    #[test]
+    fn a_member_sees_a_labelled_wait() {
+        let html = render_route("/reports", Some(OrgRole::Member));
+        assert_eq!(html.matches("<h1").count(), 1, "{html}");
+        assert!(
+            html.contains("<p class=\"my-reports-wait\" role=\"status\">Loading your reports.</p>"),
+            "{html}"
+        );
+        assert!(html.contains("ui-skel-list"), "{html}");
+    }
+
+    #[test]
+    fn list_css_uses_tokens_and_stacks_on_phone() {
+        assert_sizes_from_tokens(MY_REPORTS_CSS);
+        let phone = MY_REPORTS_CSS
+            .split("@media (max-width: 820px)")
+            .nth(1)
+            .expect("phone block");
+        let row = css_rule(phone, ".my-reports-table tr {");
+        assert!(has_decl(&row, "border-radius: var(--card-radius)"), "{row}");
+        assert!(
+            phone.contains(".my-reports-table td { display: block;")
+                || phone.contains(
+                    ".my-reports-table td { display: block; width: auto; min-width: 0; }"
+                )
+        );
+        let date = css_rule(MY_REPORTS_CSS, ".my-reports-table .report-when {");
+        assert!(has_decl(&date, "white-space: nowrap"), "{date}");
+    }
+
+    fn prod_src() -> &'static str {
+        include_str!("my_reports.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_kept_withdraw_focuses_the_rows_delete_after_the_refresh() {
+        // Vision blocker 2 on PR 706 round 4: focus_element ran while the
+        // table was still inert, and the refresh removed Withdraw itself.
+        let withdraw = opener_focus_id(ReportIntent::Withdraw, "r1");
+        let (gone, ids) = kept_withdraw_focus("r1", &withdraw);
+        assert_eq!(gone, withdraw);
+        assert_eq!(
+            ids,
+            [
+                withdraw.clone(),
+                opener_focus_id(ReportIntent::Delete, "r1"),
+                MY_REPORTS_HEADING_ID.to_string()
+            ]
+        );
+        assert!(
+            prod_src().contains("} else if let Some((gone, ids)) = after_kept {\n                        focus_after_delete_soon(gone, ids);"),
+            "kept Withdraw waits for the refresh"
+        );
+    }
+
+    #[test]
+    fn a_closed_dialog_restores_focus_after_the_re_render() {
+        // Vision blocker 2 on PR 706 round 4: a refused request (and Cancel,
+        // Escape) focused the opener while the table was still inert.
+        let delete = opener_focus_id(ReportIntent::Delete, "r1");
+        assert_eq!(
+            dismiss_focus_ids(&delete),
+            [delete.clone(), MY_REPORTS_HEADING_ID.to_string()]
+        );
+        let prod = prod_src();
+        // Refused, Cancel and Escape.
+        assert_eq!(
+            prod.matches("restore_focus_if_lost_soon(dismiss_focus_ids(")
+                .count(),
+            3,
+            "{prod}"
+        );
+        // The only synchronous focus calls left: the dialog's own Cancel
+        // (outside the inert table) and the heading (outside it too).
+        assert_eq!(prod.matches("focus_element(").count(), 2);
+        assert!(prod.contains("focus_element(CONFIRM_CANCEL_ID);"));
+        assert!(prod.contains("focus_element(MY_REPORTS_HEADING_ID);"));
     }
 }

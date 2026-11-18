@@ -15,13 +15,17 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
-## Unreleased
+## 0.6.0-alpha.4
+
+On the see-through 5v5 Tab board in Overwatch, names of other players behind the board could show in the stat columns of the report's scoreboard picture. The picture now keeps only the digits of each row (the white numbers and the grey zeros) on one flat colour. Hero portraits, perk icons, the edge of the board and anything drawn over a row outside its numbers, such as a perk tooltip, are filled. The nameplates behind the board are dark through it, so they are not kept. Light text drawn right over the numbers can still show. Report kits saved before this fix are no longer sent.
 
 At 1440p, most hero icon training crops were dropped because their PNG was over the size cap. They are now kept at 171 px, the same size as a 1080p card. A 4K portrait is still skipped.
 
 ### Highlights
 
 - If a hero icon crop still cannot be kept, a later Tab of the same game can try again.
+- A final Overwatch scoreboard with a big jump in eliminations no longer falls back to an older count. A new count that is plausible from the unsure count already saved is saved, marked as unsure, the same whether the reader was sure of it or not; otherwise the unsure count already saved is kept, marked as unsure. A sure read below the older accepted count saves that accepted count, marked as unsure, and the unsure count stays the one later reads are checked against, through any further misreads, until a read is saved from it or the scoreboard confirms a new count, so a later real count is still saved.
+- Report kits now keep up to 300 games by default instead of 50, so the 14 day limit is what normally clears them and a week of games is still there for review. The 500 MB total size limit stays, and `report_kit_max_games` in the config still changes the number. To keep the report dialog short, its game picker lists only the newest 50 games with a saved picture, plus the newest 8 without one and any game you already picked.
 
 ## 0.6.0-alpha.3.1
 
