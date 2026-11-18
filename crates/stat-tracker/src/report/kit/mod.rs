@@ -678,9 +678,10 @@ mod tests {
     }
 
     #[test]
-    fn the_defaults_are_fifty_games_and_500_mb() {
+    fn the_defaults_are_300_games_and_500_mb() {
         let r = Retention::default();
-        assert_eq!(r.max_games, 50);
+        assert_eq!(r.max_games, DEFAULT_MAX_GAMES);
+        assert_eq!(DEFAULT_MAX_GAMES, 300);
         assert_eq!(r.max_bytes, 500 * 1024 * 1024);
         assert_eq!(Retention::new(0, 1).max_games, 1);
     }

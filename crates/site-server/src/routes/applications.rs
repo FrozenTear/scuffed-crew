@@ -56,6 +56,15 @@ fn application_recruitment_gate(
     }
 }
 
+/// Minimum application message length, in Unicode chars after trim.
+const MIN_APPLICATION_MESSAGE_CHARS: usize = 10;
+
+/// A missing message counts as empty. Counts chars, not bytes, so a message
+/// in a non-Latin script is measured the same as one in ASCII.
+fn application_message_is_long_enough(message: Option<&str>) -> bool {
+    message.unwrap_or("").trim().chars().count() >= MIN_APPLICATION_MESSAGE_CHARS
+}
+
 #[derive(Deserialize)]
 pub struct SubmitApplicationRequest {
     pub preferred_games: Vec<String>,
@@ -69,6 +78,14 @@ pub async fn submit_application(
     user: AuthUser<AppState>,
     Json(body): Json<SubmitApplicationRequest>,
 ) -> Result<(StatusCode, Json<Application>), (StatusCode, Json<ErrorResponse>)> {
+    // Input check first: no DB read or write for a body that cannot be stored.
+    // `preferred_roles` may be empty.
+    if !application_message_is_long_enough(body.message.as_deref()) {
+        return Err(bad_request(&format!(
+            "Message must be at least {MIN_APPLICATION_MESSAGE_CHARS} characters"
+        )));
+    }
+
     let recruitment = match state.db.get_settings().await {
         Ok(settings) => Ok(settings.recruitment_open),
         Err(e) => {
@@ -945,6 +962,8 @@ mod tests {
         );
     }
 
+    const VALID_MESSAGE: &str = "I would like to join the crew";
+
     fn auth_user(user: scuffed_auth::User) -> AuthUser<AppState> {
         AuthUser::from_user(user)
     }
@@ -1019,7 +1038,7 @@ mod tests {
                 Json(SubmitApplicationRequest {
                     preferred_games: vec!["Overwatch".into()],
                     preferred_roles: vec!["flex".into()],
-                    message: None,
+                    message: Some(VALID_MESSAGE.into()),
                 }),
             )
             .await,
@@ -1167,7 +1186,7 @@ mod tests {
                 Json(SubmitApplicationRequest {
                     preferred_games: vec![],
                     preferred_roles: vec![],
-                    message: None,
+                    message: Some(VALID_MESSAGE.into()),
                 }),
             )
             .await,
@@ -1199,6 +1218,188 @@ mod tests {
             after.is_active,
             "an unbanned applicant is reactivated on accept"
         );
+    }
+
+    #[test]
+    fn message_length_counts_trimmed_unicode_chars() {
+        assert!(!application_message_is_long_enough(None));
+        assert!(!application_message_is_long_enough(Some("")));
+        assert!(!application_message_is_long_enough(Some("   123456789   ")));
+        assert!(application_message_is_long_enough(Some("  1234567890  ")));
+        // 10 chars, 20 bytes: passes on chars.
+        assert!(application_message_is_long_enough(Some("æøåæøåæøåæ")));
+        // 9 chars, 36 bytes: bytes are not the measure.
+        assert!(!application_message_is_long_enough(Some(
+            "🎮🎮🎮🎮🎮🎮🎮🎮🎮"
+        )));
+    }
+
+    #[test]
+    fn message_length_trims_unicode_whitespace_padding() {
+        // U+3000 and U+00A0 are Unicode White_Space, so `trim` removes them.
+        // Padding to 10+ chars with them does not count.
+        let ideographic = "\u{3000}123456789\u{3000}";
+        assert!(ideographic.chars().count() >= 10);
+        assert!(!application_message_is_long_enough(Some(ideographic)));
+        let no_break = "\u{00A0}123456789\u{00A0}";
+        assert!(no_break.chars().count() >= 10);
+        assert!(!application_message_is_long_enough(Some(no_break)));
+        // Exactly 10 chars, one of them the padding.
+        assert!(!application_message_is_long_enough(Some(
+            "\u{3000}123456789"
+        )));
+        assert!(!application_message_is_long_enough(Some(
+            "123456789\u{00A0}"
+        )));
+    }
+
+    #[test]
+    fn message_length_counts_combining_marks_and_skin_tone_modifiers_as_chars() {
+        // 5 graphemes, 10 chars: base letter + U+0301 combining acute accent.
+        let combining = "e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}";
+        assert_eq!(combining.chars().count(), 10);
+        assert!(application_message_is_long_enough(Some(combining)));
+        // 5 graphemes, 10 chars: thumbs up + U+1F3FD skin-tone modifier.
+        let skin_tone = "\u{1F44D}\u{1F3FD}".repeat(5);
+        assert_eq!(skin_tone.chars().count(), 10);
+        assert!(application_message_is_long_enough(Some(&skin_tone)));
+    }
+
+    /// Submit as a fresh non-member account with the given roles and message.
+    async fn submit_as(
+        state: &AppState,
+        username: &str,
+        preferred_roles: Vec<String>,
+        message: Option<&str>,
+    ) -> Result<(StatusCode, Json<Application>), (StatusCode, Json<ErrorResponse>)> {
+        seed_user(state, username, username).await;
+        let user = state
+            .db
+            .get_user(username)
+            .await
+            .expect("get user")
+            .expect("user");
+        submit_application(
+            State(state.clone()),
+            auth_user(user),
+            Json(SubmitApplicationRequest {
+                preferred_games: vec![],
+                preferred_roles,
+                message: message.map(str::to_string),
+            }),
+        )
+        .await
+    }
+
+    async fn assert_short_message_refused(state: &AppState, username: &str, message: Option<&str>) {
+        let (status, body) = must_err(
+            submit_as(state, username, vec!["tank".into()], message).await,
+            "short message must fail",
+        );
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body.error,
+            format!("Message must be at least {MIN_APPLICATION_MESSAGE_CHARS} characters")
+        );
+        assert!(
+            state
+                .db
+                .get_application_by_user(username)
+                .await
+                .expect("lookup")
+                .is_none(),
+            "a refused submit must not store an application"
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_refuses_message_under_ten_chars_after_trim() {
+        let state = test_state().await;
+        assert_short_message_refused(&state, "nine", Some("  123456789\n\t ")).await;
+    }
+
+    #[tokio::test]
+    async fn submit_refuses_missing_message() {
+        let state = test_state().await;
+        assert_short_message_refused(&state, "nomsg", None).await;
+        assert_short_message_refused(&state, "blankmsg", Some("          ")).await;
+    }
+
+    #[tokio::test]
+    async fn submit_refuses_nine_multibyte_chars() {
+        let state = test_state().await;
+        assert_short_message_refused(&state, "ninemb", Some("æøåæøåæøå")).await;
+        assert_short_message_refused(&state, "nineemoji", Some("🎮🎮🎮🎮🎮🎮🎮🎮🎮")).await;
+    }
+
+    #[tokio::test]
+    async fn submit_refuses_unicode_space_padded_message() {
+        let state = test_state().await;
+        assert_short_message_refused(&state, "ideopad", Some("\u{3000}123456789\u{3000}")).await;
+        assert_short_message_refused(&state, "nbsppad", Some("\u{00A0}123456789\u{00A0}")).await;
+    }
+
+    #[tokio::test]
+    async fn submit_accepts_combining_marks_and_skin_tone_modifiers() {
+        let state = test_state().await;
+        let (status, _) = must_ok(
+            submit_as(
+                &state,
+                "combining",
+                vec![],
+                Some("e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}"),
+            )
+            .await,
+            "10 chars with combining marks",
+        );
+        assert_eq!(status, StatusCode::CREATED);
+        let skin_tone = "\u{1F44D}\u{1F3FD}".repeat(5);
+        let (status, _) = must_ok(
+            submit_as(&state, "skintone", vec![], Some(&skin_tone)).await,
+            "10 chars with skin-tone modifiers",
+        );
+        assert_eq!(status, StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn submit_accepts_padded_ten_char_message_and_stores_it_as_sent() {
+        let state = test_state().await;
+        let (status, Json(app)) = must_ok(
+            submit_as(
+                &state,
+                "padded",
+                vec!["tank".into()],
+                Some("   1234567890   "),
+            )
+            .await,
+            "padded 10 chars",
+        );
+        assert_eq!(status, StatusCode::CREATED);
+        // Storage is unchanged: the message is kept as sent, not trimmed.
+        assert_eq!(app.message.as_deref(), Some("   1234567890   "));
+    }
+
+    #[tokio::test]
+    async fn submit_accepts_ten_multibyte_chars() {
+        let state = test_state().await;
+        let msg = "æøåæøåæøåæ";
+        assert!(msg.len() > 10);
+        let (status, _) = must_ok(
+            submit_as(&state, "tenmb", vec![], Some(msg)).await,
+            "10 multibyte chars",
+        );
+        assert_eq!(status, StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn submit_accepts_empty_preferred_roles_with_valid_message() {
+        let state = test_state().await;
+        let (status, Json(app)) = must_ok(
+            submit_as(&state, "noroles", vec![], Some(VALID_MESSAGE)).await,
+            "empty roles",
+        );
+        assert_eq!(status, StatusCode::CREATED);
+        assert!(app.preferred_roles.is_empty());
     }
 
     /// Trial/accept copies the account username into `member.display_name`.
