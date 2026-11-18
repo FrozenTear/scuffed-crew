@@ -173,7 +173,7 @@ TERMINAL
   no_long_dash "terminal update" "$TERMINAL_UPDATE"
 fi
 
-INTRO="Prebuilt Linux x86_64 build of the Overwatch 2 stat tracker (daemon + Iced GUI)."
+INTRO="Prebuilt Linux x86_64 build of the Overwatch stat tracker (daemon + Iced GUI)."
 no_long_dash "release intro" "$INTRO"
 
 MAIN_BOOTSTRAP_URL="https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh"
