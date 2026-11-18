@@ -15,6 +15,16 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## Unreleased
+
+If you turn on rank screen training crops on the website, the tracker now sends one picture of the rank screen after each competitive game in Overwatch. It is the same part of the screen a game report can include, with no player names and no result word, and nothing is cut or sent while the switch is off.
+
+### Highlights
+
+- The switch is off by default. Your games and your other training crops record the same way whether it is on or off.
+- On screens smaller than 1856x1056 no rank picture is taken.
+- A rank picture too large for the website's limit is left out, never sent.
+
 ## 0.6.0-rc.1
 
 Digit training crops now wait for a Tab where your damage, healing or mitigation in Overwatch has reached 1000, instead of saving the first spawn board, which is mostly zeros. Training now keeps only the first map banner of a game.

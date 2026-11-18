@@ -66,7 +66,7 @@ pub(super) fn consent(dir: &std::path::Path, value: TrainingCropConsent) {
 
 #[test]
 fn no_upload_kind_is_a_whole_screen() {
-    assert_eq!(UploadKind::ALL.len(), 3);
+    assert_eq!(UploadKind::ALL.len(), 4);
     for kind in UploadKind::ALL {
         assert_ne!(kind.crop_kind(), CropKind::FullScreen);
         assert!(kind.crop_kind().accepts_uploads());
@@ -74,6 +74,75 @@ fn no_upload_kind_is_a_whole_screen() {
     }
     assert_eq!(UploadKind::parse("full_screen"), None);
     assert_eq!(UploadKind::parse("colorblind_filter"), None);
+}
+
+#[test]
+fn rank_upload_kind_round_trips() {
+    assert!(UploadKind::ALL.contains(&UploadKind::Rank));
+    assert_eq!(UploadKind::Rank.crop_kind(), CropKind::Rank);
+    assert_eq!(UploadKind::Rank.as_str(), "rank");
+    assert_eq!(UploadKind::parse("rank"), Some(UploadKind::Rank));
+    assert_eq!(UploadKind::parse("Rank"), None);
+    assert_eq!(UploadKind::Rank.label(), "Rank screens");
+    let on = TrainingCropConsent {
+        rank: true,
+        ..TrainingCropConsent::default()
+    };
+    assert!(UploadKind::Rank.consented(&on));
+    assert!(!UploadKind::Rank.consented(&all_consent()));
+    assert!(!UploadKind::MapName.consented(&on));
+}
+
+#[test]
+fn rank_crops_need_the_kinds_screen_size_and_caps() {
+    let t = token();
+    let mut meta = rank_meta(2560, 1440);
+    meta.game_token = Some(t);
+    meta.validate().unwrap();
+    let ok = crop(meta.clone(), png(1151, 720, false));
+    assert_eq!(check_crop(UploadKind::Rank, &ok), Ok(()));
+    // Wider or taller than the rank bound.
+    assert!(matches!(
+        check_crop(UploadKind::Rank, &crop(meta.clone(), png(1537, 100, false))),
+        Err(CropRefusal::Edges { .. })
+    ));
+    assert!(matches!(
+        check_crop(UploadKind::Rank, &crop(meta.clone(), png(100, 721, false))),
+        Err(CropRefusal::Edges { .. })
+    ));
+    // Over the 384 KiB cap.
+    let cap = UploadKind::Rank.crop_kind().max_crop_bytes();
+    let over = pad_png(png(64, 64, false), cap + 1);
+    assert_eq!(
+        check_crop(UploadKind::Rank, &crop(meta.clone(), over)),
+        Err(CropRefusal::TooLarge(cap + 1))
+    );
+    // A screen under the kind's minimum, or none, is refused like the
+    // server refuses it.
+    for (w, h) in [(1600, 900), (1855, 1080), (1920, 1055)] {
+        let small = TrainingCropUploadMeta {
+            screen_width: Some(w),
+            screen_height: Some(h),
+            ..meta.clone()
+        };
+        assert_eq!(
+            check_crop(UploadKind::Rank, &crop(small, png(100, 100, false))),
+            Err(CropRefusal::Meta("screen_width")),
+            "{w}x{h}"
+        );
+    }
+    let none = TrainingCropUploadMeta {
+        screen_width: None,
+        screen_height: None,
+        ..meta
+    };
+    assert_eq!(
+        check_crop(UploadKind::Rank, &crop(none, png(100, 100, false))),
+        Err(CropRefusal::Meta("screen_width"))
+    );
+    // The other kinds keep an optional screen size.
+    let map = crop(map_name_meta(&token(), 200, 100), png(300, 40, false));
+    assert_eq!(check_crop(UploadKind::MapName, &map), Ok(()));
 }
 
 #[test]

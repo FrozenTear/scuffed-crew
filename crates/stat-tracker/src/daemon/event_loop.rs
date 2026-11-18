@@ -576,6 +576,8 @@ pub(crate) async fn run_loop(
                             daemon::pregame_dump::PregameDump::post_want_of(pregame_dump.as_mut(), now);
                         let rank_read = rank_feed.as_ref().map(daemon::rank::RankFeed::reader);
                         let rank_holds = rank_feed.as_ref().is_some_and(daemon::rank::RankFeed::holds_screen);
+                        // The open game, if it may still take a rank training crop.
+                        let rank_crop = daemon::rank_training::rank_crop_target(data_dir, st.active_game.as_ref());
                         // Dropping this join detaches the blocking OCR. That
                         // task does not write a match row. The row is written
                         // below, and only when shutdown has not begun and no
@@ -703,6 +705,13 @@ pub(crate) async fn run_loop(
                                 signal.map(|(_, source)| source),
                                 &img,
                             );
+                            // Rank training crop (consent on only): the same
+                            // rank screen frames, cut on its own task.
+                            if rank_pngs.is_some()
+                                && let Some(target) = rank_crop
+                            {
+                                let _ = daemon::rank_training::offer_rank_crop(target, &img);
+                            }
                             stat_tracker::perf::record(
                                 stat_tracker::perf::Stage::PollAnalyze,
                                 analyze_started.elapsed(),

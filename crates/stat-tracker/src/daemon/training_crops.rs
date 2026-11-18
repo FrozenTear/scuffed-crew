@@ -106,11 +106,11 @@ struct HeroCrop {
 static OFFERED: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
 const OFFERED_KEEP: usize = 64;
 
-fn offer_key(session_id: &str, kind: sync::UploadKind, hero: &str) -> String {
+pub(super) fn offer_key(session_id: &str, kind: sync::UploadKind, hero: &str) -> String {
     format!("{session_id}\n{}\n{hero}", kind.as_str())
 }
 
-fn offered(key: &str) -> bool {
+pub(super) fn offered(key: &str) -> bool {
     OFFERED
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -118,7 +118,7 @@ fn offered(key: &str) -> bool {
         .any(|k| k == key)
 }
 
-fn mark_offered(key: String) {
+pub(super) fn mark_offered(key: String) {
     let mut keys = OFFERED.lock().unwrap_or_else(|e| e.into_inner());
     if !keys.contains(&key) {
         keys.push_back(key);

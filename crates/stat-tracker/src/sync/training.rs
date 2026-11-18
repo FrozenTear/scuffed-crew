@@ -20,14 +20,18 @@ pub enum UploadKind {
     HeroIcon,
     StatDigits,
     MapName,
+    /// The rank update screen after a competitive game, cut to the report
+    /// bundle's `crops/rank.png` region (no result word, no player names).
+    Rank,
 }
 
 impl UploadKind {
     /// Every kind, in the order a send pass walks them.
-    pub const ALL: [UploadKind; 3] = [
+    pub const ALL: [UploadKind; 4] = [
         UploadKind::HeroIcon,
         UploadKind::StatDigits,
         UploadKind::MapName,
+        UploadKind::Rank,
     ];
 
     /// The shared kind.
@@ -36,6 +40,7 @@ impl UploadKind {
             UploadKind::HeroIcon => CropKind::HeroIcon,
             UploadKind::StatDigits => CropKind::StatDigits,
             UploadKind::MapName => CropKind::MapName,
+            UploadKind::Rank => CropKind::Rank,
         }
     }
 
@@ -62,6 +67,7 @@ impl UploadKind {
             UploadKind::HeroIcon => "Hero icons",
             UploadKind::StatDigits => "Stat digits",
             UploadKind::MapName => "Map names",
+            UploadKind::Rank => "Rank screens",
         }
     }
 }
@@ -128,6 +134,17 @@ pub fn check_crop(kind: UploadKind, crop: &QueuedCrop) -> Result<(), CropRefusal
         return Err(CropRefusal::TooLarge(crop.png.len()));
     }
     crop.meta.validate().map_err(CropRefusal::Meta)?;
+    if let Some((min_width, min_height)) = kind.crop_kind().min_screen() {
+        // The server refuses such a crop (`rank` must report a screen
+        // larger than any crop of its kind), so it is not kept either.
+        let large_enough = matches!(
+            (crop.meta.screen_width, crop.meta.screen_height),
+            (Some(w), Some(h)) if w >= min_width && h >= min_height
+        );
+        if !large_enough {
+            return Err(CropRefusal::Meta("screen_width"));
+        }
+    }
     if kind == UploadKind::HeroIcon && crop.meta.hero.is_none() {
         return Err(CropRefusal::NoHero);
     }
@@ -303,4 +320,27 @@ pub fn stat_digits_meta(
         slot_type: Some((*slot).to_string()),
         ..tab_meta(width, height)
     })
+}
+
+/// `screen` of a `rank` crop: the rank update screen, the same class the
+/// report bundle gives its `crops/rank.png` (`report::bundle::RANK_SCREEN_CLASS`).
+pub const RANK_SCREEN: &str = "rank_update";
+
+/// `slot_type` of a `rank` crop: the whole rank region the report bundle
+/// cuts (`report::blank::RANK_BAND`), not one field of it.
+pub const RANK_SLOT: &str = "rank_band";
+
+/// `meta` for a `rank` crop from a rank update screen of `width` x
+/// `height`, without the game token ([`super::keep_tab_crops`] adds it).
+/// The screen size is always set: the server requires it for this kind,
+/// and [`check_crop`] refuses a crop whose screen is under the kind's
+/// minimum.
+pub fn rank_meta(width: u32, height: u32) -> TrainingCropUploadMeta {
+    TrainingCropUploadMeta {
+        screen: Some(RANK_SCREEN.to_string()),
+        slot_type: Some(RANK_SLOT.to_string()),
+        screen_width: Some(width),
+        screen_height: Some(height),
+        ..TrainingCropUploadMeta::default()
+    }
 }
