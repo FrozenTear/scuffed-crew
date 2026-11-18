@@ -1,6 +1,6 @@
 mod appearance;
 mod apply;
-mod article_author;
+pub(crate) mod article_author;
 mod blog;
 mod blog_post;
 pub(crate) mod changelog;

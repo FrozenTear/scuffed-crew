@@ -2742,35 +2742,40 @@ mod tests {
     }
 
     /// QA nit 9: `/chat` at 390 was 10px taller than the viewport. The
-    /// embedded chat was a fixed 70vh under a page header; on phone the page
-    /// now takes the height the shell leaves and the chat fills it.
+    /// redesigned chat page is one full-height tool: its height is the
+    /// viewport less the shell chrome, which on phone includes the tab bar,
+    /// so nothing adds a fixed height under it.
     #[test]
     fn the_chat_page_fits_the_shell_on_phone() {
         let chat = include_str!("../pages/chat.rs");
-        let phone = chat
+        let page = css_rule(chat, "\n.team-chat {");
+        assert!(
+            has_decl(&page, "height: calc(100dvh - var(--shell-chrome-height))"),
+            "{page}"
+        );
+        assert!(!chat.contains("70vh"), "no fixed chat height");
+        let phone = SHELL_CSS
             .split("@media (max-width: 820px) {")
             .nth(1)
             .expect("phone rules");
-        let page = css_rule(phone, ".team-chat-page {");
-        assert!(
-            has_decl(
-                &page,
-                "min-height: calc(100dvh - var(--shell-chrome-height, 0px))"
-            ),
-            "{page}"
-        );
-        assert!(has_decl(&page, "flex-direction: column"), "{page}");
-        let widget = css_rule(phone, ".team-chat-page .chat-widget--embedded {");
-        assert!(has_decl(&widget, "flex: 1 1 0"), "{widget}");
-        assert!(has_decl(&widget, "height: auto"), "{widget}");
+        assert!(phone.contains(
+            "--shell-chrome-height: calc(var(--nav-height-used) + var(--tab-bar-height))"
+        ));
 
-        // The relay-off state subtracts the tab bar too, not only the top bar.
+        // The relay-off state must not overflow on phone either. The gate is
+        // a plain `PageShell` with no viewport height of its own. (A loop
+        // over its viewport-height lines checked nothing: there are none.)
+        // If one comes back, it has to subtract the whole shell chrome (top
+        // bar plus tab bar), and this test has to say so.
         let gate = include_str!("../pages/chat_gate.rs");
-        let gate = css_rule(gate, ".chat-unavailable {");
-        assert!(
-            gate.contains("var(--shell-chrome-height, var(--nav-height-used))"),
-            "{gate}"
-        );
+        let gate = gate.split("mod tests").next().expect("production source");
+        assert!(gate.contains("PageShell {"), "the gate is a plain page");
+        for unit in ["100vh", "100dvh", "100svh", "100lvh"] {
+            assert!(
+                !gate.contains(unit),
+                "the gate sets a viewport height: {unit}"
+            );
+        }
     }
 
     /// QA nit 13: what sticks on the patch notes page sits under the top bar
