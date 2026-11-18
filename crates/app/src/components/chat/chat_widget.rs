@@ -742,7 +742,6 @@ pub fn ChatWidget(
         .and_then(|o| o.as_ref())
         .and_then(|m| m.member.as_ref());
     let own_pubkey = own_member.and_then(|m| m.nostr_pubkey.clone());
-    let own_name = own_member.map(|m| m.display_name.clone());
     let notice = thread_notice(is_officer, public_send_wait, err.as_deref());
 
     rsx! {
@@ -793,7 +792,6 @@ pub fn ChatWidget(
                         key_mode: key_mode,
                         loading: is_loading,
                         own_pubkey: own_pubkey.clone(),
-                        own_name: own_name.clone(),
                         on_send: move |attempt: ComposeAttempt| {
                             if sending() {
                                 attempt.fail();
@@ -844,7 +842,6 @@ pub fn ChatWidget(
                         messages: visible,
                         loading: is_loading,
                         own_pubkey: own_pubkey.clone(),
-                        own_name: own_name.clone(),
                     }
                     ComposeBox {
                         on_send: move |attempt: ComposeAttempt| {

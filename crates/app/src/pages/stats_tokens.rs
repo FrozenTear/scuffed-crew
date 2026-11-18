@@ -7,7 +7,9 @@ use scuffed_api_client::ApiClient;
 use scuffed_types::api::{CreateDaemonTokenRequest, CreateDaemonTokenResponse};
 
 use super::stats_member::{Col, STATS_VIEWS_CSS, STATS_VIEWS_CSS_ID, StatsTable};
-use crate::components::ui::{EmptyCard, FieldError, PageHeader, PageShell, PageWidth};
+use crate::components::ui::{
+    EmptyCard, FieldError, InlineConfirm, PageHeader, PageShell, PageWidth,
+};
 use crate::components::{FormModal, Toast, member_pending, use_toast};
 use crate::hooks::{ModalController, use_api};
 use crate::layouts::focus_element;
@@ -86,6 +88,10 @@ const TOKENS_CSS: &str = r#"
   gap: var(--space-2);
 }
 .tokens-page .token-date { white-space: nowrap; color: var(--table-row-muted); }
+/* The Revoke confirm strip sits in the Actions cell in place of the button.
+   The cell is nowrap; the strip wraps, and its title repeats the label. */
+.tokens-page .token-revoke-confirm { min-width: 15em; white-space: normal; text-align: start; }
+.tokens-page .token-revoke-confirm .inline-confirm__title { overflow-wrap: anywhere; }
 /* The dialog may render outside the page container. */
 .token-form-field {
   display: flex;
@@ -152,8 +158,10 @@ fn label_error(label: &str) -> Option<&'static str> {
         .then_some("Give the token a label, for example my-desktop.")
 }
 
-/// Id of a row's Revoke button: the token id plus the action, never a counter.
-fn revoke_button_id(token_id: &str) -> String {
+/// Id prefix of a row's Revoke confirm strip: the token id plus the action,
+/// never a counter. The row's Revoke button is `{prefix}-trigger`, the id
+/// `InlineConfirm` gives focus back to on Cancel or Esc.
+fn revoke_confirm_id(token_id: &str) -> String {
     let safe: String = token_id
         .chars()
         .map(|c| {
@@ -165,6 +173,39 @@ fn revoke_button_id(token_id: &str) -> String {
         })
         .collect();
     format!("token-{safe}-revoke")
+}
+
+/// Id of a row's Revoke button.
+fn revoke_button_id(token_id: &str) -> String {
+    format!("{}-trigger", revoke_confirm_id(token_id))
+}
+
+/// The confirm strip's question, naming the token.
+fn revoke_confirm_title(label: &str) -> String {
+    format!("Revoke token {label}?")
+}
+
+const REVOKE_CONFIRM_BODY: &str = "The tracker using it stops uploading. This cannot be undone.";
+
+/// What the row's Actions cell shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RevokeCell {
+    /// A revoked token: nothing to do.
+    None,
+    /// The Revoke button.
+    Button,
+    /// The confirm strip in place of the button.
+    Confirm,
+}
+
+fn revoke_cell(token: &DaemonToken, confirming: Option<&str>) -> RevokeCell {
+    if !token.is_active {
+        RevokeCell::None
+    } else if confirming == Some(token.id.as_str()) {
+        RevokeCell::Confirm
+    } else {
+        RevokeCell::Button
+    }
 }
 
 async fn copy_daemon_token(text: &str) -> Result<(), &'static str> {
@@ -323,25 +364,43 @@ pub fn StatsTokens() -> Element {
         revealed_token.set(None);
     };
 
+    // The token whose Revoke confirm strip is open, and whether its DELETE
+    // is in flight. Revoke only opens the strip; the strip's Revoke sends.
+    let mut confirming: Signal<Option<String>> = use_signal(|| None);
+    let mut revoking = use_signal(|| false);
+
     let on_revoke = move |token_id: String| {
+        if revoking() {
+            return;
+        }
+        revoking.set(true);
         spawn(async move {
             let result = ApiClient::web()
                 .delete(&format!("/api/stats/tokens/{token_id}"))
                 .await;
+            revoking.set(false);
             match result {
                 Ok(()) => {
+                    confirming.set(None);
                     toast.show(Toast::success("Token revoked."));
                     focus_element(TOKENS_LIST_TITLE_ID);
                     tokens.refresh += 1;
                 }
                 Err(e) => {
+                    // The strip stays open, focus stays on its Revoke.
                     toast.show(Toast::error(format!("Failed: {e}")));
                 }
             }
         });
     };
 
-    let on_revoke = EventHandler::new(on_revoke);
+    let actions = RevokeActions {
+        confirming: confirming.read().clone(),
+        busy: revoking(),
+        on_ask: EventHandler::new(move |token_id: String| confirming.set(Some(token_id))),
+        on_confirm: EventHandler::new(on_revoke),
+        on_cancel: EventHandler::new(move |_: ()| confirming.set(None)),
+    };
 
     // Read once here, so no read guard is held while the children render.
     let token_count = tokens
@@ -423,7 +482,7 @@ pub fn StatsTokens() -> Element {
                                     Col::Actions("Actions"),
                                 ],
                                 for token in list.iter() {
-                                    Fragment { key: "{token.id}", {token_row(token, on_revoke)} }
+                                    Fragment { key: "{token.id}", {token_row(token, &actions)} }
                                 }
                             }
                         },
@@ -463,10 +522,30 @@ pub fn StatsTokens() -> Element {
     }
 }
 
+/// The Revoke state and handlers every row shares.
+#[derive(Clone)]
+struct RevokeActions {
+    /// Id of the token whose confirm strip is open.
+    confirming: Option<String>,
+    /// The confirmed DELETE is in flight.
+    busy: bool,
+    /// Revoke pressed: open the strip for this token.
+    on_ask: EventHandler<String>,
+    /// The strip's Revoke: send the DELETE for this token.
+    on_confirm: EventHandler<String>,
+    /// Cancel or Esc. `InlineConfirm` moves focus back to the Revoke button.
+    on_cancel: EventHandler<()>,
+}
+
 /// One token row. The status is a word on a soft fill, and the Revoke button
-/// names the token it acts on.
-fn token_row(token: &DaemonToken, on_revoke: EventHandler<String>) -> Element {
+/// names the token it acts on. Revoke opens a confirm strip in its place.
+fn token_row(token: &DaemonToken, actions: &RevokeActions) -> Element {
     let tid = token.id.clone();
+    let confirm_tid = token.id.clone();
+    let on_ask = actions.on_ask;
+    let on_confirm = actions.on_confirm;
+    let on_cancel = actions.on_cancel;
+    let cell = revoke_cell(token, actions.confirming.as_deref());
     let (status, status_class) = if token.is_active {
         ("Active", "status-pill active")
     } else {
@@ -477,6 +556,7 @@ fn token_row(token: &DaemonToken, on_revoke: EventHandler<String>) -> Element {
     let used = token.last_used_at.as_ref().map(format_date);
     let used_at = token.last_used_at.as_ref().map(DateTime::to_rfc3339);
     let revoke_id = revoke_button_id(&token.id);
+    let confirm_id = revoke_confirm_id(&token.id);
     rsx! {
         tr { key: "{token.id}",
             th { scope: "row", "{token.label}" }
@@ -490,17 +570,33 @@ fn token_row(token: &DaemonToken, on_revoke: EventHandler<String>) -> Element {
                 }
             }
             td { class: "stats-table-actions",
-                if token.is_active {
-                    button {
-                        r#type: "button",
-                        id: "{revoke_id}",
-                        class: "btn is-ghost",
-                        aria_label: "Revoke token {token.label}",
-                        onclick: move |_| on_revoke.call(tid.clone()),
-                        "Revoke"
-                    }
-                } else {
-                    span { class: "visually-hidden", "No actions" }
+                match cell {
+                    RevokeCell::Button => rsx! {
+                        button {
+                            r#type: "button",
+                            id: "{revoke_id}",
+                            class: "btn is-ghost",
+                            aria_label: "Revoke token {token.label}",
+                            onclick: move |_| on_ask.call(tid.clone()),
+                            "Revoke"
+                        }
+                    },
+                    RevokeCell::Confirm => rsx! {
+                        div { class: "token-revoke-confirm",
+                            InlineConfirm {
+                                id: confirm_id,
+                                title: revoke_confirm_title(&token.label),
+                                body: REVOKE_CONFIRM_BODY.to_string(),
+                                confirm_label: "Revoke".to_string(),
+                                busy: actions.busy,
+                                on_confirm: move |_| on_confirm.call(confirm_tid.clone()),
+                                on_cancel: move |_| on_cancel.call(()),
+                            }
+                        }
+                    },
+                    RevokeCell::None => rsx! {
+                        span { class: "visually-hidden", "No actions" }
+                    },
                 }
             }
         }
@@ -670,6 +766,24 @@ mod tests {
         assert_eq!(format_date(&at), "2 Nov 2026, 20:05 UTC");
     }
 
+    /// Row actions that do nothing, with the strip open for `confirming`.
+    fn noop_actions(confirming: Option<&str>) -> RevokeActions {
+        RevokeActions {
+            confirming: confirming.map(str::to_string),
+            busy: false,
+            on_ask: EventHandler::new(|_: String| {}),
+            on_confirm: EventHandler::new(|_: String| {}),
+            on_cancel: EventHandler::new(|_: ()| {}),
+        }
+    }
+
+    fn prod_src() -> &'static str {
+        include_str!("stats_tokens.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap()
+    }
+
     #[test]
     fn rows_say_the_status_in_words_and_name_the_revoke_button() {
         fn view() -> Element {
@@ -679,8 +793,8 @@ mod tests {
                     labelled_by: "tokens-list-title",
                     wide: true,
                     cols: vec![Col::Text("Label"), Col::Text("Status"), Col::Text("Created"), Col::Text("Last used"), Col::Actions("Actions")],
-                    {token_row(&token("a:1", true, true), EventHandler::new(|_: String| {}))}
-                    {token_row(&token("b2", false, false), EventHandler::new(|_: String| {}))}
+                    {token_row(&token("a:1", true, true), &noop_actions(None))}
+                    {token_row(&token("b2", false, false), &noop_actions(None))}
                 }
             }
         }
@@ -703,7 +817,7 @@ mod tests {
         // Only the active token can be revoked. Its button id comes from the
         // token id, and its name says which token it revokes.
         assert_eq!(html.matches("<button").count(), 1, "{html}");
-        assert!(html.contains("id=\"token-a_1-revoke\""), "{html}");
+        assert!(html.contains("id=\"token-a_1-revoke-trigger\""), "{html}");
         assert!(
             html.contains("aria-label=\"Revoke token pc-a:1\""),
             "{html}"
@@ -803,5 +917,109 @@ mod tests {
         assert!(prod.contains(
             "h2 {\n                    id: TOKENS_LIST_TITLE_ID,\n                    class: \"ui-section-title\",\n                    tabindex: \"-1\","
         ));
+    }
+
+    /// FrozenTear: Revoke asks first. Pressing Revoke opens a confirm strip
+    /// in the row (in place of the button) and sends nothing; only the
+    /// strip's own Revoke sends the DELETE, and on success focus moves to
+    /// the "Your tokens" heading.
+    #[test]
+    fn revoke_asks_before_it_removes_the_token() {
+        let active = token("a:1", true, true);
+        let other = token("c3", true, false);
+        let revoked = token("b2", false, false);
+        assert_eq!(revoke_cell(&active, None), RevokeCell::Button);
+        assert_eq!(revoke_cell(&active, Some("a:1")), RevokeCell::Confirm);
+        assert_eq!(revoke_cell(&other, Some("a:1")), RevokeCell::Button);
+        assert_eq!(revoke_cell(&revoked, Some("b2")), RevokeCell::None);
+
+        fn view() -> Element {
+            rsx! {
+                StatsTable {
+                    labelled_by: "tokens-list-title",
+                    wide: true,
+                    cols: vec![Col::Text("Label"), Col::Text("Status"), Col::Text("Created"), Col::Text("Last used"), Col::Actions("Actions")],
+                    {token_row(&token("a:1", true, true), &noop_actions(Some("a:1")))}
+                    {token_row(&token("c3", true, false), &noop_actions(Some("a:1")))}
+                }
+            }
+        }
+        let html = render(view);
+        // The open row: a named group with Cancel and Revoke, no Revoke trigger.
+        assert!(!html.contains("id=\"token-a_1-revoke-trigger\""), "{html}");
+        assert!(
+            html.contains("role=\"group\" aria-labelledby=\"token-a_1-revoke-title\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("id=\"token-a_1-revoke-title\" class=\"inline-confirm__title\">Revoke token pc-a:1?</p>"),
+            "{html}"
+        );
+        assert!(html.contains(REVOKE_CONFIRM_BODY), "{html}");
+        assert!(
+            html.contains("id=\"token-a_1-revoke-cancel\" class=\"inline-confirm__cancel\" type=\"button\">Cancel</button>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("class=\"inline-confirm__go\" type=\"button\">Revoke</button>"),
+            "{html}"
+        );
+        assert!(html.contains("Esc cancels"), "{html}");
+        // The other row keeps its button.
+        assert!(html.contains("id=\"token-c3-revoke-trigger\""), "{html}");
+        assert_eq!(html.matches("role=\"group\"").count(), 1, "{html}");
+        assert!(!html.contains("<a "), "no link wraps a button: {html}");
+        assert!(!REVOKE_CONFIRM_BODY.contains('\u{2014}'));
+
+        let prod = prod_src();
+        // Revoke only opens the strip.
+        assert!(prod.contains(
+            "on_ask: EventHandler::new(move |token_id: String| confirming.set(Some(token_id))),"
+        ));
+        assert!(prod.contains("onclick: move |_| on_ask.call(tid.clone()),"));
+        // The strip's Revoke sends the DELETE; success closes it and moves focus.
+        assert!(prod.contains("on_confirm: EventHandler::new(on_revoke),"));
+        assert!(prod.contains("on_confirm: move |_| on_confirm.call(confirm_tid.clone()),"));
+        let revoke = prod
+            .split("let on_revoke = move |token_id: String| {")
+            .nth(1)
+            .expect("revoke handler");
+        let ok_arm = &revoke[..revoke.find("Err(e) =>").expect("error arm")];
+        assert!(ok_arm.contains(".delete(&format!(\"/api/stats/tokens/{token_id}\"))"));
+        assert!(ok_arm.contains("confirming.set(None);"), "{ok_arm}");
+        assert!(ok_arm.contains("revoking.set(true);"), "{ok_arm}");
+        assert!(
+            ok_arm.contains("if revoking() {\n            return;"),
+            "{ok_arm}"
+        );
+    }
+
+    /// Cancel (or Esc) closes the strip without a DELETE and gives focus
+    /// back to the row's Revoke button: `InlineConfirm` focuses
+    /// `{id}-trigger`, which is exactly the button's id.
+    #[test]
+    fn cancel_closes_the_strip_and_returns_focus_to_revoke() {
+        assert_eq!(
+            revoke_button_id("a:1"),
+            format!("{}-trigger", revoke_confirm_id("a:1"))
+        );
+        assert_eq!(revoke_button_id("a:1"), "token-a_1-revoke-trigger");
+        assert!(crate::components::ui::inline_confirm::key_cancels(
+            &Key::Escape
+        ));
+
+        let prod = prod_src();
+        assert!(prod.contains("on_cancel: EventHandler::new(move |_: ()| confirming.set(None)),"));
+        assert!(prod.contains("on_cancel: move |_| on_cancel.call(()),"));
+        assert!(prod.contains("id: confirm_id,"));
+        // The cancel path never touches the API.
+        let cancel_line = prod
+            .lines()
+            .find(|l| l.contains("on_cancel: EventHandler::new("))
+            .unwrap();
+        assert!(!cancel_line.contains("delete"), "{cancel_line}");
+        // Opening the strip does not unmount it on the next render: the row
+        // keys stay the token ids.
+        assert!(prod.contains("Fragment { key: \"{token.id}\", {token_row(token, &actions)} }"));
     }
 }
