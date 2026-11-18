@@ -5,16 +5,16 @@ use crate::routes::Route;
 
 const FAILURE_CSS: &str = r#"
 .dm-failure {
-    background: color-mix(in srgb, var(--danger) 8%, transparent);
-    border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+    background: color-mix(in srgb, var(--loss) 8%, transparent);
+    border: 1px solid color-mix(in srgb, var(--loss) 40%, transparent);
     border-radius: 8px;
     padding: 1rem 1.25rem;
-    color: var(--danger);
+    color: var(--loss);
     font-size: 0.85rem;
     margin-bottom: 1rem;
 }
 .dm-failure a {
-    color: var(--danger);
+    color: var(--loss);
     font-weight: 600;
     text-decoration: underline;
 }

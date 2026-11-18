@@ -72,6 +72,33 @@ fn pack(kinds: &[u8]) -> TemplateSet {
 }
 
 #[test]
+fn merging_two_learners_is_one_learner_fed_both_frames() {
+    let shots = [
+        (frame(0, Screen::HeroBan, 230), NAMES[0]),
+        (frame(0, Screen::MapVote, 200), NAMES[0]),
+        (frame(1, Screen::HeroBan, 230), NAMES[1]),
+    ];
+    let screens = [Screen::HeroBan, Screen::MapVote, Screen::HeroBan];
+    let mut one = Learner::new();
+    let mut left = Learner::new();
+    let mut right = Learner::new();
+    for (i, ((img, name), screen)) in shots.iter().zip(screens).enumerate() {
+        assert!(one.add_frame(img, screen, name));
+        let part = if i == 0 { &mut left } else { &mut right };
+        assert!(part.add_frame(img, screen, name));
+    }
+    left.merge(&right);
+    // the sums and counts are the learner's whole state
+    assert_eq!(format!("{left:?}"), format!("{one:?}"));
+    let (merged, fed) = (left.build(), one.build());
+    assert_eq!(merged, fed);
+    assert_eq!(
+        merged.classes.iter().map(|c| c.n).collect::<Vec<_>>(),
+        vec![2, 1]
+    );
+}
+
+#[test]
 fn reads_each_known_title() {
     let r = Reader::new(pack(&[0, 1]));
     for k in [0u8, 1] {
@@ -356,6 +383,18 @@ fn pack_with_wrong_size_is_refused() {
     assert!(matches!(
         TemplateSet::load_dir(&dir.path().join("nope")),
         Err(TemplateError::Missing(..))
+    ));
+}
+
+/// A pack file that is there but cannot be read did not load; only a file
+/// that is not there is missing.
+#[test]
+fn an_unreadable_pack_file_is_bad_not_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join(PACK_FILE)).unwrap();
+    assert!(matches!(
+        TemplateSet::load_dir(dir.path()),
+        Err(TemplateError::Bad(..))
     ));
 }
 
@@ -659,7 +698,7 @@ fn bench_labelled_queue_titles() {
     all.save_dir(&out.join("pack")).unwrap();
     let _ = writeln!(
         md,
-        "\nPack from all {} frames (1440p) written to `pack/{PACK_FILE}`; install under `<data_dir>/{TEMPLATE_DIR}/`.",
+        "\nPack from all {} frames (1440p) written to `pack/{PACK_FILE}`; install under `<data_dir>/{TEMPLATE_DIR}/`. The pack can also arrive there through the tracker's pack download, which moves a folder whose `{PACK_FILE}` is not the one it installed (or that holds other files) to `<data_dir>/templates-kept/` first.",
         items.len()
     );
     std::fs::create_dir_all(&out).unwrap();

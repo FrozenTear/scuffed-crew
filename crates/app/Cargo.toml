@@ -43,7 +43,7 @@ web-sys = { version = "0.3", features = [
     "WebSocket", "BinaryType", "MessageEvent", "CloseEvent", "console", "Location",
     "FormData", "File", "Blob", "HtmlInputElement", "FileList",
     "Storage", "StorageEvent", "MediaQueryList", "Url", "HtmlAnchorElement",
-    "Node", "NodeList",
+    "Node", "NodeList", "CssStyleDeclaration",
 ] }
 
 # Desktop-only deps
@@ -54,5 +54,14 @@ default = ["web"]
 web = ["dioxus/web", "scuffed-api-client/web", "dep:gloo-timers"]
 desktop = ["dioxus/desktop", "scuffed-api-client/native", "dep:tokio"]
 
+# build.rs parses the "What's changed" files (content/changelog/*.toml) with
+# the page's own parser, so a broken file fails the build and the wasm carries
+# no TOML parser.
+[build-dependencies]
+chrono = { workspace = true }
+serde = { workspace = true }
+toml = { version = "1", default-features = false, features = ["parse", "serde", "std"] }
+
 [dev-dependencies]
+toml = { version = "1", default-features = false, features = ["parse", "serde", "std"] }
 dioxus-ssr = { workspace = true }

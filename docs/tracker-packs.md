@@ -10,6 +10,13 @@ release, a PR, or a comment. Do not put them in fixtures or under
 `crates/stat-tracker/test-data/`. They live in two places only: the build
 folder on the machine that made them, and `PACKS_DIR` on the server.
 
+The one approved exception is the nine rank emblems in
+`crates/app/assets/rank-icons`, which the site's rank chart needs at build
+time. They are not a pack; see `crates/app/assets/rank-icons/LICENCE-NOTE.md`.
+
+To change a pack on your own PC, see
+[Hand-edit a reader pack](hand-edit-reader-packs.md).
+
 ## The packs
 
 | Pack | What it is for | Size on 2026-10-13 |
@@ -22,6 +29,8 @@ folder on the machine that made them, and `PACKS_DIR` on the server.
 | `words-v1.tar` | result words | 90 KiB |
 | `names-v1.tar` | optional. Single-letter templates only, no member data. Version `full-20261019`. The name reader uses it for the player's own row and falls back to Tesseract until it has loaded | 1.9 MB |
 | `bans-picks-v1.tar` | optional. Hero icons for the bans and picks reader (cv-v1): one 100 by 96 `<hero>.png` for each of the 54 heroes, plus an optional `no-preference.png`. Game art, built from real frames, so it is private like the others | live |
+| `rank-v1.tar` | optional. One `templates.json`: the glyph and word templates of the rank screen reader (rank-v1), cut from real rank screens | 1.4 MB |
+| `queue-title-v1.tar` | optional. One `templates.json`: the title templates of the queue title reader, cut from real pre-game screens | 80 KiB |
 
 Which folder each one lands in, what may be inside, and which reader uses it
 are in [Reference: inside a pack](#reference-inside-a-pack).
@@ -64,13 +73,16 @@ Which names each tracker asks for:
 | 0.5.0-alpha.2 to 0.5.0-alpha.6 | `heroes-v1.tar` only |
 | 0.5.0-alpha.7 to 0.5.0-alpha.12 | six: `heroes-v1.tar` first, then `heroes-v2.tar`, `heroes-v2-1080.tar`, `bans-v1.tar`, `maps-v1.tar`, `words-v1.tar` |
 | 0.5.0-rc.1 to 0.5.0-rc.9, 0.5.0, and 0.6.0-alpha.1 to 0.6.0-alpha.1.4 | seven: the six, then `names-v1.tar` (optional) |
-| 0.6.0-alpha.2 to 0.6.0-alpha.2.3, and main | eight: the seven, then `bans-picks-v1.tar` (optional) |
+| 0.6.0-alpha.2 to 0.6.0-alpha.3, and main | eight: the seven, then `bans-picks-v1.tar` (optional) |
+| 0.6.0-alpha.3.1 and later | ten: the eight, then `rank-v1.tar` (optional) and `queue-title-v1.tar` (optional) |
 
 No tracker pins a pack `version`: each one takes the `version` the list
 gives. `heroes-v1.tar` is the only pack every release needs (it is the one
 marked `required` in `PACKS`): without it every released tracker reports
 "The reader pack did not match the site" for the hero pack. All eight names
-are asked for by a released tracker, so all eight must stay. A name may
+are asked for by a released tracker, so all eight must stay. `rank-v1.tar`
+and `queue-title-v1.tar` join them once a release that asks for them ships;
+until then they may be listed, and older trackers ignore them. A name may
 leave the list only when no tracker release that members still run asks for
 it. The publish script warns when the list has no `heroes-v1.tar`.
 
@@ -91,6 +103,145 @@ and is not in the packgen output. Publishing leaves it alone.
 
 An `<outdir>` does not have to hold every pack. To change one pack, a folder
 with that one tar and a `manifest.json` that lists it is enough.
+
+### Rank and queue title
+
+`scuffed-pack-cutter` cuts `rank-v1.tar` and `queue-title-v1.tar`
+(`RANK_PACK_NAME` and `QUEUE_TITLE_PACK_NAME` in
+`crates/stat-tracker/src/packs/layout.rs`). Release builds ship only
+`--bin scuffed-stat-tracker`, so run the cutter from a checkout:
+
+```text
+cargo run --release -p scuffed-stat-tracker --bin scuffed-pack-cutter -- cut --kind rank|queue-title --labels FILE [--frames DIR] [--role-labels FILE] [--base DIR] [--replace CLASS ...] [--replace-all] [--allow-near] [--force] --out DIR
+cargo run --release -p scuffed-stat-tracker --bin scuffed-pack-cutter -- pack --kind rank|queue-title --dir DIR --name NAME.tar --version VER --out DIR
+cargo run --release -p scuffed-stat-tracker --bin scuffed-pack-cutter -- eval --kind rank|queue-title --labels FILE [--frames DIR] --baseline DIR --candidate DIR --set-name NAME [--role-labels FILE] [--allow-drop CLASS ...] [--allow-unverified CLASS ...]
+```
+
+The tracker loads both packs. `PACKS` gives them
+`PackLayout::TemplatesJson` (exactly one `templates.json`). A published tar
+unpacks to `templates/rank-v1` (`RANK_PACK_DIR`) or
+`templates/queue-title-v1` (`QUEUE_TITLE_PACK_DIR`). Each reader matches
+the templates in that folder. The load is optional and stays off unless
+`STAT_TRACKER_RANK_RECOGNIZER` or `STAT_TRACKER_QUEUE_TITLE_RECOGNIZER` is
+on, and it happens once at daemon start. The `Learner` is the one the
+ignored benches use to build those templates. It is not what a reader runs
+at match time.
+
+`cut` writes `templates.json`. `--frames` is required for rank. For
+queue-title it is required only when a label path is relative. `--base`,
+`--baseline` and `--candidate` are folders that hold `templates.json`, not
+tars. Extract the published tar, or point at the tracker's
+`templates/rank-v1` or `templates/queue-title-v1` folder. On a conflict the
+default mix is weighted by sample count (`n`), and the summary prints
+`n <base> -> <new>` on every class line. That mix is for new frames. Cutting
+`--base` from the same labelled frames that built the pack mixes each class
+in a second time, so `n` doubles and the vector stays about the same (both
+mixes round in f32, so the last bits can move). Recut those frames
+with `--replace-all`, or `--replace` for the classes that should be
+replaced. `--replace CLASS` (repeatable) or `--replace-all` keeps the new
+cut instead. A numeric class the labels did not actually show is not a
+recut: it stays the base template and prints `kept from base (pooled)`. A
+base template marked `pooled` is replaced by an observed cut of that class,
+not averaged into the pool. Pooling fills a class only when neither side has
+it, and that line prints `new (pooled)`, with or without `--base`.
+
+The published `rank-v1` was cut before the `pooled` mark existed, so a
+`--base` recut against it cannot tell its pooled fills from real cuts: it
+prints `base pack has unmarked pooled fills (cut before pooled marks
+existed, or recut from such a pack): an observed fill is mixed unless
+replaced, the written pack keeps the rest unmarked, so do not use it as a
+later --base`. Such a recut can mark the classes
+it brings into the pool, while every inherited fill stays unmarked, so one
+`pooled` mark does not make a pack safe. The cutter also warns when any
+numeric template of a class its family does not offer (`sr/%`,
+`change/%`) lacks the mark: the Learner never cuts one, so it is an
+inherited fill. Do not use the base that triggers this warning, or the pack
+such a cut writes, as a later `--base` until a full cut without unmarked
+fills exists. The first such
+pack comes from a cut of the full label set without `--base`, held to the
+published pack by `eval`.
+
+`cut` refuses `--out` equal to `--base`, refuses an `--out` that already
+holds `templates.json` unless `--force`, and writes the file by rename. It
+also refuses an existing `--out` that group or other can read, and it does
+not chmod that directory. `pack` refuses an `<out>/packs` that group or
+other can read. `pack` checks `--name` against the
+kind (`rank-v1.tar` or `queue-title-v1.tar`), loads the folder with that
+kind's reader, and prints the sha256 of `templates.json`. `eval` diffs the
+two packs first. Every changed class needs a labelled frame that shows that
+class, unless `--allow-unverified CLASS` names it. Rank coverage is per
+class (an `sr/7` needs a labelled SR that contains a 7; a `role/Tank` needs
+a Tank label; a `division/3` needs a division 3 label; an `emblem/3` needs a
+division 2 or 4 label, whose emblems show the 3), the same way a queue class
+needs a frame of that title. A class the reader never offers in its family
+(`pct/sr_icon`, `sr/%`) cannot change a read and needs no frame. A pooled
+numeric template is verified by a frame that shows that class in any
+numeric field. Then
+it scores the candidate pack against the baseline pack on every row,
+including a title the baseline pack does not have. It fails on a new wrong,
+on a frame that was correct and is now unread or wrong, on a dropped
+baseline class, or on a changed class with no labelled frame.
+`--allow-drop CLASS` (repeat it for each class) is the escape for a drop.
+Leave-one-out stays in the report as generalisation and does not gate. The
+report prints `labelled: N`, `regressed frames:`, `allowed drops:`,
+`changed class`, and `candidate templates.json sha256:`. Compare that sha
+with the sha `pack` prints for the same file. `result:` is the last line.
+`regressed frames:` uses the label path, so a queue set with absolute paths
+prints home-folder paths. The `ignored keys in <labels path>:` and
+`skipped N row(s) with visible: false in <labels path>` lines print the
+labels path as typed, so they can hold a home-folder path too. Trim those
+before pasting a report into a PR or the fleet channel.
+
+`cut` also refuses a title or a rank word (`role_rank`, `next_mode_hint`,
+each `change_tags` entry) with a leading, trailing, or doubled space, and a
+role file that lists the same game twice. A label row may carry the extra
+keys the label tools write, and nothing else:
+
+- rank: `index`, `screen`, `hero`, `notes`, `labeler`, `placement_progress`
+- role file: `index`, `file`, `evidence`, `labeler`
+- queue title: `width`, `height`, `title_box`, `note`, `set`
+
+They are not read, and one `ignored keys in <labels path>:` line per file
+lists their names. Any other key is refused as `unknown key`, so a typo such
+as `hero_sr_chnage` stops the cut instead of blinding the gate to that
+field. A duplicate key in one row, or a value of the wrong type (a non-string
+queue `frame` included), is an error. Queue errors name the file line.
+Rank label errors name the file line too: a spaced word, a bad game or
+file name, an image header read, and a full decode. `pack` writes
+`<out>/packs/manifest.json` as mode 0600, the same as each tar.
+
+A queue row with `visible: false` marks a title the frame does not show. It
+is skipped: not learned and not scored, and `cut` and `eval` print
+`skipped N row(s) with visible: false in <labels path>`. If every row is
+hidden, that line still prints, then the `no classes` or `empty label set`
+error. `visible: true` or no `visible` key is a normal row; any other value
+is an error. A hidden row still needs `path`, `screen` (one of the known screens)
+and `title_text` as strings, `frame` must be a string if present, and
+`title_text` is checked for spaces, before it is skipped. Its frame file is
+not opened. The `eval` header prints
+`frames: N scored: N hidden: N layout-skipped: N`, so hidden rows are not
+counted as layout-skipped. The ignored `bench_labelled_queue_titles` bench does not read
+`visible`: it still learns and scores hidden rows, so its numbers can
+differ from the cutter's on a set that has them.
+
+Two classes the reader compares, when one of them is new or re-learned, are
+refused when they correlate above the reader's margin. Rank compares raw
+template dots and does not use the reader's aspect term, so it can refuse a
+pair the reader would separate by width. Queue compares the reader's
+whole-title NCC. Two kept base classes do not block a recut. `--allow-near`
+writes the pack anyway, and the summary still lists every near pair as
+`allowed near pair:`.
+
+Exit status: 0 when eval passes or help is shown, 1 when the eval gate
+fails, 2 on any other error. `-h` and `--help` are help only as the command
+or in flag-name position. A repeated flag is an error, except the repeatable
+`--replace`, `--allow-drop` and `--allow-unverified`.
+
+Inputs and output stay on the build machine. `cut` and `pack` refuse an
+`--out` inside a git work tree. Any `..` in `--out` is refused, whether or
+not the path would land in a repo. Eval must pass against the published
+pack before a publish. This tool does not publish. Publishing still needs
+FrozenTear's go, then `scripts/publish-packs.sh`.
 
 ## Publish
 
@@ -322,7 +473,7 @@ repeated. Without a token the script says `Authenticated check: SKIPPED`.
 
 The pack routes allow 16 requests in a burst per client IP, then one every
 10 seconds, and answer 429 with the seconds to wait. One check is seven
-requests for six packs (a tracker with `names-v1.tar` and `bans-picks-v1.tar` asks for eight, so nine requests). A second check within a minute is not a failure: the
+requests for six packs (a tracker with `names-v1.tar` and `bans-picks-v1.tar` asks for eight, so nine requests; one that also asks for `rank-v1.tar` and `queue-title-v1.tar` asks for ten, so eleven requests). A second check within a minute is not a failure: the
 script waits as long as each 429 asks (up to six times per request) and goes
 on, so it is slower, about ten seconds per pack.
 
@@ -419,7 +570,7 @@ depends on the tracker release.
 **Released trackers, 0.5.0-alpha.2 to alpha.6**, know one pack name:
 
 - They read the list and look for `heroes-v1.tar`. Every other entry is
-  ignored. The seven newer packs do nothing for these members until they
+  ignored. The newer packs do nothing for these members until they
   install a tracker that names them.
 - `heroes-v1.tar` is downloaded when its folder is missing, or when the
   listed `version` differs from the one recorded in
@@ -427,8 +578,8 @@ depends on the tracker release.
 - A list with entries but without `heroes-v1.tar` is reported as "The reader
   pack did not match the site". The hero folder they have is kept.
 
-**The tracker on main** knows all eight (see the table above for which
-names each release asks for):
+**The tracker on main** knows all eight, and the tracker on wip/0.6 all ten
+(see the table above for which names each release asks for):
 
 - **Daemon start** syncs `heroes-v1.tar` only (the list and one file) and
   then starts capture. The other packs are synced in the background
@@ -436,11 +587,12 @@ names each release asks for):
 - **While the daemon runs**, that background job keeps trying until every
   pack is in place or not on the list. See
   [The daemon's background job](#the-daemons-background-job).
-- **Setup guide** ("Download reader pack") syncs all eight, once per click.
+- **Setup guide** ("Download reader pack") syncs all of them, once per click.
 - **`--vacuum`** does the start sync (the list and `heroes-v1.tar`), then
   compacts and exits. It never starts the background job, so nothing is
   tried again, and a pack sync that failed in that run is not logged.
-- A pack is downloaded when its folder is missing, or when the listed
+- A pack is downloaded when its folder is missing (for `rank-v1.tar` and
+  `queue-title-v1.tar`, or `templates.json` missing), or when the listed
   `version` differs from the one recorded in
   `<data_dir>/templates/pack-versions.json`. Otherwise it is left alone.
 - A name the tracker does not know is ignored. A name it knows that the
@@ -469,14 +621,17 @@ More detail on a sync, for the tracker on main:
   current is still reported as current. The setup guide tries again on the
   next click. The daemon's background job tries again by itself.
 - A first install of all eight is nine requests (the list and eight files),
-  inside the burst of 16 (`PACK_IP_BURST` in `crates/types`).
+  and of all ten eleven requests, inside the burst of 16 (`PACK_IP_BURST` in
+  `crates/types`).
 - An install that is not linked to a site account has no sync token and runs
   no pack sync at all, so `bans-picks-v1.tar` never arrives. The bans and
   picks reader then reads nothing, the game is still recorded, and the app
   shows a warning that says to link a site account in Settings.
 - Staging (`.<pack>-next-*`) and backup (`.<pack>-prev-*`) folders left under
   `templates/` by a killed sync are removed by the next sync once they are
-  an hour old.
+  an hour old. A `rank-v1` or `queue-title-v1` staging folder that holds
+  files and is not exactly the recorded official `templates.json` (an old
+  tree a keep could not move out) is moved to `templates-kept/` instead.
 
 ### The daemon's background job
 
@@ -506,7 +661,8 @@ the same data folder exits at the pid check before it sends anything.
   job takes no more than comes back and other trackers behind the same
   address get theirs. Five missing packs then take under a minute.
 - **A pack the tracker refuses for a fixed reason** (size, sha256, layout,
-  too large) is downloaded once. The job logs one warning with the pack's
+  too large, does not load, or a changed folder `templates-kept/` cannot
+  take) is downloaded once. The job logs one warning with the pack's
   name and does not fetch it again until the list shows another `version`,
   `sha256` or `size` for it, or the tracker is restarted. It reads the list
   every 30 minutes to notice.
@@ -617,6 +773,8 @@ inside `PACKS_DIR`.
 | `maps-v1.tar` | `templates/maps-v1/` | `atlas.json`, `g<4 hex digits>.png` | new reader, map and mode from the Tab banner |
 | `words-v1.tar` | `templates/words-v1/` | `<word_id>.png`, `<name>.json` | new reader, match result from result frames, the result word on the accolade and rank screens, and the end title on poll ticks and Tab frames when the pack has end-title templates (hand-installed `templates/result/` is the fallback) |
 | `names-v1.tar` | `templates/names-v1/` | `glyphs.png`, `glyphs.txt`, `marks.png`, `marks.txt`, `compose.txt`, `whiten.f32`. The inner `manifest.json` is kept in the folder too | name reader. Optional. Single-letter templates only, no member data. Loaded at startup, and reloaded after each install by the daemon's pack sync. Until a load finishes, names fall back to Tesseract |
+| `rank-v1.tar` | `templates/rank-v1/` | `templates.json` only | rank screen reader (rank-v1). Optional, and off unless **Read my rank after Comp games** (`rank_reader`) is on; `STAT_TRACKER_RANK_RECOGNIZER` set to any non-blank value overrides it: `on`, `1`, `true`, `yes` or `rank-v1` turns the reader on, and any other value, a typo too, turns it off. Loaded once at daemon start: a pack that lands later is used from the next start. Banner classes are named as the screen writes them (`COMPETITIVE: 6V6 OPEN QUEUE`, `COMPETITIVE: ROLE QUEUE`) |
+| `queue-title-v1.tar` | `templates/queue-title-v1/` | `templates.json` only | queue title reader. Optional, and off unless **Read my rank after Comp games** (`rank_reader`) is on; `STAT_TRACKER_QUEUE_TITLE_RECOGNIZER` set to any non-blank value overrides it: `on`, `1`, `true`, `yes` or `rank-v1` turns the reader on, and any other value, a typo too, turns it off. Loaded once at daemon start, like `rank-v1.tar`. Classes `OPEN QUEUE` and `ROLE QUEUE` |
 
 `<hero>` is a file stem from `HERO_NAMES` in `crates/types/src/heroes.rs`
 (`ana`, `wrecking-ball`). For the v2 hero packs and `bans-v1.tar` a stem is
@@ -627,7 +785,52 @@ any one top-level file, or one file in `special/`.
 
 Each pack is checked on its own. A file outside its pack's layout, a bad
 sha256, or a failed download refuses that pack only. The other packs still
-install, and the refused pack's folder is left as it was.
+install, and the refused pack's folder is left as it was. A `rank-v1.tar` or
+`queue-title-v1.tar` whose `templates.json` its reader does not load is
+refused the same way, before the swap.
+
+A short member guide to editing a pack on your own PC, including how
+these two packs are kept, is in
+[Hand-edit a reader pack](hand-edit-reader-packs.md).
+
+After each `rank-v1.tar` or `queue-title-v1.tar` install the tracker
+records the sha256 of the installed `templates.json` in
+`templates/pack-file-hashes.json` (`pack-versions.json` keeps its format).
+When a new version is about to replace one of those folders, the folder is
+kept unless it is exactly one regular file named `templates.json` whose
+sha256 is the recorded one. A missing record never matches, so a folder
+placed by hand, one installed before this record, one whose
+`templates.json` was edited, and one with an added file are all kept once.
+Kept means moved whole, every file in it, to
+`templates-kept/<pack folder>-<UTC YYYYMMDDTHHMMSSZ>-<pid>/` under the data
+folder (for example `templates-kept/rank-v1-20261114T065156Z-4242/`),
+beside `templates/`, so the stale folder sweep never removes it. When that
+name is taken, `-2`, `-3` and so on are added. The path is logged as soon as
+the folder is moved. Where the kernel allows an atomic exchange, the new
+pack goes in first and the old tree is moved out after, so the live folder
+is never missing. Should that move fail, the old tree goes beside the live
+folder under `templates/` with the same name (no leading dot, so the stale
+sweep skips it). Should that fail too, the two folders are exchanged back:
+the old folder is live again, the pack is refused as not kept and no
+version is recorded. If that exchange back fails as well, the old tree goes
+beside the live folder under a kept name no folder has yet; only if that
+fails too does it stay at its `.<pack folder>-next-*` staging path, with a
+warning that names it. The new pack is live then, and the hash of its
+`templates.json` is recorded, so its next download keeps no copy of it. The
+stale sweep never removes an old tree left at a staging path: once it is an
+hour old, a later sync moves it to `templates-kept/` (or beside the live
+folder) and logs where. Without the exchange, the old folder is moved first
+and put back if the swap fails. An unchanged official folder is replaced and
+nothing is kept. If `templates-kept/` cannot be made, the pack is refused
+for a fixed reason and the folder stays as it was. Only these two packs
+keep; every other pack replaces its folder as before.
+
+Nothing removes `templates-kept/`: not the tracker, not the app, and not
+`uninstall.sh --purge` (it deletes only the names the tracker writes, and
+neither `templates` nor `templates-kept` is one). Delete it by hand when you
+no longer need what is in it. At each daemon start, when it holds folders
+or a folder was kept beside a live pack folder under `templates/`, the
+tracker logs its path once per start, with both counts.
 
 If the list is empty, the tracker does nothing. If the list has entries but
 none is `heroes-v1.tar`, every tracker reports "The reader pack did not match

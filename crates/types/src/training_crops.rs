@@ -87,6 +87,20 @@ impl CropKind {
         }
     }
 
+    /// Smallest screen `(width, height)` a crop of this kind must report in
+    /// its `meta`, or `None` when the screen size is optional.
+    ///
+    /// `rank` crops may be as large as a whole 1280x720 screen, so they must
+    /// report a screen of at least [`RANK_MIN_SCREEN_WIDTH`] by
+    /// [`RANK_MIN_SCREEN_HEIGHT`]: larger than the largest `rank` crop on
+    /// both edges, so a `rank` crop is never the whole screen it reports.
+    pub fn min_screen(self) -> Option<(u32, u32)> {
+        match self {
+            CropKind::Rank => Some((RANK_MIN_SCREEN_WIDTH, RANK_MIN_SCREEN_HEIGHT)),
+            _ => None,
+        }
+    }
+
     /// Largest accepted `crop` part in bytes. [`MAP_NAME_MAX_BYTES`] for
     /// `map_name` (its larger pixel bound needs it), [`RANK_MAX_BYTES`] for
     /// `rank`, `HERO_ICON_MAX_BYTES` otherwise. The whole request stays
@@ -133,6 +147,17 @@ pub const RANK_MAX_WIDTH: u32 = 1536;
 /// Tallest accepted `rank` crop, in pixels. The tallest region is the tier
 /// emblem, 680 px tall at 1440p.
 pub const RANK_MAX_HEIGHT: u32 = 720;
+
+/// Smallest screen width a `rank` crop must report. The tracker's rank
+/// reader takes 1080p with the height within 2% (down to 1059) and the
+/// aspect within 0.02 of 16:9, so it accepts widths down to about 1862 at
+/// that height. This sits just below that, so every screen the reader
+/// takes passes.
+pub const RANK_MIN_SCREEN_WIDTH: u32 = 1856;
+
+/// Smallest screen height a `rank` crop must report. See
+/// [`RANK_MIN_SCREEN_WIDTH`].
+pub const RANK_MIN_SCREEN_HEIGHT: u32 = 1056;
 
 /// Largest accepted `rank` crop part, in bytes (384 KiB). The largest
 /// measured rank crop is a tier emblem at 216 KiB (bar 131 KiB, result
@@ -224,5 +249,19 @@ mod tests {
         assert_eq!(CropKind::Rank.max_crop_bytes(), 384 * 1024);
         assert_eq!(CropKind::Rank.max_per_member(), RANK_MAX_PER_MEMBER);
         assert!(CropKind::ALL.contains(&CropKind::Rank));
+    }
+
+    #[test]
+    fn only_rank_needs_a_screen_size_larger_than_its_crops() {
+        let (min_w, min_h) = CropKind::Rank.min_screen().expect("rank");
+        let (max_w, max_h) = CropKind::Rank.max_edges();
+        assert!(min_w > max_w && min_h > max_h);
+        // A whole 720p screen is below the minimum.
+        assert!(1280 < min_w && 720 < min_h);
+        for kind in CropKind::ALL {
+            if kind != CropKind::Rank {
+                assert_eq!(kind.min_screen(), None, "{kind:?}");
+            }
+        }
     }
 }

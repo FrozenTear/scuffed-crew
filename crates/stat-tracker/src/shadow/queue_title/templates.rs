@@ -4,8 +4,10 @@
 //! Templates are cut from the game's own screens, so a pack is never
 //! committed. The reader loads it from
 //! `<data_dir>/templates/queue-title-v1/templates.json` ([`TEMPLATE_DIR`],
-//! [`PACK_FILE`]); a pack is built locally with [`Learner`]. Without a pack
-//! there is no reader.
+//! [`PACK_FILE`]); a pack is built locally with [`Learner`], or arrives in
+//! the same folder through the tracker's pack download
+//! (`queue-title-v1.tar`, [`crate::packs`]). Without a pack there is no
+//! reader.
 //!
 //! A template is the mean of the unpadded ink planes ([`super::centre`]) of
 //! one title, `TW x TH` values, row-major.
@@ -46,7 +48,10 @@ pub struct TemplateSet {
 
 #[derive(Debug)]
 pub enum TemplateError {
+    /// No pack file.
     Missing(PathBuf),
+    /// The file could not be read, is not a pack, or is not this build's
+    /// shape ([`TemplateSet::check`]).
     Bad(PathBuf, String),
 }
 
@@ -74,7 +79,13 @@ impl TemplateSet {
     /// Load a pack and check its shape matches this build.
     pub fn load_dir(dir: &Path) -> Result<Self, TemplateError> {
         let p = dir.join(PACK_FILE);
-        let s = std::fs::read_to_string(&p).map_err(|_| TemplateError::Missing(p.clone()))?;
+        let s = match std::fs::read_to_string(&p) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(TemplateError::Missing(p));
+            }
+            Err(e) => return Err(TemplateError::Bad(p, e.to_string())),
+        };
         let set: Self =
             serde_json::from_str(&s).map_err(|e| TemplateError::Bad(p.clone(), e.to_string()))?;
         set.check().map_err(|e| TemplateError::Bad(p, e))?;
@@ -106,7 +117,7 @@ impl TemplateSet {
 }
 
 /// Builds a [`TemplateSet`] from labelled frames.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Learner {
     sums: BTreeMap<String, (usize, Vec<f32>)>,
 }
@@ -136,6 +147,20 @@ impl Learner {
         *n += 1;
         for (s, v) in sum.iter_mut().zip(c) {
             *s += v;
+        }
+    }
+
+    /// Add every sum from `other`. Used to combine one learner per session.
+    pub fn merge(&mut self, other: &Self) {
+        for (class, (n, sum)) in &other.sums {
+            let (dest_n, dest_sum) = self
+                .sums
+                .entry(class.clone())
+                .or_insert_with(|| (0, vec![0.0; sum.len()]));
+            *dest_n += n;
+            for (slot, value) in dest_sum.iter_mut().zip(sum) {
+                *slot += value;
+            }
         }
     }
 

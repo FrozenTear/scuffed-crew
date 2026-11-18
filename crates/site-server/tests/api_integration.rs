@@ -3918,7 +3918,7 @@ async fn application_submit_accept_creates_member() {
             json!({
                 "preferred_games": ["ow2"],
                 "preferred_roles": ["tank"],
-                "message": "hi"
+                "message": "I would like to join the crew"
             }),
         ))
         .await
@@ -3937,7 +3937,8 @@ async fn application_submit_accept_creates_member() {
             APPLICANT_TOKEN,
             json!({
                 "preferred_games": ["ow2"],
-                "preferred_roles": ["tank"]
+                "preferred_roles": ["tank"],
+                "message": "I would like to join the crew"
             }),
         ))
         .await
@@ -3953,7 +3954,8 @@ async fn application_submit_accept_creates_member() {
             MEMBER_TOKEN,
             json!({
                 "preferred_games": ["ow2"],
-                "preferred_roles": ["dps"]
+                "preferred_roles": ["dps"],
+                "message": "I would like to join the crew"
             }),
         ))
         .await
@@ -3993,7 +3995,7 @@ async fn application_refused_when_recruitment_closed_and_accepted_when_open() {
     let body = json!({
         "preferred_games": ["ow2"],
         "preferred_roles": ["tank"],
-        "message": "hello"
+        "message": "I would like to join the crew"
     });
 
     let app = create_router(state.clone());
@@ -4081,6 +4083,125 @@ async fn application_refused_when_recruitment_closed_and_accepted_when_open() {
 }
 
 #[tokio::test]
+async fn application_with_short_message_is_400_and_not_stored() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_applicant(&state.db, "appshort", "ShortApplicant", "tok-app-short").await;
+
+    for body in [
+        json!({ "preferred_games": ["ow2"], "preferred_roles": [], "message": "  too short  " }),
+        json!({ "preferred_games": ["ow2"], "preferred_roles": [], "message": null }),
+        json!({ "preferred_games": ["ow2"], "preferred_roles": [] }),
+    ] {
+        let app = create_router(state.clone());
+        let resp = app
+            .oneshot(authed_json_request(
+                Method::POST,
+                "/api/applications",
+                "tok-app-short",
+                body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let err = body_json(resp).await;
+        assert_eq!(err["error"], "Message must be at least 10 characters");
+    }
+    assert!(
+        state
+            .db
+            .get_application_by_user("appshort")
+            .await
+            .unwrap()
+            .is_none(),
+        "a short message must not store an application"
+    );
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/applications",
+            "tok-app-short",
+            json!({ "preferred_games": [], "preferred_roles": [], "message": "  æøåæøåæøåæ  " }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+}
+
+/// The message check runs before the recruitment gate: with recruitment
+/// closed, a short message still gets the 400, not the 403.
+#[tokio::test]
+async fn application_short_message_is_400_even_when_recruitment_closed() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_applicant(
+        &state.db,
+        "appshortclosed",
+        "ShortClosedApplicant",
+        "tok-app-short-closed",
+    )
+    .await;
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/settings",
+            ADMIN_TOKEN,
+            json!({ "recruitment_open": false }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        !state.db.get_settings().await.unwrap().recruitment_open,
+        "recruitment must be closed for this test"
+    );
+
+    // 9 chars after trim.
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/applications",
+            "tok-app-short-closed",
+            json!({ "preferred_games": ["ow2"], "preferred_roles": ["tank"], "message": "  123456789  " }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let err = body_json(resp).await;
+    assert_eq!(err["error"], "Message must be at least 10 characters");
+    assert!(
+        state
+            .db
+            .get_application_by_user("appshortclosed")
+            .await
+            .unwrap()
+            .is_none(),
+        "a short message must not store an application"
+    );
+
+    // Control: same user, valid message, recruitment still closed, gets the
+    // recruitment-closed 403. So the 400 above came from the message check.
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/applications",
+            "tok-app-short-closed",
+            json!({ "preferred_games": ["ow2"], "preferred_roles": ["tank"], "message": "I would like to join the crew" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let err = body_json(resp).await;
+    assert_eq!(err["error"], "recruitment is currently closed");
+}
+
+#[tokio::test]
 async fn application_trial_then_accept_promotes_to_member() {
     let state = test_state().await;
     seed_all_roles(&state.db).await;
@@ -4092,7 +4213,7 @@ async fn application_trial_then_accept_promotes_to_member() {
             Method::POST,
             "/api/applications",
             APPLICANT_TOKEN,
-            json!({ "preferred_games": ["ow2"], "preferred_roles": ["support"] }),
+            json!({ "preferred_games": ["ow2"], "preferred_roles": ["support"], "message": "I would like to join the crew" }),
         ))
         .await
         .unwrap();
@@ -4152,7 +4273,7 @@ async fn application_invalid_transition_rejected() {
             Method::POST,
             "/api/applications",
             APPLICANT_TOKEN,
-            json!({ "preferred_games": [], "preferred_roles": [] }),
+            json!({ "preferred_games": [], "preferred_roles": [], "message": "I would like to join the crew" }),
         ))
         .await
         .unwrap();
@@ -4624,7 +4745,7 @@ async fn application_stale_transition_conflict() {
             Method::POST,
             "/api/applications",
             APPLICANT_TOKEN,
-            json!({ "preferred_games": ["ow2"], "preferred_roles": ["tank"] }),
+            json!({ "preferred_games": ["ow2"], "preferred_roles": ["tank"], "message": "I would like to join the crew" }),
         ))
         .await
         .unwrap();
@@ -4957,7 +5078,7 @@ async fn open_application_count_guards_duplicate() {
             Method::POST,
             "/api/applications",
             APPLICANT_TOKEN,
-            json!({ "preferred_games": ["ow2"], "preferred_roles": [] }),
+            json!({ "preferred_games": ["ow2"], "preferred_roles": [], "message": "I would like to join the crew" }),
         ))
         .await
         .unwrap();
@@ -4981,7 +5102,7 @@ async fn open_application_count_guards_duplicate() {
             Method::POST,
             "/api/applications",
             APPLICANT_TOKEN,
-            json!({ "preferred_games": [], "preferred_roles": [] }),
+            json!({ "preferred_games": [], "preferred_roles": [], "message": "I would like to join the crew" }),
         ))
         .await
         .unwrap();
@@ -5000,7 +5121,7 @@ async fn applicant_self_withdraw_pending() {
             Method::POST,
             "/api/applications",
             APPLICANT_TOKEN,
-            json!({ "preferred_games": ["ow2"], "preferred_roles": [] }),
+            json!({ "preferred_games": ["ow2"], "preferred_roles": [], "message": "I would like to join the crew" }),
         ))
         .await
         .unwrap();
@@ -5046,7 +5167,7 @@ async fn applicant_self_withdraw_trial_deactivates_recruit() {
             Method::POST,
             "/api/applications",
             APPLICANT_TOKEN,
-            json!({ "preferred_games": [], "preferred_roles": [] }),
+            json!({ "preferred_games": [], "preferred_roles": [], "message": "I would like to join the crew" }),
         ))
         .await
         .unwrap();
@@ -5105,7 +5226,7 @@ async fn trial_reject_deactivates_recruit_and_withdraw_audits_distinct() {
             Method::POST,
             "/api/applications",
             APPLICANT_TOKEN,
-            json!({ "preferred_games": ["ow2"], "preferred_roles": ["dps"] }),
+            json!({ "preferred_games": ["ow2"], "preferred_roles": ["dps"], "message": "I would like to join the crew" }),
         ))
         .await
         .unwrap();
@@ -5159,7 +5280,7 @@ async fn trial_reject_deactivates_recruit_and_withdraw_audits_distinct() {
             Method::POST,
             "/api/applications",
             "test-withdraw-token",
-            json!({ "preferred_games": [], "preferred_roles": [] }),
+            json!({ "preferred_games": [], "preferred_roles": [], "message": "I would like to join the crew" }),
         ))
         .await
         .unwrap();

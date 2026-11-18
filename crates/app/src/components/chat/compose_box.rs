@@ -3,6 +3,8 @@
 use dioxus::prelude::*;
 use scuffed_types::MAX_CHAT_MESSAGE_CHARS;
 
+use crate::components::ui::btn_class;
+
 /// Show the remaining count once this many characters or fewer are left after trim.
 const CHAT_COUNTER_WINDOW: usize = 200;
 
@@ -130,93 +132,62 @@ fn chat_counter_label(raw: &str) -> Option<String> {
     })
 }
 
+/// The composer of the `d1-chat` frame: the shared 44px field and the primary
+/// button on one row, pinned under the message list. The wrapper carries the
+/// top border, so the encrypted hint and the counter sit inside the same bar.
 const COMPOSE_BOX_CSS: &str = r#"
+.chat-composer {
+  box-sizing: border-box;
+  flex: 0 0 auto;
+  min-width: 0;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--font-body);
+}
 .chat-compose {
-    display: flex;
-    gap: 8px;
-    padding: 8px 12px;
-    border-top: 1px solid var(--border);
-    background: var(--surface);
-    align-items: flex-end;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-card-pad);
 }
-
-.chat-compose__input {
-    flex: 1;
-    min-height: 36px;
-    max-height: 100px;
-    padding: 8px 12px;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    background: var(--bg);
-    color: var(--text);
-    font-family: var(--font-body);
-    font-size: 13px;
-    line-height: 1.4;
-    resize: none;
-    transition: border-color 0.15s ease;
+.chat-compose .field-input {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
 }
-
-.chat-compose__input::placeholder {
-    color: var(--text-3);
+.chat-compose .btn {
+  flex: 0 0 auto;
 }
-
-.chat-compose__input:focus {
-    border-color: var(--accent);
+/* Nothing to send yet. The button keeps focus and ignores the click. */
+.chat-compose .btn[aria-disabled="true"] {
+  cursor: not-allowed;
 }
-
-.chat-compose__input:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-}
-
-.chat-compose__send {
-    padding: 8px 14px;
-    border: none;
-    border-radius: 8px;
-    background: var(--accent);
-    color: var(--accent-fg);
-    font-size: 13px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: opacity 0.15s ease, transform 0.1s ease;
-    white-space: nowrap;
-}
-
-.chat-compose__send:hover:not(:disabled) {
-    opacity: 0.9;
-}
-
-.chat-compose__send:active:not(:disabled) {
-    transform: scale(0.96);
-}
-
-.chat-compose__send:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-}
-
 .chat-compose__hint {
-    font-size: 10px;
-    color: var(--text-3);
-    padding: 2px 12px 4px;
-    background: var(--surface);
+  margin: 0;
+  padding: var(--space-2) var(--space-card-pad) 0;
+  color: var(--text-3);
+  font-size: var(--text-xs);
+  line-height: var(--leading-ui);
 }
-
 .chat-compose__counter {
-    font-size: 11px;
-    color: var(--text-3);
-    text-align: right;
-    padding: 0 12px 6px;
-    background: var(--surface);
+  margin: 0;
+  padding: 0 var(--space-card-pad) var(--space-2);
+  color: var(--text-3);
+  font-size: var(--text-xs);
+  line-height: var(--leading-ui);
+  text-align: right;
 }
 .chat-compose__counter:empty {
-    padding: 0;
+  padding: 0;
 }
-
 .chat-compose__counter--over {
-    color: var(--danger);
+  color: var(--loss);
 }
 "#;
+
+/// Accessible name and placeholder of the message field.
+pub const COMPOSE_PLACEHOLDER: &str = "Write a message";
 
 /// Near-limit counter. The live region stays mounted so the first count is announced.
 fn compose_counter(label: Option<String>, over_limit: bool) -> Element {
@@ -226,9 +197,9 @@ fn compose_counter(label: Option<String>, over_limit: bool) -> Element {
         "chat-compose__counter"
     };
     rsx! {
-        div {
+        p {
             class: "{class}",
-            aria_live: "polite",
+            role: "status",
             if let Some(label) = label {
                 "{label}"
             }
@@ -241,7 +212,7 @@ fn compose_counter(label: Option<String>, over_limit: bool) -> Element {
 pub fn ComposeBox(
     on_send: EventHandler<ComposeAttempt>,
     #[props(default = false)] disabled: bool,
-    #[props(default = "Type a message...".to_string())] placeholder: String,
+    #[props(default = COMPOSE_PLACEHOLDER.to_string())] placeholder: String,
     #[props(default = false)] encrypted: bool,
     /// Blocks the send button without locking the input (rate-limit countdown).
     #[props(default = false)]
@@ -277,34 +248,39 @@ pub fn ComposeBox(
 
     rsx! {
         crate::styles::StyleOnce { id: "scuffed-css-components-chat-compose_box-compose-box-css", css: COMPOSE_BOX_CSS }
-        if encrypted {
-            div { class: "chat-compose__hint",
-                "Messages in this channel are end-to-end encrypted"
+        div { class: "chat-composer",
+            if encrypted {
+                p { class: "chat-compose__hint",
+                    "Messages in this channel are end-to-end encrypted"
+                }
             }
+            div { class: "chat-compose",
+                input {
+                    class: "field-input",
+                    r#type: "text",
+                    aria_label: "{COMPOSE_PLACEHOLDER}",
+                    placeholder: "{placeholder}",
+                    disabled: disabled,
+                    value: "{draft}",
+                    oninput: move |evt| draft.set(evt.value()),
+                    onkeydown: move |evt| {
+                        if evt.key() == Key::Enter {
+                            submit();
+                        }
+                    },
+                }
+                // Never natively disabled: a disabled button drops focus the
+                // moment a send clears the draft. `submit` ignores the click.
+                button {
+                    r#type: "button",
+                    class: btn_class(true),
+                    aria_disabled: if !can_send { "true" },
+                    onclick: move |_| submit(),
+                    "Send"
+                }
+            }
+            {compose_counter(counter, over_limit)}
         }
-        div { class: "chat-compose",
-            input {
-                class: "chat-compose__input",
-                r#type: "text",
-                aria_label: "Message",
-                placeholder: "{placeholder}",
-                disabled: disabled,
-                value: "{draft}",
-                oninput: move |evt| draft.set(evt.value()),
-                onkeydown: move |evt| {
-                    if evt.key() == Key::Enter {
-                        submit();
-                    }
-                },
-            }
-            button {
-                class: "chat-compose__send",
-                disabled: !can_send,
-                onclick: move |_| submit(),
-                "Send"
-            }
-        }
-        {compose_counter(counter, over_limit)}
     }
 }
 
@@ -452,13 +428,18 @@ mod tests {
     fn message_input_is_named_and_the_counter_stays_mounted() {
         let empty = render_box(String::new());
         assert!(
-            empty.contains("aria-label=\"Message\""),
+            empty.contains("aria-label=\"Write a message\""),
             "the message field needs an accessible name: {empty}"
         );
+        assert!(empty.contains("placeholder=\"Write a message\""), "{empty}");
         assert_eq!(
-            empty.matches("aria-live=\"polite\"").count(),
+            empty.matches("role=\"status\"").count(),
             1,
             "the live region is mounted before the count appears: {empty}"
+        );
+        assert!(
+            empty.contains("<p class=\"chat-compose__counter\" role=\"status\"></p>"),
+            "{empty}"
         );
         assert!(
             !empty.contains("characters left"),
@@ -467,13 +448,66 @@ mod tests {
 
         let near = "a".repeat(MAX_CHAT_MESSAGE_CHARS - 1);
         let html = render_box(near);
-        let live_at = html.find("aria-live=\"polite\"").expect("live region");
+        let live_at = html.find("role=\"status\"").expect("live region");
         let label_at = html.find("1 character left").expect("near-limit count");
         assert!(live_at < label_at, "{html}");
         assert!(
-            !html[live_at..label_at].contains("</div>"),
+            !html[live_at..label_at].contains("</p>"),
             "the count is inside the live region: {html}"
         );
+    }
+
+    #[test]
+    fn composer_is_the_shared_field_and_primary_button() {
+        let empty = render_box(String::new());
+        assert!(!empty.contains("<h1"), "{empty}");
+        assert!(!empty.contains("<main"), "{empty}");
+        assert!(empty.contains("<input class=\"field-input\""), "{empty}");
+        assert!(
+            empty.contains(
+                "<button type=\"button\" class=\"btn is-primary\" aria-disabled=\"true\">Send</button>"
+            ),
+            "an empty draft marks Send unavailable without disabling it: {empty}"
+        );
+        assert!(
+            !empty.contains(" disabled"),
+            "nothing is natively disabled: {empty}"
+        );
+
+        let ready = render_box("hello team".to_string());
+        assert!(
+            ready.contains("<button type=\"button\" class=\"btn is-primary\">Send</button>"),
+            "{ready}"
+        );
+
+        let over = render_box("a".repeat(MAX_CHAT_MESSAGE_CHARS + 1));
+        assert!(over.contains("aria-disabled=\"true\""), "{over}");
+        assert!(
+            over.contains("chat-compose__counter chat-compose__counter--over"),
+            "{over}"
+        );
+        assert!(over.contains("1 character over the limit"), "{over}");
+    }
+
+    #[test]
+    fn composer_css_is_on_tokens_and_does_not_shrink() {
+        use crate::components::ui::test_support::{assert_sizes_from_tokens, css_rule, has_decl};
+
+        assert_sizes_from_tokens(COMPOSE_BOX_CSS);
+        let bar = css_rule(COMPOSE_BOX_CSS, ".chat-composer {");
+        for decl in [
+            "flex: 0 0 auto",
+            "border-top: 1px solid var(--border)",
+            "background: var(--surface)",
+        ] {
+            assert!(has_decl(&bar, decl), "missing {decl}: {bar}");
+        }
+        let row = css_rule(COMPOSE_BOX_CSS, ".chat-compose {");
+        assert!(
+            has_decl(&row, "padding: var(--space-3) var(--space-card-pad)"),
+            "{row}"
+        );
+        assert!(has_decl(&row, "gap: var(--space-2)"), "{row}");
     }
 
     #[test]

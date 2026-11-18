@@ -19,7 +19,7 @@ pub fn admin_pending<T: 'static>(resource: &ApiResource<T>, label: &str) -> Elem
     if let Some(err) = resource.error.read().as_ref().cloned() {
         let mut refresh = resource.refresh;
         rsx! {
-            p { class: "admin-loading", style: "color: var(--danger);",
+            p { class: "admin-loading", style: "color: var(--loss);",
                 "Failed to load {label}: {err}"
             }
             button {
@@ -35,27 +35,38 @@ pub fn admin_pending<T: 'static>(resource: &ApiResource<T>, label: &str) -> Elem
 
 /// Visible cap for a cursor list that stopped with a next cursor still set.
 ///
-/// Renders nothing until `truncated` is true, so pages under the page budget
-/// look the same. "Load more" raises the budget by another auto-follow batch.
-/// Call this outside a live `resource.data.read()` guard.
+/// The status line is always rendered and only its text changes, so the cap is
+/// announced when it appears. It is empty (and out of the layout) until
+/// `truncated` is true, so pages under the page budget look the same. "Load
+/// more" raises the budget by another auto-follow batch; it sits after the
+/// status line, not inside it. Call this outside a live `resource.data.read()`
+/// guard.
 pub fn list_cap_notice<T: 'static>(resource: &ApiResource<T>, what: &str) -> Element {
     let truncated = *resource.truncated.read();
-    if !truncated {
-        return rsx! {};
-    }
     let shown = *resource.shown.read();
-    let what = what.to_string();
+    let text = cap_notice_text(truncated, shown, what);
     let mut budget = resource.page_budget;
     rsx! {
-        p { class: "list-cap-notice", role: "status",
-            "Showing the first {shown} {what}. "
-            button {
-                r#type: "button",
-                class: "list-cap-notice__more",
-                onclick: move |_| budget += LIST_MAX_PAGES,
-                "Load more"
+        div { class: if truncated { "list-cap-notice" } else { "list-cap-notice is-idle" },
+            p { class: "list-cap-notice__text", role: "status", "{text}" }
+            if truncated {
+                button {
+                    r#type: "button",
+                    class: "list-cap-notice__more",
+                    onclick: move |_| budget += LIST_MAX_PAGES,
+                    "Load more"
+                }
             }
         }
+    }
+}
+
+/// Text of the cap status line. Empty while nothing was cut off.
+fn cap_notice_text(truncated: bool, shown: usize, what: &str) -> String {
+    if truncated {
+        format!("Showing the first {shown} {what}.")
+    } else {
+        String::new()
     }
 }
 
@@ -66,12 +77,12 @@ pub fn list_cap_notice<T: 'static>(resource: &ApiResource<T>, what: &str) -> Ele
 pub fn AccessDenied(message: String) -> Element {
     rsx! {
         div {
-            style: "display:flex;flex-direction:column;align-items:center;justify-content:center;padding:4rem 1rem;color:var(--text-2);gap:0.5rem;text-align:center;",
+            style: "display:flex;flex-direction:column;align-items:center;justify-content:center;padding:4rem 1rem;color:var(--text-3);gap:0.5rem;text-align:center;",
             h2 { style: "color:var(--text);margin-bottom:0.5rem;", "Access Denied" }
             p { "{message}" }
             Link {
                 to: Route::AdminDashboard {},
-                style: "color:var(--accent);margin-top:0.5rem;",
+                style: "color:var(--accent-text);margin-top:0.5rem;",
                 "Back to dashboard"
             }
         }
@@ -364,5 +375,58 @@ mod confirm_dialog_tests {
             }
         }
         assert!(render(app).contains(">Confirm</button>"));
+    }
+}
+
+#[cfg(test)]
+mod list_cap_notice_tests {
+    use super::*;
+
+    #[test]
+    fn cap_text_is_empty_until_the_list_is_cut_off() {
+        assert_eq!(cap_notice_text(false, 40, "events"), "");
+        assert_eq!(
+            cap_notice_text(true, 1000, "events"),
+            "Showing the first 1000 events."
+        );
+    }
+
+    #[component]
+    fn Probe(truncated: bool) -> Element {
+        let resource = ApiResource::<Vec<u8>> {
+            data: use_resource(|| async { Some(Vec::new()) }),
+            refresh: use_signal(|| 0u64),
+            error: use_signal(|| None),
+            truncated: use_signal(|| truncated),
+            shown: use_signal(|| 1000usize),
+            page_budget: use_signal(|| LIST_MAX_PAGES),
+        };
+        list_cap_notice(&resource, "events")
+    }
+
+    fn render(truncated: bool) -> String {
+        let mut dom = VirtualDom::new_with_props(Probe, ProbeProps { truncated });
+        dom.rebuild_in_place();
+        dioxus_ssr::render(&dom)
+    }
+
+    #[test]
+    fn status_line_is_always_rendered_and_load_more_sits_outside_it() {
+        let idle = render(false);
+        assert_eq!(
+            idle,
+            "<div class=\"list-cap-notice is-idle\">\
+             <p class=\"list-cap-notice__text\" role=\"status\"></p></div>"
+        );
+
+        let cut = render(true);
+        assert!(
+            cut.contains(
+                "<p class=\"list-cap-notice__text\" role=\"status\">Showing the first 1000 events.</p>\
+                 <button type=\"button\" class=\"list-cap-notice__more\">Load more</button>"
+            ),
+            "{cut}"
+        );
+        assert_eq!(cut.matches("role=\"status\"").count(), 1, "{cut}");
     }
 }

@@ -24,138 +24,15 @@ use scuffed_types::strategy::{
 
 use super::hero_chip::{HeroChip, hero_chip, portrait_ready};
 use crate::canvas::tile_manager::{SharedTileManager, create_tile_manager};
+use crate::keybindings::{self, CanvasKey, Keybinding};
 use crate::theme::tokens::{
-    CANVAS_BADGE_BG, CANVAS_BG, CANVAS_GRID_LOADING, CANVAS_MARKER_BORDER, CANVAS_SELECTION_COLOR,
-    CANVAS_TEXT_LOADING, CANVAS_TILE_PLACEHOLDER, CANVAS_WHITE, HP_GLOW, HP_LARGE_FILL,
-    HP_LARGE_STROKE, HP_SMALL_FILL, HP_SMALL_STROKE, STRATEGY_ACCENT,
+    CANVAS_BADGE_BG, CANVAS_BG, CANVAS_GRID_LOADING, CANVAS_MARKER_BORDER,
+    CANVAS_SELECTION_FALLBACK, CANVAS_SELECTION_TOKEN, CANVAS_TEXT_LOADING,
+    CANVAS_TILE_PLACEHOLDER, CANVAS_WHITE, HP_GLOW, HP_LARGE_FILL, HP_LARGE_STROKE, HP_SMALL_FILL,
+    HP_SMALL_STROKE, STRATEGY_ACCENT,
 };
 
-// =============================================================================
-// CSS
-// =============================================================================
-
-pub const MAP_CANVAS_CSS: &str = r#"
-    .map-canvas-wrapper {
-        position: relative;
-        width: 100%;
-        height: 100%;
-        overflow: hidden;
-        background: var(--bg);
-    }
-    .map-canvas {
-        position: absolute;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-    }
-    .map-canvas-background {
-        pointer-events: none;
-        z-index: 1;
-    }
-    .map-canvas-elements {
-        pointer-events: none;
-        z-index: 2;
-    }
-    .map-canvas-overlay {
-        z-index: 3;
-    }
-    .map-selector-overlay {
-        position: absolute;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        background: var(--overlay);
-        z-index: 10;
-    }
-    .map-selector-content {
-        background: var(--surface);
-        border: 1px solid var(--border);
-        border-radius: 12px;
-        padding: 2rem;
-        max-width: 600px;
-        width: 90%;
-        max-height: 70vh;
-        overflow-y: auto;
-    }
-    .map-selector-content h2 {
-        font-family: var(--font-head);
-        font-size: 1.5rem;
-        color: var(--text);
-        margin-bottom: 0.5rem;
-    }
-    .map-selector-content p {
-        color: var(--text-2);
-        margin-bottom: 1.5rem;
-    }
-    .map-selector-modes {
-        display: flex;
-        flex-direction: column;
-        gap: 0.5rem;
-    }
-    .map-selector-mode-group {
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        overflow: hidden;
-    }
-    .map-selector-mode-title {
-        padding: 0.6rem 1rem;
-        background: var(--surface-2);
-        color: var(--text);
-        font-weight: 600;
-        cursor: pointer;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-    }
-    .map-count {
-        font-size: 0.8rem;
-        color: var(--text-3);
-        background: var(--surface);
-        padding: 0.1rem 0.5rem;
-        border-radius: 10px;
-    }
-    .map-selector-grid {
-        display: flex;
-        flex-direction: column;
-    }
-    .map-selector-btn,
-    .map-selector-btn-submap {
-        display: block;
-        width: 100%;
-        padding: 0.5rem 1rem;
-        text-align: left;
-        background: transparent;
-        border: none;
-        color: var(--text-2);
-        cursor: pointer;
-        transition: background 0.15s, color 0.15s;
-    }
-    .map-selector-btn:hover,
-    .map-selector-btn-submap:hover {
-        background: var(--surface-2);
-        color: var(--text);
-    }
-    .map-selector-btn-submap {
-        padding-left: 2rem;
-        font-size: 0.9rem;
-    }
-    .map-selector-submap-group {
-        border: none;
-    }
-    .map-selector-expand-hint {
-        margin-left: 0.5rem;
-        font-size: 0.8rem;
-        color: var(--text-3);
-    }
-    .map-selector-submaps {
-        padding-left: 0.5rem;
-    }
-"#;
+// The canvas CSS lives in `map_canvas_css.rs`, shared with the desktop canvas.
 
 // =============================================================================
 // Hero image cache
@@ -389,6 +266,11 @@ pub fn MapCanvas(
     on_text_create: EventHandler<(Position, String)>,
     on_erase_at: EventHandler<Position>,
     on_element_drag_end: EventHandler<(Uuid, Position, Position)>,
+    // Tab, Esc or Shift+Tab while the canvas holds focus
+    on_canvas_key: EventHandler<CanvasKey>,
+    // A key was pressed while the canvas held focus (the editor shows its
+    // key hint then, not on a mouse focus)
+    on_canvas_keydown: EventHandler<()>,
 ) -> Element {
     // =========================================================================
     // Canvas element refs: stored as signals so effects can read them
@@ -743,8 +625,18 @@ pub fn MapCanvas(
                 .filter(|e| e.phase_id.is_none() || e.phase_id == sel_phase)
                 .collect();
 
+            // `--canvas-selection` follows the brand's solid accent for this
+            // theme, so it is read from the canvas's computed style. If it
+            // resolves empty, the outline still draws in the strategy scope's
+            // dark ring colour (CANVAS_SELECTION_FALLBACK).
+            let selection = web_sys::window()
+                .and_then(|w| w.get_computed_style(&canvas).ok().flatten())
+                .and_then(|style| style.get_property_value(CANVAS_SELECTION_TOKEN).ok())
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| CANVAS_SELECTION_FALLBACK.to_string());
             if let Some(element) = visible.iter().find(|e| e.id == sel) {
-                ctx.set_stroke_style_str(CANVAS_SELECTION_COLOR);
+                ctx.set_stroke_style_str(&selection);
                 ctx.set_line_width(2.0);
                 let dash = Array::of2(&4.0.into(), &4.0.into());
                 let _ = ctx.set_line_dash(&dash);
@@ -856,7 +748,12 @@ pub fn MapCanvas(
                 height: "1080",
                 class: "map-canvas map-canvas-overlay",
                 style: "cursor: {cursor_style()};",
-                tabindex: 0,
+                // Focus by click only. As a Tab stop the canvas would hold
+                // keyboard focus: Tab toggles the left panel in here, so the
+                // controls after the map (and the phone tab bar) could not
+                // be reached going forward.
+                tabindex: "-1",
+                aria_label: "Strategy map. Tab toggles the team panel. Esc cancels a drawing or selection. Esc or Shift+Tab leaves the map.",
                 onmounted: move |evt| {
                     ov_canvas.set(Some(evt.data()));
                 },
@@ -1058,19 +955,31 @@ pub fn MapCanvas(
 
                 // ---- Canvas keyboard shortcuts ----
                 onkeydown: move |evt: Event<KeyboardData>| {
-                    let key = evt.data().key();
-                    match key {
-                        Key::Delete | Key::Backspace
-                            if selected_sig.read().is_some() => {
-                                // Parent handles deletion through element select -> delete flow
-                                on_element_select.call(None);
-                            }
-                        Key::Escape => {
+                    // Keys that belong to the canvas while it holds focus.
+                    // This is the only place in the editor that takes Tab.
+                    on_canvas_keydown.call(());
+                    let binding = Keybinding::from_key(&evt.key(), evt.modifiers());
+                    // A half-drawn shape or a selection: Esc drops it first.
+                    let in_progress = arrow_start.read().is_some()
+                        || *drawing_sig.read()
+                        || selected_sig.read().is_some();
+                    if let Some(canvas_key) = keybindings::canvas_key(&binding, in_progress) {
+                        if canvas_key.prevents_default() {
+                            evt.prevent_default();
+                        }
+                        if canvas_key == CanvasKey::CancelInProgress {
                             on_element_select.call(None);
                             arrow_start.set(None);
                             arrow_end.set(None);
                         }
-                        _ => {}
+                        on_canvas_key.call(canvas_key);
+                    }
+                    // The editor's document listener deleted the selected
+                    // element; drop the stale selection here.
+                    if matches!(evt.data().key(), Key::Delete | Key::Backspace)
+                        && selected_sig.read().is_some()
+                    {
+                        on_element_select.call(None);
                     }
                 },
             }
@@ -1084,7 +993,7 @@ pub fn MapCanvas(
                         div { class: "map-selector-modes",
                             // Map selection handled by parent component's map picker
                             p {
-                                style: "color: var(--text-3); text-align: center; padding: 2rem;",
+                                style: "color: var(--text-subtle); text-align: center; padding: 2rem;",
                                 "Use the status bar or toolbar to select a map."
                             }
                         }

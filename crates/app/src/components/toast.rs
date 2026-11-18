@@ -133,21 +133,21 @@ const TOAST_CSS: &str = r#"
         padding: 0.75rem 1rem;
         border-radius: 8px;
         border: 1px solid var(--border);
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         color: var(--text);
         font-size: 0.85rem;
         min-width: 250px;
         animation: toast-in 0.3s ease-out;
     }
-    .toast-success { border-left: 3px solid var(--ok); }
-    .toast-error { border-left: 3px solid var(--danger); }
+    .toast-success { border-left: 3px solid var(--win); }
+    .toast-error { border-left: 3px solid var(--loss); }
     .toast-warning { border-left: 3px solid var(--warn); }
-    .toast-info { border-left: 3px solid var(--accent); }
+    .toast-info { border-left: 3px solid var(--accent-text); }
     .toast-dismiss {
         margin-left: auto;
         background: none;
         border: none;
-        color: var(--text-3);
+        color: var(--text-subtle);
         cursor: pointer;
         font-size: 1rem;
         padding: 0 0.25rem;

@@ -1,4 +1,10 @@
-//! Main expandable chat widget: sidebar/panel layout.
+//! The live chat room: channel chips, message list and composer.
+//!
+//! It is the body of the `d1-chat` thread on the `/chat` page. The page owns
+//! the thread region and its head bar (the H1, this room's connection status
+//! and the team picker), so the head stays mounted when the page remounts
+//! the room for another team. The room reports its connection through
+//! [`RoomLink`].
 //!
 //! Wires F-API-003/004: discovered `TeamChannel` group_ids, team (public)
 //! sends via `POST /api/chat/send-public`, and send-encrypted / decrypt on
@@ -14,6 +20,7 @@ use scuffed_types::{
 };
 
 use crate::components::chat::encrypted_chat::{EncryptedChat, KeyMode};
+use crate::components::ui::{ChipButton, ChipRow};
 use crate::components::{Toast, use_toast};
 use crate::state::RelayAvailability;
 use crate::state::nostr::{NostrRelayEvent, NostrRelayManager, RelayConnectionState};
@@ -21,186 +28,67 @@ use crate::state::use_relay_availability_state;
 
 use super::compose_box::{ComposeAttempt, ComposeBox};
 use super::message_list::MessageList;
-use super::relay_status::RelayStatus;
 
+/// The room fills the thread under the head bar (see `thread.rs`).
 const CHAT_WIDGET_CSS: &str = r#"
 .chat-widget {
-    position: fixed;
-    bottom: 0;
-    right: 0;
-    width: 360px;
-    max-height: 520px;
-    display: flex;
-    flex-direction: column;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-bottom: none;
-    border-radius: 12px 12px 0 0;
-    box-shadow: 0 -4px 24px var(--overlay);
-    z-index: 1000;
-    transition: transform 0.25s ease, opacity 0.2s ease;
-    overflow: hidden;
+  box-sizing: border-box;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
-
-.chat-widget--collapsed {
-    max-height: 44px;
-    cursor: pointer;
-}
-
-.chat-widget--collapsed .chat-widget__body {
-    display: none;
-}
-
-.chat-widget--embedded {
-    position: relative;
-    width: 100%;
-    max-height: none;
-    height: min(70vh, 640px);
-    border-radius: 12px;
-    border-bottom: 1px solid var(--border);
-    box-shadow: none;
-    z-index: auto;
-}
-
-.chat-widget__header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 10px 14px;
-    background: var(--surface-2);
-    border-bottom: 1px solid var(--border);
-    cursor: pointer;
-    user-select: none;
-    min-height: 44px;
-}
-
-.chat-widget--embedded .chat-widget__header {
-    cursor: default;
-}
-
-.chat-widget__header-left {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-
-.chat-widget__title {
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--text);
-}
-
-.chat-widget__header-right {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-}
-
-.chat-widget__toggle {
-    width: 24px;
-    height: 24px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border: none;
-    background: transparent;
-    color: var(--text-2);
-    cursor: pointer;
-    border-radius: 4px;
-    font-size: 16px;
-    transition: color 0.15s ease, background-color 0.15s ease;
-}
-
-.chat-widget__toggle:hover {
-    color: var(--text);
-    background: var(--surface-2);
-}
-
 .chat-widget__body {
-    display: flex;
-    flex-direction: column;
-    flex: 1;
-    min-height: 0;
-    height: 420px;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
-
-.chat-widget--embedded .chat-widget__body {
-    height: auto;
-}
-
 .chat-widget__channel-bar {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding: 6px 12px;
-    border-bottom: 1px solid var(--border);
-    overflow-x: auto;
-    scrollbar-width: none;
+  flex: 0 0 auto;
+  min-width: 0;
+  padding: var(--space-2) var(--space-card-pad);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
 }
-
-.chat-widget__channel-bar::-webkit-scrollbar {
-    display: none;
-}
-
-.chat-widget__channel {
-    padding: 4px 10px;
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    background: transparent;
-    color: var(--text-2);
-    font-size: 11px;
-    font-weight: 500;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: all 0.15s ease;
-}
-
-.chat-widget__channel:hover {
-    border-color: var(--accent);
-    color: var(--text);
-}
-
-.chat-widget__channel--active {
-    background: var(--accent-soft);
-    border-color: var(--accent);
-    color: var(--accent);
-}
-
-.chat-widget__error {
-    margin: 8px 12px 0;
-    padding: 8px 10px;
-    border-radius: 8px;
-    background: color-mix(in srgb, var(--danger) 8%, transparent);
-    border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
-    color: var(--danger);
-    font-size: 12px;
-    line-height: 1.4;
-}
-
-.chat-widget__empty {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--text-3);
-    font-size: 13px;
-    padding: 2rem;
-    text-align: center;
-}
-
-@media (max-width: 480px) {
-    .chat-widget {
-        width: 100%;
-        border-radius: 0;
-        border: none;
-        border-top: 1px solid var(--border);
-    }
-    .chat-widget--embedded {
-        border: 1px solid var(--border);
-        border-radius: 12px;
-    }
+/* A failed send or a relay error. The words carry it, not the colour. */
+.chat-notice {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: var(--space-2) var(--space-card-pad);
+  border-bottom: 1px solid var(--border);
+  background: var(--loss-soft);
+  color: var(--loss);
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+  overflow-wrap: anywhere;
 }
 "#;
+
+/// The page's side of a room: the connection state its head bar shows, and
+/// a counter the head bar's Retry bumps. The page owns both signals, so the
+/// head bar outlives the room it reports on.
+#[derive(Clone, Copy, PartialEq)]
+pub struct RoomLink {
+    pub state: Signal<RelayConnectionState>,
+    pub retry: Signal<u32>,
+}
+
+/// What the head bar says before the room's socket reports. A room that is
+/// about to dial says "Connecting", not "Disconnected" with a Retry.
+pub fn initial_connection_state(
+    availability: RelayAvailability,
+    channels: &[TeamChannel],
+) -> RelayConnectionState {
+    if relay_dial(availability, channels).is_some() {
+        RelayConnectionState::Connecting
+    } else {
+        RelayConnectionState::Disconnected
+    }
+}
 
 fn first_active_group(channels: &[TeamChannel]) -> Option<String> {
     channels
@@ -546,7 +434,42 @@ fn push_unique(messages: &mut Vec<ChatMessage>, msg: ChatMessage) {
     }
 }
 
-fn key_mode_from_me(me: Option<&MeResponse>) -> KeyMode {
+/// The banner between the head and the messages.
+///
+/// `status` is the text of the always-rendered `role="status"` line. During a
+/// rate-limit hold the visible line counts down once a second, so it is a
+/// plain line and the status line says the stable sentence once, off screen.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct ThreadNotice {
+    status: String,
+    status_visible: bool,
+    countdown: Option<String>,
+}
+
+fn thread_notice(is_officer: bool, wait_secs: u64, err: Option<&str>) -> ThreadNotice {
+    if !is_officer && wait_secs > 0 {
+        ThreadNotice {
+            status: RATE_LIMIT_LATER.to_string(),
+            status_visible: false,
+            countdown: Some(rate_limit_copy(wait_secs)),
+        }
+    } else if let Some(msg) = err {
+        ThreadNotice {
+            status: msg.to_string(),
+            status_visible: true,
+            countdown: None,
+        }
+    } else {
+        ThreadNotice::default()
+    }
+}
+
+/// `me` is the account resource: `None` while it loads, `Some(None)` when
+/// the request failed.
+fn key_mode_from_me(me: Option<Option<&MeResponse>>) -> KeyMode {
+    let Some(me) = me else {
+        return KeyMode::Checking;
+    };
     match me
         .and_then(|m| m.member.as_ref())
         .and_then(|m| m.nostr_key_mode.as_deref())
@@ -557,20 +480,22 @@ fn key_mode_from_me(me: Option<&MeResponse>) -> KeyMode {
     }
 }
 
-/// Top-level expandable chat widget.
+/// One team's chat room, below the page's head bar.
 ///
-/// Manages its own relay connection lifecycle via `NostrRelayManager`.
+/// Manages its own relay connection lifecycle via `NostrRelayManager` and
+/// reports it through `room`.
 #[component]
 pub fn ChatWidget(
     /// Discovered team channels (`GET /api/teams/:id/channels`). Use returned group_ids only.
     channels: Vec<TeamChannel>,
-    /// Page layout instead of the floating overlay.
-    #[props(default = false)]
-    embedded: bool,
+    /// The head bar's status and Retry, owned by the page.
+    room: RoomLink,
 ) -> Element {
     let mut toast = use_toast();
-    let mut expanded = use_signal(|| true);
-    let mut connection_state = use_signal(|| RelayConnectionState::Disconnected);
+    let relay_state = use_relay_availability_state();
+    let channels_for_start = channels.clone();
+    let mut connection_state =
+        use_signal(move || initial_connection_state(relay_state.current(), &channels_for_start));
     let mut messages = use_signal(Vec::<ChatMessage>::new);
     let mut active_group = use_signal(|| first_active_group(&channels));
     let mut current_sub_id = use_signal(|| Option::<String>::None);
@@ -674,7 +599,6 @@ pub fn ChatWidget(
         relay_cleanup.disconnect();
     });
 
-    let relay_state = use_relay_availability_state();
     let relay_connect = relay.clone();
     let channels_for_connect = channels.clone();
     use_effect(move || {
@@ -687,6 +611,22 @@ pub fn ChatWidget(
         };
         decrypt_relay.set(hint);
         connect_relay(&relay_connect, &dial);
+    });
+
+    // The head bar is the page's: mirror the state into it, and retry when
+    // its Retry bumps the counter.
+    let mut room_state = room.state;
+    use_effect(move || room_state.set(connection_state()));
+    let mut seen_retry = use_signal(|| *room.retry.peek());
+    let relay_retry = relay.clone();
+    use_effect(move || {
+        let bumped = (room.retry)();
+        if bumped == *seen_retry.peek() {
+            return;
+        }
+        seen_retry.set(bumped);
+        panel_error.set(None);
+        relay_retry.retry();
     });
 
     let me = use_resource(move || async move {
@@ -775,9 +715,7 @@ pub fn ChatWidget(
         wrap_sub_id.set(Some(sub_id));
     });
 
-    let conn = *connection_state.read();
     let is_loading = *loading.read();
-    let is_expanded = *expanded.read() || embedded;
     let active = channels
         .iter()
         .find(|c| Some(c.group_id.as_str()) == active_group.read().as_deref())
@@ -792,80 +730,42 @@ pub fn ChatWidget(
         .cloned()
         .collect();
     let me_data = me.read();
-    let key_mode = key_mode_from_me(me_data.as_ref().and_then(|o| o.as_ref()));
+    let key_mode = key_mode_from_me(me_data.as_ref().map(|o| o.as_ref()));
     let err = panel_error.read().clone();
     let _hold_render = hold_tick();
     let public_send_wait = remaining_hold_secs(send_hold_until_ms(), js_sys::Date::now());
-    let relay_retry = relay.clone();
     let active_channels: Vec<TeamChannel> =
         channels.iter().filter(|c| c.is_active).cloned().collect();
 
-    let widget_class = if embedded {
-        "chat-widget chat-widget--embedded"
-    } else if is_expanded {
-        "chat-widget"
-    } else {
-        "chat-widget chat-widget--collapsed"
-    };
+    let own_member = me_data
+        .as_ref()
+        .and_then(|o| o.as_ref())
+        .and_then(|m| m.member.as_ref());
+    let own_pubkey = own_member.and_then(|m| m.nostr_pubkey.clone());
+    let notice = thread_notice(is_officer, public_send_wait, err.as_deref());
 
     rsx! {
         crate::styles::StyleOnce { id: "scuffed-css-components-chat-chat_widget-chat-widget-css", css: CHAT_WIDGET_CSS }
-        div { class: "{widget_class}",
-
-            div {
-                class: "chat-widget__header",
-                onclick: move |_| {
-                    if !embedded {
-                        expanded.toggle();
-                    }
-                },
-
-                div { class: "chat-widget__header-left",
-                    span { class: "chat-widget__title",
-                        if let Some(ch) = active.as_ref() {
-                            "{ch.group_type.label()} chat"
-                        } else {
-                            "Chat"
-                        }
-                    }
-                    RelayStatus {
-                        state: conn,
-                        on_retry: move |_| {
-                            panel_error.set(None);
-                            relay_retry.retry();
-                        },
-                    }
-                }
-                if !embedded {
-                    div { class: "chat-widget__header-right",
-                        button {
-                            class: "chat-widget__toggle",
-                            onclick: move |evt| {
-                                evt.stop_propagation();
-                                expanded.toggle();
-                            },
-                            if is_expanded { "\u{25BC}" } else { "\u{25B2}" }
-                        }
-                    }
-                }
-            }
-
+        div { class: "chat-widget",
             div { class: "chat-widget__body",
-                if !active_channels.is_empty() {
+                // One channel needs no picker; the frame draws none.
+                if active_channels.len() > 1 {
                     div { class: "chat-widget__channel-bar",
-                        for channel in active_channels.iter() {
-                            {
-                                let is_on = active_group.read().as_deref() == Some(channel.group_id.as_str());
-                                let group_id = channel.group_id.clone();
-                                let label = channel.group_type.label();
-                                rsx! {
-                                    button {
-                                        class: if is_on { "chat-widget__channel chat-widget__channel--active" } else { "chat-widget__channel" },
-                                        onclick: move |_| {
-                                            active_group.set(Some(group_id.clone()));
-                                            panel_error.set(None);
-                                        },
-                                        "{label}"
+                        ChipRow { label: "Channel", scroll: true,
+                            for channel in active_channels.iter() {
+                                {
+                                    let is_on = active_group.read().as_deref() == Some(channel.group_id.as_str());
+                                    let group_id = channel.group_id.clone();
+                                    rsx! {
+                                        ChipButton {
+                                            class: "chip",
+                                            label: channel.group_type.label(),
+                                            pressed: is_on,
+                                            onclick: move |_| {
+                                                active_group.set(Some(group_id.clone()));
+                                                panel_error.set(None);
+                                            },
+                                        }
                                     }
                                 }
                             }
@@ -873,21 +773,25 @@ pub fn ChatWidget(
                     }
                 }
 
-                if !is_officer && public_send_wait > 0 {
-                    div { class: "chat-widget__error", "{rate_limit_copy(public_send_wait)}" }
-                } else if let Some(msg) = err {
-                    div { class: "chat-widget__error", "{msg}" }
+                p {
+                    class: if notice.status_visible { "chat-notice" } else { "visually-hidden" },
+                    role: "status",
+                    "{notice.status}"
+                }
+                if let Some(countdown) = notice.countdown.as_ref() {
+                    p { class: "chat-notice", "{countdown}" }
                 }
 
                 if active_channels.is_empty() {
-                    div { class: "chat-widget__empty",
-                        "No active chat channels for this team."
+                    div { class: "chat-thread__body",
+                        p { class: "chat-thread__note", "No active chat channels for this team." }
                     }
                 } else if is_officer {
                     EncryptedChat {
                         messages: visible,
                         key_mode: key_mode,
                         loading: is_loading,
+                        own_pubkey: own_pubkey.clone(),
                         on_send: move |attempt: ComposeAttempt| {
                             if sending() {
                                 attempt.fail();
@@ -924,8 +828,8 @@ pub fn ChatWidget(
                                         attempt.succeed();
                                     }
                                     Err(e) => {
-                                        panel_error.set(Some(e.clone()));
-                                        toast.show(Toast::error(e));
+                                        // The notice line is the one announcement.
+                                        panel_error.set(Some(e));
                                         attempt.fail();
                                     }
                                 }
@@ -937,6 +841,7 @@ pub fn ChatWidget(
                     MessageList {
                         messages: visible,
                         loading: is_loading,
+                        own_pubkey: own_pubkey.clone(),
                     }
                     ComposeBox {
                         on_send: move |attempt: ComposeAttempt| {
@@ -983,8 +888,8 @@ pub fn ChatWidget(
                                             panel_error.set(None);
                                             attempt.rate_limited();
                                         } else {
-                                            panel_error.set(Some(err.message.clone()));
-                                            toast.show(Toast::error(err.message));
+                                            // The notice line is the one announcement.
+                                            panel_error.set(Some(err.message));
                                             attempt.fail();
                                         }
                                     }
@@ -993,7 +898,6 @@ pub fn ChatWidget(
                             });
                         },
                         send_locked: public_send_wait > 0,
-                        placeholder: "Type a message...".to_string(),
                     }
                 }
             }
@@ -1254,5 +1158,120 @@ mod tests {
         push_unique(&mut messages, sent);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].content, "hello team");
+    }
+
+    #[test]
+    fn a_room_about_to_dial_does_not_say_disconnected() {
+        let live = channel(true, "wss://relay.example");
+        assert_eq!(
+            initial_connection_state(RelayAvailability::On, std::slice::from_ref(&live)),
+            RelayConnectionState::Connecting
+        );
+        assert_eq!(
+            initial_connection_state(RelayAvailability::Off, std::slice::from_ref(&live)),
+            RelayConnectionState::Disconnected
+        );
+        let inactive = channel(false, "wss://relay.example");
+        assert_eq!(
+            initial_connection_state(RelayAvailability::On, std::slice::from_ref(&inactive)),
+            RelayConnectionState::Disconnected
+        );
+    }
+
+    #[test]
+    fn the_key_card_waits_for_the_account() {
+        assert_eq!(key_mode_from_me(None), KeyMode::Checking);
+        assert_eq!(key_mode_from_me(Some(None)), KeyMode::None);
+    }
+
+    #[test]
+    fn a_failed_send_is_announced_once() {
+        let src = include_str!("chat_widget.rs");
+        let prod = src.split("mod tests").next().expect("production source");
+        assert!(
+            !prod.contains("Toast::error"),
+            "the role=status notice already says it; a toast would repeat it"
+        );
+        assert_eq!(
+            prod.matches("// The notice line is the one announcement.")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn notice_keeps_one_status_line_and_a_plain_countdown() {
+        assert_eq!(thread_notice(false, 0, None), ThreadNotice::default());
+        assert_eq!(thread_notice(false, 0, None).status, "");
+        assert!(!thread_notice(false, 0, None).status_visible);
+
+        let failed = thread_notice(false, 0, Some("Channel not found."));
+        assert_eq!(failed.status, "Channel not found.");
+        assert!(failed.status_visible);
+        assert_eq!(failed.countdown, None);
+
+        let held = thread_notice(false, 12, Some("Channel not found."));
+        assert_eq!(held.status, RATE_LIMIT_LATER);
+        assert!(
+            !held.status_visible,
+            "the live line does not repeat every second"
+        );
+        assert_eq!(
+            held.countdown.as_deref(),
+            Some("Too many messages. Try again in 12 seconds.")
+        );
+
+        let officer = thread_notice(true, 12, Some("Relay said no."));
+        assert_eq!(officer.status, "Relay said no.");
+        assert!(officer.status_visible);
+        assert_eq!(officer.countdown, None);
+    }
+
+    #[test]
+    fn room_markup_follows_the_frame() {
+        let src = include_str!("chat_widget.rs");
+        let prod = src.split("mod tests").next().expect("production source");
+        assert!(prod.contains("div { class: \"chat-widget\","));
+        assert!(prod.contains("ChipRow { label: \"Channel\""));
+        assert!(prod.contains("role: \"status\""));
+        assert!(!prod.contains("main {"), "the shell owns the main landmark");
+        assert!(
+            !prod.contains("h1 {"),
+            "the H1 comes from the page's head bar"
+        );
+        assert!(
+            !prod.contains("section {"),
+            "the page owns the thread region"
+        );
+        for floating in [
+            "embedded",
+            "chat-widget--floating",
+            "Collapse chat",
+            "expanded",
+        ] {
+            assert!(
+                !prod.contains(floating),
+                "no floating mode left: {floating}"
+            );
+        }
+    }
+
+    #[test]
+    fn widget_css_is_on_tokens() {
+        use crate::components::ui::test_support::{
+            assert_ink_clears_aa, assert_sizes_from_tokens, css_rule, has_decl,
+        };
+
+        assert_sizes_from_tokens(CHAT_WIDGET_CSS);
+        assert!(!CHAT_WIDGET_CSS.contains("color-mix"));
+        let body = css_rule(CHAT_WIDGET_CSS, ".chat-widget__body {");
+        for decl in ["flex: 1 1 auto", "min-height: 0", "flex-direction: column"] {
+            assert!(has_decl(&body, decl), "missing {decl}: {body}");
+        }
+        let room = css_rule(CHAT_WIDGET_CSS, ".chat-widget {");
+        for decl in ["flex: 1 1 auto", "min-height: 0", "flex-direction: column"] {
+            assert!(has_decl(&room, decl), "missing {decl}: {room}");
+        }
+        assert_ink_clears_aa("--loss", "--loss-soft", 4.5);
     }
 }

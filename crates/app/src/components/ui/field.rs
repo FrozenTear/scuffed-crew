@@ -2,15 +2,137 @@ use dioxus::prelude::*;
 
 pub const FIELD_CSS: &str = r#"
 .ui-field { width: 100%; font-family: var(--font-body); font-size: var(--text-sm); font-weight: 500;
-  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-md);
+  background: var(--surface-sunken); border: 1px solid var(--border); border-radius: var(--radius-control);
   padding: var(--space-2) var(--space-3); color: var(--text); }
-.ui-field::placeholder { color: var(--text-3); }
-.ui-field:focus { border-color: var(--accent); }
-.ui-field--invalid { border-color: var(--danger); }
+.ui-field::placeholder { color: var(--text-subtle); }
+.ui-field:focus { border-color: var(--accent-solid); }
+.ui-field--invalid { border-color: var(--loss); }
 textarea.ui-field { resize: vertical; min-height: 80px; }
 .ui-field-wrap { display: flex; flex-direction: column; gap: 0.35rem; width: 100%; }
-.ui-field-label { font-family: var(--font-body); font-size: var(--text-sm); font-weight: 600; color: var(--text-2); }
+.ui-field-label { font-family: var(--font-body); font-size: var(--text-sm); font-weight: 600; color: var(--text-3); }
 "#;
+
+/// The redesign form field (the Apply frame): a 44px control with a strong
+/// edge on `--surface`, a sentence-case label above it, a hint, and an error
+/// line that is an icon plus text. On phone the control text is 16px, so the
+/// browser does not zoom the page on focus. Add `field-input` to an `input`,
+/// `select` or `textarea`; mark an invalid one with `aria-invalid="true"`.
+pub const FORM_FIELD_CSS: &str = r#"
+.field-label {
+  display: block;
+  min-height: 0;
+  margin: 0;
+  color: var(--text);
+  font-family: var(--font-head);
+  font-size: var(--text-sm);
+  font-weight: var(--font-label-weight);
+  line-height: var(--leading-ui);
+}
+.field-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: var(--hit-target-min);
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: var(--text-md);
+  font-weight: var(--font-body-weight);
+  line-height: var(--leading-body);
+}
+textarea.field-input {
+  min-height: calc(var(--hit-target-min) * 3);
+  padding: var(--space-3);
+  resize: vertical;
+}
+.field-input::placeholder {
+  color: var(--text-subtle);
+  opacity: 1;
+}
+/* The browser's own clear button of a search field is drawn in a fixed
+   colour that ignores the theme. Redraw it as a cross in the muted ink. */
+.field-input[type="search"]::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 0 0 auto;
+  width: var(--space-3);
+  height: var(--space-3);
+  margin-inline-start: var(--space-2);
+  background: var(--text-3);
+  clip-path: polygon(15% 0%, 50% 35%, 85% 0%, 100% 15%, 65% 50%, 100% 85%, 85% 100%, 50% 65%, 15% 100%, 0% 85%, 35% 50%, 0% 15%);
+  cursor: pointer;
+}
+.field-input:focus { border-color: var(--accent-solid); }
+.field-input[aria-invalid="true"] { border-color: var(--loss); }
+.field-hint {
+  margin: 0;
+  color: var(--text-3);
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+}
+.field-error {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin: 0;
+  color: var(--loss);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+}
+/* No error: out of the layout, still in the tree so the next one is
+   announced. */
+.field-error:empty {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.field-error-icon {
+  flex: 0 0 var(--space-4);
+  width: var(--space-4);
+  height: var(--space-4);
+  margin-top: var(--space-1);
+  border-radius: var(--radius-pill);
+  background: var(--loss);
+  color: var(--on-loss);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-head);
+  font-size: var(--text-xs);
+  font-weight: var(--font-label-weight);
+  line-height: 1;
+}
+.field-error-icon::before { content: "!"; }
+@media (max-width: 820px) {
+  .field-input { font-size: var(--text-lg); }
+}
+"#;
+
+/// The error line of a field: an icon, then the text, so it does not rest on
+/// colour. The icon is decorative; the text carries the message. Point the
+/// control's `aria-describedby` at `id`. With `role` set (`"alert"`), keep the
+/// line rendered with empty `text` so a later error is announced.
+#[component]
+pub fn FieldError(id: String, text: String, #[props(default)] role: Option<String>) -> Element {
+    rsx! {
+        p { class: "field-error", id, role,
+            if !text.is_empty() {
+                span { class: "field-error-icon", aria_hidden: "true" }
+                "{text}"
+            }
+        }
+    }
+}
 
 fn field_class(invalid: bool) -> &'static str {
     if invalid {
@@ -155,6 +277,78 @@ pub fn Select(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn form_field_is_44px_with_16px_text_on_phone() {
+        use crate::components::ui::test_support::{
+            assert_ink_clears_aa, assert_sizes_from_tokens, css_rule, has_decl,
+        };
+        assert_sizes_from_tokens(FORM_FIELD_CSS);
+        let input = css_rule(FORM_FIELD_CSS, ".field-input {");
+        for decl in [
+            "min-height: var(--hit-target-min)",
+            "border: 1px solid var(--border-strong)",
+            "background: var(--surface)",
+            "font-size: var(--text-md)",
+        ] {
+            assert!(has_decl(&input, decl), "missing {decl}: {input}");
+        }
+        let phone = FORM_FIELD_CSS
+            .split_once("@media (max-width: 820px) {")
+            .expect("phone block")
+            .1;
+        assert!(
+            has_decl(
+                &css_rule(phone, ".field-input {"),
+                "font-size: var(--text-lg)"
+            ),
+            "{phone}"
+        );
+        // One placeholder ink for every field.
+        let placeholder = css_rule(FORM_FIELD_CSS, ".field-input::placeholder {");
+        assert!(
+            has_decl(&placeholder, "color: var(--text-subtle)"),
+            "{placeholder}"
+        );
+        // Labels are sentence case in the default ink, with no 44px box.
+        let label = css_rule(FORM_FIELD_CSS, ".field-label {");
+        for decl in ["display: block", "min-height: 0", "color: var(--text)"] {
+            assert!(has_decl(&label, decl), "missing {decl}: {label}");
+        }
+        assert!(!label.contains("text-transform"), "{label}");
+        assert!(!label.contains("letter-spacing"), "{label}");
+        // Invalid is a loss border plus the icon and text line.
+        assert!(
+            FORM_FIELD_CSS
+                .contains(".field-input[aria-invalid=\"true\"] { border-color: var(--loss); }")
+        );
+        assert!(has_decl(
+            &css_rule(FORM_FIELD_CSS, ".field-error {"),
+            "color: var(--loss)"
+        ));
+        assert_ink_clears_aa("--loss", "--surface", 4.5);
+        assert_ink_clears_aa("--on-loss", "--loss", 4.5);
+        assert_ink_clears_aa("--text", "--surface", 4.5);
+        assert_ink_clears_aa("--text-3", "--surface", 4.5);
+    }
+
+    #[test]
+    fn field_error_is_an_icon_then_text_and_stays_mounted_when_empty() {
+        fn shown() -> Element {
+            rsx! { FieldError { id: "apply-role-err", text: "Choose a role." } }
+        }
+        fn idle() -> Element {
+            rsx! { FieldError { id: "wiki-1-err", text: "", role: "alert" } }
+        }
+        assert_eq!(
+            render(shown),
+            "<p class=\"field-error\" id=\"apply-role-err\"><span class=\"field-error-icon\" aria-hidden=\"true\"></span>Choose a role.</p>"
+        );
+        assert_eq!(
+            render(idle),
+            "<p class=\"field-error\" id=\"wiki-1-err\" role=\"alert\"></p>"
+        );
+    }
+
     #[test]
     fn field_class_reflects_invalid() {
         assert_eq!(field_class(false), "ui-field");

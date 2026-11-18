@@ -4,8 +4,9 @@
 //! Templates are cut from the game's own text, so a pack is never committed.
 //! The reader loads it from `<data_dir>/templates/rank-v1/templates.json`
 //! ([`TEMPLATE_DIR`], [`PACK_FILE`]); a pack is built locally from labelled
-//! frames with [`Learner`] (the ignored bench in `tests.rs` writes one).
-//! Without a pack there is no reader.
+//! frames with [`Learner`] (the ignored bench in `tests.rs` writes one), or
+//! arrives in the same folder through the tracker's pack download
+//! (`rank-v1.tar`, [`crate::packs`]). Without a pack there is no reader.
 //!
 //! A template is the mean of the normalised cuts ([`super::ink::vector`]) of
 //! one class (a digit, `%`, a tag word, a tier name) in one family (where the
@@ -103,6 +104,10 @@ pub struct ClassTemplate {
     /// How many cuts were averaged.
     pub n: usize,
     pub vector: Vec<f32>,
+    /// Filled by numeric pooling, not by a cut of this family. Absent in a
+    /// pack written before this field, which loads as `false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pooled: bool,
 }
 
 /// All templates, by family.
@@ -261,7 +266,7 @@ type Example = (Vec<f32>, f32);
 /// Builds a [`TemplateSet`] from labelled rank screens: each field's cuts
 /// are paired with the label's characters when the counts agree, and
 /// skipped when they do not.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct Learner {
     examples: BTreeMap<Family, BTreeMap<String, Vec<Example>>>,
 }
@@ -269,6 +274,28 @@ pub struct Learner {
 impl Learner {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Classes a frame actually contributed, before numeric pooling.
+    /// [`build`](Self::build) also copies a digit seen in one numeric family
+    /// into the others. Those copies are not observed.
+    pub fn observed(&self) -> std::collections::BTreeSet<(Family, String)> {
+        self.examples
+            .iter()
+            .flat_map(|(family, classes)| classes.keys().map(move |class| (*family, class.clone())))
+            .collect()
+    }
+
+    /// Add every example from `other`. Used to combine one learner per day.
+    pub fn merge(&mut self, other: &Self) {
+        for (family, classes) in &other.examples {
+            let dest = self.examples.entry(*family).or_default();
+            for (class, list) in classes {
+                dest.entry(class.clone())
+                    .or_default()
+                    .extend(list.iter().cloned());
+            }
+        }
     }
 
     pub(super) fn add(&mut self, f: Family, class: &str, ink: &Plane) {
@@ -421,6 +448,7 @@ impl Learner {
                 aspect: la.exp(),
                 n: lst.len(),
                 vector: unit(v),
+                pooled: false,
             }
         };
         let mut pool: BTreeMap<String, Vec<Example>> = BTreeMap::new();
@@ -439,7 +467,9 @@ impl Learner {
             let have = families.entry(f).or_default();
             for (c, lst) in &pool {
                 if !have.iter().any(|t| &t.class == c) {
-                    have.push(mean(lst, c));
+                    let mut filled = mean(lst, c);
+                    filled.pooled = true;
+                    have.push(filled);
                 }
             }
         }

@@ -111,13 +111,36 @@ in the request passes.
 
 1. The part starts with the 8-byte PNG signature. Otherwise 415 `not_png`.
 2. The part is at most `HERO_ICON_MAX_BYTES`. Otherwise 413 `icon_too_large`.
-3. The PNG header gives a width and height in `8..=256`. Otherwise 400
-   `icon_bad_dimensions`.
-4. The image decodes. Otherwise 400 `invalid_png`.
+3. The chunk list is walked (nothing is inflated): the first chunk must be
+   a 13-byte `IHDR`, no chunk may run past the end of the part, a `PLTE`
+   must be whole RGB triples, and no critical chunk (uppercase first
+   letter) other than `IHDR`, `PLTE`, `IDAT` and `IEND` may appear.
+   Otherwise 400 `invalid_png`. The width and height in that `IHDR` must be
+   in `8..=256`. Otherwise 400 `icon_bad_dimensions`, before any decode.
+4. Only `IHDR`, `PLTE`, `tRNS`, `IDAT` and `IEND` are passed to the
+   decoder. Every other chunk (colour profiles such as `iCCP`, text, EXIF,
+   animation) is dropped unread, so it never causes an error and costs no
+   memory however large it would inflate. The image then decodes, with the
+   decoder's memory capped at 32 MiB (`PNG_DECODE_MAX_ALLOC`) as a
+   backstop. Otherwise 400 `invalid_png`. Measured peak heap for one whole
+   check, decode and re-encode: 0.8 MiB for the largest accepted hero icon
+   (256x256 16-bit RGBA) and 0.9 MiB for a refused one (a 256x256 file
+   built so its re-encode is over 64 KiB at both levels, 413). The
+   re-encode writes into a writer capped at `HERO_ICON_MAX_BYTES`, so the
+   writer never holds more than that; the PNG encoder's own compression
+   buffer is not capped and is included in these figures. See `training-crops.md` for
+   the training crop kinds, whose largest (rank, 1536x720) peaks at about
+   13 MiB, accepted or refused.
+5. The re-encode (below) is at most `HERO_ICON_MAX_BYTES`. Otherwise 413
+   `icon_too_large`.
 
 The server then re-encodes the decoded pixels as a new PNG and stores that, so
-text chunks and other metadata from the upload are dropped. `size_bytes` is the
-size of the stored file. File names on disk are `<id>.png`, where `id` is 32
+text chunks and other metadata from the upload are dropped. The re-encode is
+8 bits per sample (gray, gray with alpha, RGB or RGBA, as the upload has
+them; 16-bit samples are rounded to 8 bits) at the default PNG compression
+level, again at the best level only when the default result is over the
+limit, so from this version on a stored file is never larger than
+`HERO_ICON_MAX_BYTES` (files stored by an earlier build keep their size). `size_bytes` is the size of the stored file. File names on disk are `<id>.png`, where `id` is 32
 lowercase hex characters made by the server. Nothing in a path comes from the
 request.
 
@@ -149,9 +172,9 @@ Every error body is `{"error": "<code>"}`. The codes are constants in
 | 400 | `unexpected_field` | A multipart part not named `icon` |
 | 400 | `invalid_multipart` | Body is not `multipart/form-data` or is not readable multipart |
 | 400 | `icon_bad_dimensions` | Width or height outside 8 to 256 |
-| 400 | `invalid_png` | PNG signature present but the image does not decode |
+| 400 | `invalid_png` | PNG signature present but the chunk list is refused (no leading 13-byte `IHDR`, a chunk past the end, a `PLTE` whose length is not a multiple of 3, or a critical chunk other than `IHDR`, `PLTE`, `IDAT`, `IEND`), or the pixels do not decode (a broken `IDAT`, for example). The decoder's 32 MiB cap is a backstop only: the edge check keeps every accepted size far below it. Colour profiles (`iCCP`) and other ancillary chunks are dropped before decoding and never cause it |
 | 409 | `icon_limit_reached` | The upload would go over `HERO_ICON_MAX_PER_MEMBER` |
-| 413 | `icon_too_large` | A part over 64 KiB, or the body over 2 MiB |
+| 413 | `icon_too_large` | A part over 64 KiB, its re-encode over 64 KiB, or the body over 2 MiB |
 | 413 | `too_many_icons_in_request` | More than 20 `icon` parts |
 | 415 | `not_png` | A part without the PNG signature |
 | 429 | `rate_limited` | Per-member upload limiter, see below |

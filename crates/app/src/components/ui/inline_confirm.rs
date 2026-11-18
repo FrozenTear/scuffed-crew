@@ -1,28 +1,31 @@
 //! Inline confirm strip for destructive or hard-to-undo actions.
 //!
 //! No modal. The strip replaces the action buttons it guards, takes focus on
-//! Cancel first, and gives focus back to the trigger on Cancel or Esc. The
+//! Cancel first, and gives focus back to the trigger on Cancel or Esc. While
+//! `busy` its buttons are `aria-disabled` and ignore clicks: a natively
+//! disabled button is blurred, which drops focus to the page body. The
 //! caller owns the "is the strip open" state and the trigger button, which
 //! must carry the id `{id}-trigger`. See `0.6/redesign/ux-spec/games-delete.md`.
 
 use dioxus::prelude::*;
 
 pub const INLINE_CONFIRM_CSS: &str = r#"
-.inline-confirm { border: 1px solid var(--danger); border-radius: var(--radius-md);
+.inline-confirm { border: 1px solid var(--loss); border-radius: var(--radius-control);
   padding: var(--space-3); background: transparent; color: var(--text);
   display: flex; flex-direction: column; gap: var(--space-2); }
 .inline-confirm__title { font-size: var(--text-sm); font-weight: 600; margin: 0; }
-.inline-confirm__body { font-size: var(--text-sm); color: var(--text-2); margin: 0; line-height: 1.5; }
+.inline-confirm__body { font-size: var(--text-sm); color: var(--text-3); margin: 0; line-height: 1.5; }
 .inline-confirm__actions { display: flex; justify-content: flex-end; gap: var(--space-2); }
 .inline-confirm__cancel, .inline-confirm__go { font-family: var(--font-body); font-size: var(--text-sm);
-  font-weight: 600; border-radius: var(--radius-md); padding: var(--space-2) var(--space-4);
+  font-weight: 600; border-radius: var(--radius-control); padding: var(--space-2) var(--space-4);
   cursor: pointer; }
 .inline-confirm__cancel { background: transparent; color: var(--text); border: 1px solid var(--border); }
-.inline-confirm__cancel:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.inline-confirm__go { background: var(--danger); color: var(--accent-fg); border: 1px solid var(--danger); }
+.inline-confirm__cancel:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.inline-confirm__go { background: var(--loss); color: var(--on-loss); border: 1px solid var(--loss); }
 .inline-confirm__go:hover:not(:disabled) { filter: brightness(1.08); }
-.inline-confirm__cancel:disabled, .inline-confirm__go:disabled { opacity: .5; cursor: not-allowed; }
-.inline-confirm__hint { font-size: var(--text-xs); color: var(--text-3); margin: 0; text-align: right; }
+.inline-confirm__cancel:disabled, .inline-confirm__go:disabled,
+.inline-confirm__cancel[aria-disabled="true"], .inline-confirm__go[aria-disabled="true"] { opacity: .5; cursor: not-allowed; }
+.inline-confirm__hint { font-size: var(--text-xs); color: var(--text-subtle); margin: 0; text-align: right; }
 "#;
 
 /// True for the key that cancels the strip. Pure so it can be tested.
@@ -54,13 +57,81 @@ pub fn focus_element_by_id(id: &str) {
 
 /// Focus an element after the next render, so a button that is about to be
 /// mounted again (the trigger) exists by the time focus moves to it.
+///
+/// The wait runs on the root scope, not the caller's: the caller is often
+/// the very thing that unmounts (a confirm strip closing on Cancel), and a
+/// task tied to it would be dropped before it could move focus, leaving
+/// focus on the page body.
 pub fn focus_element_by_id_soon(id: String) {
-    spawn(async move {
+    dioxus::core::spawn_forever(async move {
         #[cfg(feature = "web")]
         {
             gloo_timers::future::TimeoutFuture::new(0).await;
         }
         focus_element_by_id(&id);
+    });
+}
+
+/// Focus a form control and bring its whole field into view: the element
+/// that matches `field_selector` around it (label, hint, control and error
+/// line), centred in the viewport. A plain `focus()` leaves a control that
+/// is partly below the fold where it is, with its error line out of sight.
+pub fn focus_field_by_id(id: &str, field_selector: &str) {
+    focus_element_by_id(id);
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen::JsCast;
+        let Some(el) = web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.get_element_by_id(id))
+        else {
+            return;
+        };
+        let field = el.closest(field_selector).ok().flatten().unwrap_or(el);
+        let options = js_sys::Object::new();
+        let _ = js_sys::Reflect::set(&options, &"block".into(), &"center".into());
+        let scroll = js_sys::Reflect::get(&field, &"scrollIntoView".into()).ok();
+        if let Some(scroll) = scroll
+            .as_ref()
+            .and_then(|f| f.dyn_ref::<js_sys::Function>())
+        {
+            let _ = scroll.call1(&field, &options);
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = field_selector;
+    }
+}
+
+/// Focus a text area after the next render with the caret and the view at
+/// its first line. A text area that takes focus right after its value is set
+/// puts the caret at the end and shows the last lines.
+pub fn focus_text_start_by_id_soon(id: String) {
+    dioxus::core::spawn_forever(async move {
+        #[cfg(feature = "web")]
+        {
+            gloo_timers::future::TimeoutFuture::new(0).await;
+        }
+        focus_element_by_id(&id);
+        #[cfg(target_arch = "wasm32")]
+        {
+            use wasm_bindgen::JsCast;
+            let Some(el) = web_sys::window()
+                .and_then(|window| window.document())
+                .and_then(|document| document.get_element_by_id(&id))
+            else {
+                return;
+            };
+            let select = js_sys::Reflect::get(&el, &"setSelectionRange".into()).ok();
+            if let Some(select) = select
+                .as_ref()
+                .and_then(|f| f.dyn_ref::<js_sys::Function>())
+            {
+                let _ = select.call2(&el, &0.into(), &0.into());
+            }
+            el.set_scroll_top(0);
+        }
     });
 }
 
@@ -98,7 +169,9 @@ pub fn InlineConfirm(
             onkeydown: move |e| {
                 if key_cancels(&e.key()) {
                     e.stop_propagation();
-                    cancel.call(());
+                    if !busy {
+                        cancel.call(());
+                    }
                 }
             },
             p { id: "{title_id}", class: "inline-confirm__title", "{title}" }
@@ -110,15 +183,24 @@ pub fn InlineConfirm(
                     id: "{cancel_id}",
                     class: "inline-confirm__cancel",
                     r#type: "button",
-                    disabled: busy,
-                    onclick: move |_| cancel.call(()),
+                    aria_disabled: if busy { "true" },
+                    onclick: move |_| {
+                        if !busy {
+                            cancel.call(());
+                        }
+                    },
                     "Cancel"
                 }
                 button {
                     class: "inline-confirm__go",
                     r#type: "button",
-                    disabled: busy,
-                    onclick: move |_| on_confirm.call(()),
+                    aria_busy: if busy { "true" },
+                    aria_disabled: if busy { "true" },
+                    onclick: move |_| {
+                        if !busy {
+                            on_confirm.call(());
+                        }
+                    },
                     "{confirm_label}"
                 }
             }
@@ -194,7 +276,10 @@ mod tests {
     #[test]
     fn busy_strip_disables_both_buttons_and_omits_missing_body() {
         let html = render(busy_strip);
-        assert_eq!(html.matches("disabled").count(), 2, "{html}");
+        // Busy, but still focusable: never the native attribute.
+        assert_eq!(html.matches("aria-disabled=\"true\"").count(), 2, "{html}");
+        assert!(!html.contains(" disabled"), "{html}");
+        assert!(html.contains("aria-busy=\"true\""), "{html}");
         assert!(!html.contains("inline-confirm__body"), "{html}");
     }
 }

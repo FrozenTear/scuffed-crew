@@ -1,0 +1,272 @@
+/* Scuffed Crew site tokens: primitives
+   Raw ramps and scales only. Pages must never reference the colour
+   primitives (--neutral-*, --mint-*, --blue-* and the other ramps); they use
+   semantic roles. The spacing scale (--space-*) is the exception for now:
+   pages use it directly until spacing gets semantic tokens.
+   A future theme remaps semantic roles onto this file (or an extended ramp). */
+
+:root {
+  /* -------------------------------------------------------------------------
+     Neutral (cool violet-gray, locked to the live site stops where they fit)
+     ------------------------------------------------------------------------- */
+  --neutral-0: #ffffff;
+  --neutral-15: #fbfcfd;
+  --neutral-25: #fbfbfe;
+  --neutral-30: #f4f4f8;
+  --neutral-50: #f7f7f9;
+  --neutral-80: #eef0f4;
+  --neutral-100: #f0f0f4;
+  --neutral-150: #e8e8ee;
+  --neutral-200: #e3e3e9;
+  --neutral-250: #d0d0d6;
+  --neutral-300: #c1c1cd;
+  --neutral-350: #a0a0ae;
+  --neutral-400: #9696a3;
+  --neutral-420: #888896;
+  --neutral-445: #777784;
+  --neutral-450: #72727f;
+  --neutral-480: #6b6b78;
+  --neutral-500: #696975;
+  --neutral-550: #5c5c6a;
+  --neutral-600: #545462;
+  --neutral-650: #3f3f4a;
+  --neutral-700: #353541;
+  --neutral-720: #3a3a48;
+  --neutral-800: #282831;
+  --neutral-825: #1c1c24;
+  --neutral-835: #2c2c36;
+  --neutral-840: #22222b;
+  --neutral-850: #1f1f27;
+  --neutral-860: #1a1a22;
+  --neutral-870: #18181f;
+  --neutral-875: #16161c;
+  --neutral-880: #14141a;
+  --neutral-900: #17171d;
+  --neutral-910: #101014;
+  --neutral-925: #121218;
+  --neutral-950: #0f0f14;
+  --neutral-975: #0a0a10;
+  --neutral-1000: #050508;
+
+  /* -------------------------------------------------------------------------
+     Mint (live brand). Locked stops:
+     400 #46d8a4 dark accent / dark win
+     600 #0ea66e live light accent (decorative only)
+     700 #087a50 light solid (all directions) and A/B light accent-text and win
+     750 #007046 C light accent-text and win, for 4.5:1 on soft fills
+     ------------------------------------------------------------------------- */
+  --mint-50: #defeed;
+  --mint-100: #c5f6dd;
+  --mint-200: #a8e9c7;
+  --mint-300: #7ee0b8;
+  --mint-400: #46d8a4;
+  --mint-500: #1fbe86;
+  --mint-600: #0ea66e;
+  --mint-700: #087a50;
+  --mint-750: #007046;
+  --mint-800: #006136;
+  --mint-900: #00451c;
+  --mint-950: #002904;
+
+  /* -------------------------------------------------------------------------
+     Red (loss / NERF). Locked stops:
+     300 #f06a6a dark loss (site --danger)
+     500 #d63031 light loss (site --danger). Text only on white or --neutral-50.
+     ------------------------------------------------------------------------- */
+  --red-50: #ffdad5;
+  --red-100: #ffc4be;
+  --red-200: #ff9a94;
+  --red-300: #f06a6a;
+  --red-400: #e24c4e;
+  --red-500: #d63031;
+  --red-550: #c81d24;
+  --red-600: #b61f24;
+  --red-700: #8c1014;
+  --red-800: #670909;
+  --red-900: #4c0000;
+  --red-950: #2a0000;
+
+  /* -------------------------------------------------------------------------
+     Amber (warn). Locked / fixed stops:
+     300 #fbbf24 dark warn (site --warn)
+     500 #c2830a previous light warn, kept for charts; fails AA as 12px text
+     600 #9b5f00 light warn text and icons (AA on light surfaces)
+     ------------------------------------------------------------------------- */
+  --amber-50: #ffe9b2;
+  --amber-100: #ffd980;
+  --amber-200: #ffcb55;
+  --amber-300: #fbbf24;
+  --amber-400: #dfa11a;
+  --amber-500: #c2830a;
+  --amber-600: #9b5f00;
+  --amber-700: #7a4800;
+  --amber-800: #5a3200;
+  --amber-900: #3d2000;
+  --amber-950: #241200;
+
+  /* -------------------------------------------------------------------------
+     Blue (info). Locked / fixed stops:
+     400 #089fd7 dark info (site chart-5)
+     500 #0284c7 previous light info, kept for charts; misses AA as 12px text
+     600 #0072b3 light info text and icons (AA on light surfaces)
+     ------------------------------------------------------------------------- */
+  --blue-50: #c9f6ff;
+  --blue-100: #9ee8ff;
+  --blue-200: #70dbff;
+  --blue-300: #4dbaf5;
+  --blue-400: #089fd7;
+  --blue-500: #0284c7;
+  --blue-600: #0072b3;
+  --blue-700: #005a90;
+  --blue-800: #00416a;
+  --blue-900: #002a48;
+  --blue-950: #00182c;
+
+  /* -------------------------------------------------------------------------
+     Cyan (Competitive secondary only). Sharp ice accent, not a status colour.
+     300 #22d3ee dark secondary text
+     600 #007693 light secondary text (AA on light surfaces)
+     ------------------------------------------------------------------------- */
+  --cyan-50: #c0faff;
+  --cyan-100: #8ef3ff;
+  --cyan-200: #56efff;
+  --cyan-300: #22d3ee;
+  --cyan-400: #00bad1;
+  --cyan-500: #00a3bb;
+  --cyan-600: #007693;
+  --cyan-700: #005b73;
+  --cyan-800: #004155;
+  --cyan-900: #002a38;
+  --cyan-950: #001820;
+
+  /* -------------------------------------------------------------------------
+     Chart ramps (CVD-validated site values, from tokens.rs)
+     ------------------------------------------------------------------------- */
+  --chart-purple-dark: #8f73ff;
+  --chart-purple-light: #6d4aff;
+  --chart-mint-dark: #15ac7d;
+  --chart-mint-light: #0ea66e;
+  --chart-amber-dark: #b98a02;
+  --chart-amber-light: #c2830a;
+  --chart-red-dark: #ca474c;
+  --chart-red-light: #d63031;
+  --chart-blue-dark: #089fd7;
+  --chart-blue-light: #0284c7;
+  --chart-violet-dark: #984ab2;
+  --chart-violet-light: #7405c3;
+  --chart-wr-up-dark: #089fd7;
+  --chart-wr-up-light: #0284c7;
+  --chart-wr-down-dark: #aa5000;
+  --chart-wr-down-light: #843900;
+
+  /* -------------------------------------------------------------------------
+     Type families and scale (12px floor)
+     ------------------------------------------------------------------------- */
+  --font-family-urbanist: "Urbanist", "Urbanist Fallback", system-ui, sans-serif;
+  --font-family-ibm-plex-sans: "IBM Plex Sans", "IBM Plex Sans Fallback", system-ui, sans-serif;
+  --font-family-jetbrains: "JetBrains Mono", ui-monospace, monospace;
+
+  --font-size-11: 11px;
+  --font-size-12: 12px;
+  --font-size-13: 13px;
+  --font-size-14: 14px;
+  --font-size-16: 16px;
+  --font-size-18: 18px;
+  --font-size-20: 20px;
+  --font-size-24: 24px;
+  --font-size-28: 28px;
+  --font-size-30: 30px;
+  --font-size-32: 32px;
+  --font-size-36: 36px;
+
+  --font-weight-400: 400;
+  --font-weight-500: 500;
+  --font-weight-600: 600;
+  --font-weight-700: 700;
+  --font-weight-800: 800;
+
+  --tracking-tight: -0.03em;
+  --tracking-snug: -0.015em;
+  --tracking-normal: 0;
+  --tracking-open: 0.01em;
+  --tracking-caps: 0.08em;
+
+  --leading-tight: 1.2;
+  --leading-snug: 1.35;
+  --leading-normal: 1.5;
+  --leading-relaxed: 1.65;
+
+  /* -------------------------------------------------------------------------
+     Space scale, 4px grid (space-1 to space-8, plus 10 and 12 for comfortable gutters)
+     ------------------------------------------------------------------------- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-7: 28px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  /* -------------------------------------------------------------------------
+     Radius scale
+     ------------------------------------------------------------------------- */
+  --radius-0: 0;
+  --radius-1: 4px;
+  --radius-2: 8px;
+  --radius-3: 12px;
+  --radius-3-5: 14px;
+  --radius-4: 16px;
+  --radius-5: 20px;
+  --radius-full: 999px;
+
+  /* -------------------------------------------------------------------------
+     Shadow scale (raw). Semantic roles pick a step per theme.
+     ------------------------------------------------------------------------- */
+  --shadow-0: none;
+  --shadow-1-dark: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2-dark: 0 8px 24px rgba(0, 0, 0, 0.4);
+  --shadow-3-dark: 0 16px 40px rgba(0, 0, 0, 0.45);
+  --shadow-4-dark: 0 24px 64px rgba(0, 0, 0, 0.55);
+  --shadow-1-light: 0 1px 2px rgba(23, 23, 29, 0.06);
+  --shadow-2-light: 0 8px 24px rgba(23, 23, 29, 0.08);
+  --shadow-3-light: 0 16px 40px rgba(23, 23, 29, 0.1);
+  --shadow-4-light: 0 24px 64px rgba(23, 23, 29, 0.14);
+
+  /* -------------------------------------------------------------------------
+     Layout constants
+     ------------------------------------------------------------------------- */
+  --size-hit-44: 44px;
+  --size-row-44: 44px;
+  --size-row-52: 52px;
+  --size-row-64: 64px;
+  --size-nav-52: 52px;
+  --size-nav-56: 56px;
+  --size-nav-64: 64px;
+  --container-sm-width: 640px;
+  --container-md-width: 880px;
+  --container-lg-width: 1120px;
+  --container-xl-width: 1280px;
+  --content-narrow-width: 720px;
+  --content-default-width: 1040px;
+  --content-wide-width: 1280px;
+  --size-control-32: 32px;
+
+  /* Canvas / planner (seeded from tokens.rs). Selection is not #00ff00. */
+  --canvas-space-bg: #14141c;
+  --canvas-tile: #2a2a3e;
+  --hp-small-fill: #ffeb3b;
+  --hp-small-stroke: #ffc107;
+  --hp-large-fill: #ff9800;
+  --hp-large-stroke: #f57c00;
+
+  /* Strategy planner brand, used only as --brand-accent under [data-accent=strategy]. */
+  --orange-strategy: #ff7a1a;
+
+  /* Calm Panels raised tints (3% mint over a surface stop, locked for contrast). */
+  --mint-raised-dark: #292d34;
+  --mint-raised-light: #f8fbfa;
+}
+

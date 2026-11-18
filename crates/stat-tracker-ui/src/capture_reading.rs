@@ -68,6 +68,9 @@ fn frame_rate_help() -> String {
 /// The second line under a row the environment fixes.
 pub(crate) const SERVICE_MAY_DIFFER: &str = "The tracker service may differ.";
 
+/// The sub-heading over every reader switch in Capture and reading.
+pub(crate) const READERS_HEADING: &str = "Readers";
+
 /// Capture method label on the 0.6 page. The classic page keeps its own.
 pub(crate) fn route_label(route: CaptureRoute) -> &'static str {
     match route {
@@ -426,9 +429,6 @@ fn capture_rows(app: &TrackerApp, demo: bool) -> Vec<Element<'_, Message>> {
         demo,
         crate::focus_status::ROW_HELP,
     ));
-    // Last in CAPTURE: it reads captured frames, so it sits after every
-    // capture row, the focus gate included (UX Spec).
-    rows.push(crate::settings_cards::bans_picks_row(app, demo));
     rows
 }
 
@@ -550,7 +550,16 @@ fn reading_rows(app: &TrackerApp, demo: bool) -> Vec<Element<'_, Message>> {
         switch(config.name_reader, name_toggle),
     );
 
-    let mut rows = vec![reader, name_reader];
+    // Every reader switch sits together here, each with its own lock and
+    // pack lines: the stat reader, names, bans and picks, rank, and the
+    // extra number reader. Then the classic OCR rows and Report pictures.
+    let mut rows = vec![
+        reader,
+        name_reader,
+        crate::settings_cards::bans_picks_row(app, demo),
+    ];
+    rows.extend(crate::settings_keys::rank_row(app, demo));
+    rows.push(crate::settings_cards::shadow_reader_row(app, demo));
     if ocr_card_blocks(app.ocr_switch.daemon_off).reading_model {
         rows.push(reading_model_row(app, demo));
     }
@@ -668,7 +677,8 @@ impl std::fmt::Display for MonitorPick {
     }
 }
 
-/// The 0.6 spec's Capture and reading: a summary, then CAPTURE and READING.
+/// The 0.6 spec's Capture and reading: a summary, then CAPTURE and
+/// READERS (the spec's READING, now holding every reader switch).
 pub(crate) fn body(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     // Hairlines above and under each sub-heading (spec p7).
     column![
@@ -678,7 +688,7 @@ pub(crate) fn body(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         hairline(),
         divided(capture_rows(app, demo)),
         hairline(),
-        sub_heading("Reading"),
+        sub_heading(READERS_HEADING),
         hairline(),
         divided(reading_rows(app, demo)),
         hint(CAPTURE_READING_FOOTER),

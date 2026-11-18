@@ -15,6 +15,17 @@ pub const ACCOUNT_KEYS: &str = "Account keys";
 
 const INTRO: &str = "Your account key is your ID in chat and direct messages. \
     We can keep one for you, or you can bring your own.";
+/// The Key mode pill in plain words. The stored values are
+/// `server_managed` and `external` (`NostrKeyMode` in `crates/db`).
+fn key_mode_label(mode: Option<&str>) -> &str {
+    match mode {
+        Some("server_managed") => "Server-managed",
+        Some("external") => "External",
+        Some(other) => other,
+        None => "Unknown",
+    }
+}
+
 const HINT_PUBLIC_KEY: &str = "Your public key is safe to share. It is how others know it is you.";
 const HINT_NIP05: &str = "A NIP-05 name looks like an email address and points to your key.";
 const HINT_BACKUP: &str =
@@ -40,7 +51,7 @@ const PAGE_CSS: &str = r#"
         margin: 0 0 1.5rem;
     }
     .identity-reports-link a {
-        color: var(--accent);
+        color: var(--accent-text);
         font-weight: 600;
         font-size: 0.9rem;
         text-decoration: none;
@@ -60,7 +71,7 @@ const PAGE_CSS: &str = r#"
         margin: 0 0 0.75rem;
     }
     .identity-section p {
-        color: var(--text-2);
+        color: var(--text-3);
         font-size: 0.85rem;
         line-height: 1.5;
         margin: 0 0 1rem;
@@ -72,7 +83,7 @@ const PAGE_CSS: &str = r#"
         display: block;
         font-size: 0.75rem;
         font-weight: 600;
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-transform: uppercase;
         letter-spacing: 0.05em;
         margin-bottom: 0.35rem;
@@ -89,7 +100,7 @@ const PAGE_CSS: &str = r#"
         box-sizing: border-box;
     }
     .identity-input:focus {
-        border-color: var(--accent);
+        border-color: var(--accent-solid);
     }
     .identity-mono {
         font-family: var(--font-mono);
@@ -111,10 +122,10 @@ const PAGE_CSS: &str = r#"
         text-transform: uppercase;
         letter-spacing: 0.04em;
         background: color-mix(in srgb, var(--accent) 20%, transparent);
-        color: var(--accent);
+        color: var(--accent-text);
     }
     .identity-nip05 {
-        color: var(--text-2);
+        color: var(--text-3);
         font-size: 0.85rem;
     }
     .identity-nip05-unset {
@@ -141,22 +152,22 @@ const PAGE_CSS: &str = r#"
         cursor: not-allowed;
     }
     .identity-btn-primary {
-        background: var(--accent);
-        color: var(--accent-fg);
+        background: var(--accent-solid);
+        color: var(--on-accent);
     }
     .identity-btn-primary:hover:not(:disabled) {
         filter: brightness(1.15);
     }
     .identity-btn-danger {
-        background: var(--danger);
-        color: var(--accent-fg);
+        background: var(--loss);
+        color: var(--on-loss);
     }
     .identity-btn-danger:hover:not(:disabled) {
         filter: brightness(1.15);
     }
     .identity-btn-outline {
         background: transparent;
-        color: var(--text-2);
+        color: var(--text-3);
         border: 1px solid var(--border);
     }
     .identity-btn-outline:hover:not(:disabled) {
@@ -181,13 +192,13 @@ const PAGE_CSS: &str = r#"
         margin-top: 0.5rem;
     }
     .identity-section p.identity-hint {
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-size: var(--text-xs);
         margin: 0 0 1rem;
     }
     .identity-intro {
-        color: var(--text-2);
-        font-size: var(--text-base);
+        color: var(--text-3);
+        font-size: var(--text-md);
         line-height: 1.5;
         margin: 0 0 1rem;
     }
@@ -199,7 +210,7 @@ const PAGE_CSS: &str = r#"
         color: var(--text);
     }
     .identity-advanced summary:focus-visible {
-        outline: 2px solid var(--accent);
+        outline: 2px solid var(--focus-ring);
         outline-offset: 2px;
     }
     .identity-advanced[open] summary {
@@ -212,7 +223,7 @@ const PAGE_CSS: &str = r#"
     }
     .identity-sub h3 {
         font-family: var(--font-head);
-        font-size: var(--text-base);
+        font-size: var(--text-md);
         color: var(--text);
         margin: 0 0 0.5rem;
     }
@@ -498,7 +509,7 @@ pub fn IdentitySettings() -> Element {
                             div { class: "identity-field",
                                 label { class: "identity-label", "Key mode" }
                                 span { class: "identity-pill",
-                                    {m.nostr_key_mode.as_deref().unwrap_or("unknown")}
+                                    {key_mode_label(m.nostr_key_mode.as_deref())}
                                 }
                             }
                             div { class: "identity-field",
@@ -862,5 +873,16 @@ mod tests {
         assert!(!HINT_UNLINK.contains("removes the key"), "{HINT_UNLINK}");
         assert!(!HINT_UNLINK.contains("Export a backup"), "{HINT_UNLINK}");
         assert!(!src.contains(&["Unlink", " Identity"].concat()));
+    }
+
+    /// Vision 694 r3 nit 7: the pill shows plain words, the same words
+    /// `docs/external-clients.md` quotes, not the stored value.
+    #[test]
+    fn key_mode_reads_in_plain_words() {
+        assert_eq!(key_mode_label(Some("server_managed")), "Server-managed");
+        assert_eq!(key_mode_label(Some("external")), "External");
+        assert_eq!(key_mode_label(None), "Unknown");
+        let docs = include_str!("../../../../docs/external-clients.md");
+        assert!(docs.contains("**Key mode** shows **Server-managed**"));
     }
 }

@@ -11,7 +11,7 @@ const TEAM_PANEL_CSS: &str = r#"
     .team-panel .panel-title {
         font-family: var(--font-head);
         font-size: 0.75rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-transform: uppercase;
         letter-spacing: 0.08em;
         padding: 0.75rem 0.75rem 0.5rem;
@@ -32,19 +32,19 @@ const TEAM_PANEL_CSS: &str = r#"
         border: 1px solid var(--border);
         border-radius: 4px;
         background: none;
-        color: var(--text-2);
+        color: var(--text-3);
         font-size: 0.8rem;
         font-weight: 600;
         cursor: pointer;
         transition: background 0.12s, color 0.12s, border-color 0.12s;
     }
     .format-btn:hover {
-        background: var(--surface-2);
+        background: var(--surface-sunken);
     }
     .format-btn.active {
         background: var(--accent-soft);
-        color: var(--accent);
-        border-color: var(--accent);
+        color: var(--accent-text);
+        border-color: var(--accent-solid);
     }
 
     /* ---- Team slots ---- */
@@ -62,7 +62,7 @@ const TEAM_PANEL_CSS: &str = r#"
     }
     .slot-label {
         font-size: 0.7rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-transform: uppercase;
         letter-spacing: 0.04em;
         min-width: 55px;
@@ -74,7 +74,7 @@ const TEAM_PANEL_CSS: &str = r#"
     }
     .slot-empty {
         font-size: 0.75rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-style: italic;
     }
     .slot-assign-btn {
@@ -83,7 +83,7 @@ const TEAM_PANEL_CSS: &str = r#"
         background: none;
         border: 1px dashed var(--border);
         border-radius: 4px;
-        color: var(--accent);
+        color: var(--accent-text);
         font-size: 0.75rem;
         font-weight: 600;
         padding: 0.2rem 0.45rem;
@@ -92,7 +92,7 @@ const TEAM_PANEL_CSS: &str = r#"
     }
     .slot-assign-btn:hover {
         background: var(--accent-soft);
-        border-color: var(--accent);
+        border-color: var(--accent-solid);
     }
 
     /* ---- Assigned hero display ---- */
@@ -107,7 +107,7 @@ const TEAM_PANEL_CSS: &str = r#"
         height: 24px;
         border-radius: 50%;
         object-fit: cover;
-        background: var(--surface-2);
+        background: var(--surface-sunken);
     }
     .slot-hero-name {
         flex: 1;
@@ -116,14 +116,14 @@ const TEAM_PANEL_CSS: &str = r#"
     .slot-remove-btn {
         background: none;
         border: none;
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-size: 0.85rem;
         cursor: pointer;
         padding: 0 0.2rem;
         transition: color 0.12s;
     }
     .slot-remove-btn:hover {
-        color: var(--danger);
+        color: var(--loss);
     }
 
     /* ---- Actions ---- */
@@ -136,13 +136,13 @@ const TEAM_PANEL_CSS: &str = r#"
         border: 1px solid var(--border);
         border-radius: 4px;
         background: none;
-        color: var(--text-2);
+        color: var(--text-3);
         font-size: 0.75rem;
         cursor: pointer;
         transition: background 0.12s, color 0.12s;
     }
     .team-clear-btn:hover {
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         color: var(--text);
     }
 "#;
@@ -226,7 +226,7 @@ pub fn TeamPanel(
                     };
 
                     let border_color = if is_6v6 {
-                        "var(--accent)".to_string()
+                        "var(--accent-text)".to_string()
                     } else {
                         slot.required_role().color_hex().to_string()
                     };

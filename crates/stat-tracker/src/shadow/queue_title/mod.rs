@@ -2,12 +2,14 @@
 //! "ROLE QUEUE") drawn top left on the pregame screens (map vote, hero
 //! select, hero ban), so a game record can carry the queue that was played.
 //!
-//! Off by default. It runs only when [`ENV`] is switched on
-//! ([`QueueTitleSetting::parse`]) and a template pack is installed under
+//! Off by default. It runs only when config `rank_reader` (Read my rank
+//! after Comp games) is on, or [`ENV`] overrides it to on
+//! ([`QueueTitleSetting::for_config`]), and a template pack is installed under
 //! `<data_dir>/templates/queue-title-v1/` ([`templates`]). The pack is cut
 //! from the game's own screens, so it is never committed: it is built
 //! locally with [`Learner`] from labelled frames (the ignored bench in
-//! `tests.rs` writes one).
+//! `tests.rs` writes one), or arrives in the same folder through the
+//! tracker's pack download (`queue-title-v1.tar`, [`crate::packs`]).
 //!
 //! # How it reads
 //!
@@ -36,10 +38,12 @@
 //! 5. Accept the best class only when its whole score is at least
 //!    [`MIN_SCORE`], its strip score at least [`MIN_STRIP`], and it leads
 //!    the runner-up by [`MIN_MARGIN`]. Otherwise the title is `None`, never
-//!    a guess. Titles the pack does not know (competitive, arcade) are
-//!    expected to come back `None` too, but that is extrapolated from the
-//!    held-out runs (each known title left out of the pack in turn), not
-//!    measured on real competitive or arcade frames: the bench has none.
+//!    a guess. Competitive pre-game titles read the bare queue name
+//!    (`OPEN QUEUE`, `ROLE QUEUE`), which this pack does know. Titles the
+//!    pack does not have (arcade, or any other) are expected to come back
+//!    `None`, but that is extrapolated from the held-out runs (each known
+//!    title left out of the pack in turn), not measured on real arcade
+//!    frames: the bench has none.
 //!
 //! # Thresholds
 //!
@@ -93,8 +97,9 @@ pub use templates::{Learner, PACK_FILE, TEMPLATE_DIR, TemplateError, TemplateSet
 /// The recognizer id written next to the value (`rank-v1`). Defined in
 /// `model` so the upload sends the same id without using the readers.
 pub use crate::model::QUEUE_TITLE_RECOGNIZER_ID as RECOGNIZER_ID;
-/// Environment switch: `on`, `1`, `true`, `yes` or [`RECOGNIZER_ID`] turns
-/// it on. Anything else, or unset, is off.
+/// Environment override of config `rank_reader` for this reader: `on`, `1`,
+/// `true`, `yes` or [`RECOGNIZER_ID`] turns it on, any other non-blank value
+/// off. Unset or blank leaves the config in charge.
 pub const ENV: &str = "STAT_TRACKER_QUEUE_TITLE_RECOGNIZER";
 /// Lowest whole title score a read may have (0.80). Defined in `model` so
 /// the upload checks the same bar.
@@ -132,7 +137,8 @@ const SAT_MAX: f32 = 0.35;
 /// Below this 99th percentile the region holds no text worth scaling up.
 const MIN_PEAK: f32 = 0.08;
 
-/// Whether the reader runs. Off unless switched on.
+/// Whether the reader runs. Off unless config `rank_reader` or [`ENV`]
+/// turns it on ([`Self::for_config`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum QueueTitleSetting {
     #[default]
@@ -157,9 +163,17 @@ impl QueueTitleSetting {
         }
     }
 
-    /// The setting from [`ENV`]; off when it is unset.
-    pub fn from_env() -> Self {
-        std::env::var(ENV).map_or(Self::default(), |v| Self::parse(&v))
+    /// [`ENV`] as an override: `None` when it is unset or blank, else
+    /// [`Self::parse`] of it (on or off).
+    pub fn env_override() -> Option<Self> {
+        crate::shadow::rank::override_of(std::env::var(ENV).ok().as_deref()).map(Self::parse)
+    }
+
+    /// The setting the tracker runs: `env` ([`Self::env_override`]) when
+    /// set, else config `rank_reader`, the one switch for both rank-v1
+    /// readers (Open queue and the next mode hint need this one).
+    pub fn for_config(rank_reader: bool, env: Option<Self>) -> Self {
+        env.unwrap_or(if rank_reader { Self::On } else { Self::Off })
     }
 
     pub fn is_on(self) -> bool {
@@ -254,15 +268,10 @@ pub struct ClassScore {
     pub dy: usize,
 }
 
-/// The title region of `img` as a padded ink plane of
-/// `(TW + 2*PAD) x (TH + 2*PAD)`, and the frame rectangle it was cut from
-/// (`[x, y, w, h]`). The region is placed in the frame's 16:9 game rect
-/// ([`game_rect_16_9`]), so an ultrawide or 16:10 frame is read from its
-/// playfield and an exact 16:9 frame is read as before. `None` for a game
-/// rect so small that the region would have to be scaled up to the
-/// template size: under 359 px tall, where the crop is 124 x 39.
-pub fn plane(img: &RgbImage, screen: Screen) -> Option<(Gray, [u32; 4])> {
-    let (gx, gy, gw, gh) = game_rect_16_9(img.width(), img.height());
+/// The title crop from frame size alone: `(x, y, width, height)`, or
+/// `None` when [`plane`] would refuse the frame before reading a pixel.
+pub fn title_crop(width: u32, height: u32, screen: Screen) -> Option<(u32, u32, usize, usize)> {
+    let (gx, gy, gw, gh) = game_rect_16_9(width, height);
     let s = gh as f32 / FRAME_H as f32;
     let pad = PAD as u32 * STEP;
     let rx = REF_X - pad;
@@ -283,6 +292,18 @@ pub fn plane(img: &RgbImage, screen: Screen) -> Option<(Gray, [u32; 4])> {
     if cw < TW + 2 * PAD || ch < TH + 2 * PAD {
         return None;
     }
+    Some((x0, y0, cw, ch))
+}
+
+/// The title region of `img` as a padded ink plane of
+/// `(TW + 2*PAD) x (TH + 2*PAD)`, and the frame rectangle it was cut from
+/// (`[x, y, w, h]`). The region is placed in the frame's 16:9 game rect
+/// ([`game_rect_16_9`]), so an ultrawide or 16:10 frame is read from its
+/// playfield and an exact 16:9 frame is read as before. `None` for a game
+/// rect so small that the region would have to be scaled up to the
+/// template size: under 359 px tall, where the crop is 124 x 39.
+pub fn plane(img: &RgbImage, screen: Screen) -> Option<(Gray, [u32; 4])> {
+    let (x0, y0, cw, ch) = title_crop(img.width(), img.height(), screen)?;
     let mut g = Gray::new(cw, ch);
     for y in 0..ch {
         for x in 0..cw {
@@ -302,7 +323,7 @@ pub fn plane(img: &RgbImage, screen: Screen) -> Option<(Gray, [u32; 4])> {
             *v = (*v / peak).min(1.0);
         }
     }
-    Some((g, [x0, y0, x1 - x0, y1 - y0]))
+    Some((g, [x0, y0, cw as u32, ch as u32]))
 }
 
 /// The unpadded centre of a padded plane: what a template is learned from.
@@ -317,6 +338,15 @@ fn window(g: &Gray, dx: usize, dy: usize) -> Vec<f32> {
         v.extend_from_slice(&g.px[row..row + TW]);
     }
     v
+}
+
+/// Mean-centred NCC of two learned title templates (no shift). This is the
+/// score the reader's whole-title NCC gives at a zero shift.
+pub fn template_ncc(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != TW * TH || b.len() != TW * TH {
+        return 0.0;
+    }
+    ncc_cols(a, b, 0, TW)
 }
 
 /// Normalised cross correlation over the columns `c0..c1` of two
@@ -416,12 +446,9 @@ impl Reader {
         TemplateSet::load(data_dir).map(Self::new)
     }
 
-    /// The gated entry point: a reader only when [`ENV`] is on and a pack
-    /// loads. Off, or no pack, is `None` and nothing runs.
-    pub fn from_env(data_dir: &Path) -> Option<Self> {
-        Self::for_setting(QueueTitleSetting::from_env(), data_dir)
-    }
-
+    /// The gated entry point: a reader only when `setting` is on
+    /// ([`QueueTitleSetting::for_config`]) and a pack loads. Off, or no
+    /// pack, is `None` and nothing runs.
     pub fn for_setting(setting: QueueTitleSetting, data_dir: &Path) -> Option<Self> {
         if !setting.is_on() {
             return None;

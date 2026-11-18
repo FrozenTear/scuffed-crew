@@ -36,6 +36,7 @@ use tower_governor::{GovernorLayer, governor::GovernorConfigBuilder};
 use std::path::PathBuf;
 
 use rate_limit::TrustedProxyIpKeyExtractor;
+use scuffed_types::MAX_BUNDLE_BYTES;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
@@ -62,10 +63,43 @@ where
     router.method_not_allowed_fallback(routes::seo::api_method_not_allowed)
 }
 
+/// Per-IP budget of the shared public read governor (anonymous GETs of the
+/// main API): `burst` requests, then one more every `replenish_ms`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PublicReadLimit {
+    /// Milliseconds per token returned to the bucket.
+    pub replenish_ms: u64,
+    /// Requests allowed back to back from a full bucket.
+    pub burst: u32,
+}
+
+impl PublicReadLimit {
+    /// The limit every production router uses: 100 burst, then one every
+    /// 100 ms.
+    pub const PRODUCTION: PublicReadLimit = PublicReadLimit {
+        replenish_ms: 100,
+        burst: 100,
+    };
+}
+
 /// Same router as [`create_router`], with an explicit Dioxus output directory.
 ///
 /// Tests pass a temp dir so cache-header checks do not need a built frontend.
 pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) -> Router {
+    create_router_with_public_read_limit(state, dist_dir, PublicReadLimit::PRODUCTION)
+}
+
+/// Same router as [`create_router_with_dist`], with an explicit public read
+/// limit. Production always uses [`PublicReadLimit::PRODUCTION`] (through
+/// [`create_router`] or [`create_router_with_dist`]). This exists so a test
+/// can keep the production burst but stop the bucket from refilling on the
+/// wall clock while it runs, which makes "the next read is 429" exact
+/// instead of racing the 100 ms refill.
+pub fn create_router_with_public_read_limit(
+    state: AppState,
+    dist_dir: impl Into<PathBuf>,
+    public_read: PublicReadLimit,
+) -> Router {
     let dist_dir = dist_dir.into();
     let origins: Vec<HeaderValue> = state
         .oauth_config
@@ -276,8 +310,8 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
     let public_governor_config = std::sync::Arc::new(
         GovernorConfigBuilder::default()
             .key_extractor(key_extractor.clone())
-            .per_millisecond(100)
-            .burst_size(100)
+            .per_millisecond(public_read.replenish_ms)
+            .burst_size(public_read.burst)
             .finish()
             .expect("valid public governor config"),
     );
@@ -738,7 +772,9 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         .route(
             "/api/stat-reports",
             post(routes::stat_reports::create_stat_report)
-                .layer::<_, std::convert::Infallible>(DefaultBodyLimit::max(10 * 1024 * 1024))
+                .layer::<_, std::convert::Infallible>(DefaultBodyLimit::max(
+                    MAX_BUNDLE_BYTES as usize,
+                ))
                 // Outer layer, so a throttled request is refused before
                 // the body is read.
                 .layer(

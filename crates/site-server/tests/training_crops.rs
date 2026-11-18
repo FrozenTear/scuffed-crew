@@ -35,7 +35,8 @@ use scuffed_site_server::state::{AppState, OAuthConfig};
 use scuffed_types::{
     CropKind, HERO_ICON_MAX_FILES_PER_UPLOAD, HERO_ICON_MAX_REQUEST_BYTES, HERO_ICON_RATE_BURST,
     MAP_NAME_MAX_BYTES, MAP_NAME_MAX_PER_MEMBER, MAP_NAME_MAX_WIDTH, RANK_MAX_BYTES,
-    RANK_MAX_HEIGHT, RANK_MAX_PER_MEMBER, RANK_MAX_WIDTH, STATS_UPLOAD_IP_BURST, TrainingCropMeta,
+    RANK_MAX_HEIGHT, RANK_MAX_PER_MEMBER, RANK_MAX_WIDTH, RANK_MIN_SCREEN_HEIGHT,
+    RANK_MIN_SCREEN_WIDTH, STATS_UPLOAD_IP_BURST, TrainingCropMeta,
 };
 
 const OWNER: &str = "cropowner";
@@ -1794,7 +1795,7 @@ async fn rows_that_fail_to_parse_are_still_deleted() {
 }
 
 // ---------------------------------------------------------------------------
-// rank kind (rank screen regions: role, tier, SR, percentile)
+// rank kind (rank screen regions: role, tier, rank bar, result, SR)
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -1960,6 +1961,243 @@ async fn rank_consent_reads_false_for_an_existing_member_row() {
     w.cleanup();
 }
 
+/// `meta` for a rank crop: the screen size every rank crop must report.
+fn rank_meta() -> Value {
+    json!({ "screen": "rank", "screen_width": 2560, "screen_height": 1440 })
+}
+
+/// CRC-32 (IEEE) of `bytes`, as PNG chunks use it.
+fn png_crc(bytes: &[u8]) -> u32 {
+    let mut crc = 0xffff_ffffu32;
+    for &byte in bytes {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+        }
+    }
+    !crc
+}
+
+/// `png` padded to exactly `total` bytes with one private ancillary chunk
+/// (`scFp`, valid CRC) before `IEND`. Decoders skip it, so the image is
+/// unchanged.
+fn padded_png(png: Vec<u8>, total: usize) -> Vec<u8> {
+    const CHUNK_OVERHEAD: usize = 12; // length, type, CRC
+    let iend = png.len() - CHUNK_OVERHEAD;
+    assert_eq!(&png[iend + 4..iend + 8], b"IEND");
+    let data_len = total
+        .checked_sub(png.len() + CHUNK_OVERHEAD)
+        .expect("png already larger than the target");
+    let mut chunk = Vec::with_capacity(data_len + CHUNK_OVERHEAD);
+    chunk.extend_from_slice(&u32::try_from(data_len).unwrap().to_be_bytes());
+    let typed_start = chunk.len();
+    chunk.extend_from_slice(b"scFp");
+    chunk.resize(chunk.len() + data_len, 0x5a);
+    let crc = png_crc(&chunk[typed_start..]);
+    chunk.extend_from_slice(&crc.to_be_bytes());
+    let mut out = png[..iend].to_vec();
+    out.extend_from_slice(&chunk);
+    out.extend_from_slice(&png[iend..]);
+    assert_eq!(out.len(), total);
+    out
+}
+
+/// PNG chunk: length, type, data, CRC.
+fn png_chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+    let mut chunk = u32::try_from(data.len()).unwrap().to_be_bytes().to_vec();
+    chunk.extend_from_slice(kind);
+    chunk.extend_from_slice(data);
+    let crc = png_crc(&chunk[4..]);
+    chunk.extend_from_slice(&crc.to_be_bytes());
+    chunk
+}
+
+/// A palette PNG (8-bit indices, 256 random colours, random indices), its
+/// image data in stored (uncompressed) deflate blocks. About one byte per
+/// pixel as an upload; a decoder expands it to RGB, three bytes per pixel
+/// of noise, so a re-encode is about three times larger.
+fn palette_noise_png(width: u32, height: u32, seed: u32) -> Vec<u8> {
+    let mut state = seed.wrapping_mul(2_654_435_761).wrapping_add(1);
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        state
+    };
+    let mut raw = Vec::new();
+    for _ in 0..height {
+        // Filter byte 0 (none), then one random palette index per pixel.
+        let row = std::iter::once(0u8).chain((0..width).map(|_| next() as u8));
+        raw.extend(row);
+    }
+    let mut zlib = vec![0x78, 0x01];
+    let blocks: Vec<&[u8]> = raw.chunks(65_535).collect();
+    for (i, block) in blocks.iter().enumerate() {
+        zlib.push(u8::from(i + 1 == blocks.len()));
+        let len = u16::try_from(block.len()).unwrap();
+        zlib.extend_from_slice(&len.to_le_bytes());
+        zlib.extend_from_slice(&(!len).to_le_bytes());
+        zlib.extend_from_slice(block);
+    }
+    let (mut a, mut b) = (1u32, 0u32);
+    for &byte in &raw {
+        a = (a + u32::from(byte)) % 65_521;
+        b = (b + a) % 65_521;
+    }
+    zlib.extend_from_slice(&((b << 16) | a).to_be_bytes());
+    let palette: Vec<u8> = (0..256 * 3).map(|_| next() as u8).collect();
+    let mut ihdr = width.to_be_bytes().to_vec();
+    ihdr.extend_from_slice(&height.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 3, 0, 0, 0]); // depth 8, palette
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    png.extend(png_chunk(b"IHDR", &ihdr));
+    png.extend(png_chunk(b"PLTE", &palette));
+    png.extend(png_chunk(b"IDAT", &zlib));
+    png.extend(png_chunk(b"IEND", &[]));
+    png
+}
+
+#[test]
+fn palette_noise_png_decodes() {
+    let png = palette_noise_png(40, 30, 1);
+    let image = image::load_from_memory_with_format(&png, ImageFormat::Png).expect("decodes");
+    assert_eq!((image.width(), image.height()), (40, 30));
+}
+
+#[tokio::test]
+async fn stored_rank_crops_stay_within_the_byte_limit() {
+    let w = world().await;
+    set_consent(&w.app, OWNER_SESSION, json!({ "rank": true })).await;
+
+    // A 16-bit RGBA 1536x720 upload (small as an upload, 8 bytes per pixel
+    // decoded) is stored as 8-bit RGBA within the rank byte limit. This
+    // input is written with fast compression and compresses well, so the
+    // byte check alone would also pass on the old 16-bit re-encode; the
+    // `Rgba8` check is what pins the 8-bit storage here, and the unit tests
+    // in `routes/hero_icons.rs` pin the size bound.
+    let sixteen = image::ImageBuffer::from_fn(1536, 720, |x, y| {
+        let v = |k: u32| (((x / 64) * 7 + (y / 64) * 13 + k * 29) % 256) as u16 * 257;
+        image::Rgba([v(0), v(1), v(2), 65535u16])
+    });
+    let mut upload = Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba16(sixteen)
+        .write_to(&mut upload, ImageFormat::Png)
+        .unwrap();
+    let upload = upload.into_inner();
+    assert!(upload.len() <= RANK_MAX_BYTES, "{}", upload.len());
+    let got = upload_parts(&w, "rank", vec![meta(rank_meta()), ("crop", upload)]).await;
+    assert_eq!(got.0, StatusCode::CREATED, "{}", got.1);
+    let stored_size = got.1["crops"][0]["size_bytes"].as_u64().unwrap();
+    assert!(stored_size <= RANK_MAX_BYTES as u64, "{stored_size}");
+    let files = files_on_disk(w.dir());
+    assert_eq!(files.len(), 1);
+    let stored = std::fs::read(w.dir().join(&files[0])).unwrap();
+    assert_eq!(stored.len() as u64, stored_size);
+    let decoded = image::load_from_memory_with_format(&stored, ImageFormat::Png).unwrap();
+    assert_eq!(decoded.color(), image::ColorType::Rgba8);
+    assert_eq!((decoded.width(), decoded.height()), (1536, 720));
+
+    // A palette upload under the limit whose re-encode is over it: 413,
+    // like an oversized upload, and nothing more is stored.
+    let palette = palette_noise_png(600, 600, 3);
+    assert!(palette.len() <= RANK_MAX_BYTES, "{}", palette.len());
+    let got = upload_parts(&w, "rank", vec![meta(rank_meta()), ("crop", palette)]).await;
+    assert_error(&got, StatusCode::PAYLOAD_TOO_LARGE, "icon_too_large");
+    assert_eq!(files_on_disk(w.dir()).len(), 1);
+    assert_eq!(w.rows_of(OWNER).await.len(), 1);
+
+    // The same holds for another kind at its own limit (stat_digits, 64 KiB).
+    set_consent(&w.app, OWNER_SESSION, json!({ "stat_digits": true })).await;
+    let palette = palette_noise_png(200, 200, 4);
+    assert!(palette.len() <= 64 * 1024, "{}", palette.len());
+    let got = upload_parts(&w, "stat_digits", vec![meta(json!({})), ("crop", palette)]).await;
+    assert_error(&got, StatusCode::PAYLOAD_TOO_LARGE, "icon_too_large");
+    assert_eq!(files_on_disk(w.dir()).len(), 1);
+    w.cleanup();
+}
+
+/// A plain RGB PNG with an `iCCP` chunk that inflates to `profile_bytes`
+/// zeros, right after IHDR.
+fn iccp_bomb_png(width: u32, height: u32, profile_bytes: usize) -> Vec<u8> {
+    use std::io::Write;
+    let mut plain = Cursor::new(Vec::new());
+    image::RgbImage::from_pixel(width, height, image::Rgb([20, 120, 220]))
+        .write_to(&mut plain, ImageFormat::Png)
+        .unwrap();
+    let plain = plain.into_inner();
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+    let zeros = vec![0u8; 1024 * 1024];
+    let mut left = profile_bytes;
+    while left > 0 {
+        let n = left.min(zeros.len());
+        z.write_all(&zeros[..n]).unwrap();
+        left -= n;
+    }
+    let mut data = b"bomb\0\0".to_vec();
+    data.extend(z.finish().unwrap());
+    let at = 8 + 12 + 13; // signature and IHDR
+    let mut out = plain[..at].to_vec();
+    out.extend(png_chunk(b"iCCP", &data));
+    out.extend_from_slice(&plain[at..]);
+    out
+}
+
+#[tokio::test]
+async fn an_iccp_bomb_rank_crop_is_stored_without_its_profile() {
+    let w = world().await;
+    set_consent(&w.app, OWNER_SESSION, json!({ "rank": true })).await;
+    // 40 MiB of colour profile in a small upload. The server drops the
+    // profile chunk before decoding (nothing is inflated) and stores the
+    // pixels; the stored file has no iCCP chunk.
+    let bomb = iccp_bomb_png(1536, 720, 40 * 1024 * 1024);
+    assert!(bomb.len() <= RANK_MAX_BYTES, "{}", bomb.len());
+    let got = upload_parts(&w, "rank", vec![meta(rank_meta()), ("crop", bomb)]).await;
+    assert_eq!(got.0, StatusCode::CREATED, "{}", got.1);
+    assert_eq!(got.1["crops"][0]["width"], json!(1536));
+    let files = files_on_disk(w.dir());
+    assert_eq!(files.len(), 1);
+    let stored = std::fs::read(w.dir().join(&files[0])).unwrap();
+    assert!(
+        !stored.windows(4).any(|kind| kind == b"iCCP"),
+        "the stored file has no colour profile"
+    );
+    w.cleanup();
+}
+
+#[tokio::test]
+async fn a_palette_crop_with_a_broken_plte_is_400_not_500() {
+    let w = world().await;
+    set_consent(&w.app, OWNER_SESSION, json!({ "rank": true })).await;
+    // A palette PNG whose PLTE is 4 bytes (not whole RGB triples). png
+    // 0.18.1 panics on it while decoding; the server must refuse it first.
+    let good = palette_noise_png(16, 16, 9);
+    let plte_len = u32::from_be_bytes([good[33], good[34], good[35], good[36]]) as usize;
+    let mut bad = good[..33].to_vec();
+    bad.extend(png_chunk(b"PLTE", &[0, 0, 0, 255]));
+    bad.extend_from_slice(&good[33 + 12 + plte_len..]);
+    let got = upload_parts(&w, "rank", vec![meta(rank_meta()), ("crop", bad)]).await;
+    assert_error(&got, StatusCode::BAD_REQUEST, "invalid_png");
+    assert!(files_on_disk(w.dir()).is_empty());
+    // The same file with its whole palette is stored.
+    let got = upload_parts(&w, "rank", vec![meta(rank_meta()), ("crop", good)]).await;
+    assert_eq!(got.0, StatusCode::CREATED, "{}", got.1);
+    w.cleanup();
+}
+
+/// Upload `parts` of `kind` with the owner's sync token.
+async fn upload_parts(w: &World, kind: &str, parts: Vec<Part>) -> Got {
+    upload(&w.app, OWNER_TOKEN, kind, &parts).await
+}
+
+#[test]
+fn padded_png_decodes_at_its_exact_size() {
+    let padded = padded_png(noise_png(64, 64, 1), 40_000);
+    assert_eq!(padded.len(), 40_000);
+    let image = image::load_from_memory_with_format(&padded, ImageFormat::Png).expect("decodes");
+    assert_eq!((image.width(), image.height()), (64, 64));
+}
+
 #[tokio::test]
 async fn rank_crops_have_their_own_bounds() {
     let w = world().await;
@@ -1969,28 +2207,27 @@ async fn rank_crops_have_their_own_bounds() {
     }
     assert_eq!((RANK_MAX_WIDTH, RANK_MAX_HEIGHT), (1536, 720));
     assert_eq!(RANK_MAX_BYTES, 384 * 1024);
-    // A noise crop over the rank byte limit, inside its edges.
-    let big = noise_png(330, 330, 7);
-    assert!(big.len() > RANK_MAX_BYTES, "{}", big.len());
+    // A valid PNG padded to one byte over the rank byte limit.
+    let over = padded_png(noise_png(300, 300, 7), RANK_MAX_BYTES + 1);
     let bad = StatusCode::BAD_REQUEST;
     let cases: Vec<(Vec<Part>, StatusCode, &str)> = vec![
         (
-            vec![meta(json!({})), crop(1537, 16)],
+            vec![meta(rank_meta()), crop(1537, 16)],
             bad,
             "icon_bad_dimensions",
         ),
         (
-            vec![meta(json!({})), crop(64, 721)],
+            vec![meta(rank_meta()), crop(64, 721)],
             bad,
             "icon_bad_dimensions",
         ),
         (
-            vec![meta(json!({})), crop(7, 16)],
+            vec![meta(rank_meta()), crop(7, 16)],
             bad,
             "icon_bad_dimensions",
         ),
         (
-            vec![meta(json!({})), ("crop", big)],
+            vec![meta(rank_meta()), ("crop", over)],
             StatusCode::PAYLOAD_TOO_LARGE,
             "icon_too_large",
         ),
@@ -2012,7 +2249,6 @@ async fn rank_crops_have_their_own_bounds() {
     )
     .await;
     assert_error(&got, bad, "icon_bad_dimensions");
-
     // Nor does the taller one: map_name stays at 256 tall.
     set_consent(&w.app, OWNER_SESSION, json!({ "map_name": true })).await;
     let got = upload(
@@ -2025,19 +2261,18 @@ async fn rank_crops_have_their_own_bounds() {
     assert_error(&got, bad, "icon_bad_dimensions");
 
     // The real 1440p regions (rank bar 1500x184, tier 420x680), the largest
-    // bound and a noise crop just under the byte limit all pass.
-    let near = noise_png(300, 300, 8);
-    assert!(near.len() <= RANK_MAX_BYTES, "{}", near.len());
-    assert!(near.len() > 216 * 1024, "{}", near.len());
+    // bound and a valid PNG of exactly the byte limit all pass.
+    let exact = padded_png(noise_png(300, 300, 8), RANK_MAX_BYTES);
+    assert_eq!(exact.len(), RANK_MAX_BYTES);
     let ok = vec![
-        meta(json!({})),
+        meta(rank_meta()),
         crop(1500, 184),
-        meta(json!({})),
+        meta(rank_meta()),
         crop(420, 680),
-        meta(json!({})),
+        meta(rank_meta()),
         crop(RANK_MAX_WIDTH, RANK_MAX_HEIGHT),
-        meta(json!({})),
-        ("crop", near),
+        meta(rank_meta()),
+        ("crop", exact),
     ];
     let got = upload(&w.app, OWNER_TOKEN, "rank", &ok).await;
     assert_eq!(got.0, StatusCode::CREATED, "{}", got.1);
@@ -2057,6 +2292,55 @@ async fn rank_crops_have_their_own_bounds() {
         ]
     );
     assert_eq!(files_on_disk(w.dir()).len(), 4);
+    w.cleanup();
+}
+
+#[tokio::test]
+async fn rank_crops_must_report_a_screen_larger_than_any_rank_crop() {
+    let w = world().await;
+    set_consent(&w.app, OWNER_SESSION, json!({ "rank": true })).await;
+    assert_eq!(
+        (RANK_MIN_SCREEN_WIDTH, RANK_MIN_SCREEN_HEIGHT),
+        (1856, 1056)
+    );
+    for (body, why) in [
+        (json!({}), "no screen size"),
+        (
+            json!({ "screen_width": 1280, "screen_height": 720 }),
+            "a whole 720p screen fits",
+        ),
+        (
+            json!({ "screen_width": 1855, "screen_height": 1080 }),
+            "one px too narrow",
+        ),
+        (
+            json!({ "screen_width": 1920, "screen_height": 1055 }),
+            "one px too short",
+        ),
+    ] {
+        let got = upload(&w.app, OWNER_TOKEN, "rank", &[meta(body), crop(1280, 720)]).await;
+        assert_eq!(got.0, StatusCode::BAD_REQUEST, "{why}: {}", got.1);
+        assert_eq!(
+            got.1["error"],
+            json!("invalid_crop_meta"),
+            "{why}: {}",
+            got.1
+        );
+    }
+    assert!(w.rows_of(OWNER).await.is_empty());
+    assert!(files_on_disk(w.dir()).is_empty());
+    let smallest = json!({ "screen_width": 1856, "screen_height": 1056 });
+    let got = upload(
+        &w.app,
+        OWNER_TOKEN,
+        "rank",
+        &[meta(smallest), crop(420, 680)],
+    )
+    .await;
+    assert_eq!(got.0, StatusCode::CREATED, "{}", got.1);
+    let row = &w.rows_of(OWNER).await[0];
+    assert_eq!(row.meta.screen_width, Some(1856));
+    assert_eq!(row.meta.screen_height, Some(1056));
     w.cleanup();
 }
 
@@ -2166,5 +2450,55 @@ async fn rank_cap_is_its_own() {
     assert_error(&got, StatusCode::CONFLICT, "crop_limit_reached");
     let got = upload(&w.app, OWNER_TOKEN, "map_name", &pairs(1, json!({}))).await;
     assert_eq!(got.0, StatusCode::CREATED, "{}", got.1);
+    w.cleanup();
+}
+
+/// Saving stats settings and the hero icon opt-in works for a member whose
+/// settings row is from before the training crop opt-in fields.
+#[tokio::test]
+async fn settings_writes_work_on_rows_from_before_the_opt_in_fields() {
+    let w = world().await;
+    w.db()
+        .client
+        .query(format!(
+            r#"
+            REMOVE FIELD IF EXISTS stat_digits_opt_in ON member_settings;
+            REMOVE FIELD IF EXISTS map_name_opt_in ON member_settings;
+            REMOVE FIELD IF EXISTS rank_opt_in ON member_settings;
+            CREATE member_settings SET member_id = '{OWNER}', player_name = 'Old',
+                stats_visibility = 'public', hero_icon_opt_in = false;
+            CREATE member_settings SET member_id = '{OTHER}', player_name = 'Old',
+                stats_visibility = 'public', hero_icon_opt_in = false;
+            "#
+        ))
+        .await
+        .expect("old rows")
+        .check()
+        .expect("old rows");
+    run_migrations(&w.db().client).await.expect("migrate");
+
+    let got = call(
+        &w.app,
+        Method::PUT,
+        "/api/stats/settings",
+        Some(OWNER_SESSION),
+        Some(json!({ "player_name": "Renamed", "stats_visibility": "members" })),
+    )
+    .await;
+    assert_eq!(got.0, StatusCode::OK, "{}", got.1);
+    let got = call(
+        &w.app,
+        Method::PUT,
+        "/api/hero-icons/opt-in",
+        Some(OTHER_SESSION),
+        Some(json!({ "icon_contribution_opt_in": true })),
+    )
+    .await;
+    assert_eq!(got.0, StatusCode::OK, "{}", got.1);
+    let (_, consent) = get(&w.app, "/api/training-crops/consent", OTHER_SESSION).await;
+    assert_eq!(
+        consent,
+        json!({ "hero_icon": true, "stat_digits": false, "map_name": false, "rank": false })
+    );
     w.cleanup();
 }

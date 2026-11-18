@@ -15,9 +15,7 @@ use crate::capture::{self, PreviewShot};
 use crate::cli::{Cli, FixtureKind};
 use crate::daemon::{self, DaemonVerb, DaemonView};
 use crate::hotkey::{self, OverlayHotkey};
-use crate::model::{
-    EditField, EditForm, Game, Outcome, Role, RoleFilter, Screen, SeasonSel, local_hm,
-};
+use crate::model::{EditField, EditForm, Game, Outcome, Role, RoleFilter, Screen, SeasonSel};
 use crate::notes::{self, ShownRelease};
 use crate::overlay::{self, CompanionChild, OverlayHold};
 use crate::restart_prompt::{self, BinStamp, RestartNeed, RestartWatch};
@@ -1781,45 +1779,6 @@ impl TrackerApp {
             .collect();
     }
 
-    fn game_choices(&self) -> Vec<crate::report::GameChoice> {
-        // Kit sessions stay listed. The newest games without a kit are capped
-        // so a long history is not a column of disabled chips.
-        const RECENT_WITHOUT_KIT: usize = 8;
-        let mut without_kit = 0;
-        let mut choices = Vec::new();
-        for game in &self.games {
-            // Every stored game can be reported: without a saved picture
-            // the report carries the stored values and the session id.
-            let has_picture = self.sessions_with_kit.contains(&game.session_id);
-            let has_kit = true;
-            if !has_picture {
-                if without_kit == RECENT_WITHOUT_KIT {
-                    continue;
-                }
-                without_kit += 1;
-            }
-            choices.push(crate::report::GameChoice {
-                session_id: game.session_id.clone(),
-                label: format!(
-                    "{} · {} · {} {}{}",
-                    game.display_hero(),
-                    game.display_map(),
-                    game.played_at
-                        .with_timezone(&chrono::Local)
-                        .format("%Y-%m-%d"),
-                    local_hm(game.played_at),
-                    if has_picture {
-                        ""
-                    } else {
-                        " · no picture saved"
-                    }
-                ),
-                has_kit,
-            });
-        }
-        choices
-    }
-
     pub(crate) fn arm_training_toast(&mut self, sid: &str, category: crate::report::GameCategory) {
         if !self.games.iter().any(|g| g.session_id == sid) {
             self.toast_action = None;
@@ -1934,7 +1893,7 @@ impl TrackerApp {
                 dialog.game_session = session_id;
                 dialog.training = training;
                 dialog.game_choices = if choices.is_empty() {
-                    self.game_choices()
+                    self.game_choices(dialog.game_session.as_deref())
                 } else {
                     choices
                 };
@@ -1975,7 +1934,10 @@ impl TrackerApp {
                 self.rebuild_report()
             }
             ReportMessage::GameCategory(category) => {
-                let choices = self.game_choices();
+                let selected = self
+                    .report_dialog_mut()
+                    .and_then(|d| d.game_session.clone());
+                let choices = self.game_choices(selected.as_deref());
                 let Some(dialog) = self.report_dialog_mut() else {
                     return Task::none();
                 };

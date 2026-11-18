@@ -43,6 +43,8 @@ pub enum Route {
         IdentitySettings {},
         #[route("/profile/edit")]
         ProfileSettings {},
+        #[route("/settings")]
+        AppearanceSettings {},
         #[route("/reports")]
         MyReports {},
         #[route("/dm")]
@@ -87,6 +89,10 @@ pub enum Route {
         StatsMatch { id: String },
         #[route("/patch-notes")]
         PatchNotes {},
+        // "What's changed". The URL always names the tab.
+        #[redirect("/changelog", || Route::Changelog { tab: "site".to_string() })]
+        #[route("/changelog/:tab")]
+        Changelog { tab: String },
         #[redirect("/strategies", || Route::StrategyBrowse {})]
         #[redirect("/matches", || Route::Home {})]
         #[route("/:..segments")]
@@ -135,6 +141,8 @@ pub enum Route {
         AdminRelay {},
         #[route("/admin/settings")]
         AdminSettings {},
+        #[route("/admin/brand")]
+        AdminBrandSettings {},
     #[end_layout]
 
     // Strategy section (strategy nav layout)
@@ -193,6 +201,8 @@ mod tests {
             "/admin",
             "/admin/members",
             "/admin/members/abc/matches",
+            "/admin/brand",
+            "/settings",
             "/strategy",
             "/strategy/editor/abc",
             "/login",

@@ -738,9 +738,10 @@ pub(crate) async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
         &ctx.data_dir,
         site_linked,
     );
-    // The queue title reader: off unless its env switch is on and the pack
-    // loads; off leaves the saver as it is.
-    let queue_title = daemon::queue_title::QueueTitleFeed::from_env(&ctx.data_dir);
+    // The queue title reader: off unless config `rank_reader` (or its env
+    // override) is on and the pack loads; off leaves the saver as it is.
+    let queue_title =
+        daemon::queue_title::QueueTitleFeed::for_config(config.rank_reader, &ctx.data_dir);
     let mut pregame_dump = daemon::pregame_dump::PregameDump::with_readers(
         ctx.save_pregame_screens,
         bans_picks,
@@ -748,12 +749,18 @@ pub(crate) async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
         &ctx.data_dir,
         ctx.auto_detect.poll_interval(ctx.use_new_reader),
     );
+    // The rank update reader: `None` (nothing read, saved or sent) unless
+    // config `rank_reader` (or its env override) is on and the pack loads
+    // (`daemon::rank`). A missing pack leaves it `None`: games record as
+    // before, and the app shows the pack warning.
+    let mut rank_feed = daemon::rank::RankFeed::for_config(config.rank_reader, &ctx.data_dir);
     let result = run_loop(
         Arc::clone(&ctx),
         early_sigterm,
         &mut sync_task,
         &mut restart_to,
         &mut pregame_dump,
+        &mut rank_feed,
     )
     .await;
     daemon::focus::shutdown().await;
@@ -761,6 +768,25 @@ pub(crate) async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     // store's close its own share of the deadline.
     let within = stat_tracker::replace::shutdown_time_left().saturating_sub(STORE_CLOSE_WAIT);
     finish_or_abort_sync(sync_task.take(), within).await;
+    // A rank screen still on screen at the stop settles and is stored on
+    // its game, as when the game closes; it uploads with the next sync.
+    // Before the pre-game flush, which takes its next mode hint.
+    if let Some(feed) = rank_feed.as_mut() {
+        let within = stat_tracker::replace::shutdown_time_left().saturating_sub(STORE_CLOSE_WAIT);
+        let flush = async {
+            if daemon::rank::finish_on_shutdown(feed, &ctx.store, pregame_dump.as_mut()).await {
+                // The Games tab reads the rank from the snapshot. The
+                // loop's forced shutdown write has run already, so force
+                // this one too: no GUI, or the 2 s debounce, would leave
+                // live_snapshot.json without the rank until the next start.
+                refresh_snapshot(&ctx.store, &ctx.data_dir).await;
+                flush_snapshot_if_dirty(&ctx.store, &ctx.data_dir).await;
+            }
+        };
+        if tokio::time::timeout(within, flush).await.is_err() {
+            tracing::warn!(target: "scuffed_stat_tracker", "rank update: the shutdown deadline ran out before the held rank screen was stored");
+        }
+    }
     // The phase's last frame, the post-game sidecar and the queued writes, briefly.
     if let Some(dump) = pregame_dump.take() {
         let within = stat_tracker::replace::shutdown_time_left()
