@@ -103,8 +103,12 @@ mod tests {
     #[test]
     fn swiss_rounds_are_numbered_and_have_no_champion() {
         let html = render(swiss);
+        // The Standings heading names its section and takes focus after a
+        // Retry (QA 705 nit 1).
         assert!(
-            html.contains("<h2 class=\"ui-section-title\">Standings</h2>"),
+            html.contains(
+                "<section class=\"ui-stack\" aria-labelledby=\"swiss-standings-title\"><h2 id=\"swiss-standings-title\" class=\"ui-section-title\" tabindex=\"-1\">Standings</h2>"
+            ),
             "{html}"
         );
         assert!(
