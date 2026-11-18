@@ -27,12 +27,16 @@
 //! analyzed ticks in a row miss it, when another game's screen starts or
 //! the open game changes or closes, when the game process stops
 //! ([`close`]), or when the tracker shuts down ([`finish_on_shutdown`]).
-//! Then [`settle`] keeps each field only when the newest read
-//! that has it agrees with the read right before it, so a value caught
+//! Then [`settle_held`] keeps each field when the newest read that has it
+//! agrees with the read right before it ([`settle`]), so a value caught
 //! while it still counts up, or one the screen has since replaced, is not
-//! kept. The result is stored on that game once
-//! (`LocalStore::attach_rank_update`), which queues it for upload when the
-//! upload changes. The mode banner word goes on to the queue title wiring
+//! kept. When no such pair exists (an alt-tab can leave one read of the
+//! screen), a field still comes from a lone read taken at least
+//! [`RANK_LONE_READ_MIN_AGE`] after the screen's first sighting, at a
+//! confidence of at least [`RANK_LONE_READ_MIN_CONFIDENCE`], when no other
+//! held read has a different value for it. The result is stored on that
+//! game once (`LocalStore::attach_rank_update`), which queues it for upload
+//! when the upload changes. The mode banner word goes on to the queue title wiring
 //! as the pending next mode hint
 //! ([`super::pregame_dump::PregameDump::set_next_mode_hint`]).
 //!
@@ -46,6 +50,7 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use image::RgbImage;
@@ -67,6 +72,30 @@ pub(crate) const RANK_HELD_READS: usize = 16;
 /// held reads settle. One miss (a misread word, a header change during a
 /// rank-up) is a break between reads, not the end of the screen.
 pub(crate) const RANK_SETTLE_MISSES: u8 = 2;
+
+/// A field no pair of reads agrees on may come from a lone read taken at
+/// least this long after the screen's first sighting ([`settle_held`]).
+/// The values on the rank screen count up after it appears, so an early
+/// read can be caught mid-animation. Measured on 54 local games with 2 or
+/// more captured rank screen frames (1440p, 389 frames, 1 to 6 s apart):
+/// the latest read that still differed from the screen's final value came
+/// 6 s after the first captured frame (a rank down where the bar wraps),
+/// the next frame, at 9 s, read the final values, and no frame 8 s or
+/// later differed. 12 s leaves a third over that bound and still admits
+/// the one alt-tab read of Dorado 2026-11-17, about 17 s in. The capture
+/// frames are 1 to 6 s apart, so the true end of the count up is only
+/// known to within that step.
+pub(crate) const RANK_LONE_READ_MIN_AGE: Duration = Duration::from_secs(12);
+
+/// The lowest confidence a field from a lone read may have to be kept
+/// ([`settle_held`]). On the labelled 1440p rank screens a single read was
+/// never wrong on any field at any confidence, and count up reads were
+/// wrong at confidences up to 1.0, so the age gate does the real work.
+/// 0.7 keeps most good digit reads (the lowest correct one was 0.64) and
+/// leaves out the Open role, which is fixed at 0.5 and only means no role
+/// icon was seen, which a frame mid-transition can also give. A floor
+/// chosen by judgement, not measured against wrong reads.
+pub(crate) const RANK_LONE_READ_MIN_CONFIDENCE: f32 = 0.7;
 
 /// On how many ticks in all a settled update the store refused is tried:
 /// the tick it settled on and the ticks after it.
@@ -92,22 +121,25 @@ impl RankStore for crate::storage::LocalStore {
 /// The reads of the rank screen on screen now.
 struct Held {
     session: String,
+    /// The screen's first sighting: when its first entry was held.
+    first: DateTime<Utc>,
     /// When the newest read was taken.
     at: DateTime<Utc>,
-    /// One per rank screen tick, oldest first; `None` for a frame read as
-    /// the rank screen that gave no read, and for a break (a tick that
-    /// missed the screen between two that showed it).
-    reads: VecDeque<Option<RankUpdate>>,
+    /// One per rank screen tick, oldest first, each with the time of its
+    /// tick; `None` for a frame read as the rank screen that gave no read,
+    /// and for a break (a tick that missed the screen between two that
+    /// showed it).
+    reads: VecDeque<(Option<RankUpdate>, DateTime<Utc>)>,
     /// Analyzed ticks in a row that missed the screen since the newest read.
     missed: u8,
 }
 
 impl Held {
-    fn push(&mut self, read: Option<RankUpdate>) {
+    fn push(&mut self, read: Option<RankUpdate>, at: DateTime<Utc>) {
         while self.reads.len() >= RANK_HELD_READS {
             self.reads.pop_front();
         }
-        self.reads.push_back(read);
+        self.reads.push_back((read, at));
     }
 }
 
@@ -217,6 +249,7 @@ impl RankFeed {
         };
         let held = self.held.get_or_insert_with(|| Held {
             session: game.to_string(),
+            first: now,
             at: now,
             reads: VecDeque::new(),
             missed: 0,
@@ -224,10 +257,10 @@ impl RankFeed {
         if held.missed > 0 {
             // the screen came back after a missed tick: a break, so the
             // reads on either side of it never count as a pair
-            held.push(None);
+            held.push(None, now);
             held.missed = 0;
         }
-        held.push(read);
+        held.push(read, now);
         held.at = now;
         done
     }
@@ -262,14 +295,21 @@ impl RankFeed {
     /// Settle the held reads, if any.
     fn finish(&mut self) -> Option<Settled> {
         let held = self.held.take()?;
-        let reads: Vec<Option<RankUpdate>> = held.reads.into();
-        let rank = settle(&reads);
+        let (reads, ages): (Vec<Option<RankUpdate>>, Vec<Duration>) = held
+            .reads
+            .into_iter()
+            .map(|(read, at)| (read, (at - held.first).to_std().unwrap_or_default()))
+            .unzip();
+        let (rank, lone) = settle_held(&reads, &ages);
+        if !lone.is_empty() {
+            tracing::info!(target: "scuffed_stat_tracker", session = %held.session, entries = reads.len(), fields = %lone.join(", "), "rank update: kept fields from one late confident read that no other read disagrees with (no pair of reads agreed on them)");
+        }
         if rank.is_empty() {
             let read = reads.iter().filter(|r| r.is_some()).count();
             if read == 0 {
                 tracing::info!(target: "scuffed_stat_tracker", session = %held.session, entries = reads.len(), "rank update: the reader read none of the rank screen frames (a frame size other than 2560x1440, not a rank update screen, or unreadable), no rank for the game");
             } else {
-                tracing::info!(target: "scuffed_stat_tracker", session = %held.session, entries = reads.len(), read, "rank update: no field read the same on its newest two reads in a row, no rank for the game");
+                tracing::info!(target: "scuffed_stat_tracker", session = %held.session, entries = reads.len(), read, "rank update: no field read the same on its newest two reads in a row, nor came from one late confident read that no other read disagrees with, no rank for the game");
             }
             return None;
         }
@@ -359,7 +399,10 @@ pub(crate) fn read_rank_screen(
 /// that has the field is kept only when the read right before it has the
 /// same value, at the lower of the two confidences; otherwise the field is
 /// `None`. So a single read, a value still counting up, and a value the
-/// screen has replaced on its newest read (`[A, A, B]`) keep nothing.
+/// screen has replaced on its newest read (`[A, A, B]`) keep nothing
+/// here. This is the pair rule alone; the feed stores [`settle_held`],
+/// which falls back to a late confident lone read only for a field this
+/// rule leaves `None`.
 ///
 /// A read with no value for the field (a frame with no read, a read that
 /// lacks the field, or a break for a missed tick) is not a value that
@@ -384,11 +427,80 @@ pub(crate) fn settle(reads: &[Option<RankUpdate>]) -> RankUpdate {
     }
 }
 
-/// A rank field: whether two reads hold the same value, and the field at
-/// the lower of two confidences.
+/// The held reads (oldest first) as one update, as the feed stores it.
+/// `ages` are the entries' read times after the screen's first sighting.
+/// Per field the pair rule ([`settle`]) goes first, unchanged. When it
+/// keeps nothing, the field comes from a lone read only when all of these
+/// hold:
+/// - the newest read that has the field was taken at least
+///   [`RANK_LONE_READ_MIN_AGE`] after the first sighting;
+/// - every other held read that has the field has the same value (no
+///   disagreement anywhere in the held reads, not only next to it);
+/// - the lowest confidence among those reads is at least
+///   [`RANK_LONE_READ_MIN_CONFIDENCE`], and that lowest confidence is the
+///   one kept.
+///
+/// So a screen read once, late and confidently (the first tick after an
+/// alt-tab, with no read before it) keeps that read's confident fields,
+/// while two reads that disagree, an early read alone, and a weak read
+/// keep nothing. Also returned: the names of the fields a lone read gave.
+pub(crate) fn settle_held(
+    reads: &[Option<RankUpdate>],
+    ages: &[Duration],
+) -> (RankUpdate, Vec<&'static str>) {
+    let pair = settle(reads);
+    let mut lone = Vec::new();
+    // the pair rule's field, else the lone read's (named in `lone`)
+    macro_rules! or_lone {
+        ($f:ident) => {
+            pair.$f.or_else(|| {
+                let kept = lone_read(reads, ages, |r| &r.$f)?;
+                lone.push(stringify!($f));
+                Some(kept)
+            })
+        };
+    }
+    let rank = RankUpdate {
+        role: or_lone!(role),
+        role_rank: or_lone!(role_rank),
+        division: or_lone!(division),
+        progress_pct: or_lone!(progress_pct),
+        progress_change: or_lone!(progress_change),
+        change_tags: or_lone!(change_tags),
+        higher_than_pct: or_lone!(higher_than_pct),
+        hero_sr: or_lone!(hero_sr),
+        hero_sr_change: or_lone!(hero_sr_change),
+        next_mode_hint: or_lone!(next_mode_hint),
+    };
+    (rank, lone)
+}
+
+fn lone_read<X: Agree>(
+    reads: &[Option<RankUpdate>],
+    ages: &[Duration],
+    get: impl Fn(&RankUpdate) -> &Option<X>,
+) -> Option<X> {
+    let field = |i: usize| reads.get(i)?.as_ref().and_then(|r| get(r).as_ref());
+    let newest = (0..reads.len()).rev().find(|&i| field(i).is_some())?;
+    if *ages.get(newest)? < RANK_LONE_READ_MIN_AGE {
+        return None;
+    }
+    let mut kept = field(newest)?.clone();
+    for other in (0..newest).filter_map(field) {
+        if !other.same(&kept) {
+            return None;
+        }
+        kept = kept.lower(other);
+    }
+    (kept.confidence() >= RANK_LONE_READ_MIN_CONFIDENCE).then_some(kept)
+}
+
+/// A rank field: whether two reads hold the same value, the field at the
+/// lower of two confidences, and its confidence.
 trait Agree: Clone {
     fn same(&self, other: &Self) -> bool;
     fn lower(&self, other: &Self) -> Self;
+    fn confidence(&self) -> f32;
 }
 
 macro_rules! agree {
@@ -402,6 +514,9 @@ macro_rules! agree {
                     confidence: self.confidence.min(other.confidence),
                     ..self.clone()
                 }
+            }
+            fn confidence(&self) -> f32 {
+                self.confidence
             }
         }
     };
@@ -586,3 +701,7 @@ mod tests;
 #[cfg(test)]
 #[path = "tests_rank_wiring.rs"]
 mod tests_wiring;
+
+#[cfg(test)]
+#[path = "tests_rank_lone.rs"]
+mod tests_lone;
