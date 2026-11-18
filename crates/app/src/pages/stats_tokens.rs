@@ -7,6 +7,7 @@ use scuffed_api_client::ApiClient;
 use scuffed_types::api::{CreateDaemonTokenRequest, CreateDaemonTokenResponse};
 
 use super::stats_member::{Col, STATS_VIEWS_CSS, STATS_VIEWS_CSS_ID, StatsTable};
+use crate::components::ui::inline_confirm::{focus_element_by_id_soon, key_cancels};
 use crate::components::ui::{
     EmptyCard, FieldError, InlineConfirm, PageHeader, PageShell, PageWidth,
 };
@@ -92,6 +93,12 @@ const TOKENS_CSS: &str = r#"
    The cell is nowrap; the strip wraps, and its title repeats the label. */
 .tokens-page .token-revoke-confirm { min-width: 15em; white-space: normal; text-align: start; }
 .tokens-page .token-revoke-confirm .inline-confirm__title { overflow-wrap: anywhere; }
+/* The shared strip's buttons are 38px tall; here they meet the 44px target
+   every other control on the page has, phone widths included. */
+.tokens-page .token-revoke-confirm .inline-confirm__cancel,
+.tokens-page .token-revoke-confirm .inline-confirm__go { min-height: var(--hit-target-min); }
+/* Catches Esc from anywhere in the New token form; adds no box. */
+.tokens-page .token-form-keys { display: contents; }
 /* The dialog may render outside the page container. */
 .token-form-field {
   display: flex;
@@ -137,9 +144,11 @@ fn dispatch_copy(token: &str, on_copy: EventHandler<String>) {
     on_copy.call(token_clipboard_text(token));
 }
 
-/// "12 Nov 2026, 20:00 UTC", the date style of the frames.
+/// "12 Nov 2026, 21:00 UTC+1": the date style of the frames on the
+/// viewer's own clock, with its offset, as the stats match page shows a
+/// game's time.
 fn format_date(dt: &DateTime<Utc>) -> String {
-    dt.format("%-d %b %Y, %H:%M UTC").to_string()
+    super::stats::local_date_time(dt)
 }
 
 /// The "Your tokens" heading. After a Revoke, the row's button is gone, so
@@ -148,6 +157,10 @@ const TOKENS_LIST_TITLE_ID: &str = "tokens-list-title";
 /// The label input in the New token form, and its error line.
 const LABEL_INPUT_ID: &str = "daemon-token-label";
 const LABEL_ERROR_ID: &str = "daemon-token-label-err";
+/// The two buttons that open the New token form: the header's, and the
+/// empty list's. Esc or Cancel gives focus back to the one that opened it.
+const NEW_TOKEN_BUTTON_ID: &str = "tokens-new";
+const NEW_TOKEN_EMPTY_BUTTON_ID: &str = "tokens-new-empty";
 
 /// Why the New token form refuses a label, if it does. The server needs a
 /// label to tell tokens apart.
@@ -346,15 +359,25 @@ pub fn StatsTokens() -> Element {
 
     let mut revealed_token: Signal<Option<String>> = use_signal(|| None);
 
-    let open_create = move |_| {
+    // The button that opened the form, so closing it can give focus back.
+    let mut form_opener = use_signal(|| NEW_TOKEN_BUTTON_ID);
+
+    let mut open_create = move |opener: &'static str| {
         form_label.set("default".to_string());
         form_error.set(String::new());
+        form_opener.set(opener);
         modal.show_empty();
+        // Into the form, so Esc and Tab act on it rather than on the page.
+        focus_element_by_id_soon(LABEL_INPUT_ID.to_string());
     };
 
-    let on_close = move |_| {
+    // Cancel, a click outside, or Esc: close and return focus to the opener.
+    let mut close_form = move || {
         modal.close();
+        focus_element_by_id_soon(form_opener().to_string());
     };
+
+    let on_close = move |_| close_form();
 
     let on_submit = move |_| {
         let label = form_label().trim().to_string();
@@ -468,9 +491,9 @@ pub fn StatsTokens() -> Element {
                 actions: rsx! {
                     button {
                         r#type: "button",
-                        id: "tokens-new",
+                        id: NEW_TOKEN_BUTTON_ID,
                         class: "btn is-primary",
-                        onclick: open_create,
+                        onclick: move |_| open_create(NEW_TOKEN_BUTTON_ID),
                         "New token"
                     }
                 },
@@ -502,9 +525,9 @@ pub fn StatsTokens() -> Element {
                                 actions: rsx! {
                                     button {
                                         r#type: "button",
-                                        id: "tokens-new-empty",
+                                        id: NEW_TOKEN_EMPTY_BUTTON_ID,
                                         class: "btn is-primary",
-                                        onclick: open_create,
+                                        onclick: move |_| open_create(NEW_TOKEN_EMPTY_BUTTON_ID),
                                         "Create a token"
                                     }
                                 },
@@ -530,32 +553,43 @@ pub fn StatsTokens() -> Element {
                 }
             }
 
-            FormModal {
-                title: "Create tracker token".to_string(),
-                open: modal.is_open(),
-                submitting: modal.is_submitting(),
-                on_close: on_close,
-                on_submit: on_submit,
-
-                div { class: "token-form-field",
-                    label { class: "field-label", r#for: LABEL_INPUT_ID, "Label" }
-                    input {
-                        id: LABEL_INPUT_ID,
-                        name: LABEL_INPUT_ID,
-                        class: "field-input",
-                        r#type: "text",
-                        placeholder: "For example my-desktop",
-                        aria_invalid: if !form_error().is_empty() { "true" },
-                        aria_describedby: LABEL_ERROR_ID,
-                        value: "{form_label}",
-                        oninput: move |e| {
-                            form_label.set(e.value());
-                            if !form_error.peek().is_empty() && label_error(&e.value()).is_none() {
-                                form_error.set(String::new());
-                            }
-                        },
+            // FormModal has no Esc of its own; this page's form closes on Esc
+            // like the Revoke strip does.
+            div {
+                class: "token-form-keys",
+                onkeydown: move |e| {
+                    if modal.is_open() && key_cancels(&e.key()) {
+                        e.stop_propagation();
+                        close_form();
                     }
-                    FieldError { id: LABEL_ERROR_ID, text: form_error(), role: "status" }
+                },
+                FormModal {
+                    title: "Create tracker token".to_string(),
+                    open: modal.is_open(),
+                    submitting: modal.is_submitting(),
+                    on_close: on_close,
+                    on_submit: on_submit,
+
+                    div { class: "token-form-field",
+                        label { class: "field-label", r#for: LABEL_INPUT_ID, "Label" }
+                        input {
+                            id: LABEL_INPUT_ID,
+                            name: LABEL_INPUT_ID,
+                            class: "field-input",
+                            r#type: "text",
+                            placeholder: "For example my-desktop",
+                            aria_invalid: if !form_error().is_empty() { "true" },
+                            aria_describedby: LABEL_ERROR_ID,
+                            value: "{form_label}",
+                            oninput: move |e| {
+                                form_label.set(e.value());
+                                if !form_error.peek().is_empty() && label_error(&e.value()).is_none() {
+                                    form_error.set(String::new());
+                                }
+                            },
+                        }
+                        FieldError { id: LABEL_ERROR_ID, text: form_error(), role: "status" }
+                    }
                 }
             }
         }
@@ -803,7 +837,84 @@ mod tests {
     fn dates_read_like_the_frames() {
         use chrono::TimeZone;
         let at = Utc.with_ymd_and_hms(2026, 11, 2, 20, 5, 0).unwrap();
+        // Native tests run on UTC; the browser uses the viewer's clock.
         assert_eq!(format_date(&at), "2 Nov 2026, 20:05 UTC");
+    }
+
+    /// QA 705 nit 3: Created and Last used are on the viewer's clock with
+    /// its offset, through the same helper as the stats match page, not a
+    /// fixed UTC format.
+    #[test]
+    fn token_dates_use_the_match_page_local_time() {
+        let prod = prod_src();
+        let body = &prod[prod.find("fn format_date(").unwrap()..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        assert!(body.contains("super::stats::local_date_time(dt)"), "{body}");
+        assert!(!prod.contains("UTC\")"), "no date is formatted in UTC here");
+        let game = include_str!("stats/game.rs");
+        assert!(game.contains("super::local_date_time(played_at)"));
+    }
+
+    /// QA 705 nit 1: the shared strip's buttons are 38px; on this page they
+    /// take the 44px hit target, scoped to the tokens strip only.
+    #[test]
+    fn the_revoke_strip_buttons_meet_the_hit_target() {
+        assert!(TOKENS_CSS.contains(
+            ".tokens-page .token-revoke-confirm .inline-confirm__cancel,\n.tokens-page .token-revoke-confirm .inline-confirm__go { min-height: var(--hit-target-min); }"
+        ));
+        // The shared component is left as it is.
+        assert!(
+            !crate::components::ui::inline_confirm::INLINE_CONFIRM_CSS.contains("hit-target-min")
+        );
+        assert!(prod_src().contains(
+            "div { class: \"token-revoke-confirm\",\n                            InlineConfirm {"
+        ));
+    }
+
+    /// QA 705 nit 2: Esc closes the New token form, as it closes the Revoke
+    /// strip, and focus goes back to the button that opened the form.
+    #[test]
+    fn esc_closes_the_new_token_form_and_returns_focus_to_its_opener() {
+        assert!(key_cancels(&Key::Escape));
+        assert!(!key_cancels(&Key::Enter));
+        let prod = prod_src();
+        // Opening records which button opened it and moves focus into the
+        // form, so Esc reaches the form's key handler.
+        let open = &prod[prod
+            .find("let mut open_create = move |opener: &'static str| {")
+            .unwrap()..];
+        let open = &open[..open.find("\n    };\n").unwrap()];
+        assert!(open.contains("form_opener.set(opener);"), "{open}");
+        assert!(open.contains("modal.show_empty();"), "{open}");
+        assert!(
+            open.contains("focus_element_by_id_soon(LABEL_INPUT_ID.to_string());"),
+            "{open}"
+        );
+        assert!(prod.contains("onclick: move |_| open_create(NEW_TOKEN_BUTTON_ID),"));
+        assert!(prod.contains("onclick: move |_| open_create(NEW_TOKEN_EMPTY_BUTTON_ID),"));
+        assert!(prod.contains("id: NEW_TOKEN_BUTTON_ID,"));
+        assert!(prod.contains("id: NEW_TOKEN_EMPTY_BUTTON_ID,"));
+        // Closing gives focus back to that button.
+        let close = &prod[prod.find("let mut close_form = move || {").unwrap()..];
+        let close = &close[..close.find("\n    };\n").unwrap()];
+        assert!(close.contains("modal.close();"), "{close}");
+        assert!(
+            close.contains("focus_element_by_id_soon(form_opener().to_string());"),
+            "{close}"
+        );
+        // Esc anywhere in the form closes it; Cancel and a click outside
+        // take the same path.
+        let keys = &prod[prod.find("class: \"token-form-keys\",").unwrap()..];
+        let keys = &keys[..keys.find("FormModal {").unwrap()];
+        assert!(
+            keys.contains("if modal.is_open() && key_cancels(&e.key()) {"),
+            "{keys}"
+        );
+        assert!(keys.contains("close_form();"), "{keys}");
+        assert!(prod.contains("let on_close = move |_| close_form();"));
+        assert!(prod.contains("on_close: on_close,"));
+        // The wrapper adds no box to the page.
+        assert!(TOKENS_CSS.contains(".tokens-page .token-form-keys { display: contents; }"));
     }
 
     /// Row actions that do nothing, with the strip open for `confirming`.
@@ -933,7 +1044,7 @@ mod tests {
         // Unconditional: not inside an `if`, so the region never comes and goes.
         assert!(
             field.contains(
-                "}\n                    FieldError { id: LABEL_ERROR_ID, text: form_error(), role: \"status\" }"
+                "}\n                        FieldError { id: LABEL_ERROR_ID, text: form_error(), role: \"status\" }"
             ),
             "{field}"
         );

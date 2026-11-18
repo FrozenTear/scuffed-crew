@@ -287,6 +287,22 @@ pub(super) fn local_time(at: DateTime<Utc>) -> DateTime<chrono::FixedOffset> {
     local
 }
 
+/// "16 Jul 2026, 00:30 UTC+2": a date and time on the viewer's own clock
+/// ([`local_time`]) with the offset it is in ([`utc_offset_label`]). The
+/// stats match page and the tracker tokens page both write times this way.
+pub(crate) fn local_date_time(at: &DateTime<Utc>) -> String {
+    date_time_label(&local_time(*at))
+}
+
+/// A time already on some clock, written with that clock's offset.
+fn date_time_label(local: &DateTime<chrono::FixedOffset>) -> String {
+    format!(
+        "{} {}",
+        local.format("%-d %b %Y, %H:%M"),
+        utc_offset_label(local.offset())
+    )
+}
+
 /// `UTC`, `UTC+2`, `UTC-5` or `UTC+5:30`: the offset a local time is in.
 pub(super) fn utc_offset_label(offset: &chrono::FixedOffset) -> String {
     let east = offset.local_minus_utc() / 60;
@@ -2727,6 +2743,13 @@ mod local_day_tests {
         assert_eq!(label(-5 * 3600), "UTC-5");
         assert_eq!(label(5 * 3600 + 30 * 60), "UTC+5:30");
         assert_eq!(label(-(3 * 3600 + 30 * 60)), "UTC-3:30");
+        // A date and time names the clock it is on.
+        let at = Utc.with_ymd_and_hms(2026, 11, 2, 20, 5, 0).unwrap();
+        let on = |secs| date_time_label(&at.with_timezone(&FixedOffset::east_opt(secs).unwrap()));
+        assert_eq!(on(0), "2 Nov 2026, 20:05 UTC");
+        assert_eq!(on(3600), "2 Nov 2026, 21:05 UTC+1");
+        assert_eq!(on(-5 * 3600), "2 Nov 2026, 15:05 UTC-5");
+        assert_eq!(local_date_time(&at), "2 Nov 2026, 20:05 UTC");
         // The local time and the local day are the same conversion.
         let at = Utc.with_ymd_and_hms(2026, 7, 15, 22, 30, 0).unwrap();
         assert_eq!(local_time(at).date_naive(), local_day(at));
@@ -2771,8 +2794,12 @@ mod local_day_tests {
         let game = game.split("#[cfg(test)]").next().unwrap();
         let time = &game[game.find("fn game_time(").unwrap()..];
         let time = &time[..time.find("\n}\n").unwrap()];
-        assert!(time.contains("super::local_time(*played_at)"), "{time}");
+        assert!(time.contains("super::local_date_time(played_at)"), "{time}");
         assert!(!time.contains("played_at.format("), "{time}");
+        let source = include_str!("mod.rs");
+        let body = &source[source.find("pub(crate) fn local_date_time(").unwrap()..];
+        let body = &body[..body.find("\n}\n").unwrap()];
+        assert!(body.contains("date_time_label(&local_time(*at))"), "{body}");
         let overview = include_str!("overview.rs");
         let form_row = &overview[overview.find("fn form_row(").unwrap()..];
         let form_row = &form_row[..form_row.find("rsx!").unwrap()];
