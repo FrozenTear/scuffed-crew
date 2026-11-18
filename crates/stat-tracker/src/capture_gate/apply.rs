@@ -569,6 +569,9 @@ pub fn apply_gate_seeded(
             // Set by the capture path after the gate, not here.
             unsure_shown: [0; GATE_COLS],
             has_unsure_shown: [false; GATE_COLS],
+            unsure_base: [0; GATE_COLS],
+            has_unsure_base: [false; GATE_COLS],
+            unsure_base_secs: [0; GATE_COLS],
             boundary_anchor,
         },
         holds,
