@@ -1,387 +1,387 @@
+//! Styles for the bracket, its slots and the standings tables.
+//!
+//! The bracket follows the `d1-tournament-bracket` frames: round labels in one
+//! header row, slots below, all inside a scroller that owns the sideways
+//! overflow so the page never scrolls sideways. A `--bg` fade sits over the
+//! right edge of the scroller and the next column peeks under it.
+
 pub const BRACKET_STYLES: &str = r#"
-/* --- Bracket Layout --- */
-.bracket-container {
-    overflow-x: auto;
-    padding: 2rem 0;
+/* --- Hint line above a scroller ---
+   Swiping is a narrow-screen gesture: wider screens show the whole bracket
+   or the fade, so the swipe hint is hidden there. */
+.bracket-hint {
+  display: none;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-3);
+  min-width: 0;
+  color: var(--text-3);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  line-height: var(--leading-ui);
 }
+/* The round robin line also carries the column legend, which every width
+   needs: it shows everywhere and only its swipe part is narrow only. */
+.bracket-hint.is-legend {
+  display: flex;
+  flex-wrap: wrap;
+}
+.bracket-swipe {
+  display: none;
+  align-items: center;
+  gap: var(--space-2);
+}
+@media (max-width: 820px) {
+  .bracket-hint { display: flex; }
+  .bracket-swipe { display: inline-flex; }
+}
+.swipe-arrow {
+  flex: 0 0 var(--space-3);
+  box-sizing: border-box;
+  width: var(--space-3);
+  height: var(--space-3);
+  border-block-end: var(--focus-ring-width) solid currentColor;
+  border-inline-end: var(--focus-ring-width) solid currentColor;
+  transform: rotate(-45deg);
+}
+
+/* --- Scroller --- */
+.bracket-clip {
+  position: relative;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}
+.bracket-scroller {
+  position: relative;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: var(--space-3);
+  -webkit-overflow-scrolling: touch;
+}
+.bracket-scroller:focus-visible,
+.bracket-table-scroll:focus-visible {
+  outline: var(--focus-ring-width) solid var(--focus-ring);
+  outline-offset: var(--focus-ring-offset);
+}
+/* Over the clipped column at the right edge. The bracket ends with the same
+   width of padding, so the last column can scroll clear of it. */
+.bracket-fade {
+  pointer-events: none;
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: var(--space-8);
+  background: linear-gradient(to left, var(--bg) 0%, var(--bg) var(--space-2), transparent 100%);
+  z-index: 1;
+}
+
+/* --- Bracket grid: one header row, one row of rounds --- */
 .bracket {
-    display: flex;
-    align-items: stretch;
-    gap: 0;
-    min-width: max-content;
+  box-sizing: content-box;
+  display: grid;
+  grid-template-columns: repeat(var(--bracket-cols), calc(var(--space-8) * 4));
+  grid-template-rows: auto 1fr;
+  column-gap: var(--space-5);
+  row-gap: var(--space-3);
+  align-items: stretch;
+  width: max-content;
+  padding-inline-end: var(--space-8);
 }
+.bracket-head {
+  grid-row: 1;
+  margin: 0;
+  min-width: 0;
+  min-height: var(--space-6);
+  display: flex;
+  align-items: center;
+  font-family: var(--font-head);
+  font-size: var(--text-sm);
+  font-weight: var(--font-label-weight);
+  letter-spacing: var(--font-head-tracking);
+  line-height: var(--leading-ui);
+  color: var(--text-3);
+}
+/* Every round is as tall as the tallest, and its slots share that height
+   evenly, so a later round's slot sits centred between its two feeders. */
 .bracket-round {
-    display: flex;
-    flex-direction: column;
-    justify-content: space-around;
-    min-width: 220px;
-    gap: 1rem;
-    padding: 0 0.5rem;
-}
-.bracket-round-title {
-    text-align: center;
-    font-family: var(--font-head);
-    font-weight: 700;
-    font-size: 0.75rem;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--text-subtle);
-    margin-bottom: 0.5rem;
+  grid-row: 2;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-around;
+  gap: var(--space-4);
+  min-width: 0;
 }
 
-/* --- Match Card --- */
-.match-card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    overflow: hidden;
-    min-width: 200px;
-    transition: border-color 0.2s;
+/* --- Slot: team, result line, team --- */
+.bracket-slot {
+  box-sizing: border-box;
+  min-width: 0;
+  padding: var(--space-3);
+  background: var(--card-bg);
+  color: var(--card-fg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--card-radius);
+  font-family: var(--font-body);
+  font-size: var(--text-md);
+  line-height: var(--leading-ui);
 }
-.match-card:hover {
-    border-color: var(--accent-soft);
+.bracket-slot.is-live { border-color: var(--border-strong); }
+.bracket-slot p {
+  margin: 0;
+  overflow-wrap: anywhere;
 }
-.match-card.live {
-    border-color: var(--win);
-    box-shadow: 0 0 12px color-mix(in srgb, var(--win) 30%, transparent);
+.bracket-slot p + p { margin-top: var(--space-1); }
+/* The winner is the heavier name, the mark points at it and the result line
+   says "Won": never colour alone. An open slot ("To be decided") keeps the
+   team ink, as the frames draw the champion slot; only the result line under
+   it is muted. */
+.slot-team.is-winner { font-weight: var(--font-label-weight); }
+.bracket-slot .slot-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-3);
+  font-size: var(--text-sm);
 }
-.match-card.completed {
-    opacity: 0.85;
+.bracket-slot.is-live .slot-meta {
+  color: var(--text);
+  font-weight: var(--font-label-weight);
 }
-.match-card.bye {
-    border-style: dashed;
-    opacity: 0.5;
+.slot-mark {
+  flex: 0 0 auto;
+  width: 0;
+  height: 0;
+  border-inline: var(--space-1) solid transparent;
 }
-
-.team-slot {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0.4rem 0.6rem;
-    gap: 0.5rem;
-    transition: opacity 0.2s;
+.slot-mark.is-up { border-block-end: var(--space-2) solid currentColor; }
+.slot-mark.is-down { border-block-start: var(--space-2) solid currentColor; }
+.bracket-slot .slot-codes {
+  margin-top: var(--space-2);
+  color: var(--text-3);
+  font-size: var(--text-xs);
 }
-.team-slot + .team-slot {
-    border-top: 1px solid color-mix(in srgb, var(--text) 6%, transparent);
-}
-.team-slot.winner {
-    background: color-mix(in srgb, var(--accent) 8%, transparent);
-}
-.team-slot.loser {
-    opacity: 0.45;
-}
-.team-slot-seed {
-    font-family: var(--font-mono);
-    font-size: 0.65rem;
-    color: var(--text-subtle);
-    min-width: 1.5rem;
-}
-.team-slot-name {
-    flex: 1;
-    font-size: 0.82rem;
-    font-weight: 600;
-    color: var(--text);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-.team-slot-name.tbd {
-    font-style: italic;
-    color: var(--text-subtle);
-    font-weight: 400;
-}
-.team-slot-score {
-    font-family: var(--font-mono);
-    font-size: 0.85rem;
-    font-weight: 700;
-    min-width: 1.5rem;
-    text-align: center;
-}
-.team-slot.winner .team-slot-score {
-    color: var(--accent-text);
+.slot-code {
+  font-family: var(--font-mono);
+  color: var(--text);
 }
 
-.match-card-status {
-    text-align: center;
-    font-family: var(--font-mono);
-    font-size: 0.6rem;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    padding: 0.15rem 0;
-    color: var(--text-subtle);
-}
-.match-card-status.live {
-    color: var(--win);
-}
-.match-card-status.live::before {
-    content: '';
-    display: inline-block;
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--win);
-    margin-right: 0.3rem;
-    vertical-align: middle;
-    animation: pulse-dot 1.5s ease-in-out infinite;
-}
-@keyframes pulse-dot {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.3; }
+/* --- Notes and section text --- */
+.bracket-note {
+  margin: 0;
+  color: var(--text-3);
+  font-family: var(--font-body);
+  font-size: var(--text-md);
+  line-height: var(--leading-body);
 }
 
-/* --- Replay Codes --- */
-.match-replay-codes {
-    display: flex;
-    gap: 0.25rem;
-    padding: 0.2rem 0.6rem 0.3rem;
-    flex-wrap: wrap;
+/* --- Standings and results tables --- */
+/* Positioned so the visually hidden header names stay inside the scroller:
+   without it they hang off the page and widen it on a phone. */
+.bracket-table-scroll {
+  position: relative;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  background: var(--table-row-bg);
+  border: 1px solid var(--table-row-border);
+  border-radius: var(--table-radius);
 }
-.replay-code {
-    font-family: var(--font-mono);
-    font-size: 0.6rem;
-    color: var(--text-subtle);
-    background: var(--surface-sunken);
-    padding: 0.1rem 0.35rem;
-    border-radius: 3px;
-    letter-spacing: 0.04em;
-    cursor: pointer;
-    transition: background 0.15s, color 0.15s;
+.bracket-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--table-font);
+  font-size: var(--text-sm);
+  line-height: var(--leading-ui);
+  color: var(--table-row-fg);
+  font-variant-numeric: tabular-nums;
 }
-.replay-code:hover {
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
-    color: var(--text);
+.bracket-table th,
+.bracket-table td {
+  box-sizing: border-box;
+  height: var(--table-row-height);
+  padding: var(--space-2) var(--table-pad-x);
+  text-align: left;
+  vertical-align: middle;
+  white-space: nowrap;
+  border-bottom: 1px solid var(--table-row-border);
 }
-
-/* --- Double Elim Layout --- */
-.double-elim-container {
-    display: flex;
-    flex-direction: column;
-    gap: 2rem;
+.bracket-table tbody tr:last-child th,
+.bracket-table tbody tr:last-child td { border-bottom: 0; }
+.bracket-table thead th {
+  color: var(--table-header-fg);
+  font-weight: var(--table-header-weight);
+  font-size: var(--text-xs);
 }
-.double-elim-section-label {
-    font-family: var(--font-head);
-    font-weight: 700;
-    font-size: 0.8rem;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--accent-text);
-    padding-bottom: 0.5rem;
-    border-bottom: 1px solid var(--border);
-    margin-bottom: 0.5rem;
+.bracket-table tbody th {
+  font-weight: var(--font-label-weight);
+  color: var(--table-row-fg);
 }
-
-/* --- Round Robin Table --- */
-.rr-table-container { overflow-x: auto; }
-.rr-table { border-collapse: collapse; font-size: 0.8rem; }
-.rr-table th, .rr-table td {
-    padding: 0.4rem 0.6rem;
-    border: 1px solid var(--border);
-    text-align: center;
-    min-width: 3rem;
+.bracket-table .is-num { text-align: right; }
+.bracket-table .is-muted { color: var(--table-row-muted); }
+.bracket-table .rr-self { background: var(--table-row-alt); }
+.rr-word {
+  display: block;
+  font-weight: var(--font-label-weight);
 }
-.rr-table th {
-    background: var(--surface-sunken);
-    color: var(--text-subtle);
-    font-family: var(--font-mono);
-    font-size: 0.7rem;
-    text-transform: uppercase;
-}
-.rr-table .rr-name {
-    text-align: left;
-    font-weight: 600;
-    color: var(--text);
-    white-space: nowrap;
-}
-.rr-table .rr-self { background: var(--bg); }
-.rr-table .rr-win { color: var(--win); font-weight: 700; }
-.rr-table .rr-loss { color: var(--loss); font-weight: 700; }
-.rr-table .rr-pending { color: var(--text-subtle); }
-.rr-score-with-codes { border-bottom: 1px dotted var(--text-subtle); cursor: help; }
-
-/* --- Swiss Standings --- */
-.swiss-standings { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-.swiss-standings th {
-    text-align: left;
-    padding: 0.5rem 0.75rem;
-    background: var(--surface-sunken);
-    color: var(--text-subtle);
-    font-size: 0.7rem;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    border-bottom: 1px solid var(--border);
-}
-.swiss-standings td {
-    padding: 0.5rem 0.75rem;
-    border-bottom: 1px solid color-mix(in srgb, var(--text) 6%, transparent);
-    color: var(--text);
-}
-.swiss-standings .rank-col { font-family: var(--font-mono); color: var(--text-subtle); width: 2.5rem; }
-.swiss-standings .record-col { font-family: var(--font-mono); font-weight: 700; }
-
-/* --- Mobile Fallback --- */
-.bracket-mobile { display: none; }
-.bracket-desktop { display: block; }
-@media (max-width: 600px) {
-    .bracket-mobile { display: block; }
-    .bracket-desktop { display: none; }
-    .match-card { min-width: 0; }
-}
-.bracket-mobile-round { margin-bottom: 1.5rem; }
-.bracket-mobile-round-title {
-    font-family: var(--font-head);
-    font-weight: 700;
-    font-size: 0.8rem;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--text-subtle);
-    margin-bottom: 0.5rem;
-    padding-bottom: 0.25rem;
-    border-bottom: 1px solid var(--border);
-}
-.bracket-mobile-matches {
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-}
-
-/* --- Tournament Pages --- */
-.tournaments-page, .tournament-detail-page {
-    min-height: 100vh;
-    padding: 2rem 2rem 4rem;
-    max-width: 1000px;
-    margin: 0 auto;
-}
-.tournaments-page h1, .tournament-detail-page h1 {
-    font-family: var(--font-head);
-    font-size: 3rem;
-    color: var(--text);
-    letter-spacing: 3px;
-    margin-bottom: 0.5rem;
-    text-align: center;
-}
-.tournaments-page h1::after, .tournament-detail-page h1::after {
-    content: '';
-    display: block;
-    width: 60px;
-    height: 3px;
-    background: var(--accent-solid);
-    margin-top: 0.75rem;
-    margin-bottom: 2.5rem;
-    border-radius: 2px;
-    margin-left: auto;
-    margin-right: auto;
-}
-.tournament-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-    gap: 1rem;
-}
-.tournament-card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 1.25rem;
-    text-decoration: none;
-    color: inherit;
-    transition: border-color 0.2s, transform 0.15s;
-    display: block;
-    text-align: center;
-}
-.tournament-card:hover {
-    border-color: var(--accent-soft);
-    transform: translateY(-2px);
-}
-.tournament-card-name {
-    font-family: var(--font-head);
-    font-weight: 700;
-    font-size: 1.2rem;
-    color: var(--text);
-    margin-bottom: 0.4rem;
-}
-.tournament-card-meta {
-    display: flex;
-    justify-content: center;
-    gap: 0.75rem;
-    flex-wrap: wrap;
-    font-size: 0.78rem;
-    color: var(--text-subtle);
-}
-.tournament-card-desc {
-    color: var(--text-3);
-    font-size: 0.82rem;
-    margin-top: 0.4rem;
-    line-height: 1.5;
-}
-.tournament-card-status {
-    display: inline-block;
-    padding: 0.15rem 0.5rem;
-    border-radius: var(--radius-pill);
-    font-size: 0.65rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    margin-top: 0.5rem;
-}
-/* registration/upcoming → accent (upcoming opportunity) */
-.tournament-card-status.registration {
-    background: color-mix(in srgb, var(--accent) 20%, transparent);
-    color: var(--accent-text);
-}
-/* in_progress → ok (active/live) */
-.tournament-card-status.in_progress {
-    background: color-mix(in srgb, var(--win) 20%, transparent);
-    color: var(--win);
-}
-/* completed → text-2 (neutral, past) */
-.tournament-card-status.completed {
-    background: color-mix(in srgb, var(--text-3) 15%, transparent);
-    color: var(--text-3);
-}
-/* draft → warn (pending/not yet open) */
-.tournament-card-status.draft {
-    background: color-mix(in srgb, var(--warn) 20%, transparent);
-    color: var(--warn);
-}
-
-.tournament-header { margin-bottom: 2rem; text-align: center; }
-.tournament-meta {
-    display: flex;
-    justify-content: center;
-    gap: 1.5rem;
-    flex-wrap: wrap;
-    color: var(--text-3);
-    font-size: 0.85rem;
-    margin-bottom: 1rem;
-}
-.tournament-meta span { font-family: var(--font-mono); font-size: 0.8rem; }
-.tournament-description {
-    color: var(--text-3);
-    max-width: 700px;
-    line-height: 1.7;
-    margin: 0 auto 1rem;
-    text-align: center;
-}
-.tournament-external-link {
-    display: inline-block;
-    color: var(--accent-text);
-    font-size: 0.85rem;
-    margin-bottom: 1.5rem;
-}
-.tournament-home-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-    gap: 1rem;
-}
-.tournament-section-title {
-    font-family: var(--font-head);
-    font-weight: 700;
-    font-size: 1rem;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--text-subtle);
-    margin: 2rem 0 1rem;
-    padding-bottom: 0.5rem;
-    border-bottom: 1px solid var(--border);
-    text-align: center;
+.rr-word.is-win { color: var(--win); }
+.rr-word.is-loss { color: var(--loss); }
+.rr-detail {
+  display: block;
+  color: var(--table-row-muted);
+  font-size: var(--text-xs);
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::BRACKET_STYLES;
+    use crate::components::ui::test_support::{
+        assert_ink_clears_aa, assert_sizes_from_tokens, css_rule, has_decl, media_block,
+    };
+
+    #[test]
+    fn sizes_and_type_come_from_tokens() {
+        assert_sizes_from_tokens(BRACKET_STYLES);
+    }
+
+    #[test]
+    fn scroller_owns_the_sideways_overflow() {
+        let scroller = css_rule(BRACKET_STYLES, ".bracket-scroller {");
+        for decl in ["overflow-x: auto", "min-width: 0", "max-width: 100%"] {
+            assert!(has_decl(&scroller, decl), "{decl}: {scroller}");
+        }
+        let clip = css_rule(BRACKET_STYLES, ".bracket-clip {");
+        assert!(has_decl(&clip, "min-width: 0"), "{clip}");
+        assert!(has_decl(&clip, "position: relative"), "{clip}");
+        let table = css_rule(BRACKET_STYLES, ".bracket-table-scroll {");
+        assert!(has_decl(&table, "overflow-x: auto"), "{table}");
+        assert!(has_decl(&table, "min-width: 0"), "{table}");
+        // Hidden header names are absolutely placed: the scroller must be
+        // their containing block or they widen the page.
+        assert!(has_decl(&table, "position: relative"), "{table}");
+    }
+
+    #[test]
+    fn fade_is_a_bg_gradient_one_space_8_wide() {
+        let fade = css_rule(BRACKET_STYLES, ".bracket-fade {");
+        assert!(has_decl(&fade, "width: var(--space-8)"), "{fade}");
+        assert!(has_decl(&fade, "pointer-events: none"), "{fade}");
+        assert!(
+            fade.contains("linear-gradient(to left, var(--bg)"),
+            "{fade}"
+        );
+        // The bracket leaves room so its last column scrolls clear of the fade.
+        let bracket = css_rule(BRACKET_STYLES, ".bracket {");
+        assert!(
+            has_decl(&bracket, "padding-inline-end: var(--space-8)"),
+            "{bracket}"
+        );
+    }
+
+    #[test]
+    fn hint_keeps_the_frame_gap_above_the_scroller() {
+        // Browser pass: the frame puts `--space-3` under the hint on top of
+        // the page gap; the app had none, so the round labels sat 12px high.
+        let hint = css_rule(BRACKET_STYLES, ".bracket-hint {");
+        assert!(has_decl(&hint, "margin: 0 0 var(--space-3)"), "{hint}");
+    }
+
+    #[test]
+    fn open_slot_is_not_muted_like_the_result_line() {
+        // The frames draw "To be decided" in the champion slot in the team
+        // ink; only the line under it is muted.
+        assert!(!BRACKET_STYLES.contains(".slot-team.is-open"));
+        let meta = css_rule(BRACKET_STYLES, ".bracket-slot .slot-meta {");
+        assert!(has_decl(&meta, "color: var(--text-3)"), "{meta}");
+    }
+
+    #[test]
+    fn heads_share_one_row_and_rounds_the_next() {
+        assert!(has_decl(
+            &css_rule(BRACKET_STYLES, ".bracket-head {"),
+            "grid-row: 1"
+        ));
+        assert!(has_decl(
+            &css_rule(BRACKET_STYLES, ".bracket-round {"),
+            "grid-row: 2"
+        ));
+    }
+
+    #[test]
+    fn scrollers_show_the_token_focus_ring() {
+        // Both scrollers share the one rule: the bracket and the tables.
+        let focus = css_rule(
+            BRACKET_STYLES,
+            ".bracket-scroller:focus-visible,\n.bracket-table-scroll:focus-visible {",
+        );
+        assert!(
+            has_decl(
+                &focus,
+                "outline: var(--focus-ring-width) solid var(--focus-ring)"
+            ),
+            "{focus}"
+        );
+    }
+
+    #[test]
+    fn later_rounds_centre_between_their_feeders() {
+        let grid = css_rule(BRACKET_STYLES, ".bracket {");
+        assert!(has_decl(&grid, "align-items: stretch"), "{grid}");
+        let round = css_rule(BRACKET_STYLES, ".bracket-round {");
+        assert!(has_decl(&round, "justify-content: space-around"), "{round}");
+    }
+
+    #[test]
+    fn the_swipe_hint_shows_on_narrow_screens_only() {
+        let hint = css_rule(BRACKET_STYLES, ".bracket-hint {");
+        assert!(has_decl(&hint, "display: none"), "{hint}");
+        let narrow = media_block(BRACKET_STYLES, "@media (max-width: 820px)");
+        assert!(
+            narrow.contains(".bracket-hint { display: flex; }"),
+            "{narrow}"
+        );
+    }
+
+    #[test]
+    fn the_round_robin_legend_shows_at_every_width() {
+        // Vision S4: the legend lived in the narrow-only hint, so above
+        // 820px the numbered columns had no key. The legend line shows at
+        // every width (outside any media block); only its swipe part waits
+        // for the narrow block.
+        let legend = css_rule(BRACKET_STYLES, ".bracket-hint.is-legend {");
+        assert!(has_decl(&legend, "display: flex"), "{legend}");
+        let swipe = css_rule(BRACKET_STYLES, ".bracket-swipe {");
+        assert!(has_decl(&swipe, "display: none"), "{swipe}");
+        let narrow = media_block(BRACKET_STYLES, "@media (max-width: 820px)");
+        assert!(
+            narrow.contains(".bracket-swipe { display: inline-flex; }"),
+            "{narrow}"
+        );
+        // Top level, so no media query gates it, and it comes after the
+        // plain hint rule so it wins over `display: none`.
+        let top = BRACKET_STYLES.find(".bracket-hint.is-legend {").unwrap();
+        let base = BRACKET_STYLES.find(".bracket-hint {").unwrap();
+        assert!(top > base);
+        let before = &BRACKET_STYLES[..top];
+        assert_eq!(before.matches('{').count(), before.matches('}').count());
+        assert!(!narrow.contains("is-legend"), "{narrow}");
+    }
+
+    #[test]
+    fn result_words_clear_text_contrast_on_the_table_fill() {
+        // `--table-row-bg` is `--surface`, `--table-row-alt` is not used
+        // under a result word.
+        assert_ink_clears_aa("--win", "--surface", 4.5);
+        assert_ink_clears_aa("--loss", "--surface", 4.5);
+        assert_ink_clears_aa("--text-3", "--surface", 4.5);
+    }
+}
