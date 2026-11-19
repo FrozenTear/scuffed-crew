@@ -1472,5 +1472,7 @@ mod bytecap;
 mod digit_timing;
 #[path = "tests_training_crops_miss.rs"]
 mod miss;
+#[path = "tests_training_crops_race.rs"]
+mod race;
 #[path = "tests_training_crops_top_band.rs"]
 mod top_band;

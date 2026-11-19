@@ -40,9 +40,11 @@
 //!   so it offers none.
 //!
 //! One set per kind per game (`hero_icon`: per hero), so a game does not
-//! fill the outbox. A miss (no box, no card edge, no header, chat over the
-//! row, or a card over the 256 px edge cap) skips that crop and nothing
-//! else. If a `hero_icon` is still refused after that downscale, that hero
+//! fill the outbox. The Tab claims that key before its save starts on the
+//! blocking thread ([`claim_offered`]), so two close Tabs cannot both
+//! save it; a save that keeps nothing releases the claim. A miss (no box,
+//! no card edge, no header, chat over the row, or a card over the 256 px
+//! edge cap) skips that crop and nothing else. If a `hero_icon` is still refused after that downscale, that hero
 //! is not marked offered, so a later Tab of the same game can retry. A
 //! consented crop lost to an error leaves the training warning. The Tab
 //! records either way.
@@ -110,7 +112,7 @@ fn offer_key(session_id: &str, kind: sync::UploadKind, hero: &str) -> String {
     format!("{session_id}\n{}\n{hero}", kind.as_str())
 }
 
-fn offered(key: &str) -> bool {
+pub(super) fn offered(key: &str) -> bool {
     OFFERED
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -118,13 +120,60 @@ fn offered(key: &str) -> bool {
         .any(|k| k == key)
 }
 
-fn mark_offered(key: String) {
+pub(super) fn mark_offered(key: String) {
+    claim_offered(key);
+}
+
+/// Mark `key` offered unless it already is, under one lock: `true` when
+/// this call marked it (the caller owns the offer), `false` when it was
+/// already offered or claimed.
+pub(super) fn claim_offered(key: String) -> bool {
     let mut keys = OFFERED.lock().unwrap_or_else(|e| e.into_inner());
-    if !keys.contains(&key) {
-        keys.push_back(key);
+    if keys.contains(&key) {
+        return false;
     }
+    keys.push_back(key);
     while keys.len() > OFFERED_KEEP {
         keys.pop_front();
+    }
+    true
+}
+
+/// Release a claim from [`claim_offered`], so a later frame may offer again.
+pub(super) fn unmark_offered(key: &str) {
+    OFFERED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|k| k != key);
+}
+
+/// Blocking crop tasks started and not yet done, so a test can wait for
+/// them to land instead of sleeping.
+#[cfg(test)]
+pub(super) static CROP_TASKS_IN_FLIGHT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Held for writing, it keeps every blocking crop task from starting its
+/// work, so a test can offer two Tabs before the first one saves.
+#[cfg(test)]
+pub(super) static CROP_TASK_GATE: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
+/// Counts one blocking crop task in [`CROP_TASKS_IN_FLIGHT`] until dropped.
+#[cfg(test)]
+struct InFlight;
+
+#[cfg(test)]
+impl InFlight {
+    fn start() -> Self {
+        CROP_TASKS_IN_FLIGHT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        InFlight
+    }
+}
+
+#[cfg(test)]
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        CROP_TASKS_IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -142,16 +191,22 @@ pub(crate) fn archive_tab_training_crops(
     source: TabCropSource<'_>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     use stat_tracker::sync::UploadKind::{HeroIcon, StatDigits};
+    // Each kind is claimed here, before the save starts on the blocking
+    // thread, so two close Tabs cannot both pass the offered check and
+    // save the same kind twice. The task releases a claim it could not
+    // keep, so a later Tab retries.
     let hero = sync::training_kind_on(data_dir, HeroIcon)
         .then(|| hero_icon_crop(frame, session_id, source.panel, source.pack_hero))
-        .flatten();
-    // A Tab under the big stat gate is not marked offered, so a later Tab
-    // of this game retries.
+        .flatten()
+        .filter(|crop| claim_offered(offer_key(session_id, HeroIcon, &crop.hero)));
+    // A Tab under the big stat gate claims nothing, so a later Tab of this
+    // game retries.
     let digit_row = (sync::training_kind_on(data_dir, StatDigits)
         && stat_digits_qualify(source.damage, source.healing, source.mitigation)
         && !offered(&offer_key(session_id, StatDigits, "")))
     .then(|| stat_digit_row(source.row, source.own_row))
-    .flatten();
+    .flatten()
+    .filter(|_| claim_offered(offer_key(session_id, StatDigits, "")));
     if hero.is_none() && digit_row.is_none() {
         return None;
     }
@@ -160,14 +215,22 @@ pub(crate) fn archive_tab_training_crops(
     let frame = frame.clone();
     let team_size = source.team_size;
     let digits_hero = source.hero.unwrap_or_default().to_string();
+    #[cfg(test)]
+    let in_flight = InFlight::start();
     Some(tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        let _in_flight = in_flight;
+        #[cfg(test)]
+        drop(CROP_TASK_GATE.read().unwrap_or_else(|e| e.into_inner()));
         let size = (frame.width(), frame.height());
         if let Some(crop) = hero {
             keep_hero_icon(&dir, &session, size, &frame, crop);
         }
         if let Some(row) = digit_row {
             let cells = stat_digit_crops(&frame, row, team_size);
-            if !cells.is_empty() {
+            if cells.is_empty() {
+                unmark_offered(&offer_key(&session, StatDigits, ""));
+            } else {
                 keep_stat_digits(&dir, &session, size, &digits_hero, cells);
             }
         }
@@ -830,7 +893,8 @@ pub(crate) fn encode_hero_icon(image: &image::DynamicImage) -> Result<Vec<u8>, H
 }
 
 /// Apply an [`encode_hero_icon`] result: keep a fitting PNG, warn on an
-/// encode error, and skip an over-cap miss without marking the hero offered.
+/// encode error, and skip an over-cap miss. Either miss releases the hero's
+/// claim, so a later Tab of the game can retry.
 pub(crate) fn keep_hero_icon_result(
     dir: &Path,
     session: &str,
@@ -840,14 +904,18 @@ pub(crate) fn keep_hero_icon_result(
 ) {
     match result {
         Ok(png) => keep_encoded_hero_icon(dir, session, hero, meta, png),
-        Err(HeroIconEncodeMiss::Encode) => sync::warn_crop_lost(dir, sync::UploadKind::HeroIcon),
-        Err(HeroIconEncodeMiss::OverCap) => {}
+        Err(miss) => {
+            if matches!(miss, HeroIconEncodeMiss::Encode) {
+                sync::warn_crop_lost(dir, sync::UploadKind::HeroIcon);
+            }
+            unmark_offered(&offer_key(session, sync::UploadKind::HeroIcon, hero));
+        }
     }
 }
 
-/// Keep an already-encoded `hero_icon` PNG. The hero is marked offered
-/// only when at least one crop was actually kept, so a cap refusal or a
-/// write error can be retried on a later Tab of the same game.
+/// Keep an already-encoded `hero_icon` PNG. The hero stays marked offered
+/// only when at least one crop was actually kept; a cap refusal or a write
+/// error releases its claim, so a later Tab of the same game can retry.
 pub(crate) fn keep_encoded_hero_icon(
     dir: &Path,
     session: &str,
@@ -858,7 +926,7 @@ pub(crate) fn keep_encoded_hero_icon(
     let kind = sync::UploadKind::HeroIcon;
     match sync::keep_tab_crops(dir, session, kind, vec![(meta, png)]) {
         Some(n) if n > 0 => mark_offered(offer_key(session, kind, hero)),
-        _ => {}
+        _ => unmark_offered(&offer_key(session, kind, hero)),
     }
 }
 
@@ -871,6 +939,7 @@ fn keep_hero_icon(
 ) {
     let Some(meta) = sync::hero_icon_meta(w, h, &crop.hero, crop.score, crop.lead, crop.pack)
     else {
+        unmark_offered(&offer_key(session, sync::UploadKind::HeroIcon, &crop.hero));
         return;
     };
     let (x, y, cw, ch) = crop.rect;
@@ -897,14 +966,18 @@ fn keep_stat_digits(
             None => lost = true,
         }
     }
-    // keep_tab_crops warns itself on an error; a later Tab of the game may
-    // then try again.
+    // keep_tab_crops warns itself on an error. A write error or a lost
+    // cell releases the game's claim, so a later Tab of the game may try
+    // again.
+    let key = offer_key(session, kind, "");
     if sync::keep_tab_crops(dir, session, kind, crops).is_none() {
+        unmark_offered(&key);
         return;
     }
     if lost {
         sync::warn_crop_lost(dir, kind);
+        unmark_offered(&key);
         return;
     }
-    mark_offered(offer_key(session, kind, ""));
+    mark_offered(key);
 }
