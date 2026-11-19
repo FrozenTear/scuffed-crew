@@ -88,7 +88,7 @@ impl ConsentKind {
                 "The map name banner the tracker read at the start of a game. Off by default."
             }
             ConsentKind::Rank => {
-                "The rank panel crop (role, tier, SR and percentile), to help train rank recognition. Off by default."
+                "Small crops of the rank screen after each competitive game: your role (icon and name) when you queued for one, the rank emblem and tier, and the progress bar with your rank progress, percentile and change (its tags can show Victory or Defeat). The chat box, hero names and player names are not cut. Off by default."
             }
         }
     }
@@ -931,16 +931,14 @@ mod tests {
         }
         assert_eq!(ConsentKind::Rank.label(), "Share rank screen crops");
         let rank = ConsentKind::Rank.hint();
-        for part in [
-            "rank panel",
-            "role",
-            "tier",
-            "SR",
-            "percentile",
-            "recognition",
-        ] {
-            assert!(rank.contains(part), "{rank}");
-        }
+        assert_eq!(
+            rank,
+            "Small crops of the rank screen after each competitive game: your role (icon and name) when you queued for one, the rank emblem and tier, and the progress bar with your rank progress, percentile and change (its tags can show Victory or Defeat). The chat box, hero names and player names are not cut. Off by default."
+        );
+        // The bar crop carries the percentile, so the hint must name it.
+        assert!(rank.contains("percentile"), "{rank}");
+        // 746 dropped the rank SR crop (chat can sit over the digits). It comes back with issue 772.
+        assert!(!rank.contains("SR"), "{rank}");
     }
 
     #[test]
