@@ -63,9 +63,13 @@ async fn two_tabs_offered_back_to_back_keep_one_digit_set() {
     let dir = tempfile::tempdir().unwrap();
     set_consent(dir.path(), false, true);
     let frame = tab_frame();
+    // Held across both offers, so the first Tab's save has not started
+    // when the second Tab is offered, however the threads are scheduled.
+    let gate = CROP_TASK_GATE.write().unwrap_or_else(|e| e.into_inner());
     let first = archive_tab_training_crops(dir.path(), "race-b2b", &frame, source(None, None));
     let second = archive_tab_training_crops(dir.path(), "race-b2b", &frame, source(None, None));
-    assert!(first.is_some());
+    drop(gate);
+    assert!(first.is_some(), "the first Tab claims the set");
     assert!(second.is_none(), "the second Tab finds the set claimed");
     first.unwrap().await.unwrap();
     assert_eq!(
@@ -136,4 +140,66 @@ async fn a_hero_icon_lost_to_a_write_error_is_saved_by_a_later_tab() {
         1
     );
     assert!(!run(dir.path(), "race-hero-writefail", &frame, tab()).await);
+}
+
+/// A 1920x1080 Tab with no header labels (and no chat): the stat columns
+/// are not guessed, so no digit cell is cut.
+fn unlabelled_tab_frame() -> DynamicImage {
+    DynamicImage::ImageRgb8(RgbImage::from_fn(1920, 1080, |x, y| {
+        if x < 336 {
+            Rgb([40, 40, 40])
+        } else {
+            coord_pixel(x, y)
+        }
+    }))
+}
+
+#[tokio::test]
+async fn a_tab_that_cuts_no_digit_cell_releases_its_claim() {
+    let dir = tempfile::tempdir().unwrap();
+    set_consent(dir.path(), false, true);
+    let session = "race-nocells";
+    // The Tab qualifies and claims the set, but its save cuts no cell.
+    let unlabelled = unlabelled_tab_frame();
+    let started = offer_held(dir.path(), session, &unlabelled, vec![source(None, None)]).await;
+    assert_eq!(started, 1, "the Tab claims the set before its save");
+    assert!(sync::queued_crops(dir.path(), UploadKind::StatDigits).is_empty());
+    // The claim was released: a good Tab of the same game saves the set,
+    // and only once.
+    let frame = tab_frame();
+    assert!(run(dir.path(), session, &frame, source(None, None)).await);
+    assert_eq!(
+        sync::queued_crops(dir.path(), UploadKind::StatDigits).len(),
+        6
+    );
+    assert!(!run(dir.path(), session, &frame, source(None, None)).await);
+    assert_eq!(sync::training_warning(dir.path()), None);
+}
+
+#[tokio::test]
+async fn a_digit_save_that_keeps_no_cell_releases_its_claim() {
+    let dir = tempfile::tempdir().unwrap();
+    set_consent(dir.path(), false, true);
+    let session = "race-keptnone";
+    let frame = tab_frame();
+    // The Tab claims the set, then consent is turned off before its save
+    // runs: keep_tab_crops keeps no cell (Some(0)).
+    let gate = CROP_TASK_GATE.write().unwrap_or_else(|e| e.into_inner());
+    let handle = archive_tab_training_crops(dir.path(), session, &frame, source(None, None));
+    set_consent(dir.path(), false, false);
+    drop(gate);
+    handle.expect("the Tab claims the set").await.unwrap();
+    assert!(sync::queued_crops(dir.path(), UploadKind::StatDigits).is_empty());
+    // While consent stays off, a later Tab offers nothing.
+    assert!(!run(dir.path(), session, &frame, source(None, None)).await);
+    // The claim was released: once consent is back on, a later Tab of the
+    // same game saves the set, and only once.
+    set_consent(dir.path(), false, true);
+    assert!(run(dir.path(), session, &frame, source(None, None)).await);
+    assert_eq!(
+        sync::queued_crops(dir.path(), UploadKind::StatDigits).len(),
+        6
+    );
+    assert!(!run(dir.path(), session, &frame, source(None, None)).await);
+    assert_eq!(sync::training_warning(dir.path()), None);
 }

@@ -193,8 +193,9 @@ pub(crate) fn archive_tab_training_crops(
     use stat_tracker::sync::UploadKind::{HeroIcon, StatDigits};
     // Each kind is claimed here, before the save starts on the blocking
     // thread, so two close Tabs cannot both pass the offered check and
-    // save the same kind twice. The task releases a claim it could not
-    // keep, so a later Tab retries.
+    // save the same kind twice. The task releases a claim when it kept
+    // nothing of that kind (no cell cut, every crop refused or lost, or
+    // consent turned off mid-save), so a later Tab retries.
     let hero = sync::training_kind_on(data_dir, HeroIcon)
         .then(|| hero_icon_crop(frame, session_id, source.panel, source.pack_hero))
         .flatten()
@@ -947,6 +948,10 @@ fn keep_hero_icon(
     keep_hero_icon_result(dir, session, &crop.hero, meta, encode_hero_icon(&cut));
 }
 
+/// Keep this Tab's `stat_digits` cells. Like [`keep_encoded_hero_icon`],
+/// the game stays marked offered only when at least one cell was kept and
+/// none was lost; otherwise its claim is released, so a later Tab of the
+/// same game can retry.
 fn keep_stat_digits(
     dir: &Path,
     session: &str,
@@ -966,18 +971,19 @@ fn keep_stat_digits(
             None => lost = true,
         }
     }
-    // keep_tab_crops warns itself on an error. A write error or a lost
-    // cell releases the game's claim, so a later Tab of the game may try
-    // again.
+    // keep_tab_crops warns itself on an error. As for a hero icon, the
+    // game stays marked offered only when at least one cell was kept and
+    // none was lost. A write error, a lost cell, or a save that kept no
+    // cell (every cell refused, or consent turned off mid-save) releases
+    // the game's claim, so a later Tab of the game may try again; while
+    // consent stays off, keep_tab_crops keeps nothing for that Tab either.
     let key = offer_key(session, kind, "");
-    if sync::keep_tab_crops(dir, session, kind, crops).is_none() {
-        unmark_offered(&key);
-        return;
+    match sync::keep_tab_crops(dir, session, kind, crops) {
+        Some(_) if lost => {
+            sync::warn_crop_lost(dir, kind);
+            unmark_offered(&key);
+        }
+        Some(n) if n > 0 => mark_offered(key),
+        _ => unmark_offered(&key),
     }
-    if lost {
-        sync::warn_crop_lost(dir, kind);
-        unmark_offered(&key);
-        return;
-    }
-    mark_offered(key);
 }
