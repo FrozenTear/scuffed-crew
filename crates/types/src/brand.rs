@@ -301,6 +301,13 @@ impl SchemeCheck {
 
     /// One short sentence for the first failing pair in this scope (text,
     /// then ink, then fill), or `None` when every pair passes.
+    ///
+    /// A light scope built by [`AccentCheck::for_brand`] cannot fail today:
+    /// [`AccentRoles::derive`] for [`Scheme::Light`] darkens the solid and
+    /// the text until they reach 4.5:1 on every light surface, so all three
+    /// light pairs pass by construction. The light branch and its three
+    /// sentences are kept as a guard in case the derivation changes, and the
+    /// copy is pinned by a test that builds a failing light check directly.
     pub fn fail_reason(&self) -> Option<String> {
         let theme = self.theme_word();
         if !self.text_passes() {
@@ -653,6 +660,69 @@ mod tests {
         assert_eq!(
             check.fail_reason().as_deref(),
             Some("Ink on this accent does not reach 4.5:1 in the dark theme.")
+        );
+    }
+
+    /// Issue 795: no accent makes the derived light scope fail, so the light
+    /// sentences are never produced end to end. Build failing light checks
+    /// directly to pin them, one per pair, in the text, ink, fill order.
+    #[test]
+    fn light_fail_reasons_are_pinned_on_a_constructed_check() {
+        let passing = AccentCheck::for_brand(&BrandConfig::product_default()).light;
+        assert!(passing.passes());
+        assert_eq!(passing.scheme, Scheme::Light);
+        let text = SchemeCheck {
+            accent_on_bg: 4.49,
+            ..passing.clone()
+        };
+        let ink = SchemeCheck {
+            ink_on_accent: 4.49,
+            ..passing.clone()
+        };
+        let fill = SchemeCheck {
+            fill_on_surface: 2.99,
+            ..passing.clone()
+        };
+        let all = SchemeCheck {
+            accent_on_bg: 1.0,
+            ink_on_accent: 1.0,
+            fill_on_surface: 1.0,
+            ..passing.clone()
+        };
+        let text_reason = "This accent does not reach 4.5:1 on the light page background.";
+        let ink_reason = "Ink on this accent does not reach 4.5:1 in the light theme.";
+        let fill_reason = "Buttons in this accent do not reach 3:1 against the light page and cards, so they lose their edge.";
+        assert_eq!(text.fail_reason().as_deref(), Some(text_reason));
+        assert_eq!(ink.fail_reason().as_deref(), Some(ink_reason));
+        assert_eq!(fill.fail_reason().as_deref(), Some(fill_reason));
+        assert_eq!(all.fail_reason().as_deref(), Some(text_reason));
+
+        // A passing dark scope hands the light sentence through unchanged.
+        let dark = AccentCheck::for_brand(&BrandConfig::product_default()).dark;
+        assert!(dark.passes());
+        for (light, reason) in [(text, text_reason), (ink, ink_reason), (fill, fill_reason)] {
+            let check = AccentCheck {
+                dark: dark.clone(),
+                light,
+            };
+            assert!(!check.passes());
+            assert_eq!(check.fail_reason().as_deref(), Some(reason));
+        }
+    }
+
+    /// Issue 796: the light default `#6d4aff` is not a valid dark accent. Its
+    /// fill is 2.83:1 on the dark card `#282831`, under the 3:1 floor.
+    #[test]
+    fn light_default_fails_as_a_dark_accent() {
+        let check = AccentCheck::for_brand(&BrandConfig::from_settings("#6d4aff", "#6d4aff"));
+        assert!(check.light.passes());
+        assert!(!check.dark.fill_passes());
+        assert_eq!(format_ratio(check.dark.fill_on_surface), "2.8:1");
+        assert_eq!(
+            check.fail_reason().as_deref(),
+            Some(
+                "Buttons in this accent do not reach 3:1 against the dark page and cards, so they lose their edge."
+            )
         );
     }
 

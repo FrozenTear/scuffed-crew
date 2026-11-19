@@ -109,6 +109,13 @@ fn changed_accent_themes(
 /// (`None` when absent); `stored_*` fill in the absent side. Only the themes
 /// [`changed_accent_themes`] reports are checked, so an accent already stored
 /// that fails the lock does not block a save that leaves that theme's key out.
+///
+/// The light check cannot fail today: `AccentRoles::derive` for the light
+/// scheme darkens until every light pair passes, so every refusal this
+/// returns names the dark theme. The light check stays as a guard in case
+/// the derivation changes; its three sentences are pinned in `scuffed-types`
+/// (`light_fail_reasons_are_pinned_on_a_constructed_check`). Reasons and
+/// rules for API callers: `docs/api/site-settings.md`.
 fn brand_contrast_error(
     dark: Option<&str>,
     light: Option<&str>,
@@ -257,7 +264,7 @@ pub async fn get_settings(
 /// `officers_can_edit_teams`, is 403.
 ///
 /// `brand_font_display` (values, who may set it, every status code, upgrade
-/// and rollback): `docs/api/site-settings.md`.
+/// and rollback) and the brand accent contrast 400: `docs/api/site-settings.md`.
 pub async fn update_settings(
     State(state): State<AppState>,
     officer: OfficerUser,
@@ -553,6 +560,27 @@ mod brand_contrast_tests {
     fn dark_only_save_checks_the_requested_dark_accent() {
         assert!(brand_contrast_error(Some(BLOCKED), None, "", "#6d4aff").is_some());
         assert!(brand_contrast_error(Some("#46d8a4"), None, BLOCKED, "#6d4aff").is_none());
+    }
+
+    /// Issue 797: a stored failing accent is grandfathered only while its key
+    /// stays out of the request. Sending the same value again is checked.
+    #[test]
+    fn resending_a_stored_failing_dark_is_refused() {
+        assert_eq!(
+            brand_contrast_error(Some(BLOCKED), None, BLOCKED, "#6d4aff").as_deref(),
+            Some("Ink on this accent does not reach 4.5:1 in the dark theme.")
+        );
+    }
+
+    /// Issue 796: the light default is refused as a dark accent.
+    #[test]
+    fn light_default_is_refused_as_a_dark_accent() {
+        assert_eq!(
+            brand_contrast_error(Some("#6d4aff"), None, "", "#6d4aff").as_deref(),
+            Some(
+                "Buttons in this accent do not reach 3:1 against the dark page and cards, so they lose their edge."
+            )
+        );
     }
 
     #[test]

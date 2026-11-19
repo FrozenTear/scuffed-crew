@@ -1,4 +1,4 @@
-# Site settings: display font
+# Site settings: display font and brand accents
 
 `brand_font_display` is the display font an admin picks for the site. It is a
 field of the one `site_settings` row, next to `brand_accent_dark` and
@@ -62,9 +62,75 @@ A settings row written before the field existed reads as `""`.
 | Admin, any other string                 | 400 `{"error":"Display font must be urbanist or ibm-plex-sans (or empty for default)"}` |
 | Officer or admin, not a string or null  | 422, plain text from the JSON extractor                                                  |
 
+## Brand accents
+
+`brand_accent_dark` and `brand_accent_light` are the accent hexes for the
+dark and light themes. `PUT /api/settings` takes them as `""` (default) or
+`#rgb` / `#rrggbb`, stored lowercase as `#rrggbb`. Admin only, like
+`brand_font_display`.
+
+The defaults (`BrandConfig::product_default` in `scuffed-types`):
+
+- `#8f73ff` is the dark default. Used when `brand_accent_dark` is `""`.
+- `#6d4aff` is the light default. Used when both accents are `""`. When only
+  `brand_accent_light` is `""`, the light theme follows the dark accent.
+
+The two defaults are not interchangeable. `#6d4aff` fails as a dark accent:
+its fill is 2.83:1 on the dark card `#282831`, under the 3:1 floor, so
+`{"brand_accent_dark":"#6d4aff"}` is refused with the dark fill reason below.
+
+### Accent contrast lock
+
+`PUT /api/settings` applies the same contrast lock as the brand settings
+page (`/admin/brand`). A refused body changes nothing, including its other
+fields. The order of checks is: role (403), accent hex format (400
+`{"error":"Brand accent must be a hex color like #8f73ff (or empty for default)"}`),
+`brand_font_display` (400), then the contrast lock.
+
+Refusal: 400 with `{"error": <reason>}`. The reason is the first failing
+pair, checked in this order, dark theme first:
+
+| Theme | Pair                                   | Reason                                                                                                  |
+|-------|----------------------------------------|---------------------------------------------------------------------------------------------------------|
+| dark  | accent text on the page, under 4.5:1   | `This accent does not reach 4.5:1 on the dark page background.`                                         |
+| dark  | ink on the accent fill, under 4.5:1    | `Ink on this accent does not reach 4.5:1 in the dark theme.`                                            |
+| dark  | fill on page and cards, under 3:1      | `Buttons in this accent do not reach 3:1 against the dark page and cards, so they lose their edge.`     |
+| light | accent text on the page, under 4.5:1   | `This accent does not reach 4.5:1 on the light page background.`                                        |
+| light | ink on the accent fill, under 4.5:1    | `Ink on this accent does not reach 4.5:1 in the light theme.`                                           |
+| light | fill on page and cards, under 3:1      | `Buttons in this accent do not reach 3:1 against the light page and cards, so they lose their edge.`    |
+
+The light reasons cannot be returned today. The light theme's derived
+colours are darkened until every light pair passes, so every refusal names
+the dark theme. The light check is kept as a guard in case that derivation
+changes.
+
+Which themes are checked (`changed_accent_themes` in
+`crates/site-server/src/routes/settings.rs`):
+
+| Accent keys in the body                     | Checked                                                   |
+|---------------------------------------------|-----------------------------------------------------------|
+| Neither (absent or `null`)                  | Nothing. The lock does not run.                           |
+| `brand_accent_dark` only                    | Dark. Light too when the stored light accent is `""`, since light then follows dark. |
+| `brand_accent_light` only                   | Light only.                                               |
+| Both                                        | Dark and light. Stored accents are not read.              |
+
+A theme is checked on the accents the save would leave stored: the request
+value for a key that is sent, the stored value for one that is not.
+
+Stored accents that fail the lock (saved before the lock existed):
+
+- They do not block a save that leaves that theme's key out. A stored
+  failing dark accent does not stop a body with only `brand_accent_light`,
+  or with no accent keys at all.
+- Sending the same failing value again is refused like any other value.
+  There is no exemption for the stored value.
+- `GET /api/settings`, the body of a successful `PUT`, and the
+  `#sc-settings` block in the SPA shell still serve them as stored. The lock
+  runs on writes only.
+
 ## Upgrade
 
-The field is defined at startup with the other `site_settings` fields
+`brand_font_display` is defined at startup with the other `site_settings` fields
 (`crates/db/src/migrations.rs`):
 
 ```
