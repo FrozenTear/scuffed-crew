@@ -117,3 +117,21 @@ When the member's setting hides their games from officers, both routes answer
 The check runs before any match query. The body has no other keys: no match
 count, no last played date. An unknown `match_id` on a hidden member gets the
 same 403, so a blocked read does not reveal whether a game exists.
+
+## Teammate hero data (planned, 0.8)
+
+**Decision (2026-11-19, FrozenTear).** Rules for teammate hero and pairing
+stats, before any of it is built:
+
+- A crew member whose `stats_visibility` is `public` or `members` may have
+  the hero they played in a shared game counted in another member's stats,
+  including hero pairing win rates. Their name is not shown there.
+- A `private` member's games are never used in another member's stats.
+- Teammates who are not crew members (random teammates) appear with their
+  hero only. Their names are never read into, stored in or shown in these
+  stats.
+- Pairing stats show aggregates only, never a list of individual shared
+  games.
+
+The routes and views that apply this land in their own PRs, which update
+this section.
