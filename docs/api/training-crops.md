@@ -62,10 +62,11 @@ box. Each region is one where the rank screen itself draws no player or
 hero name (the role line, the emblem, the progress bar). Text another
 program or the game draws over the screen is the one way a name could
 reach a crop, so the tracker leaves out `rank_bar` when chat shows on a
-line beside the bar's rows, and `rank_role` unless the reader finds the
-role icon there (an overlay line across the band is not one). The tier
-box and the bar's right part have no overlay check; no overlay has been
-seen there on real screens. The mode banner is not sent at all: the
+line beside the bar's rows, and `rank_role` when the band shows no role
+icon (an open queue screen, or an overlay that hides the role line). An
+overlay beside the role icon is not detected, and the tier box and the
+bar's right part have no overlay check either; no overlay has been seen
+there on real screens. The mode banner is not sent at all: the
 voice overlay list under it can reach into its box with another
 person's name. The SR digits under the top hero's name are not sent
 either (since `rank-regions.3`): chat or overlay text drawn over them
@@ -104,8 +105,8 @@ minimum screen size (below) gives no crop. Measured on 61 real 1440p
 rank screens, the tier is 148-286 KiB, the bar 119-148 KiB and the role
 21-22 KiB (on 98 more, the tier up to 298 KiB and the bar up to
 197 KiB), each under 384 KiB with no scaling. With the 2 MiB request
-limit a request holds at most five crops at the cap. Three crops per
-competitive game make the 1000 cap about 333 games.
+limit a request holds at most five crops at the cap. At most three crops
+per competitive game make the 1000 cap at least about 333 games.
 
 A `rank` bound of 1536 by 720 is large enough to hold a whole 1280x720
 screen, and members are told crops are never whole screens. So every

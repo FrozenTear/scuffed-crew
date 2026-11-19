@@ -21,8 +21,9 @@
 //! reader finds the "RANK PROGRESS:" label ([`offer_for_tick`]), for
 //! the game the kit would file it under (same idle rule). The game is
 //! claimed before any pixel work, so a second rank screen tick while the
-//! first one's task still runs cuts nothing; an encode or write error
-//! releases the claim so a later frame may try again.
+//! first one's task still runs cuts nothing; an encode error, or a write
+//! error before any region was kept, releases the claim so a later frame
+//! may try again.
 //!
 //! With consent off nothing is cut, cloned or kept. A frame of a size the
 //! rank reader does not read (only 1080p and 1440p, so never 4K, ultrawide
@@ -132,6 +133,13 @@ type LabelReader = (PathBuf, PackStamp, Option<Arc<Reader>>);
 /// pack that does not load is not read again until it is replaced.
 static LABEL_READERS: std::sync::Mutex<Vec<LabelReader>> = std::sync::Mutex::new(Vec::new());
 
+#[cfg(test)]
+thread_local! {
+    /// Pack loads on this thread, so a test can pin that a pack that does
+    /// not load is not parsed again on the next tick.
+    pub(crate) static PACK_LOADS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Whether the rank reader's own rank screen test
 /// ([`Reader::is_rank_screen`]: the "RANK PROGRESS:" label matched against
 /// the rank-v1 pack) passes on `rgb`. Fails safe: no pack, a pack that
@@ -156,6 +164,8 @@ fn label_reader(data_dir: &Path) -> Option<Arc<Reader>> {
     {
         return r.clone();
     }
+    #[cfg(test)]
+    PACK_LOADS.with(|n| n.set(n.get() + 1));
     let reader = match Reader::load(data_dir) {
         Ok(r) => Some(Arc::new(r)),
         Err(error) => {
@@ -188,6 +198,10 @@ pub(crate) fn offer_rank_crop(
     let key = rank_key(&target.session);
     let (width, height) = (frame.width(), frame.height());
     let (min_w, min_h) = kind.crop_kind().min_screen()?;
+    // The poll path never reaches this branch: `offer_for_tick` refuses
+    // every size `Scale::from_dims` refuses first, and the smallest size it
+    // passes (1862x1059) is above this minimum. Only a direct call (a test)
+    // gets here.
     if width < min_w || height < min_h {
         // Once per game: the screen size does not change mid-game, so mark
         // the game offered and say why no rank crop comes from it.
@@ -374,7 +388,7 @@ pub(crate) fn rank_crops(frame: &DynamicImage) -> Result<Vec<RankCrop>, EncodeFa
                 tracing::debug!(
                     target: "scuffed_stat_tracker",
                     slot = region.slot_type(),
-                    "training crops: rank role line shows no role icon (open queue), not kept"
+                    "training crops: rank role line shows no role icon (open queue or unclear), not kept"
                 );
             }
             Err(RegionMiss::Chat) => {

@@ -915,7 +915,13 @@ fn the_label_reader_follows_the_pack_file_when_it_is_replaced() {
     let pack = dir.path().join(TEMPLATE_DIR).join(PACK_FILE);
     std::fs::write(&pack, b"{").unwrap();
     assert!(!rank_label_shows(dir.path(), &rgb));
+    let loads = PACK_LOADS.with(|n| n.get());
     assert!(!rank_label_shows(dir.path(), &rgb), "still the bad pack");
+    assert_eq!(
+        PACK_LOADS.with(|n| n.get()),
+        loads,
+        "a pack that does not load is not parsed again on the next tick"
+    );
     // A good pack again is picked up without a restart.
     save_label_pack(dir.path());
     assert!(rank_label_shows(dir.path(), &rgb));

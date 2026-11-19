@@ -19,7 +19,8 @@ use crate::theme::{
 const TITLE: &str = "What leaves your PC";
 
 /// The rank fields in the game upload: read values only, never a picture.
-pub(crate) const RANK_LINE: &str = "With Read my rank after Comp games on: what the tracker read on the rank screen after the game (role, rank, division, progress and its change, its labels, the share of players you rank above, hero SR and its change, the next mode banner) and on the queue title before it, each with how sure the reader was. Only the values it read are sent, never a picture of either screen.";
+/// Rank screen pictures go only as training crops, when that kind is on.
+pub(crate) const RANK_LINE: &str = "With Read my rank after Comp games on: what the tracker read on the rank screen after the game (role, rank, division, progress and its change, its labels, the share of players you rank above, hero SR and its change, the next mode banner) and on the queue title before it, each with how sure the reader was. Only the values it read are sent with the game, never a picture of either screen. Parts of the rank screen go only as training crops (below), when you turn that kind on.";
 
 /// Heading and lines for each thing that is sent.
 pub(crate) const SECTIONS: [(&str, &[&str]); 6] = [
@@ -36,8 +37,8 @@ pub(crate) const SECTIONS: [(&str, &[&str]); 6] = [
     (
         "Training crops, only the kinds you turn on at the website",
         &[
-            "Small pictures of what the tracker read from a Tab it keeps for its game, at their own size: the map name banner, and with the New reader your hero portrait from the career panel and the number cells of your own row.",
-            "With each: a random number for the game, the screen size and which screen it came from. The website also keeps the tracker version (its User-Agent) with each one. With a hero portrait, the hero, the name of the hero picture pack it was matched with, and how sure the reader was. With a number cell, its column and your hero. No names, chat, other players' rows or whole screens.",
+            "Small pictures of what the tracker read, at their own size. From a Tab it keeps for its game: the map name banner, and with the New reader your hero portrait from the career panel and the number cells of your own row. From the rank screen after a competitive game, up to three parts: your role icon and name when you queued for a role, the rank emblem and tier, and the progress bar with your progress, the \"Higher ranked than N%\" percentile and its change.",
+            "With each: a random number for the game, the screen size and which screen it came from. The website also keeps the tracker version (its User-Agent) with each one. With a hero portrait, the hero, the name of the hero picture pack it was matched with, and how sure the reader was. With a number cell, its column and your hero. With a rank screen part, which part it is and where on the screen it was cut. Never whole screens or other players' rows, and never a part where the game shows names or chat, but text another program draws over the game can still show in one.",
             "Sent with your token while Upload games is on. Delete my training crops, under Website account, removes them from the website.",
             "While Upload games is on, the tracker itself asks the website which kinds you allow, with your token, when it starts and every 10 minutes, even with every kind off, and before each send. That question sends no pictures and no games.",
         ],
@@ -61,7 +62,7 @@ pub(crate) const SECTIONS: [(&str, &[&str]); 6] = [
     (
         "Not sent",
         &[
-            "Screen captures, debug images and the stored games stay on this computer, apart from the training crops above. Share stat pictures and Report pictures are not read by this version and start off when they come.",
+            "Screen captures, debug images and the stored games stay on this computer, apart from the training crops above (parts of a Tab and of the rank screen). Share stat pictures and Report pictures are not read by this version and start off when they come.",
         ],
     ),
 ];
@@ -123,6 +124,8 @@ fn dialog<'a>() -> Element<'a, Message> {
 
 #[cfg(test)]
 mod tests {
+    use stat_tracker::sync::UploadKind;
+
     use super::*;
 
     #[test]
@@ -171,7 +174,8 @@ mod tests {
              after the game (role, rank, division, progress and its change, its labels, the \
              share of players you rank above, hero SR and its change, the next mode banner) \
              and on the queue title before it, each with how sure the reader was. Only the \
-             values it read are sent, never a picture of either screen."
+             values it read are sent with the game, never a picture of either screen. Parts \
+             of the rank screen go only as training crops (below), when you turn that kind on."
         );
         let help = crate::settings_keys::RANK_HELP;
         assert!(
@@ -179,6 +183,38 @@ mod tests {
             "{help}"
         );
         assert!(SECTIONS[0].1[4].starts_with("No pictures"));
+    }
+
+    /// What the training crop lines must say for `kind`. An exhaustive
+    /// match, so a new `UploadKind` does not build until it has copy here.
+    fn kind_copy(kind: UploadKind) -> &'static [&'static str] {
+        match kind {
+            UploadKind::HeroIcon => &["hero portrait"],
+            UploadKind::StatDigits => &["number cells of your own row"],
+            UploadKind::MapName => &["map name banner"],
+            UploadKind::Rank => &[
+                "rank screen after a competitive game",
+                "role icon",
+                "rank emblem and tier",
+                "progress bar",
+                "\"Higher ranked than N%\" percentile",
+                "With a rank screen part, which part it is and where on the screen it was cut.",
+            ],
+        }
+    }
+
+    /// The training crop lines name every kind the tracker can send, and
+    /// Not sent does not say rank screen pictures stay on this computer.
+    #[test]
+    fn the_training_lines_name_every_upload_kind() {
+        assert!(SECTIONS[1].0.starts_with("Training crops"));
+        let training = SECTIONS[1].1.join(" ");
+        for kind in UploadKind::ALL {
+            for said in kind_copy(kind) {
+                assert!(training.contains(said), "{kind:?}: {said}");
+            }
+        }
+        assert!(SECTIONS[5].0 == "Not sent" && SECTIONS[5].1[0].contains("rank screen"));
     }
 
     /// The training crop lines say what goes with each crop, and that the
