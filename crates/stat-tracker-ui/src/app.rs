@@ -994,7 +994,10 @@ impl TrackerApp {
                 });
                 if let Some(sid) = sid {
                     match &saved {
-                        Some(Ok(saved)) => crate::commands::show_saved(self, &sid, saved),
+                        Some(Ok(saved)) => {
+                            crate::commands::show_saved(self, &sid, saved);
+                            self.refresh_game(&sid);
+                        }
                         Some(Err(e)) => self.replace_toast(e.clone()),
                         None => self.replace_toast(crate::commands::GAME_GONE),
                     }
@@ -2348,6 +2351,22 @@ impl TrackerApp {
             Task::none()
         };
         Task::batch([report, self.tick_rest()])
+    }
+
+    /// Show the Edit just queued on game `sid` now, as the next reload
+    /// will ([`snapshot::load_snapshot`] overlays the queued commands). The
+    /// card and the next Edit form then start from the corrected values,
+    /// so a second save before the tracker rewrites `live_snapshot.json`
+    /// (or with it stopped) re-sends no stale read.
+    fn refresh_game(&mut self, sid: &str) {
+        let snap = snapshot::load_snapshot(&self.data_dir);
+        if let Some(fresh) = games_from_snapshot(&snap)
+            .into_iter()
+            .find(|g| g.session_id == sid)
+            && let Some(g) = self.games.iter_mut().find(|g| g.session_id == sid)
+        {
+            *g = fresh;
+        }
     }
 
     fn tick_rest(&mut self) -> Task<Message> {

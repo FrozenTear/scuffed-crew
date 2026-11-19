@@ -125,6 +125,25 @@ impl EditForm {
         e.mitigation = num(&self.mitigation, g.mitigation, "mitigation");
         e
     }
+
+    /// A stat field holds text that is not a number ("12,345"). [`Self::diff`]
+    /// leaves it out, as it does a blank one, so the save must not read it
+    /// as "nothing changed" and confirm the Check first stats.
+    pub fn has_unparsed_stat(&self) -> bool {
+        [
+            &self.elims,
+            &self.deaths,
+            &self.assists,
+            &self.damage,
+            &self.healing,
+            &self.mitigation,
+        ]
+        .iter()
+        .any(|s| {
+            let t = s.trim();
+            !t.is_empty() && t.parse::<u32>().is_err()
+        })
+    }
 }
 
 /// `None` = all time. `Some(id)` = that season.

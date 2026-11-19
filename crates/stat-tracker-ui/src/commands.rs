@@ -7,6 +7,7 @@ use stat_tracker::storage::{
     self, MatchEdit, SEGMENT_CLEAR, SEGMENT_CONFIRM, SEGMENT_DISMISS, StoreCommand, read_commands,
 };
 
+use crate::games_detail::Stat;
 use crate::model::{Game, Outcome};
 use crate::report::GameCategory;
 
@@ -150,16 +151,39 @@ pub fn save_edit(
             .ok_or_else(|| format!("Hero not found: {typed}. Type a hero name like Ana"))?;
         edit.hero = (*hero != game.hero).then(|| hero.to_string());
     }
-    if edit.is_empty() {
+    // A typed role that names the current one ("support" on a Support
+    // game) is no change. A role that names none is sent as typed.
+    if let Some(typed) = edit.role.take() {
+        let role = crate::model::Role::parse(&typed);
+        edit.role = (role == crate::model::Role::Unknown || role != game.role).then_some(typed);
+    }
+    if edit.is_empty() && !form.has_unparsed_stat() {
         // Nothing to correct: an unsure stat left at its read value is sent
         // to confirm it. Only then, so a fix to anything else never
-        // confirms a Check first stat the member did not look at. A typed
-        // map or hero that names the current one stays unsent.
+        // confirms a Check first stat the member did not look at, and a
+        // stat typed as something other than a number ("12,345") still
+        // gets "No changes to save". A typed map, hero or role that names
+        // the current one stays unsent. A "No read" stat has no read to
+        // confirm, so it stays unsent too.
         edit = MatchEdit {
             hero: None,
+            role: None,
             map_name: None,
             ..form.diff(game, true)
         };
+        for (sent, stat) in [
+            (&mut edit.elims, Stat::E),
+            (&mut edit.deaths, Stat::D),
+            (&mut edit.assists, Stat::A),
+            (&mut edit.damage, Stat::Dmg),
+            (&mut edit.healing, Stat::Heal),
+            (&mut edit.mitigation, Stat::Mit),
+        ] {
+            let shown = stat.value(game);
+            if crate::unsure_reads::no_read(data_dir, &game.session_id, stat.flat(), shown) {
+                *sent = None;
+            }
+        }
     }
     let map = edit.map_name.as_deref().unwrap_or(&game.map_name);
     let hero = edit.hero.as_deref().unwrap_or(&game.hero);
@@ -237,8 +261,8 @@ pub fn save_edit_for(
 /// kinds of field changed, and the release line when the save lifted a
 /// hold (`None` when the game was not held). `confirmed` is the line for
 /// unsure stats saved at their read value ("Elims confirmed", "Elims and
-/// deaths confirmed"), sent only when nothing else changed; a confirm
-/// fixed nothing, so it offers no report. A role-only change reads
+/// deaths confirmed"), sent only when nothing else changed, and it leads
+/// the held line too; a confirm fixed nothing, so it offers no report. A role-only change reads
 /// "Role corrected" and offers no training report, as there is no role
 /// category. A release takes its line from [`upload`], as the
 /// picker does: a live game uploads once it ends, and with no website
@@ -270,7 +294,10 @@ fn saved(
         None
     };
     let toast: String = if held {
-        "Saved. A map or hero is still missing, so this game stays on this computer.".into()
+        // A held game names its confirm too: "Elims confirmed. A map or
+        // hero is still missing, ...".
+        let lead = confirmed.as_deref().unwrap_or("Saved");
+        format!("{lead}. A map or hero is still missing, so this game stays on this computer.")
     } else if stats_changed {
         "Stats corrected".into()
     } else if let Some(line) = release {
@@ -1281,7 +1308,10 @@ mod tests {
         g.suspect_fields = vec!["e".into()];
         let dir = tmp();
         let saved = save(&dir, &g, &EditForm::from_game(&g)).unwrap();
-        assert!(saved.toast.contains("still missing"), "{}", saved.toast);
+        assert_eq!(
+            saved.toast,
+            "Elims confirmed. A map or hero is still missing, so this game stays on this computer."
+        );
         assert_eq!(saved.category, None);
         assert_eq!(
             queued_edit(&dir),
@@ -1301,6 +1331,185 @@ mod tests {
         assert_eq!(edit.map_name.as_deref(), Some("Ilios"));
         assert!(edit.elims.is_none());
         assert!(after_queued(&dir, &g).unsure_now("elims"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A stat typed as something other than a number ("12,345", as
+    /// Overwatch prints damage) is not "nothing changed": the save does not
+    /// confirm the unsure elims, says "No changes to save" as before, and
+    /// the form stays open with what was typed. With another change it is
+    /// left out as before, and the unsure stat still is not confirmed.
+    #[test]
+    fn an_unparsed_stat_blocks_the_confirm() {
+        let mut g = sample_game();
+        g.suspect_fields = vec!["e".into()];
+        let mut form = EditForm::from_game(&g);
+        form.damage = "12,345".into();
+        assert!(form.has_unparsed_stat());
+        let dir = tmp();
+        assert_eq!(save(&dir, &g, &form).unwrap_err(), "No changes to save");
+        assert!(queued(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+
+        form.deaths = "6".into();
+        let dir = tmp();
+        assert_eq!(save(&dir, &g, &form).unwrap().toast, "Stats corrected");
+        assert_eq!(
+            queued_edit(&dir),
+            MatchEdit {
+                deaths: Some(6),
+                ..MatchEdit::default()
+            }
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Blank still means keep the read.
+        let mut form = EditForm::from_game(&g);
+        form.damage = "  ".into();
+        assert!(!form.has_unparsed_stat());
+
+        let (_dir, mut app) = crate::fixtures::test_app();
+        app.games = vec![g.clone()];
+        app.expanded = Some(g.session_id.clone());
+        let _ = app.update(crate::app::Message::ToggleEdit);
+        app.edit.damage = "12,345".into();
+        let _ = app.update(crate::app::Message::SaveEdit);
+        assert_eq!(toast(&app), "No changes to save");
+        assert!(app.editing, "the form stays open");
+        assert_eq!(app.edit.damage, "12,345");
+        assert!(queued(&app.data_dir).is_empty());
+    }
+
+    /// Correct damage, then save the form again untouched before the
+    /// tracker rewrites `live_snapshot.json`: the open game already shows
+    /// the correction, so the second save confirms only the unsure elims
+    /// and never re-sends the old damage misread.
+    #[test]
+    fn a_second_save_does_not_resend_a_corrected_misread() {
+        use crate::app::Message;
+        let (_dir, mut app) = crate::fixtures::test_app();
+        let g = sample_game();
+        let mut m = crate::fixtures::pm(
+            &g.session_id,
+            &g.hero,
+            &g.map_name,
+            g.role.label(),
+            "victory",
+            g.elims,
+            g.deaths,
+            g.assists,
+            g.damage,
+            g.healing,
+            g.mitigation,
+            crate::fixtures::dt(2026, 9, 2, 21, 14),
+        );
+        m.suspect_fields = vec!["e".into(), "dmg".into()];
+        let snap = stat_tracker::storage::Snapshot {
+            matches: vec![m],
+            ..Default::default()
+        };
+        std::fs::write(
+            app.data_dir.join("live_snapshot.json"),
+            serde_json::to_vec(&snap).unwrap(),
+        )
+        .unwrap();
+        app.games =
+            crate::snapshot::games_from_snapshot(&crate::snapshot::load_snapshot(&app.data_dir));
+        assert_eq!(app.games.len(), 1);
+        assert!(app.games[0].unsure_now("elims") && app.games[0].unsure_now("damage"));
+        app.expanded = Some(g.session_id.clone());
+
+        let _ = app.update(Message::ToggleEdit);
+        app.edit.damage = "4800".into();
+        let _ = app.update(Message::SaveEdit);
+        assert_eq!(toast(&app), "Stats corrected");
+        assert!(!app.editing);
+        assert_eq!(app.games[0].damage, 4800, "the open game shows the fix");
+        assert!(!app.games[0].unsure_now("damage"));
+
+        let _ = app.update(Message::ToggleEdit);
+        assert_eq!(app.edit.damage, "4800");
+        let _ = app.update(Message::SaveEdit);
+        assert_eq!(toast(&app), "Elims confirmed");
+        let cmds = queued(&app.data_dir);
+        assert_eq!(cmds.len(), 2);
+        let StoreCommand::EditMatch { edit, .. } = &cmds[1] else {
+            panic!("{cmds:?}")
+        };
+        assert_eq!(
+            *edit,
+            MatchEdit {
+                elims: Some(14),
+                ..MatchEdit::default()
+            },
+            "the old damage read 4200 is not sent again"
+        );
+        assert_eq!(app.games[0].damage, 4800);
+        assert_eq!(app.games[0].unsure_stats(), 0);
+    }
+
+    /// A retyped role that names the current one, in any case, is no
+    /// change, so the untouched save still confirms the unsure stat.
+    #[test]
+    fn a_retyped_current_role_does_not_block_the_confirm() {
+        let mut g = sample_game();
+        g.suspect_fields = vec!["e".into()];
+        for typed in ["support", " SUPPORT "] {
+            let mut form = EditForm::from_game(&g);
+            form.role = typed.into();
+            let dir = tmp();
+            let saved = save(&dir, &g, &form).unwrap();
+            assert_eq!(saved.toast, "Elims confirmed", "{typed}");
+            assert_eq!(
+                queued_edit(&dir),
+                MatchEdit {
+                    elims: Some(14),
+                    ..MatchEdit::default()
+                },
+                "{typed}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// An untouched save does not confirm a stat whose tile says "No read"
+    /// (the rule is unsure and no read read the shown 0): only the unsure
+    /// stat with a real read is sent. With only the "No read" stat unsure
+    /// there is nothing to send.
+    #[test]
+    fn an_untouched_save_does_not_confirm_a_no_read_stat() {
+        use stat_tracker::games::stat_reads;
+        use stat_tracker::unsure_rule::StatRead;
+        let mut g = sample_game();
+        g.damage = 0;
+        g.suspect_fields = vec!["e".into(), "dmg".into()];
+        let dir = tmp();
+        stat_reads::update(&dir, |l| {
+            for _ in 0..3 {
+                let mut tab: stat_reads::TabReads = [None; 6];
+                tab[3] = Some(StatRead::unsure(None, 0.0));
+                l.push(&g.session_id, false, &tab);
+            }
+        });
+        assert!(crate::unsure_reads::no_read(&dir, &g.session_id, "dmg", 0));
+        assert!(!crate::unsure_reads::no_read(&dir, &g.session_id, "e", 14));
+        let saved = save(&dir, &g, &EditForm::from_game(&g)).unwrap();
+        assert_eq!(saved.toast, "Elims confirmed");
+        assert_eq!(
+            queued_edit(&dir),
+            MatchEdit {
+                elims: Some(14),
+                ..MatchEdit::default()
+            }
+        );
+        let _ = std::fs::remove_dir_all(dir.join("commands"));
+
+        g.suspect_fields = vec!["dmg".into()];
+        assert_eq!(
+            save(&dir, &g, &EditForm::from_game(&g)).unwrap_err(),
+            "No changes to save"
+        );
+        assert!(queued(&dir).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

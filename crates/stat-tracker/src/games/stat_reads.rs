@@ -163,12 +163,15 @@ pub fn apply_verdicts(rows: &mut [PersonalMatch], session_id: &str, v: &[Option<
     }
 }
 
+/// The confidence line of an Unsure stat that no read read.
+pub const NO_READ: &str = "No read";
+
 /// The confidence line under an Unsure stat: the reader's confidence in the
 /// value the rule judged, "read N at X%" when that is not the stored number,
 /// and "No read" when no read read that value (never 0%).
 pub fn confidence_line(c: &StatConfirm, stored: u32) -> String {
     let Some(conf) = c.confidence else {
-        return "No read".to_string();
+        return NO_READ.to_string();
     };
     let pct = (conf * 100.0).round() as u32;
     match c.value {
