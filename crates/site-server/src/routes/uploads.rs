@@ -13,7 +13,7 @@ use scuffed_db::{AuditAction, AuditTargetType};
 
 use crate::extractors::{OfficerUser, OrgMember};
 use crate::routes::audit_log::audit;
-use crate::routes::hero_icons::decode_limits;
+use crate::routes::hero_icons::{PNG_SIGNATURE, decode_limits};
 use crate::state::AppState;
 use crate::uploads::{UploadError, save_upload, sniff_image_ext};
 
@@ -73,9 +73,11 @@ pub(crate) fn member_dir_key(member_id: &str) -> String {
 /// images before anything is persisted. The magic-byte sniff in `save_upload`
 /// still runs afterwards.
 ///
-/// The header read runs under [`decode_limits`], so what it may allocate
-/// (for a PNG, inflated `iCCP` / `zTXt` / `iTXt` before the first `IDAT`)
-/// is capped at 32 MiB; past that the upload is refused as unreadable (400).
+/// A PNG first goes through [`check_png_chunks`] (colour profile bound,
+/// critical-chunk CRCs). The header read then runs under [`decode_limits`];
+/// for a PNG header read that cap bounds only how far png inflates an
+/// `iCCP` profile, and the chunk check has already refused any profile
+/// over [`PNG_ICCP_MAX_BYTES`].
 ///
 /// AVIF is read with `imagesize` (container header only). The `image` crate
 /// is built without AVIF, so it cannot size one.
@@ -83,12 +85,13 @@ fn check_image_dimensions(data: &[u8]) -> Result<(), Reject> {
     let (w, h) = if sniff_image_ext(data) == Some("avif") {
         avif_dimensions(data)?
     } else {
+        check_png_chunks(data)?;
         let mut reader = image::ImageReader::new(Cursor::new(data))
             .with_guessed_format()
             .map_err(|_| reject(StatusCode::BAD_REQUEST, "Could not read image"))?;
-        // Same 32 MiB allocation cap as training crops (#691): without it
-        // the header read may inflate a PNG colour profile or text chunk up
-        // to the image crate's 512 MiB default.
+        // Same 32 MiB allocation cap as training crops (#691), as a
+        // backstop: without it png may inflate a colour profile up to the
+        // image crate's 512 MiB default during the header read.
         reader.limits(decode_limits());
 
         reader
@@ -111,6 +114,84 @@ fn unreadable_dimensions() -> Reject {
         StatusCode::BAD_REQUEST,
         "Invalid or unreadable image dimensions",
     )
+}
+
+/// Most that the `iCCP` colour profiles of one PNG may inflate to, all
+/// together: 4 MiB. Real profiles are a few KiB.
+const PNG_ICCP_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Chunk checks for a PNG that is stored as uploaded (avatars and article
+/// images are not re-encoded, so what is checked here is what `/uploads`
+/// serves; #691). Walks the chunk headers like
+/// [`crate::routes::hero_icons`]'s `png_pixel_chunks`, keeping nothing:
+///
+/// - every `iCCP` profile is inflated into a sink (a fixed-size buffer, so
+///   the memory cost does not grow with the profile) and the PNG is
+///   refused with 400 once the profiles pass [`PNG_ICCP_MAX_BYTES`] in
+///   total, or when one does not inflate;
+/// - a critical chunk (uppercase first letter: `IHDR`, `PLTE`, `IDAT`,
+///   `IEND`) whose CRC is wrong is refused with 400. Bad ancillary CRCs are
+///   left to the browser, which ignores such a chunk.
+///
+/// Not a PNG, or a chunk that runs past the end: the walk stops and the
+/// image read decides, as before.
+fn check_png_chunks(data: &[u8]) -> Result<(), Reject> {
+    use std::io::Read;
+    if !data.starts_with(&PNG_SIGNATURE) {
+        return Ok(());
+    }
+    let unreadable = || reject(StatusCode::BAD_REQUEST, "Could not read image");
+    let mut profile_left = PNG_ICCP_MAX_BYTES;
+    let mut at = PNG_SIGNATURE.len();
+    while let Some(header) = data.get(at..at + 8) {
+        let len = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize;
+        let Some(chunk) = at
+            .checked_add(12)
+            .and_then(|end| end.checked_add(len))
+            .and_then(|end| data.get(at..end))
+        else {
+            break;
+        };
+        let kind = &header[4..8];
+        let body = &chunk[8..8 + len];
+        if kind[0] & 0x20 == 0 {
+            let mut crc = flate2::Crc::new();
+            crc.update(&chunk[4..8 + len]);
+            if crc.sum().to_be_bytes() != chunk[8 + len..] {
+                return Err(unreadable());
+            }
+        }
+        if kind == b"iCCP" {
+            // Profile name (1-79 bytes), NUL, compression method 0, zlib.
+            let stream = body
+                .iter()
+                .take(80)
+                .position(|&b| b == 0)
+                .filter(|&nul| nul > 0 && body.get(nul + 1) == Some(&0))
+                .map(|nul| &body[nul + 2..])
+                .ok_or_else(unreadable)?;
+            let inflated = std::io::copy(
+                &mut flate2::read::ZlibDecoder::new(stream).take(profile_left + 1),
+                &mut std::io::sink(),
+            )
+            .map_err(|_| unreadable())?;
+            if inflated > profile_left {
+                return Err(reject(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "Image colour profile too large (max {} MB)",
+                        PNG_ICCP_MAX_BYTES / (1024 * 1024)
+                    ),
+                ));
+            }
+            profile_left -= inflated;
+        }
+        at += chunk.len();
+        if kind == b"IEND" {
+            break;
+        }
+    }
+    Ok(())
 }
 
 /// Declared AVIF canvas from the HEIF property boxes (`meta` / `iprp` /
@@ -686,7 +767,7 @@ mod tests {
     }
 
     #[test]
-    fn a_colour_profile_bomb_is_read_within_the_decode_cap() {
+    fn a_colour_profile_bomb_is_refused_before_the_image_read() {
         use crate::routes::hero_icons::tests::heap::peak_during;
         const MIB: usize = 1024 * 1024;
         let bomb = iccp_bomb();
@@ -703,25 +784,85 @@ mod tests {
             unbounded_peak >= 64 * MIB,
             "default limits peak {unbounded_peak} B"
         );
-        // Under `decode_limits` png stops inflating at 32 MiB and drops the
-        // profile (png 0.18 skips an iCCP it cannot read), so the header is
-        // still read, like a crop whose profile is dropped unread. What the
-        // read costs is bounded by the cap. Measured (debug build): 33.1
-        // MiB here against 66.1 MiB with the default limits, which would
-        // go on up to 512 MiB for a bigger profile.
+        // The backstop alone: under `decode_limits` png stops inflating at
+        // 32 MiB and skips the profile (png 0.18 does not fail on it).
+        let (capped, capped_peak) = peak_during(|| {
+            let mut reader = image::ImageReader::new(Cursor::new(&bomb[..]))
+                .with_guessed_format()
+                .unwrap();
+            reader.limits(decode_limits());
+            reader.into_dimensions()
+        });
+        assert_eq!(capped.unwrap(), (64, 64));
+        assert!(capped_peak <= 36 * MIB, "capped peak {capped_peak} B");
+        // The chunk check refuses the bomb before the image read, inflating
+        // into a sink: the cost does not grow with the profile.
         let (guarded, guarded_peak) = peak_during(|| check_image_dimensions(&bomb));
-        assert!(guarded.is_ok());
+        let (code, body) = guarded.unwrap_err();
+        assert_eq!(code, StatusCode::BAD_REQUEST);
         assert!(
-            guarded_peak <= 36 * MIB,
-            "guarded peak {guarded_peak} B is over 36 MiB"
+            body.error.contains("colour profile too large"),
+            "{}",
+            body.error
+        );
+        assert!(
+            guarded_peak <= MIB,
+            "guarded peak {guarded_peak} B is over 1 MiB"
         );
     }
 
     #[test]
-    fn a_normal_colour_profile_is_still_read() {
+    fn a_normal_colour_profile_is_accepted() {
+        use crate::routes::hero_icons::tests::iccp_png;
         // A 4 KiB profile, the size of a real sRGB one.
+        assert!(check_image_dimensions(&iccp_png(64, 64, 4096)).is_ok());
+        // The bound is inclusive.
+        let at = PNG_ICCP_MAX_BYTES as usize;
+        assert!(check_image_dimensions(&iccp_png(64, 64, at)).is_ok());
+        assert!(check_image_dimensions(&iccp_png(64, 64, at + 1)).is_err());
+    }
+
+    /// `png` with the CRC of its chunk number `index` (0 = IHDR) flipped.
+    fn with_bad_crc(mut png: Vec<u8>, index: usize) -> (Vec<u8>, [u8; 4]) {
+        let mut at = 8;
+        for _ in 0..index {
+            at += 12 + u32::from_be_bytes(png[at..at + 4].try_into().unwrap()) as usize;
+        }
+        let kind: [u8; 4] = png[at + 4..at + 8].try_into().unwrap();
+        let crc_at = at + 8 + u32::from_be_bytes(png[at..at + 4].try_into().unwrap()) as usize;
+        png[crc_at] ^= 0xff;
+        (png, kind)
+    }
+
+    #[test]
+    fn a_bad_critical_chunk_crc_is_refused_and_a_bad_profile_crc_is_not() {
         let png = crate::routes::hero_icons::tests::iccp_png(64, 64, 4096);
         assert!(check_image_dimensions(&png).is_ok());
+        // Chunks: IHDR, iCCP, IDAT, IEND (the encoder writes one IDAT).
+        for index in [0, 2, 3] {
+            let (bad, kind) = with_bad_crc(png.clone(), index);
+            assert!(kind[0].is_ascii_uppercase(), "{kind:?}");
+            let (code, _) = check_image_dimensions(&bad).unwrap_err();
+            assert_eq!(code, StatusCode::BAD_REQUEST, "{kind:?}");
+        }
+        let (bad, kind) = with_bad_crc(png.clone(), 1);
+        assert_eq!(&kind, b"iCCP");
+        assert!(check_image_dimensions(&bad).is_ok());
+    }
+
+    #[test]
+    fn a_profile_that_does_not_inflate_is_refused() {
+        let png = crate::routes::hero_icons::tests::iccp_png(64, 64, 4096);
+        // Corrupt the zlib header of the profile and fix the chunk CRC, so
+        // only the inflate can catch it. "bomb\0\0" comes first.
+        let len = u32::from_be_bytes(png[33..37].try_into().unwrap()) as usize;
+        let mut bad = png.clone();
+        bad[41 + 6] ^= 0xff;
+        let mut crc = flate2::Crc::new();
+        crc.update(&bad[37..41 + len]);
+        bad[41 + len..45 + len].copy_from_slice(&crc.sum().to_be_bytes());
+        let (code, _) = check_image_dimensions(&bad).unwrap_err();
+        assert_eq!(code, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -1275,15 +1416,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn avatar_upload_bounds_image_bombs_and_takes_a_normal_png() {
+    async fn avatar_upload_refuses_image_bombs_and_stores_a_normal_png() {
         let mut state = crate::test_support::test_state().await;
         let root = unique_tmp("avatar-bomb");
         state.upload_dir = root.clone();
         let (_member, token) = session_member(&state, "bomber", scuffed_db::OrgRole::Member).await;
         let app = crate::create_router(state.clone());
 
-        // Declared gigapixel canvas: refused before anything is stored, 400
-        // like a crop with bad dimensions.
+        // Declared gigapixel canvas: refused before anything is stored.
         let res = post_avatar_png(&app, &token, None, &png_with_dims(100_000, 100_000)).await;
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
         let body = response_json(res).await;
@@ -1295,16 +1435,30 @@ mod tests {
             "{body}"
         );
 
-        // A 64 MiB colour profile: read within the 32 MiB cap with the
-        // profile skipped, so the upload goes through, like a crop whose
-        // profile is dropped unread.
+        // A 64 MiB colour profile: refused before anything is stored, since
+        // the file would be served as uploaded, profile included.
         let res = post_avatar_png(&app, &token, None, &iccp_bomb()).await;
-        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(res).await;
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("Image colour profile too large"),
+            "{body}"
+        );
+        assert!(!root.join("avatars").exists(), "nothing stored");
 
-        // A normal avatar with a real-size profile.
+        // A normal avatar with a real-size profile is stored byte for byte.
         let normal = crate::routes::hero_icons::tests::iccp_png(64, 64, 4096);
         let res = post_avatar_png(&app, &token, None, &normal).await;
         assert_eq!(res.status(), StatusCode::OK, "a normal avatar is stored");
+        let body = response_json(res).await;
+        let url = body["url"].as_str().unwrap();
+        let stored = tokio::fs::read(root.join(url.strip_prefix("/uploads/").unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(stored, normal);
         tokio::fs::remove_dir_all(&root).await.ok();
     }
 }

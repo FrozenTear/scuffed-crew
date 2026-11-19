@@ -73,7 +73,7 @@ use crate::routes::audit_log::audit;
 use crate::state::AppState;
 
 /// The 8-byte PNG file signature.
-const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+pub(crate) const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
 
 pub(crate) type Reject = (StatusCode, Json<ErrorResponse>);
 
@@ -462,7 +462,8 @@ pub(crate) fn clean_png_within(
 /// under 16 MiB and the refused hero icon under 1.2 MiB. No accepted size
 /// reaches this cap; the test `the_decode_backstop_refuses_a_pixel_buffer_over_32_mib`
 /// reaches it with bounds wider than any kind's. Avatar and image uploads
-/// read their headers under the same cap ([`decode_limits`], #691).
+/// read their headers under the same cap ([`decode_limits`], #691) as a
+/// backstop behind their own colour profile bound.
 pub(crate) const PNG_DECODE_MAX_ALLOC: u64 = 32 * 1024 * 1024;
 
 /// The chunks the decoder needs for the pixels. Other ancillary chunks are
@@ -527,9 +528,12 @@ fn png_pixel_chunks(data: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
 
 /// Decoder limits for every server-side image decode or header read: the
 /// image crate's defaults with `max_alloc` cut from 512 MiB to
-/// [`PNG_DECODE_MAX_ALLOC`]. For a PNG this also bounds what the header
-/// read may inflate from `iCCP`, `zTXt` and `iTXt` chunks before the first
-/// `IDAT`.
+/// [`PNG_DECODE_MAX_ALLOC`]. The image crate passes `max_alloc` to its PNG
+/// decoder only. On a PNG header read the one thing it bounds is how far
+/// png inflates an `iCCP` profile: past the cap png 0.18 skips the profile
+/// and does not fail, and `zTXt` / `iTXt` stay compressed. A declared size
+/// big enough to hit the cap is already refused by the callers' edge
+/// checks.
 pub(crate) fn decode_limits() -> image::Limits {
     let mut limits = image::Limits::default();
     limits.max_alloc = Some(PNG_DECODE_MAX_ALLOC);
