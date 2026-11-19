@@ -15,7 +15,7 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
-## Unreleased
+## 0.6.0-rc.2
 
 If you turn on rank screen training crops on the website, the tracker now sends up to three small pictures from the rank screen after each competitive game in Overwatch: your role line, your rank emblem with its tier, and the rank progress bar with your "Higher ranked than" percentile and its change tags (which can say Victory or Defeat). Each is cut at full size from the place the rank reader reads, never the whole screen, the large result title, the mode banner, chat, hero names, the SR numbers or player names, but text another program draws over the game can still show in one. Nothing is cut or sent while the switch is off.
 
