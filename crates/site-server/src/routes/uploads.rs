@@ -982,12 +982,49 @@ mod tests {
         assert!(check_image_dimensions(&figma).is_ok());
         // The same stream under a bad zlib header (check value off by one,
         // or a preset dictionary) is refused.
-        for (case, header) in [("check value", [0x78, 0x9d]), ("dictionary", [0x78, 0xbb])] {
+        // Each header below fails one condition only: 0x7709 is CM 7 and
+        // 0x881c is CINFO 8, both with a valid check value and no FDICT.
+        for (case, header) in [
+            ("check value", [0x78, 0x9d]),
+            ("dictionary", [0x78, 0xbb]),
+            ("method 7", [0x77, 0x09]),
+            ("window 64 KiB", [0x88, 0x1c]),
+        ] {
+            assert_eq!(u16::from_be_bytes(header) % 31 == 0, case != "check value");
             let mut bad = body.clone();
             bad[12..14].copy_from_slice(&header);
             let bad = with_body(&png, 1, |_| bad);
             assert_refused(&bad, "Could not read image", case);
         }
+    }
+
+    #[test]
+    fn bytes_after_the_profile_deflate_end_are_ignored() {
+        let png = crate::routes::hero_icons::tests::iccp_png(64, 64, 4096);
+        // "bomb\0\0", then the zlib stream: header, deflate, Adler-32.
+        // A wrong Adler-32 is not checked.
+        let bad_adler = with_body(&png, 1, |body| {
+            let mut body = body.to_vec();
+            let at = body.len() - 4;
+            body[at] ^= 0xff;
+            body
+        });
+        assert_ne!(bad_adler, png);
+        assert!(check_image_dimensions(&bad_adler).is_ok(), "wrong Adler-32");
+        // Junk after the Adler-32, and junk in place of it.
+        let junk = b"not deflate data at all";
+        let after = with_body(&png, 1, |body| [body, &junk[..]].concat());
+        assert!(
+            check_image_dimensions(&after).is_ok(),
+            "junk after Adler-32"
+        );
+        let instead = with_body(&png, 1, |body| {
+            [&body[..body.len() - 4], &junk[..]].concat()
+        });
+        assert!(
+            check_image_dimensions(&instead).is_ok(),
+            "junk for Adler-32"
+        );
     }
 
     #[test]
