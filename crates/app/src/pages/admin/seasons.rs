@@ -248,7 +248,7 @@ fn SeasonsPage() -> Element {
                     save_error.set(Some(
                         SaveState::failed("Could not save the season", &e).text(),
                     ));
-                    toast.show(Toast::error(format!("Failed to save season: {e}")));
+                    toast.show(Toast::error_logged_elsewhere("Failed to save season", &e));
                 }
             }
         });
@@ -285,7 +285,7 @@ fn SeasonsPage() -> Element {
                     focus_after_delete_soon(edit_button_id(&target.id), focus_next);
                 }
                 Err(e) => {
-                    toast.show(Toast::error(format!("Failed to delete season: {e}")));
+                    toast.show(Toast::error_from("Failed to delete season", &e));
                 }
             }
         });

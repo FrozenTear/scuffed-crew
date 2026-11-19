@@ -358,7 +358,10 @@ pub fn AdminSettings() -> Element {
                     Some(true)
                 }
                 Err(e) => {
-                    load_error.set(Some(e.to_string()));
+                    load_error.set(Some(crate::client_error::logged_message(
+                        "settings load",
+                        &e,
+                    )));
                     loaded.set(false);
                     None
                 }
@@ -443,15 +446,15 @@ pub fn AdminSettings() -> Element {
                         officers_can_edit_teams.set(shown.officers_can_edit_teams);
                         homepage.with_mut(|hp| hp.sections = shown.sections);
                     }
-                    toast.show(Toast::error(format!("Failed to save settings: {e}")));
+                    toast.show(Toast::error_from("Failed to save settings", &e));
                     // The reason stays on the page after the toast is gone.
                     // A network failure reads as one short sentence there;
                     // the browser's raw error (a whole stack in Chromium) is
-                    // for the console only (QA 706 FIX5).
-                    crate::util::log_client_error("settings save", &e);
-                    save_state.set(crate::components::SaveState::failed(
+                    // for the console only (QA 706 FIX5). The toast above
+                    // logged it, so this line maps it without a second log.
+                    save_state.set(crate::components::SaveState::failed_text(
                         "Could not save settings",
-                        crate::client_error::user_message(&e),
+                        &crate::client_error::user_message(&e),
                     ));
                 }
             }

@@ -277,7 +277,7 @@ pub fn DmComposeModal(
                         state.set(SendState::NeedsIdentity);
                     }
                     Err(e) => {
-                        toast.show(Toast::error(format!("Failed to send: {e}")));
+                        toast.show(Toast::error_from("Failed to send", &e));
                         state.set(SendState::failed(&e));
                     }
                 }

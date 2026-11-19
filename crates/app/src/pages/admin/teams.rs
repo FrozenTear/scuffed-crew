@@ -331,7 +331,7 @@ pub fn AdminTeams() -> Element {
             Err(e) => {
                 let current = roster_modal.get_target().map(|open| open.id);
                 if current.as_deref() == Some(requested.as_str()) {
-                    roster_error.set(e.to_string());
+                    roster_error.set(crate::client_error::logged_message("team roster", &e));
                     roster_phase.set(RosterPhase::Failed);
                 }
             }
@@ -431,7 +431,7 @@ pub fn AdminTeams() -> Element {
                         save_error.set(Some(
                             SaveState::failed("Could not save the team", &e).text(),
                         ));
-                        toast.show(Toast::error(format!("Failed to save team: {e}")));
+                        toast.show(Toast::error_logged_elsewhere("Failed to save team", &e));
                     }
                 }
             }
@@ -487,7 +487,7 @@ pub fn AdminTeams() -> Element {
                         add_error.set(Some(
                             SaveState::failed("Could not add the member", &e).text(),
                         ));
-                        toast.show(Toast::error(format!("Failed to add member: {e}")));
+                        toast.show(Toast::error_logged_elsewhere("Failed to add member", &e));
                     }
                 }
             });
@@ -512,7 +512,7 @@ pub fn AdminTeams() -> Element {
                         toast.show(Toast::success("Role updated."));
                         roster_refresh += 1;
                     }
-                    Err(e) => toast.show(Toast::error(format!("Failed to update role: {e}"))),
+                    Err(e) => toast.show(Toast::error_from("Failed to update role", &e)),
                 }
             });
         }
@@ -552,7 +552,7 @@ pub fn AdminTeams() -> Element {
                         roster_refresh += 1;
                         focus_after_delete_soon(roster_remove_id(&member_id), focus_next);
                     }
-                    Err(e) => toast.show(Toast::error(format!("Remove failed: {e}"))),
+                    Err(e) => toast.show(Toast::error_from("Remove failed", &e)),
                 }
             });
         }

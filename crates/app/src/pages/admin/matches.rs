@@ -311,7 +311,7 @@ pub fn AdminMatches() -> Element {
                     save_error.set(Some(
                         SaveState::failed("Could not save the match", &e).text(),
                     ));
-                    toast.show(Toast::error(format!("Failed to save: {e}")));
+                    toast.show(Toast::error_logged_elsewhere("Failed to save", &e));
                 }
             }
         });

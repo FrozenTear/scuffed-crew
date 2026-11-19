@@ -70,6 +70,11 @@ pub const STORE_DISABLED: &str = "Hero icon sharing is not switched on for this 
 
 pub const LOADING: &str = "Loading your hero icons...";
 
+/// The list line while Delete all runs. Setting it empties the alert, so a
+/// repeated identical failure is a new alert and is announced again (Vision
+/// nit 5, round 4 on 748).
+pub const DELETING_ALL: &str = "Deleting your icons...";
+
 pub const KEPT_HIDDEN_NOTE: &str = "Your icons are kept on the server and hidden while sharing is off. Admins can delete them but cannot open them.";
 
 pub const NONE_SENT: &str = "You have not sent any icons yet.";
@@ -116,15 +121,23 @@ pub fn is_store_disabled(err: &ClientError) -> bool {
             .is_some_and(|b| b.contains(HERO_ICON_ERR_DISABLED))
 }
 
-/// Plain sentence for a failed call. Never shows the raw server body.
+/// Plain sentence for a failed call: "{what} failed." and why. A 401, 403
+/// or 503 keep their hero icon copy; everything else (no answer, an
+/// unreadable answer, other statuses) is the one mapping
+/// ([`crate::client_error::user_message`]), so an unreadable answer is not
+/// blamed on the connection (QA on 748). Never the raw server body: only a
+/// JSON `error` reason, as everywhere. The raw error always goes to the
+/// console ([`crate::client_error::logged_message`]).
 pub fn failure_text(what: &str, err: &ClientError) -> String {
-    match err.http_status() {
-        Some(401) => format!("{what} failed. Sign in again and retry."),
-        Some(403) => format!("{what} failed. You are not allowed to do that."),
-        Some(503) => format!("{what} failed. Hero icons are not switched on for this server."),
-        Some(_) => format!("{what} failed. Try again in a moment."),
-        None => format!("{what} failed. Check your connection and try again."),
-    }
+    let lead = format!("{what} failed.");
+    let mapped = crate::client_error::logged_message(&lead, err);
+    let why = match err.http_status() {
+        Some(401) => "Sign in again and retry.".to_string(),
+        Some(403) => "You are not allowed to do that.".to_string(),
+        Some(503) => "Hero icons are not switched on for this server.".to_string(),
+        _ => mapped,
+    };
+    crate::client_error::join_lead(&lead, &why)
 }
 
 /// Alt text for one thumbnail: the hero and the day it was sent.
@@ -344,6 +357,65 @@ mod tests {
         let text = failure_text("Delete", &err);
         assert!(!text.contains("secret"), "{text}");
         assert!(text.starts_with("Delete failed."), "{text}");
+    }
+
+    /// QA on 748: every failure goes through the one mapping. An unreadable
+    /// answer is the read-error copy, never the connection, and is logged;
+    /// no answer is the unreachable sentence.
+    #[test]
+    fn failures_use_the_one_mapping_and_log() {
+        use crate::client_error::{
+            NETWORK_ERROR_MESSAGE, SERVER_TROUBLE_MESSAGE, UNREADABLE_ANSWER_MESSAGE,
+        };
+        let _ = crate::util::take_logged();
+        let unreadable = ClientError::Deserialize("expected value at line 1 column 1".into());
+        assert_eq!(
+            failure_text("Loading your hero icons", &unreadable),
+            format!("Loading your hero icons failed. {UNREADABLE_ANSWER_MESSAGE}")
+        );
+        let logged = crate::util::take_logged();
+        assert_eq!(logged.len(), 1, "{logged:?}");
+        assert!(logged[0].contains("expected value at line 1"), "{logged:?}");
+        assert!(!failure_text("Loading", &unreadable).contains("connection"));
+
+        assert_eq!(
+            failure_text(
+                "Deleting your icons",
+                &ClientError::Network("offline".into())
+            ),
+            format!("Deleting your icons failed. {NETWORK_ERROR_MESSAGE}")
+        );
+        assert_eq!(
+            failure_text("Deleting your icons", &ClientError::http(502, "", None)),
+            format!("Deleting your icons failed. {SERVER_TROUBLE_MESSAGE}")
+        );
+        assert_eq!(
+            failure_text(
+                "Deleting your icons",
+                &ClientError::http(409, r#"{"error":"busy"}"#, None)
+            ),
+            "Deleting your icons failed. HTTP error 409: busy"
+        );
+        assert_eq!(
+            failure_text("Delete", &ClientError::http(401, "", None)),
+            "Delete failed. Sign in again and retry."
+        );
+        assert_eq!(
+            failure_text("Delete", &ClientError::http(403, "", None)),
+            "Delete failed. You are not allowed to do that."
+        );
+        assert_eq!(
+            failure_text("Delete", &ClientError::http(503, "", None)),
+            "Delete failed. Hero icons are not switched on for this server."
+        );
+        // No hard-coded connection copy is left here: it comes from the
+        // mapping only.
+        let prod = include_str!("hero_icons_ui.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("prod part");
+        assert!(!prod.contains("Check your connection"));
+        assert!(!prod.contains("Try again in a moment"));
     }
 
     #[test]

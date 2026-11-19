@@ -1026,7 +1026,7 @@ pub fn PatchNotesPage() -> Element {
     let patches = use_api::<ListResponse>("/api/strategy/patch-notes");
     let mut refresh = patches.refresh;
 
-    let (state, notes) = {
+    let (state, notes, reason) = {
         let data = patches.data.read();
         let err = patches.error.read();
         let state = classify_patch_fetch(data.as_ref().map(|d| d.as_ref()), err.as_deref());
@@ -1035,14 +1035,14 @@ pub fn PatchNotesPage() -> Element {
             .and_then(|d| d.as_ref())
             .map(|resp| resp.data.clone())
             .unwrap_or_default();
-        (state, notes)
+        (state, notes, err.clone().unwrap_or_default())
     };
     // `use_api` keeps the failed slot while a retry is in flight.
     let retrying =
         state == PatchFetchState::Failed && patches.data.state()() == UseResourceState::Pending;
 
     rsx! {
-        PatchNotesView { state, notes, retrying, on_retry: move |_| refresh += 1 }
+        PatchNotesView { state, notes, retrying, reason, on_retry: move |_| refresh += 1 }
     }
 }
 
@@ -1058,6 +1058,10 @@ fn PatchNotesView(
     retrying: bool,
     #[props(default)] initial_query: String,
     #[props(default = "All".to_string())] initial_filter: String,
+    /// The fetch's mapped error (`ApiResource::error`), said after the lead
+    /// when the load failed.
+    #[props(default)]
+    reason: String,
 ) -> Element {
     let mut search_query = use_signal(|| initial_query.clone());
     let active_filter = use_signal(|| initial_filter.clone());
@@ -1148,8 +1152,7 @@ fn PatchNotesView(
                 PatchFetchState::Loading => rsx! { SkeletonBars { rows: 5 } },
                 PatchFetchState::Failed => rsx! {
                     LoadError {
-                        message: "Couldn't load patch notes. Check your connection and try again."
-                            .to_string(),
+                        message: crate::client_error::join_lead("Couldn't load patch notes.", &reason),
                         on_retry: move |_| on_retry.call(()),
                         retrying,
                     }
@@ -1592,7 +1595,14 @@ mod tests {
     }
 
     fn failed_app() -> Element {
-        view(PatchFetchState::Failed, vec![], "", "All")
+        rsx! {
+            PatchNotesView {
+                state: PatchFetchState::Failed,
+                notes: vec![],
+                on_retry: move |_| {},
+                reason: crate::client_error::NETWORK_ERROR_MESSAGE.to_string(),
+            }
+        }
     }
 
     fn retrying_app() -> Element {
@@ -2560,7 +2570,9 @@ mod tests {
         );
         let failed = render(failed_app);
         assert!(
-            failed.contains("load patch notes. Check your connection"),
+            failed.contains(
+                "Couldn&#39;t load patch notes. Could not reach the server. Check your connection and try again."
+            ),
             "{failed}"
         );
         assert!(failed.contains("role=\"alert\""), "{failed}");

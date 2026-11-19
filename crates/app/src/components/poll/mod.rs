@@ -81,7 +81,6 @@ pub fn is_closed(poll: &PollData, now: Option<&str>) -> bool {
 pub fn poll_error_copy(lead: &str, err: &scuffed_api_client::ClientError) -> String {
     use scuffed_api_client::ClientError;
     let why = match err {
-        ClientError::Network(_) => "Check your connection and try again.",
         ClientError::Http { status: 401, .. } => "Your session ended. Log in again.",
         ClientError::Http { status: 403, .. } => "Your account can't do that.",
         ClientError::Http { status: 404, .. } => "That poll no longer exists.",
@@ -89,9 +88,19 @@ pub fn poll_error_copy(lead: &str, err: &scuffed_api_client::ClientError) -> Str
             "The poll may have closed, or that vote is already in. Reload to see it."
         }
         ClientError::Http { status: 429, .. } => "Too many tries. Wait a moment.",
-        _ => "Something went wrong. Try again in a moment.",
+        // No answer, an unreadable answer and any other status: the one
+        // mapping (QA on 748), never a guess at the connection.
+        other => crate::client_error::message_without_reason(other),
     };
     format!("{lead} {why}")
+}
+
+/// [`poll_error_copy`] for a toast: the raw error goes to the console once,
+/// under `lead`, so the detail the toast leaves out is still there (Vision
+/// nit 3, round 4 on 748). The card calls only this, never both.
+pub fn logged_poll_error(lead: &str, err: &scuffed_api_client::ClientError) -> String {
+    crate::util::log_client_error(lead.trim().trim_end_matches(['.', ':']), err);
+    poll_error_copy(lead, err)
 }
 
 /// The browser clock as an ISO-8601 UTC timestamp. `None` outside the
@@ -124,7 +133,7 @@ mod tests {
         );
         assert_eq!(
             poll_error_copy("Vote failed.", &ClientError::Network("offline".into())),
-            "Vote failed. Check your connection and try again."
+            "Vote failed. Could not reach the server. Check your connection and try again."
         );
         for status in [400, 401, 403, 404, 409, 429, 500] {
             let copy = poll_error_copy("Vote failed.", &http(status));
@@ -136,6 +145,33 @@ mod tests {
         assert!(
             !card.contains("failed: {e}"),
             "a raw client error reaches a toast"
+        );
+    }
+
+    /// Vision nit 3, round 4 on 748: a failed vote or removal logs its raw
+    /// error once, and the toast text is the same as the pure copy.
+    #[test]
+    fn a_poll_failure_logs_once() {
+        use scuffed_api_client::ClientError;
+        let _ = crate::util::take_logged();
+        let err = ClientError::Network("TypeError: Failed to fetch".into());
+        let shown = logged_poll_error("Vote failed.", &err);
+        assert_eq!(shown, poll_error_copy("Vote failed.", &err));
+        let logged = crate::util::take_logged();
+        assert_eq!(logged.len(), 1, "{logged:?}");
+        assert!(logged[0].starts_with("Vote failed: "), "{logged:?}");
+        assert!(logged[0].contains("Failed to fetch"), "{logged:?}");
+        assert!(!shown.contains("Failed to fetch"), "{shown}");
+
+        let card = include_str!("card.rs").split("mod tests").next().unwrap();
+        assert_eq!(
+            card.matches("logged_poll_error(").count(),
+            2,
+            "vote and remove"
+        );
+        assert!(
+            !card.contains("poll_error_copy(") && !card.contains("log_client_error("),
+            "the card maps through logged_poll_error only, so each failure logs once"
         );
     }
 

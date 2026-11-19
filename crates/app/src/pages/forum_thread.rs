@@ -10,8 +10,7 @@ use super::article_author::{
     load_status, use_author_names,
 };
 use super::forum::{
-    FORUM_CSS, FORUM_CSS_ID, count_label, forum_load, forum_post_error, required_mark,
-    thread_api_path,
+    FORUM_CSS, FORUM_CSS_ID, count_label, forum_post_error, required_mark, thread_api_path,
 };
 use super::not_found::{NotFoundLink, NotFoundPanel};
 use crate::components::ui::inline_confirm::focus_field_by_id;
@@ -110,7 +109,7 @@ pub fn ForumThread(id: String) -> Element {
                     thread_api_path(&tid)
                 ))
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(|e| crate::client_error::logged_message("forum thread", &e))
         }
     }));
     // Posts carry only the author id; resolve the ones on screen.
@@ -126,7 +125,8 @@ pub fn ForumThread(id: String) -> Element {
             })
             .unwrap_or_default()
     });
-    let load = forum_load(detail.read().as_ref());
+    // A 401 or 403 keeps its reason; only a 404 is "Thread not found".
+    let load = Load::of(detail.read().as_ref());
     let retrying = is_retrying(detail.state()(), &load);
     crate::head::use_page_title(tab_label(&load));
 
@@ -198,7 +198,7 @@ fn tab_label(load: &Load<ThreadDetailResponse>) -> Option<String> {
     match load {
         Load::Ready(resp) => Some(format!("{} | Forum", resp.thread.title.trim())),
         Load::Missing => Some("Thread not found | Forum".to_string()),
-        Load::Loading | Load::Failed => None,
+        Load::Loading | Load::Failed(_) => None,
     }
 }
 
@@ -266,7 +266,7 @@ fn ThreadView(
             {match &load {
                 // The title is not known yet, so the page is named by its kind.
                 Load::Loading => rsx! { PageHeader { title: "Forum thread" } },
-                Load::Failed => rsx! { PageHeader { title: "Couldn't load this thread" } },
+                Load::Failed(_) => rsx! { PageHeader { title: "Couldn't load this thread" } },
                 Load::Missing | Load::Ready(_) => rsx! {},
             }}
             p { class: "entry-status", role: "status", "{status}" }
@@ -282,10 +282,10 @@ fn ThreadView(
                         ],
                     }
                 },
-                Load::Failed => rsx! {
+                Load::Failed(reason) => rsx! {
                     LoadError {
-                        message: "Check your connection and try again.",
-                        on_retry: move |_| on_retry.call(()),
+                        message: crate::client_error::reason_or_fallback(reason),
+                        on_retry: load.retry_helps().then_some(on_retry),
                         retrying,
                     }
                 },
@@ -435,6 +435,7 @@ fn ReplyForm(
 
 #[cfg(test)]
 mod tests {
+    const NET: &str = crate::client_error::NETWORK_ERROR_MESSAGE;
     use super::super::article_author::AUTHOR_FALLBACK;
     use super::*;
     use crate::components::ui::test_support::render_routed;
@@ -723,17 +724,74 @@ mod tests {
             "{loading}"
         );
 
-        let failed = Case::of(Load::Failed).render();
+        let failed = Case::of(Load::Failed(NET.to_string())).render();
         assert!(failed.contains("load this thread</h1>"), "{failed}");
         assert!(failed.contains("role=\"alert\""), "{failed}");
         assert!(failed.contains(">Retry</button>"), "{failed}");
         assert!(!failed.contains("Loading"), "{failed}");
 
-        let mut retrying = Case::of(Load::Failed);
+        let mut retrying = Case::of(Load::Failed(NET.to_string()));
         retrying.retrying = true;
         let retrying = retrying.render();
         assert!(retrying.contains(">Loading thread</p>"), "{retrying}");
         assert!(retrying.contains(">Retrying...</button>"), "{retrying}");
+
+        // QA round 3 on 748: a 403 thread keeps the server's reason (mapped
+        // and logged once, read by `Load::of`), not the not-found card.
+        let _ = crate::util::take_logged();
+        let err = scuffed_api_client::ClientError::http(403, r#"{"error":"Members only"}"#, None);
+        let slot: Result<ThreadDetailResponse, String> =
+            Err(crate::client_error::logged_message("forum thread", &err));
+        assert_eq!(crate::util::take_logged().len(), 1);
+        let reason = crate::client_error::user_message(&err);
+        let refused = Case::of(Load::of(Some(&slot))).render();
+        assert!(refused.contains("load this thread</h1>"), "{refused}");
+        assert!(refused.contains(&reason), "{refused}");
+        assert!(refused.contains("Members only"), "{refused}");
+        assert!(!refused.contains("Thread not found"), "{refused}");
+        // Vision round 6 on 748: no Retry for a refusal, the same as the
+        // strategy editor 403. Vision round 7: the box is an alert, as the
+        // editor 403 is, so it is announced, and the status line stays empty
+        // so it is said once.
+        assert!(
+            refused.contains("<div class=\"fetch-error-wrap\" role=\"alert\">"),
+            "{refused}"
+        );
+        assert_eq!(refused.matches("role=\"alert\"").count(), 1, "{refused}");
+        assert!(
+            refused.contains("<p class=\"entry-status\" role=\"status\"></p>"),
+            "{refused}"
+        );
+        assert!(!refused.contains("fetch-error__retry"), "{refused}");
+        assert!(!refused.contains(">Retry</button>"), "{refused}");
+        for (status, body) in [(401, r#"{"error":"Log in first"}"#), (403, ""), (401, "")] {
+            let err = scuffed_api_client::ClientError::http(status, body, None);
+            let slot: Result<ThreadDetailResponse, String> =
+                Err(crate::client_error::logged_message("forum thread", &err));
+            let html = Case::of(Load::of(Some(&slot))).render();
+            assert!(html.contains("load this thread</h1>"), "{status}: {html}");
+            assert!(
+                html.contains(&crate::client_error::user_message(&err)),
+                "{html}"
+            );
+            assert!(!html.contains(">Retry</button>"), "{status}: {html}");
+            assert!(!html.contains("fetch-error__retry"), "{status}: {html}");
+        }
+        // A 5xx or an unreadable answer keeps Retry.
+        for err in [
+            scuffed_api_client::ClientError::http(500, r#"{"error":"Database down"}"#, None),
+            scuffed_api_client::ClientError::Deserialize("expected value".into()),
+        ] {
+            let slot: Result<ThreadDetailResponse, String> =
+                Err(crate::client_error::logged_message("forum thread", &err));
+            let html = Case::of(Load::of(Some(&slot))).render();
+            assert!(html.contains(">Retry</button>"), "{err:?}: {html}");
+            assert!(
+                html.contains("<div class=\"fetch-error-wrap\" role=\"alert\">"),
+                "{err:?}: {html}"
+            );
+        }
+        let _ = crate::util::take_logged();
 
         // A missing thread is the not-found card, not an error page.
         let missing = Case::of(Load::Missing).render();

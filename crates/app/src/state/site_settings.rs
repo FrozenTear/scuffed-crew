@@ -167,7 +167,7 @@ async fn load_public_settings() -> Result<SiteSettings, String> {
     ApiClient::web()
         .fetch::<SiteSettings>("/api/settings")
         .await
-        .map_err(|err| err.to_string())
+        .map_err(|err| crate::client_error::logged_message("site settings load", &err))
 }
 
 #[cfg(test)]

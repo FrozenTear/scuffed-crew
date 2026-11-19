@@ -1,7 +1,8 @@
 //! Error text for the strategy loaders (APP9).
 //!
-//! Errors are `ClientError` Display strings, as kept by the resources in
-//! `meta.rs`, `editor.rs` and `heroes`.
+//! `reason` is the failure text the resources in `meta.rs`, `editor.rs` and
+//! `heroes` keep: [`crate::client_error::user_message`] of the `ClientError`,
+//! so a server answer keeps its status and a network failure reads short.
 
 use dioxus::prelude::UseResourceState;
 
@@ -16,15 +17,15 @@ pub struct LoadError {
 
 /// Competitive Meta: a 404 means the strategies gate has Meta switched off,
 /// so a Retry cannot help. Every other failure is shown with a Retry.
-pub fn meta_load_error(err: &str) -> LoadError {
-    if is_http_status(err, 404) {
+pub fn meta_load_error(reason: &str) -> LoadError {
+    if is_http_status(reason, 404) {
         LoadError {
             message: "Competitive Meta isn't available right now.".to_string(),
             retry: false,
         }
     } else {
         LoadError {
-            message: format!("Couldn't load meta data. {err}"),
+            message: format!("Couldn't load meta data. {reason}"),
             retry: true,
         }
     }
@@ -38,32 +39,35 @@ pub fn is_retrying(state: UseResourceState) -> bool {
 
 /// Heroes page: a 404 means the strategies gate is off, so a Retry cannot
 /// help. Every other failure is shown with a Retry.
-pub fn heroes_load_error(err: &str) -> LoadError {
-    if is_http_status(err, 404) {
+pub fn heroes_load_error(reason: &str) -> LoadError {
+    if is_http_status(reason, 404) {
         LoadError {
             message: "The hero list isn't available right now.".to_string(),
             retry: false,
         }
     } else {
         LoadError {
-            message: format!("Couldn't load the hero list. {err}"),
+            message: format!("Couldn't load the hero list. {reason}"),
             retry: true,
         }
     }
 }
 
-/// Strategy editor: 404 and 403 mean the strategy is gone or private, so a
-/// Retry will not help. Anything else (500, network, bad JSON) can be retried.
-pub fn strategy_load_error(err: &str) -> LoadError {
-    if is_http_status(err, 404) || is_http_status(err, 403) {
+/// Strategy editor: a 404 means the strategy is gone or private, so a Retry
+/// will not help. A 403 keeps the server's reason next to the lead (QA round
+/// 3 on 748: a refusal read as not found dropped it), and gets no Retry
+/// either: a retry gives the same answer. Anything else (500, network, bad
+/// JSON) can be retried.
+pub fn strategy_load_error(reason: &str) -> LoadError {
+    if is_http_status(reason, 404) {
         LoadError {
             message: "Strategy not found or access denied.".to_string(),
             retry: false,
         }
     } else {
         LoadError {
-            message: format!("Couldn't load this strategy. {err}"),
-            retry: true,
+            message: format!("Couldn't load this strategy. {reason}"),
+            retry: !is_http_status(reason, 403),
         }
     }
 }
@@ -74,19 +78,29 @@ mod tests {
     use scuffed_api_client::ClientError;
 
     fn http(status: u16, body: &str) -> String {
-        ClientError::http(status, body, None).to_string()
+        crate::client_error::user_message(&ClientError::http(status, body, None))
     }
 
     #[test]
     fn missing_or_forbidden_strategy_is_not_retried() {
         for err in [
             http(404, r#"{"error":"Not found"}"#),
-            http(403, r#"{"error":"Forbidden"}"#),
             http(404, "<html></html>"),
-            http(403, ""),
         ] {
             let shown = strategy_load_error(&err);
             assert_eq!(shown.message, "Strategy not found or access denied.");
+            assert!(!shown.retry, "{err}");
+        }
+        // QA round 3 on 748: a 403 keeps the server's reason (or the bare
+        // status) after the lead, still without a Retry.
+        for (err, why) in [
+            (http(403, r#"{"error":"Forbidden"}"#), "Forbidden"),
+            (http(403, ""), "HTTP error: 403"),
+        ] {
+            let shown = strategy_load_error(&err);
+            assert_eq!(shown.message, format!("Couldn't load this strategy. {err}"));
+            assert!(shown.message.contains(why), "{}", shown.message);
+            assert!(!shown.message.contains("not found"), "{}", shown.message);
             assert!(!shown.retry, "{err}");
         }
     }
@@ -97,8 +111,8 @@ mod tests {
             http(500, r#"{"error":"Internal server error"}"#),
             http(502, ""),
             http(401, r#"{"error":"Unauthorized"}"#),
-            ClientError::Network("offline".to_string()).to_string(),
-            ClientError::Deserialize("bad json".to_string()).to_string(),
+            crate::client_error::user_message(&ClientError::Network("offline".to_string())),
+            crate::client_error::user_message(&ClientError::Deserialize("bad json".to_string())),
         ] {
             let shown = strategy_load_error(&err);
             assert!(shown.retry, "{err}");
@@ -119,7 +133,7 @@ mod tests {
         for err in [
             http(500, r#"{"error":"Internal server error"}"#),
             http(502, ""),
-            ClientError::Network("offline".to_string()).to_string(),
+            crate::client_error::user_message(&ClientError::Network("offline".to_string())),
         ] {
             let shown = meta_load_error(&err);
             assert!(shown.retry);
@@ -147,8 +161,8 @@ mod tests {
 
         for err in [
             http(500, ""),
-            ClientError::Network("offline".to_string()).to_string(),
-            ClientError::Deserialize("bad json".to_string()).to_string(),
+            crate::client_error::user_message(&ClientError::Network("offline".to_string())),
+            crate::client_error::user_message(&ClientError::Deserialize("bad json".to_string())),
         ] {
             let shown = heroes_load_error(&err);
             assert!(shown.retry, "{err}");

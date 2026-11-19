@@ -172,7 +172,8 @@ pub fn AdminAnnouncements() -> Element {
                     announcements.refresh += 1;
                 }
                 Err(e) => {
-                    let message = format!("Could not save the announcement. {e}");
+                    let message =
+                        crate::client_error::with_lead("Could not save the announcement.", &e);
                     form_error.set(Some(message.clone()));
                     toast.show(Toast::error(message));
                 }
@@ -205,9 +206,7 @@ pub fn AdminAnnouncements() -> Element {
                     focus_after_delete_soon(edit_button_id(&id), focus_next);
                 }
                 Err(e) => {
-                    toast.show(Toast::error(format!(
-                        "Could not delete the announcement. {e}"
-                    )));
+                    toast.show(Toast::error_from("Could not delete the announcement.", &e));
                 }
             }
         });

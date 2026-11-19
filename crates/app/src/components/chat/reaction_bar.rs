@@ -215,8 +215,9 @@ async fn send_reaction(event_id: &str, author_pubkey: &str, content: &str, mut t
     {
         Ok(_) => {}
         Err(e) => {
-            crate::util::log_client_error("reaction", &e);
-            toasts.show(Toast::error("Couldn't add the reaction. Try again."));
+            // The one mapping says why (and logs it): an unreadable answer
+            // may mean the reaction is in, so no blind "try again".
+            toasts.show(Toast::error_from("Couldn't add the reaction.", &e));
         }
     }
 }

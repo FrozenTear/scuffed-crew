@@ -213,8 +213,10 @@ pub fn AdminForum() -> Element {
                     toast.show(Toast::success("Category created"));
                 }
                 Err(e) => {
-                    cat_state.set(SaveState::failed("Could not create the category", &e));
-                    toast.show(Toast::error(e.to_string()));
+                    // One line for both, logged once by `SaveState::failed`.
+                    let line = SaveState::failed("Could not create the category", &e);
+                    toast.show(Toast::error(line.text()));
+                    cat_state.set(line);
                 }
             }
         });
@@ -261,8 +263,10 @@ pub fn AdminForum() -> Element {
                     toast.show(Toast::success("Board created"));
                 }
                 Err(e) => {
-                    board_state.set(SaveState::failed("Could not create the board", &e));
-                    toast.show(Toast::error(e.to_string()));
+                    // One line for both, logged once by `SaveState::failed`.
+                    let line = SaveState::failed("Could not create the board", &e);
+                    toast.show(Toast::error(line.text()));
+                    board_state.set(line);
                 }
             }
         });

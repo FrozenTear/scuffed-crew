@@ -246,7 +246,7 @@ pub fn AdminSchedule() -> Element {
                     save_error.set(Some(
                         SaveState::failed("Could not save the event", &e).text(),
                     ));
-                    toast.show(Toast::error(format!("Failed to save event: {e}")));
+                    toast.show(Toast::error_logged_elsewhere("Failed to save event", &e));
                 }
             }
         });
@@ -286,7 +286,7 @@ pub fn AdminSchedule() -> Element {
                         teams.refresh += 1;
                         members.refresh += 1;
                     }
-                    Err(e) => toast.show(Toast::error(format!("Delete failed: {e}"))),
+                    Err(e) => toast.show(Toast::error_from("Delete failed", &e)),
                 }
             });
         }
@@ -361,7 +361,10 @@ pub fn AdminSchedule() -> Element {
                         att_error.set(Some(
                             SaveState::failed("Could not save attendance", &e).text(),
                         ));
-                        toast.show(Toast::error(format!("Failed to save attendance: {e}")));
+                        toast.show(Toast::error_logged_elsewhere(
+                            "Failed to save attendance",
+                            &e,
+                        ));
                     }
                 }
             });

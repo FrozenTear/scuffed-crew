@@ -272,7 +272,7 @@ pub fn StrategyBrowse() -> Element {
             ApiClient::web()
                 .fetch::<ListResponse>(&path)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(|e| crate::client_error::logged_message("strategy list", &e))
         }
     });
 
@@ -329,10 +329,9 @@ pub fn StrategyBrowse() -> Element {
                     None => rsx! {
                         SkeletonRows { status: "Loading strategies...".to_string() }
                     },
-                    Some(Err(_)) => rsx! {
+                    Some(Err(reason)) => rsx! {
                         LoadError {
-                            message: "Couldn't load strategies. Check your connection and try again."
-                                .to_string(),
+                            message: crate::client_error::join_lead("Couldn't load strategies.", reason),
                             on_retry: move |_| strategies.restart(),
                         }
                     },

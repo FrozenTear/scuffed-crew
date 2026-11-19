@@ -541,7 +541,7 @@ pub fn AdminApplications() -> Element {
                     {
                         accept_name_error.set(Some((id, message.to_string())));
                     } else {
-                        toast.show(Toast::error(format!("Failed to accept: {e}")));
+                        toast.show(Toast::error_from("Failed to accept", &e));
                     }
                 }
             }
@@ -569,7 +569,7 @@ pub fn AdminApplications() -> Element {
                     applications.refresh += 1;
                     focus_after_delete_soon(application_accept_id(&id), focus_next);
                 }
-                Err(e) => toast.show(Toast::error(format!("Failed to decline: {e}"))),
+                Err(e) => toast.show(Toast::error_from("Failed to decline", &e)),
             }
         });
     };

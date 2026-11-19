@@ -22,7 +22,9 @@ pub(crate) fn chat_status_copy(availability: RelayAvailability) -> &'static str 
 
 /// One short line under each gate title.
 const CHAT_OFF_LEAD: &str = "Chat and direct messages are turned off on this site.";
-const CHAT_FAILED_LEAD: &str = "Check your connection and try again.";
+/// The failed gate's lead when the check kept no reason (a test override);
+/// a real failure says the mapped reason instead (QA on 748).
+const CHAT_FAILED_LEAD: &str = "Use Retry to check again.";
 
 /// H1 while the health check runs. The same gate serves `/chat` and `/dm`.
 const GATE_TITLE: &str = "Chat";
@@ -60,8 +62,20 @@ fn is_checking(availability: RelayAvailability) -> bool {
 /// every state and only its text changes, so "checking" and a failure are
 /// each announced.
 #[component]
-pub fn ChatGateNotice(availability: RelayAvailability, on_retry: EventHandler<()>) -> Element {
+pub fn ChatGateNotice(
+    availability: RelayAvailability,
+    /// The failed health check's mapped reason
+    /// (`RelayAvailabilityState::failure_reason`).
+    #[props(default)]
+    reason: String,
+    on_retry: EventHandler<()>,
+) -> Element {
     let status = gate_status(availability);
+    let failed_lead = if reason.trim().is_empty() {
+        CHAT_FAILED_LEAD.to_string()
+    } else {
+        reason.trim().to_string()
+    };
     let status_class = if is_checking(availability) {
         "chat-gate-status"
     } else {
@@ -85,7 +99,7 @@ pub fn ChatGateNotice(availability: RelayAvailability, on_retry: EventHandler<()
                     Wall {
                         page_title: true,
                         title: CHAT_FAILED,
-                        lead: CHAT_FAILED_LEAD,
+                        lead: failed_lead,
                         actions: rsx! {
                             button {
                                 r#type: "button",
@@ -109,6 +123,27 @@ pub fn ChatGateNotice(availability: RelayAvailability, on_retry: EventHandler<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// QA on 748: a failed health check says the mapped reason, not a fixed
+    /// "check your connection"; the fallback only shows with no reason.
+    #[test]
+    fn a_failed_check_says_its_reason() {
+        let prod = include_str!("chat_gate.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("prod part");
+        assert!(prod.contains("lead: failed_lead,"));
+        assert!(!prod.contains("Check your connection"));
+        for page in [include_str!("chat.rs"), include_str!("dm.rs")] {
+            assert!(page.contains("reason: relay.failure_reason(),"));
+        }
+        let relay = include_str!("../state/relay.rs");
+        assert!(
+            relay.contains(
+                "return Err(crate::client_error::logged_message(\"relay health\", &err));"
+            )
+        );
+    }
 
     use crate::state::{
         AuthState, RelayAvailability, provide_site_settings, set_test_relay_availability,

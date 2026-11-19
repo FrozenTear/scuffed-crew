@@ -259,16 +259,18 @@ fn schedule(mut events: Vec<Event>) -> Vec<Event> {
 #[derive(Debug, Clone, PartialEq)]
 enum EventsLoad {
     Loading,
-    Failed,
+    /// The mapped reason (`ApiResource::error`, logged by the hook).
+    Failed(String),
     Ready(Vec<Event>),
 }
 
 impl EventsLoad {
     /// From a `use_api_list` slot: `None` in flight, `Some(None)` failed.
-    fn of(slot: Option<&Option<Vec<Event>>>) -> Self {
+    /// `error` is the hook's mapped error text.
+    fn of(slot: Option<&Option<Vec<Event>>>, error: Option<&str>) -> Self {
         match slot {
             None => EventsLoad::Loading,
-            Some(None) => EventsLoad::Failed,
+            Some(None) => EventsLoad::Failed(error.unwrap_or_default().to_string()),
             Some(Some(list)) => EventsLoad::Ready(schedule(list.clone())),
         }
     }
@@ -292,9 +294,10 @@ pub fn Events() -> Element {
     let mut refresh = events.refresh;
 
     // Cloned out so no read guard is held while the children render.
-    let load = EventsLoad::of(events.data.read().as_ref());
+    let load = EventsLoad::of(events.data.read().as_ref(), events.error.read().as_deref());
     // `use_api_list` keeps the failed slot while a retry is in flight.
-    let retrying = load == EventsLoad::Failed && events.data.state()() == UseResourceState::Pending;
+    let retrying =
+        matches!(load, EventsLoad::Failed(_)) && events.data.state()() == UseResourceState::Pending;
 
     rsx! {
         crate::styles::StyleOnce { id: "scuffed-css-pages-events-page-css", css: PAGE_CSS }
@@ -376,9 +379,9 @@ fn EventsBody(
         p { class: "visually-hidden", role: "status", "{status}" }
         match &load {
             EventsLoad::Loading => rsx! { SkeletonBars { rows: 3 } },
-            EventsLoad::Failed => rsx! {
+            EventsLoad::Failed(reason) => rsx! {
                 LoadError {
-                    message: "Couldn't load events. Check your connection and try again.",
+                    message: crate::client_error::join_lead("Couldn't load events.", reason),
                     on_retry,
                     retrying,
                 }
@@ -571,14 +574,21 @@ fn EventCardView(
 }
 
 /// Toast for a failed RSVP. Only a failure a retry can fix says "try again".
-fn rsvp_failure_text(err: &scuffed_api_client::ClientError) -> &'static str {
-    match err.http_status() {
+fn rsvp_failure_text(err: &scuffed_api_client::ClientError) -> String {
+    let named = match err.http_status() {
         Some(401) => "Couldn't save your RSVP. Your session has ended. Log in again.",
         Some(403) => "Couldn't save your RSVP. Only crew members can RSVP.",
         Some(404) => "Couldn't save your RSVP. This event no longer exists.",
         Some(_) => "Couldn't save your RSVP. Try again in a moment.",
-        None => "Couldn't save your RSVP. Check your connection and try again.",
-    }
+        // No answer or an unreadable answer: the one mapping (QA on 748).
+        None => {
+            return crate::client_error::join_lead(
+                "Couldn't save your RSVP.",
+                crate::client_error::message_without_reason(err),
+            );
+        }
+    };
+    named.to_string()
 }
 
 /// DOM id of one RSVP radio, from the event id and the answer.
@@ -698,7 +708,7 @@ mod tests {
             Show::List(events) => rsx! { EventsBody { load: EventsLoad::Ready(events), viewer } },
             Show::Failed(retrying) => rsx! {
                 EventsBody {
-                    load: EventsLoad::Failed,
+                    load: EventsLoad::Failed(crate::client_error::NETWORK_ERROR_MESSAGE.to_string()),
                     viewer,
                     retrying,
                     on_retry: move |_| {},
@@ -913,7 +923,9 @@ mod tests {
         let failed = render(Show::Failed(false), Viewer::Guest);
         assert!(failed.contains("role=\"alert\""), "{failed}");
         assert!(
-            failed.contains("Couldn&#39;t load events. Check your connection and try again."),
+            failed.contains(
+                "Couldn&#39;t load events. Could not reach the server. Check your connection and try again."
+            ),
             "{failed}"
         );
         assert!(failed.contains(">Retry</button>"), "{failed}");
@@ -936,8 +948,11 @@ mod tests {
         }
         assert_eq!(events_status(&EventsLoad::Loading, false), "Loading events");
         assert_eq!(events_status(&EventsLoad::Ready(Vec::new()), false), "");
-        assert_eq!(EventsLoad::of(None), EventsLoad::Loading);
-        assert_eq!(EventsLoad::of(Some(&None)), EventsLoad::Failed);
+        assert_eq!(EventsLoad::of(None, None), EventsLoad::Loading);
+        assert_eq!(
+            EventsLoad::of(Some(&None), Some("HTTP error 403: Members only")),
+            EventsLoad::Failed("HTTP error 403: Members only".to_string())
+        );
     }
 
     #[test]
@@ -1114,8 +1129,17 @@ mod tests {
         );
         assert_eq!(
             rsvp_failure_text(&ClientError::Network("offline".into())),
-            "Couldn't save your RSVP. Check your connection and try again."
+            "Couldn't save your RSVP. Could not reach the server. Check your connection and try again."
         );
+        let unreadable = rsvp_failure_text(&ClientError::Deserialize("expected value".into()));
+        assert_eq!(
+            unreadable,
+            format!(
+                "Couldn't save your RSVP. {}",
+                crate::client_error::UNREADABLE_ANSWER_MESSAGE
+            )
+        );
+        assert!(!unreadable.contains("connection"), "{unreadable}");
     }
 
     /// The answer lives with the list, not the card, so a card that leaves

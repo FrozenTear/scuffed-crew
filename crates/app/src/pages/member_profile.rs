@@ -330,8 +330,10 @@ pub fn MemberProfile(id: String) -> Element {
                             ],
                         }
                     },
-                    Some(PublicFetch::Failed) => rsx! {
-                        p { class: "profile-loading", "Couldn't load this profile. Check your connection and try again." }
+                    Some(PublicFetch::Failed(reason)) => rsx! {
+                        p { class: "profile-loading",
+                            {crate::client_error::join_lead("Couldn't load this profile.", reason)}
+                        }
                     },
                     Some(PublicFetch::Found(m)) => {
                         let initials: String = m.display_name

@@ -6,7 +6,7 @@ use crate::components::ui::{LoadError, PageHeader, PageShell, PageWidth};
 use crate::components::{Toast, use_toast};
 use crate::routes::Route;
 use crate::state::{loaded_site_settings, use_site_settings};
-use crate::util::{log_client_error, pluralize};
+use crate::util::pluralize;
 use scuffed_api_client::ApiClient;
 
 /// Fields this page reads from `GET /api/public/overview`.
@@ -206,10 +206,7 @@ pub fn Community() -> Element {
                 .fetch::<PublicOverview>("/api/public/overview")
                 .await
                 .map(Counts::from)
-                .map_err(|e| {
-                    log_client_error("community overview", &e);
-                    e.to_string()
-                })
+                .map_err(|e| crate::client_error::logged_message("community overview", &e))
         }
     });
 
@@ -269,7 +266,7 @@ fn CommunityView(
     let title = community_title(org_name.as_deref());
     let lead = community_lead(description.as_deref(), loaded);
     let status = counts_status(&counts, retrying);
-    let failed = matches!(counts, Load::Failed | Load::Missing);
+    let failed = matches!(counts, Load::Failed(_) | Load::Missing);
     let tiles = [
         ("Members", loaded.map(|c| c.members.to_string())),
         ("Teams", loaded.map(|c| c.teams.to_string())),
@@ -306,7 +303,7 @@ fn CommunityView(
                 }
                 if failed {
                     LoadError {
-                        message: "Couldn't load the counts. Check your connection and try again.",
+                        message: counts.failure_line("Couldn't load the counts."),
                         on_retry: move |_| on_retry.call(()),
                         retrying,
                     }
@@ -372,8 +369,10 @@ fn OfficerCommunityActions(org_name: String) -> Element {
                     toasts.show(Toast::success("Community definition published to relay"));
                 }
                 Err(e) => {
-                    log_client_error("community publish", &e);
-                    toasts.show(Toast::error("Couldn't publish the community definition"));
+                    toasts.show(Toast::error_from(
+                        "Couldn't publish the community definition.",
+                        &e,
+                    ));
                 }
             }
             publishing.set(false);
@@ -402,6 +401,7 @@ fn OfficerCommunityActions(org_name: String) -> Element {
 
 #[cfg(test)]
 mod tests {
+    const NET: &str = crate::client_error::NETWORK_ERROR_MESSAGE;
     use super::super::article_author::test_support::render_routed;
     use super::*;
     use crate::components::ToastProvider;
@@ -546,7 +546,12 @@ mod tests {
             "{loading}"
         );
 
-        let failed = render(Some("Test Crew"), Load::Failed, false, false);
+        let failed = render(
+            Some("Test Crew"),
+            Load::Failed(NET.to_string()),
+            false,
+            false,
+        );
         assert_eq!(
             failed
                 .matches("<dd class=\"is-missing\">Not available</dd>")
@@ -556,14 +561,21 @@ mod tests {
         );
         assert!(failed.contains("role=\"alert\""), "{failed}");
         assert!(
-            failed.contains("load the counts. Check your connection"),
+            failed.contains(
+                "Couldn&#39;t load the counts. Could not reach the server. Check your connection and try again."
+            ),
             "{failed}"
         );
         assert!(failed.contains(">Retry</button>"), "{failed}");
         // The ways in do not depend on the counts.
         assert_eq!(failed.matches("class=\"entry-row\"").count(), 4, "{failed}");
 
-        let retrying = render(Some("Test Crew"), Load::Failed, true, false);
+        let retrying = render(
+            Some("Test Crew"),
+            Load::Failed(NET.to_string()),
+            true,
+            false,
+        );
         assert!(retrying.contains(">Loading counts</p>"), "{retrying}");
         assert!(retrying.contains(">Retrying...</button>"), "{retrying}");
         assert!(!retrying.contains(" disabled"), "{retrying}");

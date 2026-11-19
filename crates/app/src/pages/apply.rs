@@ -571,7 +571,13 @@ fn action_failure_text(what: &str, err: &ClientError) -> String {
         },
         Some(401) => format!("{what}. Your session has ended. Log in again."),
         Some(_) => format!("{what}. Try again."),
-        None => format!("{what}. Check your connection and try again."),
+        // No answer or an unreadable answer: the one mapping, so an
+        // unreadable answer to a send that may have gone through is not
+        // blamed on the connection or retried blindly (QA on 748).
+        None => crate::client_error::two_sentences(
+            what,
+            crate::client_error::message_without_reason(err),
+        ),
     }
 }
 
@@ -2063,8 +2069,17 @@ mod tests {
         let offline = ClientError::Network("failed to fetch".to_string());
         assert_eq!(
             action_failure_text(send, &offline),
-            "Couldn't send the application. Check your connection and try again."
+            "Couldn't send the application. Could not reach the server. Check your connection and try again."
         );
+        let unreadable = ClientError::Deserialize("expected value".to_string());
+        assert_eq!(
+            action_failure_text(send, &unreadable),
+            format!(
+                "Couldn't send the application. {}",
+                crate::client_error::UNREADABLE_ANSWER_MESSAGE
+            )
+        );
+        assert!(!action_failure_text(send, &unreadable).contains("connection"));
     }
 
     #[test]

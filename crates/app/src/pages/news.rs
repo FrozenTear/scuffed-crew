@@ -58,7 +58,10 @@ pub fn News() -> Element {
             })
             .unwrap_or_default()
     });
-    let load = Load::of_api(announcements.data.read().as_ref());
+    let load = Load::of_api(
+        announcements.data.read().as_ref(),
+        announcements.error.read().as_deref(),
+    );
     let retrying = is_retrying(announcements.data.state()(), &load);
 
     rsx! {
@@ -122,9 +125,9 @@ fn NewsIndex(
                 p { class: "entry-status", role: "status", "{status}" }
                 {match &load {
                     Load::Loading => rsx! {},
-                    Load::Failed | Load::Missing => rsx! {
+                    Load::Failed(_) | Load::Missing => rsx! {
                         LoadError {
-                            message: "Couldn't load the news. Check your connection and try again.",
+                            message: load.failure_line("Couldn't load the news."),
                             on_retry: move |_| on_retry.call(()),
                             retrying,
                         }
@@ -199,6 +202,7 @@ fn render_news_card(a: &Announcement, names: Option<&AuthorNames>) -> Element {
 
 #[cfg(test)]
 mod tests {
+    const NET: &str = crate::client_error::NETWORK_ERROR_MESSAGE;
     use super::super::article_author::AUTHOR_FALLBACK;
     use super::*;
 
@@ -372,17 +376,19 @@ mod tests {
         assert!(!loading.contains("No announcements yet"), "{loading}");
 
         // A failed fetch is an error with a retry, not an endless "Loading".
-        let failed = render(Load::Failed, None, 1);
+        let failed = render(Load::Failed(NET.to_string()), None, 1);
         assert!(failed.contains("role=\"alert\""), "{failed}");
         assert!(
-            failed.contains("load the news. Check your connection"),
+            failed.contains(
+                "Couldn&#39;t load the news. Could not reach the server. Check your connection and try again."
+            ),
             "{failed}"
         );
         assert!(failed.contains(">Retry</button>"), "{failed}");
         assert!(!failed.contains("Loading"), "{failed}");
 
         // A retry keeps the error and its button, and says it is loading.
-        let retrying = render_state(Load::Failed, None, 1, true);
+        let retrying = render_state(Load::Failed(NET.to_string()), None, 1, true);
         assert!(
             retrying
                 .contains("<p class=\"entry-status\" role=\"status\">Loading announcements</p>"),

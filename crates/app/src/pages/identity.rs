@@ -254,7 +254,7 @@ fn identity_view(auth: &AuthState, me: Option<&Result<MeResponse, ClientError>>)
     }
     match me {
         None => AccountView::Loading,
-        Some(Err(e)) => account_view_from_error(&e.to_string()),
+        Some(Err(e)) => account_view_from_error(&crate::client_error::user_message(e)),
         Some(Ok(me)) if me.member.is_none() => AccountView::Apply,
         Some(Ok(_)) => AccountView::Ready,
     }
@@ -281,7 +281,15 @@ pub fn IdentitySettings() -> Element {
     let auth = use_auth();
     let identity = use_resource(move || {
         let _ = refresh();
-        async move { ApiClient::web().get_me().await }
+        async move {
+            let me = ApiClient::web().get_me().await;
+            // Logged once per load, here: `identity_view` runs on every
+            // render and stays pure (Vision nit 3, round 4 on 748).
+            if let Err(e) = &me {
+                crate::util::log_client_error("Load account", e);
+            }
+            me
+        }
     });
 
     let has_extension = has_nip07_extension();
@@ -291,9 +299,10 @@ pub fn IdentitySettings() -> Element {
         spawn(async move {
             match get_pubkey_from_extension().await {
                 Ok(pk) => pubkey_input.set(pk),
-                Err(e) => {
-                    link_state.set(SaveState::Failed(format!("Extension error: {e}")));
-                    toast.show(Toast::error(format!("Extension error: {e}")));
+                Err(reason) => {
+                    // The extension's own words (a String), not a request error.
+                    link_state.set(SaveState::Failed(format!("Extension error: {reason}")));
+                    toast.show(Toast::error(format!("Extension error: {reason}")));
                 }
             }
         });
@@ -321,9 +330,14 @@ pub fn IdentitySettings() -> Element {
                     refresh += 1;
                     pubkey_input.set(String::new());
                 }
-                Err(e) => {
-                    link_state.set(SaveState::failed("Could not link the key", &e));
-                    toast.show(Toast::error(format!("Link failed: {e}")));
+                Err(reason) => {
+                    // `link_nostr_identity` already maps its request errors
+                    // through `user_message`; the rest is extension text.
+                    // One lead, then the step that failed (Vision nit 11
+                    // on 748: no "Link failed: Challenge request failed:").
+                    let line = SaveState::failed_text("Could not link the key", &reason);
+                    toast.show(Toast::error(line.text()));
+                    link_state.set(line);
                 }
             }
             working.set(false);
@@ -360,7 +374,7 @@ pub fn IdentitySettings() -> Element {
                 }
                 Err(e) => {
                     backup_state.set(SaveState::failed("Could not export the backup", &e));
-                    toast.show(Toast::error(format!("Export failed: {e}")));
+                    toast.show(Toast::error_logged_elsewhere("Export failed", &e));
                 }
             }
             working.set(false);
@@ -418,7 +432,7 @@ pub fn IdentitySettings() -> Element {
                 }
                 Err(e) => {
                     import_state.set(SaveState::failed("Could not import the key", &e));
-                    toast.show(Toast::error(format!("Import failed: {e}")));
+                    toast.show(Toast::error_logged_elsewhere("Import failed", &e));
                 }
             }
             working.set(false);
@@ -448,7 +462,7 @@ pub fn IdentitySettings() -> Element {
                 }
                 Err(e) => {
                     unlink_state.set(SaveState::failed("Could not unlink the key", &e));
-                    toast.show(Toast::error(format!("Unlink failed: {e}")));
+                    toast.show(Toast::error_logged_elsewhere("Unlink failed", &e));
                     // The confirm strip closed with focus in it: back to
                     // Unlink key.
                     focus_after_delete_soon(
@@ -810,7 +824,7 @@ async fn link_nostr_identity(pubkey: &str) -> Result<(), String> {
             },
         )
         .await
-        .map_err(|e| format!("Challenge request failed: {e}"))?;
+        .map_err(|e| crate::client_error::with_lead("Could not start the key check.", &e))?;
 
     // 2. Build unsigned event for NIP-07 to sign
     let window = web_sys::window().ok_or("No window")?;
@@ -873,7 +887,7 @@ async fn link_nostr_identity(pubkey: &str) -> Result<(), String> {
     client
         .post_json::<_, serde_json::Value>("/api/nostr/verify", &body)
         .await
-        .map_err(|e| format!("Verification failed: {e}"))?;
+        .map_err(|e| crate::client_error::with_lead("Could not verify the key.", &e))?;
 
     Ok(())
 }
@@ -1003,6 +1017,40 @@ mod tests {
         );
         assert_eq!(npub_from_hex("abc"), None);
         assert_eq!(npub_from_hex(&"zz".repeat(32)), None);
+    }
+
+    /// Vision nit 3, round 4 on 748: a failed `me` load logs once, in the
+    /// resource (once per load), never in `identity_view`, which runs on
+    /// every render.
+    #[test]
+    fn a_failed_account_load_logs_once_per_load() {
+        let src = include_str!("identity.rs");
+        let prod = src.split("mod tests").next().expect("production half");
+        let resource = prod.find("let identity = use_resource(").expect("resource");
+        let load = prod[resource..]
+            .find("get_me().await")
+            .map(|at| resource + at)
+            .expect("load");
+        let log = prod[load..]
+            .find("log_client_error(\"Load account\", e)")
+            .map(|at| load + at)
+            .expect("logged after the load");
+        let end = prod[resource..]
+            .find("});")
+            .map(|at| resource + at)
+            .unwrap();
+        assert!(log < end, "the log is inside the resource");
+        let view = prod
+            .split("fn identity_view(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("identity_view");
+        assert!(view.contains("user_message(e)"), "{view}");
+        assert!(
+            !view.contains("log_client_error") && !view.contains("logged_message"),
+            "identity_view runs on every render and stays pure"
+        );
+        assert_eq!(prod.matches("log_client_error(\"Load account\"").count(), 1);
     }
 
     #[test]

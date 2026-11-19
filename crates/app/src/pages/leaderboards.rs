@@ -211,7 +211,8 @@ fn parse_cached_at(raw: Option<&str>) -> Option<chrono::DateTime<chrono::Utc>> {
 #[derive(Debug, Clone, PartialEq)]
 enum LeaderboardLoad {
     Hold,
-    Failed,
+    /// The mapped reason (logged when the fetch failed).
+    Failed(String),
     Rows(Vec<LeaderboardRow>),
 }
 
@@ -227,8 +228,9 @@ fn leaderboard_hold(path: &str) -> Option<LeaderboardLoad> {
 
 /// Status line while the board loads.
 const LOADING: &str = "Loading leaderboard";
-/// Error text of a failed load. Retry sits under it.
-const LOAD_FAILED: &str = "Couldn't load the leaderboard. Check your connection and try again.";
+/// Lead of a failed load's text; the mapped reason follows it. Retry sits
+/// under it.
+const LOAD_FAILED: &str = "Couldn't load the leaderboard.";
 /// Empty state title with no hero filter.
 const NO_PLAYERS: &str = "No ranked players yet";
 /// Empty state title with a hero picked.
@@ -236,17 +238,16 @@ const NO_PLAYERS_ON_HERO: &str = "No ranked players on this hero yet";
 
 /// Words for a board with no table: the loading line, the error text or the
 /// empty state title. `None` means render the table.
-fn leaderboard_message(
-    load: Option<&LeaderboardLoad>,
-    hero_filtered: bool,
-) -> Option<&'static str> {
+fn leaderboard_message(load: Option<&LeaderboardLoad>, hero_filtered: bool) -> Option<String> {
     match load {
-        None | Some(LeaderboardLoad::Hold) => Some(LOADING),
-        Some(LeaderboardLoad::Failed) => Some(LOAD_FAILED),
-        Some(LeaderboardLoad::Rows(list)) if list.is_empty() && hero_filtered => {
-            Some(NO_PLAYERS_ON_HERO)
+        None | Some(LeaderboardLoad::Hold) => Some(LOADING.to_string()),
+        Some(LeaderboardLoad::Failed(reason)) => {
+            Some(crate::client_error::join_lead(LOAD_FAILED, reason))
         }
-        Some(LeaderboardLoad::Rows(list)) if list.is_empty() => Some(NO_PLAYERS),
+        Some(LeaderboardLoad::Rows(list)) if list.is_empty() && hero_filtered => {
+            Some(NO_PLAYERS_ON_HERO.to_string())
+        }
+        Some(LeaderboardLoad::Rows(list)) if list.is_empty() => Some(NO_PLAYERS.to_string()),
         Some(LeaderboardLoad::Rows(_)) => None,
     }
 }
@@ -388,7 +389,7 @@ enum BoardView {
 fn board_view(slot: Option<&(String, LeaderboardLoad)>) -> BoardView {
     match slot {
         None | Some((_, LeaderboardLoad::Hold)) => BoardView::Loading,
-        Some((_, LeaderboardLoad::Failed)) => BoardView::Failed,
+        Some((_, LeaderboardLoad::Failed(_))) => BoardView::Failed,
         Some((_, LeaderboardLoad::Rows(list))) if list.is_empty() => BoardView::Empty,
         Some((board, LeaderboardLoad::Rows(list))) => BoardView::Rows(board_split(board, list)),
     }
@@ -449,9 +450,9 @@ pub fn Leaderboards() -> Element {
                         shown_at.set(parse_cached_at(payload.cached_at.as_deref()));
                         LeaderboardLoad::Rows(payload.rows)
                     }
-                    Err(_) => {
+                    Err(e) => {
                         shown_at.set(None);
-                        LeaderboardLoad::Failed
+                        LeaderboardLoad::Failed(crate::client_error::logged_message(&url, &e))
                     }
                 }
             }
@@ -1095,25 +1096,40 @@ mod tests {
 
     #[test]
     fn hold_renders_loading_not_the_failure() {
-        assert_eq!(leaderboard_message(None, false), Some(LOADING));
+        let net = crate::client_error::NETWORK_ERROR_MESSAGE;
+        assert_eq!(leaderboard_message(None, false).as_deref(), Some(LOADING));
         assert_eq!(
-            leaderboard_message(Some(&LeaderboardLoad::Hold), false),
+            leaderboard_message(Some(&LeaderboardLoad::Hold), false).as_deref(),
             Some(LOADING)
         );
-        assert_ne!(
-            leaderboard_message(Some(&LeaderboardLoad::Hold), false),
-            Some(LOAD_FAILED)
+        assert!(
+            !leaderboard_message(Some(&LeaderboardLoad::Hold), false)
+                .unwrap_or_default()
+                .contains(LOAD_FAILED)
+        );
+        // QA on 748: the failure says why, from the one mapping.
+        assert_eq!(
+            leaderboard_message(Some(&LeaderboardLoad::Failed(net.to_string())), false).as_deref(),
+            Some(
+                "Couldn't load the leaderboard. Could not reach the server. Check your connection and try again."
+            )
         );
         assert_eq!(
-            leaderboard_message(Some(&LeaderboardLoad::Failed), false),
-            Some(LOAD_FAILED)
+            leaderboard_message(
+                Some(&LeaderboardLoad::Failed(
+                    "HTTP error 403: Members only".into()
+                )),
+                false
+            )
+            .as_deref(),
+            Some("Couldn't load the leaderboard. HTTP error 403: Members only")
         );
         assert_eq!(
-            leaderboard_message(Some(&LeaderboardLoad::Rows(Vec::new())), true),
+            leaderboard_message(Some(&LeaderboardLoad::Rows(Vec::new())), true).as_deref(),
             Some("No ranked players on this hero yet")
         );
         assert_eq!(
-            leaderboard_message(Some(&LeaderboardLoad::Rows(Vec::new())), false),
+            leaderboard_message(Some(&LeaderboardLoad::Rows(Vec::new())), false).as_deref(),
             Some("No ranked players yet")
         );
         let one = LeaderboardLoad::Rows(vec![named("m1", "Player01", 1, 1, 1.0)]);
@@ -1127,7 +1143,7 @@ mod tests {
             BoardView::Loading
         );
         assert_eq!(
-            board_view(Some(&slot(LeaderboardLoad::Failed))),
+            board_view(Some(&slot(LeaderboardLoad::Failed(net.to_string())))),
             BoardView::Failed
         );
         assert_eq!(
@@ -1211,11 +1227,14 @@ mod tests {
         render_routed(move || {
             let case = case.clone();
             let message = match &case.view {
-                BoardView::Loading => LOADING,
-                BoardView::Failed => LOAD_FAILED,
-                BoardView::Empty if case.hero_filtered => NO_PLAYERS_ON_HERO,
-                BoardView::Empty => NO_PLAYERS,
-                BoardView::Rows(_) => "",
+                BoardView::Loading => LOADING.to_string(),
+                BoardView::Failed => crate::client_error::join_lead(
+                    LOAD_FAILED,
+                    crate::client_error::NETWORK_ERROR_MESSAGE,
+                ),
+                BoardView::Empty if case.hero_filtered => NO_PLAYERS_ON_HERO.to_string(),
+                BoardView::Empty => NO_PLAYERS.to_string(),
+                BoardView::Rows(_) => String::new(),
             };
             rsx! {
                 div { class: "lb-case",
@@ -1446,7 +1465,9 @@ mod tests {
         let failed = render_case(PanelCase::new("winrate", BoardView::Failed));
         assert!(failed.contains("role=\"alert\""), "{failed}");
         assert!(
-            failed.contains("load the leaderboard. Check your connection"),
+            failed.contains(
+                "Couldn&#39;t load the leaderboard. Could not reach the server. Check your connection and try again."
+            ),
             "{failed}"
         );
         assert!(failed.contains(">Retry</button>"), "{failed}");

@@ -148,7 +148,7 @@ fn format_write_error(verb: &str, e: &ClientError) -> String {
         Some(403) => "Officer access required (403). Members cannot write patch notes.".into(),
         Some(409) => "That version already exists (409). Use a different version number.".into(),
         Some(404) => "Patch note not found (404). It may have already been deleted.".into(),
-        _ => format!("Failed to {verb}: {e}"),
+        _ => crate::client_error::with_lead(&format!("Failed to {verb}"), e),
     }
 }
 

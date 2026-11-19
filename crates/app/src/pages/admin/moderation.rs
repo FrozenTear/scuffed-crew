@@ -291,7 +291,7 @@ pub fn AdminModeration() -> Element {
                     actions.refresh += 1;
                 }
                 Err(e) => {
-                    let message = format!("Failed to create: {e}");
+                    let message = crate::client_error::with_lead("Failed to create", &e);
                     create_error.set(Some(message.clone()));
                     toast.show(Toast::error(message));
                 }
@@ -324,7 +324,7 @@ pub fn AdminModeration() -> Element {
                     // Lifted); then focus the nearest other Lift.
                     focus_after_delete_soon(lift_button_id(&id), focus_next);
                 }
-                Err(e) => toast.show(Toast::error(format!("Failed to lift: {e}"))),
+                Err(e) => toast.show(Toast::error_from("Failed to lift", &e)),
             }
         });
     };
