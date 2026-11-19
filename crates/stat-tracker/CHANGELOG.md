@@ -15,7 +15,7 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
-## Unreleased
+## 0.6.0-rc.3
 
 A stat marked Check first whose read value is already right can now be confirmed: open Edit and save without changing anything, and the mark clears. A stat marked No read is the exception: there was no read to confirm, so a save without changes leaves it marked. The app names the stats it confirmed (for example "Elims confirmed") instead of saying "No changes to save". A save that corrects anything else leaves Check first stats as they were.
 
