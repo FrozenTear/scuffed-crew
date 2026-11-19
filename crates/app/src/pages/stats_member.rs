@@ -469,15 +469,20 @@ pub(crate) fn rate_cell(tally: Tally, text: &str, class: &str) -> Element {
 
 /// The words for a failed load of one stats block, and whether Retry can
 /// help. A refused request is not a connection problem: a retry gives the
-/// same answer, so it gets no button.
+/// same answer, so it gets no button. `error` is the already mapped (and
+/// already logged) text the page's fetch hook keeps
+/// ([`crate::client_error::logged_message`]).
 fn load_error_copy(what: &str, error: Option<&str>) -> (String, bool) {
     match error {
         Some(err) if is_http_status(err, 401) => (
             format!("Couldn't load {what}: you are logged out. Log in again to see it."),
             false,
         ),
+        // A 403 says the server's reason after the lead, never a fixed
+        // refusal sentence (round 6 on 748). A reason-less 403 still reads
+        // "HTTP error: 403" from the mapping.
         Some(err) if is_http_status(err, 403) => (
-            format!("Couldn't load {what}: your account can't see it."),
+            crate::client_error::join_lead(&format!("Couldn't load {what}."), err),
             false,
         ),
         // Any other failure says why through the one mapping (QA on 748):
@@ -1059,7 +1064,10 @@ mod tests {
     fn a_refused_load_is_announced_once_by_the_status_line() {
         let forbidden = Some("HTTP error 403: Forbidden");
         let said = status_or_refusal(String::new(), "hero stats", forbidden);
-        assert!(said.contains("your account can't see it"), "{said}");
+        // Round 6 on 748: the 403 says the server's reason after the lead,
+        // not a fixed refusal sentence.
+        assert_eq!(said, "Couldn't load hero stats. HTTP error 403: Forbidden");
+        assert!(!said.contains("can't see it"), "{said}");
         // A retryable failure keeps the (empty) line: its card is the alert.
         assert_eq!(
             status_or_refusal(String::new(), "hero stats", Some("HTTP error 500: x")),
@@ -1113,9 +1121,130 @@ mod tests {
         }
     }
 
+    /// Round 6 on 748: a member 403 on the stats page dropped the server's
+    /// reason for the fixed "your account can't see it." This goes through
+    /// the page's real mapping: `use_api_with` keeps
+    /// `logged_message(url, err)` as the error text, the summary reads it
+    /// with `member_view`, and each block with `status_or_refusal` and
+    /// `stats_load_error`.
+    #[test]
+    fn a_member_403_shows_the_mapped_reason_and_logs_once() {
+        use scuffed_api_client::ClientError;
+
+        #[component]
+        fn Card(error: String) -> Element {
+            stats_load_error("hero stats", Some(error), use_signal(|| 0))
+        }
+        fn card(error: &str) -> String {
+            let mut dom = VirtualDom::new_with_props(
+                Card,
+                CardProps {
+                    error: error.to_string(),
+                },
+            );
+            dom.rebuild_in_place();
+            dioxus_ssr::render(&dom)
+        }
+        // The text `use_api_with` keeps for a failed fetch, and its one log.
+        fn mapped(status: u16, body: &str) -> String {
+            let _ = crate::util::take_logged();
+            let err = ClientError::http(status, body, None);
+            let text = crate::client_error::logged_message("/api/stats/member/m1/heroes", &err);
+            let logged = crate::util::take_logged();
+            assert_eq!(logged.len(), 1, "{status}: {logged:?}");
+            assert!(
+                logged[0].starts_with("/api/stats/member/m1/heroes: "),
+                "{logged:?}"
+            );
+            text
+        }
+
+        // A 403 with a reason: lead plus reason, no Retry, said once by the
+        // status line, and the summary is not a privacy wall.
+        let err = mapped(403, r#"{"error":"Forbidden"}"#);
+        assert_eq!(err, "HTTP error 403: Forbidden");
+        assert_eq!(member_view(Some(&err)), MemberView::Open);
+        let (text, retry) = load_error_copy("hero stats", Some(&err));
+        assert_eq!(text, "Couldn't load hero stats. HTTP error 403: Forbidden");
+        assert!(!retry, "a retry gets the same 403");
+        assert_eq!(
+            status_or_refusal("Loading hero stats.".into(), "hero stats", Some(&err)),
+            text
+        );
+        let html = card(&err);
+        assert!(
+            html.contains("Couldn&#39;t load hero stats. HTTP error 403: Forbidden"),
+            "{html}"
+        );
+        assert!(!html.contains("can&#39;t see it"), "{html}");
+        assert!(!html.contains("<button"), "{html}");
+        assert!(!html.contains("role="), "{html}");
+
+        // A reason-less 403 still says something past the lead.
+        let err = mapped(403, "");
+        assert_eq!(err, "HTTP error: 403");
+        let (text, retry) = load_error_copy("map stats", Some(&err));
+        assert_eq!(text, "Couldn't load map stats. HTTP error: 403");
+        assert!(!retry);
+        let html = card(&err);
+        assert!(
+            html.contains("Couldn&#39;t load hero stats. HTTP error: 403"),
+            "{html}"
+        );
+        assert!(!html.contains("can&#39;t see it"), "{html}");
+
+        // A 401 keeps the sign-in copy.
+        let err = mapped(401, r#"{"error":"Unauthorized"}"#);
+        let (text, retry) = load_error_copy("map stats", Some(&err));
+        assert_eq!(
+            text,
+            "Couldn't load map stats: you are logged out. Log in again to see it."
+        );
+        assert!(!retry);
+        assert!(card(&err).contains("Log in again"));
+
+        // The code-specific privacy walls stay.
+        let err = mapped(403, r#"{"error":"stats_private"}"#);
+        assert_eq!(
+            member_view(Some(&err)),
+            MemberView::Denied("This member keeps their stats private.")
+        );
+        let err = mapped(403, r#"{"error":"stats_members_only"}"#);
+        assert_eq!(
+            member_view(Some(&err)),
+            MemberView::Denied("These stats are only visible to signed-in crew members.")
+        );
+        let err = mapped(400, r#"{"error":"bad id"}"#);
+        assert_eq!(
+            member_view(Some(&err)),
+            MemberView::Denied("These stats can't be shown. The member link may be wrong.")
+        );
+
+        // Rendering the card or the status line logs nothing more: the
+        // fetch already logged once.
+        let _ = card("HTTP error 403: Forbidden");
+        let _ = status_or_refusal(String::new(), "hero stats", Some("HTTP error 403: x"));
+        assert!(crate::util::take_logged().is_empty());
+
+        // The page's fetches keep the mapped text, and the page adds no
+        // second log or fixed refusal sentence.
+        let hook = include_str!("../hooks/api.rs");
+        let hook = &hook[hook.find("pub fn use_api_with").unwrap()..];
+        let hook = &hook[..hook.find("\n}\n").unwrap()];
+        assert_eq!(hook.matches("logged_message(&url, &e)").count(), 1);
+        let page = include_str!("stats_member.rs");
+        let prod = &page[..page.find("#[cfg(test)]").unwrap()];
+        // Split needle: the season filter test counts this text file-wide.
+        assert_eq!(prod.matches(concat!("use_api_with", "::<")).count(), 4);
+        assert!(!prod.contains("log_client_error("));
+        assert!(!prod.contains("logged_message("));
+        assert!(!prod.contains("can't see it"));
+    }
+
     #[test]
     fn a_refused_load_is_not_a_connection_problem() {
         let (text, retry) = load_error_copy("hero stats", Some("HTTP error 403: Forbidden"));
+        assert_eq!(text, "Couldn't load hero stats. HTTP error 403: Forbidden");
         assert!(!text.contains("connection"), "{text}");
         assert!(!retry, "a retry gets the same 403");
         let (text, retry) = load_error_copy("map stats", Some("HTTP error 401: Unauthorized"));
