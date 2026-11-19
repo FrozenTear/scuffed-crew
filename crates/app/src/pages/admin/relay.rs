@@ -3,7 +3,8 @@
 //! One read of `/api/nostr/health`. The state is always a word in a pill with
 //! a shape in front of it (a filled dot for online, a triangle for offline, a
 //! ring for not set), so colour is never the only signal. An offline primary
-//! relay is an error state with Retry.
+//! relay shows an alert banner with no button of its own: "Check again" in
+//! the page header is the retry.
 
 use dioxus::prelude::*;
 use serde::Deserialize;

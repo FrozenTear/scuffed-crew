@@ -138,8 +138,8 @@ pub fn StatusLine(text: String) -> Element {
 /// without Retry: the box appears with its text already in it, and a
 /// status that appears already filled is not reliably announced (Vision
 /// round 7 on 748; the strategy editor 403 is an alert too). Pages keep
-/// their own status line empty while it shows, so it is said once. Same markup and classes as
-/// `fetch_error_state`, but the retry is a handler, so it also works for
+/// their own status line empty while it shows, so it is said once. Same
+/// markup, classes and role rule as `fetch_error_state`, but the retry is a handler, so it also works for
 /// `use_resource` (`resource.restart()`). While `retrying` the button is
 /// `aria-disabled` and ignores clicks, so it keeps keyboard focus.
 #[component]

@@ -796,8 +796,8 @@ mod tests {
                 .to_string_lossy()
                 .replace('\\', "/");
             let text = std::fs::read_to_string(&path).expect("read rs");
-            let prod = text.split("#[cfg(test)]").next().unwrap_or("");
-            for ((a, first), (b, second)) in close_log_pairs(prod) {
+            // Out-of-line test module files are already in `skip`.
+            for ((a, first), (b, second)) in close_log_pairs(&prod_text(&text)) {
                 match TWO_LOGS_ALLOWED
                     .iter()
                     .position(|(f, l1, l2, _)| *f == rel && *l1 == first && *l2 == second)
@@ -840,6 +840,30 @@ mod tests {
         let def = "pub fn logged_message(what: &str, err: &ClientError) -> String {\n\
                    crate::util::log_client_error(what, err);\n";
         assert!(close_log_pairs(def).is_empty());
+
+        // Vision nit 1 on round 7: a test seam inside production code does
+        // not end the scan. The pair after the seam is found on its true
+        // lines, and the pair inside the test module is not.
+        let seamed = "#[cfg(test)]\nfn seam() {}\n\
+                      fn save() {\n    s.set(SaveState::failed(\"x\", &e));\n    \
+                      toast.show(Toast::error_from(\"y\", &e));\n}\n\
+                      #[cfg(test)]\nmod tests {\n    fn t() {\n        \
+                      a(logged_message(\"x\", &e));\n        \
+                      b(logged_message(\"y\", &e));\n    }\n}\n";
+        let pairs = close_log_pairs(&prod_text(seamed));
+        assert_eq!(pairs.len(), 1, "{pairs:?}");
+        assert_eq!((pairs[0].0.0, pairs[0].1.0), (4, 5));
+        assert!(pairs[0].0.1.starts_with("s.set(SaveState::failed("));
+    }
+
+    /// Production text of one source, read the way the page text scan reads
+    /// it: comments and inline `#[cfg(test)] mod x { .. }` blocks are
+    /// blanked in place (newlines kept, so line numbers stay true), and code
+    /// after a `#[cfg(test)]` seam on a non-module item is still read.
+    fn prod_text(text: &str) -> String {
+        let mut lexed = lex(text);
+        let _ = drop_test_modules(&mut lexed);
+        lexed.code.iter().collect()
     }
 
     /// Logging calls (see [`a_failure_is_not_logged_by_two_helpers`]) that

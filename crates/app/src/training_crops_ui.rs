@@ -788,11 +788,15 @@ mod tests {
             assert!(text.starts_with("Loading your choices failed. "), "{text}");
             let logged = take();
             assert_eq!(logged.len(), 1, "{err:?}: {logged:?}");
-            assert!(
-                logged[0].starts_with("Loading your choices failed: ")
-                    || logged[0].starts_with("Loading your choices: "),
-                "{logged:?}"
-            );
+            // Vision nit 4 on round 7: each kind has exactly one lead. The
+            // 503 arm logs under the bare lead (`what`); the rest go through
+            // `failure_text`, which logs "<what> failed".
+            let lead = if err.http_status() == Some(503) {
+                "Loading your choices: "
+            } else {
+                "Loading your choices failed: "
+            };
+            assert!(logged[0].starts_with(lead), "{err:?}: {logged:?}");
             assert!(!logged[0].contains(".:"), "{logged:?}");
 
             let text = delete_failed_part(err);
