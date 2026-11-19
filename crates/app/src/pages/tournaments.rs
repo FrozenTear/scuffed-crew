@@ -157,7 +157,7 @@ pub fn Tournaments() -> Element {
     let slot: Load<ListSlot> = Load::of(tournaments.read().as_ref());
     let (load, capped) = match slot {
         Load::Loading => (Load::Loading, false),
-        Load::Failed => (Load::Failed, false),
+        Load::Failed(reason) => (Load::Failed(reason), false),
         Load::Missing => (Load::Missing, false),
         Load::Ready((list, capped)) => (Load::Ready(visible(list)), capped),
     };
@@ -213,9 +213,9 @@ fn TournamentsView(
                 p { class: "entry-status", role: "status", "{status}" }
                 {match &load {
                     Load::Loading => rsx! { SkeletonBars { rows: 3 } },
-                    Load::Failed | Load::Missing => rsx! {
+                    Load::Failed(_) | Load::Missing => rsx! {
                         LoadError {
-                            message: "Couldn't load the tournaments. Check your connection and try again.",
+                            message: load.failure_line("Couldn't load the tournaments."),
                             on_retry: move |_| on_retry.call(()),
                             retrying,
                         }
@@ -287,6 +287,7 @@ fn render_tournament_card(t: &Tournament) -> Element {
 
 #[cfg(test)]
 mod tests {
+    const NET: &str = crate::client_error::NETWORK_ERROR_MESSAGE;
     use super::super::article_author::test_support::render_routed;
     use super::*;
 
@@ -476,12 +477,12 @@ mod tests {
         assert!(loading.contains("ui-skel-row"), "{loading}");
         assert!(!loading.contains("No tournaments yet"), "{loading}");
 
-        let failed = render(Load::Failed);
+        let failed = render(Load::Failed(NET.to_string()));
         assert!(failed.contains("role=\"alert\""), "{failed}");
         assert!(failed.contains("load the tournaments."), "{failed}");
         assert!(failed.contains(">Retry</button>"), "{failed}");
 
-        let retrying = render_state(Load::Failed, false, false, true);
+        let retrying = render_state(Load::Failed(NET.to_string()), false, false, true);
         assert!(retrying.contains(">Retrying...</button>"), "{retrying}");
         assert!(retrying.contains("aria-disabled=\"true\""), "{retrying}");
         assert!(!retrying.contains(" disabled"), "{retrying}");

@@ -287,6 +287,9 @@ pub fn user_notice(status: Option<u16>, body: &str, retry_after: Option<&str>) -
 }
 
 fn notice_from_call(err: &LinkCallError) -> UserNotice {
+    if err.unreadable {
+        return UserNotice::Text(crate::client_error::UNREADABLE_ANSWER_MESSAGE.to_string());
+    }
     user_notice(err.status, &err.body, err.retry_after.as_deref())
 }
 

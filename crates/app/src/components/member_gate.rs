@@ -178,14 +178,23 @@ fn inactive_panel(what: &str) -> Element {
     }
 }
 
-/// The load failed for a reason a retry may fix. The raw client error is not
-/// shown. While `retrying`, the card stays up and its button stays focusable
-/// (`aria-disabled`, not `disabled`), so focus is not dropped to the page.
-fn retry_panel(what: &str, retrying: bool, mut refresh: Signal<u64>) -> Element {
+/// The load failed for a reason a retry may fix. The lead is the mapped
+/// reason (`ApiResource::error`, never the raw client error), so no answer
+/// reads as the unreachable sentence and a server answer as its reason (QA
+/// on 748). The hook clears the error while a Retry runs, so the lead then
+/// says it is trying again. While `retrying`, the card stays up and its
+/// button stays focusable (`aria-disabled`, not `disabled`), so focus is not
+/// dropped to the page.
+fn retry_panel(what: &str, reason: &str, retrying: bool, mut refresh: Signal<u64>) -> Element {
+    let lead = if reason.trim().is_empty() && retrying {
+        "Trying again.".to_string()
+    } else {
+        crate::client_error::reason_or_fallback(reason)
+    };
     rsx! {
         Wall {
             title: "Couldn't load {what}",
-            lead: "Check your connection and try again.",
+            lead,
             actions: rsx! {
                 button {
                     r#type: "button",
@@ -250,11 +259,14 @@ fn gate_view(
 }
 
 /// Text of the gate's status line. It is rendered in every state; only this
-/// text changes, so loading, a failure and a retry are each announced.
-fn gate_status(view: GateView, what: &str) -> String {
+/// text changes, so loading, a failure and a retry are each announced. A
+/// failure carries the mapped `reason`.
+fn gate_status(view: GateView, what: &str, reason: &str) -> String {
     match view {
         GateView::Loading | GateView::Failed { retrying: true } => format!("Loading {what}"),
-        GateView::Failed { retrying: false } => format!("Couldn't load {what}."),
+        GateView::Failed { retrying: false } => {
+            crate::client_error::join_lead(&format!("Couldn't load {what}."), reason)
+        }
         GateView::SignIn | GateView::Apply | GateView::Inactive => String::new(),
     }
 }
@@ -270,7 +282,8 @@ pub fn member_pending<T: 'static>(
     let failed_before = matches!(resource.data.read().as_ref(), Some(None));
     let pending = resource.data.state()() == UseResourceState::Pending;
     let view = gate_view(auth, error.as_deref(), failed_before, pending);
-    let status = gate_status(view, what);
+    let reason = error.as_deref().unwrap_or_default();
+    let status = gate_status(view, what, reason);
     // The line is the visible content while loading. Next to a card it only
     // speaks: the card already shows the words.
     let status_class = if view == GateView::Loading {
@@ -282,7 +295,7 @@ pub fn member_pending<T: 'static>(
         GateView::SignIn => sign_in_panel(what),
         GateView::Apply => apply_panel(what),
         GateView::Inactive => inactive_panel(what),
-        GateView::Failed { retrying } => retry_panel(what, retrying, resource.refresh),
+        GateView::Failed { retrying } => retry_panel(what, reason, retrying, resource.refresh),
         GateView::Loading => rsx! {},
     };
 
@@ -486,17 +499,31 @@ mod tests {
 
     #[test]
     fn gate_status_text_changes_with_the_state() {
-        assert_eq!(gate_status(GateView::Loading, "polls"), "Loading polls");
+        let net = crate::client_error::NETWORK_ERROR_MESSAGE;
+        assert_eq!(gate_status(GateView::Loading, "polls", ""), "Loading polls");
         assert_eq!(
-            gate_status(GateView::Failed { retrying: false }, "polls"),
+            gate_status(GateView::Failed { retrying: false }, "polls", ""),
             "Couldn't load polls."
         );
+        // QA on 748: the failure carries the mapped reason.
         assert_eq!(
-            gate_status(GateView::Failed { retrying: true }, "polls"),
+            gate_status(GateView::Failed { retrying: false }, "stats", net),
+            format!("Couldn't load stats. {net}")
+        );
+        assert_eq!(
+            gate_status(
+                GateView::Failed { retrying: false },
+                "stats",
+                "The server's answer could not be read. Reload to see the current state."
+            ),
+            "Couldn't load stats. The server's answer could not be read. Reload to see the current state."
+        );
+        assert_eq!(
+            gate_status(GateView::Failed { retrying: true }, "polls", ""),
             "Loading polls"
         );
         for view in [GateView::SignIn, GateView::Apply, GateView::Inactive] {
-            assert_eq!(gate_status(view, "polls"), "");
+            assert_eq!(gate_status(view, "polls", net), "");
         }
     }
 
@@ -508,7 +535,13 @@ mod tests {
     #[allow(non_snake_case)]
     fn RetryProbe(props: RetryProps) -> Element {
         let refresh = use_signal(|| 0u64);
-        retry_panel("polls", props.retrying, refresh)
+        // The hook clears the error while a Retry runs.
+        let reason = if props.retrying {
+            ""
+        } else {
+            crate::client_error::NETWORK_ERROR_MESSAGE
+        };
+        retry_panel("polls", reason, props.retrying, refresh)
     }
 
     fn retry_card(retrying: bool) -> String {
@@ -525,9 +558,11 @@ mod tests {
             card.contains("<h2 class=\"wall-title\">Couldn&#39;t load polls</h2>"),
             "{card}"
         );
-        // No raw client error in the lead.
+        // No raw client error in the lead: the mapped unreachable sentence.
         assert!(
-            card.contains("<p class=\"wall-lead\">Check your connection and try again.</p>"),
+            card.contains(
+                "<p class=\"wall-lead\">Could not reach the server. Check your connection and try again.</p>"
+            ),
             "{card}"
         );
         assert!(!card.contains("HTTP error"), "{card}");

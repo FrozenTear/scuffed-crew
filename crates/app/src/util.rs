@@ -471,8 +471,23 @@ pub fn log_client_error(what: &str, err: &dyn std::fmt::Display) {
     web_sys::console::warn_1(&format!("{what}: {err}").into());
     #[cfg(not(target_arch = "wasm32"))]
     {
+        #[cfg(test)]
+        LOGGED.with(|logged| logged.borrow_mut().push(format!("{what}: {err}")));
         let _ = (what, err);
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// What [`log_client_error`] would have sent to the console on this test
+    /// thread, so a test can pin that a failure is logged.
+    static LOGGED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Takes the lines [`log_client_error`] logged on this test thread.
+#[cfg(test)]
+pub(crate) fn take_logged() -> Vec<String> {
+    LOGGED.with(|logged| std::mem::take(&mut *logged.borrow_mut()))
 }
 
 #[cfg(test)]

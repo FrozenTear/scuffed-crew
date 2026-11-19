@@ -450,11 +450,11 @@ pub fn AdminSettings() -> Element {
                     // The reason stays on the page after the toast is gone.
                     // A network failure reads as one short sentence there;
                     // the browser's raw error (a whole stack in Chromium) is
-                    // for the console only (QA 706 FIX5).
-                    crate::util::log_client_error("settings save", &e);
-                    save_state.set(crate::components::SaveState::failed(
+                    // for the console only (QA 706 FIX5). The toast above
+                    // logged it, so this line maps it without a second log.
+                    save_state.set(crate::components::SaveState::failed_text(
                         "Could not save settings",
-                        &e,
+                        &crate::client_error::user_message(&e),
                     ));
                 }
             }

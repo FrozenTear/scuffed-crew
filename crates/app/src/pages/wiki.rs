@@ -173,7 +173,7 @@ pub fn Wiki() -> Element {
             found.query,
         ),
         Load::Loading => (Load::Loading, false, String::new()),
-        Load::Failed => (Load::Failed, false, String::new()),
+        Load::Failed(reason) => (Load::Failed(reason), false, String::new()),
         Load::Missing => (Load::Missing, false, String::new()),
     };
     let state = pages.state()();
@@ -287,9 +287,9 @@ fn WikiIndex(
                 }
                 {match &load {
                     Load::Loading => rsx! {},
-                    Load::Failed | Load::Missing => rsx! {
+                    Load::Failed(_) | Load::Missing => rsx! {
                         LoadError {
-                            message: "Couldn't load the wiki. Check your connection and try again.",
+                            message: load.failure_line("Couldn't load the wiki."),
                             on_retry: move |_| on_retry.call(()),
                             retrying,
                         }
@@ -352,6 +352,7 @@ fn render_wiki_card(entry: &WikiEntry, names: Option<&AuthorNames>) -> Element {
 
 #[cfg(test)]
 mod tests {
+    const NET: &str = crate::client_error::NETWORK_ERROR_MESSAGE;
     use super::super::article_author::test_support::render_routed;
     use super::*;
 
@@ -537,7 +538,7 @@ mod tests {
             "Loading wiki pages"
         );
         assert_eq!(
-            wiki_status(&Load::Failed, "", false, true, false),
+            wiki_status(&Load::Failed(NET.to_string()), "", false, true, false),
             "Loading wiki pages"
         );
         assert_eq!(
@@ -553,10 +554,19 @@ mod tests {
             loading.contains("<p class=\"entry-status\" role=\"status\">Loading wiki pages</p>"),
             "{loading}"
         );
-        let failed = render(Load::Failed, "", 1);
+        // QA on 748: a refusal shows the server's reason, not the connection.
+        let refused = render(Load::Failed("HTTP error 403: Members only".into()), "", 1);
+        assert!(
+            refused.contains("Couldn&#39;t load the wiki. HTTP error 403: Members only"),
+            "{refused}"
+        );
+        assert!(!refused.contains("connection"), "{refused}");
+        let failed = render(Load::Failed(NET.to_string()), "", 1);
         assert!(failed.contains("role=\"alert\""), "{failed}");
         assert!(
-            failed.contains("load the wiki. Check your connection"),
+            failed.contains(
+                "Couldn&#39;t load the wiki. Could not reach the server. Check your connection and try again."
+            ),
             "{failed}"
         );
         assert!(failed.contains(">Retry</button>"), "{failed}");
@@ -575,7 +585,7 @@ mod tests {
                 "{html}"
             );
         }
-        let mut retry = scene(Load::Failed, "", 1);
+        let mut retry = scene(Load::Failed(NET.to_string()), "", 1);
         retry.retrying = true;
         let retrying = render_scene(retry);
         assert!(retrying.contains(">Retrying...</button>"), "{retrying}");

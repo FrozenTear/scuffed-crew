@@ -65,6 +65,18 @@ const CSS: &str = r#"
     font-size: 0.85rem;
     margin-bottom: 1rem;
 }
+/* No text: out of the layout, still in the tree so the next message is
+   announced. */
+.login-error:empty {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+}
 .login-nostr-btn {
     width: 100%;
     padding: 0.6rem 1rem;
@@ -190,24 +202,32 @@ fn sign_in_wait_message(seconds: u64) -> String {
     }
 }
 
-/// Password login. A 429 with a usable JSON `retry_after` or `Retry-After`
+/// Password login. A 401 is the server's answer for a wrong username or
+/// password (`routes/auth.rs`, the only credential rejection), so only it
+/// reads as one. A 429 with a usable JSON `retry_after` or `Retry-After`
 /// header names that wait. 120 seconds or more is whole minutes, rounded up.
-/// Any other 429 says to try again later, without guessing the wait. Anything
-/// else stays the generic credential message.
+/// Any other 429 says to try again later, without guessing the wait.
+/// Anything else (no answer, an unreadable answer, a 500) goes through the
+/// one mapping with a lead, and the raw error goes to the console: an
+/// unreachable server is not a wrong password (QA on 748).
 fn login_failure_message(err: &scuffed_api_client::ClientError) -> String {
-    let scuffed_api_client::ClientError::Http {
-        status: 429,
-        body,
-        retry_after,
-    } = err
-    else {
-        return "Invalid username or password".into();
-    };
-    match scuffed_types::json_retry_after(body).or(*retry_after) {
-        Some(seconds) => sign_in_wait_message(seconds),
-        None => SIGN_IN_RATE_LIMIT.to_string(),
+    match err {
+        scuffed_api_client::ClientError::Http { status: 401, .. } => {
+            INVALID_CREDENTIALS.to_string()
+        }
+        scuffed_api_client::ClientError::Http {
+            status: 429,
+            body,
+            retry_after,
+        } => match scuffed_types::json_retry_after(body).or(*retry_after) {
+            Some(seconds) => sign_in_wait_message(seconds),
+            None => SIGN_IN_RATE_LIMIT.to_string(),
+        },
+        other => crate::client_error::with_lead("Could not sign in.", other),
     }
 }
+
+const INVALID_CREDENTIALS: &str = "Invalid username or password";
 
 /// Local register. 409, 400, and 403 keep their own copy. A 429 names the wait.
 fn register_failure_message(err: &scuffed_api_client::ClientError) -> String {
@@ -224,7 +244,7 @@ fn register_failure_message(err: &scuffed_api_client::ClientError) -> String {
             "Registration is currently closed".into()
         }
         other => client_rate_limit_message(other)
-            .unwrap_or_else(|| "Registration failed. Try again.".into()),
+            .unwrap_or_else(|| crate::client_error::with_lead("Registration failed.", other)),
     }
 }
 
@@ -773,9 +793,9 @@ pub fn Login() -> Element {
                         "Sign in to continue."
                     }
                 }
-                if let Some(message) = error() {
-                    p { class: "login-error", "{message}" }
-                }
+                // Always rendered so a new message is announced; only its text
+                // changes, and the empty paragraph is out of the layout.
+                p { class: "login-error", role: "alert", "{error().unwrap_or_default()}" }
                 if registering() && show_register {
                     form { onsubmit: on_register,
                         div { class: "login-field",
@@ -1008,6 +1028,96 @@ async fn nostr_login_flow() -> Result<(), String> {
 mod tests {
     use super::*;
     use std::str::FromStr;
+
+    /// QA on 748: an unreachable server is not a wrong password. Only the
+    /// server's 401 (its one credential rejection) reads as one; no answer,
+    /// an unreadable answer and a 5xx go through the mapping, and log.
+    #[test]
+    fn only_a_401_reads_as_a_wrong_password() {
+        use crate::client_error::{
+            NETWORK_ERROR_MESSAGE, SERVER_TROUBLE_MESSAGE, UNREADABLE_ANSWER_MESSAGE,
+        };
+        use scuffed_api_client::ClientError;
+        let _ = crate::util::take_logged();
+        assert_eq!(
+            login_failure_message(&ClientError::http(
+                401,
+                r#"{"error":"invalid username or password"}"#,
+                None
+            )),
+            "Invalid username or password"
+        );
+        let offline = login_failure_message(&ClientError::Network(
+            "JsValue(TypeError: Failed to fetch)".into(),
+        ));
+        assert_eq!(
+            offline,
+            format!("Could not sign in. {NETWORK_ERROR_MESSAGE}")
+        );
+        assert!(!offline.contains("password"), "{offline}");
+        assert_eq!(
+            login_failure_message(&ClientError::Deserialize("expected value".into())),
+            format!("Could not sign in. {UNREADABLE_ANSWER_MESSAGE}")
+        );
+        assert_eq!(
+            login_failure_message(&ClientError::http(502, "", None)),
+            format!("Could not sign in. {SERVER_TROUBLE_MESSAGE}")
+        );
+        assert_eq!(
+            login_failure_message(&ClientError::http(
+                500,
+                r#"{"error":"database error"}"#,
+                None
+            )),
+            "Could not sign in. HTTP error 500: database error"
+        );
+        for status in [400, 403, 404, 500, 502, 503] {
+            let text = login_failure_message(&ClientError::http(status, "", None));
+            assert!(!text.contains("password"), "{status}: {text}");
+        }
+        let logged = crate::util::take_logged();
+        assert!(
+            logged.iter().any(|line| line.contains("Failed to fetch")),
+            "{logged:?}"
+        );
+        assert!(
+            logged.iter().any(|line| line.contains("expected value")),
+            "{logged:?}"
+        );
+
+        // Vision nit 13 on 748: the error paragraph is a live region that is
+        // always rendered (only its text changes), here and on /setup, and
+        // an empty one is out of the layout.
+        for (src, class) in [
+            (include_str!("login.rs"), "login-error"),
+            (include_str!("setup.rs"), "setup-error"),
+        ] {
+            let prod = src
+                .split("#[cfg(test)]\nmod tests")
+                .next()
+                .expect("prod part");
+            assert!(
+                prod.contains(&format!(
+                    "p {{ class: \"{class}\", role: \"alert\", \"{{error().unwrap_or_default()}}\" }}"
+                )),
+                "{class}"
+            );
+            assert!(
+                !prod.contains("if let Some(message) = error() {"),
+                "{class}"
+            );
+            assert!(
+                prod.contains(&format!(".{class}:empty {{\n    position: absolute;")),
+                "{class}"
+            );
+        }
+
+        // Registration has no catch-all "try again" either.
+        assert_eq!(
+            register_failure_message(&ClientError::Network("offline".into())),
+            format!("Registration failed. {NETWORK_ERROR_MESSAGE}")
+        );
+    }
 
     fn css_rule_body<'a>(marker: &str) -> &'a str {
         let rest = CSS.split(marker).nth(1).expect("rule in login CSS");

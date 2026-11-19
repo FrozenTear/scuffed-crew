@@ -325,8 +325,11 @@ pub fn IdentitySettings() -> Element {
                 Err(reason) => {
                     // `link_nostr_identity` already maps its request errors
                     // through `user_message`; the rest is extension text.
-                    link_state.set(SaveState::failed_text("Could not link the key", &reason));
-                    toast.show(Toast::error(format!("Link failed: {reason}")));
+                    // One lead, then the step that failed (Vision nit 11
+                    // on 748: no "Link failed: Challenge request failed:").
+                    let line = SaveState::failed_text("Could not link the key", &reason);
+                    toast.show(Toast::error(line.text()));
+                    link_state.set(line);
                 }
             }
             working.set(false);
@@ -813,7 +816,7 @@ async fn link_nostr_identity(pubkey: &str) -> Result<(), String> {
             },
         )
         .await
-        .map_err(|e| crate::client_error::with_lead("Challenge request failed", &e))?;
+        .map_err(|e| crate::client_error::with_lead("Could not start the key check.", &e))?;
 
     // 2. Build unsigned event for NIP-07 to sign
     let window = web_sys::window().ok_or("No window")?;
@@ -876,7 +879,7 @@ async fn link_nostr_identity(pubkey: &str) -> Result<(), String> {
     client
         .post_json::<_, serde_json::Value>("/api/nostr/verify", &body)
         .await
-        .map_err(|e| crate::client_error::with_lead("Verification failed", &e))?;
+        .map_err(|e| crate::client_error::with_lead("Could not verify the key.", &e))?;
 
     Ok(())
 }

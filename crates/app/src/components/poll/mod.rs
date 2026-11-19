@@ -81,7 +81,6 @@ pub fn is_closed(poll: &PollData, now: Option<&str>) -> bool {
 pub fn poll_error_copy(lead: &str, err: &scuffed_api_client::ClientError) -> String {
     use scuffed_api_client::ClientError;
     let why = match err {
-        ClientError::Network(_) => "Check your connection and try again.",
         ClientError::Http { status: 401, .. } => "Your session ended. Log in again.",
         ClientError::Http { status: 403, .. } => "Your account can't do that.",
         ClientError::Http { status: 404, .. } => "That poll no longer exists.",
@@ -89,7 +88,9 @@ pub fn poll_error_copy(lead: &str, err: &scuffed_api_client::ClientError) -> Str
             "The poll may have closed, or that vote is already in. Reload to see it."
         }
         ClientError::Http { status: 429, .. } => "Too many tries. Wait a moment.",
-        _ => "Something went wrong. Try again in a moment.",
+        // No answer, an unreadable answer and any other status: the one
+        // mapping (QA on 748), never a guess at the connection.
+        other => crate::client_error::message_without_reason(other),
     };
     format!("{lead} {why}")
 }
@@ -124,7 +125,7 @@ mod tests {
         );
         assert_eq!(
             poll_error_copy("Vote failed.", &ClientError::Network("offline".into())),
-            "Vote failed. Check your connection and try again."
+            "Vote failed. Could not reach the server. Check your connection and try again."
         );
         for status in [400, 401, 403, 404, 409, 429, 500] {
             let copy = poll_error_copy("Vote failed.", &http(status));

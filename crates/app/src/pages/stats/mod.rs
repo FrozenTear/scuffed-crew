@@ -438,11 +438,20 @@ fn summary_tiles(season: Tally, kd: KdTile) -> Element {
     }
 }
 
-/// Fetch-failed state with a retry button (bumps the resource's refresh counter).
-pub(crate) fn load_error_state(what: &'static str, mut refresh: Signal<u64>) -> Element {
+/// Fetch-failed state with a retry button (bumps the resource's refresh
+/// counter). `reason` is the resource's mapped error (`ApiResource::error`),
+/// so the line says why (QA on 748); none leaves the lead alone.
+pub(crate) fn load_error_state(
+    what: &'static str,
+    reason: Option<String>,
+    mut refresh: Signal<u64>,
+) -> Element {
     rsx! {
         LoadError {
-            message: format!("Couldn't load {what}."),
+            message: crate::client_error::join_lead(
+                &format!("Couldn't load {what}."),
+                reason.as_deref().unwrap_or_default(),
+            ),
             on_retry: move |_| refresh += 1,
         }
     }
@@ -3365,7 +3374,7 @@ mod shell_tests {
     fn load_error_is_the_shared_card_with_retry() {
         fn view() -> Element {
             let refresh = use_signal(|| 0u64);
-            load_error_state("role breakdown", refresh)
+            load_error_state("role breakdown", None, refresh)
         }
         let html = render(view);
         assert!(
@@ -3375,6 +3384,23 @@ mod shell_tests {
         assert!(html.contains("load role breakdown.</p>"), "{html}");
         assert!(html.contains("class=\"fetch-error__retry\""), "{html}");
         assert!(html.contains(">Retry</button>"), "{html}");
+
+        // QA on 748: with the resource's reason, the line says why.
+        fn offline() -> Element {
+            let refresh = use_signal(|| 0u64);
+            load_error_state(
+                "recent matches",
+                Some(crate::client_error::NETWORK_ERROR_MESSAGE.to_string()),
+                refresh,
+            )
+        }
+        let html = render(offline);
+        assert!(
+            html.contains(
+                "Couldn&#39;t load recent matches. Could not reach the server. Check your connection and try again.</p>"
+            ),
+            "{html}"
+        );
     }
 
     #[test]

@@ -624,10 +624,10 @@ pub fn AdminTournaments() -> Element {
                         detail_refresh += 1;
                     }
                     Err(e) => {
-                        add_part_error.set(Some(
-                            SaveState::failed("Could not add the participant", &e).text(),
-                        ));
-                        toast.show(Toast::error_from("Failed", &e));
+                        // One line for both, logged once by `SaveState::failed`.
+                        let line = SaveState::failed("Could not add the participant", &e).text();
+                        add_part_error.set(Some(line.clone()));
+                        toast.show(Toast::error(line));
                     }
                 }
             });
@@ -705,7 +705,9 @@ pub fn AdminTournaments() -> Element {
                         toast.show(Toast::success("Next Swiss round generated."));
                         detail_refresh += 1;
                     }
-                    Err(e) => toast.show(Toast::error_from("Failed", &e)),
+                    Err(e) => {
+                        toast.show(Toast::error_from("Could not generate the next round.", &e))
+                    }
                 }
             });
         }
@@ -781,10 +783,10 @@ pub fn AdminTournaments() -> Element {
                         detail_refresh += 1;
                     }
                     Err(e) => {
-                        match_error.set(Some(
-                            SaveState::failed("Could not save the result", &e).text(),
-                        ));
-                        toast.show(Toast::error_from("Failed", &e));
+                        // One line for both, logged once by `SaveState::failed`.
+                        let line = SaveState::failed("Could not save the result", &e).text();
+                        match_error.set(Some(line.clone()));
+                        toast.show(Toast::error(line));
                     }
                 }
             });

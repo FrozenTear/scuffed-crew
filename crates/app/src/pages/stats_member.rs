@@ -480,8 +480,13 @@ fn load_error_copy(what: &str, error: Option<&str>) -> (String, bool) {
             format!("Couldn't load {what}: your account can't see it."),
             false,
         ),
-        _ => (
-            format!("Couldn't load {what}. Check your connection and try again."),
+        // Any other failure says why through the one mapping (QA on 748):
+        // no answer is the unreachable sentence, a 500 its reason.
+        other => (
+            crate::client_error::join_lead(
+                &format!("Couldn't load {what}."),
+                other.unwrap_or_default(),
+            ),
             true,
         ),
     }
@@ -1119,10 +1124,21 @@ mod tests {
             "{text}"
         );
         assert!(!retry);
+        // A 500 is not blamed on the connection either: it says the
+        // server's reason (QA on 748), and a retry may help.
         let (text, retry) = load_error_copy("map stats", Some("HTTP error 500: Internal error"));
-        assert!(text.contains("Check your connection"), "{text}");
+        assert_eq!(
+            text,
+            "Couldn't load map stats. HTTP error 500: Internal error"
+        );
+        assert!(!text.contains("connection"), "{text}");
         assert!(retry);
-        let (_, retry) = load_error_copy("map stats", None);
+        let net = crate::client_error::NETWORK_ERROR_MESSAGE;
+        let (text, retry) = load_error_copy("map stats", Some(net));
+        assert_eq!(text, format!("Couldn't load map stats. {net}"));
+        assert!(retry);
+        let (text, retry) = load_error_copy("map stats", None);
+        assert_eq!(text, "Couldn't load map stats.");
         assert!(retry);
     }
 

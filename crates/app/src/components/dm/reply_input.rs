@@ -112,13 +112,13 @@ impl SendState {
     /// The request failed: the reason is [`crate::client_error::user_message`],
     /// so a network failure is one short sentence, not the browser's error.
     pub(crate) fn failed(err: &ClientError) -> Self {
+        // Not logged here: both callers show `Toast::error_from` for the
+        // same error first, and that logs it.
         let reason = crate::client_error::user_message(err);
-        let reason = reason.trim();
-        if reason.is_empty() {
-            SendState::Failed("Could not send the message.".to_string())
-        } else {
-            SendState::Failed(format!("Could not send the message. {reason}"))
-        }
+        SendState::Failed(crate::client_error::two_sentences(
+            "Could not send the message.",
+            &reason,
+        ))
     }
 
     pub(crate) fn is_error(&self) -> bool {

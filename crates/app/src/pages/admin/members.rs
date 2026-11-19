@@ -409,7 +409,7 @@ fn profile_edit_failure(prefix: &str, err: &ClientError) -> String {
     if err.http_status() == Some(403) && err.to_string().contains(OFFICER_RANK_ERROR) {
         return OFFICER_RANK_COPY.to_string();
     }
-    format!("{prefix}: {}", crate::client_error::user_message(err))
+    crate::client_error::with_lead(prefix, err)
 }
 
 /// Toast copy when the avatar upload is rejected. 403 and 404 come from the
@@ -1288,7 +1288,14 @@ pub fn AdminMembers() -> Element {
                         members.refresh += 1;
                         games.refresh += 1;
                     }
-                    Err(e) => toast.show(Toast::error(profile_edit_failure("Failed", &e))),
+                    Err(e) => {
+                        let lead = if new_active {
+                            "Could not activate the member."
+                        } else {
+                            "Could not deactivate the member."
+                        };
+                        toast.show(Toast::error(profile_edit_failure(lead, &e)));
+                    }
                 }
             });
         }
@@ -1645,11 +1652,7 @@ pub fn AdminMembers() -> Element {
                 {
                     Ok(_) => done += 1,
                     Err(e) => {
-                        failures.push(format!(
-                            "{}: {}.",
-                            member.display_name,
-                            crate::client_error::user_message(&e)
-                        ));
+                        failures.push(bulk_failure(&member, &e));
                         failed_ids.push(member.id.clone());
                     }
                 }

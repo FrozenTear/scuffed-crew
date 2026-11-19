@@ -136,7 +136,6 @@ pub(crate) fn thread_api_path(thread_id: &str) -> String {
 /// board the viewer may not post to.
 pub(crate) fn forum_post_error(lead: &str, err: &ClientError) -> String {
     let why = match err {
-        ClientError::Network(_) => "Check your connection and try again.",
         ClientError::Http { status: 401, .. } => "Your session ended. Log in again.",
         ClientError::Http {
             status: 403, body, ..
@@ -145,7 +144,9 @@ pub(crate) fn forum_post_error(lead: &str, err: &ClientError) -> String {
         ClientError::Http { status: 404, .. } => "It no longer exists. Reload the page.",
         ClientError::Http { status: 400, .. } => "The server did not accept the text.",
         ClientError::Http { status: 429, .. } => "Too many posts in a row. Wait a moment.",
-        _ => "Something went wrong. Try again in a moment.",
+        // No answer, an unreadable answer and any other status: the one
+        // mapping (QA on 748).
+        other => crate::client_error::message_without_reason(other),
     };
     format!("{lead} {why}")
 }
@@ -374,9 +375,9 @@ fn ForumIndex(
             p { class: "entry-status", role: "status", "{status}" }
             {match &load {
                 Load::Loading => rsx! {},
-                Load::Failed | Load::Missing => rsx! {
+                Load::Failed(_) | Load::Missing => rsx! {
                     LoadError {
-                        message: "Couldn't load the forum. Check your connection and try again.",
+                        message: load.failure_line("Couldn't load the forum."),
                         on_retry: move |_| on_retry.call(()),
                         retrying,
                     }
@@ -662,7 +663,7 @@ fn board_tab_label(load: &Load<ThreadListResponse>) -> Option<String> {
             .as_ref()
             .map(|board| format!("{} | Forum", board.name.trim())),
         Load::Missing => Some("Board not found | Forum".to_string()),
-        Load::Loading | Load::Failed => None,
+        Load::Loading | Load::Failed(_) => None,
     }
 }
 
@@ -724,7 +725,7 @@ fn BoardView(
             {match &load {
                 // The name is not known yet, so the page is named by its kind.
                 Load::Loading => rsx! { PageHeader { title: "Forum board" } },
-                Load::Failed => rsx! { PageHeader { title: "Couldn't load this board" } },
+                Load::Failed(_) => rsx! { PageHeader { title: "Couldn't load this board" } },
                 Load::Missing => rsx! {},
                 Load::Ready(_) => rsx! {
                     PageHeader {
@@ -761,9 +762,9 @@ fn BoardView(
                     aria_label: "Threads",
                     {match &load {
                         Load::Loading | Load::Missing => rsx! {},
-                        Load::Failed => rsx! {
+                        Load::Failed(reason) => rsx! {
                             LoadError {
-                                message: "Check your connection and try again.",
+                                message: crate::client_error::reason_or_fallback(reason),
                                 on_retry: move |_| on_retry.call(()),
                                 retrying,
                             }
@@ -1035,6 +1036,7 @@ fn NewThreadForm(
 
 #[cfg(test)]
 mod tests {
+    const NET: &str = crate::client_error::NETWORK_ERROR_MESSAGE;
     use super::super::article_author::AUTHOR_FALLBACK;
     use super::*;
     use crate::components::ui::test_support::{assert_sizes_from_tokens, css_rule, render_routed};
@@ -1251,16 +1253,27 @@ mod tests {
         );
         assert!(!loading.contains("No boards yet"), "{loading}");
 
-        let failed = render_index(Load::Failed, false, false);
+        // QA on 748: a refusal shows the server's reason, not the connection.
+        for reason in ["HTTP error 403: Members only", "HTTP error 409: Board busy"] {
+            let refused = render_index(Load::Failed(reason.to_string()), false, false);
+            assert!(
+                refused.contains(&format!("Couldn&#39;t load the forum. {reason}")),
+                "{refused}"
+            );
+            assert!(!refused.contains("connection"), "{refused}");
+        }
+        let failed = render_index(Load::Failed(NET.to_string()), false, false);
         assert!(failed.contains("role=\"alert\""), "{failed}");
         assert!(
-            failed.contains("load the forum. Check your connection"),
+            failed.contains(
+                "Couldn&#39;t load the forum. Could not reach the server. Check your connection and try again."
+            ),
             "{failed}"
         );
         assert!(failed.contains(">Retry</button>"), "{failed}");
         assert!(!failed.contains("Loading"), "{failed}");
 
-        let retrying = render_index(Load::Failed, false, true);
+        let retrying = render_index(Load::Failed(NET.to_string()), false, true);
         assert!(retrying.contains(">Loading boards</p>"), "{retrying}");
         assert!(retrying.contains(">Retrying...</button>"), "{retrying}");
 
@@ -1495,9 +1508,15 @@ mod tests {
             assert_eq!(forum_load(Some(&slot)), Load::Missing, "{status}");
         }
         let server: Result<u8, String> = Err("HTTP error 500: oops".to_string());
-        assert_eq!(forum_load(Some(&server)), Load::Failed);
+        assert_eq!(
+            forum_load(Some(&server)),
+            Load::Failed("HTTP error 500: oops".to_string())
+        );
         let network: Result<u8, String> = Err("Network error: offline".to_string());
-        assert_eq!(forum_load(Some(&network)), Load::Failed);
+        assert_eq!(
+            forum_load(Some(&network)),
+            Load::Failed("Network error: offline".to_string())
+        );
         assert_eq!(forum_load(Some(&Ok::<u8, String>(3))), Load::Ready(3));
         assert_eq!(forum_load::<u8>(None), Load::Loading);
         let thread = include_str!("forum_thread.rs")
@@ -1560,7 +1579,7 @@ mod tests {
         );
         assert_eq!(
             forum_post_error("x", &ClientError::Network("offline".into())),
-            "x Check your connection and try again."
+            "x Could not reach the server. Check your connection and try again."
         );
         for status in [400, 401, 403, 404, 429, 500] {
             let copy = forum_post_error("x", &http(status, r#"{"error":"raw"}"#));
@@ -1593,7 +1612,7 @@ mod tests {
         );
         assert!(!loading.contains("No threads yet"), "{loading}");
 
-        let failed = BoardCase::of(Load::Failed).render();
+        let failed = BoardCase::of(Load::Failed(NET.to_string())).render();
         assert!(
             failed.contains("<h1>Couldn&#39;t load this board</h1>")
                 || failed.contains("<h1>Couldn't load this board</h1>"),
@@ -1603,7 +1622,7 @@ mod tests {
         assert!(failed.contains(">Retry</button>"), "{failed}");
         assert!(!failed.contains("Loading"), "{failed}");
 
-        let mut retrying = BoardCase::of(Load::Failed);
+        let mut retrying = BoardCase::of(Load::Failed(NET.to_string()));
         retrying.retrying = true;
         let retrying = retrying.render();
         assert!(retrying.contains(">Loading threads</p>"), "{retrying}");
@@ -1649,7 +1668,7 @@ mod tests {
             Some("Board not found | Forum")
         );
         assert_eq!(board_tab_label(&Load::Loading), None);
-        assert_eq!(board_tab_label(&Load::Failed), None);
+        assert_eq!(board_tab_label(&Load::Failed(NET.to_string())), None);
     }
 
     #[test]

@@ -198,7 +198,7 @@ fn tab_label(load: &Load<ThreadDetailResponse>) -> Option<String> {
     match load {
         Load::Ready(resp) => Some(format!("{} | Forum", resp.thread.title.trim())),
         Load::Missing => Some("Thread not found | Forum".to_string()),
-        Load::Loading | Load::Failed => None,
+        Load::Loading | Load::Failed(_) => None,
     }
 }
 
@@ -266,7 +266,7 @@ fn ThreadView(
             {match &load {
                 // The title is not known yet, so the page is named by its kind.
                 Load::Loading => rsx! { PageHeader { title: "Forum thread" } },
-                Load::Failed => rsx! { PageHeader { title: "Couldn't load this thread" } },
+                Load::Failed(_) => rsx! { PageHeader { title: "Couldn't load this thread" } },
                 Load::Missing | Load::Ready(_) => rsx! {},
             }}
             p { class: "entry-status", role: "status", "{status}" }
@@ -282,9 +282,9 @@ fn ThreadView(
                         ],
                     }
                 },
-                Load::Failed => rsx! {
+                Load::Failed(reason) => rsx! {
                     LoadError {
-                        message: "Check your connection and try again.",
+                        message: crate::client_error::reason_or_fallback(reason),
                         on_retry: move |_| on_retry.call(()),
                         retrying,
                     }
@@ -435,6 +435,7 @@ fn ReplyForm(
 
 #[cfg(test)]
 mod tests {
+    const NET: &str = crate::client_error::NETWORK_ERROR_MESSAGE;
     use super::super::article_author::AUTHOR_FALLBACK;
     use super::*;
     use crate::components::ui::test_support::render_routed;
@@ -723,13 +724,13 @@ mod tests {
             "{loading}"
         );
 
-        let failed = Case::of(Load::Failed).render();
+        let failed = Case::of(Load::Failed(NET.to_string())).render();
         assert!(failed.contains("load this thread</h1>"), "{failed}");
         assert!(failed.contains("role=\"alert\""), "{failed}");
         assert!(failed.contains(">Retry</button>"), "{failed}");
         assert!(!failed.contains("Loading"), "{failed}");
 
-        let mut retrying = Case::of(Load::Failed);
+        let mut retrying = Case::of(Load::Failed(NET.to_string()));
         retrying.retrying = true;
         let retrying = retrying.render();
         assert!(retrying.contains(">Loading thread</p>"), "{retrying}");

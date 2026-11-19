@@ -108,7 +108,7 @@ fn tab_label(load: &Load<BracketData>) -> Option<String> {
     match load {
         Load::Ready(data) => Some(format!("{} | Tournaments", data.tournament.name.trim())),
         Load::Missing => Some("Tournament not found | Tournaments".to_string()),
-        Load::Loading | Load::Failed => None,
+        Load::Loading | Load::Failed(_) => None,
     }
 }
 
@@ -253,7 +253,7 @@ fn TournamentView(
             {match &load {
                 // The name is not known yet, so the page is named by its kind.
                 Load::Loading => rsx! { PageHeader { title: "Tournament" } },
-                Load::Failed => rsx! { PageHeader { title: "Couldn't load this tournament" } },
+                Load::Failed(_) => rsx! { PageHeader { title: "Couldn't load this tournament" } },
                 Load::Missing => rsx! {},
                 Load::Ready(data) => rsx! { TournamentHeader { data: data.clone() } },
             }}
@@ -273,9 +273,12 @@ fn TournamentView(
                 // The server answers 500, not 404, for some unknown ids, so
                 // this state cannot tell a wrong link from an outage. The
                 // message covers both and the trail above leads back.
-                Load::Failed => rsx! {
+                Load::Failed(reason) => rsx! {
                     LoadError {
-                        message: "The link may be wrong, or the server may be having trouble. Check the address or try again.",
+                        message: crate::client_error::two_sentences(
+                            &crate::client_error::reason_or_fallback(reason),
+                            "The link may also be wrong, so check the address.",
+                        ),
                         on_retry: move |_| on_retry.call(()),
                         retrying,
                     }
@@ -420,6 +423,7 @@ fn TournamentBody(
 
 #[cfg(test)]
 mod tests {
+    const NET: &str = crate::client_error::NETWORK_ERROR_MESSAGE;
     use super::super::article_author::test_support::render_routed;
     use super::*;
     use crate::components::ui::test_support::assert_sizes_from_tokens;
@@ -696,16 +700,24 @@ mod tests {
         }
         // A 500 is a failure the page offers to retry.
         let slot: Result<BracketData, String> = Err("HTTP error 500: Internal error".to_string());
-        assert_eq!(Load::of(Some(&slot)), Load::Failed);
+        assert_eq!(
+            Load::of(Some(&slot)),
+            Load::Failed("HTTP error 500: Internal error".to_string())
+        );
     }
 
     #[test]
     fn failed_load_has_plain_words_retry_and_the_way_back() {
-        let html = render(Load::Failed);
+        let html = render(Load::Failed(NET.to_string()));
         assert_eq!(html.matches("<h1").count(), 1, "{html}");
         assert!(html.contains("load this tournament</h1>"), "{html}");
         assert!(html.contains("role=\"alert\""), "{html}");
-        assert!(html.contains("The link may be wrong"), "{html}");
+        assert!(
+            html.contains(
+                "Could not reach the server. Check your connection and try again. The link may also be wrong, so check the address."
+            ),
+            "{html}"
+        );
         assert!(html.contains(">Retry</button>"), "{html}");
         assert!(
             html.contains("<a href=\"/tournaments\">Tournaments</a>"),
@@ -714,7 +726,7 @@ mod tests {
         // No raw client or server error text.
         assert!(!html.contains("HTTP error"), "{html}");
 
-        let retrying = render_state(Load::Failed, true);
+        let retrying = render_state(Load::Failed(NET.to_string()), true);
         assert!(retrying.contains(">Retrying...</button>"), "{retrying}");
         assert!(
             retrying.contains("<p class=\"entry-status\" role=\"status\">Loading tournament</p>"),
@@ -776,7 +788,7 @@ mod tests {
             Some("Tournament not found | Tournaments")
         );
         assert_eq!(tab_label(&Load::Loading), None);
-        assert_eq!(tab_label(&Load::Failed), None);
+        assert_eq!(tab_label(&Load::Failed(NET.to_string())), None);
     }
 
     #[test]

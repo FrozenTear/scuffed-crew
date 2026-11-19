@@ -120,9 +120,9 @@ fn BlogIndex(
                 p { class: "entry-status", role: "status", "{status}" }
                 {match &load {
                     Load::Loading => rsx! {},
-                    Load::Failed | Load::Missing => rsx! {
+                    Load::Failed(_) | Load::Missing => rsx! {
                         LoadError {
-                            message: "Couldn't load the blog. Check your connection and try again.",
+                            message: load.failure_line("Couldn't load the blog."),
                             on_retry: move |_| on_retry.call(()),
                             retrying,
                         }
@@ -184,6 +184,7 @@ fn render_blog_card(a: &BlogArticle, names: Option<&AuthorNames>) -> Element {
 
 #[cfg(test)]
 mod tests {
+    const NET: &str = crate::client_error::NETWORK_ERROR_MESSAGE;
     use super::super::article_author::AUTHOR_FALLBACK;
     use super::super::article_author::test_support::render_routed;
     use super::*;
@@ -280,10 +281,19 @@ mod tests {
         );
         assert!(!loading.contains("No posts yet"), "{loading}");
 
-        let failed = render(Load::Failed, None, 1);
+        // QA on 748: a refusal shows the server's reason, not the connection.
+        let refused = render(Load::Failed("HTTP error 403: Members only".into()), None, 1);
+        assert!(
+            refused.contains("Couldn&#39;t load the blog. HTTP error 403: Members only"),
+            "{refused}"
+        );
+        assert!(!refused.contains("connection"), "{refused}");
+        let failed = render(Load::Failed(NET.to_string()), None, 1);
         assert!(failed.contains("role=\"alert\""), "{failed}");
         assert!(
-            failed.contains("load the blog. Check your connection"),
+            failed.contains(
+                "Couldn&#39;t load the blog. Could not reach the server. Check your connection and try again."
+            ),
             "{failed}"
         );
         assert!(failed.contains(">Retry</button>"), "{failed}");
@@ -305,7 +315,7 @@ mod tests {
 
     #[test]
     fn retry_says_so_and_keeps_the_button_focusable() {
-        let html = render_state(Load::Failed, None, 1, false, true);
+        let html = render_state(Load::Failed(NET.to_string()), None, 1, false, true);
         assert!(
             html.contains("<p class=\"entry-status\" role=\"status\">Loading posts</p>"),
             "{html}"

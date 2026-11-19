@@ -6,6 +6,10 @@
 
 use scuffed_api_client::ClientError;
 
+/// The first sentence of [`NETWORK_ERROR_MESSAGE`], for a line that adds
+/// its own next step ("Check your connection, then ...").
+pub const UNREACHABLE_SENTENCE: &str = "Could not reach the server.";
+
 /// What a person sees when a request never got an answer from the server
 /// (offline, the server is down, a blocked request).
 pub const NETWORK_ERROR_MESSAGE: &str =
@@ -13,8 +17,16 @@ pub const NETWORK_ERROR_MESSAGE: &str =
 
 /// What a person sees when the server answered with something this page
 /// could not read (an old cached page after a deploy, a proxy login page).
+/// It never invites a blind retry: after a write the server may well have
+/// done it (the answer was a 2xx), so the reload comes first, and it shows
+/// whether the change is there. For a load the reload is the fix as well.
 pub const UNREADABLE_ANSWER_MESSAGE: &str =
-    "The server's answer could not be read. Reload the page and try again.";
+    "The server's answer could not be read. Reload to see the current state.";
+
+/// What a person sees for a 5xx with no reason in the body: the proxy in
+/// front of a stopped or restarting site server answers a bare 502, 503 or
+/// 504 (Vision on 748, issue 728's stop-the-server step).
+pub const SERVER_TROUBLE_MESSAGE: &str = "The server had a problem. Try again in a moment.";
 
 /// The text a page shows for a failed request. This is the one place a
 /// [`ClientError`] becomes page text: toasts ([`with_lead`],
@@ -27,12 +39,86 @@ pub const UNREADABLE_ANSWER_MESSAGE: &str =
 /// characters in the settings Save bar). A body the client could not parse
 /// is [`UNREADABLE_ANSWER_MESSAGE`]: serde's text names fields, lines and
 /// columns, which mean nothing on the page. That detail is for the console
-/// only ([`crate::util::log_client_error`]). A server answer keeps its reason.
+/// only ([`crate::util::log_client_error`]). A server answer keeps its
+/// reason, with long dashes made plain ([`plain_punctuation`]). A 5xx with no
+/// reason is [`SERVER_TROUBLE_MESSAGE`]. A 4xx with no reason keeps
+/// "HTTP error: NNN": `is_http_status` reads 401, 403 and 404 back from this
+/// text to pick the sign-in wall and the missing views.
+///
+/// Pure: it logs nothing. The helpers that put the text on the page
+/// ([`with_lead`], [`logged_message`], `SaveState::failed`, ...) log.
 pub fn user_message(err: &ClientError) -> String {
     match err {
         ClientError::Network(_) => NETWORK_ERROR_MESSAGE.to_string(),
         ClientError::Deserialize(_) => UNREADABLE_ANSWER_MESSAGE.to_string(),
-        ClientError::Http { .. } => err.to_string(),
+        ClientError::Http { status, body, .. } => {
+            if has_server_reason(*status, body) {
+                plain_punctuation(&err.to_string())
+            } else if *status >= 500 {
+                SERVER_TROUBLE_MESSAGE.to_string()
+            } else {
+                format!("HTTP error: {status}")
+            }
+        }
+    }
+}
+
+/// The body carries something worth showing: the rate-limit copy for a 429,
+/// or a non-blank JSON `error` field.
+fn has_server_reason(status: u16, body: &str) -> bool {
+    scuffed_types::too_many_requests_message(status, body).is_some()
+        || serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .and_then(|v| v.get("error")?.as_str().map(|s| !s.trim().is_empty()))
+            .unwrap_or(false)
+}
+
+/// A long dash in a server reason becomes a full stop and the next word
+/// starts a sentence: "already linked \u{2014} remove it first" reads
+/// "already linked. Remove it first". The same rule as the types crate's
+/// private chat helper; the site copy uses no long dashes.
+pub fn plain_punctuation(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut capitalize_next = false;
+    for ch in text.chars() {
+        if ch == '\u{2014}' || ch == '\u{2013}' {
+            if !capitalize_next {
+                while out.ends_with(' ') {
+                    out.pop();
+                }
+                if !out.ends_with(['.', '!', '?', ':']) && !out.is_empty() {
+                    out.push('.');
+                }
+                if !out.is_empty() {
+                    out.push(' ');
+                }
+                capitalize_next = true;
+            }
+            continue;
+        }
+        if capitalize_next {
+            if ch == ' ' {
+                continue;
+            }
+            out.extend(ch.to_uppercase());
+            capitalize_next = false;
+            continue;
+        }
+        out.push(ch);
+    }
+    out.trim_end().to_string()
+}
+
+/// [`user_message`] for a surface that names its own statuses in its own
+/// words and never shows a server reason (poll votes, forum posts, scrims,
+/// feed posts): no answer and an unreadable answer read as everywhere else,
+/// and any status the surface does not name is [`SERVER_TROUBLE_MESSAGE`].
+/// Pure, like [`user_message`]: those surfaces log at the call.
+pub fn message_without_reason(err: &ClientError) -> &'static str {
+    match err {
+        ClientError::Network(_) => NETWORK_ERROR_MESSAGE,
+        ClientError::Deserialize(_) => UNREADABLE_ANSWER_MESSAGE,
+        ClientError::Http { .. } => SERVER_TROUBLE_MESSAGE,
     }
 }
 
@@ -45,13 +131,31 @@ pub fn logged_message(what: &str, err: &ClientError) -> String {
 }
 
 /// `lead` and [`user_message`] as one line: "Failed to save game: Could not
-/// reach the server. ..." A lead that already ends a sentence ("Could not
-/// delete the article.") is followed by a space, any other by ": ".
+/// reach the server. ..." (see [`join_lead`] for the separator). The raw
+/// error goes to the console under `lead`, so a caller does not log it
+/// again (Vision nit 8 on 748).
 pub fn with_lead(lead: &str, err: &ClientError) -> String {
-    let message = user_message(err);
-    let lead = lead.trim_end();
-    if lead.is_empty() {
+    let label = lead.trim().trim_end_matches(['.', ':']);
+    join_lead(lead, &logged_message(label, err))
+}
+
+/// `lead` and an already mapped `message` as one line. A lead that already
+/// ends a sentence ("Could not delete the article.") is followed by a
+/// space, a lead ending in ":" by a space, any other by ": ". Either part
+/// may be blank. Never "..", ". ." or ": .": a message that is only
+/// punctuation is dropped, and a lead's own trailing punctuation is kept.
+pub fn join_lead(lead: &str, message: &str) -> String {
+    let lead = lead.trim();
+    let message = message.trim();
+    let message = if message.chars().all(|c| matches!(c, '.' | ':' | ' ')) {
+        ""
+    } else {
         message
+    };
+    if lead.is_empty() {
+        message.to_string()
+    } else if message.is_empty() {
+        lead.to_string()
     } else if lead.ends_with(['.', '!', '?', ':']) {
         format!("{lead} {message}")
     } else {
@@ -59,9 +163,55 @@ pub fn with_lead(lead: &str, err: &ClientError) -> String {
     }
 }
 
+/// What a failed load says under its own "Couldn't load ..." heading: the
+/// mapped reason it kept, or a plain sentence when it kept none.
+pub fn reason_or_fallback(reason: &str) -> String {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        UNKNOWN_FAILURE_MESSAGE.to_string()
+    } else {
+        reason.to_string()
+    }
+}
+
+/// A failure with no reason kept (never from a request: those always map).
+pub const UNKNOWN_FAILURE_MESSAGE: &str = "Something went wrong.";
+
+/// `text` ending in a full stop (unless it already ends a sentence), so a
+/// next sentence can follow it without "..". Blank stays blank.
+pub fn as_sentence(text: &str) -> String {
+    let text = text.trim();
+    if text.is_empty() || text.ends_with(['.', '!', '?']) {
+        text.to_string()
+    } else {
+        format!("{}.", text.trim_end_matches(':'))
+    }
+}
+
+/// `first` and `second` as two sentences: `first` gets a full stop when it
+/// has none. Blank parts are skipped. Never "..".
+pub fn two_sentences(first: &str, second: &str) -> String {
+    let first = as_sentence(first);
+    let second = second.trim();
+    let second = if second.chars().all(|c| matches!(c, '.' | ':' | ' ')) {
+        ""
+    } else {
+        second
+    };
+    match (first.is_empty(), second.is_empty()) {
+        (true, _) => second.to_string(),
+        (false, true) => first,
+        (false, false) => format!("{first} {second}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{NETWORK_ERROR_MESSAGE, UNREADABLE_ANSWER_MESSAGE, user_message, with_lead};
+    use super::{
+        NETWORK_ERROR_MESSAGE, SERVER_TROUBLE_MESSAGE, UNREACHABLE_SENTENCE,
+        UNREADABLE_ANSWER_MESSAGE, as_sentence, join_lead, message_without_reason,
+        plain_punctuation, two_sentences, user_message, with_lead,
+    };
     use scuffed_api_client::ClientError;
 
     /// The response the API client reads for an unknown `/api/*` path.
@@ -203,8 +353,8 @@ mod tests {
         }
     }
 
-    /// A server answer keeps its reason; the network and unreadable-answer
-    /// cases are replaced.
+    /// A server answer keeps its reason; the network, unreadable-answer and
+    /// reason-less 5xx cases are replaced.
     #[test]
     fn a_server_answer_keeps_its_reason() {
         let http = ClientError::http(400, r#"{"error":"name too long"}"#, None);
@@ -282,120 +432,380 @@ mod tests {
             "Could not save settings. Could not reach the server. Check your connection and try again."
         );
 
+        // The toast logs the raw error (`Toast::error_from` via `with_lead`),
+        // so the save line maps the same error without a second log (Vision
+        // nit 8 on 748: one console line per failure, not three).
         let prod = include_str!("pages/admin/settings.rs")
             .split("#[cfg(test)]")
             .next()
             .expect("prod part");
+        assert!(prod.contains("toast.show(Toast::error_from(\"Failed to save settings\", &e));"));
         assert!(prod.contains(
-            "crate::util::log_client_error(\"settings save\", &e);\n                    save_state.set(crate::components::SaveState::failed(\n                        \"Could not save settings\",\n                        &e,\n                    ));"
+            "save_state.set(crate::components::SaveState::failed_text(\n                        \"Could not save settings\",\n                        &crate::client_error::user_message(&e),\n                    ));"
         ));
+        assert!(!prod.contains("crate::util::log_client_error(\"settings save\", &e);"));
     }
 
-    /// Display text of an error binding the scan looks for: inline format
-    /// arguments and `.to_string()` on the names the crate gives errors.
-    const SHOWN: [&str; 7] = [
-        "{e}",
-        "{err}",
-        "{error}",
-        "{other}",
-        "{e:?}",
-        "{err:?}",
-        "{error:?}",
-    ];
+    /// Vision blocking 1 on 748: production is a bare proxy, so a stopped
+    /// site server answers a 502, 503 or 504 with no JSON reason. That reads
+    /// as one plain sentence, never "HTTP error: 502". A real reason in a
+    /// 5xx body is kept.
+    #[test]
+    fn a_reasonless_5xx_reads_as_a_plain_sentence() {
+        for status in [500, 502, 503, 504] {
+            for body in [
+                "",
+                "<html><body>502 Bad Gateway</body></html>",
+                "{}",
+                r#"{"error":"  "}"#,
+            ] {
+                let err = ClientError::http(status, body, None);
+                assert_eq!(
+                    user_message(&err),
+                    SERVER_TROUBLE_MESSAGE,
+                    "{status} {body}"
+                );
+                assert!(!user_message(&err).contains("HTTP"), "{status}");
+            }
+        }
+        assert_eq!(
+            SERVER_TROUBLE_MESSAGE,
+            "The server had a problem. Try again in a moment."
+        );
+        let real = ClientError::http(500, r#"{"error":"database error"}"#, None);
+        assert_eq!(user_message(&real), "HTTP error 500: database error");
+        let busy = ClientError::http(503, r#"{"error":"hero_icons_disabled"}"#, None);
+        assert_eq!(user_message(&busy), "HTTP error 503: hero_icons_disabled");
+        // A reason-less 4xx keeps its status: `is_http_status` reads 401,
+        // 403 and 404 back from this text to pick the sign-in wall and the
+        // missing views.
+        for status in [400, 401, 403, 404, 409, 413] {
+            let err = ClientError::http(status, "", None);
+            assert_eq!(user_message(&err), format!("HTTP error: {status}"));
+        }
+        for status in [401, 403, 404] {
+            let shown = user_message(&ClientError::http(status, "", None));
+            assert!(crate::components::is_http_status(&shown, status), "{shown}");
+            assert!(!crate::components::is_http_status(
+                SERVER_TROUBLE_MESSAGE,
+                status
+            ));
+        }
+        // A 429 keeps the rate-limit copy with or without a body.
+        assert_eq!(
+            user_message(&ClientError::http(429, "", None)),
+            "Too many requests. Try again later."
+        );
+        assert_eq!(message_without_reason(&real), SERVER_TROUBLE_MESSAGE);
+        assert_eq!(
+            message_without_reason(&ClientError::Network("x".into())),
+            NETWORK_ERROR_MESSAGE
+        );
+        assert_eq!(
+            message_without_reason(&ClientError::Deserialize("x".into())),
+            UNREADABLE_ANSWER_MESSAGE
+        );
+        assert!(NETWORK_ERROR_MESSAGE.starts_with(UNREACHABLE_SENTENCE));
+    }
+
+    /// Vision nit 10 on 748: an unreadable answer after a write (a 2xx) may
+    /// mean the change went through, so the copy never invites a blind
+    /// retry; the reload shows the current state, for a load as well.
+    #[test]
+    fn an_unreadable_answer_never_invites_a_retry() {
+        let text = user_message(&ClientError::Deserialize("expected value".into()));
+        assert_eq!(
+            text,
+            "The server's answer could not be read. Reload to see the current state."
+        );
+        assert!(!text.to_lowercase().contains("try again"), "{text}");
+        assert!(
+            text.starts_with("The server's answer could not be read. Reload"),
+            "{text}"
+        );
+    }
+
+    /// Vision nit 12 on 748: a long dash in a server reason (the key import
+    /// 409) reads as two plain sentences.
+    #[test]
+    fn a_long_dash_in_a_server_reason_is_made_plain() {
+        let err = ClientError::http(
+            409,
+            r#"{"error":"This key is already linked \u2014 remove it from the other account first"}"#,
+            None,
+        );
+        let shown = user_message(&err);
+        assert_eq!(
+            shown,
+            "HTTP error 409: This key is already linked. Remove it from the other account first"
+        );
+        assert!(
+            !shown.contains('\u{2014}') && !shown.contains('\u{2013}'),
+            "{shown}"
+        );
+        assert_eq!(plain_punctuation("a \u{2014} b"), "a. B");
+        assert_eq!(plain_punctuation("done. \u{2014} next"), "done. Next");
+        assert_eq!(plain_punctuation("a\u{2013}b"), "a. B");
+        assert_eq!(plain_punctuation("ends \u{2014}"), "ends.");
+        assert_eq!(plain_punctuation("no dash"), "no dash");
+    }
+
+    /// Vision nit 6 on 748: no join ever reads "..", ". ." or ": .".
+    #[test]
+    fn joins_never_double_their_punctuation() {
+        let net = ClientError::Network("offline".into());
+        let reasons = [
+            NETWORK_ERROR_MESSAGE.to_string(),
+            UNREADABLE_ANSWER_MESSAGE.to_string(),
+            SERVER_TROUBLE_MESSAGE.to_string(),
+            "HTTP error 409: last admin".to_string(),
+            "HTTP error 409: last admin.".to_string(),
+            "HTTP error: 404".to_string(),
+            ".".to_string(),
+            " ".to_string(),
+            String::new(),
+        ];
+        let leads = [
+            "Could not save",
+            "Could not save.",
+            "Could not save:",
+            "Player03",
+            "Could not save. ",
+            "",
+        ];
+        for lead in leads {
+            for reason in &reasons {
+                for joined in [
+                    join_lead(lead, reason),
+                    two_sentences(lead, reason),
+                    as_sentence(&join_lead(lead, reason)),
+                    crate::components::SaveState::failed_text(lead, reason).text(),
+                ] {
+                    for bad in ["..", ". .", ": .", ":.", " :"] {
+                        assert!(!joined.contains(bad), "{lead:?} + {reason:?} = {joined:?}");
+                    }
+                    assert_eq!(joined, joined.trim(), "{joined:?}");
+                }
+            }
+            let shown = with_lead(lead, &net);
+            assert!(!shown.contains(".."), "{shown}");
+        }
+        assert_eq!(join_lead("Could not save", "."), "Could not save");
+        assert_eq!(two_sentences("Could not save", ""), "Could not save.");
+        assert_eq!(
+            two_sentences("Player03: HTTP error 409: last admin", "Use Delete all."),
+            "Player03: HTTP error 409: last admin. Use Delete all."
+        );
+        assert_eq!(as_sentence("Failed:"), "Failed.");
+    }
+
+    /// Vision nit 8 and QA on 748: the helpers that put a request error on
+    /// the page log the raw error once; `user_message` itself stays pure.
+    #[test]
+    fn the_page_text_helpers_log_the_raw_error_once() {
+        use crate::components::{SaveState, Toast};
+        let take = crate::util::take_logged;
+        let _ = take();
+        let parse =
+            ClientError::Deserialize("missing field `display_name` at line 1 column 212".into());
+
+        let _ = user_message(&parse);
+        assert!(take().is_empty(), "user_message is pure");
+
+        let _ = with_lead("Could not save the game.", &parse);
+        assert_eq!(
+            take(),
+            [
+                "Could not save the game: Deserialization error: missing field `display_name` at line 1 column 212"
+            ]
+        );
+
+        let _ = Toast::error_from("Failed to save settings", &parse);
+        assert_eq!(take().len(), 1);
+
+        // QA on 748: the profile save with an unreadable 200 logs it.
+        let line = SaveState::failed("Could not save your profile", &parse);
+        assert_eq!(
+            line.text(),
+            format!("Could not save your profile. {UNREADABLE_ANSWER_MESSAGE}")
+        );
+        let logged = take();
+        assert_eq!(logged.len(), 1, "{logged:?}");
+        assert!(
+            logged[0].contains("missing field `display_name`"),
+            "{logged:?}"
+        );
+        let profile = include_str!("pages/profile_settings.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("prod part");
+        assert!(
+            profile.contains(
+                "save_state.set(SaveState::failed(\"Could not save your profile\", &e));"
+            )
+        );
+
+        // The DM load classifier logs every kind.
+        let _ = crate::components::dm::classify_dm_client_error(&ClientError::http(403, "", None));
+        assert_eq!(take().len(), 1);
+
+        // An aborted fetch (the page is being left) is not logged.
+        let _ = with_lead(
+            "x",
+            &ClientError::Network("JsValue(AbortError: The operation was aborted. )".into()),
+        );
+        assert!(take().is_empty());
+    }
+
+    /// The names the crate gives a bound error. A binding with one of these
+    /// names that is not a [`ClientError`] goes in [`NOT_PAGE_TEXT`].
     const NAMES: [&str; 4] = ["e", "err", "error", "other"];
 
-    /// Lines that format an error binding which is not a [`ClientError`], or
-    /// that keep it off the page. `(file, part of the line, why)`. Every
-    /// entry must still match, so the list cannot go stale.
+    /// Copy that blames the connection, or a fixed catch-all, written out by
+    /// hand. It comes from [`user_message`] (or [`message_without_reason`])
+    /// only, so a 403 or an unreadable answer is never called a connection
+    /// problem (QA on 748). Lines that use one on purpose are in
+    /// [`NOT_PAGE_TEXT`].
+    const CATCH_ALL: [&str; 4] = [
+        "Check your connection",
+        "Something went wrong. Try again",
+        "Invalid username or password",
+        "Couldn't reach the server",
+    ];
+
+    /// Lines the scan flags that are not a [`ClientError`] shown on the
+    /// page, or copy used on purpose. `(file, the exact trimmed line, why)`:
+    /// an exact line, so a new line next to an old one is never absorbed.
+    /// Every entry must still match, so the list cannot go stale.
     const NOT_PAGE_TEXT: &[(&str, &str, &str)] = &[
         (
-            "util.rs",
-            "is_cancelled_fetch_text(&err.to_string()",
-            "abort check, not shown",
-        ),
-        (
-            "util.rs",
-            "console::warn_1(&format!(\"{what}: {err}\")",
-            "the console log",
-        ),
-        (
             "components/chat/chat_widget.rs",
-            "serde_json::to_string(event).map_err(|e| e.to_string())",
+            "event_json: serde_json::to_string(event).map_err(|e| e.to_string())?,",
             "serde error",
         ),
         (
             "components/chat/chat_widget.rs",
-            "tracing::info!(\"Gift wrap decrypt skipped: {e}\")",
+            "\"Can't reach the chat relay. Check your connection and retry.\"",
+            "relay WebSocket state, not a ClientError",
+        ),
+        (
+            "components/chat/chat_widget.rs",
+            "Err(e) => tracing::info!(\"Gift wrap decrypt skipped: {e}\"),",
             "log",
         ),
         (
             "components/dm/types.rs",
-            "format!(\"Invalid npub: {e}\")",
+            "CheckedHrpstring::new::<Bech32>(trimmed).map_err(|e| format!(\"Invalid npub: {e}\"))?;",
             "bech32 error",
         ),
         (
+            "pages/admin/articles.rs",
+            "other => format!(\"Upload failed: HTTP {other}\"),",
+            "status code (deferred, Vision nit 9)",
+        ),
+        (
+            "pages/admin/brand_settings.rs",
+            "return serde_json::from_str(&json).map_err(|err| err.to_string());",
+            "test fixture serde error",
+        ),
+        (
+            "pages/admin/members.rs",
+            "if err.http_status() == Some(403) && err.to_string().contains(OFFICER_RANK_ERROR) {",
+            "match, not shown",
+        ),
+        (
+            "pages/admin/members.rs",
+            "other => format!(\"Upload failed: HTTP {other}\"),",
+            "status code (deferred, Vision nit 9)",
+        ),
+        (
+            "pages/admin/moderation.rs",
+            ".unwrap_or_else(|| other.to_string().trim_matches('\"').to_string()),",
+            "JSON value",
+        ),
+        (
+            "pages/admin/patch_notes.rs",
+            "serde_json::from_str(trimmed).map_err(|e| format!(\"Hero changes JSON is invalid: {e}\"))",
+            "serde error on typed JSON",
+        ),
+        (
             "pages/apply.rs",
-            "other => (PillTone::Neutral, other.to_string())",
+            "other => (PillTone::Neutral, other.to_string()),",
             "status name",
+        ),
+        (
+            "pages/changelog/data.rs",
+            ".unwrap_or_else(|e| panic!(\"test source: {e}\"))",
+            "panic",
+        ),
+        (
+            "pages/identity.rs",
+            ".map_err(|e| format!(\"getPublicKey call failed: {e:?}\"))?;",
+            "NIP-07 extension error (deferred, Vision nit 9)",
+        ),
+        (
+            "pages/identity.rs",
+            ".map_err(|e| format!(\"getPublicKey rejected: {e:?}\"))?;",
+            "NIP-07 extension error (deferred, Vision nit 9)",
+        ),
+        (
+            "pages/identity.rs",
+            ".map_err(|e| format!(\"signEvent call failed: {e:?}\"))?;",
+            "NIP-07 extension error (deferred, Vision nit 9)",
+        ),
+        (
+            "pages/identity.rs",
+            ".map_err(|e| format!(\"signEvent rejected: {e:?}\"))?;",
+            "NIP-07 extension error (deferred, Vision nit 9)",
+        ),
+        (
+            "pages/identity.rs",
+            "serde_wasm_bindgen::from_value(signed_event).map_err(|e| format!(\"Parse error: {e}\"))?;",
+            "serde_wasm_bindgen error (deferred, Vision nit 9)",
+        ),
+        (
+            "pages/link/mod.rs",
+            "pub const SOMETHING_WENT_WRONG: &str = \"Something went wrong. Try again.\";",
+            "link page copy for an unnamed status of an ObservedError, not a ClientError; no answer and an unreadable answer have their own lines",
+        ),
+        (
+            "pages/login.rs",
+            "const INVALID_CREDENTIALS: &str = \"Invalid username or password\";",
+            "the 401 credential rejection only",
+        ),
+        (
+            "pages/login.rs",
+            ".map_err(|e| format!(\"signEvent call failed: {e:?}\"))?;",
+            "NIP-07 extension error (deferred, Vision nit 9)",
+        ),
+        (
+            "pages/login.rs",
+            ".map_err(|e| format!(\"signEvent rejected: {e:?}\"))?;",
+            "NIP-07 extension error (deferred, Vision nit 9)",
+        ),
+        (
+            "pages/login.rs",
+            "serde_wasm_bindgen::from_value(signed_event).map_err(|e| format!(\"Parse error: {e}\"))?;",
+            "serde_wasm_bindgen error (deferred, Vision nit 9)",
         ),
         (
             "pages/scrims.rs",
-            "other => Some((other.to_string(), PillTone::Neutral))",
+            "other => Some((other.to_string(), PillTone::Neutral)),",
             "status name",
         ),
         (
-            "pages/identity.rs",
-            "getPublicKey call failed: {e:?}",
-            "NIP-07 extension error",
-        ),
-        (
-            "pages/identity.rs",
-            "getPublicKey rejected: {e:?}",
-            "NIP-07 extension error",
-        ),
-        (
-            "pages/identity.rs",
-            "signEvent call failed: {e:?}",
-            "NIP-07 extension error",
-        ),
-        (
-            "pages/identity.rs",
-            "signEvent rejected: {e:?}",
-            "NIP-07 extension error",
-        ),
-        (
-            "pages/identity.rs",
-            "format!(\"Parse error: {e}\")",
-            "serde_wasm_bindgen error",
-        ),
-        (
-            "pages/login.rs",
-            "signEvent call failed: {e:?}",
-            "NIP-07 extension error",
-        ),
-        (
-            "pages/login.rs",
-            "signEvent rejected: {e:?}",
-            "NIP-07 extension error",
-        ),
-        (
-            "pages/login.rs",
-            "format!(\"Parse error: {e}\")",
-            "serde_wasm_bindgen error",
-        ),
-        (
             "pages/stat_reports.rs",
-            "serde_json::from_value(value.clone()).map_err(|err| err.to_string())",
+            "serde_json::from_value(value.clone()).map_err(|err| err.to_string())?;",
             "serde error",
         ),
         (
             "pages/stat_reports.rs",
-            "serde_json::from_value(report.clone()).map_err(|err| err.to_string())",
+            "serde_json::from_value(report.clone()).map_err(|err| err.to_string())?;",
             "serde error",
         ),
         (
             "pages/stat_reports.rs",
-            "serde_json::from_value(report).map_err(|err| err.to_string())",
+            "serde_json::from_value(report).map_err(|err| err.to_string())?;",
             "serde error",
         ),
         (
@@ -404,79 +814,53 @@ mod tests {
             "label check copy",
         ),
         (
-            "pages/admin/articles.rs",
-            "format!(\"Upload failed: HTTP {other}\")",
-            "status code",
-        ),
-        (
-            "pages/admin/members.rs",
-            "format!(\"Upload failed: HTTP {other}\")",
-            "status code",
-        ),
-        (
-            "pages/admin/members.rs",
-            "err.to_string().contains(OFFICER_RANK_ERROR)",
-            "match, not shown",
-        ),
-        (
-            "pages/admin/moderation.rs",
-            "other.to_string().trim_matches",
-            "JSON value",
-        ),
-        (
-            "pages/admin/brand_settings.rs",
-            "serde_json::from_str(&json).map_err(|err| err.to_string())",
-            "test fixture serde error",
-        ),
-        (
-            "pages/admin/patch_notes.rs",
-            "Hero changes JSON is invalid: {e}",
-            "serde error on typed JSON",
-        ),
-        (
-            "pages/changelog/data.rs",
-            "panic!(\"test source: {e}\")",
-            "panic",
-        ),
-        ("pages/changelog/parse.rs", "changelog: {e}", "toml error"),
-        (
             "pages/strategy/editor.rs",
-            "tracing::error!(\"Failed to save strategy: {e}\")",
+            "tracing::error!(\"Failed to save strategy: {e}\");",
             "log",
         ),
         (
             "state/nostr.rs",
-            "warn_console(&format!(\"Failed to parse relay message: {err}\"))",
+            "warn_console(&format!(\"Failed to parse relay message: {err}\"));",
             "console",
         ),
         (
             "state/nostr.rs",
-            "tracing::error!(\"NIP-42 auth failed: {e}\")",
+            "tracing::error!(\"NIP-42 auth failed: {e}\");",
             "log",
         ),
         (
             "state/nostr.rs",
-            "serde_json::to_string(&body).map_err(|e| e.to_string())",
+            "let body_str = serde_json::to_string(&body).map_err(|e| e.to_string())?;",
             "serde error",
         ),
         (
             "state/nostr.rs",
-            "Request::new_with_str_and_init(endpoint, &opts).map_err(|e| format!(\"{e:?}\"))",
+            "let request = Request::new_with_str_and_init(endpoint, &opts).map_err(|e| format!(\"{e:?}\"))?;",
             "web_sys fetch, logged",
         ),
         (
             "state/nostr.rs",
             ".map_err(|e| format!(\"{e:?}\"))?;",
+            "web_sys fetch, logged (1 of 3)",
+        ),
+        (
+            "state/nostr.rs",
+            ".map_err(|e| format!(\"{e:?}\"))?;",
+            "web_sys fetch, logged (2 of 3)",
+        ),
+        (
+            "state/nostr.rs",
+            "let json = JsFuture::from(resp.json().map_err(|e| format!(\"{e:?}\"))?)",
             "web_sys fetch, logged",
         ),
         (
             "state/nostr.rs",
-            "resp.json().map_err(|e| format!(\"{e:?}\"))",
-            "web_sys fetch, logged",
+            ".map_err(|e| format!(\"{e:?}\"))?;",
+            "web_sys fetch, logged (3 of 3)",
         ),
         (
             "state/nostr.rs",
-            "serde_wasm_bindgen::from_value(json).map_err(|e| e.to_string())",
+            "serde_wasm_bindgen::from_value(json).map_err(|e| e.to_string())?;",
             "serde error",
         ),
         (
@@ -486,20 +870,260 @@ mod tests {
         ),
         (
             "state/site_settings.rs",
-            "ignored invalid #sc-settings JSON: {err}",
+            "tracing::warn!(\"ignored invalid #sc-settings JSON: {err}\");",
             "log",
         ),
         (
             "state/site_settings.rs",
-            "serde_json::from_str(&json).map_err(|err| err.to_string())",
+            "Some(json) => serde_json::from_str(&json).map_err(|err| err.to_string()),",
             "test fixture serde error",
+        ),
+        (
+            "training_crops_ui.rs",
+            "format!(\"{LEAD} {UNREACHABLE_SENTENCE} Check your connection, then {BUTTON}\")",
+            "no answer: the mapped first sentence plus this line's own next step (Vision nit 3)",
+        ),
+        (
+            "util.rs",
+            "is_cancelled_fetch_text(&err.to_string(), page_is_leaving())",
+            "abort check, not shown",
+        ),
+        (
+            "util.rs",
+            "web_sys::console::warn_1(&format!(\"{what}: {err}\").into());",
+            "the console log",
+        ),
+        (
+            "util.rs",
+            "LOGGED.with(|logged| logged.borrow_mut().push(format!(\"{what}: {err}\")));",
+            "the console log's test seam",
         ),
     ];
 
-    fn shows_an_error_binding(line: &str) -> bool {
-        if SHOWN.iter().any(|shown| line.contains(shown)) {
-            return true;
+    /// A Rust source as two same-length char vectors: `code` with comments
+    /// blanked (strings kept), and `shape` with comments and the insides of
+    /// string and char literals blanked (quotes kept), for brace and comma
+    /// matching. Newlines are kept in both, so line numbers stay true.
+    struct Lexed {
+        code: Vec<char>,
+        shape: Vec<char>,
+    }
+
+    fn lex(src: &str) -> Lexed {
+        let chars: Vec<char> = src.chars().collect();
+        let mut code = chars.clone();
+        let mut shape = chars.clone();
+        let blank = |v: &mut Vec<char>, at: usize| {
+            if v[at] != '\n' {
+                v[at] = ' ';
+            }
+        };
+        let ident = |c: char| c.is_alphanumeric() || c == '_';
+        let mut i = 0;
+        while i < chars.len() {
+            let c = chars[i];
+            let next = chars.get(i + 1).copied();
+            if c == '/' && next == Some('/') {
+                while i < chars.len() && chars[i] != '\n' {
+                    blank(&mut code, i);
+                    blank(&mut shape, i);
+                    i += 1;
+                }
+                continue;
+            }
+            if c == '/' && next == Some('*') {
+                let mut depth = 0usize;
+                while i < chars.len() {
+                    if chars[i] == '/' && chars.get(i + 1) == Some(&'*') {
+                        depth += 1;
+                        for at in [i, i + 1] {
+                            blank(&mut code, at);
+                            blank(&mut shape, at);
+                        }
+                        i += 2;
+                        continue;
+                    }
+                    if chars[i] == '*' && chars.get(i + 1) == Some(&'/') {
+                        depth -= 1;
+                        for at in [i, i + 1] {
+                            blank(&mut code, at);
+                            blank(&mut shape, at);
+                        }
+                        i += 2;
+                        if depth == 0 {
+                            break;
+                        }
+                        continue;
+                    }
+                    blank(&mut code, i);
+                    blank(&mut shape, i);
+                    i += 1;
+                }
+                continue;
+            }
+            // Raw strings: r"..", r#".."#, br#".."#.
+            let prev_ident = i > 0 && ident(chars[i - 1]);
+            let raw_at = match c {
+                'r' if !prev_ident => Some(i + 1),
+                'b' if !prev_ident && next == Some('r') => Some(i + 2),
+                _ => None,
+            };
+            if let Some(mut at) = raw_at {
+                let mut hashes = 0;
+                while chars.get(at) == Some(&'#') {
+                    hashes += 1;
+                    at += 1;
+                }
+                if chars.get(at) == Some(&'"') {
+                    let mut j = at + 1;
+                    loop {
+                        if j >= chars.len() {
+                            break;
+                        }
+                        if chars[j] == '"'
+                            && (0..hashes).all(|h| chars.get(j + 1 + h) == Some(&'#'))
+                        {
+                            break;
+                        }
+                        blank(&mut shape, j);
+                        j += 1;
+                    }
+                    i = j + 1 + hashes;
+                    continue;
+                }
+            }
+            if c == '"' {
+                let mut j = i + 1;
+                while j < chars.len() && chars[j] != '"' {
+                    if chars[j] == '\\' {
+                        blank(&mut shape, j);
+                        j += 1;
+                    }
+                    if j < chars.len() {
+                        blank(&mut shape, j);
+                    }
+                    j += 1;
+                }
+                i = j + 1;
+                continue;
+            }
+            if c == '\'' {
+                // A char literal ('x', '\n', '\u{..}'), not a lifetime.
+                let end = if next == Some('\\') {
+                    (i + 2..chars.len()).find(|&j| chars[j] == '\'')
+                } else if chars.get(i + 2) == Some(&'\'') {
+                    Some(i + 2)
+                } else {
+                    None
+                };
+                if let Some(end) = end {
+                    for at in i + 1..end {
+                        blank(&mut shape, at);
+                    }
+                    i = end + 1;
+                    continue;
+                }
+            }
+            i += 1;
         }
+        Lexed { code, shape }
+    }
+
+    /// The index after the bracket that closes the one at `open` (in `shape`).
+    fn close_of(shape: &[char], open: usize) -> usize {
+        let mut depth = 0i32;
+        for (at, c) in shape.iter().enumerate().skip(open) {
+            match c {
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return at + 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        shape.len()
+    }
+
+    fn starts_at(v: &[char], at: usize, word: &str) -> bool {
+        word.chars()
+            .enumerate()
+            .all(|(k, c)| v.get(at + k) == Some(&c))
+    }
+
+    /// Inline `#[cfg(test)] mod x { .. }` blocks are blanked (only the block:
+    /// code after it is still scanned). Out-of-line `#[cfg(test)] mod x;`
+    /// names are returned, so their files are skipped.
+    fn drop_test_modules(lexed: &mut Lexed) -> Vec<String> {
+        let mut out_of_line = Vec::new();
+        let marker = "#[cfg(test)]";
+        let mut at = 0;
+        while at < lexed.shape.len() {
+            if !starts_at(&lexed.shape, at, marker) {
+                at += 1;
+                continue;
+            }
+            let mut j = at + marker.chars().count();
+            let skip_ws = |j: &mut usize, v: &[char]| {
+                while *j < v.len() && v[*j].is_whitespace() {
+                    *j += 1;
+                }
+            };
+            skip_ws(&mut j, &lexed.shape);
+            for vis in ["pub(crate) ", "pub "] {
+                if starts_at(&lexed.shape, j, vis) {
+                    j += vis.len();
+                }
+            }
+            if !starts_at(&lexed.shape, j, "mod ") {
+                at += 1;
+                continue;
+            }
+            j += 4;
+            let name_start = j;
+            while j < lexed.shape.len()
+                && (lexed.shape[j].is_alphanumeric() || lexed.shape[j] == '_')
+            {
+                j += 1;
+            }
+            let name: String = lexed.shape[name_start..j].iter().collect();
+            skip_ws(&mut j, &lexed.shape);
+            match lexed.shape.get(j) {
+                Some('{') => {
+                    let end = close_of(&lexed.shape, j);
+                    for k in at..end {
+                        if lexed.code[k] != '\n' {
+                            lexed.code[k] = ' ';
+                            lexed.shape[k] = ' ';
+                        }
+                    }
+                    at = end;
+                }
+                Some(';') => {
+                    out_of_line.push(name);
+                    at = j + 1;
+                }
+                _ => at += 1,
+            }
+        }
+        out_of_line
+    }
+
+    fn line_of(v: &[char], at: usize) -> usize {
+        v[..at].iter().filter(|c| **c == '\n').count()
+    }
+
+    /// `name` is an error binding: `e`, `&e`, `*err`, `other.to_string()`.
+    fn is_error_arg(arg: &str) -> bool {
+        let arg = arg.trim().trim_start_matches(['&', '*']).trim();
+        let arg = arg.strip_suffix(".to_string()").unwrap_or(arg);
+        NAMES.contains(&arg)
+    }
+
+    /// `.to_string()` called on an error binding (not on `self.e`, `value`).
+    fn to_string_on_name(line: &str) -> bool {
         NAMES.iter().any(|name| {
             let call = format!("{name}.to_string()");
             line.match_indices(&call).any(|(at, _)| {
@@ -511,22 +1135,82 @@ mod tests {
         })
     }
 
-    /// The code before a file's test module.
-    fn prod_part(text: &str) -> &str {
-        let mut from = 0;
-        while let Some(at) = text[from..].find("#[cfg(test)]") {
-            let at = from + at;
-            let rest = text[at + "#[cfg(test)]".len()..].trim_start();
-            let rest = rest
-                .strip_prefix("pub(crate) ")
-                .or_else(|| rest.strip_prefix("pub "))
-                .unwrap_or(rest);
-            if rest.starts_with("mod ") {
-                return &text[..at];
+    /// `{e}`, `{err:?}`, `{error:#}`: an error binding inline in a format
+    /// string, with any format spec.
+    fn inline_name(line: &str) -> bool {
+        NAMES.iter().any(|name| {
+            line.contains(&format!("{{{name}}}")) || line.contains(&format!("{{{name}:"))
+        })
+    }
+
+    /// Every flagged line of one source: `(line number, trimmed code line)`.
+    /// Comments are not read. Test modules are skipped. A format macro whose
+    /// arguments (on any line of the call) include an error binding is
+    /// flagged on the argument's line.
+    fn scan_source(text: &str) -> (Vec<(usize, String)>, Vec<String>) {
+        let mut lexed = lex(text);
+        let out_of_line = drop_test_modules(&mut lexed);
+        let code: String = lexed.code.iter().collect();
+        let lines: Vec<&str> = code.lines().collect();
+        let mut hits = std::collections::BTreeSet::new();
+        for (idx, line) in lines.iter().enumerate() {
+            if inline_name(line)
+                || to_string_on_name(line)
+                || CATCH_ALL.iter().any(|copy| line.contains(copy))
+            {
+                hits.insert(idx);
             }
-            from = at + 1;
         }
-        text
+        // Format-style macros: any argument after the template that is an
+        // error binding (positional `{}` / `{0}` or named `x = e`).
+        let shape = &lexed.shape;
+        for at in 0..shape.len() {
+            if shape[at] != '!' || shape.get(at + 1) != Some(&'(') {
+                continue;
+            }
+            let name_start = (0..at)
+                .rev()
+                .take_while(|&p| shape[p].is_alphanumeric() || shape[p] == '_')
+                .last()
+                .unwrap_or(at);
+            let name: String = shape[name_start..at].iter().collect();
+            // Arguments before the template: none, or the writer.
+            let leading = match name.as_str() {
+                "format" | "format_args" | "panic" | "print" | "println" | "eprint"
+                | "eprintln" => 1,
+                "write" | "writeln" => 2,
+                _ => continue,
+            };
+            let open = at + 1;
+            let end = close_of(shape, open);
+            let mut depth = 0i32;
+            let mut from = open + 1;
+            let mut index = 0;
+            for k in open + 1..end {
+                match shape[k] {
+                    '(' | '[' | '{' => depth += 1,
+                    ')' | ']' | '}' if depth > 0 => depth -= 1,
+                    ',' | ')' if depth == 0 => {
+                        let arg: String = lexed.code[from..k].iter().collect();
+                        let value = arg.split_once('=').map_or(arg.as_str(), |(_, v)| v);
+                        index += 1;
+                        if index > leading && is_error_arg(value) {
+                            let first = (from..k)
+                                .find(|&p| !lexed.code[p].is_whitespace())
+                                .unwrap_or(from);
+                            hits.insert(line_of(&lexed.code, first));
+                        }
+                        from = k + 1;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let hits = hits
+            .into_iter()
+            .map(|idx| (idx + 1, lines.get(idx).map_or("", |l| l.trim()).to_string()))
+            .collect();
+        (hits, out_of_line)
     }
 
     fn collect(
@@ -534,12 +1218,16 @@ mod tests {
         dir: &std::path::Path,
         hits: &mut Vec<String>,
         used: &mut [bool],
+        skip: &mut Vec<std::path::PathBuf>,
     ) {
-        let entries = std::fs::read_dir(dir).unwrap_or_else(|why| panic!("read {dir:?}: {why}"));
-        for entry in entries {
-            let path = entry.expect("dir entry").path();
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .unwrap_or_else(|why| panic!("read {dir:?}: {why}"))
+            .map(|entry| entry.expect("dir entry").path())
+            .collect();
+        entries.sort();
+        for path in entries {
             if path.is_dir() {
-                collect(src, &path, hits, used);
+                collect(src, &path, hits, used, skip);
                 continue;
             }
             if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
@@ -551,69 +1239,141 @@ mod tests {
                 .to_string_lossy()
                 .replace('\\', "/");
             // This file is the one place a ClientError becomes page text.
-            if rel == "client_error.rs" {
+            if rel == "client_error.rs" || skip.contains(&path) {
                 continue;
             }
             let text = std::fs::read_to_string(&path).expect("read rs");
-            for (idx, line) in prod_part(&text).lines().enumerate() {
-                if !shows_an_error_binding(line) {
-                    continue;
-                }
+            let (found, test_mods) = scan_source(&text);
+            // `mod x;` behind `#[cfg(test)]`: x.rs or x/mod.rs beside this
+            // file (or in its own folder for a non-mod file).
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            let base = if matches!(stem, "mod" | "main" | "lib") {
+                path.parent().expect("parent").to_path_buf()
+            } else {
+                path.with_extension("")
+            };
+            for name in test_mods {
+                skip.push(base.join(format!("{name}.rs")));
+                skip.push(base.join(&name).join("mod.rs"));
+            }
+            // Each entry covers one occurrence: a second identical line in
+            // the same file is a new hit until it gets its own entry.
+            for (line_no, line) in found {
                 match NOT_PAGE_TEXT
                     .iter()
-                    .position(|(file, part, _)| *file == rel && line.contains(part))
+                    .enumerate()
+                    .position(|(at, (file, exact, _))| !used[at] && *file == rel && *exact == line)
                 {
                     Some(at) => used[at] = true,
-                    None => hits.push(format!("{rel}:{}: {}", idx + 1, line.trim())),
+                    None => hits.push(format!(
+                        "        (\"{rel}\", {line:?}, \"\"), // :{line_no}"
+                    )),
                 }
             }
         }
     }
 
-    /// Issues 726 and 728: every toast and inline line that shows a
-    /// [`ClientError`] goes through [`user_message`] (directly, or via
-    /// [`with_lead`], `Toast::error_from`, `SaveState::failed`,
-    /// [`super::logged_message`] or the `ApiResource` error). Formatting an
-    /// error binding with `{e}` or `.to_string()` anywhere else in the app is
-    /// refused, so the raw `JsValue` stack cannot come back. A binding that
-    /// is not a ClientError goes in [`NOT_PAGE_TEXT`] with its reason.
+    /// Issues 726 and 728, QA and Vision on 748: every toast and inline line
+    /// that shows a [`ClientError`] goes through [`user_message`] (directly,
+    /// or via [`with_lead`], `Toast::error_from`, `SaveState::failed`,
+    /// [`super::logged_message`] or the `ApiResource` error). An error
+    /// binding formatted any other way (inline `{e}` with any spec, a
+    /// positional `{}` argument on any line of the call, `.to_string()`), or
+    /// hand-written catch-all connection copy, anywhere else in the app is
+    /// refused. A line that is not a ClientError goes in [`NOT_PAGE_TEXT`]
+    /// with its reason.
     #[test]
     fn no_client_error_is_formatted_into_page_text() {
         let src = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
         let mut hits = Vec::new();
         let mut used = vec![false; NOT_PAGE_TEXT.len()];
-        collect(src, src, &mut hits, &mut used);
+        // Test-only files named from `main.rs` / `lib.rs` are found as the
+        // scan goes; the folder walk is sorted, so collect twice to be sure
+        // a test file listed before its parent is skipped too.
+        let mut skip = Vec::new();
+        {
+            let mut scratch_hits = Vec::new();
+            let mut scratch_used = vec![false; NOT_PAGE_TEXT.len()];
+            collect(src, src, &mut scratch_hits, &mut scratch_used, &mut skip);
+        }
+        collect(src, src, &mut hits, &mut used, &mut skip);
         assert!(
             hits.is_empty(),
             "format the error with crate::client_error::user_message (or with_lead, \
-             Toast::error_from, SaveState::failed), not its Display:\n{}",
+             Toast::error_from, SaveState::failed), not its Display, and take \
+             connection copy from the mapping; or add an exact line with its reason:\n{}",
             hits.join("\n")
         );
         let stale: Vec<_> = NOT_PAGE_TEXT
             .iter()
             .zip(&used)
             .filter(|(_, used)| !**used)
-            .map(|((file, part, _), _)| format!("{file}: {part}"))
+            .map(|((file, line, _), _)| format!("{file}: {line}"))
             .collect();
         assert!(stale.is_empty(), "stale entries:\n{}", stale.join("\n"));
+    }
 
-        // The scan itself: these shapes are what it refuses.
+    /// The scan itself: what it flags, what it lets through, and that it
+    /// reads past comments, test modules and string contents correctly.
+    #[test]
+    fn the_scan_flags_these_shapes_and_skips_comments() {
+        let flagged = |text: &str| -> Vec<usize> {
+            scan_source(text).0.into_iter().map(|(n, _)| n).collect()
+        };
         for bad in [
             "toast.show(Toast::error(format!(\"Failed to save game: {e}\")));",
             "toast.show(Toast::error(e.to_string()));",
             "p { class: \"fetch-error\", \"Couldn't load totals. {err}\" }",
             ".map_err(|e| e.to_string())",
             "other => DmLoadFailure::Other(other.to_string()),",
+            "let s = format!(\"Failed: {}\", e);",
+            "let s = format!(\"Failed: {0}\", &err);",
+            "let s = format!(\"Failed: {why}\", why = error);",
+            "let s = format!(\"Failed: {e:#}\");",
+            "let s = format!(\"Failed: {err:?}\");",
+            "message: \"Couldn't load. Check your connection and try again.\",",
+            "let c = '\"'; let s = format!(\"{}\", e);",
         ] {
-            assert!(shows_an_error_binding(bad), "{bad}");
+            assert_eq!(flagged(bad), vec![1], "{bad}");
         }
+        // A call over several lines is flagged on the argument's line.
+        assert_eq!(
+            flagged("let s = format!(\n    \"Failed: {}\",\n    e,\n);"),
+            vec![3]
+        );
         for fine in [
             "toast.show(Toast::error_from(\"Failed to save game\", &e));",
             "p { class: \"fetch-error\", \"Couldn't load totals. {reason}\" }",
             "value.to_string()",
             "self.e.to_string()",
+            "let n = format!(\"{} games\", count);",
+            "let s = format!(\"{}\", e.http_status().unwrap_or(0));",
+            "// toast.show(Toast::error(format!(\"{e}\")));",
+            "/* Check your connection and try again. {err} */",
+            "let s = \"a // not a comment {reason}\";",
+            "let s = r#\"raw \"{why}\" string\"#;",
         ] {
-            assert!(!shows_an_error_binding(fine), "{fine}");
+            assert!(flagged(fine).is_empty(), "{fine}");
         }
+        // Code after an out-of-line test module is still scanned, and the
+        // module's name is reported so its file is skipped.
+        let (hits, mods) =
+            scan_source("#[cfg(test)]\nmod helpers;\nfn x() -> String { format!(\"{e}\") }\n");
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].0, 3);
+        assert_eq!(mods, ["helpers"]);
+        // An inline test module is skipped, code after it is not.
+        let (hits, _) = scan_source(
+            "#[cfg(test)]\nmod tests {\n    fn t() -> String { format!(\"{e}\") }\n}\nfn after() -> String { format!(\"{err}\") }\n",
+        );
+        assert_eq!(
+            hits,
+            [(5, "fn after() -> String { format!(\"{err}\") }".to_string())]
+        );
+        // A brace inside a string does not end the test module early.
+        let (hits, _) = scan_source(
+            "#[cfg(test)]\nmod tests {\n    const S: &str = \"}\";\n    fn t() -> String { format!(\"{e}\") }\n}\n",
+        );
+        assert!(hits.is_empty(), "{hits:?}");
     }
 }

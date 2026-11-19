@@ -143,11 +143,14 @@ pub fn consent_update(kind: ConsentKind, on: bool) -> TrainingCropConsentUpdate 
 }
 
 /// Plain sentence for a failed consent load or save. Same as the hero icon
-/// copy except a 503, which names training crops rather than hero icons.
-/// Never shows the raw server body.
+/// copy (the one mapping, logged) except a 503, which names training crops
+/// rather than hero icons. Never shows the raw server body.
 pub fn consent_failure_text(what: &str, err: &ClientError) -> String {
     match err.http_status() {
-        Some(503) => format!("{what} failed. {CONSENT_UNAVAILABLE}"),
+        Some(503) => {
+            crate::util::log_client_error(what, err);
+            format!("{what} failed. {CONSENT_UNAVAILABLE}")
+        }
         _ => crate::hero_icons_ui::failure_text(what, err),
     }
 }
@@ -185,11 +188,93 @@ pub fn failed_status(kind: ConsentKind, failure: &str) -> String {
 
 /// The failed part of a hero icon opt-out whose consent save worked but
 /// whose delete did not. It goes to the alert region, not the saved note.
+///
+/// One next step per reason, and never two "try again"s (Vision nit 3 on
+/// 748): no answer says to check the connection, then use Delete all my
+/// icons; a 401 says to sign in again first; a 403 or 503 has no next step
+/// (Delete all would fail the same way, and a 503 hides it); an unreadable
+/// answer says to reload (the icons may be gone); a reason-less 5xx says to
+/// wait. Any other answer keeps the server's reason and names the button.
+/// The raw error goes to the console.
 pub fn delete_failed_part(err: &ClientError) -> String {
-    format!(
-        "{} Use Delete all my icons to try again.",
-        crate::hero_icons_ui::failure_text("Deleting your icons", err)
-    )
+    use crate::client_error::{SERVER_TROUBLE_MESSAGE, UNREACHABLE_SENTENCE, user_message};
+    const LEAD: &str = "Deleting your icons failed.";
+    const BUTTON: &str = "use Delete all my icons.";
+    match err {
+        ClientError::Network(_) => {
+            crate::util::log_client_error(LEAD, err);
+            format!("{LEAD} {UNREACHABLE_SENTENCE} Check your connection, then {BUTTON}")
+        }
+        ClientError::Http { status: 401, .. } => {
+            crate::util::log_client_error(LEAD, err);
+            format!("{LEAD} Your session has ended. Sign in again, then {BUTTON}")
+        }
+        ClientError::Http {
+            status: 403 | 503, ..
+        }
+        | ClientError::Deserialize(_) => {
+            crate::hero_icons_ui::failure_text("Deleting your icons", err)
+        }
+        ClientError::Http { .. } if user_message(err) == SERVER_TROUBLE_MESSAGE => {
+            crate::util::log_client_error(LEAD, err);
+            format!("{LEAD} The server had a problem. Wait a moment, then {BUTTON}")
+        }
+        ClientError::Http { .. } => crate::client_error::two_sentences(
+            &crate::hero_icons_ui::failure_text("Deleting your icons", err),
+            "Use Delete all my icons to try again.",
+        ),
+    }
+}
+
+/// What happened to stored hero icons after a consent save answered.
+#[derive(Debug)]
+pub enum IconsAfterSave {
+    /// Not a hero icon save, sharing turned on, or nothing was stored.
+    Untouched,
+    /// Turned off and kept (hidden): how many.
+    Kept(u32),
+    /// Turned off and deleted: how many.
+    Deleted(u32),
+    /// Turned off with Delete chosen, and the delete failed.
+    DeleteFailed(ClientError),
+}
+
+/// The consent line after a save answered (Vision nit 4 on 748): the page's
+/// save callback only gathers the results and calls this, so every
+/// combination is tested here. `save` is the saved state of `kind` (`Ok`)
+/// or the save's error. What worked is the note; a failed delete is the
+/// alert, never part of the note (issue 729).
+pub fn line_after_save(
+    kind: ConsentKind,
+    save: Result<bool, &ClientError>,
+    icons: IconsAfterSave,
+) -> ConsentLine {
+    use crate::hero_icons_ui::{OptOutChoice, opt_out_detail};
+    let on = match save {
+        Ok(on) => on,
+        Err(err) => {
+            let what = format!("Saving {}", kind.noun().to_lowercase());
+            return ConsentLine::failure(failed_status(kind, &consent_failure_text(&what, err)));
+        }
+    };
+    match icons {
+        IconsAfterSave::Untouched => ConsentLine::saved(kind, on, None, None),
+        IconsAfterSave::Kept(n) => ConsentLine::saved(
+            kind,
+            on,
+            opt_out_detail(OptOutChoice::Keep, n).as_deref(),
+            None,
+        ),
+        IconsAfterSave::Deleted(n) => ConsentLine::saved(
+            kind,
+            on,
+            opt_out_detail(OptOutChoice::Delete, n).as_deref(),
+            None,
+        ),
+        IconsAfterSave::DeleteFailed(err) => {
+            ConsentLine::saved(kind, on, None, Some(delete_failed_part(&err)))
+        }
+    }
 }
 
 /// The consent live line shared by the four switches, as two parts so the
@@ -245,6 +330,16 @@ impl ConsentLine {
         match failed_part {
             Some(failed) => Self::partial(note, failed),
             None => Self::note(note),
+        }
+    }
+
+    /// A Delete all my icons answered (Vision nits 2 and 5 on 748): the
+    /// failed delete part of an earlier partial save is out of date, so it
+    /// goes. A full load or save failure (no note) stays: it is not about
+    /// the icons.
+    pub fn drop_failed_part(&mut self) {
+        if !self.note.is_empty() {
+            self.failure = None;
         }
     }
 
@@ -611,11 +706,142 @@ mod tests {
             failed.starts_with("Deleting your icons failed."),
             "{failed}"
         );
-        assert!(
-            failed.ends_with("Use Delete all my icons to try again."),
-            "{failed}"
+        // Vision nit 3 on 748: one next step, no doubled "try again".
+        assert_eq!(
+            failed,
+            "Deleting your icons failed. Could not reach the server. Check your connection, then use Delete all my icons."
         );
         assert!(!failed.contains("offline"), "{failed}");
+    }
+
+    /// Vision nit 3 on 748: the failed delete part names one next step per
+    /// reason, never repeats "try again" and never names a button that a
+    /// retry cannot help with. Every case logs the raw error.
+    #[test]
+    fn delete_failed_part_has_one_next_step_per_reason() {
+        use crate::client_error::UNREADABLE_ANSWER_MESSAGE;
+        let _ = crate::util::take_logged();
+        let cases: [(ClientError, String); 8] = [
+            (
+                ClientError::Network("JsValue(TypeError: Failed to fetch)".into()),
+                "Deleting your icons failed. Could not reach the server. Check your connection, then use Delete all my icons.".into(),
+            ),
+            (
+                ClientError::http(401, r#"{"error":"Unauthorized"}"#, None),
+                "Deleting your icons failed. Your session has ended. Sign in again, then use Delete all my icons.".into(),
+            ),
+            (
+                ClientError::http(403, r#"{"error":"Forbidden"}"#, None),
+                "Deleting your icons failed. You are not allowed to do that.".into(),
+            ),
+            (
+                ClientError::http(503, r#"{"error":"hero_icons_disabled"}"#, None),
+                "Deleting your icons failed. Hero icons are not switched on for this server.".into(),
+            ),
+            (
+                ClientError::Deserialize("expected value".into()),
+                format!("Deleting your icons failed. {UNREADABLE_ANSWER_MESSAGE}"),
+            ),
+            (
+                ClientError::http(502, "", None),
+                "Deleting your icons failed. The server had a problem. Wait a moment, then use Delete all my icons.".into(),
+            ),
+            (
+                ClientError::http(500, "<html>oops</html>", None),
+                "Deleting your icons failed. The server had a problem. Wait a moment, then use Delete all my icons.".into(),
+            ),
+            (
+                ClientError::http(409, r#"{"error":"a delete is already running"}"#, None),
+                "Deleting your icons failed. HTTP error 409: a delete is already running. Use Delete all my icons to try again.".into(),
+            ),
+        ];
+        for (err, want) in &cases {
+            let text = delete_failed_part(err);
+            assert_eq!(&text, want, "{err:?}");
+            let lower = text.to_lowercase();
+            assert!(lower.matches("try again").count() <= 1, "{text}");
+            assert!(lower.matches("delete all my icons").count() <= 1, "{text}");
+            assert!(!text.contains(".."), "{text}");
+            assert!(!text.contains(". ."), "{text}");
+        }
+        assert_eq!(crate::util::take_logged().len(), cases.len());
+    }
+
+    /// Vision nit 4 on 748: the save callback's result-to-line mapping, per
+    /// combination. The failed delete is only ever the alert, never the note
+    /// (the mutant `detail = Some(delete_failed_part(&e))` fails here).
+    #[test]
+    fn line_after_save_maps_every_result() {
+        let offline = || ClientError::Network("offline".into());
+        // A save that worked, nothing else touched.
+        for kind in ConsentKind::ALL {
+            for on in [true, false] {
+                assert_eq!(
+                    line_after_save(kind, Ok(on), IconsAfterSave::Untouched),
+                    ConsentLine::note(saved_status(kind, on, None)),
+                    "{kind:?} {on}"
+                );
+            }
+        }
+        // Hero icons off, icons kept or deleted: the note says so, no failure.
+        assert_eq!(
+            line_after_save(ConsentKind::HeroIcon, Ok(false), IconsAfterSave::Kept(3)),
+            ConsentLine::note("Saved. Hero icons off. 3 icons kept and hidden.")
+        );
+        assert_eq!(
+            line_after_save(ConsentKind::HeroIcon, Ok(false), IconsAfterSave::Kept(0)),
+            ConsentLine::note("Saved. Hero icons off.")
+        );
+        assert_eq!(
+            line_after_save(ConsentKind::HeroIcon, Ok(false), IconsAfterSave::Deleted(2)),
+            ConsentLine::note("Saved. Hero icons off. Deleted 2 icons.")
+        );
+        // Saved, delete failed: the note is only what worked, the failed
+        // part is the alert.
+        let partial = line_after_save(
+            ConsentKind::HeroIcon,
+            Ok(false),
+            IconsAfterSave::DeleteFailed(offline()),
+        );
+        assert_eq!(partial.note, "Saved. Hero icons off.");
+        assert_eq!(
+            partial.failure.as_deref(),
+            Some(delete_failed_part(&offline()).as_str())
+        );
+        assert!(!partial.note.contains("failed"), "{partial:?}");
+        assert!(!partial.note.contains("Delete all"), "{partial:?}");
+        // The save failed: the switch went back, the whole line is the alert.
+        for kind in ConsentKind::ALL {
+            let what = format!("Saving {}", kind.noun().to_lowercase());
+            let failed = line_after_save(kind, Err(&offline()), IconsAfterSave::Untouched);
+            assert_eq!(
+                failed,
+                ConsentLine::failure(failed_status(
+                    kind,
+                    &consent_failure_text(&what, &offline())
+                ))
+            );
+            assert_eq!(failed.note, "", "{kind:?}");
+            assert!(
+                failed
+                    .failure_text()
+                    .ends_with("are back to how they were."),
+                "{failed:?}"
+            );
+        }
+        // A failed save ignores any icon result: nothing was saved.
+        assert_eq!(
+            line_after_save(
+                ConsentKind::HeroIcon,
+                Err(&offline()),
+                IconsAfterSave::Deleted(2)
+            ),
+            line_after_save(
+                ConsentKind::HeroIcon,
+                Err(&offline()),
+                IconsAfterSave::Untouched
+            )
+        );
     }
 
     #[test]

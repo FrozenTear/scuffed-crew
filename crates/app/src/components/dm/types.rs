@@ -33,6 +33,8 @@ impl DmLoadFailure {
 }
 
 pub fn classify_dm_client_error(err: &ClientError) -> DmLoadFailure {
+    // The raw error is console detail for every kind (Vision nit 8 on 748).
+    crate::util::log_client_error("DM load", err);
     match err {
         ClientError::Http { status: 412, .. } => DmLoadFailure::IdentitySettings,
         ClientError::Http { status: 403, .. } => DmLoadFailure::Membership,

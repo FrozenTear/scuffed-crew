@@ -181,9 +181,9 @@ fn FeedView(
                 }
                 {match &load {
                     Load::Loading => rsx! { SkeletonBars { rows: 3 } },
-                    Load::Failed | Load::Missing => rsx! {
+                    Load::Failed(_) | Load::Missing => rsx! {
                         LoadError {
-                            message: "Couldn't load the feed. Check your connection and try again.",
+                            message: load.failure_line("Couldn't load the feed."),
                             on_retry: move |_| on_retry.call(()),
                             retrying,
                         }
@@ -215,6 +215,7 @@ fn FeedView(
 
 #[cfg(test)]
 mod tests {
+    const NET: &str = crate::client_error::NETWORK_ERROR_MESSAGE;
     use super::*;
     use crate::components::ToastProvider;
 
@@ -369,11 +370,13 @@ mod tests {
         );
         assert!(!loading.contains("No posts yet"), "{loading}");
 
-        let failed = render(state(Load::Failed, true));
+        let failed = render(state(Load::Failed(NET.to_string()), true));
         let failed = page(&failed);
         assert!(failed.contains("role=\"alert\""), "{failed}");
         assert!(
-            failed.contains("load the feed. Check your connection"),
+            failed.contains(
+                "Couldn&#39;t load the feed. Could not reach the server. Check your connection and try again."
+            ),
             "{failed}"
         );
         assert!(failed.contains(">Retry</button>"), "{failed}");
@@ -381,7 +384,7 @@ mod tests {
         // The composer stays usable while the list is down.
         assert!(failed.contains("class=\"post-compose\""), "{failed}");
 
-        let mut retry = state(Load::Failed, true);
+        let mut retry = state(Load::Failed(NET.to_string()), true);
         retry.retrying = true;
         let retrying = render(retry);
         let retrying = page(&retrying);
@@ -421,7 +424,7 @@ mod tests {
 
     #[test]
     fn a_sent_post_shows_while_the_list_is_loading_or_failed() {
-        for load in [Load::Loading, Load::Failed] {
+        for load in [Load::Loading, Load::Failed(NET.to_string())] {
             let mut props = state(load, true);
             props.optimistic = vec![post(7, &[])];
             let html = render(props);

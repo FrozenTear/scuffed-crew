@@ -77,6 +77,18 @@ const CSS: &str = r#"
     font-size: 0.85rem;
     margin-bottom: 1rem;
 }
+/* No text: out of the layout, still in the tree so the next message is
+   announced. */
+.setup-error:empty {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+}
 .setup-card button[type="submit"] {
     width: 100%;
     margin-top: 0.5rem;
@@ -209,9 +221,9 @@ pub fn Setup() -> Element {
                 p { class: "lead",
                     "First-time setup for your clan platform. Create the admin account, name the org, and pick a homepage starter."
                 }
-                if let Some(message) = error() {
-                    p { class: "setup-error", "{message}" }
-                }
+                // Always rendered so a new message is announced; only its text
+                // changes, and the empty paragraph is out of the layout.
+                p { class: "setup-error", role: "alert", "{error().unwrap_or_default()}" }
                 form { onsubmit: on_submit,
                     div { class: "setup-field",
                         label { r#for: "setup-org", "Clan / org name" }

@@ -374,6 +374,7 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
         return rsx! {
             ChatGateNotice {
                 availability,
+                reason: relay.failure_reason(),
                 on_retry: move |_| relay.retry(),
             }
         };

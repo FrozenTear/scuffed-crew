@@ -393,19 +393,15 @@ impl SaveState {
     /// [`crate::client_error::user_message`] (the server's reason, or one
     /// plain sentence for a network or unreadable answer). It takes the
     /// error itself, so a raw browser error cannot reach the line.
+    /// The raw error goes to the console under `what`.
     pub fn failed(what: &str, err: &scuffed_api_client::ClientError) -> Self {
-        Self::failed_text(what, &crate::client_error::user_message(err))
+        Self::failed_text(what, &crate::client_error::logged_message(what, err))
     }
 
     /// [`SaveState::failed`] for a reason that is already page text (a
     /// check made on the page, not a request error).
     pub fn failed_text(what: &str, reason: &str) -> Self {
-        let reason = reason.trim();
-        if reason.is_empty() {
-            SaveState::Failed(format!("{what}."))
-        } else {
-            SaveState::Failed(format!("{what}. {reason}"))
-        }
+        SaveState::Failed(crate::client_error::two_sentences(what, reason))
     }
 }
 

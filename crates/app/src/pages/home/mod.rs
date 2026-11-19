@@ -119,9 +119,11 @@ fn home_frame(shell: HomeShell, skin: HomeSkin, state: HomeBody, body: Element) 
 
 /// Pending and error share one wrapper so the error branch can be mounted in tests.
 /// Default shell, skin and alignment match a fresh install.
-fn pending_home(body: HomeBody, refresh: Signal<u32>) -> Element {
+/// `reason` is the settings fetch's mapped error, said under the heading.
+fn pending_home(body: HomeBody, reason: &str, refresh: Signal<u32>) -> Element {
     let inner = if body == HomeBody::Error {
-        rsx! { HeroSettingsError { refresh } }
+        let reason = reason.to_string();
+        rsx! { HeroSettingsError { reason, refresh } }
     } else {
         rsx! { HeroSkeleton {} }
     };
@@ -205,7 +207,11 @@ pub fn Home() -> Element {
     let Some(settings) = loaded.filter(|_| body == HomeBody::Ready) else {
         // A parsed `#sc-settings` block is Ready above and uses that org's
         // shell and skin.
-        return pending_home(body, site_settings.refresh);
+        let reason = match resolved.as_ref() {
+            Some(Err(reason)) => reason.clone(),
+            _ => String::new(),
+        };
+        return pending_home(body, &reason, site_settings.refresh);
     };
 
     let content = crate::copy::plain_homepage(&settings.homepage);
@@ -436,12 +442,19 @@ fn HeroSkeleton() -> Element {
 /// Settings failed. Same hero box, no template copy, retry refetches settings.
 /// The failure is the page's H1, so the page still has a heading.
 #[component]
-fn HeroSettingsError(refresh: Signal<u32>) -> Element {
+fn HeroSettingsError(
+    /// The settings fetch's mapped error (QA on 748: not a fixed
+    /// "check your connection" for every failure).
+    #[props(default)]
+    reason: String,
+    refresh: Signal<u32>,
+) -> Element {
+    let message = crate::client_error::reason_or_fallback(&reason);
     let class = hero_class(ContentAlign::default());
     rsx! {
         section { class: "{class}",
             h1 { class: "home-hero-title", "Couldn't load this page" }
-            {fetch_error("Check your connection and try again.", refresh)}
+            {fetch_error(&message, refresh)}
         }
     }
 }
@@ -525,11 +538,15 @@ mod tests {
         assert_eq!(home_status(HomeBody::Ready), "");
         fn loading() -> Element {
             let refresh = use_signal(|| 0u32);
-            pending_home(HomeBody::Skeleton, refresh)
+            pending_home(HomeBody::Skeleton, "", refresh)
         }
         fn failed() -> Element {
             let refresh = use_signal(|| 0u32);
-            pending_home(HomeBody::Error, refresh)
+            pending_home(
+                HomeBody::Error,
+                crate::client_error::NETWORK_ERROR_MESSAGE,
+                refresh,
+            )
         }
         fn ready() -> Element {
             home_frame(
@@ -669,7 +686,11 @@ mod tests {
     fn error_home_mounts_the_error_branch_not_the_template() {
         fn view() -> Element {
             let refresh = use_signal(|| 0u32);
-            pending_home(HomeBody::Error, refresh)
+            pending_home(
+                HomeBody::Error,
+                crate::client_error::NETWORK_ERROR_MESSAGE,
+                refresh,
+            )
         }
         let html = render(view);
         assert!(
@@ -694,11 +715,15 @@ mod tests {
     fn pending_and_error_bodies_sit_in_the_default_width_shell() {
         fn loading() -> Element {
             let refresh = use_signal(|| 0u32);
-            pending_home(HomeBody::Skeleton, refresh)
+            pending_home(HomeBody::Skeleton, "", refresh)
         }
         fn failed() -> Element {
             let refresh = use_signal(|| 0u32);
-            pending_home(HomeBody::Error, refresh)
+            pending_home(
+                HomeBody::Error,
+                crate::client_error::NETWORK_ERROR_MESSAGE,
+                refresh,
+            )
         }
         for html in [render(loading), render(failed)] {
             // The shell owns `<main>`; the page body is a default-width div.
@@ -788,7 +813,12 @@ mod tests {
     fn failed_settings_hero_is_an_error_not_the_template() {
         fn view() -> Element {
             let refresh = use_signal(|| 0u32);
-            rsx! { HeroSettingsError { refresh } }
+            rsx! {
+                HeroSettingsError {
+                    reason: crate::client_error::NETWORK_ERROR_MESSAGE.to_string(),
+                    refresh,
+                }
+            }
         }
         let html = render(view);
         assert!(
