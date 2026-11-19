@@ -87,7 +87,9 @@
 //!   class well makes its field `None`. What is not caught: a frame taken
 //!   while the pill or the SR is still counting shows clean digits of a
 //!   value that is not final yet, and reads as that value with full
-//!   confidence. One read of one frame is never enough to trust a value.
+//!   confidence. One read of one frame is never enough to trust a value
+//!   on its own: the wiring keeps it only with an agreeing read, or late
+//!   after the screen's first read (below).
 //! * Install a pack ([`templates::TemplateSet::load`]); without it
 //!   [`Reader::load`] fails and the reader is off.
 //!
@@ -100,9 +102,17 @@
 //! held like any other, and a frame it does not read is a miss.
 //! A single tick that misses the screen is a break between reads; two in a
 //! row, another game, or the game closing end the screen. Then each field
-//! is kept only when the newest read that has it agrees with the read right
+//! is kept when the newest read that has it agrees with the read right
 //! before it, at the lower confidence, so a value still counting up or one
-//! the screen replaced on its newest read is dropped. What that does not
+//! the screen replaced on its newest read is dropped. Where no such pair
+//! exists, the field still comes from a lone read whose frame was grabbed
+//! at least 12 s after the frame of the screen's first read, at a
+//! confidence of at least 0.7, when no other held read has a different
+//! value for it (`RANK_LONE_READ_MIN_AGE` and
+//! `RANK_LONE_READ_MIN_CONFIDENCE` in the wiring); a screen read only once
+//! keeps nothing. The lone read can still be wrong when the count up runs
+//! longer than 12 s after the first read, or the frame is a transition
+//! frame no other read contradicts. What the pair rule does not
 //! catch: two frames in a row that both show the same value that is not
 //! final yet (the count paused on one value for two ticks), and a field
 //! whose last agreed pair is followed only by frames that no longer read

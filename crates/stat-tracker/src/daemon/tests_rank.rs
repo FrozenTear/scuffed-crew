@@ -61,7 +61,7 @@ async fn tick(
     store: &impl RankStore,
     dump: Option<&mut PregameDump>,
 ) -> bool {
-    super::tick(feed, seen, false, game, store, dump).await
+    super::tick(feed, seen, false, game, store, dump, Instant::now()).await
 }
 
 /// The store, with its rank writes failing while `fail` is set.
@@ -208,43 +208,57 @@ fn an_agreed_field_has_the_lower_confidence() {
 fn reads_are_held_for_their_game_and_settle_when_the_screen_is_gone() {
     let mut feed = RankFeed::with_read(Arc::new(|_| None));
     let now = Utc::now();
-    assert_eq!(feed.observe(Some(Some(full(40))), Some("g1"), now), None);
-    assert_eq!(feed.observe(Some(Some(full(40))), Some("g1"), now), None);
+    assert_eq!(
+        feed.observe(Some(Some(full(40))), Some("g1"), now, Instant::now()),
+        None
+    );
+    assert_eq!(
+        feed.observe(Some(Some(full(40))), Some("g1"), now, Instant::now()),
+        None
+    );
     // one missed tick is not the end of the screen
-    assert_eq!(feed.observe(None, Some("g1"), now), None);
+    assert_eq!(feed.observe(None, Some("g1"), now, Instant::now()), None);
     assert_eq!(RANK_SETTLE_MISSES, 2);
-    let s = feed.observe(None, Some("g1"), now).expect("settled");
+    let s = feed
+        .observe(None, Some("g1"), now, Instant::now())
+        .expect("settled");
     assert_eq!(s.session, "g1");
     assert_eq!(s.rank, full(40));
     // nothing held any more
-    assert_eq!(feed.observe(None, Some("g1"), now), None);
-    assert_eq!(feed.observe(None, Some("g1"), now), None);
+    assert_eq!(feed.observe(None, Some("g1"), now, Instant::now()), None);
+    assert_eq!(feed.observe(None, Some("g1"), now, Instant::now()), None);
     // a missed tick between two reads breaks the pair
-    feed.observe(Some(Some(full(40))), Some("g1"), now);
-    feed.observe(None, Some("g1"), now);
-    feed.observe(Some(Some(full(40))), Some("g1"), now);
-    feed.observe(None, Some("g1"), now);
-    assert_eq!(feed.observe(None, Some("g1"), now), None, "no pair");
+    feed.observe(Some(Some(full(40))), Some("g1"), now, Instant::now());
+    feed.observe(None, Some("g1"), now, Instant::now());
+    feed.observe(Some(Some(full(40))), Some("g1"), now, Instant::now());
+    feed.observe(None, Some("g1"), now, Instant::now());
+    assert_eq!(
+        feed.observe(None, Some("g1"), now, Instant::now()),
+        None,
+        "no pair"
+    );
     // the open game closing (no game any more) settles at once
-    feed.observe(Some(Some(full(40))), Some("g1"), now);
-    feed.observe(Some(Some(full(40))), Some("g1"), now);
-    let s = feed.observe(None, None, now).expect("settled on close");
+    feed.observe(Some(Some(full(40))), Some("g1"), now, Instant::now());
+    feed.observe(Some(Some(full(40))), Some("g1"), now, Instant::now());
+    let s = feed
+        .observe(None, None, now, Instant::now())
+        .expect("settled on close");
     assert_eq!(s.session, "g1");
     // as does the game process stopping
-    feed.observe(Some(Some(full(40))), Some("g1"), now);
-    feed.observe(Some(Some(full(40))), Some("g1"), now);
+    feed.observe(Some(Some(full(40))), Some("g1"), now, Instant::now());
+    feed.observe(Some(Some(full(40))), Some("g1"), now, Instant::now());
     assert_eq!(feed.close().map(|s| s.session).as_deref(), Some("g1"));
     assert_eq!(feed.close(), None);
     // another game's screen settles the first game's reads
-    feed.observe(Some(Some(full(40))), Some("g1"), now);
-    feed.observe(Some(Some(full(40))), Some("g1"), now);
-    let s = feed.observe(Some(Some(full(50))), Some("g2"), now);
+    feed.observe(Some(Some(full(40))), Some("g1"), now, Instant::now());
+    feed.observe(Some(Some(full(40))), Some("g1"), now, Instant::now());
+    let s = feed.observe(Some(Some(full(50))), Some("g2"), now, Instant::now());
     assert_eq!(s.map(|s| s.session).as_deref(), Some("g1"));
     // a rank screen with no game to put it on is not held
     let mut feed = RankFeed::with_read(Arc::new(|_| None));
-    feed.observe(Some(Some(full(40))), None, now);
-    feed.observe(Some(Some(full(40))), None, now);
-    assert_eq!(feed.observe(None, None, now), None);
+    feed.observe(Some(Some(full(40))), None, now, Instant::now());
+    feed.observe(Some(Some(full(40))), None, now, Instant::now());
+    assert_eq!(feed.observe(None, None, now, Instant::now()), None);
 }
 
 // ---- the game record ----
@@ -285,7 +299,8 @@ async fn an_unreadable_rank_screen_leaves_the_game_and_its_upload_as_they_were()
     let before = rows_and_body(&store, "g1").await;
     let mut feed = RankFeed::with_read(Arc::new(|_| None));
     // frames read as the rank screen that the reader could not read (wrong
-    // size, a reader error or panic), then a single read alone
+    // size, a reader error or panic), then an early single read (the ticks
+    // are microseconds apart, far under the lone-read age)
     for seen in [Some(None), Some(None), Some(Some(full(40))), None, None] {
         tick(&mut feed, seen, Some("g1"), &store, None).await;
     }
@@ -371,6 +386,7 @@ async fn the_banner_word_becomes_the_next_games_pending_hint() {
             &store,
             Some(&mut dump),
             at,
+            Instant::now(),
         )
         .await;
     }
@@ -1134,14 +1150,14 @@ fn a_reader_on_with_no_usable_pack_records_games_and_warns() {
 // ---- Numbani 2026-11-13: a focus pause must not cost the rank ----
 
 /// A synthetic frame: pixel (0, 0) says what it shows.
-fn shows(what: u8) -> RgbImage {
+pub(super) fn shows(what: u8) -> RgbImage {
     let mut img = frame();
     img.put_pixel(0, 0, image::Rgb([what, 0, 0]));
     img
 }
-const PROGRESSION: u8 = 1;
-const RANK: u8 = 2;
-const MENU: u8 = 3;
+pub(super) const PROGRESSION: u8 = 1;
+pub(super) const RANK: u8 = 2;
+pub(super) const MENU: u8 = 3;
 
 /// rank-v1 on the synthetic frames: only the rank screen reads.
 fn rank_v1(calls: &Arc<AtomicUsize>) -> RankReadFn {
@@ -1157,23 +1173,24 @@ fn rank_v1(calls: &Arc<AtomicUsize>) -> RankReadFn {
 /// before the tick, and the feed gets the tick's held-back flag
 /// ([`RankFeed::observe_tick`]). `fixed` false replays the old wiring,
 /// which never read a held-back frame.
-fn poll(
+pub(super) fn poll(
     feed: &mut RankFeed,
     source: Option<OutcomeSource>,
     first_seen: bool,
     img: &RgbImage,
     fixed: bool,
+    grabbed: Instant,
 ) -> Option<Settled> {
     let read = feed.reader();
     let held_back = fixed && rank_held_back(feed.holds_screen(), first_seen);
     let seen = read_rank_screen(Some(&read), source, held_back, img);
-    feed.observe_tick(seen, held_back, Some("g1"), Utc::now())
+    feed.observe_tick(seen, held_back, Some("g1"), Utc::now(), grabbed)
 }
 
 /// A black frame with white bars inside the rank word crop (x 1% to 25%,
 /// y 14.5% to 22.5% of the 16:9 frame): lit, so the stability gate checks
 /// it, but no real rank word.
-fn lit_word_crop() -> RgbImage {
+pub(super) fn lit_word_crop() -> RgbImage {
     let mut rgb = frame();
     for y in (1440 * 160 / 1000)..(1440 * 200 / 1000) {
         for x in (2560 * 20 / 1000)..(2560 * 200 / 1000) {
@@ -1188,7 +1205,7 @@ fn lit_word_crop() -> RgbImage {
 /// The poll loop's stability step on `rgb`: forget the last tick's first
 /// sightings, run the outcome detector, and ask whether it held the rank
 /// word back on a first sighting.
-fn first_seen_on(rgb: &RgbImage, stability: &mut FrameStability) -> bool {
+pub(super) fn first_seen_on(rgb: &RgbImage, stability: &mut FrameStability) -> bool {
     use stat_tracker::detect::match_end::{
         FinalScoreSource, ResultWords, Titles, detect_outcome_signal_polled,
     };
@@ -1229,7 +1246,7 @@ fn numbani(fixed: bool) -> (Vec<Option<Settled>>, usize) {
                 source: Option<OutcomeSource>,
                 img: &RgbImage| {
         let first_seen = first_seen_on(img, stability);
-        poll(feed, source, first_seen, img, fixed)
+        poll(feed, source, first_seen, img, fixed, Instant::now())
     };
     // one entry held (the log's "1 entry"), then one miss before the pause
     let mut out = vec![
@@ -1284,7 +1301,7 @@ fn a_frame_is_held_back_only_with_a_screen_held_and_a_first_sighting() {
         None
     );
     assert_eq!(calls.load(Ordering::SeqCst), 0);
-    feed.observe(Some(Some(full(40))), Some("g1"), Utc::now());
+    feed.observe(Some(Some(full(40))), Some("g1"), Utc::now(), Instant::now());
     assert_eq!(
         read_rank_screen(Some(&read), None, gated(&feed), &shows(RANK)),
         Some(Some(full(40)))
@@ -1310,8 +1327,8 @@ fn a_held_back_frame_on_a_new_game_finishes_the_old_screen_only() {
     let now = Utc::now();
     let held_g1 = || {
         let mut feed = RankFeed::with_read(Arc::clone(&read));
-        feed.observe_tick(Some(Some(full(40))), false, Some("g1"), now);
-        feed.observe_tick(Some(Some(full(40))), false, Some("g1"), now);
+        feed.observe_tick(Some(Some(full(40))), false, Some("g1"), now, Instant::now());
+        feed.observe_tick(Some(Some(full(40))), false, Some("g1"), now, Instant::now());
         feed
     };
     for game in [Some("g2"), None] {
@@ -1320,7 +1337,7 @@ fn a_held_back_frame_on_a_new_game_finishes_the_old_screen_only() {
         assert!(held_back);
         let seen = read_rank_screen(Some(&read), None, held_back, &shows(RANK));
         assert_eq!(seen, Some(Some(full(40))), "rank-v1 reads it");
-        let done = feed.observe_tick(seen, held_back, game, now);
+        let done = feed.observe_tick(seen, held_back, game, now, Instant::now());
         let done = done.expect("the old game's screen settles");
         assert_eq!((done.session.as_str(), done.rank), ("g1", full(40)));
         assert!(!feed.holds_screen(), "{game:?}: nothing starts from it");
@@ -1330,19 +1347,19 @@ fn a_held_back_frame_on_a_new_game_finishes_the_old_screen_only() {
     // a held-back read for the held game is still held
     let mut feed = held_g1();
     assert_eq!(
-        feed.observe_tick(Some(Some(full(40))), true, Some("g1"), now),
+        feed.observe_tick(Some(Some(full(40))), true, Some("g1"), now, Instant::now()),
         None
     );
     assert!(feed.holds_screen());
     // a classified read for a new game still starts that game's screen
     let mut feed = held_g1();
-    let done = feed.observe_tick(Some(Some(full(50))), false, Some("g2"), now);
+    let done = feed.observe_tick(Some(Some(full(50))), false, Some("g2"), now, Instant::now());
     assert_eq!(done.map(|s| s.session), Some("g1".to_string()));
     assert!(
         feed.holds_screen(),
         "the classified frame starts g2's screen"
     );
-    feed.observe_tick(Some(Some(full(50))), false, Some("g2"), now);
+    feed.observe_tick(Some(Some(full(50))), false, Some("g2"), now, Instant::now());
     let g2 = feed.close().expect("g2 settles");
     assert_eq!((g2.session.as_str(), g2.rank), ("g2", full(50)));
 }
@@ -1379,16 +1396,40 @@ fn a_held_back_frame_counts_only_as_rank_v1_reads_it() {
     // with no screen held a held-back frame is not read at all
     let mut feed = RankFeed::with_read(rank_v1(&calls));
     assert!(!feed.holds_screen());
-    assert_eq!(poll(&mut feed, None, true, &shows(RANK), true), None);
+    assert_eq!(
+        poll(&mut feed, None, true, &shows(RANK), true, Instant::now()),
+        None
+    );
     assert!(!feed.holds_screen());
     assert_eq!(calls.load(Ordering::SeqCst), 3);
     // progression frames held back while a screen is held settle it as
     // misses (looked at, not a rank screen)
     let rank_screen = Some(OutcomeSource::RankScreen);
-    poll(&mut feed, rank_screen, false, &shows(PROGRESSION), true);
+    poll(
+        &mut feed,
+        rank_screen,
+        false,
+        &shows(PROGRESSION),
+        true,
+        Instant::now(),
+    );
     assert!(feed.holds_screen());
-    poll(&mut feed, None, true, &shows(PROGRESSION), true);
-    poll(&mut feed, None, true, &shows(PROGRESSION), true);
+    poll(
+        &mut feed,
+        None,
+        true,
+        &shows(PROGRESSION),
+        true,
+        Instant::now(),
+    );
+    poll(
+        &mut feed,
+        None,
+        true,
+        &shows(PROGRESSION),
+        true,
+        Instant::now(),
+    );
     assert!(!feed.holds_screen(), "two looked-at misses settle it");
 }
 

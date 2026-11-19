@@ -17,7 +17,7 @@ summary, then the highlights, and tucks the remaining text under Details.
 
 ## Unreleased
 
-When you alt-tab out of Overwatch while the rank update screen is up and the tracker reads it only once, that read can now still give the game its rank, as long as it came well after the screen appeared and the reader was sure of it.
+When you alt-tab out of Overwatch while the rank update screen is up, the rank can now still be kept from a read taken at least 12 seconds after the tracker first read that screen, when the reader was sure of it and no other read of the screen disagrees. A screen the tracker read only once still gets no rank.
 
 ## 0.6.0-rc.1
 
