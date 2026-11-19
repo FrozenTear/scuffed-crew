@@ -468,7 +468,7 @@ mod tests {
     }
 
     #[test]
-    fn offline_relay_is_an_error_with_retry() {
+    fn offline_relay_is_an_alert_without_its_own_retry() {
         let html = render_routed(|| {
             rsx! { RelayDetails { health: health(true, false, "nostr") } }
         });

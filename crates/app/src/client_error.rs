@@ -786,6 +786,8 @@ mod tests {
         walk(src, &mut files);
         let mut hits = Vec::new();
         let mut used = vec![false; TWO_LOGS_ALLOWED.len()];
+        // Logging calls the walk reads below a file's first `#[cfg(test)]`.
+        let mut after_seam = Vec::new();
         for path in files {
             if skip.contains(&path) {
                 continue;
@@ -797,7 +799,17 @@ mod tests {
                 .replace('\\', "/");
             let text = std::fs::read_to_string(&path).expect("read rs");
             // Out-of-line test module files are already in `skip`.
-            for ((a, first), (b, second)) in close_log_pairs(&prod_text(&text)) {
+            let prod = prod_text(&text);
+            if let Some(seam) = text.find("#[cfg(test)]") {
+                let seam_line = text[..seam].matches('\n').count() + 1;
+                after_seam.extend(
+                    log_calls(&prod)
+                        .into_iter()
+                        .filter(|(n, _)| *n > seam_line)
+                        .map(|(n, _)| format!("{rel}:{n}")),
+                );
+            }
+            for ((a, first), (b, second)) in close_log_pairs(&prod) {
                 match TWO_LOGS_ALLOWED
                     .iter()
                     .position(|(f, l1, l2, _)| *f == rel && *l1 == first && *l2 == second)
@@ -820,6 +832,21 @@ mod tests {
             .map(|((file, first, _, _), _)| format!("{file}: {first}"))
             .collect();
         assert!(stale.is_empty(), "stale entries:\n{}", stale.join("\n"));
+        // Vision nit 1 on round 8: the walk reads production code past a
+        // file's first `#[cfg(test)]` seam (it reads `prod_text`, not the
+        // text before the first seam). These are the logging calls there
+        // today; update the list when one moves.
+        assert_eq!(
+            after_seam,
+            [
+                "pages/admin/brand_settings.rs:239",
+                "pages/admin/brand_settings.rs:337",
+                "pages/login.rs:973",
+                "state/relay.rs:237",
+                "state/site_settings.rs:170",
+            ],
+            "logging calls read after a file's first #[cfg(test)]"
+        );
 
         // The guard itself flags the QA round 7 shape and lets the fixed
         // one, a lone helper, and two far-apart logs through.
@@ -872,6 +899,16 @@ mod tests {
     /// calls.
     #[allow(clippy::type_complexity)]
     fn close_log_pairs(prod: &str) -> Vec<((usize, String), (usize, String))> {
+        log_calls(prod)
+            .windows(2)
+            .filter(|pair| pair[1].0 - pair[0].0 <= 3)
+            .map(|pair| (pair[0].clone(), pair[1].clone()))
+            .collect()
+    }
+
+    /// Logging calls in `prod`, as line number and trimmed line.
+    /// Definitions (`fn ` on the line) and comments are not calls.
+    fn log_calls(prod: &str) -> Vec<(usize, String)> {
         const LOGGERS: [&str; 5] = [
             "SaveState::failed(",
             "Toast::error_from(",
@@ -879,19 +916,13 @@ mod tests {
             "logged_message(",
             "log_client_error(",
         ];
-        let calls: Vec<(usize, String)> = prod
-            .lines()
+        prod.lines()
             .enumerate()
             .filter(|(_, line)| {
                 let code = line.split("//").next().unwrap_or("");
                 !code.contains("fn ") && LOGGERS.iter().any(|l| code.contains(l))
             })
             .map(|(n, line)| (n + 1, line.trim().to_string()))
-            .collect();
-        calls
-            .windows(2)
-            .filter(|pair| pair[1].0 - pair[0].0 <= 3)
-            .map(|pair| (pair[0].clone(), pair[1].clone()))
             .collect()
     }
 
@@ -1369,7 +1400,12 @@ mod tests {
 
     /// Inline `#[cfg(test)] mod x { .. }` blocks are blanked (only the block:
     /// code after it is still scanned). Out-of-line `#[cfg(test)] mod x;`
-    /// names are returned, so their files are skipped.
+    /// names are returned, so their files are skipped. Further attributes
+    /// between `#[cfg(test)]` and the module (`#[allow(..)]`) and any
+    /// visibility (`pub`, `pub(crate)`, `pub(super)`, `pub(in ..)`) are
+    /// allowed. Test-only items that are not modules (a `#[cfg(test)]` fn,
+    /// impl, use or const) are not dropped: they are read like production
+    /// code.
     fn drop_test_modules(lexed: &mut Lexed) -> Vec<String> {
         let mut out_of_line = Vec::new();
         let marker = "#[cfg(test)]";
@@ -1386,10 +1422,18 @@ mod tests {
                 }
             };
             skip_ws(&mut j, &lexed.shape);
-            for vis in ["pub(crate) ", "pub "] {
-                if starts_at(&lexed.shape, j, vis) {
-                    j += vis.len();
-                }
+            // Further attributes: `#[allow(..)]`, `#[path = ".."]`.
+            while starts_at(&lexed.shape, j, "#[") {
+                j = close_of(&lexed.shape, j + 1);
+                skip_ws(&mut j, &lexed.shape);
+            }
+            // Any visibility: `pub`, `pub(crate)`, `pub(super)`, `pub(in ..)`.
+            if starts_at(&lexed.shape, j, "pub(") {
+                j = close_of(&lexed.shape, j + 3);
+                skip_ws(&mut j, &lexed.shape);
+            } else if starts_at(&lexed.shape, j, "pub ") {
+                j += 4;
+                skip_ws(&mut j, &lexed.shape);
             }
             if !starts_at(&lexed.shape, j, "mod ") {
                 at += 1;
@@ -1689,5 +1733,35 @@ mod tests {
             "#[cfg(test)]\nmod tests {\n    const S: &str = \"}\";\n    fn t() -> String { format!(\"{e}\") }\n}\n",
         );
         assert!(hits.is_empty(), "{hits:?}");
+        // Vision nit 2 on round 8: an extra attribute between `#[cfg(test)]`
+        // and the module (the components/ui/mod.rs shape) and a
+        // `pub(super)` module (the bracket/single_elim.rs shape) are still
+        // test modules; code after them is still scanned.
+        let (hits, _) = scan_source(
+            "#[cfg(test)]\n#[allow(unreachable_code)]\npub(crate) mod test_support {\n    fn t() -> String { format!(\"{e}\") }\n}\nfn after() -> String { format!(\"{err}\") }\n",
+        );
+        assert_eq!(
+            hits,
+            [(6, "fn after() -> String { format!(\"{err}\") }".to_string())]
+        );
+        let (hits, _) = scan_source(
+            "#[cfg(test)]\npub(super) mod test_data {\n    fn t() -> String { format!(\"{e}\") }\n}\nfn after() -> String { format!(\"{err}\") }\n",
+        );
+        assert_eq!(
+            hits,
+            [(5, "fn after() -> String { format!(\"{err}\") }".to_string())]
+        );
+        let (hits, mods) = scan_source(
+            "#[cfg(test)]\n#[path = \"x_tests.rs\"]\npub(in crate::pages) mod x_tests;\nfn x() -> String { format!(\"{e}\") }\n",
+        );
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].0, 4);
+        assert_eq!(mods, ["x_tests"]);
+        // A test-only item that is not a module is still read.
+        let (hits, _) = scan_source(
+            "#[cfg(test)]\n#[allow(dead_code)]\npub(crate) fn seam() -> String { format!(\"{e}\") }\n",
+        );
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].0, 3);
     }
 }
