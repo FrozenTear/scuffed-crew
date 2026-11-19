@@ -1285,6 +1285,9 @@ pub struct SiteSettings {
     pub brand_accent_dark: String,
     #[serde(default)]
     pub brand_accent_light: String,
+    /// Display font key ("" | "urbanist" | "ibm-plex-sans"). Empty = Urbanist.
+    #[serde(default)]
+    pub brand_font_display: String,
     pub updated_at: DateTime<Utc>,
 }
 

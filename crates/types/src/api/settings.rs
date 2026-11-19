@@ -49,4 +49,30 @@ pub struct UpdateSettingsRequest {
     /// Brand accent light. Empty string = product default / match dark.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub brand_accent_light: Option<String>,
+    /// Display font key: `""` (default, Urbanist), `"urbanist"` or `"ibm-plex-sans"`.
+    /// Absent keeps the stored value. See `BRAND_FONT_DISPLAY_ALLOWED`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brand_font_display: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn brand_font_display_absent_is_none_and_not_serialized() {
+        let req: UpdateSettingsRequest = serde_json::from_str("{}").expect("empty body");
+        assert_eq!(req.brand_font_display, None);
+        let v = serde_json::to_value(&req).expect("serialize");
+        assert!(v.get("brand_font_display").is_none());
+    }
+
+    #[test]
+    fn brand_font_display_empty_string_is_some_and_serialized() {
+        let req: UpdateSettingsRequest =
+            serde_json::from_str(r#"{"brand_font_display":""}"#).expect("body");
+        assert_eq!(req.brand_font_display.as_deref(), Some(""));
+        let v = serde_json::to_value(&req).expect("serialize");
+        assert_eq!(v["brand_font_display"], "");
+    }
 }

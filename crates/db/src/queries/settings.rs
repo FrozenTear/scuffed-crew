@@ -57,6 +57,10 @@ struct DbSiteSettings {
     #[surreal(default)]
     #[serde(default)]
     brand_accent_light: String,
+    /// Older rows omit this. Missing reads as "" (Urbanist).
+    #[surreal(default)]
+    #[serde(default)]
+    brand_font_display: String,
     updated_at: SurrealDatetime,
 }
 
@@ -116,6 +120,7 @@ fn db_to_settings(db: DbSiteSettings) -> SiteSettings {
         page_bg_image_url: db.page_bg_image_url,
         brand_accent_dark: db.brand_accent_dark,
         brand_accent_light: db.brand_accent_light,
+        brand_font_display: db.brand_font_display,
         updated_at: db.updated_at.into(),
     }
 }
@@ -183,6 +188,7 @@ impl Database {
                 page_bg_image_url: String::new(),
                 brand_accent_dark: String::new(),
                 brand_accent_light: String::new(),
+                brand_font_display: String::new(),
                 updated_at: SurrealDatetime::from(Utc::now()),
             };
             apply_shell_skin_dual_write(&mut defaults);
@@ -222,6 +228,7 @@ impl Database {
         home_skin: Option<&str>,
         strategies_enabled: Option<bool>,
         officers_can_edit_teams: Option<bool>,
+        brand_font_display: Option<&str>,
     ) -> DbResult<SiteSettings> {
         with_timeout(async {
             let current = self.get_settings().await?;
@@ -280,6 +287,9 @@ impl Database {
             }
             if let Some(c) = brand_accent_light {
                 db.brand_accent_light = c.to_string();
+            }
+            if let Some(font) = brand_font_display {
+                db.brand_font_display = font.to_string();
             }
 
             // Shell preferred; layout-only updates map to shell for legacy clients.
@@ -395,6 +405,7 @@ mod tests {
             None,
             None,
             Some(true),
+            None,
         )
         .await
         .expect("admin sets flag");
@@ -405,5 +416,347 @@ mod tests {
             .await
             .expect("restart migrations");
         assert_eq!(stored_flag(&db).await, Some(true));
+    }
+
+    async fn set_font(db: &Database, font: Option<&str>) -> crate::types::SiteSettings {
+        db.update_settings(
+            None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+            None, None, None, None, font,
+        )
+        .await
+        .expect("update brand_font_display")
+    }
+
+    /// Raw stored value: `None` when the row has no such field at all.
+    async fn stored_font(db: &Database) -> Option<String> {
+        #[derive(Debug, Deserialize, SurrealValue)]
+        struct FontRow {
+            brand_font_display: Option<String>,
+        }
+        let mut q = db
+            .client
+            .query("SELECT brand_font_display FROM site_settings")
+            .await
+            .expect("select font")
+            .check()
+            .expect("select font ok");
+        let rows: Vec<FontRow> = q.take(0).expect("take font");
+        assert_eq!(rows.len(), 1, "one site_settings row");
+        rows[0].brand_font_display.clone()
+    }
+
+    #[tokio::test]
+    async fn brand_font_display_defaults_empty_and_round_trips() {
+        let db = migrated().await;
+        let created = db.get_settings().await.expect("create defaults");
+        assert_eq!(created.brand_font_display, "");
+        assert_eq!(stored_font(&db).await.as_deref(), Some(""));
+
+        for font in ["ibm-plex-sans", "urbanist", ""] {
+            let written = set_font(&db, Some(font)).await;
+            assert_eq!(written.brand_font_display, font);
+            assert_eq!(stored_font(&db).await.as_deref(), Some(font));
+            let read = db.get_settings().await.expect("read");
+            assert_eq!(read.brand_font_display, font);
+        }
+    }
+
+    #[tokio::test]
+    async fn brand_font_display_none_keeps_the_stored_value() {
+        let db = migrated().await;
+        set_font(&db, Some("ibm-plex-sans")).await;
+
+        // An unrelated update passes None for the font.
+        let written = set_font(&db, None).await;
+        assert_eq!(written.brand_font_display, "ibm-plex-sans");
+        assert_eq!(
+            db.get_settings().await.expect("read").brand_font_display,
+            "ibm-plex-sans"
+        );
+        // Restarting (re-running migrations) does not reset it either.
+        run_migrations(&db.client).await.expect("re-migrate");
+        assert_eq!(stored_font(&db).await.as_deref(), Some("ibm-plex-sans"));
+    }
+
+    #[tokio::test]
+    async fn row_written_before_brand_font_display_reads_as_empty() {
+        let db = migrated().await;
+        // Schema as it was before this field existed, then a row written under it.
+        db.client
+            .query("REMOVE FIELD IF EXISTS brand_font_display ON TABLE site_settings")
+            .await
+            .expect("remove field")
+            .check()
+            .expect("remove field ok");
+        db.client
+            .query("CREATE site_settings SET org_name = 'Old Clan', brand_accent_dark = '#38bdf8'")
+            .await
+            .expect("create old row")
+            .check()
+            .expect("create old row ok");
+        assert_eq!(stored_font(&db).await, None, "old row has no font field");
+        let old = db
+            .get_settings()
+            .await
+            .expect("old row reads before migrating");
+        assert_eq!(old.org_name, "Old Clan");
+        assert_eq!(old.brand_font_display, "");
+
+        // Upgrade: the new field definition lands on the existing row. The boot
+        // backfill inside run_migrations is the only write here; its error is
+        // only logged there, so the stored "" is the proof that it went through.
+        run_migrations(&db.client).await.expect("migrate");
+        assert_eq!(
+            stored_font(&db).await.as_deref(),
+            Some(""),
+            "the boot backfill wrote the old row and the font default filled in"
+        );
+        backfill_officers_can_edit_teams(&db.client)
+            .await
+            .expect("boot backfill is accepted on a row from before the field");
+        assert_eq!(stored_flag(&db).await, Some(false));
+        let read = db
+            .get_settings()
+            .await
+            .expect("old row reads after migrating");
+        assert_eq!(read.org_name, "Old Clan");
+        assert_eq!(read.brand_accent_dark, "#38bdf8");
+        assert_eq!(read.brand_font_display, "");
+
+        // An update that does not mention the font keeps it empty, and a later one sets it.
+        let kept = set_font(&db, None).await;
+        assert_eq!(kept.brand_font_display, "");
+        assert_eq!(kept.org_name, "Old Clan");
+        let set = set_font(&db, Some("ibm-plex-sans")).await;
+        assert_eq!(set.brand_font_display, "ibm-plex-sans");
+        assert_eq!(stored_font(&db).await.as_deref(), Some("ibm-plex-sans"));
+
+        // A stored font survives the same partial update on later boots.
+        backfill_officers_can_edit_teams(&db.client)
+            .await
+            .expect("backfill with a stored font");
+        run_migrations(&db.client).await.expect("restart");
+        assert_eq!(stored_font(&db).await.as_deref(), Some("ibm-plex-sans"));
+    }
+
+    /// The shipped definition: the default is the empty string and it is
+    /// `DEFAULT ALWAYS` (a plain DEFAULT would refuse the UNSET below).
+    #[tokio::test]
+    async fn brand_font_display_field_default_is_always_empty() {
+        let db = migrated().await;
+        db.client
+            .query("CREATE site_settings SET org_name = 'Raw Clan'")
+            .await
+            .expect("raw create")
+            .check()
+            .expect("raw create ok");
+        assert_eq!(stored_font(&db).await.as_deref(), Some(""));
+
+        // UNSET leaves no value in the written row, so only ALWAYS can refill it.
+        db.client
+            .query("UPDATE site_settings UNSET brand_font_display")
+            .await
+            .expect("unset")
+            .check()
+            .expect("unset is accepted and refilled");
+        assert_eq!(stored_font(&db).await.as_deref(), Some(""));
+    }
+
+    /// `DbSiteSettings` as it is on the merge base (6b098007): the row a
+    /// rolled-back build reads and writes. It has no `brand_font_display`.
+    #[derive(Debug, Clone, serde::Serialize, Deserialize, SurrealValue)]
+    struct OldBuildSiteSettings {
+        #[surreal(default)]
+        id: Option<surrealdb_types::RecordId>,
+        org_name: String,
+        site_description: String,
+        recruitment_open: bool,
+        #[surreal(default)]
+        strategies_enabled: Option<bool>,
+        #[surreal(default)]
+        officers_can_edit_teams: Option<bool>,
+        recruitment_message: String,
+        min_age: u32,
+        forum_backend: String,
+        #[surreal(default)]
+        extra_relay_urls: String,
+        #[surreal(default)]
+        home_shell: String,
+        #[surreal(default)]
+        home_skin: String,
+        #[surreal(default)]
+        public_layout: String,
+        #[surreal(default)]
+        homepage_json: String,
+        #[surreal(default)]
+        nav_json: String,
+        #[surreal(default)]
+        page_bg_color: String,
+        #[surreal(default)]
+        page_bg_image_url: String,
+        #[surreal(default)]
+        brand_accent_dark: String,
+        #[surreal(default)]
+        brand_accent_light: String,
+        updated_at: surrealdb::types::Datetime,
+    }
+
+    /// The old build's `update_settings`: select the row, change it, write it
+    /// back whole with `.content(..)`.
+    async fn old_build_save(db: &Database, org_name: &str) -> Result<String, String> {
+        let id = db.get_settings().await.expect("settings id").id;
+        let existing: Option<OldBuildSiteSettings> = db
+            .client
+            .select(("site_settings", id.as_str()))
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut row = existing.expect("row");
+        row.org_name = org_name.to_string();
+        let updated: Option<OldBuildSiteSettings> = db
+            .client
+            .update(("site_settings", id.as_str()))
+            .content(row)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(updated.expect("row after update").org_name)
+    }
+
+    /// Rollback A in docs/api/site-settings.md: revert only, the field
+    /// definition stays. The old build's settings save must still be accepted.
+    #[tokio::test]
+    async fn rollback_old_build_saves_settings_with_the_field_definition_in_place() {
+        let db = migrated().await;
+        db.get_settings().await.expect("create defaults");
+
+        // Stored default.
+        assert_eq!(
+            old_build_save(&db, "Rolled Back").await.as_deref(),
+            Ok("Rolled Back")
+        );
+        assert_eq!(stored_font(&db).await.as_deref(), Some(""));
+
+        // Stored non-default: the old build's write has no font, so it is
+        // accepted and the font goes back to the default.
+        set_font(&db, Some("ibm-plex-sans")).await;
+        assert_eq!(
+            old_build_save(&db, "Rolled Back Twice").await.as_deref(),
+            Ok("Rolled Back Twice")
+        );
+        assert_eq!(stored_font(&db).await.as_deref(), Some(""));
+
+        // The old build's boot backfill is the same statement as today's.
+        backfill_officers_can_edit_teams(&db.client)
+            .await
+            .expect("old build boot backfill");
+
+        // Rolling forward again needs nothing: the row reads and saves.
+        run_migrations(&db.client).await.expect("roll forward");
+        assert_eq!(set_font(&db, None).await.brand_font_display, "");
+        assert_eq!(
+            set_font(&db, Some("urbanist")).await.brand_font_display,
+            "urbanist"
+        );
+    }
+
+    /// The cleanup query in the doc's rollback section: the text of its one
+    /// fenced `surql` block (two statements on one line).
+    fn documented_rollback_query() -> String {
+        let doc = include_str!("../../../../docs/api/site-settings.md");
+        let section = doc
+            .split("## Rollback")
+            .nth(1)
+            .expect("doc has a Rollback section");
+        let block = section
+            .split("```surql\n")
+            .nth(1)
+            .and_then(|rest| rest.split("```").next())
+            .expect("Rollback section has a surql block");
+        block.trim().to_string()
+    }
+
+    /// Rollback B: the optional cleanup query, run exactly as the doc gives it,
+    /// once the older build is up. Its boot backfill runs right after, with no
+    /// settings save in between, and must be accepted.
+    #[tokio::test]
+    async fn rollback_documented_remove_field_query_works() {
+        let query = documented_rollback_query();
+        assert_eq!(
+            query,
+            "REMOVE FIELD IF EXISTS brand_font_display ON TABLE site_settings; \
+             UPDATE site_settings UNSET brand_font_display;"
+        );
+
+        // Why the UNSET is there: REMOVE FIELD alone leaves the value on the
+        // SCHEMAFULL row with no definition, and every partial update of the
+        // row is refused, the boot backfill included.
+        {
+            let db = migrated().await;
+            set_font(&db, Some("ibm-plex-sans")).await;
+            db.client
+                .query("REMOVE FIELD IF EXISTS brand_font_display ON TABLE site_settings")
+                .await
+                .expect("remove only")
+                .check()
+                .expect("remove only ok");
+            let err = backfill_officers_can_edit_teams(&db.client)
+                .await
+                .expect_err(
+                    "REMOVE FIELD alone must break the backfill, or this control proves nothing",
+                )
+                .to_string();
+            // The refusal Site review 2 quoted, not some other failure.
+            assert!(
+                err.contains(
+                    "Found field 'brand_font_display', but no such field exists for table 'site_settings'"
+                ),
+                "{err}"
+            );
+        }
+
+        let db = migrated().await;
+        set_font(&db, Some("ibm-plex-sans")).await;
+        // The older build is up: its boot backfill ran with the definition in place.
+        backfill_officers_can_edit_teams(&db.client)
+            .await
+            .expect("old build boot backfill before the cleanup");
+
+        db.client
+            .query(&query)
+            .await
+            .expect("doc query")
+            .check()
+            .expect("doc query ok");
+        assert_eq!(stored_font(&db).await, None, "no font left on the row");
+
+        // Right after the query, no settings save in between: the next boot
+        // backfill of the older build is accepted.
+        backfill_officers_can_edit_teams(&db.client)
+            .await
+            .expect("old build boot backfill right after the cleanup");
+        assert_eq!(
+            old_build_save(&db, "Cleaned Up").await.as_deref(),
+            Ok("Cleaned Up")
+        );
+        assert_eq!(stored_font(&db).await, None);
+        backfill_officers_can_edit_teams(&db.client)
+            .await
+            .expect("old build boot backfill after a save");
+
+        // Safe to run again, and a later roll forward starts from the default.
+        db.client
+            .query(&query)
+            .await
+            .expect("doc query twice")
+            .check()
+            .expect("doc query twice ok");
+        backfill_officers_can_edit_teams(&db.client)
+            .await
+            .expect("backfill after the second run");
+        run_migrations(&db.client).await.expect("roll forward");
+        assert_eq!(
+            db.get_settings().await.expect("read").brand_font_display,
+            ""
+        );
+        assert_eq!(stored_font(&db).await.as_deref(), Some(""));
     }
 }

@@ -398,6 +398,14 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE page_bg_image_url ON site_settings TYPE string DEFAULT '';
         DEFINE FIELD OVERWRITE brand_accent_dark ON site_settings TYPE string DEFAULT '';
         DEFINE FIELD OVERWRITE brand_accent_light ON site_settings TYPE string DEFAULT '';
+        -- DEFAULT ALWAYS, not a plain DEFAULT: a plain DEFAULT is applied on create only,
+        -- while TYPE string is checked on every write. A row from before this field has
+        -- no value, so a partial UPDATE of it (the officers_can_edit_teams backfill at
+        -- boot) and a full write by a build that does not know the field (rollback) would
+        -- both be refused. ALWAYS fills '' when the written row has no value and never
+        -- replaces a value that the write carries. Values, upgrade and rollback (with the
+        -- optional cleanup query): docs/api/site-settings.md.
+        DEFINE FIELD OVERWRITE brand_font_display ON site_settings TYPE string DEFAULT ALWAYS '';
         DEFINE FIELD OVERWRITE updated_at ON site_settings TYPE datetime DEFAULT time::now();
 
         -- ================================================

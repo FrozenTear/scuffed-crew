@@ -191,8 +191,9 @@ fn App() -> Element {
     // Unknown settings use a gray accent. Product purple is a real brand and
     // must not paint before the embedded block or `/api/settings` says so.
     let brand_theme_css = theme::chrome_theme_css_for(loaded_settings);
-    // Admin display font, once the server stores one (see `state::brand_font`).
-    let display_font_css = state::provide_brand_font().font().root_css();
+    // Admin display font, from the same settings: the embedded block, then
+    // the fetch, then a brand save.
+    let display_font_css = theme::fonts::DisplayFont::for_settings(loaded_settings).root_css();
 
     // Desktop only. Native Rust cannot call web_sys, so the canvas module is
     // injected as script text. This is not in the web bundle. The site CSP
