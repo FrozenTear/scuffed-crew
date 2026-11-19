@@ -499,7 +499,7 @@ mod tests {
         );
         // The bar crop carries the percentile, so the hint must name it.
         assert!(rank.contains("percentile"), "{rank}");
-        // 746 dropped the rank SR crop (chat can sit over the digits). It comes back with issue #772.
+        // 746 dropped the rank SR crop (chat can sit over the digits). It comes back with issue 772.
         assert!(!rank.contains("SR"), "{rank}");
     }
 
