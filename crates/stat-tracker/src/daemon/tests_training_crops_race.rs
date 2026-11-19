@@ -1,7 +1,8 @@
 //! Two close Tabs of one game: the first to qualify claims the kind before
 //! its save starts on the blocking thread, so the second saves nothing
 //! even while the first is still saving. A save that keeps nothing
-//! releases the claim, so a later Tab retries.
+//! releases the claim (consent turned off mid-save, or every cell over the
+//! byte cap), so a later Tab retries.
 
 use std::sync::atomic::Ordering;
 
@@ -202,4 +203,103 @@ async fn a_digit_save_that_keeps_no_cell_releases_its_claim() {
     );
     assert!(!run(dir.path(), session, &frame, source(None, None)).await);
     assert_eq!(sync::training_warning(dir.path()), None);
+}
+
+/// A 7680x4320 Tab: the [`tab_frame_with`] header bar and the six
+/// [`REAL_LABELS`] marks, four times the 1080p size, over a chat strip of
+/// flat grey and, everywhere else, high-entropy noise. Every stat digit
+/// cell it cuts is within the 256 px edge bound but its PNG is over the
+/// 64 KiB `stat_digits` byte cap.
+fn noisy_8k_tab_frame() -> DynamicImage {
+    let (w, h) = (7680, 4320);
+    let (bx, by, bw, bh) = ocr::preprocess::crop_scoreboard_rect(w, h);
+    let header_end = by + (f64::from(bh) * 0.024) as u32;
+    let (label_y0, label_y1) = (
+        by + (f64::from(bh) * 0.008) as u32,
+        by + (f64::from(bh) * 0.022) as u32,
+    );
+    let spans: Vec<(u32, u32)> = REAL_LABELS
+        .iter()
+        .enumerate()
+        .map(|(i, &c)| {
+            let width = label_width(i) * 4;
+            let start = bx + (c * f64::from(bw)).round() as u32 - width / 2;
+            (start, start + width)
+        })
+        .collect();
+    let is_label = |x: u32, y: u32| {
+        (label_y0..label_y1).contains(&y) && spans.iter().any(|&(s, e)| (s..e).contains(&x))
+    };
+    DynamicImage::ImageRgb8(RgbImage::from_fn(w, h, |x, y| {
+        if x < bx {
+            Rgb([40, 40, 40])
+        } else if (by..header_end).contains(&y) && (bx..bx + bw).contains(&x) {
+            if is_label(x, y) {
+                Rgb([16, 16, 16])
+            } else {
+                Rgb([232, 232, 232])
+            }
+        } else {
+            // splitmix64 of the position: no pattern for the encoder.
+            let mut z = (u64::from(y) << 32 | u64::from(x)).wrapping_add(0x9e37_79b9_7f4a_7c15);
+            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            z ^= z >> 31;
+            Rgb([z as u8, (z >> 8) as u8, (z >> 16) as u8])
+        }
+    }))
+}
+
+/// The six stat cells [`noisy_8k_tab_frame`] cuts for row 1 of a 5v5
+/// board, as the save cuts them, each as its encoded `stat_digits` crop.
+fn noisy_8k_digit_crops(frame: &DynamicImage) -> Vec<sync::QueuedCrop> {
+    let board = ocr::preprocess::crop_scoreboard(frame);
+    let groups = ocr::preprocess::header_label_groups(&board);
+    let columns = training_stat_columns(&groups, board.width()).expect("the six labels");
+    let row = ocr::preprocess::crop_player_row(&board, 1, 5).expect("row 1");
+    (0..sync::STAT_DIGIT_COLUMNS.len())
+        .map(|col| {
+            let cell = ocr::preprocess::crop_stat_cell(&row, col, &columns).expect("a cell");
+            sync::QueuedCrop {
+                id: String::new(),
+                meta: sync::stat_digits_meta(7680, 4320, col, "Ana").unwrap(),
+                png: encode_png(&cell).expect("the cell encodes"),
+            }
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_digit_save_whose_every_cell_is_over_the_byte_cap_releases_its_claim() {
+    let dir = tempfile::tempdir().unwrap();
+    set_consent(dir.path(), false, true);
+    let session = "race-overcap";
+    let noisy = noisy_8k_tab_frame();
+    // The fixture: six cells, each within the edge bound and refused only
+    // by the 64 KiB byte cap.
+    let crops = noisy_8k_digit_crops(&noisy);
+    assert_eq!(crops.len(), 6);
+    for crop in &crops {
+        assert_eq!(
+            sync::check_crop(UploadKind::StatDigits, crop),
+            Err(sync::CropRefusal::TooLarge(crop.png.len())),
+            "{:?}",
+            crop.meta.slot_type
+        );
+    }
+    // The Tab claims the set before its save; the save cuts six cells and
+    // keeps none (Some(0)), and nothing is lost, so no warning.
+    let started = offer_held(dir.path(), session, &noisy, vec![source(None, None)]).await;
+    assert_eq!(started, 1, "the Tab claims the set before its save");
+    assert!(sync::queued_crops(dir.path(), UploadKind::StatDigits).is_empty());
+    assert_eq!(sync::training_warning(dir.path()), None);
+    // The claim was released: a good 1080p Tab of the same game saves the
+    // set, and only once.
+    let frame = tab_frame();
+    assert!(run(dir.path(), session, &frame, source(None, None)).await);
+    assert_eq!(
+        sync::queued_crops(dir.path(), UploadKind::StatDigits).len(),
+        6
+    );
+    assert!(!run(dir.path(), session, &frame, source(None, None)).await);
 }
