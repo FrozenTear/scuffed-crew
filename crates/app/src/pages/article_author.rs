@@ -155,6 +155,20 @@ impl<T> Load<T> {
             _ => lead.trim().to_string(),
         }
     }
+
+    /// A Retry can change the answer. A 401 or 403 cannot: the server gives
+    /// the same refusal again, so the forum shows no Retry for it, the same
+    /// as the strategy editor 403 (Vision round 6 on 748). Every other
+    /// failure (no answer, a 5xx, an unreadable answer) can be retried.
+    pub(crate) fn retry_helps(&self) -> bool {
+        match self {
+            Load::Failed(reason) => {
+                !crate::components::is_http_status(reason, 401)
+                    && !crate::components::is_http_status(reason, 403)
+            }
+            Load::Loading | Load::Missing | Load::Ready(_) => true,
+        }
+    }
 }
 
 impl<T> Load<Batched<T>> {

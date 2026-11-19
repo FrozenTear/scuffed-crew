@@ -365,7 +365,7 @@ fn ForumIndex(
                 Load::Failed(_) | Load::Missing => rsx! {
                     LoadError {
                         message: load.failure_line("Couldn't load the forum."),
-                        on_retry: move |_| on_retry.call(()),
+                        on_retry: load.retry_helps().then_some(on_retry),
                         retrying,
                     }
                 },
@@ -753,7 +753,7 @@ fn BoardView(
                         Load::Failed(reason) => rsx! {
                             LoadError {
                                 message: crate::client_error::reason_or_fallback(reason),
-                                on_retry: move |_| on_retry.call(()),
+                                on_retry: load.retry_helps().then_some(on_retry),
                                 retrying,
                             }
                         },
@@ -1518,15 +1518,71 @@ mod tests {
                 index.contains(&format!("Couldn&#39;t load the forum. {reason}")),
                 "{index}"
             );
-            assert!(index.contains("role=\"alert\""), "{index}");
+            // Vision round 6 on 748: a retry gets the same refusal, so there
+            // is no Retry, the same as the strategy editor 403. The error box
+            // is still rendered, as a status rather than an alert.
+            assert!(
+                index.contains("<div class=\"fetch-error-wrap\" role=\"status\">"),
+                "{index}"
+            );
+            assert!(!index.contains("role=\"alert\""), "{index}");
+            assert!(!index.contains("fetch-error__retry"), "{index}");
+            assert!(!index.contains(">Retry</button>"), "{index}");
             assert!(!index.contains("not found"), "{index}");
 
             let (load, _) = mapped_load::<ThreadListResponse>(status, body);
+            assert!(!load.retry_helps(), "{status}");
             let board = BoardCase::of(load).render();
             assert!(board.contains("Couldn&#39;t load this board"), "{board}");
             assert!(board.contains(&reason), "{board}");
             assert!(!board.contains("Board not found"), "{board}");
+            assert!(
+                board.contains("<div class=\"fetch-error-wrap\" role=\"status\">"),
+                "{board}"
+            );
+            assert!(!board.contains("fetch-error__retry"), "{board}");
+            assert!(!board.contains(">Retry</button>"), "{board}");
+
+            // A reason-less refusal ("HTTP error: 403") has no Retry either.
+            let (load, _) = mapped_load::<ThreadListResponse>(status, "");
+            assert!(!load.retry_helps(), "{status}");
+            let board = BoardCase::of(load).render();
+            assert!(board.contains(&format!("HTTP error: {status}")), "{board}");
+            assert!(!board.contains(">Retry</button>"), "{board}");
         }
+
+        // Anything a retry can change keeps Retry: no answer, a 5xx (with and
+        // without a reason), an unreadable answer, and other 4xx answers.
+        let _ = crate::util::take_logged();
+        let retryable = [
+            ClientError::Network("TypeError: Failed to fetch".into()),
+            ClientError::http(500, r#"{"error":"Database down"}"#, None),
+            ClientError::http(503, "", None),
+            ClientError::Deserialize("expected value at line 1".into()),
+            ClientError::http(409, r#"{"error":"Board busy"}"#, None),
+        ];
+        for err in retryable {
+            let slot: Result<Vec<ForumCategoryNode>, String> =
+                Err(crate::client_error::logged_message("forum tree", &err));
+            let load = Load::of(Some(&slot));
+            assert!(load.retry_helps(), "{err:?}");
+            let index = render_index(load, false, false);
+            assert!(index.contains(">Retry</button>"), "{err:?}: {index}");
+            assert!(
+                index.contains("<div class=\"fetch-error-wrap\" role=\"alert\">"),
+                "{err:?}: {index}"
+            );
+
+            let slot: Result<ThreadListResponse, String> =
+                Err(crate::client_error::logged_message("forum threads", &err));
+            let board = BoardCase::of(Load::of(Some(&slot))).render();
+            assert!(board.contains(">Retry</button>"), "{err:?}: {board}");
+        }
+        let _ = crate::util::take_logged();
+        // Only a failed load can refuse a retry.
+        assert!(Load::<u8>::Loading.retry_helps());
+        assert!(Load::<u8>::Missing.retry_helps());
+        assert!(Load::Ready(3u8).retry_helps());
 
         // A 404 is still the not-found panel, with nothing to retry.
         let (load, _) = mapped_load::<Vec<ForumCategoryNode>>(404, r#"{"error":"Not found"}"#);
@@ -1545,6 +1601,7 @@ mod tests {
             index.contains("Couldn&#39;t load the forum. HTTP error: 403"),
             "{index}"
         );
+        assert!(!index.contains(">Retry</button>"), "{index}");
 
         assert_eq!(Load::of(Some(&Ok::<u8, String>(3))), Load::Ready(3));
         assert_eq!(Load::<u8>::of(None), Load::Loading);
@@ -1559,7 +1616,22 @@ mod tests {
             .next()
             .unwrap();
         assert!(thread.contains("Load::of(detail.read().as_ref())"));
+        // Every forum LoadError takes its Retry from `retry_helps` (index,
+        // board, thread), never an unconditional handler.
+        assert_eq!(
+            board
+                .matches("on_retry: load.retry_helps().then_some(on_retry),")
+                .count(),
+            2
+        );
+        assert_eq!(
+            thread
+                .matches("on_retry: load.retry_helps().then_some(on_retry),")
+                .count(),
+            1
+        );
         for src in [board, thread] {
+            assert!(!src.contains("on_retry: move |_| on_retry.call(())"));
             assert!(!src.contains("forum_load"));
             assert!(!src.contains("is_http_status(err, 401)"));
             assert!(!src.contains("is_http_status(err, 403)"));

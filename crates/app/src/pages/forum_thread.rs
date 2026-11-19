@@ -285,7 +285,7 @@ fn ThreadView(
                 Load::Failed(reason) => rsx! {
                     LoadError {
                         message: crate::client_error::reason_or_fallback(reason),
-                        on_retry: move |_| on_retry.call(()),
+                        on_retry: load.retry_helps().then_some(on_retry),
                         retrying,
                     }
                 },
@@ -749,6 +749,42 @@ mod tests {
         assert!(refused.contains(&reason), "{refused}");
         assert!(refused.contains("Members only"), "{refused}");
         assert!(!refused.contains("Thread not found"), "{refused}");
+        // Vision round 6 on 748: no Retry for a refusal, the same as the
+        // strategy editor 403; the box is a status, not an alert.
+        assert!(
+            refused.contains("<div class=\"fetch-error-wrap\" role=\"status\">"),
+            "{refused}"
+        );
+        assert!(!refused.contains("fetch-error__retry"), "{refused}");
+        assert!(!refused.contains(">Retry</button>"), "{refused}");
+        for (status, body) in [(401, r#"{"error":"Log in first"}"#), (403, ""), (401, "")] {
+            let err = scuffed_api_client::ClientError::http(status, body, None);
+            let slot: Result<ThreadDetailResponse, String> =
+                Err(crate::client_error::logged_message("forum thread", &err));
+            let html = Case::of(Load::of(Some(&slot))).render();
+            assert!(html.contains("load this thread</h1>"), "{status}: {html}");
+            assert!(
+                html.contains(&crate::client_error::user_message(&err)),
+                "{html}"
+            );
+            assert!(!html.contains(">Retry</button>"), "{status}: {html}");
+            assert!(!html.contains("fetch-error__retry"), "{status}: {html}");
+        }
+        // A 5xx or an unreadable answer keeps Retry.
+        for err in [
+            scuffed_api_client::ClientError::http(500, r#"{"error":"Database down"}"#, None),
+            scuffed_api_client::ClientError::Deserialize("expected value".into()),
+        ] {
+            let slot: Result<ThreadDetailResponse, String> =
+                Err(crate::client_error::logged_message("forum thread", &err));
+            let html = Case::of(Load::of(Some(&slot))).render();
+            assert!(html.contains(">Retry</button>"), "{err:?}: {html}");
+            assert!(
+                html.contains("<div class=\"fetch-error-wrap\" role=\"alert\">"),
+                "{err:?}: {html}"
+            );
+        }
+        let _ = crate::util::take_logged();
 
         // A missing thread is the not-found card, not an error page.
         let missing = Case::of(Load::Missing).render();

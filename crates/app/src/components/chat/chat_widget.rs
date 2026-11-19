@@ -360,8 +360,11 @@ fn public_send_refusal(
 /// console once, under "Chat send", like officer chat. A refusal the channel
 /// names keeps its words ([`public_send_refusal`]); anything else is
 /// [`SEND_FAILED_LEAD`] and the shared mapping: no answer reads the
-/// unreachable sentence, an unreadable answer the reload sentence, and a 5xx
-/// its reason (QA round 3 on 748: no chat-only copy).
+/// unreachable sentence and a 5xx its reason (QA round 3 on 748: no chat-only
+/// copy). An unreadable answer comes only from a status under 400, so the
+/// message may have been posted: it shows the reload sentence alone, with no
+/// "Could not send" lead that would invite a duplicate, as officer chat does
+/// (Vision round 6 on 748).
 fn public_send_client_error(err: ClientError) -> PublicSendError {
     let mapped = crate::client_error::logged_message("Chat send", &err);
     let refusal = match &err {
@@ -372,8 +375,14 @@ fn public_send_client_error(err: ClientError) -> PublicSendError {
         } => public_send_refusal(*status, body, *retry_after),
         ClientError::Network(_) | ClientError::Deserialize(_) => None,
     };
-    refusal.unwrap_or_else(|| PublicSendError {
-        message: crate::client_error::join_lead(SEND_FAILED_LEAD, &mapped),
+    let message = match &err {
+        ClientError::Deserialize(_) => mapped,
+        ClientError::Http { .. } | ClientError::Network(_) => {
+            crate::client_error::join_lead(SEND_FAILED_LEAD, &mapped)
+        }
+    };
+    refusal.unwrap_or(PublicSendError {
+        message,
         retry_after_secs: None,
     })
 }
@@ -1098,13 +1107,12 @@ mod tests {
         assert_eq!(net.retry_after_secs, None);
         let bad =
             public_send_client_error(ClientError::Deserialize("expected value at line 1".into()));
-        assert_eq!(
-            bad.message,
-            format!(
-                "Could not send that message. {}",
-                crate::client_error::UNREADABLE_ANSWER_MESSAGE
-            )
-        );
+        // The send may have landed: no "Could not send" lead, the reload
+        // sentence alone, the same as officer chat (Vision round 6 on 748).
+        assert_eq!(bad.message, crate::client_error::UNREADABLE_ANSWER_MESSAGE);
+        assert!(!bad.message.contains(SEND_FAILED_LEAD), "{}", bad.message);
+        assert!(!bad.message.contains("Could not send"), "{}", bad.message);
+        assert_eq!(bad.retry_after_secs, None);
         assert!(!bad.message.contains("line 1"), "{}", bad.message);
         let logged = crate::util::take_logged();
         assert_eq!(logged.len(), 2, "{logged:?}");

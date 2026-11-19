@@ -1168,6 +1168,42 @@ mod tests {
         }
     }
 
+    /// Vision nit 3, round 6 on 748: the register 400 dash checks have their
+    /// own test, out of the 429 one.
+    #[test]
+    fn register_400_reason_reads_without_long_dashes() {
+        // Vision nit 1 at e453160d on 748: the register 400 reason goes
+        // through plain_punctuation like setup's, so the server's en dash
+        // range reads "1-32" and a spaced dash breaks the sentence.
+        let range = register_failure_message(&http(
+            400,
+            r#"{"error":"username must be 1\u201332 characters"}"#,
+        ));
+        assert_eq!(range, "username must be 1-32 characters");
+        assert!(
+            !range.contains('\u{2013}') && !range.contains('\u{2014}'),
+            "{range}"
+        );
+        assert_eq!(
+            register_failure_message(&http(
+                400,
+                r#"{"error":"username may only contain letters, digits, _ and -"}"#,
+            )),
+            "username may only contain letters, digits, _ and -"
+        );
+        assert_eq!(
+            register_failure_message(&http(400, r#"{"error":"taken \u2014 pick another"}"#)),
+            "taken. Pick another"
+        );
+        for body in [r#"{"error":"  "}"#, r#"{"error":""}"#, "<html>", ""] {
+            assert_eq!(
+                register_failure_message(&http(400, body)),
+                "Check your input",
+                "{body}"
+            );
+        }
+    }
+
     /// Governor JSON, plain text, and password lockout. Forum posts, tokens,
     /// and every other `ClientError` toast use `Display`. Login, register,
     /// and Nostr verify map the same bodies themselves.
@@ -1278,37 +1314,6 @@ mod tests {
             register_failure_message(&http(409, json)),
             "Could not create account. Try a different username."
         );
-
-        // Vision nit 1 at e453160d on 748: the register 400 reason goes
-        // through plain_punctuation like setup's, so the server's en dash
-        // range reads "1-32" and a spaced dash breaks the sentence.
-        let range = register_failure_message(&http(
-            400,
-            r#"{"error":"username must be 1\u201332 characters"}"#,
-        ));
-        assert_eq!(range, "username must be 1-32 characters");
-        assert!(
-            !range.contains('\u{2013}') && !range.contains('\u{2014}'),
-            "{range}"
-        );
-        assert_eq!(
-            register_failure_message(&http(
-                400,
-                r#"{"error":"username may only contain letters, digits, _ and -"}"#,
-            )),
-            "username may only contain letters, digits, _ and -"
-        );
-        assert_eq!(
-            register_failure_message(&http(400, r#"{"error":"taken \u2014 pick another"}"#)),
-            "taken. Pick another"
-        );
-        for body in [r#"{"error":"  "}"#, r#"{"error":""}"#, "<html>", ""] {
-            assert_eq!(
-                register_failure_message(&http(400, body)),
-                "Check your input",
-                "{body}"
-            );
-        }
 
         assert_eq!(nostr_verify_failure_message(&json_err), "Try again in 9 s");
         assert_eq!(nostr_verify_failure_message(&plain_err), later);
