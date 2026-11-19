@@ -520,6 +520,25 @@ mod tests {
     fn from_settings_empty_uses_product_default() {
         let b = BrandConfig::from_settings("", "");
         assert_eq!(b.accent_dark, "#8f73ff");
+        assert_eq!(b.accent_light, "#6d4aff");
+        assert_eq!(b, BrandConfig::product_default());
+        assert_eq!(BrandConfig::from_settings("  ", " "), b);
+    }
+
+    /// An empty light accent follows a set dark one (`docs/api/site-settings.md`).
+    #[test]
+    fn from_settings_empty_light_follows_a_set_dark() {
+        let b = BrandConfig::from_settings(TEST_OTHER_ACCENT, "");
+        assert_eq!(b.accent_dark, TEST_OTHER_ACCENT);
+        assert_eq!(b.accent_light, TEST_OTHER_ACCENT);
+        assert_eq!(
+            b,
+            BrandConfig::from_accents(TEST_OTHER_ACCENT, TEST_OTHER_ACCENT)
+        );
+        // An empty dark with a set light: dark takes the dark default.
+        let b = BrandConfig::from_settings("", TEST_OTHER_ACCENT);
+        assert_eq!(b.accent_dark, "#8f73ff");
+        assert_eq!(b.accent_light, TEST_OTHER_ACCENT);
     }
 
     #[test]
@@ -710,8 +729,64 @@ mod tests {
         }
     }
 
+    /// The documented order when more than one pair fails: within a theme
+    /// text, then ink, then fill; across themes dark before light.
+    #[test]
+    fn fail_reason_order_when_several_pairs_fail() {
+        let passing = AccentCheck::for_brand(&BrandConfig::product_default());
+        for (scope, theme) in [(&passing.dark, "dark"), (&passing.light, "light")] {
+            assert!(scope.passes());
+            let ink_and_fill = SchemeCheck {
+                ink_on_accent: 1.0,
+                fill_on_surface: 1.0,
+                ..scope.clone()
+            };
+            assert_eq!(
+                ink_and_fill.fail_reason(),
+                Some(format!(
+                    "Ink on this accent does not reach 4.5:1 in the {theme} theme."
+                ))
+            );
+            let text_and_fill = SchemeCheck {
+                accent_on_bg: 1.0,
+                fill_on_surface: 1.0,
+                ..scope.clone()
+            };
+            assert_eq!(
+                text_and_fill.fail_reason(),
+                Some(format!(
+                    "This accent does not reach 4.5:1 on the {theme} page background."
+                ))
+            );
+        }
+
+        // Both themes fail: the dark sentence wins, whatever light fails on.
+        let dark = AccentCheck::for_brand(&BrandConfig::from_settings(
+            TEST_BLOCKED_ACCENT,
+            TEST_BLOCKED_ACCENT,
+        ))
+        .dark;
+        assert!(!dark.passes());
+        let dark_reason = dark.fail_reason();
+        assert_eq!(
+            dark_reason.as_deref(),
+            Some("Ink on this accent does not reach 4.5:1 in the dark theme.")
+        );
+        let light = SchemeCheck {
+            accent_on_bg: 1.0,
+            ink_on_accent: 1.0,
+            fill_on_surface: 1.0,
+            ..passing.light.clone()
+        };
+        let check = AccentCheck { dark, light };
+        assert!(check.light.fail_reason().is_some());
+        assert_eq!(check.fail_reason(), dark_reason);
+    }
+
     /// Issue 796: the light default `#6d4aff` is not a valid dark accent. Its
-    /// fill is 2.83:1 on the dark card `#282831`, under the 3:1 floor.
+    /// fill is 2.83:1 on the raised dark surface `#282831` (the card only in
+    /// the Competitive direction), under the 3:1 floor. On the default dark
+    /// card `#1f1f27` it reaches 3.17:1.
     #[test]
     fn light_default_fails_as_a_dark_accent() {
         let check = AccentCheck::for_brand(&BrandConfig::from_settings("#6d4aff", "#6d4aff"));

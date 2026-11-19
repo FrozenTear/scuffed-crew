@@ -76,16 +76,26 @@ The defaults (`BrandConfig::product_default` in `scuffed-types`):
   `brand_accent_light` is `""`, the light theme follows the dark accent.
 
 The two defaults are not interchangeable. `#6d4aff` fails as a dark accent:
-its fill is 2.83:1 on the dark card `#282831`, under the 3:1 floor, so
+its fill is 2.83:1 on the raised dark surface `#282831` (`--surface-raised`
+and `--surface-sunken`, also the card background in the Competitive
+direction), under the 3:1 floor, so
 `{"brand_accent_dark":"#6d4aff"}` is refused with the dark fill reason below.
+On the default dark card `#1f1f27` (`--surface`) it reaches 3.17:1, and on
+the dark page `#17171d` 3.46:1; the lock checks the fill against every dark
+surface, so the raised surface decides.
 
 ### Accent contrast lock
 
 `PUT /api/settings` applies the same contrast lock as the brand settings
 page (`/admin/brand`). A refused body changes nothing, including its other
-fields. The order of checks is: role (403), accent hex format (400
+fields. The order of checks is: role (403), `page_bg_color` format (400
+`{"error":"Page background color must be a hex value like #17171d (or empty for theme default)"}`),
+`page_bg_image_url` (400, `{"error":"Background image URL contains invalid characters"}`
+or `{"error":"Background image must be an https/http URL or a path starting with /"}`),
+accent hex format (400
 `{"error":"Brand accent must be a hex color like #8f73ff (or empty for default)"}`),
-`brand_font_display` (400), then the contrast lock.
+`brand_font_display` (400), then the contrast lock. So a body with a bad
+`page_bg_color` and a failing accent gets the background color message.
 
 Refusal: 400 with `{"error": <reason>}`. The reason is the first failing
 pair, checked in this order, dark theme first:
@@ -110,7 +120,7 @@ Which themes are checked (`changed_accent_themes` in
 | Accent keys in the body                     | Checked                                                   |
 |---------------------------------------------|-----------------------------------------------------------|
 | Neither (absent or `null`)                  | Nothing. The lock does not run.                           |
-| `brand_accent_dark` only                    | Dark. Light too when the stored light accent is `""`, since light then follows dark. |
+| `brand_accent_dark` only                    | Dark. Light too when the stored light accent is `""`, because the light theme then depends on dark: it follows a set dark accent, and when the sent dark is also `""` both themes take the defaults (light `#6d4aff`). |
 | `brand_accent_light` only                   | Light only.                                               |
 | Both                                        | Dark and light. Stored accents are not read.              |
 

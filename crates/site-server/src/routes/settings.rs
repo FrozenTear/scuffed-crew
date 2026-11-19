@@ -93,8 +93,10 @@ fn sanitize_brand_accent(raw: &str) -> Result<String, String> {
 
 /// Which themes a brand save changes, as `(dark, light)`. `dark` and `light`
 /// are the accents in the request (`None` when absent). A dark save also
-/// changes light when the stored light is empty, because an empty light
-/// accent follows the dark one.
+/// changes light when the stored light is empty, because the light theme
+/// then depends on dark: an empty light follows a set dark accent, and when
+/// the sent dark is empty too both themes take the product defaults (light
+/// `#6d4aff`, see `BrandConfig::from_settings`).
 fn changed_accent_themes(
     dark: Option<&str>,
     light: Option<&str>,
