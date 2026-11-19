@@ -119,13 +119,30 @@ pub(super) fn offered(key: &str) -> bool {
 }
 
 pub(super) fn mark_offered(key: String) {
+    claim_offered(key);
+}
+
+/// Mark `key` offered unless it already is, under one lock: `true` when
+/// this call marked it (the caller owns the offer), `false` when it was
+/// already offered or claimed.
+pub(super) fn claim_offered(key: String) -> bool {
     let mut keys = OFFERED.lock().unwrap_or_else(|e| e.into_inner());
-    if !keys.contains(&key) {
-        keys.push_back(key);
+    if keys.contains(&key) {
+        return false;
     }
+    keys.push_back(key);
     while keys.len() > OFFERED_KEEP {
         keys.pop_front();
     }
+    true
+}
+
+/// Release a claim from [`claim_offered`], so a later frame may offer again.
+pub(super) fn unmark_offered(key: &str) {
+    OFFERED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|k| k != key);
 }
 
 /// Cut this Tab's `hero_icon` and `stat_digits` crops for the game

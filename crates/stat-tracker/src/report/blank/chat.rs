@@ -115,3 +115,32 @@ pub fn chat_over_board(frame: &RgbImage) -> Chat {
     let reach = py(top - LINE);
     Chat::ReachesY(reach.saturating_sub(crop_y))
 }
+
+/// Whether chat shows in the chat strip anywhere from its bottom band up to
+/// playfield row `top` (in 2560x1440 px): text strokes in the bottom band,
+/// or in any line band of the stack whose bottom is below `top`. Every band
+/// is checked, not only the stack up to its first empty line, so one empty
+/// line never hides a line above it. For a crop that reaches left toward
+/// the chat box (the rank training crops' progress bar): chat lines start
+/// in this strip, and a long one runs on to the right.
+pub fn chat_up_to(frame: &RgbImage, top: f64) -> bool {
+    let (w, h) = frame.dimensions();
+    let (gx, gy, gw, gh) = game_rect_16_9(w, h);
+    let (sx, sy) = (f64::from(gw) / 2560.0, f64::from(gh) / 1440.0);
+    let px = |v: f64| gx + (v * sx).round() as u32;
+    let py = |v: f64| gy + (v.max(0.0) * sy).round() as u32;
+    let min_px = TEXT_PX * sx * sy;
+    let (x0, x1) = (px(X.0), px(X.1));
+    let text = |a: f64, b: f64| (strokes(frame, x0, x1, py(a), py(b)) as f64) > min_px;
+    if text(BOTTOM.0, BOTTOM.1) {
+        return true;
+    }
+    let mut bottom = BOTTOM.0;
+    while bottom > top {
+        if text(bottom - LINE, bottom) {
+            return true;
+        }
+        bottom -= LINE;
+    }
+    false
+}

@@ -705,13 +705,10 @@ pub(crate) async fn run_loop(
                                 signal.map(|(_, source)| source),
                                 &img,
                             );
-                            // Rank training crop (consent on only): the same
-                            // rank screen frames, cut on its own task.
-                            if rank_pngs.is_some()
-                                && let Some(target) = rank_crop
-                            {
-                                let _ = daemon::rank_training::offer_rank_crop(target, &img);
-                            }
+                            // Rank training crops (consent on only): only the
+                            // frames the kit took as a rank screen, cut on
+                            // their own task.
+                            let _ = daemon::rank_training::offer_for_tick(rank_pngs.as_ref(), rank_crop, &img);
                             stat_tracker::perf::record(
                                 stat_tracker::perf::Stage::PollAnalyze,
                                 analyze_started.elapsed(),

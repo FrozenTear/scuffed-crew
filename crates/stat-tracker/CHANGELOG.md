@@ -17,13 +17,14 @@ summary, then the highlights, and tucks the remaining text under Details.
 
 ## Unreleased
 
-If you turn on rank screen training crops on the website, the tracker now sends one picture of the rank screen after each competitive game in Overwatch. It is the same part of the screen a game report can include, with no player names and no result word, and nothing is cut or sent while the switch is off.
+If you turn on rank screen training crops on the website, the tracker now sends up to five small pictures from the rank screen after each competitive game in Overwatch: your role line, your rank emblem with its tier, the rank progress bar with its change tags (which can say Victory or Defeat), the mode banner and your top hero's SR number. Each is cut at full size from the place the rank reader reads, never the whole screen, the large result title, chat, hero names or player names, and nothing is cut or sent while the switch is off.
 
 ### Highlights
 
 - The switch is off by default. Your games and your other training crops record the same way whether it is on or off.
-- On screens smaller than 1856x1056 no rank picture is taken.
-- A rank picture too large for the website's limit is left out, never sent.
+- One set per game, even when the rank screen stays up for many seconds.
+- While chat shows on the screen, the progress bar picture is left out.
+- On screens smaller than 1856x1056 no rank picture is taken. A picture too large for the website's limit is left out, never shrunk or sent; at 4K that is the emblem and the progress bar.
 
 ## 0.6.0-rc.1
 

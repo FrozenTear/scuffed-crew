@@ -56,16 +56,37 @@ stays capped at 2 MiB (`HERO_ICON_MAX_REQUEST_BYTES`) for every kind, so a
 request of large banners holds fewer than 20 of them. The bounds live on
 `CropKind::max_edges` and `CropKind::max_crop_bytes`.
 
-`rank` crops are regions of the post-game rank screen (role, tier, rank
-bar, result, SR), never a region with player names. The tracker's rank
-reader takes only 1080p and 1440p frames. At 1440p the regions are
-`rank_role` 440x90, `rank_tier` 420x680, `rank_bar` 1500x184,
-`rank_result` 700x170 and `rank_sr` 222 wide with a variable height, so
-1536 by 720 leaves room above the widest (bar) and the tallest (tier).
-The largest measured PNG is a tier at 216 KiB (bar 131 KiB, result 90 KiB,
-role 20 KiB, SR about 19 KiB), so 384 KiB leaves room above it; with the
-2 MiB request limit a request holds at most five crops of that size.
-About five crops per competitive game make the 1000 cap about 200 games.
+`rank` crops are regions of the post-game rank screen, never the whole
+screen, the large result title (top left), chat or a region with player
+or hero names. The bar's change tags can name the result (`DEFEAT`). What
+the tracker sends: at most one set per competitive game, up to five crops,
+each cut at native scale (never resized) from the box the tracker's rank
+reader reads, placed on the 16:9 playfield at the 2560x1440 reference and
+scaled by the screen size:
+
+| `slot_type` | Box at 2560x1440 | 1080p | 1440p | 4K |
+|-------------|------------------|-------|-------|----|
+| `rank_role` | x 1060-1500, y 236-326 (the role line) | 330x68 | 440x90 | 660x135 |
+| `rank_tier` | x 1070-1490, y 340-1020 (emblem, tier word, division) | 315x510 | 420x680 | 630x1020, not sent |
+| `rank_bar` | x 540-2040, y 1048-1232 (labels, bar, pill, tags, neighbour emblems) | 1125x138 | 1500x184 | 2250x276, not sent |
+| `rank_banner` | x 2056-2430, y 136-186 (the mode banner word, no timer) | 281x38 | 374x50 | 561x75 |
+| `rank_sr` | the first hero's SR line as the reader finds it, digits plus 2 rows and columns, never the hero name above it | about 55x20 | about 72x25 | not sent |
+
+A region outside 1536 by 720 (the tier and the bar at 4K) or over 384 KiB
+is left out by the tracker, never scaled; the others of the frame are still
+sent. `rank_sr` comes only from 1080p and 1440p frames, the sizes the
+reader reads, and only when its hero search finds the SR line. The bar's
+left end is near the chat box, so the tracker leaves `rank_bar` out of a
+frame where chat shows. Each crop's `meta` carries `screen`
+`rank_update`, the screen size, the region rectangle in frame pixels as
+`found_spot` (with `found_confidence` 1) and `spot_version`
+`rank-regions.1`, which is bumped whenever a box or rule changes. A frame
+under the minimum screen size (below) gives no crop. Measured on 61 real
+1440p rank screens, the tier is 148-286 KiB, the bar 119-148 KiB, the role
+12-22 KiB and the banner 6-13 KiB, each under 384 KiB with no scaling
+(315-449 KiB per game for those four). With the 2 MiB request limit a
+request holds at most five crops at the cap. Five crops per competitive
+game make the 1000 cap about 200 games.
 
 A `rank` bound of 1536 by 720 is large enough to hold a whole 1280x720
 screen, and members are told crops are never whole screens. So every
@@ -332,7 +353,7 @@ Every field is optional unless noted. Unknown fields are refused (400
 | `locked_in` | bool | |
 | `screen_width`, `screen_height` | int | Game resolution in pixels, both or neither, each 320 to 16384. These stay the game's size even when a `hero_icon` PNG is a 171 px downscale. **Required for `rank`**: both, at least 1856x1056 (`RANK_MIN_SCREEN_WIDTH`, `RANK_MIN_SCREEN_HEIGHT`), else 400 `invalid_crop_meta`. Optional for the other kinds |
 | `ui_scale` | float | Above 0, at most 200 (same range as the report bundle) |
-| `found_spot` | object `{x, y, w, h}` | Unsigned ints, `w` and `h` at least 1, the box inside the resolution when one is given (inside 16384 otherwise). Unknown keys refused. Sending it only for unknown screen sizes is the tracker's rule: the server accepts it at any resolution, since it cannot know the tracker's layouts |
+| `found_spot` | object `{x, y, w, h}` | Unsigned ints, `w` and `h` at least 1, the box inside the resolution when one is given (inside 16384 otherwise). Unknown keys refused. Sending it only for unknown screen sizes is the tracker's rule for the Tab kinds; every `rank` crop carries its region rectangle here (confidence 1). The server accepts it at any resolution, since it cannot know the tracker's layouts |
 | `found_confidence` | float | 0 to 1. `found_spot` and `found_confidence` come together or not at all |
 
 Any bound failure is the one stable code 400 `invalid_crop_meta`; the server
@@ -341,16 +362,16 @@ logs the field name at debug level.
 The server takes any `slot_type` of that shape. The tracker sends these.
 `hero_icon`, `stat_digits` and `map_name` crops come from the Tab screen
 and carry `screen` `tab`. `rank` crops come from the post-game rank
-screen, not the Tab: the tracker picks their `screen` and `slot_type`
-(for example `screen` `rank`), and they must carry the screen size (see
-Crop size per kind).
+screen, not the Tab: the tracker sends `screen` `rank_update` and one
+`slot_type` per region, and they must carry the screen size (see Crop
+size per kind).
 
 | Kind | `slot_type` | What the crop is |
 |------|-------------|------------------|
 | `hero_icon` | `career_panel` | The career panel's hero portrait: a `hero_icon` is shrunk to 171 px with Lanczos3 (smaller steps only if still needed) only when its PNG is over the 65,536-byte cap; otherwise stored as the native card; screen fields stay the game's. Carries `hero`, `score`, `runner_up`, `margin` and the hero pack name as `icon_set_version` |
 | `stat_digits` | `elims`, `assists`, `deaths`, `damage`, `healing`, `mitigation` | One stat cell of the member's own row, named by its column left to right, with `hero` only when that Tab's own read named it |
 | `map_name` | none | The map name banner |
-| `rank` | tracker's choice | One rank screen region (role, tier, bar, result, SR). No player names |
+| `rank` | `rank_role`, `rank_tier`, `rank_bar`, `rank_banner`, `rank_sr` | One rank screen region at native scale (see Crop size per kind), with its rectangle in `found_spot`. No result title, chat, hero or player names (the bar's change tags can say `VICTORY` or `DEFEAT`) |
 
 There is no colourblind filter field. It hints at a member's colour vision
 and is not in the agreed field list or the consent text, so it is not

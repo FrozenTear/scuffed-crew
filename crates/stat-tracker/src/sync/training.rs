@@ -5,7 +5,7 @@
 //! The contract is `docs/api/training-crops.md`; the shapes and caps come
 //! from `scuffed_types`. Nothing here does I/O.
 
-use scuffed_types::api::training_crops::{TrainingCropConsent, TrainingCropUploadMeta};
+use scuffed_types::api::training_crops::{CropSpot, TrainingCropConsent, TrainingCropUploadMeta};
 use scuffed_types::{
     CropKind, HERO_ICON_MAX_FILES_PER_UPLOAD, HERO_ICON_MAX_REQUEST_BYTES, HERO_ICON_MIN_EDGE,
     TRAINING_CROP_GAME_TOKEN_LEN, TRAINING_CROP_META_MAX_BYTES, TRAINING_CROP_SCREEN_MAX_EDGE,
@@ -20,8 +20,9 @@ pub enum UploadKind {
     HeroIcon,
     StatDigits,
     MapName,
-    /// The rank update screen after a competitive game, cut to the report
-    /// bundle's `crops/rank.png` region (no result word, no player names).
+    /// The rank update screen after a competitive game, cut into the
+    /// regions the rank reader reads ([`RANK_SLOTS`]) at native scale: never
+    /// the result title, chat, a hero name or a player name.
     Rank,
 }
 
@@ -326,21 +327,39 @@ pub fn stat_digits_meta(
 /// report bundle gives its `crops/rank.png` (`report::bundle::RANK_SCREEN_CLASS`).
 pub const RANK_SCREEN: &str = "rank_update";
 
-/// `slot_type` of a `rank` crop: the whole rank region the report bundle
-/// cuts (`report::blank::RANK_BAND`), not one field of it.
-pub const RANK_SLOT: &str = "rank_band";
+/// `slot_type` of each `rank` crop, one per rank screen region the rank
+/// reader reads (`daemon::rank_training` cuts them): the role line, the
+/// emblem with its tier word, the progress bar with its labels and tags,
+/// the mode banner word, and the first hero's SR line.
+pub const RANK_SLOTS: [&str; 5] = [
+    "rank_role",
+    "rank_tier",
+    "rank_bar",
+    "rank_banner",
+    "rank_sr",
+];
 
-/// `meta` for a `rank` crop from a rank update screen of `width` x
-/// `height`, without the game token ([`super::keep_tab_crops`] adds it).
-/// The screen size is always set: the server requires it for this kind,
-/// and [`check_crop`] refuses a crop whose screen is under the kind's
-/// minimum.
-pub fn rank_meta(width: u32, height: u32) -> TrainingCropUploadMeta {
+/// `spot_version` of a `rank` crop: the geometry its region rectangle
+/// comes from. Bumped whenever a region's box or rule changes.
+pub const RANK_SPOT_VERSION: &str = "rank-regions.1";
+
+/// `meta` for the `slot` region of a rank update screen of `width` x
+/// `height`, cut at `spot` (frame pixels), without the game token
+/// ([`super::keep_tab_crops`] adds it). The screen size is always set: the
+/// server requires it for this kind, and [`check_crop`] refuses a crop
+/// whose screen is under the kind's minimum. The rectangle goes in
+/// `found_spot` (confidence 1: the box is placed by the layout or, for the
+/// SR line, found by the rank reader's own line search) with
+/// [`RANK_SPOT_VERSION`].
+pub fn rank_meta(width: u32, height: u32, slot: &str, spot: CropSpot) -> TrainingCropUploadMeta {
     TrainingCropUploadMeta {
         screen: Some(RANK_SCREEN.to_string()),
-        slot_type: Some(RANK_SLOT.to_string()),
+        slot_type: Some(slot.to_string()),
+        spot_version: Some(RANK_SPOT_VERSION.to_string()),
         screen_width: Some(width),
         screen_height: Some(height),
+        found_spot: Some(spot),
+        found_confidence: Some(1.0),
         ..TrainingCropUploadMeta::default()
     }
 }

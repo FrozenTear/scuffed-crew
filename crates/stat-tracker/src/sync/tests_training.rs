@@ -96,10 +96,25 @@ fn rank_upload_kind_round_trips() {
 #[test]
 fn rank_crops_need_the_kinds_screen_size_and_caps() {
     let t = token();
-    let mut meta = rank_meta(2560, 1440);
+    // The role box: it fits inside every screen size checked below, so
+    // only the screen size can refuse those.
+    let role = scuffed_types::api::training_crops::CropSpot {
+        x: 1060,
+        y: 236,
+        w: 440,
+        h: 90,
+    };
+    let mut meta = rank_meta(2560, 1440, "rank_role", role);
+    assert_eq!(meta.slot_type.as_deref(), Some("rank_role"));
+    assert_eq!(meta.spot_version.as_deref(), Some(RANK_SPOT_VERSION));
+    assert_eq!(
+        (meta.found_spot, meta.found_confidence),
+        (Some(role), Some(1.0))
+    );
+    assert!(RANK_SLOTS.contains(&"rank_role"));
     meta.game_token = Some(t);
     meta.validate().unwrap();
-    let ok = crop(meta.clone(), png(1151, 720, false));
+    let ok = crop(meta.clone(), png(440, 90, false));
     assert_eq!(check_crop(UploadKind::Rank, &ok), Ok(()));
     // Wider or taller than the rank bound.
     assert!(matches!(

@@ -41,7 +41,7 @@ use tests_synth as synth;
 #[cfg(test)]
 mod tests_measured;
 
-pub use chat::{Chat, chat_over_board};
+pub use chat::{Chat, chat_over_board, chat_up_to};
 
 use std::collections::VecDeque;
 
