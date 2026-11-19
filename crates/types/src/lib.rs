@@ -1,4 +1,5 @@
 pub mod api;
+pub mod application_message;
 pub mod auth;
 pub mod hero_icons;
 pub mod heroes;
@@ -14,6 +15,9 @@ pub mod strategy;
 pub mod training_crops;
 
 pub use api::*;
+pub use application_message::{
+    MIN_APPLICATION_MESSAGE_CHARS, application_message_chars, application_message_long_enough,
+};
 pub use auth::*;
 pub use hero_icons::{
     HERO_ICON_MAX_BYTES, HERO_ICON_MAX_EDGE, HERO_ICON_MAX_FILES_PER_UPLOAD,
