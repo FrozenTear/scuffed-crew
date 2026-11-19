@@ -50,6 +50,15 @@ pub fn line(session_id: &str, flat: &str, stored: u32) -> Option<String> {
     line_in(LATEST.lock().ok()?.as_ref()?, session_id, flat, stored)
 }
 
+/// Whether the tile of stat `flat` of `session_id` says "No read" (the
+/// rule is unsure and no read read `stored`, so `stored` is a placeholder),
+/// judged from the log on disk now, as the next snapshot load would. An
+/// Edit save does not confirm such a stat: there is no read to confirm.
+pub fn no_read(data_dir: &Path, session_id: &str, flat: &str, stored: u32) -> bool {
+    let v = verdicts(data_dir, &mut Snapshot::default());
+    line_in(&v, session_id, flat, stored).as_deref() == Some(stat_reads::NO_READ)
+}
+
 fn line_in(latest: &Verdicts, session_id: &str, flat: &str, stored: u32) -> Option<String> {
     let (sid, verdicts) = latest;
     let col = STATS.iter().position(|s| *s == flat)?;

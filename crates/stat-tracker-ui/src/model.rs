@@ -98,7 +98,11 @@ impl EditForm {
     }
 
     /// Only fields that differ from the game's current effective values.
-    pub fn diff(&self, g: &Game) -> stat_tracker::storage::MatchEdit {
+    /// With `confirm`, also any stat the reader was unsure of ("Check
+    /// first"), sent even at its shown value: saving it confirms the read
+    /// and clears the mark. [`crate::commands::save_edit`] asks for that
+    /// only when the save would otherwise send nothing.
+    pub fn diff(&self, g: &Game, confirm: bool) -> stat_tracker::storage::MatchEdit {
         let mut e = stat_tracker::storage::MatchEdit::default();
         let txt = |cur: &str, disp: &str| {
             let t = cur.trim();
@@ -107,14 +111,38 @@ impl EditForm {
         e.hero = txt(&self.hero, &g.hero);
         e.role = txt(&self.role, g.role.label());
         e.map_name = txt(&self.map_name, &g.map_name);
-        let num = |cur: &str, disp: u32| cur.trim().parse::<u32>().ok().filter(|v| *v != disp);
-        e.elims = num(&self.elims, g.elims);
-        e.deaths = num(&self.deaths, g.deaths);
-        e.assists = num(&self.assists, g.assists);
-        e.damage = num(&self.damage, g.damage);
-        e.healing = num(&self.healing, g.healing);
-        e.mitigation = num(&self.mitigation, g.mitigation);
+        let num = |cur: &str, disp: u32, field: &str| {
+            cur.trim()
+                .parse::<u32>()
+                .ok()
+                .filter(|v| *v != disp || (confirm && g.unsure_now(field)))
+        };
+        e.elims = num(&self.elims, g.elims, "elims");
+        e.deaths = num(&self.deaths, g.deaths, "deaths");
+        e.assists = num(&self.assists, g.assists, "assists");
+        e.damage = num(&self.damage, g.damage, "damage");
+        e.healing = num(&self.healing, g.healing, "healing");
+        e.mitigation = num(&self.mitigation, g.mitigation, "mitigation");
         e
+    }
+
+    /// A stat field holds text that is not a number ("12,345"). [`Self::diff`]
+    /// leaves it out, as it does a blank one, so the save must not read it
+    /// as "nothing changed" and confirm the Check first stats.
+    pub fn has_unparsed_stat(&self) -> bool {
+        [
+            &self.elims,
+            &self.deaths,
+            &self.assists,
+            &self.damage,
+            &self.healing,
+            &self.mitigation,
+        ]
+        .iter()
+        .any(|s| {
+            let t = s.trim();
+            !t.is_empty() && t.parse::<u32>().is_err()
+        })
     }
 }
 
