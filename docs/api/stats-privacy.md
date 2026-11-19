@@ -123,15 +123,49 @@ same 403, so a blocked read does not reveal whether a game exists.
 **Decision (2026-11-19, FrozenTear).** Rules for teammate hero and pairing
 stats, before any of it is built:
 
-- A crew member whose `stats_visibility` is `public` or `members` may have
-  the hero they played in a shared game counted in another member's stats,
-  including hero pairing win rates. Their name is not shown there.
+- An active crew member whose `stats_visibility` is `public` or `members` may
+  have the hero they played in a shared game counted in another member's
+  stats, including hero pairing win rates. Their name is not shown there.
 - A `private` member's games are never used in another member's stats.
 - Teammates who are not crew members (random teammates) appear with their
-  hero only. Their names are never read into, stored in or shown in these
-  stats.
+  hero only. These stats never read, store or show their names.
 - Pairing stats show aggregates only, never a list of individual shared
   games.
+
+How the rules apply:
+
+- **Who sees it.** Pairing stats are only for active signed-in crew members
+  (the `OrgMember` check). They are never on a signed-out route, including
+  `/api/public/...`, and are never cached in a slot that a signed-out caller
+  can be served from. The subject member's own setting decides who sees their
+  pairing totals, like their other totals (`StatsVisibility::denial`).
+- **Minimum games.** A pairing row with fewer than 10 shared decided games is
+  not returned at all: no counts, no record, no win rate. The floor is applied
+  on the server after the season and map filters, not only in the app. A
+  total across maps or seasons is the sum of rows that passed the floor, so
+  subtracting rows cannot reveal a row that was held back. A hidden name is not
+  anonymity in a crew this size, since a hero only one member plays points at
+  that member, and that is why the floor exists.
+- **When changes apply.** Read time. The teammate's current
+  `stats_visibility` applies to all past shared games. Nothing from another
+  member's games is stored in a member's own rows. A cached pairing result is
+  dropped when any member's visibility changes. A deleted game drops out of
+  pairing stats on the next read.
+- **Former members.** A member who leaves, or is inactive or banned (the
+  same set leaderboards leave out), is treated as a random teammate: hero
+  only, and their games stop counting as crew games.
+- **What a response carries.** Rows are keyed only by the member's own hero,
+  the teammate's hero and the map, with games, wins, losses and draws. No
+  teammate member id, name, `session_id` or game time.
+- **No settings row.** A member with no settings row counts as `public`, as
+  today. The implementing PR updates the value table above and the Settings
+  copy for `public` and `members` to mention teammate hero stats, before any
+  pairing data shows.
+- **Random teammates phase.** When random teammates' heroes are added (from
+  the issue 780 reader), any slot that matches a crew member's uploaded game
+  is handled by the crew rules above, so a `private` member's slot is dropped.
+  A crew member who did not upload that game cannot be told apart from a
+  random teammate and counts as one: hero only, no name.
 
 The routes and views that apply this land in their own PRs, which update
 this section.
