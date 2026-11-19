@@ -89,11 +89,24 @@ fn sanitize_brand_accent(raw: &str) -> Result<String, String> {
     }
 }
 
+/// Which themes a brand save changes, as `(dark, light)`. `dark` and `light`
+/// are the accents in the request (`None` when absent). A dark save also
+/// changes light when the stored light is empty, because an empty light
+/// accent follows the dark one.
+fn changed_accent_themes(
+    dark: Option<&str>,
+    light: Option<&str>,
+    stored_light: &str,
+) -> (bool, bool) {
+    let light_changed = light.is_some() || (dark.is_some() && stored_light.trim().is_empty());
+    (dark.is_some(), light_changed)
+}
+
 /// The brand settings contrast lock, run on the accents a save would leave
 /// stored. `dark` and `light` are the sanitized accents in the request
-/// (`None` when absent); `stored_*` fill in the absent side. Only the theme
-/// scopes the request changes are checked, so an accent already stored that
-/// fails the lock does not block a save of the other theme.
+/// (`None` when absent); `stored_*` fill in the absent side. Only the themes
+/// [`changed_accent_themes`] reports are checked, so an accent already stored
+/// that fails the lock does not block a save that leaves that theme's key out.
 fn brand_contrast_error(
     dark: Option<&str>,
     light: Option<&str>,
@@ -106,9 +119,12 @@ fn brand_contrast_error(
     let eff_dark = dark.unwrap_or(stored_dark);
     let eff_light = light.unwrap_or(stored_light);
     let check = AccentCheck::for_brand(&BrandConfig::from_settings(eff_dark, eff_light));
-    // An empty light accent follows the dark one, so a dark save moves both.
-    let light_changed = light.is_some() || (dark.is_some() && eff_light.trim().is_empty());
-    let dark_reason = dark.and_then(|_| check.dark.fail_reason());
+    let (dark_changed, light_changed) = changed_accent_themes(dark, light, stored_light);
+    let dark_reason = if dark_changed {
+        check.dark.fail_reason()
+    } else {
+        None
+    };
     dark_reason.or_else(|| {
         if light_changed {
             check.light.fail_reason()
@@ -447,7 +463,7 @@ mod officer_settings_gate_tests {
 
 #[cfg(test)]
 mod brand_contrast_tests {
-    use super::brand_contrast_error;
+    use super::{brand_contrast_error, changed_accent_themes};
 
     /// Blocked by the client lock: no ink reaches 4.5:1 on it in dark.
     const BLOCKED: &str = "#d35400";
@@ -483,7 +499,7 @@ mod brand_contrast_tests {
     }
 
     #[test]
-    fn dark_only_save_checks_dark_against_the_stored_light() {
+    fn dark_only_save_checks_the_requested_dark_accent() {
         assert!(brand_contrast_error(Some(BLOCKED), None, "", "#6d4aff").is_some());
         assert!(brand_contrast_error(Some("#46d8a4"), None, BLOCKED, "#6d4aff").is_none());
     }
@@ -491,5 +507,42 @@ mod brand_contrast_tests {
     #[test]
     fn stored_failing_dark_does_not_block_a_light_save() {
         assert!(brand_contrast_error(None, Some("#6d4aff"), BLOCKED, "").is_none());
+    }
+
+    #[test]
+    fn dark_only_save_changes_light_only_when_stored_light_is_empty() {
+        assert_eq!(
+            changed_accent_themes(Some("#8f73ff"), None, ""),
+            (true, true)
+        );
+        assert_eq!(
+            changed_accent_themes(Some("#8f73ff"), None, "  "),
+            (true, true)
+        );
+        assert_eq!(
+            changed_accent_themes(Some("#8f73ff"), None, "#6d4aff"),
+            (true, false)
+        );
+    }
+
+    #[test]
+    fn light_only_save_changes_only_light() {
+        assert_eq!(
+            changed_accent_themes(None, Some("#6d4aff"), ""),
+            (false, true)
+        );
+        assert_eq!(
+            changed_accent_themes(None, Some(""), "#6d4aff"),
+            (false, true)
+        );
+    }
+
+    #[test]
+    fn save_with_both_or_neither_accent() {
+        assert_eq!(
+            changed_accent_themes(Some("#8f73ff"), Some("#6d4aff"), "#6d4aff"),
+            (true, true)
+        );
+        assert_eq!(changed_accent_themes(None, None, ""), (false, false));
     }
 }

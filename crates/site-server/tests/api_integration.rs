@@ -2189,6 +2189,57 @@ async fn settings_put_accepts_the_default_accent() {
     assert_eq!(stored.brand_accent_light, "#6d4aff");
 }
 
+/// Issue 698: a stored dark accent that fails the lock (stored before the
+/// lock, so it is still served) does not block a save that leaves the dark
+/// key out. Only light is in the request, so only light is checked.
+#[tokio::test]
+async fn settings_put_light_only_save_passes_over_a_stored_failing_dark() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    state
+        .db
+        .update_settings(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("#d35400"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("store a failing dark accent");
+
+    let resp = create_router(state.clone())
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/settings",
+            ADMIN_TOKEN,
+            json!({ "brand_accent_light": "#6d4aff" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["brand_accent_dark"], "#d35400");
+    assert_eq!(json["brand_accent_light"], "#6d4aff");
+
+    let stored = state.db.get_settings().await.expect("settings");
+    assert_eq!(stored.brand_accent_dark, "#d35400");
+    assert_eq!(stored.brand_accent_light, "#6d4aff");
+}
+
 #[tokio::test]
 async fn member_cannot_update_settings() {
     let state = test_state().await;
