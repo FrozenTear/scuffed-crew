@@ -22,7 +22,8 @@ pub enum UploadKind {
     MapName,
     /// The rank update screen after a competitive game, cut into the
     /// regions the rank reader reads ([`RANK_SLOTS`]) at native scale: never
-    /// the result title, chat, a hero name or a player name.
+    /// the result title, the mode banner, chat, a hero name or a player
+    /// name (the SR line is refused when overlay text shows in its box).
     Rank,
 }
 
@@ -330,18 +331,13 @@ pub const RANK_SCREEN: &str = "rank_update";
 /// `slot_type` of each `rank` crop, one per rank screen region the rank
 /// reader reads (`daemon::rank_training` cuts them): the role line, the
 /// emblem with its tier word, the progress bar with its labels and tags,
-/// the mode banner word, and the first hero's SR line.
-pub const RANK_SLOTS: [&str; 5] = [
-    "rank_role",
-    "rank_tier",
-    "rank_bar",
-    "rank_banner",
-    "rank_sr",
-];
+/// and the first hero's SR line. No mode banner: the voice overlay list
+/// can reach into its box with another person's name.
+pub const RANK_SLOTS: [&str; 4] = ["rank_role", "rank_tier", "rank_bar", "rank_sr"];
 
 /// `spot_version` of a `rank` crop: the geometry its region rectangle
 /// comes from. Bumped whenever a region's box or rule changes.
-pub const RANK_SPOT_VERSION: &str = "rank-regions.1";
+pub const RANK_SPOT_VERSION: &str = "rank-regions.2";
 
 /// `meta` for the `slot` region of a rank update screen of `width` x
 /// `height`, cut at `spot` (frame pixels), without the game token

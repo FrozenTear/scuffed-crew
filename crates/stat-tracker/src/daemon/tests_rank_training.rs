@@ -1,7 +1,8 @@
 //! `rank` training crops: nothing with consent off, one set of native rank
 //! reader regions per game with it on (claimed before the task, released on
-//! an error), only from frames the kit took as a rank screen, never chat,
-//! and a region over the cap or the edge bound never kept.
+//! an error before anything was kept), only from frames the kit took as a
+//! rank screen, never chat or overlay text, no mode banner, no empty role
+//! line, and a region over the cap or the edge bound never kept.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -24,6 +25,35 @@ fn set_consent(dir: &Path, rank: bool) {
     let path = dir.join("training_crops").join("consent.json");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, serde_json::to_vec(&consent).unwrap()).unwrap();
+    save_label_pack(dir);
+}
+
+/// A rank-v1 pack in `dir` holding only the "RANK PROGRESS:" label
+/// template, learned from [`rank_frame`]'s stand-in label: what the rank
+/// reader's rank screen test needs (the real pack comes from the site).
+fn save_label_pack(dir: &Path) {
+    use stat_tracker::shadow::rank::templates::ClassTemplate;
+    use stat_tracker::shadow::rank::{
+        Family, GATE_CLASS, RECOGNIZER_ID, TEMPLATE_DIR, TemplateSet, ink, layout,
+    };
+    let frame = rank_frame(2560, 1440).to_rgb8();
+    let gate = layout::gate_word(&frame).expect("the stand-in label");
+    let (w, h, _) = Family::Gate.shape();
+    let mut set = TemplateSet {
+        recognizer: RECOGNIZER_ID.to_string(),
+        ..TemplateSet::default()
+    };
+    set.families.insert(
+        Family::Gate,
+        vec![ClassTemplate {
+            class: GATE_CLASS.to_string(),
+            aspect: ink::aspect(&gate.ink),
+            n: 1,
+            pooled: false,
+            vector: ink::unit(ink::vector(&gate.ink, w, h)),
+        }],
+    );
+    set.save_dir(&dir.join(TEMPLATE_DIR)).unwrap();
 }
 
 fn game(session: &str) -> ActiveGame {
@@ -63,13 +93,23 @@ const NAME_ROWS: (u32, u32) = (700, 714);
 const SR_ROWS: (u32, u32) = (724, 745);
 
 /// A rank screen stand-in at `w` x `h`: flat background, a few text blocks
-/// in the role, tier and bar boxes, and (at 1440p) the first hero entry.
+/// in the role, tier and bar boxes and the mode banner, and (at 1440p) the
+/// first hero entry.
 fn rank_frame(w: u32, h: u32) -> DynamicImage {
     let mut img = RgbImage::from_pixel(w, h, BG);
     let s = |v: u32| v * w / 2560;
     fill(&mut img, [s(1190), s(290), s(1300), s(310)], TEXT);
     fill(&mut img, [s(1160), s(900), s(1380), s(942)], TEXT);
-    fill(&mut img, [s(840), s(1066), s(975), s(1092)], TEXT);
+    // "RANK PROGRESS:" stand-in: letter strokes with a bar under them.
+    for k in 0..8 {
+        fill(
+            &mut img,
+            [s(842 + 16 * k), s(1068), s(850 + 16 * k), s(1086)],
+            TEXT,
+        );
+    }
+    fill(&mut img, [s(842), s(1086), s(970), s(1090)], TEXT);
+    // The mode banner word: on screen, never cut.
     fill(&mut img, [s(2068), s(150), s(2300), s(171)], TEXT);
     if (w, h) == (2560, 1440) {
         blocks(&mut img, 2333, NAME_ROWS.0, NAME_ROWS.1, (5, 12, 4));
@@ -181,8 +221,9 @@ async fn rank_consent_on_keeps_one_set_of_native_regions_per_game() {
         ("rank_role", spot(1060, 236, 440, 90)),
         ("rank_tier", spot(1070, 340, 420, 680)),
         ("rank_bar", spot(540, 1048, 1500, 184)),
-        ("rank_banner", spot(2056, 136, 374, 50)),
     ];
+    assert!(!slots(&kept).contains(&"rank_banner".to_string()));
+    assert_eq!(RANK_SPOT_VERSION, "rank-regions.2");
     for crop in &kept {
         assert_eq!(crate::sync::check_crop(UploadKind::Rank, crop), Ok(()));
         let meta = &crop.meta;
@@ -320,7 +361,6 @@ fn region_sizes_at_1080p_1440p_and_4k() {
         (Role, (330, 68), (440, 90), (660, 135)),
         (Tier, (315, 510), (420, 680), (630, 1020)),
         (Bar, (1125, 138), (1500, 184), (2250, 276)),
-        (Banner, (281, 38), (374, 50), (561, 75)),
     ];
     for (r, p1080, p1440, p2160) in table {
         assert_eq!(size(r, 1920, 1080), p1080, "{r:?} 1080p");
@@ -338,8 +378,9 @@ fn region_sizes_at_1080p_1440p_and_4k() {
 #[test]
 fn a_region_outside_the_edge_bound_is_left_out_never_scaled() {
     // At 4K the tier (630x1020) and the bar (2250x276) are outside 1536x720:
-    // left out, while the role and the banner still go. The reader reads
-    // no 4K frame, so there is no SR line either.
+    // left out, while the role still goes (the role check reads no 4K frame,
+    // so it never calls the line empty). The reader reads no 4K frame, so
+    // there is no SR line either.
     let frame = rank_frame(3840, 2160);
     let rgb = frame.to_rgb8();
     assert_eq!(
@@ -353,7 +394,7 @@ fn a_region_outside_the_edge_bound_is_left_out_never_scaled() {
     assert_eq!(cut_region(RankRegion::Sr, &rgb), Err(RegionMiss::NotFound));
     let crops = rank_crops(&frame).unwrap();
     let got: Vec<&str> = crops.iter().map(|c| c.region.slot_type()).collect();
-    assert_eq!(got, ["rank_role", "rank_banner"]);
+    assert_eq!(got, ["rank_role"]);
     for c in &crops {
         assert_eq!(
             crate::sync::png_size(&c.png),
@@ -374,6 +415,7 @@ fn the_sr_crop_is_the_readers_sr_line_without_the_hero_name() {
     let frame = rank_frame(2560, 1440);
     let rgb = frame.to_rgb8();
     let s = sr_spot(&rgb).expect("the reader finds the SR line");
+    assert_eq!(cut_region(RankRegion::Sr, &rgb).map(|c| c.spot), Ok(s));
     // Two reference rows and columns around the SR digits only: the name
     // line (rows 700 to 714) is above it.
     assert_eq!(s, spot(2333 - 68 - 2, SR_ROWS.0 - 2, 68 + 4, 21 + 4));
@@ -383,44 +425,246 @@ fn the_sr_crop_is_the_readers_sr_line_without_the_hero_name() {
     // No hero entry (an SR line with no name line over it): no SR crop.
     let mut bare = RgbImage::from_pixel(2560, 1440, BG);
     blocks(&mut bare, 2333, SR_ROWS.0, SR_ROWS.1, (4, 14, 4));
-    assert_eq!(sr_spot(&bare), None);
+    assert_eq!(sr_spot(&bare), Err(RegionMiss::NotFound));
     assert_eq!(cut_region(RankRegion::Sr, &bare), Err(RegionMiss::NotFound));
-    // At 1080p the screen without a hero entry gives the other four.
+    // At 1080p the screen without a hero entry gives the other three.
     let crops = rank_crops(&rank_frame(1920, 1080)).unwrap();
     let got: Vec<&str> = crops.iter().map(|c| c.region.slot_type()).collect();
-    assert_eq!(got, ["rank_role", "rank_tier", "rank_bar", "rank_banner"]);
+    assert_eq!(got, ["rank_role", "rank_tier", "rank_bar"]);
 }
 
 #[test]
-fn the_bar_is_left_out_while_chat_shows() {
-    let clean = rank_frame(2560, 1440);
-    assert!(!stat_tracker::report::blank::chat_up_to(
-        &clean.to_rgb8(),
-        1048.0
-    ));
-    let chat = with_chat(&clean);
-    assert!(stat_tracker::report::blank::chat_up_to(
-        &chat.to_rgb8(),
-        1048.0
-    ));
-    assert_eq!(
-        cut_region(RankRegion::Bar, &chat.to_rgb8()),
-        Err(RegionMiss::Chat)
+fn an_sr_window_that_cuts_the_digits_short_gives_no_sr_crop() {
+    // The name ends at x 2300 while the SR digits run on to x 2333: the
+    // SR window (up to the name's end) would cut the number short, so no
+    // SR crop at all rather than a part of one.
+    let mut img = RgbImage::from_pixel(2560, 1440, BG);
+    blocks(&mut img, 2300, NAME_ROWS.0, NAME_ROWS.1, (5, 12, 4));
+    blocks(&mut img, 2333, SR_ROWS.0, SR_ROWS.1, (4, 14, 4));
+    let e = stat_tracker::shadow::rank::layout::first_entry(&img).expect("the entry");
+    assert!(stat_tracker::shadow::rank::layout::sr_cut_short(&img, &e));
+    assert!(
+        !stat_tracker::shadow::rank::layout::sr_glyphs(&img, &e).is_empty(),
+        "the window alone would give a part of the number"
     );
-    let got: Vec<&str> = rank_crops(&chat)
+    assert_eq!(sr_spot(&img), Err(RegionMiss::NotFound));
+    assert_eq!(cut_region(RankRegion::Sr, &img), Err(RegionMiss::NotFound));
+}
+
+/// A stream chat line drawn across the SR row, its left end at `x`: a dark
+/// backing strip, a coloured name, then smaller white message letters.
+fn with_overlay_line(frame: &RgbImage, x: u32) -> RgbImage {
+    let mut img = frame.clone();
+    let (y0, y1) = (SR_ROWS.0 - 3, SR_ROWS.1 + 3);
+    let x1 = (x + 420).min(2560);
+    for yy in y0..y1 {
+        for xx in x..x1 {
+            let p = img.get_pixel(xx, yy).0;
+            img.put_pixel(xx, yy, Rgb(p.map(|v| v / 3)));
+        }
+    }
+    // The name: cyan strokes 14 rows tall.
+    let mut cx = x + 6;
+    while cx + 3 < x1.min(x + 90) {
+        fill(&mut img, [cx, y0 + 6, cx + 3, y0 + 20], Rgb([90, 200, 255]));
+        cx += 7;
+    }
+    // The message: white strokes 11 rows tall, word gaps every fifth.
+    let mut k = 0;
+    while cx + 2 < x1 {
+        if k % 5 != 4 {
+            fill(&mut img, [cx, y0 + 9, cx + 2, y0 + 20], TEXT);
+        }
+        cx += 6;
+        k += 1;
+    }
+    img
+}
+
+#[test]
+fn an_overlay_line_across_the_sr_row_keeps_no_sr_crop() {
+    let clean = rank_frame(2560, 1440).to_rgb8();
+    // The clean row keeps its SR crop.
+    assert!(cut_region(RankRegion::Sr, &clean).is_ok());
+    let names = |img: &RgbImage| -> Vec<&'static str> {
+        rank_crops(&DynamicImage::ImageRgb8(img.clone()))
+            .unwrap()
+            .iter()
+            .map(|c| c.region.slot_type())
+            .collect()
+    };
+    assert_eq!(
+        names(&clean),
+        ["rank_role", "rank_tier", "rank_bar", "rank_sr"]
+    );
+    // Six positions, from wholly left of the digits to over all of them:
+    // never an SR crop, and the overlay rule (not only a missed line) is
+    // what refuses it where the line still reads.
+    let mut refused = 0;
+    for x in [1880, 1960, 2040, 2120, 2200, 2260] {
+        let img = with_overlay_line(&clean, x);
+        let got = cut_region(RankRegion::Sr, &img);
+        assert!(got.is_err(), "x {x}: {:?}", got.map(|c| c.spot));
+        if matches!(got, Err(RegionMiss::Overlay(_))) {
+            refused += 1;
+        }
+        assert!(!names(&img).contains(&"rank_sr"), "x {x}");
+    }
+    assert!(refused >= 2, "{refused} of 6 refused by the overlay rule");
+}
+
+#[test]
+fn sr_overlay_rules_refuse_colour_short_glyphs_and_stray_ink() {
+    let clean = rank_frame(2560, 1440).to_rgb8();
+    let at = sr_spot(&clean).unwrap();
+    // A coloured chip inside the box, clear of the digits' rows.
+    let mut chip = clean.clone();
+    fill(
+        &mut chip,
+        [at.x + 1, at.y, at.x + 30, at.y + 2],
+        Rgb([220, 60, 200]),
+    );
+    assert!(matches!(
+        sr_spot(&chip),
+        Err(RegionMiss::Overlay(SrOverlay::Colour(_)))
+    ));
+    // A glyph just right of the number, inside the SR window: the digits
+    // no longer line up with the rightmost glyph, so the reader drops them
+    // all (more than an icon).
+    let mut right = clean.clone();
+    fill(&mut right, [2334, SR_ROWS.0 + 9, 2336, SR_ROWS.1], TEXT);
+    assert_eq!(sr_spot(&right), Err(RegionMiss::Overlay(SrOverlay::Shape)));
+    // Glyphs that line up with each other but are shorter than the SR line
+    // (lower case or smaller text; the line is as tall as a block far left
+    // on the same rows).
+    let mut short = RgbImage::from_pixel(2560, 1440, BG);
+    blocks(&mut short, 2333, NAME_ROWS.0, NAME_ROWS.1, (5, 12, 4));
+    fill(&mut short, [2130, SR_ROWS.0, 2140, SR_ROWS.1], TEXT);
+    blocks(&mut short, 2333, SR_ROWS.0 + 5, SR_ROWS.1, (4, 14, 4));
+    assert_eq!(sr_spot(&short), Err(RegionMiss::Overlay(SrOverlay::Short)));
+    // One left of the number, clear of the box: the reader's own line
+    // shape drops it, and the box around the digits is still clean.
+    let mut left = clean.clone();
+    fill(
+        &mut left,
+        [at.x - 14, SR_ROWS.0 + 9, at.x - 4, SR_ROWS.1],
+        TEXT,
+    );
+    assert_eq!(sr_spot(&left), Ok(at));
+    // A grey rank icon taller than the digits, in two parts: the line's
+    // rows grow to the icon's, the reader drops both parts, and the digits
+    // still make a clean SR crop.
+    let mut icon = clean.clone();
+    for x in [at.x - 30, at.x - 18] {
+        fill(
+            &mut icon,
+            [x, SR_ROWS.0 - 4, x + 10, SR_ROWS.1 + 4],
+            Rgb([200, 200, 205]),
+        );
+    }
+    let got = sr_spot(&icon).expect("an icon is no overlay");
+    assert_eq!((got.x, got.w), (at.x, at.w));
+    // An overlay strip hiding the digits leaves the icon as the line's
+    // only glyph: too tall for a digit, no SR crop of the icon alone.
+    let mut hidden = icon.clone();
+    fill(
+        &mut hidden,
+        [at.x - 4, SR_ROWS.0 - 6, 2342, SR_ROWS.1 + 6],
+        Rgb([12, 12, 16]),
+    );
+    assert_eq!(sr_spot(&hidden), Err(RegionMiss::Overlay(SrOverlay::Tall)));
+    // Ink between two digits outside their glyph boxes (a stroke the
+    // reader's glyph cut did not take, here added after the cut): the
+    // rule alone, on the line the reader found.
+    use stat_tracker::shadow::rank::layout;
+    let e = layout::first_entry(&clean).unwrap();
+    let gl = layout::sr_glyphs(&clean, &e);
+    let s = layout::Scale::from_img(&clean).unwrap();
+    assert_eq!(sr_overlay(&clean, s, &e, &gl, at), None);
+    let mut stray = clean.clone();
+    let gap = gl[0].bbox[2] + 1;
+    fill(
+        &mut stray,
+        [gap, SR_ROWS.0, gap + 2, SR_ROWS.1],
+        Rgb([200, 200, 200]),
+    );
+    assert_eq!(
+        sr_overlay(&stray, s, &e, &gl, at),
+        Some(SrOverlay::Stray(2 * 21))
+    );
+    // The background a little lighter or darker, digits anti-aliased into
+    // it: still the clean line.
+    let mut shade = clean.clone();
+    for y in at.y..at.y + at.h {
+        for x in at.x..at.x + at.w {
+            let p = shade.get_pixel(x, y).0;
+            if p == BG.0 {
+                let d = (x - at.x) as u8 / 8;
+                shade.put_pixel(x, y, Rgb(p.map(|v| v + d)));
+            } else if x % 3 == 0 {
+                shade.put_pixel(x, y, Rgb([138, 140, 148]));
+            }
+        }
+    }
+    assert_eq!(sr_spot(&shade), Ok(at));
+}
+
+#[test]
+fn an_empty_role_line_is_not_cut() {
+    // The open queue screen: no role line above the emblem.
+    let mut rgb = rank_frame(2560, 1440).to_rgb8();
+    fill(&mut rgb, [1060, 236, 1500, 326], BG);
+    use stat_tracker::shadow::rank::layout::{RoleLine, role_icon};
+    assert_eq!(role_icon(&rgb), RoleLine::Empty);
+    assert_eq!(cut_region(RankRegion::Role, &rgb), Err(RegionMiss::Blank));
+    let got: Vec<&str> = rank_crops(&DynamicImage::ImageRgb8(rgb))
         .unwrap()
         .iter()
         .map(|c| c.region.slot_type())
         .collect();
-    assert_eq!(got, ["rank_role", "rank_tier", "rank_banner", "rank_sr"]);
-    // A chat line higher up the stack (beside the bar's rows), with the
-    // bottom line empty, also keeps the bar out.
+    assert_eq!(got, ["rank_tier", "rank_bar", "rank_sr"]);
+    // A role line that is there (or unclear) is cut.
+    let rgb = rank_frame(2560, 1440).to_rgb8();
+    assert_ne!(role_icon(&rgb), RoleLine::Empty);
+    assert!(cut_region(RankRegion::Role, &rgb).is_ok());
+}
+
+#[test]
+fn the_bar_is_left_out_while_chat_shows_beside_its_rows() {
+    use stat_tracker::report::blank::chat_in_rows;
+    let clean = rank_frame(2560, 1440);
+    assert!(!chat_in_rows(&clean.to_rgb8(), 1048.0, 1232.0));
+    // Chat only in the bottom line (y 1258 to 1308), below the bar's box
+    // (rows 1048 to 1232): the bar is kept.
+    let bottom = with_chat(&clean);
+    assert!(chat_in_rows(&bottom.to_rgb8(), 1048.0, 1340.0));
+    assert!(!chat_in_rows(&bottom.to_rgb8(), 1048.0, 1232.0));
+    assert!(cut_region(RankRegion::Bar, &bottom.to_rgb8()).is_ok());
+    let got: Vec<&str> = rank_crops(&bottom)
+        .unwrap()
+        .iter()
+        .map(|c| c.region.slot_type())
+        .collect();
+    assert_eq!(got, ["rank_role", "rank_tier", "rank_bar", "rank_sr"]);
+    // A chat line beside the bar's rows keeps the bar out, with the bottom
+    // line empty or not.
     let mut high = clean.to_rgb8();
     for x in (70..400).step_by(6) {
         fill(&mut high, [x, 1110, x + 2, 1130], TEXT);
     }
-    assert!(stat_tracker::report::blank::chat_up_to(&high, 1048.0));
+    assert!(chat_in_rows(&high, 1048.0, 1232.0));
     assert_eq!(cut_region(RankRegion::Bar, &high), Err(RegionMiss::Chat));
+    let got: Vec<&str> = rank_crops(&DynamicImage::ImageRgb8(high.clone()))
+        .unwrap()
+        .iter()
+        .map(|c| c.region.slot_type())
+        .collect();
+    assert_eq!(got, ["rank_role", "rank_tier", "rank_sr"]);
+    let mut both = bottom.to_rgb8();
+    for x in (70..400).step_by(6) {
+        fill(&mut both, [x, 1200, x + 2, 1220], TEXT);
+    }
+    assert_eq!(cut_region(RankRegion::Bar, &both), Err(RegionMiss::Chat));
     // No region reaches the chat strip (x 60 to 448).
     for r in RankRegion::ALL {
         if let Some(b) = r.reference_box() {
@@ -433,8 +677,7 @@ fn the_bar_is_left_out_while_chat_shows() {
 fn a_region_over_the_byte_cap_is_left_out_the_rest_kept() {
     let cap = UploadKind::Rank.crop_kind().max_crop_bytes();
     // Noise does not compress: noise in the tier (420x680) and the bar
-    // (1500x184) is over 384 KiB; the role, the banner and the SR line are
-    // not.
+    // (1500x184) is over 384 KiB; the role and the SR line are not.
     let mut rgb = rank_frame(2560, 1440).to_rgb8();
     for [x0, y0, x1, y1] in [[1070, 340, 1490, 1020], [540, 1048, 2040, 1232]] {
         let n = noise(x1 - x0, y1 - y0);
@@ -454,7 +697,7 @@ fn a_region_over_the_byte_cap_is_left_out_the_rest_kept() {
         .iter()
         .map(|c| c.region.slot_type())
         .collect();
-    assert_eq!(got, ["rank_role", "rank_banner", "rank_sr"]);
+    assert_eq!(got, ["rank_role", "rank_sr"]);
 }
 
 #[tokio::test]
@@ -541,10 +784,184 @@ async fn an_encode_or_write_error_releases_the_game_for_a_later_frame() {
     assert!(rank_crop_target(dir.path(), Some(&g3)).is_none());
 }
 
+#[tokio::test]
+async fn a_write_error_after_a_region_was_kept_keeps_the_claim() {
+    let dir = tempfile::tempdir().unwrap();
+    set_consent(dir.path(), true);
+    let crops = rank_crops(&rank_frame(2560, 1440)).unwrap();
+    assert!(crops.len() >= 2);
+    let claim = |session: &str| {
+        super::training_crops::mark_offered(super::training_crops::offer_key(
+            session,
+            UploadKind::Rank,
+            "",
+        ));
+    };
+    // The first region is written, the second write fails: the game stays
+    // claimed, so no later frame sends the first region again.
+    let g = game("rank-half");
+    claim("rank-half");
+    let mut writes = Vec::new();
+    keep_rank_result_with(
+        dir.path(),
+        "rank-half",
+        (2560, 1440),
+        Ok(crops.clone()),
+        |meta, _| {
+            writes.push(meta.slot_type.clone().unwrap_or_default());
+            (writes.len() == 1).then_some(1)
+        },
+    );
+    assert_eq!(writes.len(), crops.len(), "every region is tried once");
+    assert!(
+        rank_crop_target(dir.path(), Some(&g)).is_none(),
+        "a region was kept: the claim stays"
+    );
+    // Every write fails: nothing was kept, the claim is released.
+    let g2 = game("rank-none-written");
+    claim("rank-none-written");
+    keep_rank_result_with(
+        dir.path(),
+        "rank-none-written",
+        (2560, 1440),
+        Ok(crops),
+        |_, _| None,
+    );
+    assert!(rank_crop_target(dir.path(), Some(&g2)).is_some());
+}
+
 #[test]
 fn the_rank_screen_class_is_the_report_bundles() {
     assert_eq!(
         crate::sync::RANK_SCREEN,
         stat_tracker::report::bundle::RANK_SCREEN_CLASS
     );
+}
+
+/// Local bench on labelled rank screens (never in CI): set
+/// `SCUFFED_RANK_BENCH` to the labels JSONL (`game`, `file`, `readable`)
+/// and `SCUFFED_RANK_FRAMES` to the folder holding `<game>/<file>`. Prints
+/// the regions each readable frame keeps and why an SR line was refused.
+#[test]
+#[ignore = "needs local labelled rank screens"]
+fn bench_rank_training_regions() {
+    let (Ok(jsonl), Ok(frames)) = (
+        std::env::var("SCUFFED_RANK_BENCH"),
+        std::env::var("SCUFFED_RANK_FRAMES"),
+    ) else {
+        return;
+    };
+    let mut kept = std::collections::BTreeMap::<String, usize>::new();
+    let mut frames_read = 0;
+    for line in std::fs::read_to_string(jsonl).unwrap().lines() {
+        let Ok(row) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let (game, file) = (row["game"].as_str().unwrap(), row["file"].as_str().unwrap());
+        let Ok(frame) = image::open(Path::new(&frames).join(game).join(file)) else {
+            continue;
+        };
+        // `SCUFFED_RANK_DATA`: a data folder holding a rank-v1 pack, for
+        // the rank label test on every labelled frame.
+        if let Ok(data) = std::env::var("SCUFFED_RANK_DATA") {
+            println!(
+                "{game}/{file}: screen {} label {}",
+                row["screen"],
+                rank_label_shows(Path::new(&data), &frame)
+            );
+        }
+        if row["readable"] != serde_json::Value::Bool(true) {
+            continue;
+        }
+        frames_read += 1;
+        let rgb = frame.to_rgb8();
+        let crops = rank_crops(&frame).unwrap();
+        let got: Vec<&str> = crops.iter().map(|c| c.region.slot_type()).collect();
+        for g in &got {
+            *kept.entry(g.to_string()).or_default() += 1;
+        }
+        let sr = sr_spot(&rgb);
+        println!("{game}/{file}: {got:?} sr {sr:?}");
+        if let (Err(RegionMiss::Overlay(_)), Some(e)) =
+            (sr, stat_tracker::shadow::rank::layout::first_entry(&rgb))
+        {
+            let boxes = |gl: Vec<stat_tracker::shadow::rank::ink::Glyph>| -> Vec<[u32; 4]> {
+                gl.iter().map(|g| g.bbox).collect()
+            };
+            println!(
+                "  line {:?} glyphs {:?} cluster {:?}",
+                e.sr,
+                boxes(stat_tracker::shadow::rank::layout::sr_glyphs(&rgb, &e)),
+                boxes(stat_tracker::shadow::rank::layout::sr_cluster(&rgb, &e)),
+            );
+        }
+    }
+    println!("{frames_read} frames, kept {kept:?}");
+}
+
+/// `frame` with the "RANK PROGRESS:" label box (x 840-975, y 1066-1092)
+/// holding `label`: nothing (the placement screen), or bright art (a hero
+/// highlight).
+fn without_label(frame: &DynamicImage, art: bool) -> DynamicImage {
+    let mut img = frame.to_rgb8();
+    fill(&mut img, [830, 1060, 985, 1098], BG);
+    if art {
+        for y in 1062..1096 {
+            for x in 832..983 {
+                let v = 120 + ((x * 7 + y * 13) % 120) as u8;
+                img.put_pixel(x, y, Rgb([v, v, v.saturating_sub(10)]));
+            }
+        }
+    }
+    DynamicImage::ImageRgb8(img)
+}
+
+#[tokio::test]
+async fn a_frame_without_the_rank_label_offers_nothing_and_keeps_the_game_open() {
+    let dir = tempfile::tempdir().unwrap();
+    set_consent(dir.path(), true);
+    let g = game("rank-label");
+    let labelled = rank_frame(2560, 1440);
+    assert!(rank_label_shows(dir.path(), &labelled));
+    // Hero highlight art and the placement screen: the kit took them as a
+    // rank screen (`Some(pngs)`), but there is no rank progress label.
+    for art in [false, true] {
+        let frame = without_label(&labelled, art);
+        assert!(!rank_label_shows(dir.path(), &frame), "art {art}");
+        let target = rank_crop_target(dir.path(), Some(&g));
+        assert!(offer_for_tick(Some(&pngs()), target, &frame).is_none());
+        assert!(
+            rank_crop_target(dir.path(), Some(&g)).is_some(),
+            "art {art}: the game is not claimed"
+        );
+    }
+    assert!(queued(dir.path()).is_empty());
+    // A later rank update frame of the same game still gives its set.
+    let target = rank_crop_target(dir.path(), Some(&g));
+    offer_for_tick(Some(&pngs()), target, &labelled)
+        .expect("the labelled frame is offered")
+        .await
+        .unwrap();
+    assert_eq!(slots(&queued(dir.path())), sorted(&RANK_SLOTS));
+    assert!(rank_crop_target(dir.path(), Some(&g)).is_none());
+}
+
+#[tokio::test]
+async fn no_rank_pack_or_a_4k_frame_offers_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    set_consent(dir.path(), true);
+    let g = game("rank-no-pack");
+    // No pack: the label cannot be checked, so nothing is offered.
+    std::fs::remove_dir_all(dir.path().join(stat_tracker::shadow::rank::TEMPLATE_DIR)).unwrap();
+    let frame = rank_frame(2560, 1440);
+    assert!(!rank_label_shows(dir.path(), &frame));
+    let target = rank_crop_target(dir.path(), Some(&g));
+    assert!(offer_for_tick(Some(&pngs()), target, &frame).is_none());
+    assert!(rank_crop_target(dir.path(), Some(&g)).is_some());
+    // The reader takes no 4K frame: nothing offered there either.
+    let four_k = tempfile::tempdir().unwrap();
+    set_consent(four_k.path(), true);
+    let target = rank_crop_target(four_k.path(), Some(&g));
+    assert!(offer_for_tick(Some(&pngs()), target, &rank_frame(3840, 2160)).is_none());
+    assert!(queued(dir.path()).is_empty() && queued(four_k.path()).is_empty());
 }

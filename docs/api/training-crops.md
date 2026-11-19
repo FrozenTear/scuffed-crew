@@ -4,9 +4,9 @@ Alpha.3 item 14. The stat tracker can send small PNG crops of what it read
 (hero icons, stat digits, map name banners, rank screen regions) so recognizers can be trained on
 real captures. Every kind is opt-in, off by default, and consent is only
 given with a session, never with the tracker's sync token. The site has a
-switch for `hero_icon`, `stat_digits` and `map_name`. **`rank` has no switch
-on the site yet**: the only way to turn it on is a session
-`PUT /api/training-crops/consent` with `{"rank": true}` (see Consent). The
+switch for each of the four kinds (`hero_icon`, `stat_digits`, `map_name`
+and, since #687, `rank`), all off by default; a session
+`PUT /api/training-crops/consent` sets the same values (see Consent). The
 tracker sends crops itself with its sync token and shows the consent
 read-only, linking to the site. JSON types and error codes live in
 `crates/types/src/api/training_crops.rs`; kinds and caps live in
@@ -57,36 +57,61 @@ request of large banners holds fewer than 20 of them. The bounds live on
 `CropKind::max_edges` and `CropKind::max_crop_bytes`.
 
 `rank` crops are regions of the post-game rank screen, never the whole
-screen, the large result title (top left), chat or a region with player
-or hero names. The bar's change tags can name the result (`DEFEAT`). What
-the tracker sends: at most one set per competitive game, up to five crops,
+screen, the large result title (top left), the mode banner or the chat
+box. Each region is one where the rank screen itself draws no player or
+hero name (the role line, the emblem, the progress bar, the SR digits
+under the top hero's name). Text another program or the game draws over
+the screen is the one way a name could reach a crop, so the tracker
+refuses the two regions where it has been seen: `rank_bar` when chat
+shows on a line beside the bar's rows, and `rank_sr` when its box holds
+anything but the line's own digits (below). The mode banner is not sent
+at all: the voice overlay list under it can reach into its box with
+another person's name. The bar's change tags can name the result
+(`DEFEAT`). What the tracker sends: at most one set per competitive game,
+up to four crops,
 each cut at native scale (never resized) from the box the tracker's rank
 reader reads, placed on the 16:9 playfield at the 2560x1440 reference and
 scaled by the screen size:
 
 | `slot_type` | Box at 2560x1440 | 1080p | 1440p | 4K |
 |-------------|------------------|-------|-------|----|
-| `rank_role` | x 1060-1500, y 236-326 (the role line) | 330x68 | 440x90 | 660x135 |
+| `rank_role` | x 1060-1500, y 236-326 (the role line; not sent when the line is empty, an open queue screen) | 330x68 | 440x90 | 660x135, not sent (no 4K frame is offered) |
 | `rank_tier` | x 1070-1490, y 340-1020 (emblem, tier word, division) | 315x510 | 420x680 | 630x1020, not sent |
-| `rank_bar` | x 540-2040, y 1048-1232 (labels, bar, pill, tags, neighbour emblems) | 1125x138 | 1500x184 | 2250x276, not sent |
-| `rank_banner` | x 2056-2430, y 136-186 (the mode banner word, no timer) | 281x38 | 374x50 | 561x75 |
+| `rank_bar` | x 540-2040, y 1048-1232 (the RANK PROGRESS label and percent, the bar, the "Higher ranked than N%" percentile, the change pill, the change tags, the neighbour emblems) | 1125x138 | 1500x184 | 2250x276, not sent |
 | `rank_sr` | the first hero's SR line as the reader finds it, digits plus 2 rows and columns, never the hero name above it | about 55x20 | about 72x25 | not sent |
 
-A region outside 1536 by 720 (the tier and the bar at 4K) or over 384 KiB
-is left out by the tracker, never scaled; the others of the frame are still
-sent. `rank_sr` comes only from 1080p and 1440p frames, the sizes the
-reader reads, and only when its hero search finds the SR line. The bar's
-left end is near the chat box, so the tracker leaves `rank_bar` out of a
-frame where chat shows. Each crop's `meta` carries `screen`
-`rank_update`, the screen size, the region rectangle in frame pixels as
-`found_spot` (with `found_confidence` 1) and `spot_version`
-`rank-regions.1`, which is bumped whenever a box or rule changes. A frame
-under the minimum screen size (below) gives no crop. Measured on 61 real
-1440p rank screens, the tier is 148-286 KiB, the bar 119-148 KiB, the role
-12-22 KiB and the banner 6-13 KiB, each under 384 KiB with no scaling
-(315-449 KiB per game for those four). With the 2 MiB request limit a
-request holds at most five crops at the cap. Five crops per competitive
-game make the 1000 cap about 200 games.
+A frame is offered only when the report kit took it as a rank screen and
+the rank reader's own rank screen test finds the "RANK PROGRESS:" label
+on it (matched against the rank-v1 pack, which the tracker downloads
+whether or not its rank reader switch is on). Hero highlight art and the
+placement screen pass the kit's test but show no label: they give no
+crop and do not use up the game's one set (#760). With no rank-v1 pack on
+the PC, or on a frame size the reader does not take (only 1080p and
+1440p, so never 4K), nothing is sent. A region outside 1536 by 720 or
+over 384 KiB is left out by the tracker, never scaled; the others of the
+frame are still sent. `rank_sr` comes only from 1080p and 1440p frames, the sizes the
+reader reads, and only when its hero search finds the SR line. The SR
+crop is refused when its box holds a colour that is no mix of the
+background with grey (overlay text, a name chip), a glyph shorter than
+80% or taller than 125% of the SR digit height, more than five glyphs or one wider than two
+digits, glyphs along the line that do not line up with the digits and
+span more than the rank icon's width, or ink outside the line's glyphs; a missed SR crop is fine, one with
+letters is not. The tracker does not match the glyphs against its digit
+templates here, so grey-white capital letters at digit height, spaced
+like digits on the plain background, would pass; no overlay seen on the
+rank screen draws that. The bar's left end is near the chat box, so the
+tracker leaves `rank_bar` out of a frame where chat shows on a chat line
+band that shares rows with the bar (y 1048-1232); chat only in the
+bottom line, below the bar, does not drop it. Each crop's `meta` carries
+`screen` `rank_update`, the screen size, the region rectangle in frame
+pixels as `found_spot` (with `found_confidence` 1) and `spot_version`
+`rank-regions.2` (`.1` also had `rank_banner`), which is bumped whenever
+a box or rule changes. A frame under the minimum screen size (below)
+gives no crop. Measured on 61 real 1440p rank screens, the tier is
+148-286 KiB, the bar 119-148 KiB and the role 12-22 KiB, each under
+384 KiB with no scaling. With the 2 MiB request limit a request holds at
+most five crops at the cap. Four crops per competitive game make the
+1000 cap about 250 games.
 
 A `rank` bound of 1536 by 720 is large enough to hold a whole 1280x720
 screen, and members are told crops are never whole screens. So every
@@ -137,8 +162,7 @@ or banned). It is accepted, besides a session, on exactly these routes:
 
 Setting consent is session only, so a leaked or misused sync token can never
 turn a kind on. The tracker shows the consent read-only and links to the site
-to change it. The site has no `rank` switch yet, so `rank` consent is only
-set through the API `PUT` with a session.
+to change it, where `rank` has its own switch like the other kinds.
 
 The four routes that take the sync token share one per-IP limit: burst 40
 requests, then one every 2 s (`STATS_UPLOAD_IP_BURST`,
@@ -171,10 +195,10 @@ is present, the Bearer is tried as a sync token.
 
 ## Consent
 
-The site's consent page has switches for `hero_icon`, `stat_digits` and
-`map_name` only. `rank` has no switch on the site yet: it stays off unless
-the member sends `PUT /api/training-crops/consent` with `{"rank": true}`
-from a session.
+The site's consent page has a switch for each kind: `hero_icon`,
+`stat_digits`, `map_name` and `rank` (since #687). Each stays off until the
+member turns it on there, or sends `PUT /api/training-crops/consent` with
+`{"rank": true}` (or another kind) from a session.
 
 `GET /api/training-crops/consent`:
 
@@ -371,7 +395,7 @@ size per kind).
 | `hero_icon` | `career_panel` | The career panel's hero portrait: a `hero_icon` is shrunk to 171 px with Lanczos3 (smaller steps only if still needed) only when its PNG is over the 65,536-byte cap; otherwise stored as the native card; screen fields stay the game's. Carries `hero`, `score`, `runner_up`, `margin` and the hero pack name as `icon_set_version` |
 | `stat_digits` | `elims`, `assists`, `deaths`, `damage`, `healing`, `mitigation` | One stat cell of the member's own row, named by its column left to right, with `hero` only when that Tab's own read named it |
 | `map_name` | none | The map name banner |
-| `rank` | `rank_role`, `rank_tier`, `rank_bar`, `rank_banner`, `rank_sr` | One rank screen region at native scale (see Crop size per kind), with its rectangle in `found_spot`. No result title, chat, hero or player names (the bar's change tags can say `VICTORY` or `DEFEAT`) |
+| `rank` | `rank_role`, `rank_tier`, `rank_bar`, `rank_sr` | One rank screen region at native scale (see Crop size per kind), with its rectangle in `found_spot`. No result title, mode banner or chat box, and no region where the rank screen draws a name; the bar is left out while chat shows beside it and the SR line when its box holds overlay text (the bar's change tags can say `VICTORY` or `DEFEAT`). The server takes any of these slot names; `rank_banner` from a `rank-regions.1` tracker is not refused |
 
 There is no colourblind filter field. It hints at a member's colour vision
 and is not in the agreed field list or the consent text, so it is not

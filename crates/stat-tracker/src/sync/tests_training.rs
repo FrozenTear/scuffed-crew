@@ -112,6 +112,11 @@ fn rank_crops_need_the_kinds_screen_size_and_caps() {
         (Some(role), Some(1.0))
     );
     assert!(RANK_SLOTS.contains(&"rank_role"));
+    assert!(
+        !RANK_SLOTS.contains(&"rank_banner"),
+        "the mode banner is never cut"
+    );
+    assert_eq!(RANK_SPOT_VERSION, "rank-regions.2");
     meta.game_token = Some(t);
     meta.validate().unwrap();
     let ok = crop(meta.clone(), png(440, 90, false));
