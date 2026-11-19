@@ -416,5 +416,6 @@ fn set_consent(consent: &mut TrainingCropConsent, kind: UploadKind, on: bool) {
         UploadKind::HeroIcon => consent.hero_icon = on,
         UploadKind::StatDigits => consent.stat_digits = on,
         UploadKind::MapName => consent.map_name = on,
+        UploadKind::Rank => consent.rank = on,
     }
 }

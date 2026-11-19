@@ -52,9 +52,9 @@ pub use client::{
 };
 pub use errors::{SyncUploadError, server_error_text};
 pub use training::{
-    CropRefusal, QueuedCrop, STAT_DIGIT_COLUMNS, UploadKind, batch_len, check_crop, game_token_ok,
-    hero_field, hero_icon_meta, map_name_meta, meta_json, multipart_body, png_size, random_token,
-    stat_digits_meta,
+    CropRefusal, QueuedCrop, RANK_SCREEN, RANK_SLOTS, RANK_SPOT_VERSION, STAT_DIGIT_COLUMNS,
+    UploadKind, batch_len, check_crop, game_token_ok, hero_field, hero_icon_meta, map_name_meta,
+    meta_json, multipart_body, png_size, random_token, rank_meta, stat_digits_meta,
 };
 pub use training_client::TrainingCallError;
 pub use training_collect::{keep_tab_crops, training_kind_on, warn_crop_lost};

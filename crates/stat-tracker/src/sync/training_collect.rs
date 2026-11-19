@@ -72,9 +72,15 @@ pub fn warn_crop_lost(data_dir: &Path, kind: UploadKind) {
         kind = kind.as_str(),
         "a consented training crop could not be kept"
     );
-    let text = format!(
-        "Training crops: {} from a Tab could not be kept on this PC. Your games still record.",
-        kind.label().to_lowercase()
-    );
+    let text = match kind {
+        UploadKind::Rank => {
+            "Training crops: a rank screen could not be kept on this PC. Your games still record."
+                .to_string()
+        }
+        _ => format!(
+            "Training crops: {} from a Tab could not be kept on this PC. Your games still record.",
+            kind.label().to_lowercase()
+        ),
+    };
     add_sticky_training_warning(data_dir, &text);
 }

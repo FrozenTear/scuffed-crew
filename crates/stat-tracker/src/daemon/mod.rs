@@ -20,6 +20,7 @@ pub(crate) mod pregame_dump;
 pub(crate) mod query_server;
 pub(crate) mod queue_title;
 pub(crate) mod rank;
+mod rank_training;
 mod session;
 mod shutdown;
 pub(crate) mod snapshot_policy;
@@ -70,6 +71,8 @@ mod tests_pregame_staging;
 mod tests_pregame_tick;
 #[cfg(test)]
 mod tests_query_server;
+#[cfg(test)]
+mod tests_rank_training;
 #[cfg(test)]
 mod tests_roster_cadence;
 #[cfg(test)]
