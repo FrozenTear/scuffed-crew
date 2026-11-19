@@ -110,9 +110,12 @@
 //! confidence of at least 0.7, when no other held read has a different
 //! value for it (`RANK_LONE_READ_MIN_AGE` and
 //! `RANK_LONE_READ_MIN_CONFIDENCE` in the wiring); a screen read only once
-//! keeps nothing. The first read after a focus pause starts that clock
-//! again, so the time away never counts. The lone read can still be wrong when the count up runs
-//! longer than 12 s after the first read, or the frame is a transition
+//! keeps nothing. The first read after a pause the focus gate sees (or a
+//! failed analysis) starts that clock again, and every read from before
+//! the pause then counts as age zero. An alt-tab the gate does not see
+//! (GNOME Wayland, or the gate off) is no pause, so its time away counts.
+//! The lone read can still be wrong when the count up runs longer than
+//! 12 s after the first read, or the frame is a transition
 //! frame no other read contradicts. What the pair rule does not
 //! catch: two frames in a row that both show the same value that is not
 //! final yet (the count paused on one value for two ticks), and a field

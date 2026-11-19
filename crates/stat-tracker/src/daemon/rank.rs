@@ -37,8 +37,12 @@
 //! [`RANK_LONE_READ_MIN_CONFIDENCE`], when no other held read has a
 //! different value for it. The first read after a held-back tick (a focus
 //! pause or a failed analysis) restarts that clock, since the frames that
-//! set the bound were all taken with the game in focus. So a screen read
-//! only once, or only once since a pause, keeps nothing. The
+//! set the bound were all taken with the game in focus, and every read
+//! from before the pause then has age zero. So a screen read only once, or
+//! only once since a pause, gets nothing from a lone read (the pair rule
+//! can still keep a pair that spans the pause). Only a pause the focus
+//! gate sees restarts it: an alt-tab the gate does not see (GNOME Wayland,
+//! or the gate off) drops no history, so its time away counts. The
 //! result is stored on that game once (`LocalStore::attach_rank_update`),
 //! which queues it for upload when the upload changes. The mode banner
 //! word goes on to the queue title wiring as the pending next mode hint
@@ -92,7 +96,9 @@ pub(crate) const RANK_SETTLE_MISSES: u8 = 2;
 /// the count up is only known to within that step. All of those frames
 /// were taken with the game in focus: no frame shows whether the count up
 /// runs while Overwatch is in the background, so the first read after a
-/// pause starts the clock again ([`RankFeed::observe_tick`]).
+/// pause the focus gate sees starts the clock again
+/// ([`RankFeed::observe_tick`]); an alt-tab the gate does not see still
+/// counts toward the bound.
 pub(crate) const RANK_LONE_READ_MIN_AGE: Duration = Duration::from_secs(12);
 
 /// The lowest confidence a field from a lone read may have to be kept
@@ -130,18 +136,22 @@ impl RankStore for crate::storage::LocalStore {
 /// The reads of the rank screen on screen now.
 struct Held {
     session: String,
-    /// When the frame of the screen's first read was grabbed: the lone-read
-    /// clock starts here ([`settle_held`]). `None` until rank-v1 reads a
+    /// When the frame of the screen's first read, or of the first read
+    /// after the newest pause, was grabbed: the lone-read clock starts here
+    /// ([`settle_held`]). `None` until rank-v1 reads a
     /// frame. A frame the end detector took for the rank screen that
     /// rank-v1 did not read (a false fire on another screen, a fade-in, a
     /// frame size it does not take) never starts it. The first read after
     /// a pause starts it again ([`Self::paused`]).
     first_read: Option<Instant>,
     /// A held-back tick came since the newest read: the stability history
-    /// was dropped, by a focus pause (an alt-tab) or a failed analysis. No
-    /// data shows whether the count up runs while Overwatch is in the
-    /// background, so the time away does not count: the next read restarts
-    /// the clock at its own grab time.
+    /// was dropped, by a focus pause (an alt-tab the focus gate sees) or a
+    /// failed analysis. No data shows whether the count up runs while
+    /// Overwatch is in the background, so the next read restarts the clock
+    /// at its own grab time: the time away does not count, and every read
+    /// from before the pause then has age zero. An alt-tab the gate does
+    /// not see (GNOME Wayland, or the gate off) drops no history, so it
+    /// sets nothing here and its time away counts.
     paused: bool,
     /// When the newest read was taken.
     at: DateTime<Utc>,
@@ -333,7 +343,8 @@ impl RankFeed {
     /// Settle the held reads, if any.
     fn finish(&mut self) -> Option<Settled> {
         let held = self.held.take()?;
-        // an entry before the first read, or a clock that went back, is 0
+        // an entry before the clock's start (before the screen's first read,
+        // or a read from before the newest pause) is 0
         let age = |at: Instant| {
             held.first_read
                 .map_or(Duration::ZERO, |f| at.saturating_duration_since(f))
@@ -349,7 +360,7 @@ impl RankFeed {
                 .iter()
                 .map(|l| {
                     format!(
-                        "{} ({:.1} s after the first read, confidence {:.3})",
+                        "{} ({:.1} s after the lone-read clock started, confidence {:.3})",
                         l.field,
                         l.age.as_secs_f32(),
                         l.confidence
@@ -482,13 +493,15 @@ pub(crate) fn settle(reads: &[Option<RankUpdate>]) -> RankUpdate {
 }
 
 /// The held reads (oldest first) as one update, as the feed stores it.
-/// `ages` are the entries' grab times after the screen's first read (zero
-/// for an entry before it).
+/// `ages` are the entries' grab times after the lone-read clock started:
+/// the screen's first read, or the first read after the newest pause (zero
+/// for an entry before it, so for every read from before the pause).
 /// Per field the pair rule ([`settle`]) goes first, unchanged. When it
 /// keeps nothing, the field comes from a lone read only when all of these
 /// hold:
 /// - the newest read that has the field was taken at least
-///   [`RANK_LONE_READ_MIN_AGE`] after the first read;
+///   [`RANK_LONE_READ_MIN_AGE`] after the clock started (the
+///   screen's first read, or the first read after the newest pause);
 /// - every other held read that has the field has the same value (no
 ///   disagreement anywhere in the held reads, not only next to it);
 /// - the lowest confidence among those reads is at least
