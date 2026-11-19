@@ -163,6 +163,23 @@ fn subscription_allowed(state: RelayConnectionState) -> bool {
     )
 }
 
+/// The page text for a failed chat request. The raw error goes to the
+/// console once, under `what` (Vision nit 3, round 4 on 748): every chat
+/// request maps its failure through here, never through a second log.
+fn chat_failure(what: &str, err: &ClientError) -> String {
+    crate::util::log_client_error(what, err);
+    match err {
+        ClientError::Http { status, body, .. } => chat_api_error_copy(*status, body),
+        other => crate::client_error::user_message(other),
+    }
+}
+
+/// A 400 the server fixes with a fresh relay auth token (one retry). A 400
+/// about an external key is final.
+fn needs_auth_token(err: &ClientError) -> bool {
+    matches!(err, ClientError::Http { status: 400, body, .. } if !body.contains("External key"))
+}
+
 async fn provision_auth_token(relay_url: &str) -> Result<AuthTokenResponse, String> {
     let client = ApiClient::web();
     client
@@ -174,14 +191,7 @@ async fn provision_auth_token(relay_url: &str) -> Result<AuthTokenResponse, Stri
             },
         )
         .await
-        .map_err(|e| match e {
-            ClientError::Http {
-                status,
-                body,
-                retry_after: _,
-            } => chat_api_error_copy(status, &body),
-            other => crate::client_error::user_message(&other),
-        })
+        .map_err(|e| chat_failure("Chat auth token", &e))
 }
 
 async fn send_officer_message(
@@ -200,34 +210,14 @@ async fn send_officer_message(
         .await
     {
         Ok(r) => Ok(r),
-        Err(ClientError::Http {
-            status: 400,
-            body,
-            retry_after: _,
-        }) => {
-            if body.contains("External key") {
-                return Err(chat_api_error_copy(400, &body));
-            }
+        Err(e) if needs_auth_token(&e) => {
             provision_auth_token(relay_url).await?;
-            match client
+            client
                 .post_json::<_, SendEncryptedResponse>("/api/chat/send-encrypted", &req)
                 .await
-            {
-                Ok(r) => Ok(r),
-                Err(ClientError::Http {
-                    status,
-                    body,
-                    retry_after: _,
-                }) => Err(chat_api_error_copy(status, &body)),
-                Err(e) => Err(crate::client_error::user_message(&e)),
-            }
+                .map_err(|e| chat_failure("Chat send", &e))
         }
-        Err(ClientError::Http {
-            status,
-            body,
-            retry_after: _,
-        }) => Err(chat_api_error_copy(status, &body)),
-        Err(e) => Err(crate::client_error::user_message(&e)),
+        Err(e) => Err(chat_failure("Chat send", &e)),
     }
 }
 
@@ -241,33 +231,14 @@ async fn decrypt_gift_wrap(event: &NostrEvent, relay_url: &str) -> Result<ChatMe
         .await
     {
         Ok(r) => r,
-        Err(ClientError::Http {
-            status: 400,
-            body,
-            retry_after: _,
-        }) => {
-            if body.contains("External key") {
-                return Err(chat_api_error_copy(400, &body));
-            }
+        Err(e) if needs_auth_token(&e) => {
             let _ = provision_auth_token(relay_url).await;
             client
                 .post_json::<_, DecryptMessageResponse>("/api/chat/decrypt", &req)
                 .await
-                .map_err(|e| match e {
-                    ClientError::Http {
-                        status,
-                        body,
-                        retry_after: _,
-                    } => chat_api_error_copy(status, &body),
-                    other => crate::client_error::user_message(&other),
-                })?
+                .map_err(|e| chat_failure("Chat decrypt", &e))?
         }
-        Err(ClientError::Http {
-            status,
-            body,
-            retry_after: _,
-        }) => return Err(chat_api_error_copy(status, &body)),
-        Err(e) => return Err(crate::client_error::user_message(&e)),
+        Err(e) => return Err(chat_failure("Chat decrypt", &e)),
     };
     let group_id = resp
         .tags
@@ -908,6 +879,62 @@ pub fn ChatWidget(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Vision nit 3, round 4 on 748: each failed chat request logs its raw
+    /// error once and shows the mapped copy.
+    #[test]
+    fn a_chat_failure_logs_once_and_shows_the_mapped_copy() {
+        let _ = crate::util::take_logged();
+        let net = ClientError::Network("TypeError: Failed to fetch".into());
+        assert_eq!(
+            chat_failure("Chat send", &net),
+            crate::client_error::NETWORK_ERROR_MESSAGE
+        );
+        let http = ClientError::http(403, r#"{"error":"not a member"}"#, None);
+        assert_eq!(
+            chat_failure("Chat decrypt", &http),
+            "You don't have access to this channel."
+        );
+        let logged = crate::util::take_logged();
+        assert_eq!(logged.len(), 2, "{logged:?}");
+        assert!(logged[0].starts_with("Chat send: "), "{logged:?}");
+        assert!(logged[0].contains("Failed to fetch"), "{logged:?}");
+        assert!(logged[1].starts_with("Chat decrypt: "), "{logged:?}");
+
+        // Only a 400 that is not about an external key retries.
+        assert!(needs_auth_token(&ClientError::http(
+            400,
+            r#"{"error":"No Nostr keys"}"#,
+            None
+        )));
+        assert!(!needs_auth_token(&ClientError::http(
+            400,
+            r#"{"error":"External key"}"#,
+            None
+        )));
+        assert!(!needs_auth_token(&http));
+        assert!(!needs_auth_token(&net));
+
+        // Every request maps through chat_failure: one log, no second path.
+        let src = include_str!("chat_widget.rs");
+        let prod = src.split("mod tests").next().expect("production source");
+        assert_eq!(
+            prod.matches("chat_failure(").count(),
+            6,
+            "definition + 5 calls"
+        );
+        assert_eq!(
+            prod.matches("chat_api_error_copy(").count(),
+            1,
+            "only inside chat_failure"
+        );
+        assert_eq!(
+            prod.matches("user_message(").count(),
+            1,
+            "only inside chat_failure"
+        );
+        assert_eq!(prod.matches("log_client_error(").count(), 1);
+    }
 
     fn channel(active: bool, relay_url: &str) -> TeamChannel {
         TeamChannel {

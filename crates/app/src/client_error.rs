@@ -73,31 +73,58 @@ fn has_server_reason(status: u16, body: &str) -> bool {
             .unwrap_or(false)
 }
 
-/// A long dash in a server reason becomes a full stop and the next word
-/// starts a sentence: "already linked \u{2014} remove it first" reads
-/// "already linked. Remove it first". The same rule as the types crate's
-/// private chat helper; the site copy uses no long dashes.
+/// A dash used as a sentence break in a server reason becomes a full stop
+/// and the next word starts a sentence: "already linked \u{2014} remove it
+/// first" reads "already linked. Remove it first". The site copy uses no
+/// long dashes.
+///
+/// Which dashes break (Vision nit 2, round 4 on 748):
+/// - An em dash (U+2014) always does, spaced or not: it is never a range or
+///   a compound, and "linked\u{2014}remove" is the closed style of the same
+///   break.
+/// - An en dash (U+2013) or a hyphen breaks only with whitespace on both
+///   sides ("a \u{2013} b", "a - b"). An unspaced en dash is a range: the
+///   server's "username must be 1\u{2013}32 characters" reads "1-32", a plain
+///   hyphen, so the page shows no long dash and never "1. 32". An unspaced
+///   hyphen ("1-32", "re-link", "-5") is kept as it is.
+/// - A long dash with nothing after it ends the sentence ("ends \u{2014}"
+///   reads "ends."). A hyphen at the end is kept: the server's "letters,
+///   digits, _ and -" names the hyphen itself.
 pub fn plain_punctuation(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
     let mut capitalize_next = false;
-    for ch in text.chars() {
-        if ch == '\u{2014}' || ch == '\u{2013}' {
-            if !capitalize_next {
-                while out.ends_with(' ') {
-                    out.pop();
+    for (at, &ch) in chars.iter().enumerate() {
+        let mut ch = ch;
+        if matches!(ch, '\u{2014}' | '\u{2013}' | '-') {
+            let space_before = at > 0 && chars[at - 1].is_whitespace();
+            let space_after = chars.get(at + 1).is_some_and(|c| c.is_whitespace());
+            let nothing_after = chars[at + 1..].iter().all(|c| c.is_whitespace());
+            let long = ch != '-';
+            let breaks = ch == '\u{2014}'
+                || (space_before && space_after)
+                || (long && (nothing_after || (at == 0 && space_after)));
+            if breaks {
+                if !capitalize_next {
+                    while out.ends_with(char::is_whitespace) {
+                        out.pop();
+                    }
+                    if !out.ends_with(['.', '!', '?', ':']) && !out.is_empty() {
+                        out.push('.');
+                    }
+                    if !out.is_empty() {
+                        out.push(' ');
+                    }
+                    capitalize_next = true;
                 }
-                if !out.ends_with(['.', '!', '?', ':']) && !out.is_empty() {
-                    out.push('.');
-                }
-                if !out.is_empty() {
-                    out.push(' ');
-                }
-                capitalize_next = true;
+                continue;
             }
-            continue;
+            if ch == '\u{2013}' {
+                ch = '-';
+            }
         }
         if capitalize_next {
-            if ch == ' ' {
+            if ch.is_whitespace() {
                 continue;
             }
             out.extend(ch.to_uppercase());
@@ -545,9 +572,66 @@ mod tests {
         );
         assert_eq!(plain_punctuation("a \u{2014} b"), "a. B");
         assert_eq!(plain_punctuation("done. \u{2014} next"), "done. Next");
-        assert_eq!(plain_punctuation("a\u{2013}b"), "a. B");
         assert_eq!(plain_punctuation("ends \u{2014}"), "ends.");
         assert_eq!(plain_punctuation("no dash"), "no dash");
+    }
+
+    /// Vision nit 2, round 4 on 748: only a spaced dash breaks a sentence.
+    /// The setup and register 400 ("username must be 1\u{2013}32
+    /// characters") keeps its range as a plain "1-32", never "1. 32".
+    #[test]
+    fn the_username_length_reason_keeps_its_range() {
+        let err = ClientError::http(
+            400,
+            r#"{"error":"username must be 1\u201332 characters"}"#,
+            None,
+        );
+        let shown = user_message(&err);
+        assert_eq!(shown, "HTTP error 400: username must be 1-32 characters");
+        assert!(!shown.contains("1. 32"), "{shown}");
+        assert!(
+            !shown.contains('\u{2014}') && !shown.contains('\u{2013}'),
+            "{shown}"
+        );
+        // The register form's other reason names the hyphen itself, at the end.
+        let err = ClientError::http(
+            400,
+            r#"{"error":"username may only contain letters, digits, _ and -"}"#,
+            None,
+        );
+        assert_eq!(
+            user_message(&err),
+            "HTTP error 400: username may only contain letters, digits, _ and -"
+        );
+    }
+
+    #[test]
+    fn a_spaced_dash_breaks_the_sentence_and_an_unspaced_one_is_a_range() {
+        // Spaced em dash and spaced en dash: two sentences.
+        assert_eq!(plain_punctuation("a \u{2014} b"), "a. B");
+        assert_eq!(plain_punctuation("a \u{2013} b"), "a. B");
+        assert_eq!(plain_punctuation("a - b"), "a. B");
+        // Any whitespace counts, not only a plain space.
+        assert_eq!(plain_punctuation("a\u{a0}\u{2013}\tb"), "a. B");
+        // Unspaced en dash: a range, made a plain hyphen.
+        assert_eq!(plain_punctuation("a\u{2013}b"), "a-b");
+        assert_eq!(plain_punctuation("1\u{2013}32"), "1-32");
+        // Half-spaced en dash is not a break either.
+        assert_eq!(plain_punctuation("1 \u{2013}32"), "1 -32");
+        // Unspaced hyphen: a compound, a range or a sign, kept.
+        assert_eq!(plain_punctuation("re-link 1-32 -5"), "re-link 1-32 -5");
+        assert_eq!(plain_punctuation("_ and -"), "_ and -");
+        // Unspaced em dash: still a break (never a range).
+        assert_eq!(
+            plain_punctuation("already linked\u{2014}remove it first"),
+            "already linked. Remove it first"
+        );
+        // Trailing and leading long dashes end or open a sentence.
+        assert_eq!(plain_punctuation("ends \u{2014}"), "ends.");
+        assert_eq!(plain_punctuation("ends\u{2013}"), "ends.");
+        assert_eq!(plain_punctuation("\u{2013} starts"), "Starts");
+        // A run of spaced dashes is one break.
+        assert_eq!(plain_punctuation("a \u{2014} \u{2013} b"), "a. B");
     }
 
     /// Vision nit 6 on 748: no join ever reads "..", ". ." or ": .".
@@ -1186,8 +1270,8 @@ mod tests {
             let mut depth = 0i32;
             let mut from = open + 1;
             let mut index = 0;
-            for k in open + 1..end {
-                match shape[k] {
+            for (k, &c) in shape.iter().enumerate().take(end).skip(open + 1) {
+                match c {
                     '(' | '[' | '{' => depth += 1,
                     ')' | ']' | '}' if depth > 0 => depth -= 1,
                     ',' | ')' if depth == 0 => {

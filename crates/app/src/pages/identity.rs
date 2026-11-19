@@ -281,7 +281,15 @@ pub fn IdentitySettings() -> Element {
     let auth = use_auth();
     let identity = use_resource(move || {
         let _ = refresh();
-        async move { ApiClient::web().get_me().await }
+        async move {
+            let me = ApiClient::web().get_me().await;
+            // Logged once per load, here: `identity_view` runs on every
+            // render and stays pure (Vision nit 3, round 4 on 748).
+            if let Err(e) = &me {
+                crate::util::log_client_error("Load account", e);
+            }
+            me
+        }
     });
 
     let has_extension = has_nip07_extension();
@@ -1009,6 +1017,40 @@ mod tests {
         );
         assert_eq!(npub_from_hex("abc"), None);
         assert_eq!(npub_from_hex(&"zz".repeat(32)), None);
+    }
+
+    /// Vision nit 3, round 4 on 748: a failed `me` load logs once, in the
+    /// resource (once per load), never in `identity_view`, which runs on
+    /// every render.
+    #[test]
+    fn a_failed_account_load_logs_once_per_load() {
+        let src = include_str!("identity.rs");
+        let prod = src.split("mod tests").next().expect("production half");
+        let resource = prod.find("let identity = use_resource(").expect("resource");
+        let load = prod[resource..]
+            .find("get_me().await")
+            .map(|at| resource + at)
+            .expect("load");
+        let log = prod[load..]
+            .find("log_client_error(\"Load account\", e)")
+            .map(|at| load + at)
+            .expect("logged after the load");
+        let end = prod[resource..]
+            .find("});")
+            .map(|at| resource + at)
+            .unwrap();
+        assert!(log < end, "the log is inside the resource");
+        let view = prod
+            .split("fn identity_view(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("identity_view");
+        assert!(view.contains("user_message(e)"), "{view}");
+        assert!(
+            !view.contains("log_client_error") && !view.contains("logged_message"),
+            "identity_view runs on every render and stays pure"
+        );
+        assert_eq!(prod.matches("log_client_error(\"Load account\"").count(), 1);
     }
 
     #[test]

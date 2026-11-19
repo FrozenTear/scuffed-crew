@@ -322,6 +322,10 @@ pub fn TrainingCropSettings(member_id: String) -> Element {
             return;
         }
         busy.set(true);
+        // A note first, as the consent save does: the alert empties, so a
+        // repeated identical failure is announced again (Vision nit 5,
+        // round 4 on 748).
+        status.set(ConsentLine::note(text::DELETING_ALL));
         let before = count;
         // B9: the confirm strip, and the focus in it, goes when the delete
         // ends. Focus comes back to Delete all my icons, which says there is
@@ -655,6 +659,82 @@ mod tests {
             render(failed),
             "<p id=\"hero-icons-m1-status\" class=\"account-status training-crops__status\" role=\"status\"></p><p id=\"hero-icons-m1-status-alert\" class=\"account-status training-crops__status is-error\" role=\"alert\"><span class=\"field-error-icon\" aria-hidden=\"true\"></span>Deleting your icons failed. Could not reach the server. Check your connection and try again.</p>"
         );
+    }
+
+    /// Vision nit 5, round 4 on 748: Delete all sets the "Deleting your
+    /// icons..." note before the request, so a second identical failure goes
+    /// alert, empty, alert and is announced again. Both regions stay
+    /// rendered in every state; only their text changes.
+    #[test]
+    fn a_repeated_delete_all_failure_is_announced_again() {
+        let prod = include_str!("hero_icon_settings.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("prod part");
+        let delete_all = prod
+            .split("let delete_all = move |_| {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    };\n").next())
+            .expect("delete_all");
+        let guard = delete_all.find("if busy() {").expect("busy guard");
+        let note = delete_all
+            .find("status.set(ConsentLine::note(text::DELETING_ALL));")
+            .expect("the note");
+        let request = delete_all
+            .find("ApiClient::web().delete(\"/api/hero-icons/mine\")")
+            .expect("the request");
+        let failure = delete_all
+            .find("status.set(ConsentLine::failure(")
+            .expect("the failure");
+        assert!(
+            guard < note && note < request && request < failure,
+            "{delete_all}"
+        );
+        assert_eq!(text::DELETING_ALL, "Deleting your icons...");
+
+        // The sequence a person hears: failure, the note (alert empty), the
+        // same failure again (a new alert text).
+        fn failed() -> Element {
+            let line = ConsentLine::failure(text::failure_text(
+                "Deleting your icons",
+                &scuffed_api_client::ClientError::http(403, "", None),
+            ));
+            rsx! { ConsentStatus { id: "s".to_string(), line } }
+        }
+        fn deleting() -> Element {
+            let line = ConsentLine::note(text::DELETING_ALL);
+            rsx! { ConsentStatus { id: "s".to_string(), line } }
+        }
+        let alert_text = |html: &str| -> String {
+            let alert = html
+                .split("role=\"alert\">")
+                .nth(1)
+                .expect("alert always rendered");
+            let alert = alert.strip_suffix("</p>").expect("alert last");
+            alert
+                .replace(
+                    "<span class=\"field-error-icon\" aria-hidden=\"true\"></span>",
+                    "",
+                )
+                .to_string()
+        };
+        let first = render(failed);
+        let between = render(deleting);
+        let second = render(failed);
+        assert!(
+            alert_text(&first).starts_with("Deleting your icons failed."),
+            "{first}"
+        );
+        assert_eq!(alert_text(&between), "", "{between}");
+        assert_eq!(alert_text(&second), alert_text(&first));
+        assert_eq!(
+            between,
+            "<p id=\"s\" class=\"account-status training-crops__status\" role=\"status\">Deleting your icons...</p><p id=\"s-alert\" class=\"account-status training-crops__status\" role=\"alert\"></p>"
+        );
+        for html in [&first, &between, &second] {
+            assert_eq!(html.matches("role=\"status\"").count(), 1, "{html}");
+            assert_eq!(html.matches("role=\"alert\"").count(), 1, "{html}");
+        }
     }
 
     #[test]

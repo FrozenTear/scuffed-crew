@@ -70,6 +70,11 @@ pub const STORE_DISABLED: &str = "Hero icon sharing is not switched on for this 
 
 pub const LOADING: &str = "Loading your hero icons...";
 
+/// The list line while Delete all runs. Setting it empties the alert, so a
+/// repeated identical failure is a new alert and is announced again (Vision
+/// nit 5, round 4 on 748).
+pub const DELETING_ALL: &str = "Deleting your icons...";
+
 pub const KEPT_HIDDEN_NOTE: &str = "Your icons are kept on the server and hidden while sharing is off. Admins can delete them but cannot open them.";
 
 pub const NONE_SENT: &str = "You have not sent any icons yet.";

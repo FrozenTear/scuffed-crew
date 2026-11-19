@@ -95,6 +95,14 @@ pub fn poll_error_copy(lead: &str, err: &scuffed_api_client::ClientError) -> Str
     format!("{lead} {why}")
 }
 
+/// [`poll_error_copy`] for a toast: the raw error goes to the console once,
+/// under `lead`, so the detail the toast leaves out is still there (Vision
+/// nit 3, round 4 on 748). The card calls only this, never both.
+pub fn logged_poll_error(lead: &str, err: &scuffed_api_client::ClientError) -> String {
+    crate::util::log_client_error(lead.trim().trim_end_matches(['.', ':']), err);
+    poll_error_copy(lead, err)
+}
+
 /// The browser clock as an ISO-8601 UTC timestamp. `None` outside the
 /// browser (native tests have no clock to trust).
 #[cfg(all(feature = "web", target_arch = "wasm32"))]
@@ -137,6 +145,33 @@ mod tests {
         assert!(
             !card.contains("failed: {e}"),
             "a raw client error reaches a toast"
+        );
+    }
+
+    /// Vision nit 3, round 4 on 748: a failed vote or removal logs its raw
+    /// error once, and the toast text is the same as the pure copy.
+    #[test]
+    fn a_poll_failure_logs_once() {
+        use scuffed_api_client::ClientError;
+        let _ = crate::util::take_logged();
+        let err = ClientError::Network("TypeError: Failed to fetch".into());
+        let shown = logged_poll_error("Vote failed.", &err);
+        assert_eq!(shown, poll_error_copy("Vote failed.", &err));
+        let logged = crate::util::take_logged();
+        assert_eq!(logged.len(), 1, "{logged:?}");
+        assert!(logged[0].starts_with("Vote failed: "), "{logged:?}");
+        assert!(logged[0].contains("Failed to fetch"), "{logged:?}");
+        assert!(!shown.contains("Failed to fetch"), "{shown}");
+
+        let card = include_str!("card.rs").split("mod tests").next().unwrap();
+        assert_eq!(
+            card.matches("logged_poll_error(").count(),
+            2,
+            "vote and remove"
+        );
+        assert!(
+            !card.contains("poll_error_copy(") && !card.contains("log_client_error("),
+            "the card maps through logged_poll_error only, so each failure logs once"
         );
     }
 

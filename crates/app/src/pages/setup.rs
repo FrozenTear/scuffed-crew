@@ -195,6 +195,9 @@ pub fn Setup() -> Element {
                     nav.replace(Route::AdminDashboard {});
                 }
                 Err(e) => {
+                    // Logged once here, whichever line shows it (Vision nit 3,
+                    // round 4 on 748); the mapping below is pure.
+                    crate::util::log_client_error("Create admin account", &e);
                     let settled = settle_name_field(
                         &typed_at_submit,
                         &username(),
@@ -313,5 +316,25 @@ pub fn Setup() -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Vision nit 3, round 4 on 748: a failed first-admin setup logs its raw
+    /// error once, at the top of the failure arm, whichever line (the name
+    /// field or the form error) then shows it, and the mapping stays pure.
+    #[test]
+    fn a_failed_setup_logs_once() {
+        let src = include_str!("setup.rs");
+        let prod = src.split("mod tests").next().expect("production source");
+        assert_eq!(prod.matches("log_client_error(").count(), 1);
+        assert!(!prod.contains("logged_message("), "a second log");
+        assert!(!prod.contains("with_lead("), "a second log");
+        let arm = prod.find("Err(e) => {").expect("failure arm");
+        let log = prod.find("log_client_error(").expect("log");
+        let settle = prod.find("settle_name_field(\n").expect("settle");
+        let shown = prod.find("user_message(&e)").expect("form error");
+        assert!(arm < log && log < settle && settle < shown);
     }
 }
