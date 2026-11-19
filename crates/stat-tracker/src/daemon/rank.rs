@@ -309,7 +309,7 @@ impl RankFeed {
             if read == 0 {
                 tracing::info!(target: "scuffed_stat_tracker", session = %held.session, entries = reads.len(), "rank update: the reader read none of the rank screen frames (a frame size other than 2560x1440, not a rank update screen, or unreadable), no rank for the game");
             } else {
-                tracing::info!(target: "scuffed_stat_tracker", session = %held.session, entries = reads.len(), read, "rank update: no field read the same on its newest two reads in a row, nor came from one late confident read that no other read disagrees with, no rank for the game");
+                tracing::info!(target: "scuffed_stat_tracker", session = %held.session, entries = reads.len(), read, lone_read = "none qualified", "rank update: no field read the same on its newest two reads in a row, no rank for the game");
             }
             return None;
         }

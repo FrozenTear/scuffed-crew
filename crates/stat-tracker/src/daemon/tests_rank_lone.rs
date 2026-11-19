@@ -173,3 +173,40 @@ fn the_pair_rule_still_decides_where_it_keeps_a_field() {
     assert!(lone.is_empty());
     assert_eq!(r.division, n(3, 1.0));
 }
+
+#[test]
+fn a_lone_read_at_exactly_the_min_age_is_kept_and_a_hair_under_is_not() {
+    assert_eq!(RANK_LONE_READ_MIN_AGE, Duration::from_secs(12));
+    let reads = [None, Some(read(40, 1.0))];
+    let at = Duration::from_millis(12_000);
+    let (r, lone) = settle_held(&reads, &[Duration::ZERO, at]);
+    assert_eq!(r, read(40, 1.0), "at the gate");
+    assert_eq!(lone.len(), 10);
+    let under = Duration::from_millis(11_999);
+    let (r, lone) = settle_held(&reads, &[Duration::ZERO, under]);
+    assert!(r.is_empty() && lone.is_empty(), "under the gate: {r:?}");
+}
+
+#[test]
+fn a_field_at_exactly_the_min_confidence_is_kept_and_a_hair_under_is_not() {
+    // the same f32 the gate compares with, no rounding in between
+    let at: f32 = 0.7;
+    assert_eq!(at, RANK_LONE_READ_MIN_CONFIDENCE);
+    let under: f32 = 0.699;
+    assert!(under < RANK_LONE_READ_MIN_CONFIDENCE);
+    let mut lone = read(40, 1.0);
+    lone.hero_sr = n(3412, at);
+    lone.division = n(3, under);
+    let reads = [None, Some(lone)];
+    let (r, kept) = settle_held(&reads, &[Duration::ZERO, late()]);
+    assert_eq!(r.hero_sr, n(3412, at), "at the gate");
+    assert!(kept.contains(&"hero_sr"));
+    assert_eq!(r.division, None, "under the gate");
+    assert!(!kept.contains(&"division"));
+    // a read at the gate on every field keeps every field, a hair under
+    // keeps nothing
+    let (r, _) = settle_held(&[None, Some(read(40, at))], &[Duration::ZERO, late()]);
+    assert_eq!(r, read(40, at));
+    let (r, _) = settle_held(&[None, Some(read(40, under))], &[Duration::ZERO, late()]);
+    assert!(r.is_empty(), "{r:?}");
+}
