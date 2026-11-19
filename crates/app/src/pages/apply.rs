@@ -1,5 +1,5 @@
 use dioxus::prelude::*;
-use scuffed_types::{MIN_APPLICATION_MESSAGE_CHARS, application_message_long_enough};
+use scuffed_types::{Game, MIN_APPLICATION_MESSAGE_CHARS, application_message_long_enough};
 use serde::{Deserialize, Serialize};
 
 use crate::components::ui::inline_confirm::{focus_element_by_id_soon, focus_field_by_id};
@@ -14,7 +14,6 @@ use crate::state::auth::{AuthState, use_auth};
 use crate::state::{loaded_site_settings, use_site_settings};
 use crate::util::{FetchClass, classify_fetch, log_client_error};
 use scuffed_api_client::{ApiClient, ClientError};
-use scuffed_types::Game;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ApplyScreen {

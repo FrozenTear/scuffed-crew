@@ -6,8 +6,9 @@
 /// Minimum application message length, in Unicode chars after trim.
 pub const MIN_APPLICATION_MESSAGE_CHARS: usize = 10;
 
-/// Characters of the message as the rule counts them: trimmed, then counted
-/// in `char`s (code points), not bytes. A message in a non-Latin script is
+/// Characters of the message as the rule counts them: trimmed with Unicode
+/// whitespace rules (`trim`, not `trim_ascii`), then counted in `char`s:
+/// code points, not bytes or graphemes. A message in a non-Latin script is
 /// measured the same as one in ASCII.
 pub fn application_message_chars(message: &str) -> usize {
     message.trim().chars().count()
@@ -59,6 +60,30 @@ mod tests {
         assert_eq!(application_message_chars(nine), 9);
         assert!(!application_message_long_enough(nine));
         assert!(!application_message_long_enough("æøåÆØÅéüñ"));
+    }
+
+    #[test]
+    fn non_ascii_whitespace_padding_is_trimmed() {
+        // U+3000 ideographic space and U+00A0 no-break space are Unicode
+        // whitespace, so `trim` drops them; `trim_ascii` would not.
+        let ideographic = "\u{3000}123456789\u{3000}";
+        assert_eq!(application_message_chars(ideographic), 9);
+        assert!(!application_message_long_enough(ideographic));
+        let no_break = "\u{A0}\u{A0}123456789\u{A0}";
+        assert_eq!(application_message_chars(no_break), 9);
+        assert!(!application_message_long_enough(no_break));
+    }
+
+    #[test]
+    fn counts_code_points_not_graphemes() {
+        // 5 graphemes, 10 code points: e + combining acute accent.
+        let combining = "e\u{301}".repeat(5);
+        assert_eq!(application_message_chars(&combining), 10);
+        assert!(application_message_long_enough(&combining));
+        // 5 graphemes, 10 code points: thumbs up + skin tone modifier.
+        let toned = "\u{1F44D}\u{1F3FD}".repeat(5);
+        assert_eq!(application_message_chars(&toned), 10);
+        assert!(application_message_long_enough(&toned));
     }
 
     #[test]
