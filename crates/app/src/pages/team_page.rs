@@ -308,7 +308,7 @@ fn tab_label(load: &Load<TeamDetailData>) -> Option<String> {
     match load {
         Load::Ready(t) => Some(format!("{} | Team", t.name.trim())),
         Load::Missing => Some("Team not found".to_string()),
-        Load::Loading | Load::Failed => None,
+        Load::Loading | Load::Failed(_) => None,
     }
 }
 
@@ -335,7 +335,7 @@ fn TeamView(
         PageShell { width, class: "team-page",
             {match &load {
                 Load::Loading => rsx! { PageHeader { title: "Team" } },
-                Load::Failed => rsx! { PageHeader { title: "Couldn't load this team" } },
+                Load::Failed(_) => rsx! { PageHeader { title: "Couldn't load this team" } },
                 Load::Missing | Load::Ready(_) => rsx! {},
             }}
             p { class: "entry-status", role: "status", "{status}" }
@@ -351,9 +351,9 @@ fn TeamView(
                         ],
                     }
                 },
-                Load::Failed => rsx! {
+                Load::Failed(reason) => rsx! {
                     LoadError {
-                        message: "Check your connection and try again.",
+                        message: crate::client_error::reason_or_fallback(reason),
                         on_retry: move |_| on_retry.call(()),
                         retrying,
                     }
@@ -542,6 +542,7 @@ fn render_match_row(team: &str, m: &TeamMatch) -> Element {
 
 #[cfg(test)]
 mod tests {
+    const NET: &str = crate::client_error::NETWORK_ERROR_MESSAGE;
     use super::*;
     use crate::components::ui::test_support::{
         assert_sizes_from_tokens, css_rule, has_decl, render_routed,
@@ -758,7 +759,7 @@ mod tests {
         );
         assert!(loading.contains("ui-skel-list"), "{loading}");
 
-        let failed = render(Load::Failed);
+        let failed = render(Load::Failed(NET.to_string()));
         assert_eq!(failed.matches("<h1").count(), 1, "{failed}");
         assert!(failed.contains("load this team</h1>"), "{failed}");
         assert!(failed.contains("fetch-error__retry"), "{failed}");
@@ -813,7 +814,7 @@ mod tests {
             Some("Squad Alpha | Team")
         );
         assert_eq!(tab_label(&Load::Missing).as_deref(), Some("Team not found"));
-        assert_eq!(tab_label(&Load::Failed), None);
+        assert_eq!(tab_label(&Load::Failed(NET.to_string())), None);
     }
 
     #[test]

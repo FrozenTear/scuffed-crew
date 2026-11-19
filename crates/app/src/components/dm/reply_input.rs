@@ -109,14 +109,16 @@ pub(crate) enum SendState {
 }
 
 impl SendState {
-    pub(crate) fn failed(reason: impl std::fmt::Display) -> Self {
-        let reason = reason.to_string();
-        let reason = reason.trim();
-        if reason.is_empty() {
-            SendState::Failed("Could not send the message.".to_string())
-        } else {
-            SendState::Failed(format!("Could not send the message. {reason}"))
-        }
+    /// The request failed: the reason is [`crate::client_error::user_message`],
+    /// so a network failure is one short sentence, not the browser's error.
+    pub(crate) fn failed(err: &ClientError) -> Self {
+        // Not logged here: both callers show `Toast::error_from` for the
+        // same error first, and that logs it.
+        let reason = crate::client_error::user_message(err);
+        SendState::Failed(crate::client_error::two_sentences(
+            "Could not send the message.",
+            &reason,
+        ))
     }
 
     pub(crate) fn is_error(&self) -> bool {
@@ -238,7 +240,7 @@ pub fn ReplyInput(
                         state.set(SendState::NeedsIdentity);
                     }
                     Err(e) => {
-                        toast.show(Toast::error(format!("Failed to send: {e}")));
+                        toast.show(Toast::error_from("Failed to send", &e));
                         state.set(SendState::failed(&e));
                     }
                 }
@@ -319,10 +321,26 @@ mod tests {
 
     #[test]
     fn a_failed_send_keeps_the_server_reason() {
-        let state = SendState::failed("HTTP 502: relay unreachable");
+        let state = SendState::failed(&ClientError::http(
+            502,
+            r#"{"error":"relay unreachable"}"#,
+            None,
+        ));
         assert_eq!(
             state,
-            SendState::Failed("Could not send the message. HTTP 502: relay unreachable".into())
+            SendState::Failed(
+                "Could not send the message. HTTP error 502: relay unreachable".into()
+            )
+        );
+        // A network failure is the short sentence, never the browser's text.
+        assert_eq!(
+            SendState::failed(&ClientError::Network(
+                "JsValue(TypeError: Failed to fetch\n    at http://x/a.js:1:2)".into()
+            )),
+            SendState::Failed(format!(
+                "Could not send the message. {}",
+                crate::client_error::NETWORK_ERROR_MESSAGE
+            ))
         );
         assert!(state.is_error());
         assert!(!SendState::Sending.is_error());

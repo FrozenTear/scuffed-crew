@@ -382,9 +382,9 @@ fn MemberMatchesBody(id: String) -> Element {
                                 }
                             },
                             None => match totals_error.clone() {
-                                Some(err) => rsx! {
+                                Some(reason) => rsx! {
                                     div { class: "fetch-error-wrap", role: "alert",
-                                        p { class: "fetch-error", "Couldn't load totals. {err}" }
+                                        p { class: "fetch-error", "Couldn't load totals. {reason}" }
                                         button {
                                             r#type: "button",
                                             class: "fetch-error__retry",

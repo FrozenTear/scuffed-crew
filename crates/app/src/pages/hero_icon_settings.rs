@@ -20,7 +20,7 @@ use crate::components::ui::inline_confirm::{
     focus_element_by_id, focus_element_by_id_soon, key_cancels,
 };
 use crate::hero_icons_ui::{self as text, OptOutChoice};
-use crate::training_crops_ui::{self as crops, ConsentKind, CropConsent};
+use crate::training_crops_ui::{self as crops, ConsentKind, ConsentLine, CropConsent};
 
 /// The section sits under the profile form as its own titled card
 /// (`account-section` / `account-card` from profile_settings.rs). Switches are
@@ -61,6 +61,10 @@ const CSS: &str = r#"
         color: var(--text); }
     .hero-icons__choice input { flex: 0 0 auto; margin: 0; accent-color: var(--accent-solid);
         width: calc(var(--space-4) + var(--space-1) / 2); height: calc(var(--space-4) + var(--space-1) / 2); }
+    /* A failed load or save, or the failed part of a save (issue 729): the
+       field error pattern, an icon then the text in the error colour, so it
+       does not rest on colour. */
+    .training-crops__status.is-error { display: flex; align-items: flex-start; gap: var(--space-2); }
     .hero-icons__sent { font-family: var(--font-head); font-size: var(--text-md);
         font-weight: var(--font-label-weight); line-height: var(--leading-ui); color: var(--text); }
     .hero-icons__grid { list-style: none; padding: 0; display: grid;
@@ -86,12 +90,35 @@ const CSS: &str = r#"
     }
 "#;
 
+/// The consent live line: two live regions, both always rendered, so every
+/// change is announced and only their text changes.
+/// - `role="status"` (id `id`): the muted note (loading, saving, saved).
+/// - `role="alert"` (id derived from `id`): the failure, in the field error
+///   pattern (decorative icon plus error colour), empty when nothing failed.
+///   A full failure and the failed part of a partial one both land here.
+#[component]
+fn ConsentStatus(id: String, line: ConsentLine) -> Element {
+    let alert_id = crops::consent_alert_id(&id);
+    let note_class = line.note_class();
+    let alert_class = line.alert_class();
+    let failure = line.failure_text();
+    rsx! {
+        p { id, class: note_class, role: "status", "{line.note}" }
+        p { id: alert_id, class: alert_class, role: "alert",
+            if line.failure.is_some() {
+                span { class: "field-error-icon", aria_hidden: "true" }
+            }
+            "{failure}"
+        }
+    }
+}
+
 #[component]
 pub fn TrainingCropSettings(member_id: String) -> Element {
     // Consent for the four kinds.
     let mut consent = use_signal(|| None::<CropConsent>);
     let mut consent_failed = use_signal(|| false);
-    let mut consent_status = use_signal(|| crops::LOADING.to_string());
+    let mut consent_status = use_signal(|| ConsentLine::note(crops::LOADING));
     let mut saving = use_signal(|| false);
     let mut consent_refresh = use_signal(|| 0u64);
 
@@ -99,7 +126,9 @@ pub fn TrainingCropSettings(member_id: String) -> Element {
     let mut mine = use_signal(|| None::<MyHeroIcons>);
     let mut store_off = use_signal(|| false);
     let mut load_failed = use_signal(|| false);
-    let mut status = use_signal(|| text::LOADING.to_string());
+    // The hero icon list line: the same two live regions as the consent
+    // line, so a failed list load or Delete all is the same alert.
+    let mut status = use_signal(|| ConsentLine::note(text::LOADING));
     let mut busy = use_signal(|| false);
     let mut asking = use_signal(|| false);
     let mut choice = use_signal(OptOutChoice::default);
@@ -115,11 +144,14 @@ pub fn TrainingCropSettings(member_id: String) -> Element {
             Ok(loaded) => {
                 consent.set(Some(loaded));
                 consent_failed.set(false);
-                consent_status.set(String::new());
+                consent_status.set(ConsentLine::default());
             }
             Err(e) => {
                 consent_failed.set(true);
-                consent_status.set(crops::consent_failure_text("Loading your choices", &e));
+                consent_status.set(ConsentLine::failure(crops::consent_failure_text(
+                    "Loading your choices",
+                    &e,
+                )));
             }
         }
     });
@@ -134,18 +166,21 @@ pub fn TrainingCropSettings(member_id: String) -> Element {
                 store_off.set(false);
                 load_failed.set(false);
                 if mine.peek().is_none() {
-                    status.set(String::new());
+                    status.set(ConsentLine::default());
                 }
                 mine.set(Some(list));
             }
             Err(e) if text::is_store_disabled(&e) => {
                 store_off.set(true);
                 load_failed.set(false);
-                status.set(String::new());
+                status.set(ConsentLine::default());
             }
             Err(e) => {
                 load_failed.set(true);
-                status.set(text::failure_text("Loading your hero icons", &e));
+                status.set(ConsentLine::failure(text::failure_text(
+                    "Loading your hero icons",
+                    &e,
+                )));
             }
         }
     });
@@ -178,7 +213,7 @@ pub fn TrainingCropSettings(member_id: String) -> Element {
                 let next = before.with(kind, on);
                 consent.set(Some(next));
                 saving.set(true);
-                consent_status.set(crops::saving_status(kind));
+                consent_status.set(ConsentLine::note(crops::saving_status(kind)));
                 spawn(async move {
                     let saved = ApiClient::web()
                         .put_json::<_, CropConsent>(
@@ -190,7 +225,7 @@ pub fn TrainingCropSettings(member_id: String) -> Element {
                         Ok(saved) => {
                             consent.set(Some(saved));
                             let now_on = saved.get(kind);
-                            let mut detail = None;
+                            let mut icons = crops::IconsAfterSave::Untouched;
                             if kind == ConsentKind::HeroIcon {
                                 mine.with_mut(|m| {
                                     if let Some(m) = m {
@@ -201,41 +236,36 @@ pub fn TrainingCropSettings(member_id: String) -> Element {
                                 if now_on {
                                     // Nothing stored changes when sharing turns on.
                                 } else if choice_made == OptOutChoice::Delete && stored > 0 {
-                                    match ApiClient::web().delete("/api/hero-icons/mine").await {
-                                        Ok(()) => {
-                                            mine.with_mut(|m| {
-                                                if let Some(m) = m {
-                                                    m.count = 0;
-                                                    m.icons.clear();
-                                                }
-                                            });
-                                            detail =
-                                                text::opt_out_detail(OptOutChoice::Delete, stored);
-                                        }
-                                        Err(e) => {
-                                            detail = Some(format!(
-                                                "{} Use Delete all my icons to try again.",
-                                                text::failure_text("Deleting your icons", &e)
-                                            ))
-                                        }
-                                    }
+                                    icons =
+                                        match ApiClient::web().delete("/api/hero-icons/mine").await
+                                        {
+                                            Ok(()) => {
+                                                mine.with_mut(|m| {
+                                                    if let Some(m) = m {
+                                                        m.count = 0;
+                                                        m.icons.clear();
+                                                    }
+                                                });
+                                                crops::IconsAfterSave::Deleted(stored)
+                                            }
+                                            Err(e) => crops::IconsAfterSave::DeleteFailed(e),
+                                        };
                                     refresh += 1;
                                 } else {
-                                    detail = text::opt_out_detail(OptOutChoice::Keep, stored);
+                                    icons = crops::IconsAfterSave::Kept(stored);
                                 }
                             }
-                            consent_status.set(crops::saved_status(
-                                kind,
-                                now_on,
-                                detail.as_deref(),
-                            ));
+                            // What worked is the note; a failed delete is
+                            // the alert (issue 729, Chief of Staff). The
+                            // mapping is `line_after_save`, tested per case.
+                            consent_status.set(crops::line_after_save(kind, Ok(now_on), icons));
                         }
                         Err(e) => {
                             consent.set(Some(before));
-                            let what = format!("Saving {}", kind.noun().to_lowercase());
-                            consent_status.set(crops::failed_status(
+                            consent_status.set(crops::line_after_save(
                                 kind,
-                                &crops::consent_failure_text(&what, &e),
+                                Err(&e),
+                                crops::IconsAfterSave::Untouched,
                             ));
                         }
                     }
@@ -292,6 +322,10 @@ pub fn TrainingCropSettings(member_id: String) -> Element {
             return;
         }
         busy.set(true);
+        // A note first, as the consent save does: the alert empties, so a
+        // repeated identical failure is announced again (Vision nit 5,
+        // round 4 on 748).
+        status.set(ConsentLine::note(text::DELETING_ALL));
         let before = count;
         // B9: the confirm strip, and the focus in it, goes when the delete
         // ends. Focus comes back to Delete all my icons, which says there is
@@ -307,10 +341,19 @@ pub fn TrainingCropSettings(member_id: String) -> Element {
                             m.icons.clear();
                         }
                     });
-                    status.set(text::status_deleted_all(before));
+                    status.set(ConsentLine::note(text::status_deleted_all(before)));
                 }
-                Err(e) => status.set(text::failure_text("Deleting your icons", &e)),
+                Err(e) => {
+                    status.set(ConsentLine::failure(text::failure_text(
+                        "Deleting your icons",
+                        &e,
+                    )));
+                }
             }
+            // Either way this answer replaces the failed delete part of an
+            // earlier opt-out: a success makes it stale, a failure is now on
+            // the list line, so it is never shown twice.
+            consent_status.with_mut(ConsentLine::drop_failed_part);
             confirming_delete.set(false);
             focus_after_delete_soon(strip_cancel, back_to);
             busy.set(false);
@@ -442,7 +485,7 @@ pub fn TrainingCropSettings(member_id: String) -> Element {
                             r#type: "button",
                             class: "btn is-ghost",
                             onclick: move |_| {
-                                consent_status.set(crops::LOADING.to_string());
+                                consent_status.set(ConsentLine::note(crops::LOADING));
                                 consent_refresh += 1;
                             },
                             "Retry loading your choices"
@@ -450,12 +493,7 @@ pub fn TrainingCropSettings(member_id: String) -> Element {
                     }
                 }
 
-                p {
-                    id: "{consent_status_id}",
-                    class: if consent_failed() { "account-status is-error" } else { "account-status" },
-                    role: "status",
-                    "{consent_status}"
-                }
+                ConsentStatus { id: consent_status_id.clone(), line: consent_status() }
 
                 if store_off() {
                     p { class: "field-hint", "{text::STORE_DISABLED}" }
@@ -526,7 +564,7 @@ pub fn TrainingCropSettings(member_id: String) -> Element {
                             r#type: "button",
                             class: "btn is-ghost",
                             onclick: move |_| {
-                                status.set(text::LOADING.to_string());
+                                status.set(ConsentLine::note(text::LOADING));
                                 refresh += 1;
                             },
                             "Retry loading hero icons"
@@ -534,12 +572,7 @@ pub fn TrainingCropSettings(member_id: String) -> Element {
                     }
                 }
 
-                p {
-                    id: "{status_id}",
-                    class: if load_failed() { "account-status is-error" } else { "account-status" },
-                    role: "status",
-                    "{status}"
-                }
+                ConsentStatus { id: status_id.clone(), line: status() }
             }
         }
     }
@@ -557,6 +590,151 @@ mod tests {
 
     fn section() -> Element {
         rsx! { TrainingCropSettings { member_id: "m1".to_string() } }
+    }
+
+    /// Vision nits 2 and 5 on 748: a failed Delete all is the same
+    /// always-rendered alert as the consent failures (the list line is a
+    /// `ConsentStatus` too), and any Delete all answer drops the failed
+    /// delete part of an earlier opt-out, so a success leaves no stale
+    /// alert and a failure is not shown twice.
+    #[test]
+    fn delete_all_uses_the_alert_and_clears_a_stale_failed_part() {
+        let prod = include_str!("hero_icon_settings.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("prod part");
+        assert!(prod.contains("ConsentStatus { id: status_id.clone(), line: status() }"));
+        let delete_all = prod
+            .split("let delete_all = move |_| {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    };\n").next())
+            .expect("delete_all");
+        assert!(
+            delete_all.contains(
+                "status.set(ConsentLine::failure(text::failure_text(\n                        \"Deleting your icons\","
+            ),
+            "{delete_all}"
+        );
+        assert!(
+            delete_all.contains("status.set(ConsentLine::note(text::status_deleted_all(before)));"),
+            "{delete_all}"
+        );
+        // After the match, so both the Ok and the Err arm drop it.
+        let after_match = delete_all
+            .split("            }\n            // Either way")
+            .nth(1)
+            .expect("after the match");
+        assert!(
+            after_match.contains("consent_status.with_mut(ConsentLine::drop_failed_part);"),
+            "{delete_all}"
+        );
+        assert_eq!(delete_all.matches("drop_failed_part").count(), 1);
+
+        // What the drop does: a partial line loses its failed part, a full
+        // failure (no note) keeps its own.
+        let mut partial = ConsentLine::saved(
+            ConsentKind::HeroIcon,
+            false,
+            None,
+            Some(crops::delete_failed_part(
+                &scuffed_api_client::ClientError::Network("offline".into()),
+            )),
+        );
+        partial.drop_failed_part();
+        assert_eq!(partial, ConsentLine::note("Saved. Hero icons off."));
+        let mut full = ConsentLine::failure("Loading your choices failed.");
+        full.drop_failed_part();
+        assert_eq!(full, ConsentLine::failure("Loading your choices failed."));
+
+        // A failed Delete all renders in the alert with the icon and the
+        // error class, the status empty.
+        fn failed() -> Element {
+            let line = ConsentLine::failure(text::failure_text(
+                "Deleting your icons",
+                &scuffed_api_client::ClientError::Network("offline".into()),
+            ));
+            rsx! { ConsentStatus { id: "hero-icons-m1-status".to_string(), line } }
+        }
+        assert_eq!(
+            render(failed),
+            "<p id=\"hero-icons-m1-status\" class=\"account-status training-crops__status\" role=\"status\"></p><p id=\"hero-icons-m1-status-alert\" class=\"account-status training-crops__status is-error\" role=\"alert\"><span class=\"field-error-icon\" aria-hidden=\"true\"></span>Deleting your icons failed. Could not reach the server. Check your connection and try again.</p>"
+        );
+    }
+
+    /// Vision nit 5, round 4 on 748: Delete all sets the "Deleting your
+    /// icons..." note before the request, so a second identical failure goes
+    /// alert, empty, alert and is announced again. Both regions stay
+    /// rendered in every state; only their text changes.
+    #[test]
+    fn a_repeated_delete_all_failure_is_announced_again() {
+        let prod = include_str!("hero_icon_settings.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("prod part");
+        let delete_all = prod
+            .split("let delete_all = move |_| {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n    };\n").next())
+            .expect("delete_all");
+        let guard = delete_all.find("if busy() {").expect("busy guard");
+        let note = delete_all
+            .find("status.set(ConsentLine::note(text::DELETING_ALL));")
+            .expect("the note");
+        let request = delete_all
+            .find("ApiClient::web().delete(\"/api/hero-icons/mine\")")
+            .expect("the request");
+        let failure = delete_all
+            .find("status.set(ConsentLine::failure(")
+            .expect("the failure");
+        assert!(
+            guard < note && note < request && request < failure,
+            "{delete_all}"
+        );
+        assert_eq!(text::DELETING_ALL, "Deleting your icons...");
+
+        // The sequence a person hears: failure, the note (alert empty), the
+        // same failure again (a new alert text).
+        fn failed() -> Element {
+            let line = ConsentLine::failure(text::failure_text(
+                "Deleting your icons",
+                &scuffed_api_client::ClientError::http(403, "", None),
+            ));
+            rsx! { ConsentStatus { id: "s".to_string(), line } }
+        }
+        fn deleting() -> Element {
+            let line = ConsentLine::note(text::DELETING_ALL);
+            rsx! { ConsentStatus { id: "s".to_string(), line } }
+        }
+        let alert_text = |html: &str| -> String {
+            let alert = html
+                .split("role=\"alert\">")
+                .nth(1)
+                .expect("alert always rendered");
+            let alert = alert.strip_suffix("</p>").expect("alert last");
+            alert
+                .replace(
+                    "<span class=\"field-error-icon\" aria-hidden=\"true\"></span>",
+                    "",
+                )
+                .to_string()
+        };
+        let first = render(failed);
+        let between = render(deleting);
+        let second = render(failed);
+        assert!(
+            alert_text(&first).starts_with("Deleting your icons failed."),
+            "{first}"
+        );
+        assert_eq!(alert_text(&between), "", "{between}");
+        assert_eq!(alert_text(&second), alert_text(&first));
+        assert_eq!(
+            between,
+            "<p id=\"s\" class=\"account-status training-crops__status\" role=\"status\">Deleting your icons...</p><p id=\"s-alert\" class=\"account-status training-crops__status\" role=\"alert\"></p>"
+        );
+        for html in [&first, &between, &second] {
+            assert_eq!(html.matches("role=\"status\"").count(), 1, "{html}");
+            assert_eq!(html.matches("role=\"alert\"").count(), 1, "{html}");
+        }
     }
 
     #[test]
@@ -578,6 +756,167 @@ mod tests {
         assert!(forced.contains("border-color: Highlight;"), "{forced}");
     }
 
+    /// Issue 729: a failed save reads as an error (the field error icon and
+    /// the error class) in the always-rendered `role="alert"` paragraph, and
+    /// the `role="status"` paragraph is empty; saving and saved stay the
+    /// muted note with the alert present and empty. Both regions are
+    /// rendered in every state.
+    #[test]
+    fn a_failed_save_reads_as_an_error_and_a_save_does_not() {
+        fn failed() -> Element {
+            let failure = crops::consent_failure_text(
+                "Saving rank screen crops",
+                &scuffed_api_client::ClientError::Network("offline".into()),
+            );
+            rsx! {
+                ConsentStatus {
+                    id: "s".to_string(),
+                    line: ConsentLine::failure(crops::failed_status(ConsentKind::Rank, &failure)),
+                }
+            }
+        }
+        fn saving() -> Element {
+            rsx! {
+                ConsentStatus {
+                    id: "s".to_string(),
+                    line: ConsentLine::note(crops::saving_status(ConsentKind::Rank)),
+                }
+            }
+        }
+        fn saved() -> Element {
+            rsx! {
+                ConsentStatus {
+                    id: "s".to_string(),
+                    line: ConsentLine::note(crops::saved_status(ConsentKind::Rank, true, None)),
+                }
+            }
+        }
+        fn idle() -> Element {
+            rsx! { ConsentStatus { id: "s".to_string(), line: ConsentLine::default() } }
+        }
+
+        // Full failure: the status is empty; the alert carries the same text,
+        // icon and error class the status carried before.
+        let html = render(failed);
+        assert!(
+            html.starts_with(
+                "<p id=\"s\" class=\"account-status training-crops__status\" role=\"status\"></p><p id=\"s-alert\" class=\"account-status training-crops__status is-error\" role=\"alert\"><span class=\"field-error-icon\" aria-hidden=\"true\"></span>Saving rank screen crops failed."
+            ),
+            "{html}"
+        );
+        assert!(html.ends_with("are back to how they were.</p>"), "{html}");
+        assert_eq!(html.matches("field-error-icon").count(), 1, "{html}");
+        assert_eq!(html.matches("is-error").count(), 1, "{html}");
+
+        for (state, html, note) in [
+            ("saving", render(saving), "Saving rank screen crops..."),
+            ("saved", render(saved), "Saved. Rank screen crops on."),
+        ] {
+            assert_eq!(
+                html,
+                format!(
+                    "<p id=\"s\" class=\"account-status training-crops__status\" role=\"status\">{note}</p><p id=\"s-alert\" class=\"account-status training-crops__status\" role=\"alert\"></p>"
+                ),
+                "{state}"
+            );
+            assert!(!html.contains("is-error"), "{state}: {html}");
+            assert!(!html.contains("field-error-icon"), "{state}: {html}");
+        }
+        assert_eq!(
+            render(idle),
+            "<p id=\"s\" class=\"account-status training-crops__status\" role=\"status\"></p><p id=\"s-alert\" class=\"account-status training-crops__status\" role=\"alert\"></p>"
+        );
+
+        // The error layout is the field error one, on tokens; the colour is
+        // the shared `.account-status.is-error` (the error token).
+        let rule = crate::components::ui::test_support::css_rule(
+            CSS,
+            ".training-crops__status.is-error {",
+        );
+        assert!(rule.contains("display: flex;"), "{rule}");
+        assert!(rule.contains("gap: var(--space-2);"), "{rule}");
+        assert!(
+            super::super::profile_settings::ACCOUNT_CSS
+                .contains(".account-status.is-error { color: var(--loss); }")
+        );
+
+        // The page renders the line through `ConsentStatus` from one state.
+        let prod = include_str!("hero_icon_settings.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("prod part");
+        assert!(
+            prod.contains(
+                "ConsentStatus { id: consent_status_id.clone(), line: consent_status() }"
+            )
+        );
+        assert!(!prod.contains("consent_status.set(crops::failed_status("));
+        // Both live regions are unconditional children of `ConsentStatus`;
+        // only the decorative icon sits behind the failure check.
+        let component = prod
+            .split("fn ConsentStatus(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("ConsentStatus body");
+        assert!(
+            component.contains(
+                "        p { id, class: note_class, role: \"status\", \"{line.note}\" }\n        p { id: alert_id, class: alert_class, role: \"alert\",\n            if line.failure.is_some() {\n                span { class: \"field-error-icon\", aria_hidden: \"true\" }\n            }\n            \"{failure}\"\n        }"
+            ),
+            "{component}"
+        );
+        assert!(
+            component.contains("let alert_id = crops::consent_alert_id(&id);"),
+            "{component}"
+        );
+        // The saved line is built from parts, never from the formatted text:
+        // the callback gathers the results and `line_after_save` maps them
+        // (tested per combination in training_crops_ui.rs).
+        assert!(
+            prod.contains("consent_status.set(crops::line_after_save(kind, Ok(now_on), icons));")
+        );
+        assert!(prod.contains("Err(e) => crops::IconsAfterSave::DeleteFailed(e),"));
+        assert!(prod.contains("crops::IconsAfterSave::Deleted(stored)"));
+        assert!(prod.contains("icons = crops::IconsAfterSave::Kept(stored);"));
+        assert!(!prod.contains("ConsentLine::note(crops::saved_status("));
+        assert!(!prod.contains("delete_failed_part"));
+        assert!(!prod.contains("ConsentLine::saved("));
+    }
+
+    /// Issue 729 (Chief of Staff): a save that worked but whose icon delete
+    /// failed keeps "Saved. ... off." as the muted note and shows the failed
+    /// part as an error in the alert region.
+    #[test]
+    fn a_partly_failed_save_keeps_the_note_and_alerts_the_failed_part() {
+        fn partial() -> Element {
+            let failed = crops::delete_failed_part(&scuffed_api_client::ClientError::Network(
+                "offline".into(),
+            ));
+            rsx! {
+                ConsentStatus {
+                    id: "s".to_string(),
+                    line: ConsentLine::saved(ConsentKind::HeroIcon, false, None, Some(failed)),
+                }
+            }
+        }
+        let html = render(partial);
+        let failed =
+            crops::delete_failed_part(&scuffed_api_client::ClientError::Network("offline".into()));
+        assert!(
+            failed.starts_with("Deleting your icons failed."),
+            "{failed}"
+        );
+        assert_eq!(
+            html,
+            format!(
+                "<p id=\"s\" class=\"account-status training-crops__status\" role=\"status\">Saved. Hero icons off.</p><p id=\"s-alert\" class=\"account-status training-crops__status is-error\" role=\"alert\"><span class=\"field-error-icon\" aria-hidden=\"true\"></span>{failed}</p>"
+            )
+        );
+        // The note paragraph has no icon and no error class.
+        let status = html.split("</p>").next().expect("status");
+        assert!(!status.contains("field-error-icon"), "{status}");
+        assert!(!status.contains("is-error"), "{status}");
+    }
+
     #[test]
     fn first_render_has_both_live_regions_with_loading_text() {
         let html = render(section);
@@ -587,6 +926,22 @@ mod tests {
         );
         assert!(html.contains("id=\"hero-icons-m1-status\""), "{html}");
         assert_eq!(html.matches("role=\"status\"").count(), 2, "{html}");
+        // Both alert regions (consent line and hero icon list line) are
+        // rendered from the first paint, empty.
+        assert_eq!(html.matches("role=\"alert\"").count(), 2, "{html}");
+        assert!(
+            html.contains(
+                "<p id=\"hero-icons-m1-status\" class=\"account-status training-crops__status\" role=\"status\">Loading your hero icons...</p><p id=\"hero-icons-m1-status-alert\" class=\"account-status training-crops__status\" role=\"alert\"></p>"
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                "<p id=\"training-crops-m1-consent-status-alert\" class=\"account-status training-crops__status\" role=\"alert\"></p>"
+            ),
+            "{html}"
+        );
+        assert!(!html.contains("field-error-icon"), "{html}");
         assert!(html.contains(crops::LOADING), "{html}");
         assert!(html.contains(text::LOADING), "{html}");
     }

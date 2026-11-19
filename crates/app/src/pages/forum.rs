@@ -110,22 +110,6 @@ fn thread_count_label(count: u64) -> String {
     count_label(count, "thread", "threads")
 }
 
-/// A description worth a line: trimmed, and `None` when blank.
-/// A forum fetch as a view state. A board or thread the viewer may not open
-/// (401, 403) reads like a missing one: the not-found panel already says
-/// "not open to you", and a Retry could never fix it.
-pub(crate) fn forum_load<T: Clone>(slot: Option<&Result<T, String>>) -> Load<T> {
-    match slot {
-        Some(Err(err))
-            if crate::components::is_http_status(err, 401)
-                || crate::components::is_http_status(err, 403) =>
-        {
-            Load::Missing
-        }
-        other => Load::of(other),
-    }
-}
-
 /// API path of one thread. The id is percent-encoded like the board slug.
 pub(crate) fn thread_api_path(thread_id: &str) -> String {
     format!("/api/forum/threads/{}", encode_query(thread_id))
@@ -136,7 +120,6 @@ pub(crate) fn thread_api_path(thread_id: &str) -> String {
 /// board the viewer may not post to.
 pub(crate) fn forum_post_error(lead: &str, err: &ClientError) -> String {
     let why = match err {
-        ClientError::Network(_) => "Check your connection and try again.",
         ClientError::Http { status: 401, .. } => "Your session ended. Log in again.",
         ClientError::Http {
             status: 403, body, ..
@@ -145,11 +128,14 @@ pub(crate) fn forum_post_error(lead: &str, err: &ClientError) -> String {
         ClientError::Http { status: 404, .. } => "It no longer exists. Reload the page.",
         ClientError::Http { status: 400, .. } => "The server did not accept the text.",
         ClientError::Http { status: 429, .. } => "Too many posts in a row. Wait a moment.",
-        _ => "Something went wrong. Try again in a moment.",
+        // No answer, an unreadable answer and any other status: the one
+        // mapping (QA on 748).
+        other => crate::client_error::message_without_reason(other),
     };
     format!("{lead} {why}")
 }
 
+/// A description worth a line: trimmed, and `None` when blank.
 fn shown_text(text: Option<&str>) -> Option<&str> {
     text.map(str::trim).filter(|text| !text.is_empty())
 }
@@ -327,10 +313,12 @@ pub fn Forum() -> Element {
             ApiClient::web()
                 .fetch::<Vec<ForumCategoryNode>>("/api/forum/tree")
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(|e| crate::client_error::logged_message("forum tree", &e))
         }
     });
-    let load = forum_load(tree.read().as_ref());
+    // Only a 404 is missing: a 401 or 403 keeps the server's reason next to
+    // the lead (QA round 3 on 748).
+    let load = Load::of(tree.read().as_ref());
     let retrying = is_retrying(tree.state()(), &load);
 
     rsx! {
@@ -374,10 +362,10 @@ fn ForumIndex(
             p { class: "entry-status", role: "status", "{status}" }
             {match &load {
                 Load::Loading => rsx! {},
-                Load::Failed | Load::Missing => rsx! {
+                Load::Failed(_) | Load::Missing => rsx! {
                     LoadError {
-                        message: "Couldn't load the forum. Check your connection and try again.",
-                        on_retry: move |_| on_retry.call(()),
+                        message: load.failure_line("Couldn't load the forum."),
+                        on_retry: load.retry_helps().then_some(on_retry),
                         retrying,
                     }
                 },
@@ -533,7 +521,7 @@ pub fn ForumBoardPage(slug: String) -> Element {
             ApiClient::web()
                 .fetch::<ThreadListResponse>(&url)
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(|e| crate::client_error::logged_message("forum threads", &e))
         }
     }));
     // Names for the starters of the threads on screen only.
@@ -550,7 +538,8 @@ pub fn ForumBoardPage(slug: String) -> Element {
             .unwrap_or_default()
     });
 
-    let load = forum_load(list.read().as_ref());
+    // A 401 or 403 board keeps its reason; only a 404 is "Board not found".
+    let load = Load::of(list.read().as_ref());
     let pending = list.state()() == UseResourceState::Pending;
     let retrying = is_retrying(list.state()(), &load);
     // A page change or a refresh keeps the old rows until the new ones land.
@@ -662,7 +651,7 @@ fn board_tab_label(load: &Load<ThreadListResponse>) -> Option<String> {
             .as_ref()
             .map(|board| format!("{} | Forum", board.name.trim())),
         Load::Missing => Some("Board not found | Forum".to_string()),
-        Load::Loading | Load::Failed => None,
+        Load::Loading | Load::Failed(_) => None,
     }
 }
 
@@ -724,7 +713,7 @@ fn BoardView(
             {match &load {
                 // The name is not known yet, so the page is named by its kind.
                 Load::Loading => rsx! { PageHeader { title: "Forum board" } },
-                Load::Failed => rsx! { PageHeader { title: "Couldn't load this board" } },
+                Load::Failed(_) => rsx! { PageHeader { title: "Couldn't load this board" } },
                 Load::Missing => rsx! {},
                 Load::Ready(_) => rsx! {
                     PageHeader {
@@ -761,10 +750,10 @@ fn BoardView(
                     aria_label: "Threads",
                     {match &load {
                         Load::Loading | Load::Missing => rsx! {},
-                        Load::Failed => rsx! {
+                        Load::Failed(reason) => rsx! {
                             LoadError {
-                                message: "Check your connection and try again.",
-                                on_retry: move |_| on_retry.call(()),
+                                message: crate::client_error::reason_or_fallback(reason),
+                                on_retry: load.retry_helps().then_some(on_retry),
                                 retrying,
                             }
                         },
@@ -1035,6 +1024,7 @@ fn NewThreadForm(
 
 #[cfg(test)]
 mod tests {
+    const NET: &str = crate::client_error::NETWORK_ERROR_MESSAGE;
     use super::super::article_author::AUTHOR_FALLBACK;
     use super::*;
     use crate::components::ui::test_support::{assert_sizes_from_tokens, css_rule, render_routed};
@@ -1251,16 +1241,27 @@ mod tests {
         );
         assert!(!loading.contains("No boards yet"), "{loading}");
 
-        let failed = render_index(Load::Failed, false, false);
+        // QA on 748: a refusal shows the server's reason, not the connection.
+        for reason in ["HTTP error 403: Members only", "HTTP error 409: Board busy"] {
+            let refused = render_index(Load::Failed(reason.to_string()), false, false);
+            assert!(
+                refused.contains(&format!("Couldn&#39;t load the forum. {reason}")),
+                "{refused}"
+            );
+            assert!(!refused.contains("connection"), "{refused}");
+        }
+        let failed = render_index(Load::Failed(NET.to_string()), false, false);
         assert!(failed.contains("role=\"alert\""), "{failed}");
         assert!(
-            failed.contains("load the forum. Check your connection"),
+            failed.contains(
+                "Couldn&#39;t load the forum. Could not reach the server. Check your connection and try again."
+            ),
             "{failed}"
         );
         assert!(failed.contains(">Retry</button>"), "{failed}");
         assert!(!failed.contains("Loading"), "{failed}");
 
-        let retrying = render_index(Load::Failed, false, true);
+        let retrying = render_index(Load::Failed(NET.to_string()), false, true);
         assert!(retrying.contains(">Loading boards</p>"), "{retrying}");
         assert!(retrying.contains(">Retrying...</button>"), "{retrying}");
 
@@ -1488,29 +1489,163 @@ mod tests {
         assert!(!open.contains("Start a thread"), "{open}");
     }
 
+    /// A fetch failure the way the forum resources keep it: mapped and
+    /// logged once by `logged_message`, then read by `Load::of`.
+    fn mapped_load<T: Clone>(status: u16, body: &str) -> (Load<T>, String) {
+        let _ = crate::util::take_logged();
+        let err = ClientError::http(status, body, None);
+        let slot: Result<T, String> =
+            Err(crate::client_error::logged_message("forum threads", &err));
+        let load = Load::of(Some(&slot));
+        let logged = crate::util::take_logged();
+        assert_eq!(logged.len(), 1, "{status}: {logged:?}");
+        (load, crate::client_error::user_message(&err))
+    }
+
+    /// QA round 3 on 748: a 401 or 403 board showed only "Couldn't load the
+    /// forum." because the forum mapped them to the not-found view. Only a
+    /// 404 is missing now; a refusal keeps the server's reason on the
+    /// index, the board and (through the same `Load::of`) the thread page.
     #[test]
-    fn a_board_or_thread_closed_to_the_viewer_is_not_a_connection_error() {
-        for status in [401, 403, 404] {
-            let slot: Result<u8, String> = Err(format!("HTTP error {status}: {{\"error\":\"x\"}}"));
-            assert_eq!(forum_load(Some(&slot)), Load::Missing, "{status}");
+    fn a_refused_forum_load_shows_the_reason_through_the_mapping() {
+        for status in [401, 403] {
+            let body = r#"{"error":"Members only"}"#;
+            let (load, reason) = mapped_load::<Vec<ForumCategoryNode>>(status, body);
+            assert!(reason.contains("Members only"), "{reason}");
+            assert_eq!(load, Load::Failed(reason.clone()), "{status}");
+            let index = render_index(load, false, false);
+            assert!(
+                index.contains(&format!("Couldn&#39;t load the forum. {reason}")),
+                "{index}"
+            );
+            // Vision round 6 on 748: a retry gets the same refusal, so there
+            // is no Retry, the same as the strategy editor 403. Vision round
+            // 7: the box is still an alert, as the editor 403 is, so it is
+            // announced; the status line stays empty, so it is said once.
+            assert!(
+                index.contains("<div class=\"fetch-error-wrap\" role=\"alert\">"),
+                "{index}"
+            );
+            assert_eq!(index.matches("role=\"alert\"").count(), 1, "{index}");
+            assert!(
+                index.contains("<p class=\"entry-status\" role=\"status\"></p>"),
+                "{index}"
+            );
+            assert!(!index.contains("fetch-error__retry"), "{index}");
+            assert!(!index.contains(">Retry</button>"), "{index}");
+            assert!(!index.contains("not found"), "{index}");
+
+            let (load, _) = mapped_load::<ThreadListResponse>(status, body);
+            assert!(!load.retry_helps(), "{status}");
+            let board = BoardCase::of(load).render();
+            assert!(board.contains("Couldn&#39;t load this board"), "{board}");
+            assert!(board.contains(&reason), "{board}");
+            assert!(!board.contains("Board not found"), "{board}");
+            assert!(
+                board.contains("<div class=\"fetch-error-wrap\" role=\"alert\">"),
+                "{board}"
+            );
+            assert_eq!(board.matches("role=\"alert\"").count(), 1, "{board}");
+            assert!(
+                board.contains("<p class=\"entry-status\" role=\"status\"></p>"),
+                "{board}"
+            );
+            assert!(!board.contains("fetch-error__retry"), "{board}");
+            assert!(!board.contains(">Retry</button>"), "{board}");
+
+            // A reason-less refusal ("HTTP error: 403") has no Retry either.
+            let (load, _) = mapped_load::<ThreadListResponse>(status, "");
+            assert!(!load.retry_helps(), "{status}");
+            let board = BoardCase::of(load).render();
+            assert!(board.contains(&format!("HTTP error: {status}")), "{board}");
+            assert!(!board.contains(">Retry</button>"), "{board}");
         }
-        let server: Result<u8, String> = Err("HTTP error 500: oops".to_string());
-        assert_eq!(forum_load(Some(&server)), Load::Failed);
-        let network: Result<u8, String> = Err("Network error: offline".to_string());
-        assert_eq!(forum_load(Some(&network)), Load::Failed);
-        assert_eq!(forum_load(Some(&Ok::<u8, String>(3))), Load::Ready(3));
-        assert_eq!(forum_load::<u8>(None), Load::Loading);
+
+        // Anything a retry can change keeps Retry: no answer, a 5xx (with and
+        // without a reason), an unreadable answer, and other 4xx answers.
+        let _ = crate::util::take_logged();
+        let retryable = [
+            ClientError::Network("TypeError: Failed to fetch".into()),
+            ClientError::http(500, r#"{"error":"Database down"}"#, None),
+            ClientError::http(503, "", None),
+            ClientError::Deserialize("expected value at line 1".into()),
+            ClientError::http(409, r#"{"error":"Board busy"}"#, None),
+        ];
+        for err in retryable {
+            let slot: Result<Vec<ForumCategoryNode>, String> =
+                Err(crate::client_error::logged_message("forum tree", &err));
+            let load = Load::of(Some(&slot));
+            assert!(load.retry_helps(), "{err:?}");
+            let index = render_index(load, false, false);
+            assert!(index.contains(">Retry</button>"), "{err:?}: {index}");
+            assert!(
+                index.contains("<div class=\"fetch-error-wrap\" role=\"alert\">"),
+                "{err:?}: {index}"
+            );
+
+            let slot: Result<ThreadListResponse, String> =
+                Err(crate::client_error::logged_message("forum threads", &err));
+            let board = BoardCase::of(Load::of(Some(&slot))).render();
+            assert!(board.contains(">Retry</button>"), "{err:?}: {board}");
+        }
+        let _ = crate::util::take_logged();
+        // Only a failed load can refuse a retry.
+        assert!(Load::<u8>::Loading.retry_helps());
+        assert!(Load::<u8>::Missing.retry_helps());
+        assert!(Load::Ready(3u8).retry_helps());
+
+        // A 404 is still the not-found panel, with nothing to retry.
+        let (load, _) = mapped_load::<Vec<ForumCategoryNode>>(404, r#"{"error":"Not found"}"#);
+        assert_eq!(load, Load::Missing);
+        let (load, _) = mapped_load::<ThreadListResponse>(404, r#"{"error":"Not found"}"#);
+        assert_eq!(load, Load::Missing);
+        let board = BoardCase::of(load).render();
+        assert!(board.contains("Board not found"), "{board}");
+        assert!(!board.contains("role=\"alert\""), "{board}");
+
+        // A reason-less 403 still says something past the lead.
+        let (load, reason) = mapped_load::<Vec<ForumCategoryNode>>(403, "");
+        assert_eq!(reason, "HTTP error: 403");
+        let index = render_index(load, false, false);
+        assert!(
+            index.contains("Couldn&#39;t load the forum. HTTP error: 403"),
+            "{index}"
+        );
+        assert!(!index.contains(">Retry</button>"), "{index}");
+
+        assert_eq!(Load::of(Some(&Ok::<u8, String>(3))), Load::Ready(3));
+        assert_eq!(Load::<u8>::of(None), Load::Loading);
+
+        // All three forum fetches read their slot through `Load::of`, which
+        // maps only a 404 to missing; no forum-only 401/403 mapping is back.
+        let board = include_str!("forum.rs").split("mod tests").next().unwrap();
+        assert!(board.contains("Load::of(tree.read().as_ref())"));
+        assert!(board.contains("Load::of(list.read().as_ref())"));
         let thread = include_str!("forum_thread.rs")
             .split("mod tests")
             .next()
             .unwrap();
-        assert!(thread.contains("forum_load(detail.read().as_ref())"));
-        assert!(
-            !thread.contains("Load::of("),
-            "the thread page maps 401/403 too"
+        assert!(thread.contains("Load::of(detail.read().as_ref())"));
+        // Every forum LoadError takes its Retry from `retry_helps` (index,
+        // board, thread), never an unconditional handler.
+        assert_eq!(
+            board
+                .matches("on_retry: load.retry_helps().then_some(on_retry),")
+                .count(),
+            2
         );
-        let board = include_str!("forum.rs").split("mod tests").next().unwrap();
-        assert!(!board.contains("Load::of(list") && !board.contains("Load::of(tree"));
+        assert_eq!(
+            thread
+                .matches("on_retry: load.retry_helps().then_some(on_retry),")
+                .count(),
+            1
+        );
+        for src in [board, thread] {
+            assert!(!src.contains("on_retry: move |_| on_retry.call(())"));
+            assert!(!src.contains("forum_load"));
+            assert!(!src.contains("is_http_status(err, 401)"));
+            assert!(!src.contains("is_http_status(err, 403)"));
+        }
     }
 
     #[test]
@@ -1560,7 +1695,7 @@ mod tests {
         );
         assert_eq!(
             forum_post_error("x", &ClientError::Network("offline".into())),
-            "x Check your connection and try again."
+            "x Could not reach the server. Check your connection and try again."
         );
         for status in [400, 401, 403, 404, 429, 500] {
             let copy = forum_post_error("x", &http(status, r#"{"error":"raw"}"#));
@@ -1593,7 +1728,7 @@ mod tests {
         );
         assert!(!loading.contains("No threads yet"), "{loading}");
 
-        let failed = BoardCase::of(Load::Failed).render();
+        let failed = BoardCase::of(Load::Failed(NET.to_string())).render();
         assert!(
             failed.contains("<h1>Couldn&#39;t load this board</h1>")
                 || failed.contains("<h1>Couldn't load this board</h1>"),
@@ -1603,7 +1738,7 @@ mod tests {
         assert!(failed.contains(">Retry</button>"), "{failed}");
         assert!(!failed.contains("Loading"), "{failed}");
 
-        let mut retrying = BoardCase::of(Load::Failed);
+        let mut retrying = BoardCase::of(Load::Failed(NET.to_string()));
         retrying.retrying = true;
         let retrying = retrying.render();
         assert!(retrying.contains(">Loading threads</p>"), "{retrying}");
@@ -1649,7 +1784,7 @@ mod tests {
             Some("Board not found | Forum")
         );
         assert_eq!(board_tab_label(&Load::Loading), None);
-        assert_eq!(board_tab_label(&Load::Failed), None);
+        assert_eq!(board_tab_label(&Load::Failed(NET.to_string())), None);
     }
 
     #[test]

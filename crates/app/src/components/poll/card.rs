@@ -5,7 +5,7 @@ use crate::components::ui::{Pill, PillTone};
 use crate::components::{Toast, use_toast};
 
 use super::{
-    PollCloseDate, PollResultsData, is_closed, now_iso, percent, poll_error_copy, votes_text,
+    PollCloseDate, PollResultsData, is_closed, logged_poll_error, now_iso, percent, votes_text,
 };
 
 pub(crate) const CARD_CSS: &str = r#"
@@ -284,7 +284,7 @@ pub fn PollCard(
                                                     Err(e) => {
                                                         status.set(String::new());
                                                         let lead = if voted { "Couldn't remove the vote." } else { "Vote failed." };
-                                                        toasts.show(Toast::error(poll_error_copy(lead, &e)));
+                                                        toasts.show(Toast::error(logged_poll_error(lead, &e)));
                                                     }
                                                 }
                                                 busy.set(false);
@@ -317,7 +317,7 @@ pub fn PollCard(
                                             match ApiClient::web().delete(&format!("/api/polls/{poll_id}")).await {
                                                 Ok(()) => on_removed.call(()),
                                                 Err(e) => {
-                                                    toasts.show(Toast::error(poll_error_copy("Couldn't remove the poll.", &e)));
+                                                    toasts.show(Toast::error(logged_poll_error("Couldn't remove the poll.", &e)));
                                                 }
                                             }
                                             busy.set(false);

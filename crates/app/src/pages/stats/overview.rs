@@ -222,7 +222,7 @@ pub(super) fn overview_tab(
                         p { class: "stats-state is-loading", "Loading role breakdown..." }
                         SkeletonBars { rows: 3 }
                     },
-                    RolePanel::Failed => load_error_state("role breakdown", roles.refresh),
+                    RolePanel::Failed => load_error_state("role breakdown", role_err.clone(), roles.refresh),
                     RolePanel::Ready(_) if !has_roles => rsx! {
                         p { class: "stats-state is-empty", "No role stats yet." }
                     },
@@ -247,7 +247,7 @@ pub(super) fn overview_tab(
                 h2 { class: "ui-section-title", id: "stats-form-title", "Recent form" }
                 if form_rows.is_empty() {
                     if form_err {
-                        {load_error_state("recent matches", form.refresh)}
+                        {load_error_state("recent matches", form.error.read().clone(), form.refresh)}
                     } else if form_waiting {
                         p { class: "stats-state is-loading", "Loading form..." }
                         SkeletonBars { rows: 3 }
@@ -311,7 +311,7 @@ pub(super) fn overview_tab(
                 section { class: "ui-stack", aria_labelledby: "stats-top-heroes-title",
                     h2 { class: "ui-section-title", id: "stats-top-heroes-title", "Top heroes" }
                     if h_err.is_some() {
-                        {load_error_state("hero rankings", heroes.refresh)}
+                        {load_error_state("hero rankings", h_err.clone(), heroes.refresh)}
                     } else if h_list.is_none() {
                         p { class: "stats-state is-loading", "Loading hero rankings..." }
                     } else if top5.is_empty() {
@@ -333,7 +333,7 @@ pub(super) fn overview_tab(
                     h2 { class: "ui-section-title", id: "stats-modes-title", "Mode win rates" }
                     if chips.is_empty() {
                         if maps_err {
-                            {load_error_state("maps", maps.refresh)}
+                            {load_error_state("maps", maps.error.read().clone(), maps.refresh)}
                         } else if maps_waiting {
                             p { class: "stats-state is-loading", "Loading maps..." }
                         } else {

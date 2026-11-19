@@ -26,22 +26,22 @@ const TAGS_HINT_ID: &str = "feed-compose-tags-hint";
 const ERROR_ID: &str = "feed-compose-error";
 
 const EMPTY_ERROR: &str = "Write something before you post.";
-/// Only a request that never reached the server blames the connection.
-const SEND_ERROR: &str = "Couldn't publish your post. Check your connection and try again.";
+/// Lead of a failure the post's own copy does not name; the one mapping
+/// says why (only no answer blames the connection, and an unreadable answer
+/// to a post that may have gone through says to reload, never to retry).
+const PUBLISH_FAILED: &str = "Couldn't publish your post.";
 const RELAY_OFF_ERROR: &str = "Posting is off on this site: no chat relay is set up. An admin can set one on the admin Relay page.";
 const KEY_ERROR: &str =
     "Posting needs a server-managed key. Set one up under Account keys in your account menu.";
 const SIGNED_OUT_ERROR: &str = "Your session ended. Log in again to post.";
 const FORBIDDEN_ERROR: &str = "Your account can't post to the feed.";
 const RATE_ERROR: &str = "Too many posts in a row. Wait a moment and try again.";
-const SERVER_ERROR: &str = "Couldn't publish your post. Try again in a moment.";
 
 /// What the error line says for a failed `POST /api/nostr/post`. The route
 /// answers 503 when no relay is configured, 400 for a member whose key is
 /// not server-managed and 404 when that key is missing.
-fn post_error_copy(err: &ClientError) -> &'static str {
-    match err {
-        ClientError::Network(_) => SEND_ERROR,
+fn post_error_copy(err: &ClientError) -> String {
+    let named = match err {
         ClientError::Http { status: 503, .. } => RELAY_OFF_ERROR,
         ClientError::Http { status: 404, .. } => KEY_ERROR,
         ClientError::Http {
@@ -53,8 +53,14 @@ fn post_error_copy(err: &ClientError) -> &'static str {
         ClientError::Http { status: 401, .. } => SIGNED_OUT_ERROR,
         ClientError::Http { status: 403, .. } => FORBIDDEN_ERROR,
         ClientError::Http { status: 429, .. } => RATE_ERROR,
-        _ => SERVER_ERROR,
-    }
+        other => {
+            return crate::client_error::join_lead(
+                PUBLISH_FAILED,
+                crate::client_error::message_without_reason(other),
+            );
+        }
+    };
+    named.to_string()
 }
 
 const COMPOSE_CSS: &str = r#"
@@ -168,7 +174,7 @@ pub fn PostCompose(
                         content.set(text);
                         tags_input.set(tags_text);
                     }
-                    error.set(post_error_copy(&e).to_string());
+                    error.set(post_error_copy(&e));
                     toasts.show(Toast::error("Couldn't publish your post"));
                 }
             }
@@ -315,10 +321,25 @@ mod tests {
         assert_eq!(post_error_copy(&http(401, "")), SIGNED_OUT_ERROR);
         assert_eq!(post_error_copy(&http(403, "")), FORBIDDEN_ERROR);
         assert_eq!(post_error_copy(&http(429, "")), RATE_ERROR);
-        assert_eq!(post_error_copy(&http(500, "")), SERVER_ERROR);
+        let server = "Couldn't publish your post. The server had a problem. Try again in a moment.";
+        assert_eq!(post_error_copy(&http(500, "")), server);
         assert_eq!(
             post_error_copy(&ClientError::Network("offline".into())),
-            SEND_ERROR
+            "Couldn't publish your post. Could not reach the server. Check your connection and try again."
+        );
+        // Vision nit 10 on 748: an unreadable answer to a post that may have
+        // gone through says to reload, not to post again.
+        let unreadable = post_error_copy(&ClientError::Deserialize("expected value".into()));
+        assert_eq!(
+            unreadable,
+            format!(
+                "Couldn't publish your post. {}",
+                crate::client_error::UNREADABLE_ANSWER_MESSAGE
+            )
+        );
+        assert!(
+            !unreadable.to_lowercase().contains("try again"),
+            "{unreadable}"
         );
         for copy in [
             RELAY_OFF_ERROR,
@@ -326,7 +347,7 @@ mod tests {
             SIGNED_OUT_ERROR,
             FORBIDDEN_ERROR,
             RATE_ERROR,
-            SERVER_ERROR,
+            server,
         ] {
             assert!(!copy.contains("connection"), "{copy}");
             assert!(
@@ -339,7 +360,9 @@ mod tests {
     #[test]
     fn only_an_empty_box_marks_the_text_invalid() {
         assert!(text_is_invalid(EMPTY_ERROR));
-        assert!(!text_is_invalid(SEND_ERROR));
+        assert!(!text_is_invalid(&post_error_copy(&ClientError::Network(
+            "offline".into()
+        ))));
         assert!(!text_is_invalid(""));
     }
 

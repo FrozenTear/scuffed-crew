@@ -111,8 +111,15 @@ pub(crate) fn entry_date(iso: &str) -> Element {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Load<T> {
     Loading,
-    /// The fetch failed for a reason a retry may fix.
-    Failed,
+    /// The fetch failed: no answer, a 5xx or another status a retry may fix,
+    /// or a 401/403 refusal a retry cannot fix. [`Load::retry_helps`] tells
+    /// them apart for a page that asks. Today only the forum pages ask, so a
+    /// forum refusal shows no Retry; other pages do not consult it and
+    /// decide their Retry on their own. The text is the mapped
+    /// reason ([`crate::client_error::user_message`], already logged by the
+    /// resource), so the page can say why next to its own lead. It may be
+    /// blank when nothing said why.
+    Failed(String),
     /// The server said 404.
     Missing,
     Ready(T),
@@ -126,16 +133,44 @@ impl<T: Clone> Load<T> {
             None => Load::Loading,
             Some(Ok(value)) => Load::Ready(value.clone()),
             Some(Err(err)) if crate::components::is_http_status(err, 404) => Load::Missing,
-            Some(Err(_)) => Load::Failed,
+            Some(Err(err)) => Load::Failed(err.clone()),
         }
     }
 
     /// From a `use_api*` slot: `None` is in flight, `Some(None)` failed.
-    pub(crate) fn of_api(slot: Option<&Option<T>>) -> Self {
+    /// `error` is the resource's mapped error text (`ApiResource::error`).
+    pub(crate) fn of_api(slot: Option<&Option<T>>, error: Option<&str>) -> Self {
         match slot {
             None => Load::Loading,
-            Some(None) => Load::Failed,
+            Some(None) => Load::Failed(error.unwrap_or_default().to_string()),
             Some(Some(value)) => Load::Ready(value.clone()),
+        }
+    }
+}
+
+impl<T> Load<T> {
+    /// A failed load's line: `lead` ("Couldn't load the forum.") and the
+    /// reason the fetch kept, so a 403 or 409 shows the server's reason and
+    /// no answer shows the unreachable sentence (QA on 748). A 404 or a
+    /// blank reason is the lead alone.
+    pub(crate) fn failure_line(&self, lead: &str) -> String {
+        match self {
+            Load::Failed(reason) => crate::client_error::join_lead(lead, reason),
+            _ => lead.trim().to_string(),
+        }
+    }
+
+    /// A Retry can change the answer. A 401 or 403 cannot: the server gives
+    /// the same refusal again, so the forum shows no Retry for it, the same
+    /// as the strategy editor 403 (Vision round 6 on 748). Every other
+    /// failure (no answer, a 5xx, an unreadable answer) can be retried.
+    pub(crate) fn retry_helps(&self) -> bool {
+        match self {
+            Load::Failed(reason) => {
+                !crate::components::is_http_status(reason, 401)
+                    && !crate::components::is_http_status(reason, 403)
+            }
+            Load::Loading | Load::Missing | Load::Ready(_) => true,
         }
     }
 }
@@ -145,7 +180,7 @@ impl<T> Load<Batched<T>> {
     pub(crate) fn split(self) -> (Load<Vec<T>>, bool) {
         match self {
             Load::Loading => (Load::Loading, false),
-            Load::Failed => (Load::Failed, false),
+            Load::Failed(reason) => (Load::Failed(reason), false),
             Load::Missing => (Load::Missing, false),
             Load::Ready(batched) => (Load::Ready(batched.items), batched.truncated),
         }
@@ -155,7 +190,7 @@ impl<T> Load<Batched<T>> {
 /// A Retry is running. `use_resource` keeps the failed value while it
 /// refetches, so the error stays on screen and its button says "Retrying...".
 pub(crate) fn is_retrying<T>(state: UseResourceState, load: &Load<T>) -> bool {
-    state == UseResourceState::Pending && matches!(load, Load::Failed)
+    state == UseResourceState::Pending && matches!(load, Load::Failed(_))
 }
 
 /// Text of an article page's status line: the loading words during the first
@@ -506,7 +541,7 @@ fn author_lookup_entry(fetched: PublicFetch<PublicMemberName>) -> Option<Option<
     match fetched {
         PublicFetch::Found(m) => Some(Some(m.display_name)),
         PublicFetch::NotFound => Some(None),
-        PublicFetch::Failed => None,
+        PublicFetch::Failed(_) => None,
     }
 }
 
@@ -740,9 +775,36 @@ mod tests {
         assert_eq!(author_lookup_entry(PublicFetch::NotFound), Some(None));
         // A failed request stores nothing, so the id is still missing and is
         // asked for again the next time its row is shown.
-        assert_eq!(author_lookup_entry(PublicFetch::Failed), None);
+        assert_eq!(
+            author_lookup_entry(PublicFetch::Failed(String::new())),
+            None
+        );
         let known = AuthorNames::new();
         assert_eq!(missing_author_ids(vec!["a".to_string()], &known), ["a"]);
+    }
+
+    /// QA on 748: a failed load's line is its lead and the reason it kept;
+    /// a 404 or no reason is the lead alone.
+    #[test]
+    fn a_failed_load_line_says_why() {
+        let net = crate::client_error::NETWORK_ERROR_MESSAGE;
+        assert_eq!(
+            Load::<u8>::Failed(net.to_string()).failure_line("Couldn't load the forum."),
+            format!("Couldn't load the forum. {net}")
+        );
+        assert_eq!(
+            Load::<u8>::Failed("HTTP error 403: Members only".into())
+                .failure_line("Couldn't load the blog."),
+            "Couldn't load the blog. HTTP error 403: Members only"
+        );
+        assert_eq!(
+            Load::<u8>::Missing.failure_line("Couldn't load the wiki."),
+            "Couldn't load the wiki."
+        );
+        assert_eq!(
+            Load::<u8>::Failed(String::new()).failure_line("Couldn't load the wiki."),
+            "Couldn't load the wiki."
+        );
     }
 
     #[test]
@@ -753,8 +815,8 @@ mod tests {
         });
         assert_eq!(ready.split(), (Load::Ready(vec![1u8, 2]), true));
         assert_eq!(
-            Load::<Batched<u8>>::Failed.split(),
-            (Load::<Vec<u8>>::Failed, false)
+            Load::<Batched<u8>>::Failed("why".into()).split(),
+            (Load::<Vec<u8>>::Failed("why".into()), false)
         );
         assert_eq!(
             Load::<Batched<u8>>::Loading.split(),
@@ -778,7 +840,7 @@ mod tests {
         // A retry keeps the failed value on screen and says it is loading.
         assert_eq!(
             list_status(
-                &Load::<Vec<u8>>::Failed,
+                &Load::<Vec<u8>>::Failed(String::new()),
                 true,
                 false,
                 "Loading posts",
@@ -788,7 +850,7 @@ mod tests {
         );
         assert_eq!(
             list_status(
-                &Load::<Vec<u8>>::Failed,
+                &Load::<Vec<u8>>::Failed(String::new()),
                 false,
                 false,
                 "Loading posts",
@@ -809,13 +871,19 @@ mod tests {
             "Loading post"
         );
         assert_eq!(
-            load_status(&Load::<u8>::Failed, true, "Loading post"),
+            load_status(&Load::<u8>::Failed(String::new()), true, "Loading post"),
             "Loading post"
         );
         assert_eq!(load_status(&Load::Ready(1u8), false, "Loading post"), "");
 
-        assert!(is_retrying(UseResourceState::Pending, &Load::<u8>::Failed));
-        assert!(!is_retrying(UseResourceState::Ready, &Load::<u8>::Failed));
+        assert!(is_retrying(
+            UseResourceState::Pending,
+            &Load::<u8>::Failed(String::new())
+        ));
+        assert!(!is_retrying(
+            UseResourceState::Ready,
+            &Load::<u8>::Failed(String::new())
+        ));
         assert!(!is_retrying(UseResourceState::Pending, &Load::Ready(1u8)));
         assert!(!is_retrying(
             UseResourceState::Pending,
@@ -825,9 +893,17 @@ mod tests {
 
     #[test]
     fn api_slots_map_to_load_states() {
-        assert_eq!(Load::<u8>::of_api(None), Load::Loading);
-        assert_eq!(Load::<u8>::of_api(Some(&None)), Load::Failed);
-        assert_eq!(Load::of_api(Some(&Some(7u8))), Load::Ready(7));
+        assert_eq!(Load::<u8>::of_api(None, None), Load::Loading);
+        assert_eq!(
+            Load::<u8>::of_api(Some(&None), None),
+            Load::Failed(String::new())
+        );
+        // The resource's mapped reason rides along, so the page can say why.
+        assert_eq!(
+            Load::<u8>::of_api(Some(&None), Some("HTTP error 403: Members only")),
+            Load::Failed("HTTP error 403: Members only".to_string())
+        );
+        assert_eq!(Load::of_api(Some(&Some(7u8)), None), Load::Ready(7));
     }
 
     #[derive(Props, Clone, PartialEq)]
@@ -926,7 +1002,10 @@ mod tests {
         assert_eq!(Load::<u8>::of(None), Load::Loading);
         assert_eq!(Load::of(Some(&ok)), Load::Ready(7));
         assert_eq!(Load::of(Some(&missing)), Load::Missing);
-        assert_eq!(Load::of(Some(&down)), Load::Failed);
+        assert_eq!(
+            Load::of(Some(&down)),
+            Load::Failed("HTTP error: 500".to_string())
+        );
     }
 
     #[test]

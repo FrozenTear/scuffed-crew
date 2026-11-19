@@ -136,14 +136,21 @@ const PAGE_CSS: &str = r#"
 /// Text under the editor after a failed save. Only a failure that a retry
 /// can fix says "try again": a 403 is a viewer who is not a crew member, a
 /// 401 is an ended session, and only no answer at all is the connection.
-fn save_failed_text(err: &ClientError) -> &'static str {
-    match err.http_status() {
+fn save_failed_text(err: &ClientError) -> String {
+    let named = match err.http_status() {
         Some(401) => "Couldn't save the page. Your session has ended. Log in again.",
         Some(403) => "Couldn't save the page. Only crew members can edit the wiki.",
         Some(404) => "Couldn't save the page. It no longer exists.",
         Some(_) => "Couldn't save the page. Try again in a moment.",
-        None => "Couldn't save the page. Check your connection and try again.",
-    }
+        // No answer or an unreadable answer: the one mapping (QA on 748).
+        None => {
+            return crate::client_error::join_lead(
+                "Couldn't save the page.",
+                crate::client_error::message_without_reason(err),
+            );
+        }
+    };
+    named.to_string()
 }
 
 /// Edit shows for a crew member who is not already editing. A logged-in
@@ -164,8 +171,8 @@ enum RevisionsView {
     /// History is closed: nothing is shown and nothing is said.
     Closed,
     Loading,
-    /// The fetch failed for a reason a retry may fix.
-    Failed,
+    /// The fetch failed for a reason a retry may fix: the mapped reason.
+    Failed(String),
     /// No revisions (an empty list, or the server said 404).
     Empty,
     List(Vec<WikiRevisionData>),
@@ -181,13 +188,11 @@ fn revisions_view(
     match classify_fetch(slot) {
         FetchClass::Loading => RevisionsView::Loading,
         FetchClass::Error => {
-            let not_found = slot
-                .and_then(|r| r.as_ref().err())
-                .is_some_and(|err| is_http_status(err, 404));
-            if not_found {
+            let err = slot.and_then(|r| r.as_ref().err());
+            if err.is_some_and(|err| is_http_status(err, 404)) {
                 RevisionsView::Empty
             } else {
-                RevisionsView::Failed
+                RevisionsView::Failed(err.cloned().unwrap_or_default())
             }
         }
         FetchClass::Ready => match slot.and_then(|r| r.as_ref().ok()).and_then(Option::as_ref) {
@@ -202,7 +207,7 @@ fn revisions_view(
 /// Text of the history status line. It is always rendered; only this changes.
 fn revisions_status(view: &RevisionsView) -> String {
     match view {
-        RevisionsView::Closed | RevisionsView::Failed => String::new(),
+        RevisionsView::Closed | RevisionsView::Failed(_) => String::new(),
         RevisionsView::Loading => "Loading revisions".to_string(),
         RevisionsView::Empty => "No revisions yet.".to_string(),
         RevisionsView::List(rows) => pluralize(rows.len(), "revision", "revisions"),
@@ -225,7 +230,7 @@ pub fn WikiPage(topic: String) -> Element {
             ApiClient::web()
                 .fetch::<WikiPageData>(&wiki_api_path(&t))
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(|e| crate::client_error::logged_message("wiki page", &e))
         }
     });
 
@@ -244,7 +249,7 @@ pub fn WikiPage(topic: String) -> Element {
                 .fetch::<WikiRevisionsResponse>(&format!("{}/revisions", wiki_api_path(&t)))
                 .await
                 .map(Some)
-                .map_err(|e| e.to_string())
+                .map_err(|e| crate::client_error::logged_message("wiki revisions", &e))
         }
     });
 
@@ -261,7 +266,7 @@ pub fn WikiPage(topic: String) -> Element {
     let mut editing = use_signal(|| false);
     let mut edit_content = use_signal(String::new);
     let mut revision_note = use_signal(String::new);
-    let mut save_error = use_signal(|| Option::<&'static str>::None);
+    let mut save_error = use_signal(|| Option::<String>::None);
 
     let load = Load::of(page_resource.read().as_ref());
     let retrying = is_retrying(page_resource.state()(), &load);
@@ -274,11 +279,11 @@ pub fn WikiPage(topic: String) -> Element {
     crate::head::use_page_title(match &load {
         Load::Ready(page) => Some(format!("{} | Wiki", page.title.trim())),
         Load::Missing => Some("Page not found | Wiki".to_string()),
-        Load::Loading | Load::Failed => None,
+        Load::Loading | Load::Failed(_) => None,
     });
     let rev_view = revisions_view(show_revisions(), revisions.read().as_ref());
-    let rev_retrying =
-        revisions.state()() == UseResourceState::Pending && rev_view == RevisionsView::Failed;
+    let rev_retrying = revisions.state()() == UseResourceState::Pending
+        && matches!(rev_view, RevisionsView::Failed(_));
 
     rsx! {
         crate::styles::StyleOnce { id: ARTICLE_CSS_ID, css: ARTICLE_CSS }
@@ -296,9 +301,9 @@ pub fn WikiPage(topic: String) -> Element {
             {match &load {
                 Load::Loading => rsx! {},
                 Load::Missing => wiki_missing(),
-                Load::Failed => rsx! {
+                Load::Failed(reason) => rsx! {
                     LoadError {
-                        message: "Check your connection and try again.",
+                        message: crate::client_error::reason_or_fallback(reason),
                         on_retry: move |_| page_refresh += 1,
                         retrying,
                     }
@@ -491,7 +496,7 @@ impl WikiIds {
 fn wiki_state_head(load: &Load<WikiPageData>) -> Element {
     match load {
         Load::Loading => rsx! { PageHeader { title: "Wiki page" } },
-        Load::Failed => rsx! { PageHeader { title: "Couldn't load this page" } },
+        Load::Failed(_) => rsx! { PageHeader { title: "Couldn't load this page" } },
         Load::Missing | Load::Ready(_) => rsx! {},
     }
 }
@@ -575,9 +580,9 @@ fn WikiRevisions(
             }
             p { class: "entry-status", role: "status", "{status}" }
             {match &view {
-                RevisionsView::Failed => rsx! {
+                RevisionsView::Failed(reason) => rsx! {
                     LoadError {
-                        message: "Couldn't load revisions. Check your connection and try again.",
+                        message: crate::client_error::join_lead("Couldn't load revisions.", reason),
                         on_retry: move |_| on_retry.call(()),
                         retrying,
                     }
@@ -623,6 +628,7 @@ fn render_revision(rev: &WikiRevisionData) -> Element {
 
 #[cfg(test)]
 mod tests {
+    const NET: &str = crate::client_error::NETWORK_ERROR_MESSAGE;
     use super::super::article_author::test_support::render_routed;
     use super::*;
     use crate::components::ui::test_support::assert_sizes_from_tokens;
@@ -783,7 +789,15 @@ mod tests {
         let offline = save_failed_text(&ClientError::Network("failed to fetch".into()));
         assert_eq!(
             offline,
-            "Couldn't save the page. Check your connection and try again."
+            "Couldn't save the page. Could not reach the server. Check your connection and try again."
+        );
+        let unreadable = save_failed_text(&ClientError::Deserialize("expected value".into()));
+        assert_eq!(
+            unreadable,
+            format!(
+                "Couldn't save the page. {}",
+                crate::client_error::UNREADABLE_ANSWER_MESSAGE
+            )
         );
     }
 
@@ -856,14 +870,20 @@ mod tests {
         assert_eq!(revisions_view(true, Some(&skipped)), RevisionsView::Loading);
         assert_eq!(revisions_view(true, Some(&empty)), RevisionsView::Empty);
         assert_eq!(revisions_view(true, Some(&gone)), RevisionsView::Empty);
-        assert_eq!(revisions_view(true, Some(&down)), RevisionsView::Failed);
+        assert_eq!(
+            revisions_view(true, Some(&down)),
+            RevisionsView::Failed("HTTP error: 500".to_string())
+        );
         assert_eq!(
             revisions_view(true, Some(&list)),
             RevisionsView::List(vec![revision(1)])
         );
 
         assert_eq!(revisions_status(&RevisionsView::Closed), "");
-        assert_eq!(revisions_status(&RevisionsView::Failed), "");
+        assert_eq!(
+            revisions_status(&RevisionsView::Failed(NET.to_string())),
+            ""
+        );
         assert_eq!(
             revisions_status(&RevisionsView::Loading),
             "Loading revisions"
@@ -936,7 +956,7 @@ mod tests {
         );
         assert_eq!(list.matches("<li class=\"wiki-revision-item\">").count(), 2);
 
-        let failed = revisions(RevisionsView::Failed, true);
+        let failed = revisions(RevisionsView::Failed(NET.to_string()), true);
         assert!(failed.contains("role=\"alert\""), "{failed}");
         assert!(failed.contains(">Retrying...</button>"), "{failed}");
         assert!(failed.contains("aria-disabled=\"true\""), "{failed}");
@@ -958,7 +978,7 @@ mod tests {
             wiki_state_head(&Load::Loading)
         }
         fn failed() -> Element {
-            wiki_state_head(&Load::Failed)
+            wiki_state_head(&Load::Failed(NET.to_string()))
         }
         fn missing() -> Element {
             wiki_state_head(&Load::Missing)

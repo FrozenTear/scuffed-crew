@@ -41,7 +41,7 @@ pub fn BlogPost(slug: String) -> Element {
             ApiClient::web()
                 .fetch::<FullArticle>(&article_api_path(&s))
                 .await
-                .map_err(|e| e.to_string())
+                .map_err(|e| crate::client_error::logged_message("blog article", &e))
         }
     });
     // Articles carry only the author id; resolve it once the article loads.
@@ -73,7 +73,7 @@ fn tab_label(load: &Load<FullArticle>) -> Option<String> {
     match load {
         Load::Ready(a) => Some(format!("{} | Blog", a.title.trim())),
         Load::Missing => Some("Post not found | Blog".to_string()),
-        Load::Loading | Load::Failed => None,
+        Load::Loading | Load::Failed(_) => None,
     }
 }
 
@@ -107,7 +107,7 @@ fn BlogPostView(
             {match &load {
                 // The title is not known yet, so the page is named by its kind.
                 Load::Loading => rsx! { PageHeader { title: "Blog post" } },
-                Load::Failed => rsx! { PageHeader { title: "Couldn't load this post" } },
+                Load::Failed(_) => rsx! { PageHeader { title: "Couldn't load this post" } },
                 Load::Missing | Load::Ready(_) => rsx! {},
             }}
             p { class: "entry-status", role: "status", "{status}" }
@@ -123,9 +123,9 @@ fn BlogPostView(
                         ],
                     }
                 },
-                Load::Failed => rsx! {
+                Load::Failed(reason) => rsx! {
                     LoadError {
-                        message: "Check your connection and try again.",
+                        message: crate::client_error::reason_or_fallback(reason),
                         on_retry: move |_| on_retry.call(()),
                         retrying,
                     }
@@ -158,6 +158,7 @@ fn BlogPostView(
 
 #[cfg(test)]
 mod tests {
+    const NET: &str = crate::client_error::NETWORK_ERROR_MESSAGE;
     use super::super::article_author::AUTHOR_FALLBACK;
     use super::super::article_author::test_support::render_routed;
     use super::*;
@@ -321,7 +322,7 @@ mod tests {
             Some("Post not found | Blog")
         );
         assert_eq!(tab_label(&Load::Loading), None);
-        assert_eq!(tab_label(&Load::Failed), None);
+        assert_eq!(tab_label(&Load::Failed(NET.to_string())), None);
     }
 
     #[test]
@@ -334,7 +335,7 @@ mod tests {
         assert!(!loading.contains("not found"), "{loading}");
         assert!(loading.contains("<h1>Blog post</h1>"), "{loading}");
 
-        let failed = render(Load::Failed, None);
+        let failed = render(Load::Failed(NET.to_string()), None);
         assert!(failed.contains("role=\"alert\""), "{failed}");
         assert!(
             failed.contains("<h1>Couldn&#39;t load this post</h1>"),
@@ -348,7 +349,7 @@ mod tests {
         assert!(!failed.contains("Post not found"), "{failed}");
 
         // A retry keeps the error and its button, and says it is loading.
-        let retrying = render_state(Load::Failed, None, true);
+        let retrying = render_state(Load::Failed(NET.to_string()), None, true);
         assert!(
             retrying.contains("<p class=\"entry-status\" role=\"status\">Loading post</p>"),
             "{retrying}"

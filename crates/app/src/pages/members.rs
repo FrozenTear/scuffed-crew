@@ -98,7 +98,8 @@ fn roster_path(hero: Option<&str>, cursor: Option<&str>) -> String {
 /// pager needs every row: walk `next_cursor` to the end, with and without a
 /// hero filter (players past offset 100 still appear, HS-DR FE-1). `None` is a
 /// failed request.
-async fn fetch_roster(hero: Option<String>) -> Option<Roster> {
+/// The roster, or the mapped reason it failed (logged).
+async fn fetch_roster(hero: Option<String>) -> Result<Roster, String> {
     let mut members = Vec::new();
     let mut cursor: Option<String> = None;
     let mut truncated = true;
@@ -107,7 +108,7 @@ async fn fetch_roster(hero: Option<String>) -> Option<Roster> {
         let page = ApiClient::web()
             .fetch::<MembersResponse>(&path)
             .await
-            .ok()?;
+            .map_err(|e| crate::client_error::logged_message("members roster", &e))?;
         members.extend(page.data);
         match page.next_cursor {
             Some(c) if !c.is_empty() => cursor = Some(c),
@@ -117,7 +118,7 @@ async fn fetch_roster(hero: Option<String>) -> Option<Roster> {
             }
         }
     }
-    Some(Roster {
+    Ok(Roster {
         hero,
         members,
         truncated,
@@ -395,7 +396,7 @@ pub fn Members() -> Element {
         async move { fetch_roster(hero).await }
     });
 
-    let fetched = Load::of_api(members.read().as_ref());
+    let fetched = Load::of(members.read().as_ref());
     let retrying = is_retrying(members.state()(), &fetched);
     // `use_resource` keeps the last roster while the next one is in flight.
     let load = match fetched {
@@ -512,9 +513,9 @@ fn MembersIndex(
                             }
                         }
                     },
-                    Load::Failed | Load::Missing => rsx! {
+                    Load::Failed(_) | Load::Missing => rsx! {
                         LoadError {
-                            message: "Couldn't load the members. Check your connection and try again.",
+                            message: load.failure_line("Couldn't load the members."),
                             on_retry: move |_| on_retry.call(()),
                             retrying,
                         }
@@ -632,6 +633,7 @@ fn hero_stat_line(hero: &str, hs: &HeroScoped) -> HeroStatLine {
 
 #[cfg(test)]
 mod tests {
+    const NET: &str = crate::client_error::NETWORK_ERROR_MESSAGE;
     use super::*;
     use crate::components::ui::test_support::{
         assert_sizes_from_tokens, css_rule, has_decl, render_routed,
@@ -757,7 +759,7 @@ mod tests {
         let ready = render(view(Load::Ready(roster(crew(3)))));
         let empty = render(view(Load::Ready(roster(Vec::new()))));
         let loading = render(view(Load::Loading));
-        let failed = render(view(Load::Failed));
+        let failed = render(view(Load::Failed(NET.to_string())));
         for html in [&ready, &empty, &loading, &failed] {
             assert_eq!(html.matches("<h1").count(), 1, "{html}");
             assert!(html.contains("<h1>Members</h1>"), "{html}");
@@ -1016,16 +1018,18 @@ mod tests {
         assert!(!loading.contains("No members"), "{loading}");
 
         // A failed fetch is an error with a retry, not an endless "Loading".
-        let failed = render(view(Load::Failed));
+        let failed = render(view(Load::Failed(NET.to_string())));
         assert!(failed.contains("role=\"alert\""), "{failed}");
         assert!(
-            failed.contains("load the members. Check your connection"),
+            failed.contains(
+                "Couldn&#39;t load the members. Could not reach the server. Check your connection and try again."
+            ),
             "{failed}"
         );
         assert!(failed.contains(">Retry</button>"), "{failed}");
         assert!(!failed.contains("Loading"), "{failed}");
 
-        let mut v = view(Load::Failed);
+        let mut v = view(Load::Failed(NET.to_string()));
         v.retrying = true;
         let retrying = render(v);
         assert!(

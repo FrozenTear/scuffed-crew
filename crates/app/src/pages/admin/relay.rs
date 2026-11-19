@@ -3,7 +3,8 @@
 //! One read of `/api/nostr/health`. The state is always a word in a pill with
 //! a shape in front of it (a filled dot for online, a triangle for offline, a
 //! ring for not set), so colour is never the only signal. An offline primary
-//! relay is an error state with Retry.
+//! relay shows an alert banner with no button of its own: "Check again" in
+//! the page header is the retry.
 
 use dioxus::prelude::*;
 use serde::Deserialize;
@@ -467,13 +468,20 @@ mod tests {
     }
 
     #[test]
-    fn offline_relay_is_an_error_with_retry() {
+    fn offline_relay_is_an_alert_without_its_own_retry() {
         let html = render_routed(|| {
             rsx! { RelayDetails { health: health(true, false, "nostr") } }
         });
         assert!(html.contains("The primary relay is offline."), "{html}");
         // One way to check again: the header button, not a second Retry.
         assert!(!html.contains(">Retry</button>"), "{html}");
+        // Vision round 7 on 748: the no-Retry banner is an alert, and the
+        // status line says nothing while it shows, so it is said once.
+        assert!(
+            html.contains("<div class=\"fetch-error-wrap\" role=\"alert\">"),
+            "{html}"
+        );
+        assert_eq!(summary_text(RelayState::Offline), "");
         assert!(html.contains("relay-shape is-offline"), "{html}");
         assert!(html.contains(">Offline</span>"), "{html}");
     }

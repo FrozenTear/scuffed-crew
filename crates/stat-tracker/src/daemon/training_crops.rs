@@ -44,9 +44,11 @@
 //! blocking thread ([`claim_offered`]), so two close Tabs cannot both
 //! save it. A `hero_icon` or `stat_digits` save that keeps nothing, or
 //! loses a digit cell, releases the claim, so a later Tab of the same
-//! game retries. Rank crops (PR 746) deliberately keep their claim after
-//! an empty cut: a rank screen shows once per game, so there is no later
-//! one to retry on. A miss (no box, no card edge, no header, chat over the
+//! game retries. Rank crops (`rank_training.rs`, PR 746) keep their claim
+//! when no region fits or some were kept: every frame of one rank screen
+//! gives about the same regions, so a retry would only spend the encodes
+//! again. A later Tab is a new board, so a hero or digit retry can come
+//! out differently. A miss (no box, no card edge, no header, chat over the
 //! row, or a card over the 256 px edge cap) skips that crop and nothing
 //! else. If a `hero_icon` is still refused after that downscale, that
 //! hero is not marked offered, so a later Tab of the same game can retry.

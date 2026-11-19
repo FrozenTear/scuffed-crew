@@ -46,7 +46,7 @@ pub(super) fn load_of<T: Clone>(slot: Option<&PublicFetch<T>>) -> Load<T> {
         None => Load::Loading,
         Some(PublicFetch::Found(value)) => Load::Ready(value.clone()),
         Some(PublicFetch::NotFound) => Load::Missing,
-        Some(PublicFetch::Failed) => Load::Failed,
+        Some(PublicFetch::Failed(reason)) => Load::Failed(reason.clone()),
     }
 }
 
@@ -365,7 +365,7 @@ fn tab_label(load: &Load<MatchDetailData>) -> Option<String> {
             m.opponent.trim()
         )),
         Load::Missing => Some("Match not found".to_string()),
-        Load::Loading | Load::Failed => None,
+        Load::Loading | Load::Failed(_) => None,
     }
 }
 
@@ -396,7 +396,7 @@ fn MatchView(
         PageShell { width, class: "match-page",
             {match &load {
                 Load::Loading => rsx! { PageHeader { title: "Match" } },
-                Load::Failed => rsx! { PageHeader { title: "Couldn't load this match" } },
+                Load::Failed(_) => rsx! { PageHeader { title: "Couldn't load this match" } },
                 Load::Missing | Load::Ready(_) => rsx! {},
             }}
             p { class: "entry-status", role: "status", "{status}" }
@@ -412,9 +412,9 @@ fn MatchView(
                         ],
                     }
                 },
-                Load::Failed => rsx! {
+                Load::Failed(reason) => rsx! {
                     LoadError {
-                        message: "Check your connection and try again.",
+                        message: crate::client_error::reason_or_fallback(reason),
                         on_retry: move |_| on_retry.call(()),
                         retrying,
                     }
@@ -569,6 +569,7 @@ fn render_match(m: &MatchDetailData, scheduled_ms: Option<f64>, now_ms: Option<f
 
 #[cfg(test)]
 mod tests {
+    const NET: &str = crate::client_error::NETWORK_ERROR_MESSAGE;
     use super::*;
     use crate::components::ui::test_support::{
         assert_sizes_from_tokens, css_rule, has_decl, render_routed,
@@ -829,7 +830,7 @@ mod tests {
         );
         assert!(loading.contains("ui-skel-list"), "{loading}");
 
-        let failed = render(Load::Failed);
+        let failed = render(Load::Failed(NET.to_string()));
         assert_eq!(failed.matches("<h1").count(), 1, "{failed}");
         assert!(failed.contains("load this match</h1>"), "{failed}");
         assert!(failed.contains("fetch-error__retry"), "{failed}");

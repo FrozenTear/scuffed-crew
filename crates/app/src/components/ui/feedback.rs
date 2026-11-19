@@ -134,8 +134,12 @@ pub fn StatusLine(text: String) -> Element {
 }
 
 /// Failed load. Plain sentence, no raw server error. `on_retry: None` hides
-/// the button for failures a retry cannot fix. Same markup and classes as
-/// `fetch_error_state`, but the retry is a handler, so it also works for
+/// the button for failures a retry cannot fix. Always an alert, with or
+/// without Retry: the box appears with its text already in it, and a
+/// status that appears already filled is not reliably announced (Vision
+/// round 7 on 748; the strategy editor 403 is an alert too). Pages keep
+/// their own status line empty while it shows, so it is said once. Same
+/// markup, classes and role rule as `fetch_error_state`, but the retry is a handler, so it also works for
 /// `use_resource` (`resource.restart()`). While `retrying` the button is
 /// `aria-disabled` and ignores clicks, so it keeps keyboard focus.
 #[component]
@@ -148,7 +152,7 @@ pub fn LoadError(
     rsx! {
         div {
             class: "fetch-error-wrap",
-            role: if on_retry.is_some() { "alert" } else { "status" },
+            role: "alert",
             aria_busy: if retrying { "true" },
             p { class: "fetch-error", "{message}" }
             if let Some(retry) = on_retry {
@@ -307,7 +311,10 @@ mod tests {
         assert!(html.contains("role=\"alert\""), "{html}");
         assert!(html.contains(">Retry</button>"), "{html}");
         let html = render(fixed);
-        assert!(html.contains("role=\"status\""), "{html}");
+        // Vision round 7 on 748: no Retry is still an alert, exactly one
+        // live region, and no status that would say it a second time.
+        assert_eq!(html.matches("role=\"alert\"").count(), 1, "{html}");
+        assert!(!html.contains("role=\"status\""), "{html}");
         assert!(!html.contains("<button"), "{html}");
         let html = render(busy);
         assert!(html.contains(">Retrying...</button>"), "{html}");

@@ -388,16 +388,20 @@ impl SaveState {
         matches!(self, SaveState::Failed(_))
     }
 
-    /// A failure sentence that keeps the server's reason: `what` is the plain
-    /// part ("Could not save settings"), `reason` the error as received.
-    pub fn failed(what: &str, reason: impl std::fmt::Display) -> Self {
-        let reason = reason.to_string();
-        let reason = reason.trim();
-        if reason.is_empty() {
-            SaveState::Failed(format!("{what}."))
-        } else {
-            SaveState::Failed(format!("{what}. {reason}"))
-        }
+    /// A failure sentence for a failed request: `what` is the plain part
+    /// ("Could not save settings"), then the short text from
+    /// [`crate::client_error::user_message`] (the server's reason, or one
+    /// plain sentence for a network or unreadable answer). It takes the
+    /// error itself, so a raw browser error cannot reach the line.
+    /// The raw error goes to the console under `what`.
+    pub fn failed(what: &str, err: &scuffed_api_client::ClientError) -> Self {
+        Self::failed_text(what, &crate::client_error::logged_message(what, err))
+    }
+
+    /// [`SaveState::failed`] for a reason that is already page text (a
+    /// check made on the page, not a request error).
+    pub fn failed_text(what: &str, reason: &str) -> Self {
+        SaveState::Failed(crate::client_error::two_sentences(what, reason))
     }
 }
 
@@ -1398,7 +1402,10 @@ mod admin_pattern_tests {
         fn failed() -> Element {
             rsx! {
                 FormStatus {
-                    state: SaveState::failed("Could not save settings", "HTTP error 400: name too long"),
+                    state: SaveState::failed(
+                        "Could not save settings",
+                        &scuffed_api_client::ClientError::http(400, r#"{"error":"name too long"}"#, None),
+                    ),
                     id: "settings-save-status".to_string(),
                 }
             }
@@ -1409,7 +1416,7 @@ mod admin_pattern_tests {
         );
         assert_eq!(SaveState::Saving.text(), "Saving...");
         assert_eq!(
-            SaveState::failed("Could not save", " "),
+            SaveState::failed_text("Could not save", " "),
             SaveState::Failed("Could not save.".to_string())
         );
     }

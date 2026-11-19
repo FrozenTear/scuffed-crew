@@ -141,7 +141,7 @@ pub fn AdminGames() -> Element {
                     save_error.set(Some(
                         SaveState::failed("Could not save the game", &e).text(),
                     ));
-                    toast.show(Toast::error(format!("Failed to save game: {e}")));
+                    toast.show(Toast::error_logged_elsewhere("Failed to save game", &e));
                 }
             }
         });

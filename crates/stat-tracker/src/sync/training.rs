@@ -5,7 +5,7 @@
 //! The contract is `docs/api/training-crops.md`; the shapes and caps come
 //! from `scuffed_types`. Nothing here does I/O.
 
-use scuffed_types::api::training_crops::{TrainingCropConsent, TrainingCropUploadMeta};
+use scuffed_types::api::training_crops::{CropSpot, TrainingCropConsent, TrainingCropUploadMeta};
 use scuffed_types::{
     CropKind, HERO_ICON_MAX_FILES_PER_UPLOAD, HERO_ICON_MAX_REQUEST_BYTES, HERO_ICON_MIN_EDGE,
     TRAINING_CROP_GAME_TOKEN_LEN, TRAINING_CROP_META_MAX_BYTES, TRAINING_CROP_SCREEN_MAX_EDGE,
@@ -20,14 +20,20 @@ pub enum UploadKind {
     HeroIcon,
     StatDigits,
     MapName,
+    /// The rank update screen after a competitive game, cut into the
+    /// regions the rank reader reads ([`RANK_SLOTS`]) at native scale: never
+    /// the result title, the mode banner, chat, a hero name, a player
+    /// name or the SR line (overlay text over its digits joins them).
+    Rank,
 }
 
 impl UploadKind {
     /// Every kind, in the order a send pass walks them.
-    pub const ALL: [UploadKind; 3] = [
+    pub const ALL: [UploadKind; 4] = [
         UploadKind::HeroIcon,
         UploadKind::StatDigits,
         UploadKind::MapName,
+        UploadKind::Rank,
     ];
 
     /// The shared kind.
@@ -36,6 +42,7 @@ impl UploadKind {
             UploadKind::HeroIcon => CropKind::HeroIcon,
             UploadKind::StatDigits => CropKind::StatDigits,
             UploadKind::MapName => CropKind::MapName,
+            UploadKind::Rank => CropKind::Rank,
         }
     }
 
@@ -62,6 +69,7 @@ impl UploadKind {
             UploadKind::HeroIcon => "Hero icons",
             UploadKind::StatDigits => "Stat digits",
             UploadKind::MapName => "Map names",
+            UploadKind::Rank => "Rank screens",
         }
     }
 }
@@ -128,6 +136,17 @@ pub fn check_crop(kind: UploadKind, crop: &QueuedCrop) -> Result<(), CropRefusal
         return Err(CropRefusal::TooLarge(crop.png.len()));
     }
     crop.meta.validate().map_err(CropRefusal::Meta)?;
+    if let Some((min_width, min_height)) = kind.crop_kind().min_screen() {
+        // The server refuses such a crop (`rank` must report a screen
+        // larger than any crop of its kind), so it is not kept either.
+        let large_enough = matches!(
+            (crop.meta.screen_width, crop.meta.screen_height),
+            (Some(w), Some(h)) if w >= min_width && h >= min_height
+        );
+        if !large_enough {
+            return Err(CropRefusal::Meta("screen_width"));
+        }
+    }
     if kind == UploadKind::HeroIcon && crop.meta.hero.is_none() {
         return Err(CropRefusal::NoHero);
     }
@@ -303,4 +322,40 @@ pub fn stat_digits_meta(
         slot_type: Some((*slot).to_string()),
         ..tab_meta(width, height)
     })
+}
+
+/// `screen` of a `rank` crop: the rank update screen, the same class the
+/// report bundle gives its `crops/rank.png` (`report::bundle::RANK_SCREEN_CLASS`).
+pub const RANK_SCREEN: &str = "rank_update";
+
+/// `slot_type` of each `rank` crop, one per rank screen region the rank
+/// reader reads (`daemon::rank_training` cuts them): the role line, the
+/// emblem with its tier word, and the progress bar with its labels and
+/// tags. No mode banner: the voice overlay list can reach into its box
+/// with another person's name. No SR line: chat or overlay text over the
+/// SR digits joins their glyphs.
+pub const RANK_SLOTS: [&str; 3] = ["rank_role", "rank_tier", "rank_bar"];
+
+/// `spot_version` of a `rank` crop: the geometry its region rectangle
+/// comes from. Bumped whenever a region's box or rule changes.
+pub const RANK_SPOT_VERSION: &str = "rank-regions.3";
+
+/// `meta` for the `slot` region of a rank update screen of `width` x
+/// `height`, cut at `spot` (frame pixels), without the game token
+/// ([`super::keep_tab_crops`] adds it). The screen size is always set: the
+/// server requires it for this kind, and [`check_crop`] refuses a crop
+/// whose screen is under the kind's minimum. The rectangle goes in
+/// `found_spot` (confidence 1: the box is placed by the layout) with
+/// [`RANK_SPOT_VERSION`].
+pub fn rank_meta(width: u32, height: u32, slot: &str, spot: CropSpot) -> TrainingCropUploadMeta {
+    TrainingCropUploadMeta {
+        screen: Some(RANK_SCREEN.to_string()),
+        slot_type: Some(slot.to_string()),
+        spot_version: Some(RANK_SPOT_VERSION.to_string()),
+        screen_width: Some(width),
+        screen_height: Some(height),
+        found_spot: Some(spot),
+        found_confidence: Some(1.0),
+        ..TrainingCropUploadMeta::default()
+    }
 }

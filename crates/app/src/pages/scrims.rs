@@ -258,9 +258,6 @@ const UNNAMED_SCRIM: &str = "Scrim request";
 /// 403 to a member who is not on the team's roster and not an officer.
 fn scrim_error_copy(err: &ClientError) -> &'static str {
     match err {
-        ClientError::Network(_) => {
-            "Couldn't reach the server. Check your connection and try again."
-        }
         ClientError::Http { status: 401, .. } => "Your session ended. Log in again.",
         ClientError::Http { status: 403, .. } => {
             "Only the team's roster or an officer can do that for this team."
@@ -270,7 +267,9 @@ fn scrim_error_copy(err: &ClientError) -> &'static str {
         ClientError::Http { status: 429, .. } => {
             "Too many changes in a row. Wait a moment and try again."
         }
-        _ => "Something went wrong. Try again in a moment.",
+        // No answer, an unreadable answer and any other status: the one
+        // mapping (QA on 748).
+        other => crate::client_error::message_without_reason(other),
     }
 }
 

@@ -8,7 +8,8 @@ use serde::de::DeserializeOwned;
 pub struct ApiResource<T: 'static> {
     pub data: Resource<Option<T>>,
     pub refresh: Signal<u64>,
-    /// Last fetch error (None when ok or still loading).
+    /// Last fetch error as page text (None when ok or still loading): always
+    /// [`crate::client_error::user_message`], the raw error is logged.
     pub error: Signal<Option<String>>,
     /// True when a cursor page remains after the loaded page budget.
     pub truncated: Signal<bool>,
@@ -38,7 +39,7 @@ pub fn use_api<T: DeserializeOwned + 'static>(url: &'static str) -> ApiResource<
         match ApiClient::web().fetch::<T>(url).await {
             Ok(v) => Some(v),
             Err(e) => {
-                error.set(Some(e.to_string()));
+                error.set(Some(crate::client_error::logged_message(url, &e)));
                 None
             }
         }
@@ -77,7 +78,7 @@ pub fn use_api_when<T: DeserializeOwned + Default + 'static>(
         match ApiClient::web().fetch::<T>(url).await {
             Ok(v) => Some(v),
             Err(e) => {
-                error.set(Some(e.to_string()));
+                error.set(Some(crate::client_error::logged_message(url, &e)));
                 None
             }
         }
@@ -162,11 +163,12 @@ fn remember_list_failure(
     mut truncated: Signal<bool>,
     mut shown: Signal<usize>,
     mut error: Signal<Option<String>>,
-    message: String,
+    what: &str,
+    err: &ClientError,
 ) {
     truncated.set(false);
     shown.set(0);
-    error.set(Some(message));
+    error.set(Some(crate::client_error::logged_message(what, err)));
 }
 
 async fn fetch_pages<T: DeserializeOwned>(
@@ -244,7 +246,7 @@ pub fn use_api_list<T: DeserializeOwned + 'static>(url: &'static str) -> ApiReso
                     Some(batch.items)
                 }
                 Err(e) => {
-                    remember_list_failure(truncated, shown, error, e.to_string());
+                    remember_list_failure(truncated, shown, error, url, &e);
                     None
                 }
             }
@@ -288,7 +290,7 @@ pub fn use_api_list_prefer<T: DeserializeOwned + 'static>(
                     Some(batch.items)
                 }
                 Err(e) => {
-                    remember_list_failure(truncated, shown, error, e.to_string());
+                    remember_list_failure(truncated, shown, error, fallback, &e);
                     None
                 }
             }
@@ -331,7 +333,7 @@ pub fn use_api_list_with<T: DeserializeOwned + 'static>(
                     Some(batch.items)
                 }
                 Err(e) => {
-                    remember_list_failure(truncated, shown, error, e.to_string());
+                    remember_list_failure(truncated, shown, error, &url, &e);
                     None
                 }
             }
@@ -365,7 +367,7 @@ pub fn use_api_with<T: DeserializeOwned + 'static>(
             match ApiClient::web().fetch::<T>(&url).await {
                 Ok(v) => Some(v),
                 Err(e) => {
-                    error.set(Some(e.to_string()));
+                    error.set(Some(crate::client_error::logged_message(&url, &e)));
                     None
                 }
             }
