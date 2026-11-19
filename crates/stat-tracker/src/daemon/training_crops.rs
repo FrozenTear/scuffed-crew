@@ -42,11 +42,15 @@
 //! One set per kind per game (`hero_icon`: per hero), so a game does not
 //! fill the outbox. The Tab claims that key before its save starts on the
 //! blocking thread ([`claim_offered`]), so two close Tabs cannot both
-//! save it; a save that keeps nothing releases the claim. A miss (no box,
-//! no card edge, no header, chat over the row, or a card over the 256 px
-//! edge cap) skips that crop and nothing else. If a `hero_icon` is still refused after that downscale, that hero
-//! is not marked offered, so a later Tab of the same game can retry. A
-//! consented crop lost to an error leaves the training warning. The Tab
+//! save it. A `hero_icon` or `stat_digits` save that keeps nothing, or
+//! loses a digit cell, releases the claim, so a later Tab of the same
+//! game retries. Rank crops (PR 746) deliberately keep their claim after
+//! an empty cut: a rank screen shows once per game, so there is no later
+//! one to retry on. A miss (no box, no card edge, no header, chat over the
+//! row, or a card over the 256 px edge cap) skips that crop and nothing
+//! else. If a `hero_icon` is still refused after that downscale, that
+//! hero is not marked offered, so a later Tab of the same game can retry.
+//! A consented crop lost to an error leaves the training warning. The Tab
 //! records either way.
 //!
 //! The card snap runs inline in `handle_capture`, after the Tab's row is
@@ -108,7 +112,7 @@ struct HeroCrop {
 static OFFERED: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
 const OFFERED_KEEP: usize = 64;
 
-fn offer_key(session_id: &str, kind: sync::UploadKind, hero: &str) -> String {
+pub(super) fn offer_key(session_id: &str, kind: sync::UploadKind, hero: &str) -> String {
     format!("{session_id}\n{}\n{hero}", kind.as_str())
 }
 
@@ -195,7 +199,8 @@ pub(crate) fn archive_tab_training_crops(
     // thread, so two close Tabs cannot both pass the offered check and
     // save the same kind twice. The task releases a claim when it kept
     // nothing of that kind (no cell cut, every crop refused or lost, or
-    // consent turned off mid-save), so a later Tab retries.
+    // consent turned off mid-save) or loses a digit cell, so a later Tab
+    // retries.
     let hero = sync::training_kind_on(data_dir, HeroIcon)
         .then(|| hero_icon_crop(frame, session_id, source.panel, source.pack_hero))
         .flatten()
@@ -845,7 +850,7 @@ pub(crate) enum HeroIconEncodeMiss {
 /// [`HERO_ICON_BYTE_FALLBACK_SIDE`], then 16 px smaller at a time down to
 /// [`HERO_ICON_BYTE_SHRINK_FLOOR`]. `Err` when it cannot be encoded, or
 /// when even that floor is still over the cap: the caller must not store
-/// it or mark the hero offered.
+/// it, and releases the hero's claim.
 pub(crate) fn encode_hero_icon(image: &image::DynamicImage) -> Result<Vec<u8>, HeroIconEncodeMiss> {
     debug_assert_eq!(
         image.width(),
@@ -976,7 +981,7 @@ fn keep_stat_digits(
     // none was lost. A write error, a lost cell, or a save that kept no
     // cell (every cell refused, or consent turned off mid-save) releases
     // the game's claim, so a later Tab of the game may try again; while
-    // consent stays off, keep_tab_crops keeps nothing for that Tab either.
+    // consent stays off, later Tabs cut nothing.
     let key = offer_key(session, kind, "");
     match sync::keep_tab_crops(dir, session, kind, crops) {
         Some(_) if lost => {

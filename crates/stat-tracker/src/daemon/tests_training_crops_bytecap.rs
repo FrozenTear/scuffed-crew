@@ -1,13 +1,24 @@
 //! Byte-cap follow-up for `hero_icon`: a snapped card whose Best-encoded
 //! PNG is over the 65,536-byte cap is downscaled to the 1080p card side
-//! (171 px) so the stored PNG fits, and a refused crop does not mark the
-//! hero offered, so a later Tab of the same game can retry.
+//! (171 px) so the stored PNG fits, and a refused crop releases the
+//! hero's claim, so a later Tab of the same game can retry. Each refusal
+//! test holds the claim the Tab would hold and checks the miss releases it.
 
 use super::super::training_crops::{
     HERO_ICON_BYTE_FALLBACK_SIDE, HERO_ICON_BYTE_SHRINK_FLOOR, HeroIconEncodeMiss, card_side,
-    encode_hero_icon, encode_png, keep_encoded_hero_icon, keep_hero_icon_result,
+    claim_offered, encode_hero_icon, encode_png, keep_encoded_hero_icon, keep_hero_icon_result,
+    offer_key, offered,
 };
 use super::*;
+
+/// Claim Ana's `hero_icon` for `session` as an offered Tab does before its
+/// save, and check the claim is held. Returns the key.
+fn hold_ana_claim(session: &str) -> String {
+    let key = offer_key(session, UploadKind::HeroIcon, "ana");
+    assert!(claim_offered(key.clone()), "the claim was free");
+    assert!(offered(&key), "the claim is held before the save");
+    key
+}
 
 /// A 228 px card whose Best-encoded PNG is over the `hero_icon` byte cap,
 /// while a Lanczos3 copy at [`HERO_ICON_BYTE_FALLBACK_SIDE`] fits, matching
@@ -117,7 +128,9 @@ async fn a_refused_hero_icon_is_not_marked_offered_so_the_next_tab_can_retry() {
     let over = encode_png(&noisy_card(228)).expect("the over-cap fixture encodes");
     assert!(over.len() > cap(), "the refusal PNG must miss the cap");
     let meta = sync::hero_icon_meta(2560, 1440, "ana", 0.97, 0.5, "heroes-v2").unwrap();
+    let key = hold_ana_claim(session);
     keep_encoded_hero_icon(dir.path(), session, "ana", meta, over);
+    assert!(!offered(&key), "the refusal releases the claim");
     assert!(
         sync::queued_crops(dir.path(), UploadKind::HeroIcon).is_empty(),
         "an over-cap PNG is not stored"
@@ -275,7 +288,9 @@ async fn a_hero_icon_at_exactly_the_byte_cap_is_kept_and_one_byte_over_is_refuse
     let at_cap = pad_png(encode_png(&noisy_card(64)).expect("base encodes"), cap);
     assert_eq!(at_cap.len(), 65_536);
     assert_eq!(sync::png_size(&at_cap), Some((64, 64)));
+    let key = hold_ana_claim(session);
     keep_encoded_hero_icon(dir.path(), session, "ana", meta.clone(), at_cap.clone());
+    assert!(offered(&key), "a kept icon keeps the claim");
     let queued = sync::queued_crops(dir.path(), UploadKind::HeroIcon);
     assert_eq!(queued.len(), 1);
     assert_eq!(queued[0].png.len(), 65_536);
@@ -287,7 +302,9 @@ async fn a_hero_icon_at_exactly_the_byte_cap_is_kept_and_one_byte_over_is_refuse
     let session = "tc-bytecap-capplus1";
     let over = pad_png(encode_png(&noisy_card(64)).expect("base encodes"), cap + 1);
     assert_eq!(over.len(), 65_537);
+    let key = hold_ana_claim(session);
     keep_encoded_hero_icon(dir.path(), session, "ana", meta, over);
+    assert!(!offered(&key), "one byte over releases the claim");
     assert!(
         sync::queued_crops(dir.path(), UploadKind::HeroIcon).is_empty(),
         "one byte over the cap must not be stored"
@@ -433,6 +450,7 @@ async fn an_encode_miss_warns_and_does_not_mark_the_hero_offered() {
     set_consent(dir.path(), true, false);
     let session = "tc-bytecap-encode-miss";
     let meta = sync::hero_icon_meta(1920, 1080, "ana", 0.97, 0.5, "heroes-v2").unwrap();
+    let key = hold_ana_claim(session);
     keep_hero_icon_result(
         dir.path(),
         session,
@@ -440,6 +458,7 @@ async fn an_encode_miss_warns_and_does_not_mark_the_hero_offered() {
         meta,
         Err(HeroIconEncodeMiss::Encode),
     );
+    assert!(!offered(&key), "an encode miss releases the claim");
     assert!(sync::queued_crops(dir.path(), UploadKind::HeroIcon).is_empty());
     let warning = sync::training_warning(dir.path()).expect("an encode miss is an error");
     assert!(warning.contains("hero icons"), "{warning}");
@@ -471,6 +490,7 @@ async fn an_overcap_miss_does_not_warn_or_mark_the_hero_offered() {
     set_consent(dir.path(), true, false);
     let session = "tc-bytecap-overcap-miss";
     let meta = sync::hero_icon_meta(1920, 1080, "ana", 0.97, 0.5, "heroes-v2").unwrap();
+    let key = hold_ana_claim(session);
     keep_hero_icon_result(
         dir.path(),
         session,
@@ -478,6 +498,7 @@ async fn an_overcap_miss_does_not_warn_or_mark_the_hero_offered() {
         meta,
         Err(HeroIconEncodeMiss::OverCap),
     );
+    assert!(!offered(&key), "an over-cap miss releases the claim");
     assert!(sync::queued_crops(dir.path(), UploadKind::HeroIcon).is_empty());
     assert_eq!(
         sync::training_warning(dir.path()),

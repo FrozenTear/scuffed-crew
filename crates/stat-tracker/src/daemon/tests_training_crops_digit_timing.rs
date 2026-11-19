@@ -156,8 +156,11 @@ async fn a_recorded_spawn_tab_waits_for_a_big_stat_before_its_digit_set() {
     let spawn = o10_board([sure(0), sure(0), sure(0), sure(0), sure(0), sure(0)]);
     let (recorded, _) = record_tab(&ctx, "dt-capture", sure_tab(Some("ana")), spawn).await;
     assert!(recorded, "a spawn Tab still records");
-    // Give a blocking cut, had one started, time to land.
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Let a blocking cut, had one started, land.
+    assert!(
+        crops_settled().await,
+        "the blocking crop tasks did not finish"
+    );
     assert_eq!(queued_digits(dir.path()), 0, "no set from the spawn Tab");
     let (recorded, _) = record_tab(&ctx, "dt-capture", sure_tab(Some("ana")), sure_board()).await;
     assert!(recorded);

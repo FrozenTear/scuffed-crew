@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use crate::{main_tests::*, *};
 use image::{DynamicImage, Rgb, RgbImage};
+use race::crops_settled;
 use scuffed_types::api::training_crops::TrainingCropConsent;
 use stat_tracker::detect::own_row::{OwnRow, Source as OwnRowSource, Trust};
 use stat_tracker::shadow::heroes::{HeroPack, HeroRead, PanelRead, RowClass};
@@ -1312,7 +1313,10 @@ async fn a_rejected_tab_gives_no_hero_icon_or_stat_digit_crop() {
     .await;
     assert!(!recorded);
     assert_eq!(rows, 0);
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        crops_settled().await,
+        "the blocking crop tasks did not finish"
+    );
     assert!(!sync::has_queued_crops(dir.path()));
 }
 
@@ -1394,7 +1398,10 @@ async fn an_accepted_tab_with_an_unconfirmed_own_row_keeps_no_stat_digit_crops()
         let (recorded, rows) = record_tab(&ctx, &session, analysis, sure_board()).await;
         assert!(recorded, "an unconfirmed own row still records the Tab");
         assert_eq!(rows, 1);
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            crops_settled().await,
+            "the blocking crop tasks did not finish"
+        );
         assert!(
             sync::queued_crops(dir.path(), UploadKind::StatDigits).is_empty(),
             "{voice:?}"
@@ -1418,7 +1425,10 @@ async fn an_accepted_ocr_v1_tab_keeps_no_stat_digit_crops() {
     let (recorded, rows) = record_tab(&ctx, "tc-v1-tab", analysis, sure_board()).await;
     assert!(recorded, "ocr-v1 records the Tab");
     assert_eq!(rows, 1);
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        crops_settled().await,
+        "the blocking crop tasks did not finish"
+    );
     assert!(sync::queued_crops(dir.path(), UploadKind::StatDigits).is_empty());
     assert!(!sync::has_queued_crops(dir.path()));
 }

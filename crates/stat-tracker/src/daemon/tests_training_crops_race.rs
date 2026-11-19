@@ -1,11 +1,12 @@
 //! Two close Tabs of one game: the first to qualify claims the kind before
 //! its save starts on the blocking thread, so the second saves nothing
 //! even while the first is still saving. A save that keeps nothing
-//! releases the claim (consent turned off mid-save, or every cell over the
-//! byte cap), so a later Tab retries.
+//! releases the claim (consent turned off mid-save, every cell over the
+//! byte cap, or a hero with no `hero_icon` meta), so a later Tab retries.
 
 use std::sync::atomic::Ordering;
 
+use super::super::training_crops::{offer_key, offered};
 use crate::daemon::{CROP_TASK_GATE, CROP_TASKS_IN_FLIGHT};
 
 use super::*;
@@ -49,33 +50,19 @@ async fn two_tabs_offered_before_the_first_saves_keep_one_digit_set() {
     let dir = tempfile::tempdir().unwrap();
     set_consent(dir.path(), false, true);
     let frame = tab_frame();
-    let tabs = vec![source(None, None), source(None, None)];
-    let started = offer_held(dir.path(), "race-digits", &frame, tabs).await;
-    assert_eq!(started, 1, "the second Tab finds the set claimed");
-    assert_eq!(
-        sync::queued_crops(dir.path(), UploadKind::StatDigits).len(),
-        6,
-        "one set"
-    );
-}
-
-#[tokio::test]
-async fn two_tabs_offered_back_to_back_keep_one_digit_set() {
-    let dir = tempfile::tempdir().unwrap();
-    set_consent(dir.path(), false, true);
-    let frame = tab_frame();
     // Held across both offers, so the first Tab's save has not started
     // when the second Tab is offered, however the threads are scheduled.
     let gate = CROP_TASK_GATE.write().unwrap_or_else(|e| e.into_inner());
-    let first = archive_tab_training_crops(dir.path(), "race-b2b", &frame, source(None, None));
-    let second = archive_tab_training_crops(dir.path(), "race-b2b", &frame, source(None, None));
+    let first = archive_tab_training_crops(dir.path(), "race-digits", &frame, source(None, None));
+    let second = archive_tab_training_crops(dir.path(), "race-digits", &frame, source(None, None));
     drop(gate);
     assert!(first.is_some(), "the first Tab claims the set");
     assert!(second.is_none(), "the second Tab finds the set claimed");
     first.unwrap().await.unwrap();
     assert_eq!(
         sync::queued_crops(dir.path(), UploadKind::StatDigits).len(),
-        6
+        6,
+        "one set"
     );
 }
 
@@ -141,6 +128,33 @@ async fn a_hero_icon_lost_to_a_write_error_is_saved_by_a_later_tab() {
         1
     );
     assert!(!run(dir.path(), "race-hero-writefail", &frame, tab()).await);
+}
+
+#[tokio::test]
+async fn a_hero_icon_with_no_meta_releases_its_claim() {
+    let dir = tempfile::tempdir().unwrap();
+    set_consent(dir.path(), true, false);
+    let session = "race-hero-nometa";
+    let frame = tab_frame();
+    // A hero the panel read accepts but the hero list does not know, so
+    // the save finds no `hero_icon` meta for it and keeps nothing.
+    let hero = "zorblax";
+    assert!(sync::hero_icon_meta(1920, 1080, hero, 0.97, 0.5, "heroes-v2").is_none());
+    let read = panel((1600, 200, 1800, 400), hero, 0.97);
+    let tab = || source(Some(&read), Some(hero));
+    assert!(
+        run(dir.path(), session, &frame, tab()).await,
+        "the Tab claims the hero"
+    );
+    assert!(sync::queued_crops(dir.path(), UploadKind::HeroIcon).is_empty());
+    assert_eq!(sync::training_warning(dir.path()), None);
+    assert!(!offered(&offer_key(session, UploadKind::HeroIcon, hero)));
+    // The claim was released: a later Tab of the same game starts again.
+    assert!(
+        run(dir.path(), session, &frame, tab()).await,
+        "a later Tab retries"
+    );
+    assert!(sync::queued_crops(dir.path(), UploadKind::HeroIcon).is_empty());
 }
 
 /// A 1920x1080 Tab with no header labels (and no chat): the stat columns
