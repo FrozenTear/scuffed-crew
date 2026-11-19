@@ -1,4 +1,5 @@
 use dioxus::prelude::*;
+use scuffed_types::{Game, MIN_APPLICATION_MESSAGE_CHARS, application_message_long_enough};
 use serde::{Deserialize, Serialize};
 
 use crate::components::ui::inline_confirm::{focus_element_by_id_soon, focus_field_by_id};
@@ -13,7 +14,6 @@ use crate::state::auth::{AuthState, use_auth};
 use crate::state::{loaded_site_settings, use_site_settings};
 use crate::util::{FetchClass, classify_fetch, log_client_error};
 use scuffed_api_client::{ApiClient, ClientError};
-use scuffed_types::Game;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ApplyScreen {
@@ -394,15 +394,9 @@ const ROLE_ID: &str = "apply-role";
 
 /// Shortest "Why you want to join" text the form sends. A short message is
 /// enough; the rule only stops an empty or one-word answer. The server runs
-/// the same check (`message.trim().chars().count() < 10` is a 400), so the
-/// count here must stay [`message_chars`].
-const MIN_MESSAGE_CHARS: usize = 10;
-
-/// Characters of the message as the server counts them: trimmed, then
-/// counted in `char`s (code points), not bytes.
-fn message_chars(message: &str) -> usize {
-    message.trim().chars().count()
-}
+/// the same check from `scuffed_types` (trim, then count chars; short is a
+/// 400), so the form and the server cannot drift.
+const MIN_MESSAGE_CHARS: usize = MIN_APPLICATION_MESSAGE_CHARS;
 
 /// The body `POST /api/applications` gets. The one builder the submit
 /// handler and the tests share.
@@ -489,7 +483,7 @@ fn validate(games: &[String], message: &str) -> Vec<ApplyField> {
     if games.is_empty() {
         invalid.push(ApplyField::Games);
     }
-    if message_chars(message) < MIN_MESSAGE_CHARS {
+    if !application_message_long_enough(message) {
         invalid.push(ApplyField::Message);
     }
     invalid
@@ -1258,6 +1252,7 @@ pub fn Apply() -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use scuffed_types::application_message_chars;
 
     #[test]
     fn rejected_is_a_neutral_not_accepted_chip() {
@@ -1807,11 +1802,11 @@ mod tests {
             " Hi I heal ",
             "ålesund99 ",
         ] {
-            assert_eq!(message_chars(nine), 9, "{nine:?}");
+            assert_eq!(application_message_chars(nine), 9, "{nine:?}");
             assert_eq!(validate(&ow, nine), [ApplyField::Message], "{nine:?}");
         }
         // Inner spaces count, like on the server.
-        assert_eq!(message_chars("Hi, I heal"), 10);
+        assert_eq!(application_message_chars("Hi, I heal"), 10);
         assert_eq!(validate(&ow, "Hi, I heal"), []);
         // 10 characters with multibyte letters is accepted: 10 chars, more
         // than 10 bytes. A byte count would pass 9 of them too, so check that
@@ -1822,7 +1817,7 @@ mod tests {
             "ゲームが好きです。!",
             "🎮🎮🎮🎮🎮 heal",
         ] {
-            assert_eq!(message_chars(ten), 10, "{ten:?}");
+            assert_eq!(application_message_chars(ten), 10, "{ten:?}");
             assert!(ten.trim().len() > 10, "{ten:?}");
             assert_eq!(validate(&ow, ten), [], "{ten:?}");
         }

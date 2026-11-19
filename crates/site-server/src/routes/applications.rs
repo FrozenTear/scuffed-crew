@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use scuffed_auth::server::AuthUser;
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{Application, ApplicationStatus, AuditAction, AuditTargetType, Member, OrgRole};
+use scuffed_types::{MIN_APPLICATION_MESSAGE_CHARS, application_message_long_enough};
 
 use crate::extractors::OfficerUser;
 use crate::membership_policy::{
@@ -56,13 +57,11 @@ fn application_recruitment_gate(
     }
 }
 
-/// Minimum application message length, in Unicode chars after trim.
-const MIN_APPLICATION_MESSAGE_CHARS: usize = 10;
-
-/// A missing message counts as empty. Counts chars, not bytes, so a message
-/// in a non-Latin script is measured the same as one in ASCII.
+/// A missing message counts as empty. The rule (trim, then count chars, not
+/// bytes) is shared with the apply page: see
+/// [`scuffed_types::application_message_long_enough`].
 fn application_message_is_long_enough(message: Option<&str>) -> bool {
-    message.unwrap_or("").trim().chars().count() >= MIN_APPLICATION_MESSAGE_CHARS
+    application_message_long_enough(message.unwrap_or(""))
 }
 
 #[derive(Deserialize)]
