@@ -527,6 +527,9 @@ pub(crate) async fn run_loop(
                         return Ok(());
                     }
                     Ok(Ok(captured)) => {
+                        // when this frame was grabbed: the rank wiring's
+                        // lone-read clock, before the analysis time
+                        let grabbed_at = Instant::now();
                         if let Some((failed, over)) = poll_failures.recovered(Instant::now()) {
                             tracing::info!(
                                 target: "scuffed_stat_tracker",
@@ -814,6 +817,7 @@ pub(crate) async fn run_loop(
                                 daemon::rank::rank_game(st.active_game.as_ref()),
                                 store,
                                 pregame_dump.as_mut(),
+                                grabbed_at,
                             )
                             .await
                         {

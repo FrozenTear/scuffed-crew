@@ -15,6 +15,10 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## Unreleased
+
+When the rank update screen gives no two reads in a row that agree, the rank can now still be kept from a read taken at least 12 seconds after the tracker first read that screen, when the reader was sure of it and no other read of the screen disagrees. When the tracker pauses because another window is focused (the focus gate, where it can tell which window is in front), the first read after the pause starts the 12 seconds again, and reads from before the pause no longer count toward them. An alt-tab the focus gate does not see (on GNOME Wayland, where it cannot tell another window is in front, or with **Only capture while Overwatch is in front** off) is not a pause, and the time away still counts. A screen the tracker read only once, or only once since a pause, still gets no rank from a lone read.
+
 ## 0.6.0-rc.1
 
 Digit training crops now wait for a Tab where your damage, healing or mitigation in Overwatch has reached 1000, instead of saving the first spawn board, which is mostly zeros. Training now keeps only the first map banner of a game.
