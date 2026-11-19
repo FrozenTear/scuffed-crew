@@ -786,7 +786,8 @@ mod tests {
         walk(src, &mut files);
         let mut hits = Vec::new();
         let mut used = vec![false; TWO_LOGS_ALLOWED.len()];
-        // Logging calls the walk reads below a file's first `#[cfg(test)]`.
+        // Logging calls the walk reads below a file's first `#[cfg(test)]`,
+        // as `file: enclosing fn: helper`.
         let mut after_seam = Vec::new();
         for path in files {
             if skip.contains(&path) {
@@ -798,18 +799,11 @@ mod tests {
                 .to_string_lossy()
                 .replace('\\', "/");
             let text = std::fs::read_to_string(&path).expect("read rs");
-            // Out-of-line test module files are already in `skip`.
-            let prod = prod_text(&text);
-            if let Some(seam) = text.find("#[cfg(test)]") {
-                let seam_line = text[..seam].matches('\n').count() + 1;
-                after_seam.extend(
-                    log_calls(&prod)
-                        .into_iter()
-                        .filter(|(n, _)| *n > seam_line)
-                        .map(|(n, _)| format!("{rel}:{n}")),
-                );
-            }
-            for ((a, first), (b, second)) in close_log_pairs(&prod) {
+            // Out-of-line test module files are already in `skip`. The pin
+            // and the pair search share one read (API nit 1 on round 9).
+            let (seam_sites, pairs) = double_log_scan(&text);
+            after_seam.extend(seam_sites.into_iter().map(|site| format!("{rel}: {site}")));
+            for ((a, first), (b, second)) in pairs {
                 match TWO_LOGS_ALLOWED
                     .iter()
                     .position(|(f, l1, l2, _)| *f == rel && *l1 == first && *l2 == second)
@@ -835,15 +829,17 @@ mod tests {
         // Vision nit 1 on round 8: the walk reads production code past a
         // file's first `#[cfg(test)]` seam (it reads `prod_text`, not the
         // text before the first seam). These are the logging calls there
-        // today; update the list when one moves.
+        // today, keyed by file, enclosing fn and helper so an unrelated
+        // line shift does not break the pin (API nit 2 on round 9). Update
+        // the list when a call is added, dropped or moved to another fn.
         assert_eq!(
             after_seam,
             [
-                "pages/admin/brand_settings.rs:239",
-                "pages/admin/brand_settings.rs:337",
-                "pages/login.rs:973",
-                "state/relay.rs:237",
-                "state/site_settings.rs:170",
+                "pages/admin/brand_settings.rs: load_brand_settings: logged_message",
+                "pages/admin/brand_settings.rs: BrandSettingsForm: Toast::error_from",
+                "pages/login.rs: nostr_login_flow: with_lead",
+                "state/relay.rs: load_relay_health: logged_message",
+                "state/site_settings.rs: load_public_settings: logged_message",
             ],
             "logging calls read after a file's first #[cfg(test)]"
         );
@@ -877,10 +873,74 @@ mod tests {
                       #[cfg(test)]\nmod tests {\n    fn t() {\n        \
                       a(logged_message(\"x\", &e));\n        \
                       b(logged_message(\"y\", &e));\n    }\n}\n";
-        let pairs = close_log_pairs(&prod_text(seamed));
+        // API nit 1 on round 9: the walk's own read (`double_log_scan`)
+        // finds that pair, so the pair search cannot fall back to the text
+        // before the first seam while the pin still reads `prod_text`.
+        let (seam_sites, pairs) = double_log_scan(seamed);
         assert_eq!(pairs.len(), 1, "{pairs:?}");
         assert_eq!((pairs[0].0.0, pairs[0].1.0), (4, 5));
         assert!(pairs[0].0.1.starts_with("s.set(SaveState::failed("));
+        assert_eq!(
+            seam_sites,
+            ["save: SaveState::failed", "save: Toast::error_from"]
+        );
+        // API nit 2 on round 9: a line shift above the calls keeps the keys.
+        let shifted = seamed.replacen("fn save()", "// moved down\n\nfn save()", 1);
+        let (shifted_sites, shifted_pairs) = double_log_scan(&shifted);
+        assert_eq!(shifted_sites, seam_sites);
+        assert_eq!((shifted_pairs[0].0.0, shifted_pairs[0].1.0), (6, 7));
+        // A call in another fn, or a nested fn, is keyed by its own fn.
+        let nested = "#[cfg(test)]\nfn seam() {}\nfn outer() {\n    fn inner() {\n        \
+                      a(logged_message(\"x\", &e));\n    }\n}\n\
+                      async fn other() {\n    crate::util::log_client_error(\"y\", &e);\n}\n";
+        assert_eq!(
+            double_log_scan(nested).0,
+            ["inner: logged_message", "other: log_client_error"]
+        );
+    }
+
+    /// The double-log walk's read of one source file: `prod_text` is
+    /// computed once and both results come from it. First, the logging
+    /// calls below the file's first `#[cfg(test)]`, each as
+    /// `enclosing fn: helper` (no line numbers, so an unrelated line shift
+    /// keeps the key). Second, the close pairs of [`close_log_pairs`].
+    #[allow(clippy::type_complexity)]
+    fn double_log_scan(text: &str) -> (Vec<String>, Vec<((usize, String), (usize, String))>) {
+        let prod = prod_text(text);
+        let mut seam_sites = Vec::new();
+        if let Some(seam) = text.find("#[cfg(test)]") {
+            let seam_line = text[..seam].matches('\n').count() + 1;
+            for (n, line) in log_calls(&prod) {
+                if n > seam_line {
+                    let helper = LOGGERS
+                        .iter()
+                        .find(|l| line.contains(*l))
+                        .map_or("?", |l| l.trim_end_matches('('));
+                    seam_sites.push(format!("{}: {helper}", enclosing_fn(&prod, n)));
+                }
+            }
+        }
+        (seam_sites, close_log_pairs(&prod))
+    }
+
+    /// Name of the nearest `fn` declared at or above line `n` (1-based) of
+    /// `prod`, or `?` when there is none.
+    fn enclosing_fn(prod: &str, n: usize) -> String {
+        prod.lines()
+            .take(n)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .find_map(|line| {
+                let at = line.find("fn ")?;
+                let name: String = line[at + 3..]
+                    .trim_start()
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                (!name.is_empty()).then_some(name)
+            })
+            .unwrap_or_else(|| "?".to_string())
     }
 
     /// Production text of one source, read the way the page text scan reads
@@ -906,16 +966,18 @@ mod tests {
             .collect()
     }
 
+    /// The logging helpers [`log_calls`] looks for.
+    const LOGGERS: [&str; 5] = [
+        "SaveState::failed(",
+        "Toast::error_from(",
+        "with_lead(",
+        "logged_message(",
+        "log_client_error(",
+    ];
+
     /// Logging calls in `prod`, as line number and trimmed line.
     /// Definitions (`fn ` on the line) and comments are not calls.
     fn log_calls(prod: &str) -> Vec<(usize, String)> {
-        const LOGGERS: [&str; 5] = [
-            "SaveState::failed(",
-            "Toast::error_from(",
-            "with_lead(",
-            "logged_message(",
-            "log_client_error(",
-        ];
         prod.lines()
             .enumerate()
             .filter(|(_, line)| {
