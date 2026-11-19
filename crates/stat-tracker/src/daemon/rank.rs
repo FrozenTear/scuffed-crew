@@ -35,7 +35,10 @@
 //! frame of the screen's first read (the first frame rank-v1 read, so one
 //! that showed its "RANK PROGRESS:" label), at a confidence of at least
 //! [`RANK_LONE_READ_MIN_CONFIDENCE`], when no other held read has a
-//! different value for it. So a screen read only once keeps nothing. The
+//! different value for it. The first read after a held-back tick (a focus
+//! pause or a failed analysis) restarts that clock, since the frames that
+//! set the bound were all taken with the game in focus. So a screen read
+//! only once, or only once since a pause, keeps nothing. The
 //! result is stored on that game once (`LocalStore::attach_rank_update`),
 //! which queues it for upload when the upload changes. The mode banner
 //! word goes on to the queue title wiring as the pending next mode hint
@@ -86,7 +89,10 @@ pub(crate) const RANK_SETTLE_MISSES: u8 = 2;
 /// values. Counted from the first captured rank screen frame, which in 29
 /// games did not show the label yet, it came at 6 s. 12 s is kept with a
 /// wide margin. The capture frames are 1 to 6 s apart, so the true end of
-/// the count up is only known to within that step.
+/// the count up is only known to within that step. All of those frames
+/// were taken with the game in focus: no frame shows whether the count up
+/// runs while Overwatch is in the background, so the first read after a
+/// pause starts the clock again ([`RankFeed::observe_tick`]).
 pub(crate) const RANK_LONE_READ_MIN_AGE: Duration = Duration::from_secs(12);
 
 /// The lowest confidence a field from a lone read may have to be kept
@@ -128,8 +134,15 @@ struct Held {
     /// clock starts here ([`settle_held`]). `None` until rank-v1 reads a
     /// frame. A frame the end detector took for the rank screen that
     /// rank-v1 did not read (a false fire on another screen, a fade-in, a
-    /// frame size it does not take) never starts it.
+    /// frame size it does not take) never starts it. The first read after
+    /// a pause starts it again ([`Self::paused`]).
     first_read: Option<Instant>,
+    /// A held-back tick came since the newest read: the stability history
+    /// was dropped, by a focus pause (an alt-tab) or a failed analysis. No
+    /// data shows whether the count up runs while Overwatch is in the
+    /// background, so the time away does not count: the next read restarts
+    /// the clock at its own grab time.
+    paused: bool,
     /// When the newest read was taken.
     at: DateTime<Utc>,
     /// One per rank screen tick, oldest first, each with the grab time of
@@ -261,6 +274,7 @@ impl RankFeed {
         let held = self.held.get_or_insert_with(|| Held {
             session: game.to_string(),
             first_read: None,
+            paused: false,
             at: now,
             reads: VecDeque::new(),
             missed: 0,
@@ -272,7 +286,11 @@ impl RankFeed {
             held.missed = 0;
         }
         if read.is_some() {
-            held.first_read.get_or_insert(grabbed);
+            if std::mem::take(&mut held.paused) {
+                held.first_read = Some(grabbed);
+            } else {
+                held.first_read.get_or_insert(grabbed);
+            }
         }
         held.push(read, grabbed);
         held.at = now;
@@ -284,7 +302,9 @@ impl RankFeed {
     /// because a screen was held before the tick, and the end detector never
     /// classified it. So when that screen is for another game than `game`
     /// (or `game` is `None`), the tick finishes it, and the frame starts no
-    /// screen for the new game: it counts as no read.
+    /// screen for the new game: it counts as no read. A held-back tick on
+    /// the held screen's own game marks a pause: the first read on or after it
+    /// restarts the lone-read clock ([`Held::paused`]).
     pub(crate) fn observe_tick(
         &mut self,
         seen: Option<Option<RankUpdate>>,
@@ -298,6 +318,9 @@ impl RankFeed {
             .as_ref()
             .is_some_and(|h| game != Some(h.session.as_str()));
         let seen = if held_back && other_game { None } else { seen };
+        if held_back && let Some(h) = self.held.as_mut().filter(|_| !other_game) {
+            h.paused = true;
+        }
         self.observe(seen, game, now, grabbed)
     }
 

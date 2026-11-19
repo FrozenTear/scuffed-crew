@@ -78,6 +78,23 @@ fn screen(first: Option<RankUpdate>, lone: RankUpdate) -> Option<Settled> {
     tick(None, false, 19)
 }
 
+/// A rank screen watched without a pause: the first entry (`first`), rank
+/// screen frames rank-v1 did not read every second, the one full read at
+/// +17 s, then the screen is gone. No tick is held back.
+fn steady(first: Option<RankUpdate>, lone: RankUpdate) -> Option<Settled> {
+    let t0 = Instant::now();
+    let now = Utc::now();
+    let mut feed = RankFeed::with_read(Arc::new(|_| None));
+    let mut tick = |seen, at| feed.observe_tick(seen, false, Some("g1"), now, t0 + secs(at));
+    assert_eq!(tick(Some(first), 0), None);
+    for at in 1..17 {
+        assert_eq!(tick(Some(None), at), None);
+    }
+    assert_eq!(tick(Some(Some(lone)), 17), None);
+    assert_eq!(tick(None, 18), None);
+    tick(None, 19)
+}
+
 /// Dorado 2026-11-17: the first entry is a frame rank-v1 did not read, so
 /// the one read is the screen's first read, at age zero.
 fn dorado(lone: RankUpdate) -> Option<Settled> {
@@ -87,9 +104,11 @@ fn dorado(lone: RankUpdate) -> Option<Settled> {
 #[test]
 fn the_dorado_case_keeps_nothing_as_its_one_read_starts_the_clock() {
     assert_eq!(dorado(read(40, 1.0)), None);
-    // with an earlier read that does not disagree, the clock starts 17 s
-    // before the late read
-    let s = screen(Some(early()), read(40, sure())).expect("settled with a rank");
+    // with an earlier read that does not disagree, the late read is still
+    // the first read after the pause: the clock starts again there
+    assert_eq!(screen(Some(early()), read(40, 1.0)), None);
+    // with no pause the clock starts 17 s before the late read
+    let s = steady(Some(early()), read(40, sure())).expect("settled with a rank");
     assert_eq!(s.session, "g1");
     assert_eq!(s.rank, read(40, sure()), "the read's own confidence");
 }
@@ -99,12 +118,12 @@ fn a_lone_read_keeps_only_its_fields_that_pass_the_confidence_gate() {
     let mut lone = read(40, sure());
     lone.hero_sr = n(3412, weak());
     lone.division = None;
-    let s = screen(Some(early()), lone).expect("settled with a rank");
+    let s = steady(Some(early()), lone).expect("settled with a rank");
     assert_eq!(s.rank.hero_sr, None, "under the gate");
     assert_eq!(s.rank.division, None, "not read");
     assert_eq!(s.rank.role_rank, t("Diamond", sure()));
     // a lone read under the gate on every field keeps nothing
-    assert_eq!(screen(Some(early()), read(40, weak())), None);
+    assert_eq!(steady(Some(early()), read(40, weak())), None);
 }
 
 #[test]
@@ -300,8 +319,42 @@ fn the_clock_keeps_its_start_when_the_first_read_leaves_the_held_ring() {
     assert_eq!(s.expect("settled").rank, read(40, 1.0));
 }
 
+/// The pause comes after the screen's first read: a held-back tick that
+/// reads nothing, then the first read after it restarts the clock, so a
+/// later read counts its age from there, not from the screen's first read.
 #[test]
-fn a_clock_that_goes_back_keeps_nothing() {
+fn the_first_read_after_a_pause_restarts_the_lone_read_clock() {
+    // the late read's grab time, in seconds after the screen's first read
+    let run = |late_at: u64| {
+        let t0 = Instant::now();
+        let now = Utc::now();
+        let mut feed = RankFeed::with_read(Arc::new(|_| None));
+        let mut tick = |seen, held_back, at| {
+            feed.observe_tick(seen, held_back, Some("g1"), now, t0 + secs(at))
+        };
+        assert_eq!(tick(Some(Some(early())), false, 0), None);
+        // the focus pause, then a held-back tick rank-v1 does not read
+        assert_eq!(tick(None, true, 15), None);
+        // the first read after the pause: the clock starts again here
+        assert_eq!(tick(Some(Some(early())), false, 16), None);
+        for at in 17..late_at {
+            assert_eq!(tick(Some(None), false, at), None);
+        }
+        assert_eq!(tick(Some(Some(read(40, 1.0))), false, late_at), None);
+        assert_eq!(tick(None, false, late_at + 1), None);
+        tick(None, false, late_at + 2).map(|s| s.rank)
+    };
+    // 27 s after the screen's first read, but 11 s after the restart
+    assert_eq!(run(27), None);
+    // 12 s after the restart
+    assert_eq!(
+        run(16 + RANK_LONE_READ_MIN_AGE.as_secs()),
+        Some(read(40, 1.0))
+    );
+}
+
+#[test]
+fn a_read_grabbed_before_the_first_read_has_age_zero() {
     let t0 = Instant::now();
     let now = Utc::now();
     let first = t0 + secs(20);
