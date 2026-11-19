@@ -31,5 +31,6 @@ pub mod stats;
 pub mod teams;
 pub mod tournaments;
 pub mod training_crops;
+pub mod training_export;
 pub mod uploads;
 pub mod wiki;

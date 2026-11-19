@@ -445,6 +445,129 @@ pub struct TrainingCropResolutionTotals {
     pub resolutions: Vec<TrainingCropResolutionCount>,
 }
 
+// ---------------------------------------------------------------------------
+// Export for training (Scuffed Vision). See "Export for training" in
+// `docs/api/training-crops.md`.
+// ---------------------------------------------------------------------------
+
+/// Tombstones older than this many days are pruned. A puller whose cursor is
+/// older than this gets 410 [`TRAINING_EXPORT_ERR_CURSOR_EXPIRED`] and starts
+/// over from no cursor.
+pub const TRAINING_TOMBSTONE_RETENTION_DAYS: u32 = 60;
+/// Default lifetime of a new export token, in days.
+pub const TRAINING_EXPORT_TOKEN_DEFAULT_DAYS: u32 = 90;
+/// Longest lifetime of an export token, in days.
+pub const TRAINING_EXPORT_TOKEN_MAX_DAYS: u32 = 365;
+/// Longest export token label, in characters.
+pub const TRAINING_EXPORT_TOKEN_LABEL_MAX_LEN: usize = 64;
+/// Items per export page when `limit` is not given.
+pub const TRAINING_EXPORT_PAGE_DEFAULT: u32 = 100;
+/// Most items per export page.
+pub const TRAINING_EXPORT_PAGE_MAX: u32 = 500;
+/// Per-IP burst of the export routes (list and image share it).
+pub const TRAINING_EXPORT_IP_BURST: u32 = 60;
+/// Seconds until the export per-IP bucket gives back one request.
+pub const TRAINING_EXPORT_IP_REPLENISH_SECS: u64 = 1;
+
+/// `since` is not a cursor this server made. 400.
+pub const TRAINING_EXPORT_ERR_INVALID_CURSOR: &str = "invalid_export_cursor";
+/// `since` is older than [`TRAINING_TOMBSTONE_RETENTION_DAYS`], so some
+/// removals may be gone. Start again without `since`. 410.
+pub const TRAINING_EXPORT_ERR_CURSOR_EXPIRED: &str = "export_cursor_expired";
+/// Mint body is not JSON, the label is blank or too long, or
+/// `expires_in_days` is 0 or over [`TRAINING_EXPORT_TOKEN_MAX_DAYS`]. 400.
+pub const TRAINING_EXPORT_ERR_INVALID_TOKEN_REQUEST: &str = "invalid_export_token_request";
+/// No unrevoked export token has this id. 404.
+pub const TRAINING_EXPORT_ERR_TOKEN_NOT_FOUND: &str = "export_token_not_found";
+
+/// `POST /api/training-crops/export-tokens` (admin session).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrainingExportTokenCreate {
+    pub label: String,
+    /// Default [`TRAINING_EXPORT_TOKEN_DEFAULT_DAYS`], at most
+    /// [`TRAINING_EXPORT_TOKEN_MAX_DAYS`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_in_days: Option<u32>,
+}
+
+/// One export token, without its secret.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrainingExportTokenInfo {
+    pub id: String,
+    pub label: String,
+    /// Member id of the admin who minted it.
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revoked_at: Option<DateTime<Utc>>,
+    /// `expires_at` is at or before now.
+    pub expired: bool,
+}
+
+/// `201` from the mint route. `token` is shown this once and never again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrainingExportTokenCreated {
+    pub token: String,
+    #[serde(flatten)]
+    pub info: TrainingExportTokenInfo,
+}
+
+/// `?kind=&since=&limit=` on `GET /api/training-crops/export`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrainingExportQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// `next_cursor` of the previous page. Absent: from the start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// One exported crop. Never carries the member id.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrainingExportItem {
+    pub id: String,
+    pub kind: CropKind,
+    /// Label the tracker read (hero key), when stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hero: Option<String>,
+    pub meta: TrainingCropMeta,
+    /// Upload time cut to the start of its UTC hour.
+    pub created_at: DateTime<Utc>,
+    /// Lowercase hex SHA-256 of the stored PNG.
+    pub sha256: String,
+    pub size_bytes: u64,
+    pub width: u32,
+    pub height: u32,
+    /// Lowercase hex HMAC-SHA256 of the member id, keyed with the token's
+    /// own random salt. Stable for one token, different across tokens.
+    pub member_key: String,
+}
+
+/// A crop the puller must drop: deleted, or no longer eligible (consent
+/// withdrawn, member inactive, suspended or banned).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrainingExportRemoved {
+    pub id: String,
+    pub kind: CropKind,
+}
+
+/// `GET /api/training-crops/export`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrainingExportPage {
+    pub items: Vec<TrainingExportItem>,
+    pub removed: Vec<TrainingExportRemoved>,
+    /// Pass back as `since`. Always set, also on the last page, so a puller
+    /// with nothing new still moves its cursor forward.
+    pub next_cursor: String,
+    /// More items or removals are waiting right now.
+    pub has_more: bool,
+    pub tombstone_retention_days: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

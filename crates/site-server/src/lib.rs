@@ -245,6 +245,21 @@ pub fn create_router_with_public_read_limit(
     let training_crop_ip_limit = GovernorLayer::new(training_crop_ip_config)
         .error_handler(rate_limit::governor_error_response);
 
+    // Own per-IP bucket for the two training export routes (list and image
+    // share it): burst `TRAINING_EXPORT_IP_BURST`, then one every
+    // `TRAINING_EXPORT_IP_REPLENISH_SECS`. It runs before the export token is
+    // looked up. A weekly pull of a few thousand crops fits at that pace.
+    let training_export_ip_config = std::sync::Arc::new(
+        GovernorConfigBuilder::default()
+            .key_extractor(key_extractor.clone())
+            .per_second(scuffed_types::api::TRAINING_EXPORT_IP_REPLENISH_SECS)
+            .burst_size(scuffed_types::api::TRAINING_EXPORT_IP_BURST)
+            .finish()
+            .expect("valid training export ip governor config"),
+    );
+    let training_export_ip_limit = GovernorLayer::new(training_export_ip_config)
+        .error_handler(rate_limit::governor_error_response);
+
     #[cfg(test)]
     let stats_token_governor = stats_upload_limits::take_stats_upload_governor_override()
         .unwrap_or_else(stats_upload_limits::StatsUploadGovernor::new);
@@ -760,6 +775,27 @@ pub fn create_router_with_public_read_limit(
         .route(
             "/api/training-crops/{id}/image",
             get(routes::training_crops::crop_image),
+        )
+        // Export for Scuffed Vision. Tokens: admin session only. List and
+        // image: export token only, behind their own per-IP limit. See
+        // routes::training_export.
+        .route(
+            "/api/training-crops/export-tokens",
+            post(routes::training_export::mint_token).get(routes::training_export::list_tokens),
+        )
+        .route(
+            "/api/training-crops/export-tokens/{id}",
+            delete(routes::training_export::revoke_token),
+        )
+        .route(
+            "/api/training-crops/export",
+            get(routes::training_export::export_list)
+                .layer::<_, std::convert::Infallible>(training_export_ip_limit.clone()),
+        )
+        .route(
+            "/api/training-crops/export/{id}/image",
+            get(routes::training_export::export_image)
+                .layer::<_, std::convert::Infallible>(training_export_ip_limit),
         )
         .route(
             "/api/training-crops/{id}",

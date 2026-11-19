@@ -92,7 +92,7 @@ struct DbHeroIcon {
 
 /// The stored kind. Absent (a row from before `kind`) is `hero_icon`. An
 /// unknown stored value is `None` so callers can skip the row.
-fn stored_kind(raw: Option<&str>) -> Option<CropKind> {
+pub(crate) fn stored_kind(raw: Option<&str>) -> Option<CropKind> {
     match raw {
         None => Some(CropKind::HeroIcon),
         Some(value) => CropKind::parse(value),
@@ -691,6 +691,28 @@ impl Database {
                 kind: stored_kind(row.kind.as_deref()),
                 member_id: row.member_id,
             }))
+        })
+        .await
+    }
+
+    /// The rows with these ids that parse, in no set order. Unknown ids are
+    /// left out.
+    pub async fn training_crops_by_ids(&self, ids: &[String]) -> DbResult<Vec<TrainingCrop>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rids: Vec<RecordId> = ids
+            .iter()
+            .map(|id| RecordId::new("hero_icon", id.as_str()))
+            .collect();
+        with_timeout(async {
+            let mut result = self
+                .client
+                .query("SELECT * FROM hero_icon WHERE id IN $rids")
+                .bind(("rids", rids))
+                .await?;
+            let rows: Vec<DbHeroIcon> = result.take(0)?;
+            Ok(crops_from(rows))
         })
         .await
     }
