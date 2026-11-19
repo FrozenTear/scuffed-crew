@@ -167,11 +167,20 @@ fn me_to_user_info(me: &MeResponse) -> UserInfo {
     }
 }
 
-/// Pull the server's `{"error": "..."}` message out of an HTTP error body.
+/// Pull the server's `{"error": "..."}` message out of an HTTP error body,
+/// with long dashes made plain like every other server reason
+/// ([`crate::client_error::plain_punctuation`]): the register 400 "username
+/// must be 1\u{2013}32 characters" reads "1-32", as on setup (Vision nit 1 at
+/// e453160d on 748). A blank reason is the fallback.
 fn body_error_or(body: &str, fallback: &str) -> String {
     serde_json::from_str::<serde_json::Value>(body)
         .ok()
-        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
+        .and_then(|v| {
+            v.get("error")?
+                .as_str()
+                .map(crate::client_error::plain_punctuation)
+        })
+        .filter(|reason| !reason.is_empty())
         .unwrap_or_else(|| fallback.to_string())
 }
 
@@ -1269,6 +1278,37 @@ mod tests {
             register_failure_message(&http(409, json)),
             "Could not create account. Try a different username."
         );
+
+        // Vision nit 1 at e453160d on 748: the register 400 reason goes
+        // through plain_punctuation like setup's, so the server's en dash
+        // range reads "1-32" and a spaced dash breaks the sentence.
+        let range = register_failure_message(&http(
+            400,
+            r#"{"error":"username must be 1\u201332 characters"}"#,
+        ));
+        assert_eq!(range, "username must be 1-32 characters");
+        assert!(
+            !range.contains('\u{2013}') && !range.contains('\u{2014}'),
+            "{range}"
+        );
+        assert_eq!(
+            register_failure_message(&http(
+                400,
+                r#"{"error":"username may only contain letters, digits, _ and -"}"#,
+            )),
+            "username may only contain letters, digits, _ and -"
+        );
+        assert_eq!(
+            register_failure_message(&http(400, r#"{"error":"taken \u2014 pick another"}"#)),
+            "taken. Pick another"
+        );
+        for body in [r#"{"error":"  "}"#, r#"{"error":""}"#, "<html>", ""] {
+            assert_eq!(
+                register_failure_message(&http(400, body)),
+                "Check your input",
+                "{body}"
+            );
+        }
 
         assert_eq!(nostr_verify_failure_message(&json_err), "Try again in 9 s");
         assert_eq!(nostr_verify_failure_message(&plain_err), later);

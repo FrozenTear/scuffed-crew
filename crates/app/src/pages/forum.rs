@@ -110,22 +110,6 @@ fn thread_count_label(count: u64) -> String {
     count_label(count, "thread", "threads")
 }
 
-/// A description worth a line: trimmed, and `None` when blank.
-/// A forum fetch as a view state. A board or thread the viewer may not open
-/// (401, 403) reads like a missing one: the not-found panel already says
-/// "not open to you", and a Retry could never fix it.
-pub(crate) fn forum_load<T: Clone>(slot: Option<&Result<T, String>>) -> Load<T> {
-    match slot {
-        Some(Err(err))
-            if crate::components::is_http_status(err, 401)
-                || crate::components::is_http_status(err, 403) =>
-        {
-            Load::Missing
-        }
-        other => Load::of(other),
-    }
-}
-
 /// API path of one thread. The id is percent-encoded like the board slug.
 pub(crate) fn thread_api_path(thread_id: &str) -> String {
     format!("/api/forum/threads/{}", encode_query(thread_id))
@@ -151,6 +135,7 @@ pub(crate) fn forum_post_error(lead: &str, err: &ClientError) -> String {
     format!("{lead} {why}")
 }
 
+/// A description worth a line: trimmed, and `None` when blank.
 fn shown_text(text: Option<&str>) -> Option<&str> {
     text.map(str::trim).filter(|text| !text.is_empty())
 }
@@ -331,7 +316,9 @@ pub fn Forum() -> Element {
                 .map_err(|e| crate::client_error::logged_message("forum tree", &e))
         }
     });
-    let load = forum_load(tree.read().as_ref());
+    // Only a 404 is missing: a 401 or 403 keeps the server's reason next to
+    // the lead (QA round 3 on 748).
+    let load = Load::of(tree.read().as_ref());
     let retrying = is_retrying(tree.state()(), &load);
 
     rsx! {
@@ -551,7 +538,8 @@ pub fn ForumBoardPage(slug: String) -> Element {
             .unwrap_or_default()
     });
 
-    let load = forum_load(list.read().as_ref());
+    // A 401 or 403 board keeps its reason; only a 404 is "Board not found".
+    let load = Load::of(list.read().as_ref());
     let pending = list.state()() == UseResourceState::Pending;
     let retrying = is_retrying(list.state()(), &load);
     // A page change or a refresh keeps the old rows until the new ones land.
@@ -1501,35 +1489,81 @@ mod tests {
         assert!(!open.contains("Start a thread"), "{open}");
     }
 
+    /// A fetch failure the way the forum resources keep it: mapped and
+    /// logged once by `logged_message`, then read by `Load::of`.
+    fn mapped_load<T: Clone>(status: u16, body: &str) -> (Load<T>, String) {
+        let _ = crate::util::take_logged();
+        let err = ClientError::http(status, body, None);
+        let slot: Result<T, String> =
+            Err(crate::client_error::logged_message("forum threads", &err));
+        let load = Load::of(Some(&slot));
+        let logged = crate::util::take_logged();
+        assert_eq!(logged.len(), 1, "{status}: {logged:?}");
+        (load, crate::client_error::user_message(&err))
+    }
+
+    /// QA round 3 on 748: a 401 or 403 board showed only "Couldn't load the
+    /// forum." because the forum mapped them to the not-found view. Only a
+    /// 404 is missing now; a refusal keeps the server's reason on the
+    /// index, the board and (through the same `Load::of`) the thread page.
     #[test]
-    fn a_board_or_thread_closed_to_the_viewer_is_not_a_connection_error() {
-        for status in [401, 403, 404] {
-            let slot: Result<u8, String> = Err(format!("HTTP error {status}: {{\"error\":\"x\"}}"));
-            assert_eq!(forum_load(Some(&slot)), Load::Missing, "{status}");
+    fn a_refused_forum_load_shows_the_reason_through_the_mapping() {
+        for status in [401, 403] {
+            let body = r#"{"error":"Members only"}"#;
+            let (load, reason) = mapped_load::<Vec<ForumCategoryNode>>(status, body);
+            assert!(reason.contains("Members only"), "{reason}");
+            assert_eq!(load, Load::Failed(reason.clone()), "{status}");
+            let index = render_index(load, false, false);
+            assert!(
+                index.contains(&format!("Couldn&#39;t load the forum. {reason}")),
+                "{index}"
+            );
+            assert!(index.contains("role=\"alert\""), "{index}");
+            assert!(!index.contains("not found"), "{index}");
+
+            let (load, _) = mapped_load::<ThreadListResponse>(status, body);
+            let board = BoardCase::of(load).render();
+            assert!(board.contains("Couldn&#39;t load this board"), "{board}");
+            assert!(board.contains(&reason), "{board}");
+            assert!(!board.contains("Board not found"), "{board}");
         }
-        let server: Result<u8, String> = Err("HTTP error 500: oops".to_string());
-        assert_eq!(
-            forum_load(Some(&server)),
-            Load::Failed("HTTP error 500: oops".to_string())
+
+        // A 404 is still the not-found panel, with nothing to retry.
+        let (load, _) = mapped_load::<Vec<ForumCategoryNode>>(404, r#"{"error":"Not found"}"#);
+        assert_eq!(load, Load::Missing);
+        let (load, _) = mapped_load::<ThreadListResponse>(404, r#"{"error":"Not found"}"#);
+        assert_eq!(load, Load::Missing);
+        let board = BoardCase::of(load).render();
+        assert!(board.contains("Board not found"), "{board}");
+        assert!(!board.contains("role=\"alert\""), "{board}");
+
+        // A reason-less 403 still says something past the lead.
+        let (load, reason) = mapped_load::<Vec<ForumCategoryNode>>(403, "");
+        assert_eq!(reason, "HTTP error: 403");
+        let index = render_index(load, false, false);
+        assert!(
+            index.contains("Couldn&#39;t load the forum. HTTP error: 403"),
+            "{index}"
         );
-        let network: Result<u8, String> = Err("Network error: offline".to_string());
-        assert_eq!(
-            forum_load(Some(&network)),
-            Load::Failed("Network error: offline".to_string())
-        );
-        assert_eq!(forum_load(Some(&Ok::<u8, String>(3))), Load::Ready(3));
-        assert_eq!(forum_load::<u8>(None), Load::Loading);
+
+        assert_eq!(Load::of(Some(&Ok::<u8, String>(3))), Load::Ready(3));
+        assert_eq!(Load::<u8>::of(None), Load::Loading);
+
+        // All three forum fetches read their slot through `Load::of`, which
+        // maps only a 404 to missing; no forum-only 401/403 mapping is back.
+        let board = include_str!("forum.rs").split("mod tests").next().unwrap();
+        assert!(board.contains("Load::of(tree.read().as_ref())"));
+        assert!(board.contains("Load::of(list.read().as_ref())"));
         let thread = include_str!("forum_thread.rs")
             .split("mod tests")
             .next()
             .unwrap();
-        assert!(thread.contains("forum_load(detail.read().as_ref())"));
-        assert!(
-            !thread.contains("Load::of("),
-            "the thread page maps 401/403 too"
-        );
-        let board = include_str!("forum.rs").split("mod tests").next().unwrap();
-        assert!(!board.contains("Load::of(list") && !board.contains("Load::of(tree"));
+        assert!(thread.contains("Load::of(detail.read().as_ref())"));
+        for src in [board, thread] {
+            assert!(!src.contains("forum_load"));
+            assert!(!src.contains("is_http_status(err, 401)"));
+            assert!(!src.contains("is_http_status(err, 403)"));
+        }
     }
 
     #[test]

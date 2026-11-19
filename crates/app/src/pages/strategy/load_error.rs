@@ -53,10 +53,13 @@ pub fn heroes_load_error(reason: &str) -> LoadError {
     }
 }
 
-/// Strategy editor: 404 and 403 mean the strategy is gone or private, so a
-/// Retry will not help. Anything else (500, network, bad JSON) can be retried.
+/// Strategy editor: a 404 means the strategy is gone or private, so a Retry
+/// will not help. A 403 keeps the server's reason next to the lead (QA round
+/// 3 on 748: a refusal read as not found dropped it), and gets no Retry
+/// either: a retry gives the same answer. Anything else (500, network, bad
+/// JSON) can be retried.
 pub fn strategy_load_error(reason: &str) -> LoadError {
-    if is_http_status(reason, 404) || is_http_status(reason, 403) {
+    if is_http_status(reason, 404) {
         LoadError {
             message: "Strategy not found or access denied.".to_string(),
             retry: false,
@@ -64,7 +67,7 @@ pub fn strategy_load_error(reason: &str) -> LoadError {
     } else {
         LoadError {
             message: format!("Couldn't load this strategy. {reason}"),
-            retry: true,
+            retry: !is_http_status(reason, 403),
         }
     }
 }
@@ -82,12 +85,22 @@ mod tests {
     fn missing_or_forbidden_strategy_is_not_retried() {
         for err in [
             http(404, r#"{"error":"Not found"}"#),
-            http(403, r#"{"error":"Forbidden"}"#),
             http(404, "<html></html>"),
-            http(403, ""),
         ] {
             let shown = strategy_load_error(&err);
             assert_eq!(shown.message, "Strategy not found or access denied.");
+            assert!(!shown.retry, "{err}");
+        }
+        // QA round 3 on 748: a 403 keeps the server's reason (or the bare
+        // status) after the lead, still without a Retry.
+        for (err, why) in [
+            (http(403, r#"{"error":"Forbidden"}"#), "Forbidden"),
+            (http(403, ""), "HTTP error: 403"),
+        ] {
+            let shown = strategy_load_error(&err);
+            assert_eq!(shown.message, format!("Couldn't load this strategy. {err}"));
+            assert!(shown.message.contains(why), "{}", shown.message);
+            assert!(!shown.message.contains("not found"), "{}", shown.message);
             assert!(!shown.retry, "{err}");
         }
     }

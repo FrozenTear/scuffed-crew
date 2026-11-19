@@ -10,8 +10,7 @@ use super::article_author::{
     load_status, use_author_names,
 };
 use super::forum::{
-    FORUM_CSS, FORUM_CSS_ID, count_label, forum_load, forum_post_error, required_mark,
-    thread_api_path,
+    FORUM_CSS, FORUM_CSS_ID, count_label, forum_post_error, required_mark, thread_api_path,
 };
 use super::not_found::{NotFoundLink, NotFoundPanel};
 use crate::components::ui::inline_confirm::focus_field_by_id;
@@ -126,7 +125,8 @@ pub fn ForumThread(id: String) -> Element {
             })
             .unwrap_or_default()
     });
-    let load = forum_load(detail.read().as_ref());
+    // A 401 or 403 keeps its reason; only a 404 is "Thread not found".
+    let load = Load::of(detail.read().as_ref());
     let retrying = is_retrying(detail.state()(), &load);
     crate::head::use_page_title(tab_label(&load));
 
@@ -735,6 +735,20 @@ mod tests {
         let retrying = retrying.render();
         assert!(retrying.contains(">Loading thread</p>"), "{retrying}");
         assert!(retrying.contains(">Retrying...</button>"), "{retrying}");
+
+        // QA round 3 on 748: a 403 thread keeps the server's reason (mapped
+        // and logged once, read by `Load::of`), not the not-found card.
+        let _ = crate::util::take_logged();
+        let err = scuffed_api_client::ClientError::http(403, r#"{"error":"Members only"}"#, None);
+        let slot: Result<ThreadDetailResponse, String> =
+            Err(crate::client_error::logged_message("forum thread", &err));
+        assert_eq!(crate::util::take_logged().len(), 1);
+        let reason = crate::client_error::user_message(&err);
+        let refused = Case::of(Load::of(Some(&slot))).render();
+        assert!(refused.contains("load this thread</h1>"), "{refused}");
+        assert!(refused.contains(&reason), "{refused}");
+        assert!(refused.contains("Members only"), "{refused}");
+        assert!(!refused.contains("Thread not found"), "{refused}");
 
         // A missing thread is the not-found card, not an error page.
         let missing = Case::of(Load::Missing).render();

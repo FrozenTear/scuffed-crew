@@ -168,10 +168,25 @@ fn subscription_allowed(state: RelayConnectionState) -> bool {
 /// request maps its failure through here, never through a second log.
 fn chat_failure(what: &str, err: &ClientError) -> String {
     crate::util::log_client_error(what, err);
+    chat_copy(err)
+}
+
+/// [`chat_failure`] without the log, for the one expected answer that is
+/// not a fault ([`is_external_key_decrypt`]).
+fn chat_copy(err: &ClientError) -> String {
     match err {
         ClientError::Http { status, body, .. } => chat_api_error_copy(*status, body),
         other => crate::client_error::user_message(other),
     }
+}
+
+/// The 400 an external-key member gets for every gift wrap ("External key
+/// users must decrypt client-side"): their extension decrypts, not the
+/// server. It is expected, up to once per subscribed wrap, so it is not
+/// logged as a warning; the skip's info line is its one console line
+/// (Vision nit 2 at e453160d on 748).
+fn is_external_key_decrypt(err: &ClientError) -> bool {
+    matches!(err, ClientError::Http { status: 400, body, .. } if body.contains("External key"))
 }
 
 /// A 400 the server fixes with a fresh relay auth token (one retry). A 400
@@ -238,6 +253,7 @@ async fn decrypt_gift_wrap(event: &NostrEvent, relay_url: &str) -> Result<ChatMe
                 .await
                 .map_err(|e| chat_failure("Chat decrypt", &e))?
         }
+        Err(e) if is_external_key_decrypt(&e) => return Err(chat_copy(&e)),
         Err(e) => return Err(chat_failure("Chat decrypt", &e)),
     };
     let group_id = resp
@@ -295,18 +311,24 @@ fn remaining_hold_secs(until_ms: f64, now_ms: f64) -> u64 {
     }
 }
 
-/// Plain copy for `POST /api/chat/send-public` failures.
+/// The lead of a public send failure the channel does not name in its own
+/// words: no answer, an unreadable answer, a 5xx or any other status. The
+/// mapped sentence follows it, as on officer chat (QA round 3 on 748).
+const SEND_FAILED_LEAD: &str = "Could not send that message.";
+
+/// Plain copy for the `POST /api/chat/send-public` refusals the channel
+/// names in its own words, or `None` for any other answer.
 ///
 /// 429 uses the JSON `retry_after` (then the `Retry-After` header) so the
 /// composer can count down. Waits outside 1..=3600 stay a static message.
-fn public_send_failure(
+fn public_send_refusal(
     status: u16,
     body: &str,
     header_retry_after: Option<u64>,
-) -> PublicSendError {
+) -> Option<PublicSendError> {
     if status == 429 {
         let secs = scuffed_types::json_retry_after(body).or(header_retry_after);
-        return match secs {
+        return Some(match secs {
             Some(secs) => PublicSendError {
                 message: rate_limit_copy(secs),
                 retry_after_secs: Some(secs),
@@ -315,7 +337,7 @@ fn public_send_failure(
                 message: RATE_LIMIT_LATER.to_string(),
                 retry_after_secs: None,
             },
-        };
+        });
     }
     let message = match status {
         400 if body.contains("too long") => "Message is too long.",
@@ -326,31 +348,34 @@ fn public_send_failure(
         401 => "Sign in to send a message.",
         403 => "You are not allowed in this channel.",
         404 => "Channel not found.",
-        502 | 503 => "Couldn't reach the chat server.",
-        _ => "Something went wrong sending that message.",
+        _ => return None,
     };
-    PublicSendError {
+    Some(PublicSendError {
         message: message.to_string(),
         retry_after_secs: None,
-    }
+    })
 }
 
+/// The page text for a failed public send. The raw error goes to the
+/// console once, under "Chat send", like officer chat. A refusal the channel
+/// names keeps its words ([`public_send_refusal`]); anything else is
+/// [`SEND_FAILED_LEAD`] and the shared mapping: no answer reads the
+/// unreachable sentence, an unreadable answer the reload sentence, and a 5xx
+/// its reason (QA round 3 on 748: no chat-only copy).
 fn public_send_client_error(err: ClientError) -> PublicSendError {
-    match err {
+    let mapped = crate::client_error::logged_message("Chat send", &err);
+    let refusal = match &err {
         ClientError::Http {
             status,
             body,
             retry_after,
-        } => public_send_failure(status, &body, retry_after),
-        ClientError::Network(_) => PublicSendError {
-            message: "Couldn't reach the chat server.".into(),
-            retry_after_secs: None,
-        },
-        ClientError::Deserialize(_) => PublicSendError {
-            message: "Something went wrong sending that message.".into(),
-            retry_after_secs: None,
-        },
-    }
+        } => public_send_refusal(*status, body, *retry_after),
+        ClientError::Network(_) | ClientError::Deserialize(_) => None,
+    };
+    refusal.unwrap_or_else(|| PublicSendError {
+        message: crate::client_error::join_lead(SEND_FAILED_LEAD, &mapped),
+        retry_after_secs: None,
+    })
 }
 
 fn needs_key_provision(body: &str) -> bool {
@@ -387,11 +412,11 @@ async fn send_public_message(
         .await
     {
         Ok(resp) => Ok(resp),
-        Err(ClientError::Http {
-            status: 400, body, ..
-        }) if needs_key_provision(&body) => {
+        Err(err @ ClientError::Http { status: 400, .. })
+            if err.http_body().is_some_and(needs_key_provision) =>
+        {
             if provision_auth_token(relay_url).await.is_err() {
-                return Err(public_send_failure(400, &body, None));
+                return Err(public_send_client_error(err));
             }
             post_public_message(&client, &req).await
         }
@@ -926,12 +951,12 @@ mod tests {
         assert_eq!(
             prod.matches("chat_api_error_copy(").count(),
             1,
-            "only inside chat_failure"
+            "only inside chat_copy, which chat_failure logs around"
         );
         assert_eq!(
             prod.matches("user_message(").count(),
             1,
-            "only inside chat_failure"
+            "only inside chat_copy, which chat_failure logs around"
         );
         assert_eq!(prod.matches("log_client_error(").count(), 1);
     }
@@ -1041,6 +1066,150 @@ mod tests {
         assert!(prod.contains("/api/chat/send-encrypted"));
     }
 
+    /// A public send failure through the real mapping, checking that it
+    /// logged exactly once under "Chat send".
+    fn public_send_failure(status: u16, body: &str, retry_after: Option<u64>) -> PublicSendError {
+        let _ = crate::util::take_logged();
+        let shown = public_send_client_error(ClientError::Http {
+            status,
+            body: body.to_string(),
+            retry_after,
+        });
+        let logged = crate::util::take_logged();
+        assert_eq!(logged.len(), 1, "{status}: {logged:?}");
+        assert!(logged[0].starts_with("Chat send: "), "{logged:?}");
+        shown
+    }
+
+    /// QA round 3 on 748: no answer and an unreadable answer read the lead
+    /// and the shared sentence, and each is logged once.
+    #[test]
+    fn public_send_without_an_answer_shares_the_mapping_and_logs_once() {
+        let _ = crate::util::take_logged();
+        let net =
+            public_send_client_error(ClientError::Network("TypeError: Failed to fetch".into()));
+        assert_eq!(
+            net.message,
+            format!(
+                "Could not send that message. {}",
+                crate::client_error::NETWORK_ERROR_MESSAGE
+            )
+        );
+        assert_eq!(net.retry_after_secs, None);
+        let bad =
+            public_send_client_error(ClientError::Deserialize("expected value at line 1".into()));
+        assert_eq!(
+            bad.message,
+            format!(
+                "Could not send that message. {}",
+                crate::client_error::UNREADABLE_ANSWER_MESSAGE
+            )
+        );
+        assert!(!bad.message.contains("line 1"), "{}", bad.message);
+        let logged = crate::util::take_logged();
+        assert_eq!(logged.len(), 2, "{logged:?}");
+        assert!(logged[0].starts_with("Chat send: "), "{logged:?}");
+        assert!(logged[0].contains("Failed to fetch"), "{logged:?}");
+        assert!(logged[1].starts_with("Chat send: "), "{logged:?}");
+        assert!(logged[1].contains("expected value"), "{logged:?}");
+
+        // The old chat-only strings are gone from the code.
+        let src = include_str!("chat_widget.rs");
+        let prod = src.split("mod tests").next().expect("production source");
+        assert!(!prod.contains("reach the chat server"));
+        assert!(!prod.contains("Something went wrong sending"));
+        assert_eq!(prod.matches("logged_message(").count(), 1);
+        // The key-provision fallback maps through the same function.
+        assert!(prod.contains(".map_err(public_send_client_error)"));
+        assert!(prod.contains("return Err(public_send_client_error(err));"));
+        assert!(prod.contains("Err(other) => Err(public_send_client_error(other)),"));
+    }
+
+    /// QA round 3 on 748: officer send with an unreadable answer shows the
+    /// reload sentence and logs once (chat_failure, round 4).
+    #[test]
+    fn officer_send_logs_an_unreadable_answer_once() {
+        let _ = crate::util::take_logged();
+        let bad = ClientError::Deserialize("missing field `sender_pubkey`".into());
+        assert_eq!(
+            chat_failure("Chat send", &bad),
+            crate::client_error::UNREADABLE_ANSWER_MESSAGE
+        );
+        let logged = crate::util::take_logged();
+        assert_eq!(logged.len(), 1, "{logged:?}");
+        assert!(logged[0].starts_with("Chat send: "), "{logged:?}");
+        assert!(logged[0].contains("sender_pubkey"), "{logged:?}");
+        // Both officer send arms (first try and the retry after a token)
+        // map through chat_failure, never a bare user_message.
+        let src = include_str!("chat_widget.rs");
+        let prod = src.split("mod tests").next().expect("production source");
+        let send = prod
+            .split("async fn send_officer_message(")
+            .nth(1)
+            .and_then(|rest| rest.split("async fn decrypt_gift_wrap(").next())
+            .expect("send_officer_message");
+        assert_eq!(
+            send.matches("chat_failure(\"Chat send\", &e)").count(),
+            2,
+            "{send}"
+        );
+        assert!(!send.contains("user_message("), "{send}");
+    }
+
+    /// Vision nit 2 at e453160d on 748: the 400 an external-key member gets
+    /// for every gift wrap is expected, so it is not a warning; the skip's
+    /// info line stays its one console line. Any other decrypt failure logs.
+    #[test]
+    fn the_expected_external_key_decrypt_400_is_not_logged() {
+        let _ = crate::util::take_logged();
+        let external = ClientError::http(
+            400,
+            r#"{"error":"External key users must decrypt client-side (NIP-07 + NIP-44)"}"#,
+            None,
+        );
+        assert!(is_external_key_decrypt(&external));
+        assert!(!needs_auth_token(&external));
+        assert_eq!(
+            chat_copy(&external),
+            "Your Nostr key is external. Use a NIP-07 extension to send."
+        );
+        assert!(crate::util::take_logged().is_empty());
+        for other in [
+            ClientError::http(400, r#"{"error":"No Nostr keys"}"#, None),
+            ClientError::http(403, r#"{"error":"External key"}"#, None),
+            ClientError::http(500, r#"{"error":"External key store down"}"#, None),
+            ClientError::Network("offline".into()),
+        ] {
+            assert!(!is_external_key_decrypt(&other), "{other}");
+        }
+
+        let src = include_str!("chat_widget.rs");
+        let prod = src.split("mod tests").next().expect("production source");
+        let decrypt = prod
+            .split("async fn decrypt_gift_wrap(")
+            .nth(1)
+            .and_then(|rest| rest.split("let group_id").next())
+            .expect("decrypt_gift_wrap");
+        let skip = decrypt
+            .find("Err(e) if is_external_key_decrypt(&e) => return Err(chat_copy(&e)),")
+            .expect("the expected 400 skips the log");
+        let logged = decrypt
+            .find("Err(e) => return Err(chat_failure(\"Chat decrypt\", &e)),")
+            .expect("every other failure logs");
+        assert!(skip < logged, "the skip arm comes first");
+        assert_eq!(
+            prod.matches("tracing::info!(\"Gift wrap decrypt skipped: {e}\")")
+                .count(),
+            1,
+            "the info line is kept"
+        );
+        assert_eq!(
+            prod.matches("chat_copy(").count(),
+            3,
+            "def + chat_failure + skip"
+        );
+    }
+
     #[test]
     fn public_send_errors_use_plain_language() {
         let too_long = public_send_failure(
@@ -1094,27 +1263,39 @@ mod tests {
             public_send_failure(404, r#"{"error":"Channel 'alpha' not found"}"#, None).message,
             "Channel not found."
         );
-        assert_eq!(
-            public_send_failure(
+        // QA round 3 on 748: no chat-only copy. A 5xx is the lead and the
+        // shared mapping, the server's reason when it gave one.
+        for (status, body) in [
+            (
                 502,
                 r#"{"error":"Relay rejected or failed to accept the message"}"#,
-                None
-            )
-            .message,
-            "Couldn't reach the chat server."
-        );
-        assert_eq!(
-            public_send_failure(
-                503,
-                r#"{"error":"Cannot connect to relay for publishing"}"#,
-                None
-            )
-            .message,
-            "Couldn't reach the chat server."
-        );
+            ),
+            (503, r#"{"error":"Cannot connect to relay for publishing"}"#),
+            (500, r#"{"error":"Internal error"}"#),
+            (502, ""),
+        ] {
+            let err = ClientError::http(status, body, None);
+            let shown = public_send_failure(status, body, None);
+            assert_eq!(
+                shown.message,
+                format!(
+                    "Could not send that message. {}",
+                    crate::client_error::user_message(&err)
+                ),
+                "{status}"
+            );
+            assert_eq!(shown.retry_after_secs, None);
+        }
         assert_eq!(
             public_send_failure(500, r#"{"error":"Internal error"}"#, None).message,
-            "Something went wrong sending that message."
+            "Could not send that message. HTTP error 500: Internal error"
+        );
+        assert_eq!(
+            public_send_failure(502, "", None).message,
+            format!(
+                "Could not send that message. {}",
+                crate::client_error::SERVER_TROUBLE_MESSAGE
+            )
         );
 
         let limited =

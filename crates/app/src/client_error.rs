@@ -578,7 +578,10 @@ mod tests {
 
     /// Vision nit 2, round 4 on 748: only a spaced dash breaks a sentence.
     /// The setup and register 400 ("username must be 1\u{2013}32
-    /// characters") keeps its range as a plain "1-32", never "1. 32".
+    /// characters") keeps its range as a plain "1-32", never "1. 32". Setup
+    /// reads it through `user_message`; the register form's own reason
+    /// (`body_error_or` in `pages/login.rs`) through `plain_punctuation`,
+    /// pinned below and in `login.rs`.
     #[test]
     fn the_username_length_reason_keeps_its_range() {
         let err = ClientError::http(
@@ -589,6 +592,10 @@ mod tests {
         let shown = user_message(&err);
         assert_eq!(shown, "HTTP error 400: username must be 1-32 characters");
         assert!(!shown.contains("1. 32"), "{shown}");
+        assert_eq!(
+            plain_punctuation("username must be 1\u{2013}32 characters"),
+            "username must be 1-32 characters"
+        );
         assert!(
             !shown.contains('\u{2014}') && !shown.contains('\u{2013}'),
             "{shown}"
