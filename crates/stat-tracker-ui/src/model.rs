@@ -97,10 +97,12 @@ impl EditForm {
         }
     }
 
-    /// Only fields that differ from the game's current effective values,
-    /// plus any stat the reader was unsure of ("Check first"), sent even at
-    /// its shown value: saving it confirms the read and clears the mark.
-    pub fn diff(&self, g: &Game) -> stat_tracker::storage::MatchEdit {
+    /// Only fields that differ from the game's current effective values.
+    /// With `confirm`, also any stat the reader was unsure of ("Check
+    /// first"), sent even at its shown value: saving it confirms the read
+    /// and clears the mark. [`crate::commands::save_edit`] asks for that
+    /// only when the save would otherwise send nothing.
+    pub fn diff(&self, g: &Game, confirm: bool) -> stat_tracker::storage::MatchEdit {
         let mut e = stat_tracker::storage::MatchEdit::default();
         let txt = |cur: &str, disp: &str| {
             let t = cur.trim();
@@ -113,7 +115,7 @@ impl EditForm {
             cur.trim()
                 .parse::<u32>()
                 .ok()
-                .filter(|v| *v != disp || g.unsure_now(field))
+                .filter(|v| *v != disp || (confirm && g.unsure_now(field)))
         };
         e.elims = num(&self.elims, g.elims, "elims");
         e.deaths = num(&self.deaths, g.deaths, "deaths");

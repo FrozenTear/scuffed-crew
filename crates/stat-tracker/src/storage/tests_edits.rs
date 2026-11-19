@@ -224,3 +224,31 @@ async fn set_session_map_keeps_a_member_map_edit() {
     assert!(rows[0].field_edited("map_name"));
     assert_eq!(rows[0].display_map_name(), "King's Row");
 }
+
+/// An edit at the value the row already shows is still applied: the stat
+/// is marked edited, its Check first mark clears and the row queues for
+/// upload again. The GUI's confirm of an unsure stat relies on it (#770).
+#[tokio::test]
+async fn an_edit_at_the_shown_value_is_still_applied() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalStore::open(dir.path()).await.expect("open store");
+    let mut m = snap("s1", 7); // ocr elims 7
+    m.suspect_fields = vec!["e".into(), "dmg".into()];
+    store.insert_match(m).await.unwrap();
+    mark_current(&store).await;
+
+    let edit = MatchEdit {
+        elims: Some(7),
+        ..Default::default()
+    };
+    store.edit_match("s1", &edit).await.unwrap();
+
+    let rows = store.get_all_matches().await.unwrap();
+    let m = &rows[0];
+    assert_eq!(m.elims, 7);
+    assert_eq!(m.corrected_elims, Some(7));
+    assert!(m.field_edited("elims"));
+    assert!(m.edited_at.is_some());
+    assert_eq!(m.suspect_fields, vec!["dmg".to_string()]);
+    assert!(!m.synced, "queued to upload again");
+}

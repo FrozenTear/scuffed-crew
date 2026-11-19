@@ -138,7 +138,7 @@ pub fn save_edit(
     in_progress: bool,
     sync_on: bool,
 ) -> Result<Saved, String> {
-    let mut edit = form.diff(game);
+    let mut edit = form.diff(game, false);
     if let Some(typed) = edit.map_name.take() {
         let map = stat_tracker::parse::canonical_map(&typed)
             .filter(|m| stat_tracker::parse::map_is_known(m))
@@ -150,34 +150,42 @@ pub fn save_edit(
             .ok_or_else(|| format!("Hero not found: {typed}. Type a hero name like Ana"))?;
         edit.hero = (*hero != game.hero).then(|| hero.to_string());
     }
+    if edit.is_empty() {
+        // Nothing to correct: an unsure stat left at its read value is sent
+        // to confirm it. Only then, so a fix to anything else never
+        // confirms a Check first stat the member did not look at. A typed
+        // map or hero that names the current one stays unsent.
+        edit = MatchEdit {
+            hero: None,
+            map_name: None,
+            ..form.diff(game, true)
+        };
+    }
     let map = edit.map_name.as_deref().unwrap_or(&game.map_name);
     let hero = edit.hero.as_deref().unwrap_or(&game.hero);
     let held = !stat_tracker::parse::review_suspect_fields(map, "", hero).is_empty();
     let was_held =
         !stat_tracker::parse::review_suspect_fields(&game.map_name, "", &game.hero).is_empty();
-    // An unsure stat saved at its shown value is sent to confirm it
-    // ([`crate::model::EditForm::diff`]): that confirms the read, it does
-    // not correct it.
+    // An unsure stat saved at its shown value is sent to confirm it (see
+    // above): that confirms the read, it does not correct it.
     let stats = [
-        (edit.elims, game.elims, "Elims confirmed"),
-        (edit.deaths, game.deaths, "Deaths confirmed"),
-        (edit.assists, game.assists, "Assists confirmed"),
-        (edit.damage, game.damage, "Damage confirmed"),
-        (edit.healing, game.healing, "Healing confirmed"),
-        (edit.mitigation, game.mitigation, "Mitigation confirmed"),
+        (edit.elims, game.elims, "Elims"),
+        (edit.deaths, game.deaths, "Deaths"),
+        (edit.assists, game.assists, "Assists"),
+        (edit.damage, game.damage, "Damage"),
+        (edit.healing, game.healing, "Healing"),
+        (edit.mitigation, game.mitigation, "Mitigation"),
     ];
     let stats_changed = stats
         .iter()
         .any(|(v, shown, _)| v.is_some_and(|v| v != *shown));
-    let mut confirmed = stats
+    let confirmed: Vec<&str> = stats
         .iter()
         .filter(|(v, shown, _)| *v == Some(*shown))
-        .map(|(_, _, line)| *line);
-    let confirmed = match (confirmed.next(), confirmed.next()) {
-        (Some(line), None) => Some(line),
-        (Some(_), Some(_)) => Some("Stats confirmed"),
-        (None, _) => None,
-    };
+        .map(|(_, _, name)| *name)
+        .collect();
+    let confirmed =
+        crate::games_rows::names_list(&confirmed).map(|list| format!("{list} confirmed"));
     let map_changed = edit.map_name.is_some();
     let hero_fixed = edit.hero.is_some();
     let role_changed = edit.role.is_some();
@@ -228,11 +236,11 @@ pub fn save_edit_for(
 /// What a queued Edit says, from whether the game is still held, which
 /// kinds of field changed, and the release line when the save lifted a
 /// hold (`None` when the game was not held). `confirmed` is the line for
-/// unsure stats saved at their read value ("Elims confirmed"), said when
-/// nothing else changed; a confirm fixed nothing, so it offers no report.
-/// A role-only
-/// change reads "Role corrected" and offers no training report, as there
-/// is no role category. A release takes its line from [`upload`], as the
+/// unsure stats saved at their read value ("Elims confirmed", "Elims and
+/// deaths confirmed"), sent only when nothing else changed; a confirm
+/// fixed nothing, so it offers no report. A role-only change reads
+/// "Role corrected" and offers no training report, as there is no role
+/// category. A release takes its line from [`upload`], as the
 /// picker does: a live game uploads once it ends, and with no website
 /// linked it stays on this computer.
 fn saved(
@@ -241,7 +249,7 @@ fn saved(
     map_changed: bool,
     hero_fixed: bool,
     role_changed: bool,
-    confirmed: Option<&'static str>,
+    confirmed: Option<String>,
     release: Option<&'static str>,
 ) -> Saved {
     let hero_changed = hero_fixed || role_changed;
@@ -261,20 +269,20 @@ fn saved(
     } else {
         None
     };
-    let toast = if held {
-        "Saved. A map or hero is still missing, so this game stays on this computer."
+    let toast: String = if held {
+        "Saved. A map or hero is still missing, so this game stays on this computer.".into()
     } else if stats_changed {
-        "Stats corrected"
+        "Stats corrected".into()
     } else if let Some(line) = release {
-        line
+        line.into()
     } else {
         match (map_changed, hero_changed, role_only) {
-            (true, true, false) => "Map and hero corrected",
-            (true, true, true) => "Map and role corrected",
-            (true, false, _) => "Map corrected",
-            (false, true, false) => "Hero corrected",
-            (false, true, true) => "Role corrected",
-            (false, false, _) => confirmed.unwrap_or("Saved"),
+            (true, true, false) => "Map and hero corrected".into(),
+            (true, true, true) => "Map and role corrected".into(),
+            (true, false, _) => "Map corrected".into(),
+            (false, true, false) => "Hero corrected".into(),
+            (false, true, true) => "Role corrected".into(),
+            (false, false, _) => confirmed.unwrap_or_else(|| "Saved".into()),
         }
     };
     Saved { toast, category }
@@ -282,16 +290,16 @@ fn saved(
 
 /// What an Edit save says, and the training report category its toast
 /// offers (`None`: the save changed nothing, so no report is offered).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Saved {
-    pub toast: &'static str,
+    pub toast: String,
     pub category: Option<GameCategory>,
 }
 
 /// Show an Edit save's toast, with the training report offer when the
 /// save fixed something.
 pub(crate) fn show_saved(app: &mut crate::app::TrackerApp, sid: &str, saved: &Saved) {
-    app.replace_toast(saved.toast);
+    app.replace_toast(saved.toast.clone());
     if let Some(category) = saved.category {
         app.arm_training_toast(sid, category);
     }
@@ -797,7 +805,7 @@ mod tests {
         let g = sample_game();
         app.games = vec![g.clone()];
         show_saved(&mut app, &g.session_id, &saved);
-        assert_eq!(app.toast.as_deref(), Some(saved.toast));
+        assert_eq!(app.toast.as_deref(), Some(saved.toast.as_str()));
         matches!(
             app.toast_action,
             Some(crate::app::Message::Report(
@@ -1047,25 +1055,52 @@ mod tests {
         let mut form = EditForm::from_game(&g);
         form.elims = "21".into();
         form.hero = "Kiriko".into();
-        let edit = form.diff(&g);
+        let edit = form.diff(&g, false);
         assert_eq!(edit.elims, Some(21));
         assert_eq!(edit.hero.as_deref(), Some("Kiriko"));
         assert!(edit.deaths.is_none());
         assert!(edit.map_name.is_none());
     }
 
-    /// An unsure stat ("Check first") saved at its read value is sent, so
-    /// the store marks it edited and the mark clears; the toast says it was
-    /// confirmed, not corrected, and offers no report. (The store side,
-    /// `apply_match_edit`, marks any sent stat edited and clears its
-    /// suspect whatever the value.)
+    /// The game as a reload shows it once the queued commands in `dir`
+    /// are overlaid on its stored row ([`crate::snapshot::overlay_queued`]).
+    fn after_queued(dir: &Path, g: &Game) -> Game {
+        let mut m = crate::fixtures::pm(
+            &g.session_id,
+            &g.hero,
+            &g.map_name,
+            g.role.label(),
+            "victory",
+            g.elims,
+            g.deaths,
+            g.assists,
+            g.damage,
+            g.healing,
+            g.mitigation,
+            crate::fixtures::dt(2026, 9, 2, 21, 14),
+        );
+        m.suspect_fields = g.suspect_fields.clone();
+        let mut snap = stat_tracker::storage::Snapshot {
+            matches: vec![m],
+            ..Default::default()
+        };
+        crate::snapshot::overlay_queued(&mut snap, &queued(dir));
+        Game::from_match(&snap.matches[0])
+    }
+
+    /// An unsure stat ("Check first") saved at its read value, with nothing
+    /// else changed, is sent, so the store marks it edited and the mark
+    /// clears; the toast says it was confirmed, not corrected, and offers
+    /// no report. (The store side, `apply_match_edit`, marks any sent stat
+    /// edited and clears its suspect whatever the value.)
     #[test]
     fn an_unsure_stat_saved_at_its_read_value_is_confirmed() {
         let mut g = sample_game();
         g.suspect_fields = vec!["e".into()];
         assert!(g.unsure_now("elims"));
         let form = EditForm::from_game(&g);
-        let edit = form.diff(&g);
+        assert!(form.diff(&g, false).is_empty());
+        let edit = form.diff(&g, true);
         assert_eq!(edit.elims, Some(14));
         assert!(edit.deaths.is_none() && edit.damage.is_none());
         assert!(edit.hero.is_none() && edit.role.is_none() && edit.map_name.is_none());
@@ -1075,19 +1110,21 @@ mod tests {
         assert_eq!(saved.toast, "Elims confirmed");
         assert_eq!(saved.category, None, "a confirm fixed nothing");
         assert_eq!(queued_edit(&dir).elims, Some(14));
-        let _ = std::fs::remove_dir_all(&dir);
-
-        // What the store records for that edit: elims hand edited.
-        let mut after = g.clone();
-        after.edited_fields.push("elims".into());
+        let after = after_queued(&dir, &g);
+        assert_eq!(after.elims, 14);
+        assert_eq!(after.edited_fields, vec!["elims".to_string()]);
         assert!(!after.unsure_now("elims"), "Check first is gone");
         assert_eq!(after.unsure_stats(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
 
-        // Two unsure stats confirmed at once.
+        // Two unsure stats confirmed at once: the toast names both.
         g.suspect_fields.push("dmg".into());
-        let both = save(&tmp(), &g, &EditForm::from_game(&g)).unwrap();
-        assert_eq!(both.toast, "Stats confirmed");
+        let dir = tmp();
+        let both = save(&dir, &g, &EditForm::from_game(&g)).unwrap();
+        assert_eq!(both.toast, "Elims and damage confirmed");
         assert_eq!(both.category, None);
+        assert!(after_queued(&dir, &g).suspect_fields.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
 
         // The same through the app's Save.
         let (_dir, mut app) = crate::fixtures::test_app();
@@ -1100,6 +1137,61 @@ mod tests {
         assert!(app.toast_action.is_none(), "no report for a confirm");
     }
 
+    /// Each unsure stat is looked up under its own name and confirmed at
+    /// its own value: a swapped lookup (deaths for assists) sends nothing
+    /// or the wrong stat, and a swapped toast names the wrong one.
+    #[test]
+    fn each_unsure_stat_is_confirmed_under_its_own_name() {
+        let mut g = sample_game();
+        g.mitigation = 3100;
+        type Set = fn(&mut MatchEdit, u32);
+        let cases: [(&str, &str, &str, u32, Set); 6] = [
+            ("e", "elims", "Elims confirmed", 14, |e, v| {
+                e.elims = Some(v)
+            }),
+            ("d", "deaths", "Deaths confirmed", 5, |e, v| {
+                e.deaths = Some(v)
+            }),
+            ("a", "assists", "Assists confirmed", 16, |e, v| {
+                e.assists = Some(v)
+            }),
+            ("dmg", "damage", "Damage confirmed", 4200, |e, v| {
+                e.damage = Some(v)
+            }),
+            ("h", "healing", "Healing confirmed", 11200, |e, v| {
+                e.healing = Some(v)
+            }),
+            ("mit", "mitigation", "Mitigation confirmed", 3100, |e, v| {
+                e.mitigation = Some(v)
+            }),
+        ];
+        for (suspect, field, toast, value, set) in cases {
+            g.suspect_fields = vec![suspect.into()];
+            let dir = tmp();
+            let saved = save(&dir, &g, &EditForm::from_game(&g)).unwrap();
+            assert_eq!(saved.toast, toast, "{field}");
+            assert_eq!(saved.category, None, "{field}");
+            let mut want = MatchEdit::default();
+            set(&mut want, value);
+            assert_eq!(queued_edit(&dir), want, "{field}");
+            let after = after_queued(&dir, &g);
+            assert!(!after.unsure_now(field), "{field}");
+            assert!(after.suspect_fields.is_empty(), "{field}");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        g.suspect_fields = vec!["e".into(), "d".into(), "a".into()];
+        let dir = tmp();
+        let saved = save(&dir, &g, &EditForm::from_game(&g)).unwrap();
+        assert_eq!(saved.toast, "Elims, deaths and assists confirmed");
+        let edit = queued_edit(&dir);
+        assert_eq!(
+            (edit.elims, edit.deaths, edit.assists),
+            (Some(14), Some(5), Some(16))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A stat the reader was sure of, saved at its value, is still left
     /// out, so an untouched form says "No changes to save".
     #[test]
@@ -1108,17 +1200,17 @@ mod tests {
         g.suspect_fields = vec!["hero".into()];
         assert!(!g.unsure_now("elims"));
         let form = EditForm::from_game(&g);
-        assert!(form.diff(&g).is_empty());
+        assert!(form.diff(&g, true).is_empty());
         let dir = tmp();
         assert_eq!(save(&dir, &g, &form).unwrap_err(), "No changes to save");
         assert!(queued(&dir).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// One stat changed and one unsure stat left at its value: both are
-    /// sent, and the save is a correction.
+    /// One stat changed and one unsure stat left at its value: only the
+    /// changed stat is sent, so the unsure one stays Check first.
     #[test]
-    fn a_changed_stat_and_an_unchanged_unsure_stat_are_both_sent() {
+    fn a_changed_stat_does_not_confirm_an_unchanged_unsure_stat() {
         let mut g = sample_game();
         g.suspect_fields = vec!["dmg".into()];
         let mut form = EditForm::from_game(&g);
@@ -1129,8 +1221,86 @@ mod tests {
         assert_eq!(saved.category, Some(GameCategory::WrongStats));
         let edit = queued_edit(&dir);
         assert_eq!(edit.elims, Some(20));
-        assert_eq!(edit.damage, Some(4200));
+        assert!(edit.damage.is_none(), "unsure damage is not confirmed");
         assert!(edit.deaths.is_none() && edit.healing.is_none());
+        let after = after_queued(&dir, &g);
+        assert!(after.unsure_now("damage"));
+        assert_eq!(after.suspect_fields, vec!["dmg".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A hero, map or role fix on a game with unsure stats sends no stat,
+    /// so the stats stay Check first. A typed map or hero that names the
+    /// current one sends nothing, so that save confirms them instead.
+    #[test]
+    fn a_hero_map_or_role_fix_leaves_unsure_stats_unsure() {
+        let mut g = sample_game();
+        g.suspect_fields = vec!["dmg".into(), "h".into()];
+        type Fix = fn(&mut EditForm);
+        let fixes: [(Fix, &str); 3] = [
+            (|f| f.hero = "Kiriko".into(), "Hero corrected"),
+            (|f| f.map_name = "kings row".into(), "Map corrected"),
+            (|f| f.role = "Tank".into(), "Role corrected"),
+        ];
+        for (fix, toast) in fixes {
+            let mut form = EditForm::from_game(&g);
+            fix(&mut form);
+            let dir = tmp();
+            let saved = save(&dir, &g, &form).unwrap();
+            assert_eq!(saved.toast, toast);
+            let edit = queued_edit(&dir);
+            assert!(edit.damage.is_none() && edit.healing.is_none(), "{toast}");
+            let after = after_queued(&dir, &g);
+            assert_eq!(
+                after.suspect_fields,
+                vec!["dmg".to_string(), "h".into()],
+                "{toast}"
+            );
+            assert!(after.unsure_now("damage") && after.unsure_now("healing"));
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        let mut form = EditForm::from_game(&g);
+        form.map_name = "ilios".into();
+        form.hero = "ana".into();
+        let dir = tmp();
+        let saved = save(&dir, &g, &form).unwrap();
+        assert_eq!(saved.toast, "Damage and healing confirmed");
+        let edit = queued_edit(&dir);
+        assert!(edit.map_name.is_none() && edit.hero.is_none());
+        assert_eq!((edit.damage, edit.healing), (Some(4200), Some(11200)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// On a game held for a missing map, an untouched save confirms an
+    /// unsure stat (the toast says the game is still held), and a save
+    /// that sets the map leaves it unsure.
+    #[test]
+    fn a_held_game_confirms_only_on_an_untouched_save() {
+        let mut g = held_game();
+        g.suspect_fields = vec!["e".into()];
+        let dir = tmp();
+        let saved = save(&dir, &g, &EditForm::from_game(&g)).unwrap();
+        assert!(saved.toast.contains("still missing"), "{}", saved.toast);
+        assert_eq!(saved.category, None);
+        assert_eq!(
+            queued_edit(&dir),
+            MatchEdit {
+                elims: Some(14),
+                ..MatchEdit::default()
+            }
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut form = EditForm::from_game(&g);
+        form.map_name = "Ilios".into();
+        let dir = tmp();
+        let saved = save(&dir, &g, &form).unwrap();
+        assert_eq!(saved.toast, RELEASED);
+        let edit = queued_edit(&dir);
+        assert_eq!(edit.map_name.as_deref(), Some("Ilios"));
+        assert!(edit.elims.is_none());
+        assert!(after_queued(&dir, &g).unsure_now("elims"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

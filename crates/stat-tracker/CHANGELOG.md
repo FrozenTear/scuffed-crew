@@ -17,7 +17,7 @@ summary, then the highlights, and tucks the remaining text under Details.
 
 ## Unreleased
 
-A stat marked Check first whose read value is already right can now be confirmed: open Edit and save it as it is, and the mark clears. The app says the stat was confirmed (for example "Elims confirmed") instead of "No changes to save".
+A stat marked Check first whose read value is already right can now be confirmed: open Edit and save without changing anything, and the mark clears. The app names the stats it confirmed (for example "Elims confirmed") instead of saying "No changes to save". A save that corrects anything else leaves Check first stats as they were.
 
 ## 0.6.0-rc.1
 

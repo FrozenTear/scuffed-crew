@@ -381,23 +381,29 @@ pub fn unsure_items(g: &Game, in_progress: bool) -> Vec<UnsureItem> {
 
 /// "Map unsure", "Map and hero unsure", "Map, hero and result unsure".
 pub fn items_label(items: &[UnsureItem]) -> Option<String> {
-    let names: Vec<String> = items
+    let names: Vec<&str> = items.iter().map(|item| item.name()).collect();
+    names_list(&names).map(|list| format!("{list} unsure"))
+}
+
+/// "Map", "Map and hero", "Map, hero and result": the names joined, the
+/// first as given and the rest in lower case. `None` for no names.
+pub fn names_list(names: &[&str]) -> Option<String> {
+    let names: Vec<String> = names
         .iter()
         .enumerate()
-        .map(|(i, item)| {
+        .map(|(i, name)| {
             if i == 0 {
-                item.name().to_string()
+                name.to_string()
             } else {
-                item.name().to_lowercase()
+                name.to_lowercase()
             }
         })
         .collect();
-    let list = match names.as_slice() {
-        [] => return None,
-        [one] => one.clone(),
-        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
-    };
-    Some(format!("{list} unsure"))
+    match names.as_slice() {
+        [] => None,
+        [one] => Some(one.clone()),
+        [rest @ .., last] => Some(format!("{} and {last}", rest.join(", "))),
+    }
 }
 
 /// Result column text.
