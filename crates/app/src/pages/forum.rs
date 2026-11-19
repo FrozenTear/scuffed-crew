@@ -1519,13 +1519,18 @@ mod tests {
                 "{index}"
             );
             // Vision round 6 on 748: a retry gets the same refusal, so there
-            // is no Retry, the same as the strategy editor 403. The error box
-            // is still rendered, as a status rather than an alert.
+            // is no Retry, the same as the strategy editor 403. Vision round
+            // 7: the box is still an alert, as the editor 403 is, so it is
+            // announced; the status line stays empty, so it is said once.
             assert!(
-                index.contains("<div class=\"fetch-error-wrap\" role=\"status\">"),
+                index.contains("<div class=\"fetch-error-wrap\" role=\"alert\">"),
                 "{index}"
             );
-            assert!(!index.contains("role=\"alert\""), "{index}");
+            assert_eq!(index.matches("role=\"alert\"").count(), 1, "{index}");
+            assert!(
+                index.contains("<p class=\"entry-status\" role=\"status\"></p>"),
+                "{index}"
+            );
             assert!(!index.contains("fetch-error__retry"), "{index}");
             assert!(!index.contains(">Retry</button>"), "{index}");
             assert!(!index.contains("not found"), "{index}");
@@ -1537,7 +1542,12 @@ mod tests {
             assert!(board.contains(&reason), "{board}");
             assert!(!board.contains("Board not found"), "{board}");
             assert!(
-                board.contains("<div class=\"fetch-error-wrap\" role=\"status\">"),
+                board.contains("<div class=\"fetch-error-wrap\" role=\"alert\">"),
+                "{board}"
+            );
+            assert_eq!(board.matches("role=\"alert\"").count(), 1, "{board}");
+            assert!(
+                board.contains("<p class=\"entry-status\" role=\"status\"></p>"),
                 "{board}"
             );
             assert!(!board.contains("fetch-error__retry"), "{board}");

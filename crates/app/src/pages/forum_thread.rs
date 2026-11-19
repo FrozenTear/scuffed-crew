@@ -750,9 +750,16 @@ mod tests {
         assert!(refused.contains("Members only"), "{refused}");
         assert!(!refused.contains("Thread not found"), "{refused}");
         // Vision round 6 on 748: no Retry for a refusal, the same as the
-        // strategy editor 403; the box is a status, not an alert.
+        // strategy editor 403. Vision round 7: the box is an alert, as the
+        // editor 403 is, so it is announced, and the status line stays empty
+        // so it is said once.
         assert!(
-            refused.contains("<div class=\"fetch-error-wrap\" role=\"status\">"),
+            refused.contains("<div class=\"fetch-error-wrap\" role=\"alert\">"),
+            "{refused}"
+        );
+        assert_eq!(refused.matches("role=\"alert\"").count(), 1, "{refused}");
+        assert!(
+            refused.contains("<p class=\"entry-status\" role=\"status\"></p>"),
             "{refused}"
         );
         assert!(!refused.contains("fetch-error__retry"), "{refused}");

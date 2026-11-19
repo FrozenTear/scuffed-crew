@@ -111,7 +111,9 @@ pub(crate) fn entry_date(iso: &str) -> Element {
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Load<T> {
     Loading,
-    /// The fetch failed for a reason a retry may fix. The text is the mapped
+    /// The fetch failed: no answer, a 5xx or another status a retry may fix,
+    /// or a 401/403 refusal a retry cannot fix ([`Load::retry_helps`] tells
+    /// them apart, so a refusal shows no Retry). The text is the mapped
     /// reason ([`crate::client_error::user_message`], already logged by the
     /// resource), so the page can say why next to its own lead. It may be
     /// blank when nothing said why.

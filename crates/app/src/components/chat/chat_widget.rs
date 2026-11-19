@@ -312,8 +312,9 @@ fn remaining_hold_secs(until_ms: f64, now_ms: f64) -> u64 {
 }
 
 /// The lead of a public send failure the channel does not name in its own
-/// words: no answer, an unreadable answer, a 5xx or any other status. The
-/// mapped sentence follows it, as on officer chat (QA round 3 on 748).
+/// words: no answer, a 5xx or any other status. The mapped sentence follows
+/// it, as on officer chat (QA round 3 on 748). An unreadable answer has no
+/// lead: the message may have been posted (Vision round 6 on 748).
 const SEND_FAILED_LEAD: &str = "Could not send that message.";
 
 /// Plain copy for the `POST /api/chat/send-public` refusals the channel
@@ -1090,8 +1091,9 @@ mod tests {
         shown
     }
 
-    /// QA round 3 on 748: no answer and an unreadable answer read the lead
-    /// and the shared sentence, and each is logged once.
+    /// QA round 3 on 748: no answer reads the lead and the shared sentence;
+    /// an unreadable answer reads the shared reload sentence alone, with no
+    /// lead (Vision round 6 on 748). Each is logged once.
     #[test]
     fn public_send_without_an_answer_shares_the_mapping_and_logs_once() {
         let _ = crate::util::take_logged();

@@ -474,6 +474,13 @@ mod tests {
         assert!(html.contains("The primary relay is offline."), "{html}");
         // One way to check again: the header button, not a second Retry.
         assert!(!html.contains(">Retry</button>"), "{html}");
+        // Vision round 7 on 748: the no-Retry banner is an alert, and the
+        // status line says nothing while it shows, so it is said once.
+        assert!(
+            html.contains("<div class=\"fetch-error-wrap\" role=\"alert\">"),
+            "{html}"
+        );
+        assert_eq!(summary_text(RelayState::Offline), "");
         assert!(html.contains("relay-shape is-offline"), "{html}");
         assert!(html.contains(">Offline</span>"), "{html}");
     }
