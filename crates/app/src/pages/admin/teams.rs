@@ -431,7 +431,7 @@ pub fn AdminTeams() -> Element {
                         save_error.set(Some(
                             SaveState::failed("Could not save the team", &e).text(),
                         ));
-                        toast.show(Toast::error_from("Failed to save team", &e));
+                        toast.show(Toast::error_logged_elsewhere("Failed to save team", &e));
                     }
                 }
             }
@@ -487,7 +487,7 @@ pub fn AdminTeams() -> Element {
                         add_error.set(Some(
                             SaveState::failed("Could not add the member", &e).text(),
                         ));
-                        toast.show(Toast::error_from("Failed to add member", &e));
+                        toast.show(Toast::error_logged_elsewhere("Failed to add member", &e));
                     }
                 }
             });

@@ -248,7 +248,7 @@ fn SeasonsPage() -> Element {
                     save_error.set(Some(
                         SaveState::failed("Could not save the season", &e).text(),
                     ));
-                    toast.show(Toast::error_from("Failed to save season", &e));
+                    toast.show(Toast::error_logged_elsewhere("Failed to save season", &e));
                 }
             }
         });

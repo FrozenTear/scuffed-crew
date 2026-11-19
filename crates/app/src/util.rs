@@ -463,10 +463,16 @@ fn page_is_leaving() -> bool {
 
 /// Log a raw client error to the browser console. User-facing copy stays a
 /// plain sentence; the technical text goes here for whoever debugs it.
+///
+/// `what` is the label before the colon. A lead written as page text
+/// ("Loading your choices failed.") keeps no trailing full stop or colon
+/// here, so the line reads "Loading your choices failed: ..." and never
+/// "failed.: ..." (QA round 7 on 748).
 pub fn log_client_error(what: &str, err: &dyn std::fmt::Display) {
     if is_aborted_fetch(err) {
         return;
     }
+    let what = log_label(what);
     #[cfg(target_arch = "wasm32")]
     web_sys::console::warn_1(&format!("{what}: {err}").into());
     #[cfg(not(target_arch = "wasm32"))]
@@ -475,6 +481,11 @@ pub fn log_client_error(what: &str, err: &dyn std::fmt::Display) {
         LOGGED.with(|logged| logged.borrow_mut().push(format!("{what}: {err}")));
         let _ = (what, err);
     }
+}
+
+/// The console label for a lead: trimmed, with no trailing `.` or `:`.
+pub(crate) fn log_label(lead: &str) -> &str {
+    lead.trim().trim_end_matches(['.', ':']).trim_end()
 }
 
 #[cfg(test)]

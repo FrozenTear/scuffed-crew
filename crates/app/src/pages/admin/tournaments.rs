@@ -476,7 +476,7 @@ pub fn AdminTournaments() -> Element {
                     save_error.set(Some(
                         SaveState::failed("Could not save the tournament", &e).text(),
                     ));
-                    toast.show(Toast::error_from("Failed to save", &e));
+                    toast.show(Toast::error_logged_elsewhere("Failed to save", &e));
                 }
             }
         });

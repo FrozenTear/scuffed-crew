@@ -315,6 +315,24 @@ const PAGE_CSS: &str = r#"
 }
 "#;
 
+/// The save line and the toast for a failed profile save. The line logs the
+/// raw error (`SaveState::failed`); the toast does not, so one failure is
+/// one console line (QA round 7 on 748).
+fn profile_save_failure(err: &scuffed_api_client::ClientError) -> (SaveState, Toast) {
+    (
+        SaveState::failed("Could not save your profile", err),
+        Toast::error_logged_elsewhere("Save failed", err),
+    )
+}
+
+/// [`profile_save_failure`] for a game account row: one console line.
+fn account_save_failure(err: &scuffed_api_client::ClientError) -> (SaveState, Toast) {
+    (
+        SaveState::failed("Could not save the game account", err),
+        Toast::error_logged_elsewhere("Save failed", err),
+    )
+}
+
 /// The save line of an account form: one `role="status"` paragraph that is
 /// always rendered, so a change of its text is announced. A failure keeps the
 /// server's reason (see [`SaveState::failed`]).
@@ -622,9 +640,10 @@ pub fn ProfileSettings() -> Element {
                     );
                     display_name.set(settled.value);
                     name_error.set(settled.error.map(str::to_string));
-                    save_state.set(SaveState::failed("Could not save your profile", &e));
+                    let (line, failure_toast) = profile_save_failure(&e);
+                    save_state.set(line);
                     if settled.keep_existing_failure {
-                        toast.show(Toast::error_from("Save failed", &e));
+                        toast.show(failure_toast);
                     }
                 }
             }
@@ -718,11 +737,9 @@ pub fn ProfileSettings() -> Element {
                     toast.show(Toast::success("Game account saved."));
                 }
                 Err(e) => {
-                    account_state.set(Some((
-                        game_id,
-                        SaveState::failed("Could not save the game account", &e),
-                    )));
-                    toast.show(Toast::error_from("Save failed", &e));
+                    let (line, failure_toast) = account_save_failure(&e);
+                    account_state.set(Some((game_id, line)));
+                    toast.show(failure_toast);
                 }
             }
             account_saving.set(false);
@@ -1196,12 +1213,87 @@ mod tests {
             .split("#[cfg(test)]\nmod tests")
             .next()
             .expect("prod part");
-        assert!(
-            prod.contains(
-                "save_state.set(SaveState::failed(\"Could not save your profile\", &e));"
-            )
-        );
+        // QA round 7 on 748: the line and the toast come from one helper
+        // that maps the error itself; the pin follows it there.
+        assert!(prod.contains("SaveState::failed(\"Could not save your profile\", err),"));
+        assert!(prod.contains(
+            "let (line, failure_toast) = profile_save_failure(&e);\n                    save_state.set(line);"
+        ));
         assert!(!prod.contains("Save failed: {e}"));
+    }
+
+    /// QA round 7 on 748: a failed profile save and a failed game account
+    /// save each log the raw error exactly once (the save line logs, the
+    /// toast does not), and both still show the line and the toast.
+    #[test]
+    fn a_failed_profile_or_account_save_logs_once() {
+        use crate::components::toast::ToastLevel;
+        use scuffed_api_client::ClientError;
+        let take = crate::util::take_logged;
+        let errors = [
+            ClientError::Network("JsValue(TypeError: Failed to fetch)".into()),
+            ClientError::Deserialize("missing field `display_name` at line 1 column 212".into()),
+            ClientError::http(409, r#"{"error":"name taken"}"#, None),
+            ClientError::http(502, "", None),
+        ];
+        for err in &errors {
+            let _ = take();
+            let (line, toast) = profile_save_failure(err);
+            let logged = take();
+            assert_eq!(logged.len(), 1, "profile save {err:?}: {logged:?}");
+            assert!(
+                logged[0].starts_with("Could not save your profile: "),
+                "{logged:?}"
+            );
+            assert!(line.is_error());
+            assert!(
+                line.text().starts_with("Could not save your profile. "),
+                "{}",
+                line.text()
+            );
+            assert!(toast.level == ToastLevel::Error);
+            assert!(
+                toast.message.starts_with("Save failed: "),
+                "{}",
+                toast.message
+            );
+            assert!(
+                toast
+                    .message
+                    .ends_with(&crate::client_error::user_message(err)),
+                "{}",
+                toast.message
+            );
+
+            let (line, toast) = account_save_failure(err);
+            let logged = take();
+            assert_eq!(logged.len(), 1, "account save {err:?}: {logged:?}");
+            assert!(
+                logged[0].starts_with("Could not save the game account: "),
+                "{logged:?}"
+            );
+            assert!(line.is_error());
+            assert!(
+                line.text().starts_with("Could not save the game account. "),
+                "{}",
+                line.text()
+            );
+            assert!(toast.level == ToastLevel::Error);
+            assert!(
+                toast.message.starts_with("Save failed: "),
+                "{}",
+                toast.message
+            );
+        }
+
+        // Both save handlers use the helpers and add no log of their own.
+        let prod = include_str!("profile_settings.rs")
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("prod part");
+        assert_eq!(prod.matches("profile_save_failure(&e)").count(), 1);
+        assert_eq!(prod.matches("account_save_failure(&e)").count(), 1);
+        assert!(!prod.contains("Toast::error_from("), "a second log");
     }
 
     #[test]

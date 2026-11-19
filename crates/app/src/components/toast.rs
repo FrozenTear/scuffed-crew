@@ -35,6 +35,12 @@ impl Toast {
     pub fn error_from(lead: &str, err: &scuffed_api_client::ClientError) -> Self {
         Self::error(crate::client_error::with_lead(lead, err))
     }
+    /// [`Toast::error_from`] that does not log: for a toast shown beside a
+    /// save line built with `SaveState::failed`, which already sent the raw
+    /// error to the console. One failure logs one line.
+    pub fn error_logged_elsewhere(lead: &str, err: &scuffed_api_client::ClientError) -> Self {
+        Self::error(crate::client_error::with_lead_unlogged(lead, err))
+    }
     pub fn info(msg: impl Into<String>) -> Self {
         Self {
             id: 0,

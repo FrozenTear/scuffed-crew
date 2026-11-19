@@ -374,7 +374,7 @@ pub fn IdentitySettings() -> Element {
                 }
                 Err(e) => {
                     backup_state.set(SaveState::failed("Could not export the backup", &e));
-                    toast.show(Toast::error_from("Export failed", &e));
+                    toast.show(Toast::error_logged_elsewhere("Export failed", &e));
                 }
             }
             working.set(false);
@@ -432,7 +432,7 @@ pub fn IdentitySettings() -> Element {
                 }
                 Err(e) => {
                     import_state.set(SaveState::failed("Could not import the key", &e));
-                    toast.show(Toast::error_from("Import failed", &e));
+                    toast.show(Toast::error_logged_elsewhere("Import failed", &e));
                 }
             }
             working.set(false);
@@ -462,7 +462,7 @@ pub fn IdentitySettings() -> Element {
                 }
                 Err(e) => {
                     unlink_state.set(SaveState::failed("Could not unlink the key", &e));
-                    toast.show(Toast::error_from("Unlink failed", &e));
+                    toast.show(Toast::error_logged_elsewhere("Unlink failed", &e));
                     // The confirm strip closed with focus in it: back to
                     // Unlink key.
                     focus_after_delete_soon(

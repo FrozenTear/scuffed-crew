@@ -152,6 +152,8 @@ pub fn message_without_reason(err: &ClientError) -> &'static str {
 /// [`user_message`] for a load that keeps its failure as text: the raw
 /// error goes to the console first ([`crate::util::log_client_error`]), so
 /// the detail the page no longer shows is still there for whoever debugs it.
+/// `what` may be page text ending in a full stop: the console label drops
+/// it ("Loading your choices failed: ...", never "failed.: ...").
 pub fn logged_message(what: &str, err: &ClientError) -> String {
     crate::util::log_client_error(what, err);
     user_message(err)
@@ -159,11 +161,17 @@ pub fn logged_message(what: &str, err: &ClientError) -> String {
 
 /// `lead` and [`user_message`] as one line: "Failed to save game: Could not
 /// reach the server. ..." (see [`join_lead`] for the separator). The raw
-/// error goes to the console under `lead`, so a caller does not log it
-/// again (Vision nit 8 on 748).
+/// error goes to the console under `lead` (without its trailing `.` or
+/// `:`), so a caller does not log it again (Vision nit 8 on 748).
 pub fn with_lead(lead: &str, err: &ClientError) -> String {
-    let label = lead.trim().trim_end_matches(['.', ':']);
-    join_lead(lead, &logged_message(label, err))
+    join_lead(lead, &logged_message(lead, err))
+}
+
+/// [`with_lead`] without the console line, for a toast beside a save line
+/// that already logged the same error (`SaveState::failed`): one failure,
+/// one console line (QA round 7 on 748).
+pub fn with_lead_unlogged(lead: &str, err: &ClientError) -> String {
+    join_lead(lead, &user_message(err))
 }
 
 /// `lead` and an already mapped `message` as one line. A lead that already
@@ -236,8 +244,8 @@ pub fn two_sentences(first: &str, second: &str) -> String {
 mod tests {
     use super::{
         NETWORK_ERROR_MESSAGE, SERVER_TROUBLE_MESSAGE, UNREACHABLE_SENTENCE,
-        UNREADABLE_ANSWER_MESSAGE, as_sentence, join_lead, message_without_reason,
-        plain_punctuation, two_sentences, user_message, with_lead,
+        UNREADABLE_ANSWER_MESSAGE, as_sentence, join_lead, logged_message, message_without_reason,
+        plain_punctuation, two_sentences, user_message, with_lead, with_lead_unlogged,
     };
     use scuffed_api_client::ClientError;
 
@@ -690,6 +698,185 @@ mod tests {
         assert_eq!(as_sentence("Failed:"), "Failed.");
     }
 
+    /// QA round 7 on 748: a lead that ends in a full stop (or a colon) logs
+    /// without it, through every logging helper, so the console never reads
+    /// "failed.: ...". A lead with no trailing stop logs as it is. The page
+    /// text keeps the lead's own sentence break.
+    #[test]
+    fn a_lead_ending_in_a_stop_logs_without_it() {
+        use crate::components::{SaveState, Toast};
+        let take = crate::util::take_logged;
+        let _ = take();
+        let err = ClientError::http(409, r#"{"error":"busy"}"#, None);
+        let raw = err.to_string();
+
+        let shown = logged_message("Loading your choices failed.", &err);
+        assert_eq!(shown, user_message(&err));
+        assert_eq!(take(), [format!("Loading your choices failed: {raw}")]);
+
+        let shown = with_lead("Loading your choices failed.", &err);
+        assert_eq!(
+            shown,
+            format!("Loading your choices failed. {}", user_message(&err))
+        );
+        assert_eq!(take(), [format!("Loading your choices failed: {raw}")]);
+
+        let _ = SaveState::failed("Could not save.", &err);
+        assert_eq!(take(), [format!("Could not save: {raw}")]);
+
+        let _ = Toast::error_from("Could not delete the article.", &err);
+        assert_eq!(take(), [format!("Could not delete the article: {raw}")]);
+
+        for lead in [
+            "Save failed:",
+            " Save failed. ",
+            "Save failed.:",
+            "Save failed...",
+        ] {
+            let _ = logged_message(lead, &err);
+            assert_eq!(take(), [format!("Save failed: {raw}")], "{lead:?}");
+        }
+
+        // No trailing stop: unchanged.
+        let _ = logged_message("forum thread", &err);
+        assert_eq!(take(), [format!("forum thread: {raw}")]);
+        let _ = logged_message("/api/stats/member/m1/heroes", &err);
+        assert_eq!(take(), [format!("/api/stats/member/m1/heroes: {raw}")]);
+        crate::util::log_client_error("DM load", &err);
+        assert_eq!(take(), [format!("DM load: {raw}")]);
+
+        // A direct log with a page-text lead is labelled the same way.
+        crate::util::log_client_error("Deleting your icons failed.", &err);
+        let logged = take();
+        assert_eq!(logged, [format!("Deleting your icons failed: {raw}")]);
+        assert!(!logged[0].contains(".:"));
+    }
+
+    /// QA round 7 on 748: a save line and a toast for the same failure log
+    /// it once. `SaveState::failed` logs, so a toast beside it in the same
+    /// arm is `Toast::error_logged_elsewhere` (or `Toast::error` of mapped
+    /// text), never a second logging helper. Any two logging calls within
+    /// three lines of each other in production code are refused unless
+    /// listed in [`TWO_LOGS_ALLOWED`] with a reason.
+    #[test]
+    fn a_failure_is_not_logged_by_two_helpers() {
+        let src = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
+        // Test-only files, as found by the page text scan.
+        let mut skip = Vec::new();
+        {
+            let mut scratch_hits = Vec::new();
+            let mut scratch_used = vec![false; NOT_PAGE_TEXT.len()];
+            collect(src, src, &mut scratch_hits, &mut scratch_used, &mut skip);
+        }
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            let mut entries: Vec<_> = std::fs::read_dir(dir)
+                .expect("read dir")
+                .map(|e| e.expect("entry").path())
+                .collect();
+            entries.sort();
+            for path in entries {
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        walk(src, &mut files);
+        let mut hits = Vec::new();
+        let mut used = vec![false; TWO_LOGS_ALLOWED.len()];
+        for path in files {
+            if skip.contains(&path) {
+                continue;
+            }
+            let rel = path
+                .strip_prefix(src)
+                .expect("relative")
+                .to_string_lossy()
+                .replace('\\', "/");
+            let text = std::fs::read_to_string(&path).expect("read rs");
+            let prod = text.split("#[cfg(test)]").next().unwrap_or("");
+            for ((a, first), (b, second)) in close_log_pairs(prod) {
+                match TWO_LOGS_ALLOWED
+                    .iter()
+                    .position(|(f, l1, l2, _)| *f == rel && *l1 == first && *l2 == second)
+                {
+                    Some(at) => used[at] = true,
+                    None => hits.push(format!("{rel}:{a}: {first}\n{rel}:{b}: {second}")),
+                }
+            }
+        }
+        assert!(
+            hits.is_empty(),
+            "two logging helpers handle one error; make the second one non-logging \
+             (Toast::error_logged_elsewhere, with_lead_unlogged, user_message):\n{}",
+            hits.join("\n")
+        );
+        let stale: Vec<_> = TWO_LOGS_ALLOWED
+            .iter()
+            .zip(&used)
+            .filter(|(_, used)| !**used)
+            .map(|((file, first, _, _), _)| format!("{file}: {first}"))
+            .collect();
+        assert!(stale.is_empty(), "stale entries:\n{}", stale.join("\n"));
+
+        // The guard itself flags the QA round 7 shape and lets the fixed
+        // one, a lone helper, and two far-apart logs through.
+        let shape = "save_state.set(SaveState::failed(\"Could not save your profile\", &e));\n\
+                     if keep {\n    toast.show(Toast::error_from(\"Save failed\", &e));\n}\n";
+        assert_eq!(close_log_pairs(shape).len(), 1);
+        let shape = "account_state.set(Some((id, SaveState::failed(\"x\", &e))));\n\
+                     toast.show(Toast::error_from(\"Save failed\", &e));\n";
+        assert_eq!(close_log_pairs(shape).len(), 1);
+        let shape = "let m = crate::client_error::with_lead(\"x\", &e);\n\
+                     crate::util::log_client_error(\"x\", &e);\n";
+        assert_eq!(close_log_pairs(shape).len(), 1);
+        let fixed = "save_state.set(SaveState::failed(\"Could not save your profile\", &e));\n\
+                     if keep {\n    toast.show(Toast::error_logged_elsewhere(\"Save failed\", &e));\n}\n";
+        assert!(close_log_pairs(fixed).is_empty());
+        let far = "a(logged_message(\"x\", &e));\n\n\n\nb(logged_message(\"y\", &f));\n";
+        assert!(close_log_pairs(far).is_empty());
+        let def = "pub fn logged_message(what: &str, err: &ClientError) -> String {\n\
+                   crate::util::log_client_error(what, err);\n";
+        assert!(close_log_pairs(def).is_empty());
+    }
+
+    /// Logging calls (see [`a_failure_is_not_logged_by_two_helpers`]) that
+    /// follow each other within three lines in `prod`, as line number and
+    /// trimmed line. Definitions (`fn ` on the line) and comments are not
+    /// calls.
+    #[allow(clippy::type_complexity)]
+    fn close_log_pairs(prod: &str) -> Vec<((usize, String), (usize, String))> {
+        const LOGGERS: [&str; 5] = [
+            "SaveState::failed(",
+            "Toast::error_from(",
+            "with_lead(",
+            "logged_message(",
+            "log_client_error(",
+        ];
+        let calls: Vec<(usize, String)> = prod
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| {
+                let code = line.split("//").next().unwrap_or("");
+                !code.contains("fn ") && LOGGERS.iter().any(|l| code.contains(l))
+            })
+            .map(|(n, line)| (n + 1, line.trim().to_string()))
+            .collect();
+        calls
+            .windows(2)
+            .filter(|pair| pair[1].0 - pair[0].0 <= 3)
+            .map(|pair| (pair[0].clone(), pair[1].clone()))
+            .collect()
+    }
+
+    /// Two logging calls close together that log two different failures
+    /// (separate match arms), each with its reason.
+    /// (file, first line, second line, reason). Empty: no production code
+    /// needs one today.
+    const TWO_LOGS_ALLOWED: &[(&str, &str, &str, &str)] = &[];
+
     /// Vision nit 8 and QA on 748: the helpers that put a request error on
     /// the page log the raw error once; `user_message` itself stays pure.
     #[test]
@@ -730,11 +917,23 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .expect("prod part");
-        assert!(
-            profile.contains(
-                "save_state.set(SaveState::failed(\"Could not save your profile\", &e));"
-            )
+        // QA round 7 on 748: the profile save maps the error in one helper
+        // (`profile_save_failure`), whose toast does not log again.
+        assert!(profile.contains("SaveState::failed(\"Could not save your profile\", err),"));
+        assert!(profile.contains("save_state.set(line);"));
+
+        // The toast beside a save line maps the same text and logs nothing.
+        let toast = Toast::error_logged_elsewhere("Save failed", &parse);
+        assert_eq!(
+            toast.message,
+            format!("Save failed: {UNREADABLE_ANSWER_MESSAGE}")
         );
+        assert!(take().is_empty(), "error_logged_elsewhere logs nothing");
+        assert_eq!(
+            with_lead_unlogged("Could not delete the article.", &parse),
+            format!("Could not delete the article. {UNREADABLE_ANSWER_MESSAGE}")
+        );
+        assert!(take().is_empty(), "with_lead_unlogged logs nothing");
 
         // The DM load classifier logs every kind.
         let _ = crate::components::dm::classify_dm_client_error(&ClientError::http(403, "", None));

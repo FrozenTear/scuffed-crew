@@ -767,6 +767,46 @@ mod tests {
         assert_eq!(crate::util::take_logged().len(), cases.len());
     }
 
+    /// QA round 7 on 748: the console label of a training crops failure has
+    /// no full stop before its colon ("Loading your choices failed: ...",
+    /// never "failed.: ..."), while the page keeps its sentence break.
+    #[test]
+    fn training_crops_console_labels_have_no_stop_before_the_colon() {
+        let take = crate::util::take_logged;
+        let _ = take();
+        let errors = [
+            ClientError::Network("JsValue(TypeError: Failed to fetch)".into()),
+            ClientError::Deserialize("expected value".into()),
+            ClientError::http(401, r#"{"error":"Unauthorized"}"#, None),
+            ClientError::http(403, r#"{"error":"Forbidden"}"#, None),
+            ClientError::http(409, r#"{"error":"busy"}"#, None),
+            ClientError::http(500, "", None),
+            ClientError::http(503, r#"{"error":"training_crops_disabled"}"#, None),
+        ];
+        for err in &errors {
+            let text = consent_failure_text("Loading your choices", err);
+            assert!(text.starts_with("Loading your choices failed. "), "{text}");
+            let logged = take();
+            assert_eq!(logged.len(), 1, "{err:?}: {logged:?}");
+            assert!(
+                logged[0].starts_with("Loading your choices failed: ")
+                    || logged[0].starts_with("Loading your choices: "),
+                "{logged:?}"
+            );
+            assert!(!logged[0].contains(".:"), "{logged:?}");
+
+            let text = delete_failed_part(err);
+            assert!(text.starts_with("Deleting your icons failed. "), "{text}");
+            let logged = take();
+            assert_eq!(logged.len(), 1, "{err:?}: {logged:?}");
+            assert!(
+                logged[0].starts_with("Deleting your icons failed: "),
+                "{logged:?}"
+            );
+            assert!(!logged[0].contains(".:"), "{logged:?}");
+        }
+    }
+
     /// Vision nit 4 on 748: the save callback's result-to-line mapping, per
     /// combination. The failed delete is only ever the alert, never the note
     /// (the mutant `detail = Some(delete_failed_part(&e))` fails here).
