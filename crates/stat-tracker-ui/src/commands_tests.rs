@@ -1087,6 +1087,54 @@ fn an_untouched_save_does_not_confirm_a_no_read_stat() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A latest-game unsure stat with a real read is not "No read", so an
+/// untouched save confirms it at the shown value. That holds when the
+/// read matches the shown value (tile "Read at 40%") and when it differs
+/// (tile "Read 14 at 40%").
+#[test]
+fn an_untouched_save_confirms_a_latest_game_stat_with_a_real_read() {
+    use stat_tracker::games::stat_reads;
+    use stat_tracker::unsure_rule::{StatRead, Verdict};
+    for shown in [14, 15] {
+        let mut g = sample_game();
+        g.elims = shown;
+        g.suspect_fields = vec!["e".into()];
+        let dir = tmp();
+        stat_reads::update(&dir, |l| {
+            for _ in 0..3 {
+                let mut tab: stat_reads::TabReads = [None; 6];
+                tab[0] = Some(StatRead::unsure(Some(14), 0.4));
+                l.push(&g.session_id, false, &tab);
+            }
+        });
+        let elims = stat_reads::load(&dir).confirm(&g.session_id, true)[0].unwrap();
+        assert_eq!(elims.verdict, Verdict::Unsure);
+        let tile = if shown == 14 {
+            "Read at 40%"
+        } else {
+            "Read 14 at 40%"
+        };
+        assert_eq!(stat_reads::confidence_line(&elims, shown), tile);
+        assert!(!crate::unsure_reads::no_read(
+            &dir,
+            &g.session_id,
+            "e",
+            shown
+        ));
+        let saved = save(&dir, &g, &EditForm::from_game(&g)).unwrap();
+        assert_eq!(saved.toast, "Elims confirmed", "{shown}");
+        assert_eq!(
+            queued_edit(&dir),
+            MatchEdit {
+                elims: Some(shown),
+                ..MatchEdit::default()
+            },
+            "{shown}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 /// What the toasts below must say.
 const SAYS_NO_SESSION_ID: &str = "no session id";
 const SAYS_GAME_GONE: &str = "no longer in the list";

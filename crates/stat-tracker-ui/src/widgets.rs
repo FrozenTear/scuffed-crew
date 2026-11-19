@@ -899,7 +899,7 @@ fn segment_list(game: &Game) -> Element<'static, Message> {
 pub(crate) fn edit_form<'a>(form: &'a EditForm, _sid: &str) -> Element<'a, Message> {
     column![
         label_text(
-            "Correct stats (blank / unchanged fields keep the OCR read; saving with no change confirms Check first stats)",
+            "Correct stats (blank / unchanged fields keep the OCR read; saving with no change confirms Check first stats, except ones marked No read)",
         ),
         row![
             field_input("Hero", &form.hero, EditField::Hero),
