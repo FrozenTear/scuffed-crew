@@ -88,7 +88,7 @@ impl ConsentKind {
                 "The map name banner the tracker read at the start of a game. Off by default."
             }
             ConsentKind::Rank => {
-                "The rank panel crop (role, tier, SR and percentile), to help train rank recognition. Off by default."
+                "Small crops of the rank screen after each game: the role icon when there is one, the rank emblem and tier, the progress bar (its tags can show Victory or Defeat) and your top hero's SR. Nothing else, so no names or chat. Off by default."
             }
         }
     }
@@ -494,15 +494,19 @@ mod tests {
         assert_eq!(ConsentKind::Rank.label(), "Share rank screen crops");
         let rank = ConsentKind::Rank.hint();
         for part in [
-            "rank panel",
-            "role",
+            "rank screen",
+            "role icon",
+            "rank emblem",
             "tier",
-            "SR",
-            "percentile",
-            "recognition",
+            "progress bar",
+            "Victory or Defeat",
+            "top hero's SR",
+            "no names or chat",
         ] {
             assert!(rank.contains(part), "{rank}");
         }
+        // PR 746: the tracker no longer sends the percentile.
+        assert!(!rank.to_lowercase().contains("percentile"), "{rank}");
     }
 
     #[test]
