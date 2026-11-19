@@ -19,6 +19,8 @@ summary, then the highlights, and tucks the remaining text under Details.
 
 A stat marked Check first whose read value is already right can now be confirmed: open Edit and save without changing anything, and the mark clears. The app names the stats it confirmed (for example "Elims confirmed") instead of saying "No changes to save". A save that corrects anything else leaves Check first stats as they were.
 
+Two scoreboards opened close together no longer save the digit training crops twice for the same game. The same goes for the hero icon crop.
+
 ## 0.6.0-rc.1
 
 Digit training crops now wait for a Tab where your damage, healing or mitigation in Overwatch has reached 1000, instead of saving the first spawn board, which is mostly zeros. Training now keeps only the first map banner of a game.
