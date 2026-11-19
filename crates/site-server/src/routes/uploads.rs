@@ -129,9 +129,13 @@ const PNG_ICCP_MAX_BYTES: u64 = 4 * 1024 * 1024;
 /// - an `iCCP` profile that inflates past [`PNG_ICCP_MAX_BYTES`] ("colour
 ///   profile too large"). It is inflated into a fixed-size buffer, so the
 ///   memory cost does not grow with the profile;
-/// - an `iCCP` profile whose zlib stream is corrupt or cut short (it must
-///   reach its end), and a second `iCCP` (PNG allows one, and each costs a
-///   decoder);
+/// - an `iCCP` profile whose zlib stream is corrupt or cut short: the
+///   2-byte zlib header must be valid and the deflate data must reach its
+///   end. The Adler-32 trailer is not required, since some exporters omit
+///   it (Figma Display P3, lovell/sharp#4128) and libpng still reads such a
+///   profile; bytes after the deflate end are ignored;
+/// - a second `iCCP` (PNG allows one, and each costs a decoder). It is
+///   refused before it is inflated;
 /// - a critical chunk (uppercase first letter) whose CRC is wrong, or whose
 ///   type is not `IHDR`, `PLTE`, `IDAT` or `IEND`. Bad ancillary CRCs are
 ///   left to the browser, which ignores such a chunk;
@@ -172,14 +176,28 @@ fn check_png_chunks(data: &[u8]) -> Result<(), Reject> {
                 return Err(unreadable());
             }
             // Profile name (1-79 bytes), NUL, compression method 0, zlib.
-            let stream = body
+            let zlib = body
                 .iter()
                 .take(80)
                 .position(|&b| b == 0)
                 .filter(|&nul| nul > 0 && body.get(nul + 1) == Some(&0))
                 .map(|nul| &body[nul + 2..])
                 .ok_or_else(unreadable)?;
-            let mut z = Decompress::new(true);
+            // zlib header (RFC 1950): deflate with a window of at most
+            // 32 KiB, a valid check value, no preset dictionary. The raw
+            // deflate data follows; the Adler-32 after it is not required.
+            let stream = match zlib {
+                [cmf, flg, rest @ ..]
+                    if cmf & 0x0f == 8
+                        && cmf >> 4 <= 7
+                        && flg & 0x20 == 0
+                        && (u16::from(*cmf) << 8 | u16::from(*flg)) % 31 == 0 =>
+                {
+                    rest
+                }
+                _ => return Err(unreadable()),
+            };
+            let mut z = Decompress::new(false);
             let mut sink = [0u8; 8 * 1024];
             loop {
                 let (fed, made) = (z.total_in(), z.total_out());
@@ -197,7 +215,7 @@ fn check_png_chunks(data: &[u8]) -> Result<(), Reject> {
                 }
                 match status {
                     Status::StreamEnd => break,
-                    // No progress: the input ran out before the stream end.
+                    // No progress: the input ran out before the deflate end.
                     _ if z.total_in() == fed && z.total_out() == made => {
                         return Err(unreadable());
                     }
@@ -884,7 +902,7 @@ mod tests {
     }
 
     #[test]
-    fn the_colour_profile_budget_is_4_mib_in_total() {
+    fn the_colour_profile_bound_is_4_mib() {
         use crate::routes::hero_icons::tests::iccp_png;
         let at = PNG_ICCP_MAX_BYTES as usize;
         // The bound is inclusive.
@@ -894,13 +912,6 @@ mod tests {
             "colour profile too large",
             "4 MiB + 1",
         );
-        // Two profiles that are each under the bound but over it together:
-        // refused, since a second profile is never inflated.
-        let three = iccp_png(64, 64, 3 * 1024 * 1024);
-        assert!(check_image_dimensions(&three).is_ok());
-        let profile = &three[chunk_at(&three, 1)..chunk_at(&three, 2)];
-        let two = with_chunk(&three, 2, profile);
-        assert_refused(&two, "Could not read image", "two 3 MiB profiles");
     }
 
     #[test]
@@ -916,26 +927,67 @@ mod tests {
     }
 
     #[test]
+    fn a_second_colour_profile_is_refused_before_it_is_inflated() {
+        use crate::routes::hero_icons::tests::heap::peak_during;
+        let png = crate::routes::hero_icons::tests::iccp_png(64, 64, 4096);
+        let bomb = iccp_bomb();
+        let second = &bomb[chunk_at(&bomb, 1)..chunk_at(&bomb, 2)];
+        assert_eq!(&second[4..8], b"iCCP");
+        let two = with_chunk(&png, 2, second);
+        // Inflating the 64 MiB profile would answer "colour profile too
+        // large"; the second-profile rule answers first, in bounded memory.
+        let (out, peak) = peak_during(|| check_image_dimensions(&two));
+        let (code, body) = out.unwrap_err();
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert!(
+            body.error.contains("Could not read image"),
+            "{}",
+            body.error
+        );
+        assert!(peak <= 1024 * 1024, "peak {peak} B is over 1 MiB");
+    }
+
+    #[test]
     fn a_cut_short_profile_stream_is_refused() {
         let png = crate::routes::hero_icons::tests::iccp_png(64, 64, 4096);
         // "bomb\0\0", then the zlib stream: header, deflate, Adler-32.
         let whole = with_body(&png, 1, |body| body.to_vec());
         assert_eq!(whole, png);
         assert!(check_image_dimensions(&whole).is_ok());
-        for (case, cut) in [("no Adler-32", 4), ("half the stream", 0)] {
-            let bad = with_body(&png, 1, |body| {
-                let keep = if cut == 0 {
-                    6 + (body.len() - 6) / 2
-                } else {
-                    body.len() - cut
-                };
-                body[..keep].to_vec()
-            });
-            assert_refused(&bad, "Could not read image", case);
-        }
+        // No Adler-32: the deflate data is whole, so it is accepted.
+        let no_adler = with_body(&png, 1, |body| body[..body.len() - 4].to_vec());
+        assert!(check_image_dimensions(&no_adler).is_ok(), "no Adler-32");
+        let half = with_body(&png, 1, |body| body[..6 + (body.len() - 6) / 2].to_vec());
+        assert_refused(&half, "Could not read image", "half the stream");
         // A stream that stops right after the zlib header.
         let bare = with_body(&png, 1, |body| body[..8].to_vec());
         assert_refused(&bare, "Could not read image", "header only");
+        // A stream that stops inside the zlib header.
+        let one = with_body(&png, 1, |body| body[..7].to_vec());
+        assert_refused(&one, "Could not read image", "half a header");
+    }
+
+    #[test]
+    fn a_profile_stream_without_adler32_is_accepted() {
+        use std::io::Write;
+        // The Figma Display P3 shape (lovell/sharp#4128): a valid zlib
+        // header, a complete deflate stream, no Adler-32 trailer.
+        let mut deflate =
+            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+        deflate.write_all(&[7u8; 3144]).unwrap();
+        let mut body = b"Display P3\0\0\x78\x9c".to_vec();
+        body.extend(deflate.finish().unwrap());
+        let png = crate::routes::hero_icons::tests::iccp_png(64, 64, 4096);
+        let figma = with_body(&png, 1, |_| body.clone());
+        assert!(check_image_dimensions(&figma).is_ok());
+        // The same stream under a bad zlib header (check value off by one,
+        // or a preset dictionary) is refused.
+        for (case, header) in [("check value", [0x78, 0x9d]), ("dictionary", [0x78, 0xbb])] {
+            let mut bad = body.clone();
+            bad[12..14].copy_from_slice(&header);
+            let bad = with_body(&png, 1, |_| bad);
+            assert_refused(&bad, "Could not read image", case);
+        }
     }
 
     #[test]
