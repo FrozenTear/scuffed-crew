@@ -284,11 +284,13 @@ pub fn sr_cut_short(img: &RgbImage, e: &Entry) -> bool {
     cols[(x1 - hx0) as usize..].iter().any(|c| *c >= s.f(2.0))
 }
 
-/// Every glyph of the SR line's right-hand cluster, before
-/// [`sr_glyphs`] keeps those that line up with the rightmost one: the SR
-/// digits, and left of them a rank icon or anything else drawn on the line
-/// close enough to join the cluster.
-pub fn sr_cluster(img: &RgbImage, e: &Entry) -> Vec<Glyph> {
+/// The hero SR glyphs. A rank icon left of the digits that is taller or
+/// lower than they are is left out by shape: the digits share their top and
+/// bottom rows (within 2 reference rows), so cuts are kept from the right
+/// while they line up with the rightmost digit. An icon of digit height
+/// stays and is matched as [`super::SR_ICON`] by the reader. Two touching
+/// digits stay one cut here.
+pub fn sr_glyphs(img: &RgbImage, e: &Entry) -> Vec<Glyph> {
     let Some(s) = Scale::from_img(img) else {
         return Vec::new();
     };
@@ -302,20 +304,7 @@ pub fn sr_cluster(img: &RgbImage, e: &Entry) -> Vec<Glyph> {
         1.0,
         s.n(4),
     );
-    cluster_right(gl, (0.75 * (e.sr.1 - e.sr.0) as f32) as u32)
-}
-
-/// The hero SR glyphs. A rank icon left of the digits that is taller or
-/// lower than they are is left out by shape: the digits share their top and
-/// bottom rows (within 2 reference rows), so cuts are kept from the right
-/// while they line up with the rightmost digit. An icon of digit height
-/// stays and is matched as [`super::SR_ICON`] by the reader. Two touching
-/// digits stay one cut here.
-pub fn sr_glyphs(img: &RgbImage, e: &Entry) -> Vec<Glyph> {
-    let Some(s) = Scale::from_img(img) else {
-        return Vec::new();
-    };
-    let mut gl = sr_cluster(img, e);
+    let mut gl = cluster_right(gl, (0.75 * (e.sr.1 - e.sr.0) as f32) as u32);
     let Some(&[_, top, _, bottom]) = gl.last().map(|g| &g.bbox) else {
         return gl;
     };

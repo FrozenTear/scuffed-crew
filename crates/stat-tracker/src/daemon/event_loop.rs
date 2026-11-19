@@ -708,7 +708,7 @@ pub(crate) async fn run_loop(
                             // Rank training crops (consent on only): only the
                             // frames the kit took as a rank screen, cut on
                             // their own task.
-                            let _ = daemon::rank_training::offer_for_tick(rank_pngs.as_ref(), rank_crop, &img);
+                            let _ = daemon::rank_training::offer_for_tick(rank_pngs.as_ref(), rank_crop, &img, &rgb);
                             stat_tracker::perf::record(
                                 stat_tracker::perf::Stage::PollAnalyze,
                                 analyze_started.elapsed(),

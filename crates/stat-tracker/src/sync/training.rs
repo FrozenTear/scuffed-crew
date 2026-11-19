@@ -22,8 +22,8 @@ pub enum UploadKind {
     MapName,
     /// The rank update screen after a competitive game, cut into the
     /// regions the rank reader reads ([`RANK_SLOTS`]) at native scale: never
-    /// the result title, the mode banner, chat, a hero name or a player
-    /// name (the SR line is refused when overlay text shows in its box).
+    /// the result title, the mode banner, chat, a hero name, a player
+    /// name or the SR line (overlay text over its digits joins them).
     Rank,
 }
 
@@ -330,22 +330,22 @@ pub const RANK_SCREEN: &str = "rank_update";
 
 /// `slot_type` of each `rank` crop, one per rank screen region the rank
 /// reader reads (`daemon::rank_training` cuts them): the role line, the
-/// emblem with its tier word, the progress bar with its labels and tags,
-/// and the first hero's SR line. No mode banner: the voice overlay list
-/// can reach into its box with another person's name.
-pub const RANK_SLOTS: [&str; 4] = ["rank_role", "rank_tier", "rank_bar", "rank_sr"];
+/// emblem with its tier word, and the progress bar with its labels and
+/// tags. No mode banner: the voice overlay list can reach into its box
+/// with another person's name. No SR line: chat or overlay text over the
+/// SR digits joins their glyphs.
+pub const RANK_SLOTS: [&str; 3] = ["rank_role", "rank_tier", "rank_bar"];
 
 /// `spot_version` of a `rank` crop: the geometry its region rectangle
 /// comes from. Bumped whenever a region's box or rule changes.
-pub const RANK_SPOT_VERSION: &str = "rank-regions.2";
+pub const RANK_SPOT_VERSION: &str = "rank-regions.3";
 
 /// `meta` for the `slot` region of a rank update screen of `width` x
 /// `height`, cut at `spot` (frame pixels), without the game token
 /// ([`super::keep_tab_crops`] adds it). The screen size is always set: the
 /// server requires it for this kind, and [`check_crop`] refuses a crop
 /// whose screen is under the kind's minimum. The rectangle goes in
-/// `found_spot` (confidence 1: the box is placed by the layout or, for the
-/// SR line, found by the rank reader's own line search) with
+/// `found_spot` (confidence 1: the box is placed by the layout) with
 /// [`RANK_SPOT_VERSION`].
 pub fn rank_meta(width: u32, height: u32, slot: &str, spot: CropSpot) -> TrainingCropUploadMeta {
     TrainingCropUploadMeta {

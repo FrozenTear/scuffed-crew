@@ -26,7 +26,7 @@ use crate::theme::{self, FONT_MEDIUM, FONT_SEMIBOLD, SIZE_LABEL, SIZE_META, TEXT
 pub(crate) const HEADING: &str = "TRAINING CROPS";
 
 /// What the section is about, and what this version sends.
-pub(crate) const ABOUT: &str = "Small pictures of what the tracker read, sent to the website so its readers can learn. Each kind stays off until you turn it on at the website. This version sends map names, four small parts of the rank screen after a competitive game (your role, rank emblem and tier, progress bar and top hero's SR number), and with the New reader your hero portrait and your own row's numbers, and nothing while Upload games is off. No names, chat or whole screens.";
+pub(crate) const ABOUT: &str = "Small pictures of what the tracker read, sent to the website so its readers can learn. Each kind stays off until you turn it on at the website. This version sends map names, three small parts of the rank screen after a competitive game (your role, rank emblem and tier, and progress bar with your percentile and its change), and with the New reader your hero portrait and your own row's numbers, and nothing while Upload games is off. Never whole screens, and never a part where the game shows names or chat, but text another program draws over the game can still show in one.";
 
 /// The confirm line before the delete.
 pub(crate) const CONFIRM: &str = "Delete every training crop you sent, of every kind? The website removes them for good, and crops waiting on this PC are removed too. Your choices on the website stay as they are.";

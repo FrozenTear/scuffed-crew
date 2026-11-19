@@ -17,17 +17,17 @@ summary, then the highlights, and tucks the remaining text under Details.
 
 ## Unreleased
 
-If you turn on rank screen training crops on the website, the tracker now sends up to four small pictures from the rank screen after each competitive game in Overwatch: your role line, your rank emblem with its tier, the rank progress bar with your "Higher ranked than" percentile and its change tags (which can say Victory or Defeat) and your top hero's SR number. Each is cut at full size from the place the rank reader reads, never the whole screen, the large result title, the mode banner, chat, hero names or player names, and nothing is cut or sent while the switch is off.
+If you turn on rank screen training crops on the website, the tracker now sends up to three small pictures from the rank screen after each competitive game in Overwatch: your role line, your rank emblem with its tier, and the rank progress bar with your "Higher ranked than" percentile and its change tags (which can say Victory or Defeat). Each is cut at full size from the place the rank reader reads, never the whole screen, the large result title, the mode banner, chat, hero names, the SR numbers or player names, and nothing is cut or sent while the switch is off.
 
 ### Highlights
 
 - The switch is off by default. Your games and your other training crops record the same way whether it is on or off.
 - One set per game, even when the rank screen stays up for many seconds.
 - While chat shows beside the progress bar, its picture is left out. Chat only in the bottom line, below the bar, no longer drops it.
-- The SR number picture is left out when anything else shows in its box, such as a stream or voice overlay line.
-- On an open queue rank screen, which shows no role line, the role picture is left out.
-- Pictures are taken only from a frame showing the RANK PROGRESS label, so hero highlight art or the placement screen no longer use up the game's one set. This uses the rank reader's downloaded pack (the Read my rank switch can stay off); without it, and at 4K, no rank picture is taken.
-- On screens smaller than 1856x1056 no rank picture is taken. A picture too large for the website's limit is left out, never shrunk or sent.
+- No picture of your top hero's SR number: chat or an overlay line drawn over the digits cannot be told apart from them, so it is left out on every screen.
+- The role picture is taken only when the role icon shows, so an open queue rank screen, or an overlay across the role line, gives none.
+- Pictures are taken only from a frame showing the RANK PROGRESS label, so hero highlight art or the placement screen no longer use up the game's one set. This uses the rank reader's downloaded pack (the Read my rank switch can stay off); without it no rank picture is taken.
+- Rank pictures come only from 1080p and 1440p screens in 16:9, the sizes the rank reader reads. At 4K, on ultrawide or 16:10 screens, below 1856x1056 or at any other size no rank picture is taken, and the log says so once per game. A picture too large for the website's limit is left out, never shrunk or sent.
 
 ## 0.6.0-rc.1
 

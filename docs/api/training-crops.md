@@ -59,26 +59,28 @@ request of large banners holds fewer than 20 of them. The bounds live on
 `rank` crops are regions of the post-game rank screen, never the whole
 screen, the large result title (top left), the mode banner or the chat
 box. Each region is one where the rank screen itself draws no player or
-hero name (the role line, the emblem, the progress bar, the SR digits
-under the top hero's name). Text another program or the game draws over
-the screen is the one way a name could reach a crop, so the tracker
-refuses the two regions where it has been seen: `rank_bar` when chat
-shows on a line beside the bar's rows, and `rank_sr` when its box holds
-anything but the line's own digits (below). The mode banner is not sent
-at all: the voice overlay list under it can reach into its box with
-another person's name. The bar's change tags can name the result
-(`DEFEAT`). What the tracker sends: at most one set per competitive game,
-up to four crops,
+hero name (the role line, the emblem, the progress bar). Text another
+program or the game draws over the screen is the one way a name could
+reach a crop, so the tracker leaves out `rank_bar` when chat shows on a
+line beside the bar's rows, and `rank_role` unless the reader finds the
+role icon there (an overlay line across the band is not one). The tier
+box and the bar's right part have no overlay check; no overlay has been
+seen there on real screens. The mode banner is not sent at all: the
+voice overlay list under it can reach into its box with another
+person's name. The SR digits under the top hero's name are not sent
+either (since `rank-regions.3`): chat or overlay text drawn over them
+joins their glyphs, and no pixel rule tells the two apart. The bar's
+change tags can name the result (`DEFEAT`). What the tracker sends: at
+most one set per competitive game, up to three crops,
 each cut at native scale (never resized) from the box the tracker's rank
 reader reads, placed on the 16:9 playfield at the 2560x1440 reference and
 scaled by the screen size:
 
 | `slot_type` | Box at 2560x1440 | 1080p | 1440p | 4K |
 |-------------|------------------|-------|-------|----|
-| `rank_role` | x 1060-1500, y 236-326 (the role line; not sent when the line is empty, an open queue screen) | 330x68 | 440x90 | 660x135, not sent (no 4K frame is offered) |
+| `rank_role` | x 1060-1500, y 236-326 (the role line; sent only when the reader finds its role icon, so not on an open queue screen) | 330x68 | 440x90 | 660x135, not sent (no 4K frame is offered) |
 | `rank_tier` | x 1070-1490, y 340-1020 (emblem, tier word, division) | 315x510 | 420x680 | 630x1020, not sent |
 | `rank_bar` | x 540-2040, y 1048-1232 (the RANK PROGRESS label and percent, the bar, the "Higher ranked than N%" percentile, the change pill, the change tags, the neighbour emblems) | 1125x138 | 1500x184 | 2250x276, not sent |
-| `rank_sr` | the first hero's SR line as the reader finds it, digits plus 2 rows and columns, never the hero name above it | about 55x20 | about 72x25 | not sent |
 
 A frame is offered only when the report kit took it as a rank screen and
 the rank reader's own rank screen test finds the "RANK PROGRESS:" label
@@ -86,32 +88,24 @@ on it (matched against the rank-v1 pack, which the tracker downloads
 whether or not its rank reader switch is on). Hero highlight art and the
 placement screen pass the kit's test but show no label: they give no
 crop and do not use up the game's one set (#760). With no rank-v1 pack on
-the PC, or on a frame size the reader does not take (only 1080p and
-1440p, so never 4K), nothing is sent. A region outside 1536 by 720 or
-over 384 KiB is left out by the tracker, never scaled; the others of the
-frame are still sent. `rank_sr` comes only from 1080p and 1440p frames, the sizes the
-reader reads, and only when its hero search finds the SR line. The SR
-crop is refused when its box holds a colour that is no mix of the
-background with grey (overlay text, a name chip), a glyph shorter than
-80% or taller than 125% of the SR digit height, more than five glyphs or one wider than two
-digits, glyphs along the line that do not line up with the digits and
-span more than the rank icon's width, or ink outside the line's glyphs; a missed SR crop is fine, one with
-letters is not. The tracker does not match the glyphs against its digit
-templates here, so grey-white capital letters at digit height, spaced
-like digits on the plain background, would pass; no overlay seen on the
-rank screen draws that. The bar's left end is near the chat box, so the
+the PC nothing is sent. A frame size the reader does not take (only 1080p
+and 1440p in 16:9, so never 4K, ultrawide or 16:10) is checked before
+the label: nothing is sent from that game, with one log line per game. A
+region outside 1536 by 720 or over 384 KiB is left out by the tracker,
+never scaled; the others of the frame are still sent. The bar's left end is near the chat box, so the
 tracker leaves `rank_bar` out of a frame where chat shows on a chat line
 band that shares rows with the bar (y 1048-1232); chat only in the
 bottom line, below the bar, does not drop it. Each crop's `meta` carries
 `screen` `rank_update`, the screen size, the region rectangle in frame
 pixels as `found_spot` (with `found_confidence` 1) and `spot_version`
-`rank-regions.2` (`.1` also had `rank_banner`), which is bumped whenever
-a box or rule changes. A frame under the minimum screen size (below)
-gives no crop. Measured on 61 real 1440p rank screens, the tier is
-148-286 KiB, the bar 119-148 KiB and the role 12-22 KiB, each under
-384 KiB with no scaling. With the 2 MiB request limit a request holds at
-most five crops at the cap. Four crops per competitive game make the
-1000 cap about 250 games.
+`rank-regions.3` (`.2` also had `rank_sr`, `.1` also `rank_banner`),
+which is bumped whenever a box or rule changes. A frame under the
+minimum screen size (below) gives no crop. Measured on 61 real 1440p
+rank screens, the tier is 148-286 KiB, the bar 119-148 KiB and the role
+21-22 KiB (on 98 more, the tier up to 298 KiB and the bar up to
+197 KiB), each under 384 KiB with no scaling. With the 2 MiB request
+limit a request holds at most five crops at the cap. Three crops per
+competitive game make the 1000 cap about 333 games.
 
 A `rank` bound of 1536 by 720 is large enough to hold a whole 1280x720
 screen, and members are told crops are never whole screens. So every
@@ -395,7 +389,7 @@ size per kind).
 | `hero_icon` | `career_panel` | The career panel's hero portrait: a `hero_icon` is shrunk to 171 px with Lanczos3 (smaller steps only if still needed) only when its PNG is over the 65,536-byte cap; otherwise stored as the native card; screen fields stay the game's. Carries `hero`, `score`, `runner_up`, `margin` and the hero pack name as `icon_set_version` |
 | `stat_digits` | `elims`, `assists`, `deaths`, `damage`, `healing`, `mitigation` | One stat cell of the member's own row, named by its column left to right, with `hero` only when that Tab's own read named it |
 | `map_name` | none | The map name banner |
-| `rank` | `rank_role`, `rank_tier`, `rank_bar`, `rank_sr` | One rank screen region at native scale (see Crop size per kind), with its rectangle in `found_spot`. No result title, mode banner or chat box, and no region where the rank screen draws a name; the bar is left out while chat shows beside it and the SR line when its box holds overlay text (the bar's change tags can say `VICTORY` or `DEFEAT`). The server takes any of these slot names; `rank_banner` from a `rank-regions.1` tracker is not refused |
+| `rank` | `rank_role`, `rank_tier`, `rank_bar` | One rank screen region at native scale (see Crop size per kind), with its rectangle in `found_spot`. No result title, mode banner, SR line or chat box, and no region where the rank screen draws a name; the bar is left out while chat shows beside it and the role unless its icon is found (the bar's change tags can say `VICTORY` or `DEFEAT`). The server takes any slot name of the label shape; `rank_sr` from a `rank-regions.2` tracker and `rank_banner` from a `rank-regions.1` tracker are not refused |
 
 There is no colourblind filter field. It hints at a member's colour vision
 and is not in the agreed field list or the consent text, so it is not

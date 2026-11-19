@@ -116,7 +116,12 @@ fn rank_crops_need_the_kinds_screen_size_and_caps() {
         !RANK_SLOTS.contains(&"rank_banner"),
         "the mode banner is never cut"
     );
-    assert_eq!(RANK_SPOT_VERSION, "rank-regions.2");
+    assert!(
+        !RANK_SLOTS.contains(&"rank_sr"),
+        "no SR crop: chat over the SR digits joins their glyphs"
+    );
+    assert_eq!(RANK_SLOTS.len(), 3);
+    assert_eq!(RANK_SPOT_VERSION, "rank-regions.3");
     meta.game_token = Some(t);
     meta.validate().unwrap();
     let ok = crop(meta.clone(), png(440, 90, false));
