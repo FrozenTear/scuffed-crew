@@ -61,8 +61,9 @@ const CSS: &str = r#"
         color: var(--text); }
     .hero-icons__choice input { flex: 0 0 auto; margin: 0; accent-color: var(--accent-solid);
         width: calc(var(--space-4) + var(--space-1) / 2); height: calc(var(--space-4) + var(--space-1) / 2); }
-    /* A failed load or save (issue 729): the field error pattern, an icon
-       then the text in the error colour, so it does not rest on colour. */
+    /* A failed load or save, or the failed part of a save (issue 729): the
+       field error pattern, an icon then the text in the error colour, so it
+       does not rest on colour. */
     .training-crops__status.is-error { display: flex; align-items: flex-start; gap: var(--space-2); }
     .hero-icons__sent { font-family: var(--font-head); font-size: var(--text-md);
         font-weight: var(--font-label-weight); line-height: var(--leading-ui); color: var(--text); }
@@ -89,18 +90,25 @@ const CSS: &str = r#"
     }
 "#;
 
-/// The consent live line. The `role="status"` paragraph is always rendered;
-/// only its class, its text and the decorative icon of a failure change, so
-/// every change is announced.
+/// The consent live line: two live regions, both always rendered, so every
+/// change is announced and only their text changes.
+/// - `role="status"` (id `id`): the muted note (loading, saving, saved).
+/// - `role="alert"` (id derived from `id`): the failure, in the field error
+///   pattern (decorative icon plus error colour), empty when nothing failed.
+///   A full failure and the failed part of a partial one both land here.
 #[component]
 fn ConsentStatus(id: String, line: ConsentLine) -> Element {
-    let class = line.class();
+    let alert_id = crops::consent_alert_id(&id);
+    let note_class = line.note_class();
+    let alert_class = line.alert_class();
+    let failure = line.failure_text();
     rsx! {
-        p { id, class, role: "status",
-            if line.failed {
+        p { id, class: note_class, role: "status", "{line.note}" }
+        p { id: alert_id, class: alert_class, role: "alert",
+            if line.failure.is_some() {
                 span { class: "field-error-icon", aria_hidden: "true" }
             }
-            "{line.text}"
+            "{failure}"
         }
     }
 }
@@ -213,6 +221,7 @@ pub fn TrainingCropSettings(member_id: String) -> Element {
                             consent.set(Some(saved));
                             let now_on = saved.get(kind);
                             let mut detail = None;
+                            let mut failed_part = None;
                             if kind == ConsentKind::HeroIcon {
                                 mine.with_mut(|m| {
                                     if let Some(m) = m {
@@ -235,10 +244,7 @@ pub fn TrainingCropSettings(member_id: String) -> Element {
                                                 text::opt_out_detail(OptOutChoice::Delete, stored);
                                         }
                                         Err(e) => {
-                                            detail = Some(format!(
-                                                "{} Use Delete all my icons to try again.",
-                                                text::failure_text("Deleting your icons", &e)
-                                            ))
+                                            failed_part = Some(crops::delete_failed_part(&e));
                                         }
                                     }
                                     refresh += 1;
@@ -246,11 +252,14 @@ pub fn TrainingCropSettings(member_id: String) -> Element {
                                     detail = text::opt_out_detail(OptOutChoice::Keep, stored);
                                 }
                             }
-                            consent_status.set(ConsentLine::note(crops::saved_status(
+                            // What worked is the note; a failed delete is
+                            // the alert (issue 729, Chief of Staff).
+                            consent_status.set(ConsentLine::saved(
                                 kind,
                                 now_on,
                                 detail.as_deref(),
-                            )));
+                                failed_part,
+                            ));
                         }
                         Err(e) => {
                             consent.set(Some(before));
@@ -596,8 +605,10 @@ mod tests {
     }
 
     /// Issue 729: a failed save reads as an error (the field error icon and
-    /// the error class); saving and saved stay the muted note. The live
-    /// region is the same `role="status"` paragraph in every state.
+    /// the error class) in the always-rendered `role="alert"` paragraph, and
+    /// the `role="status"` paragraph is empty; saving and saved stay the
+    /// muted note with the alert present and empty. Both regions are
+    /// rendered in every state.
     #[test]
     fn a_failed_save_reads_as_an_error_and_a_save_does_not() {
         fn failed() -> Element {
@@ -632,28 +643,36 @@ mod tests {
             rsx! { ConsentStatus { id: "s".to_string(), line: ConsentLine::default() } }
         }
 
+        // Full failure: the status is empty; the alert carries the same text,
+        // icon and error class the status carried before.
         let html = render(failed);
         assert!(
             html.starts_with(
-                "<p id=\"s\" class=\"account-status training-crops__status is-error\" role=\"status\"><span class=\"field-error-icon\" aria-hidden=\"true\"></span>Saving rank screen crops failed."
+                "<p id=\"s\" class=\"account-status training-crops__status\" role=\"status\"></p><p id=\"s-alert\" class=\"account-status training-crops__status is-error\" role=\"alert\"><span class=\"field-error-icon\" aria-hidden=\"true\"></span>Saving rank screen crops failed."
             ),
             "{html}"
         );
-        assert!(html.contains("are back to how they were."), "{html}");
+        assert!(html.ends_with("are back to how they were.</p>"), "{html}");
+        assert_eq!(html.matches("field-error-icon").count(), 1, "{html}");
+        assert_eq!(html.matches("is-error").count(), 1, "{html}");
 
-        for (state, html) in [("saving", render(saving)), ("saved", render(saved))] {
-            assert!(
-                html.starts_with(
-                    "<p id=\"s\" class=\"account-status training-crops__status\" role=\"status\">"
+        for (state, html, note) in [
+            ("saving", render(saving), "Saving rank screen crops..."),
+            ("saved", render(saved), "Saved. Rank screen crops on."),
+        ] {
+            assert_eq!(
+                html,
+                format!(
+                    "<p id=\"s\" class=\"account-status training-crops__status\" role=\"status\">{note}</p><p id=\"s-alert\" class=\"account-status training-crops__status\" role=\"alert\"></p>"
                 ),
-                "{state}: {html}"
+                "{state}"
             );
             assert!(!html.contains("is-error"), "{state}: {html}");
             assert!(!html.contains("field-error-icon"), "{state}: {html}");
         }
         assert_eq!(
             render(idle),
-            "<p id=\"s\" class=\"account-status training-crops__status\" role=\"status\"></p>"
+            "<p id=\"s\" class=\"account-status training-crops__status\" role=\"status\"></p><p id=\"s-alert\" class=\"account-status training-crops__status\" role=\"alert\"></p>"
         );
 
         // The error layout is the field error one, on tokens; the colour is
@@ -680,6 +699,61 @@ mod tests {
             )
         );
         assert!(!prod.contains("consent_status.set(crops::failed_status("));
+        // Both live regions are unconditional children of `ConsentStatus`;
+        // only the decorative icon sits behind the failure check.
+        let component = prod
+            .split("fn ConsentStatus(")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}\n").next())
+            .expect("ConsentStatus body");
+        assert!(
+            component.contains(
+                "        p { id, class: note_class, role: \"status\", \"{line.note}\" }\n        p { id: alert_id, class: alert_class, role: \"alert\",\n            if line.failure.is_some() {\n                span { class: \"field-error-icon\", aria_hidden: \"true\" }\n            }\n            \"{failure}\"\n        }"
+            ),
+            "{component}"
+        );
+        assert!(
+            component.contains("let alert_id = crops::consent_alert_id(&id);"),
+            "{component}"
+        );
+        // The saved line is built from parts, never from the formatted text.
+        assert!(prod.contains("consent_status.set(ConsentLine::saved("));
+        assert!(!prod.contains("ConsentLine::note(crops::saved_status("));
+    }
+
+    /// Issue 729 (Chief of Staff): a save that worked but whose icon delete
+    /// failed keeps "Saved. ... off." as the muted note and shows the failed
+    /// part as an error in the alert region.
+    #[test]
+    fn a_partly_failed_save_keeps_the_note_and_alerts_the_failed_part() {
+        fn partial() -> Element {
+            let failed = crops::delete_failed_part(&scuffed_api_client::ClientError::Network(
+                "offline".into(),
+            ));
+            rsx! {
+                ConsentStatus {
+                    id: "s".to_string(),
+                    line: ConsentLine::saved(ConsentKind::HeroIcon, false, None, Some(failed)),
+                }
+            }
+        }
+        let html = render(partial);
+        let failed =
+            crops::delete_failed_part(&scuffed_api_client::ClientError::Network("offline".into()));
+        assert!(
+            failed.starts_with("Deleting your icons failed."),
+            "{failed}"
+        );
+        assert_eq!(
+            html,
+            format!(
+                "<p id=\"s\" class=\"account-status training-crops__status\" role=\"status\">Saved. Hero icons off.</p><p id=\"s-alert\" class=\"account-status training-crops__status is-error\" role=\"alert\"><span class=\"field-error-icon\" aria-hidden=\"true\"></span>{failed}</p>"
+            )
+        );
+        // The note paragraph has no icon and no error class.
+        let status = html.split("</p>").next().expect("status");
+        assert!(!status.contains("field-error-icon"), "{status}");
+        assert!(!status.contains("is-error"), "{status}");
     }
 
     #[test]
@@ -691,6 +765,15 @@ mod tests {
         );
         assert!(html.contains("id=\"hero-icons-m1-status\""), "{html}");
         assert_eq!(html.matches("role=\"status\"").count(), 2, "{html}");
+        // The consent alert region is rendered from the first paint, empty.
+        assert_eq!(html.matches("role=\"alert\"").count(), 1, "{html}");
+        assert!(
+            html.contains(
+                "<p id=\"training-crops-m1-consent-status-alert\" class=\"account-status training-crops__status\" role=\"alert\"></p>"
+            ),
+            "{html}"
+        );
+        assert!(!html.contains("field-error-icon"), "{html}");
         assert!(html.contains(crops::LOADING), "{html}");
         assert!(html.contains(text::LOADING), "{html}");
     }

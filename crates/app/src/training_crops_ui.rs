@@ -183,42 +183,94 @@ pub fn failed_status(kind: ConsentKind, failure: &str) -> String {
     format!("{failure} {} are back to how they were.", kind.noun())
 }
 
-/// The consent live line shared by the four switches: its text, and whether
-/// it reports a failure (a failed load or save). A failure reads as an error
-/// (icon and error colour, issue 729); loading, saving and saved stay a
-/// muted note.
+/// The failed part of a hero icon opt-out whose consent save worked but
+/// whose delete did not. It goes to the alert region, not the saved note.
+pub fn delete_failed_part(err: &ClientError) -> String {
+    format!(
+        "{} Use Delete all my icons to try again.",
+        crate::hero_icons_ui::failure_text("Deleting your icons", err)
+    )
+}
+
+/// The consent live line shared by the four switches, as two parts so the
+/// split never depends on the rendered text (issue 729):
+/// - `note`: loading, saving or saved, a muted note in the `role="status"`
+///   paragraph;
+/// - `failure`: what failed and needs the user (a failed load, a failed
+///   save, or the failed part of a save that partly worked), shown as an
+///   error (icon and error colour) in the `role="alert"` paragraph.
+///
+/// A full failure has an empty note; a partial failure has both.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ConsentLine {
-    pub text: String,
-    pub failed: bool,
+    pub note: String,
+    pub failure: Option<String>,
 }
 
 impl ConsentLine {
-    /// Loading, saving or saved.
+    /// Loading, saving or saved. No failure.
     pub fn note(text: impl Into<String>) -> Self {
         Self {
-            text: text.into(),
-            failed: false,
+            note: text.into(),
+            failure: None,
         }
     }
 
-    /// A load or save that failed.
+    /// A load or save that failed outright. No note.
     pub fn failure(text: impl Into<String>) -> Self {
         Self {
-            text: text.into(),
-            failed: true,
+            note: String::new(),
+            failure: non_empty(text.into()),
         }
     }
 
-    /// The line's class: the account status note, plus the error modifier
-    /// on a failure.
-    pub fn class(&self) -> &'static str {
-        if self.failed {
+    /// A save that partly worked: the note says what worked, the failure
+    /// what did not.
+    pub fn partial(note: impl Into<String>, failure: impl Into<String>) -> Self {
+        Self {
+            note: note.into(),
+            failure: non_empty(failure.into()),
+        }
+    }
+
+    /// The line after a save answered. `detail` is what else worked (icons
+    /// kept or deleted); `failed_part` is what did not (the delete failed).
+    pub fn saved(
+        kind: ConsentKind,
+        on: bool,
+        detail: Option<&str>,
+        failed_part: Option<String>,
+    ) -> Self {
+        let note = saved_status(kind, on, detail);
+        match failed_part {
+            Some(failed) => Self::partial(note, failed),
+            None => Self::note(note),
+        }
+    }
+
+    /// The failure text, empty when nothing failed.
+    pub fn failure_text(&self) -> &str {
+        self.failure.as_deref().unwrap_or("")
+    }
+
+    /// The `role="status"` paragraph's class: always the muted note.
+    pub fn note_class(&self) -> &'static str {
+        "account-status training-crops__status"
+    }
+
+    /// The `role="alert"` paragraph's class: the error modifier only while
+    /// it carries a failure.
+    pub fn alert_class(&self) -> &'static str {
+        if self.failure.is_some() {
             "account-status training-crops__status is-error"
         } else {
             "account-status training-crops__status"
         }
     }
+}
+
+fn non_empty(text: String) -> Option<String> {
+    (!text.is_empty()).then_some(text)
 }
 
 // Ids.
@@ -241,6 +293,11 @@ pub fn hint_id(member_id: &str, kind: ConsentKind) -> String {
 
 pub fn consent_status_id(member_id: &str) -> String {
     format!("training-crops-{member_id}-consent-status")
+}
+
+/// The consent alert region's id, derived from the status id it sits next to.
+pub fn consent_alert_id(status_id: &str) -> String {
+    format!("{status_id}-alert")
 }
 
 #[cfg(test)]
@@ -486,6 +543,79 @@ mod tests {
         );
         assert_eq!(consent_status_id("m1"), "training-crops-m1-consent-status");
         assert_eq!(section_id("m1"), "training-crops-m1");
+        // The alert id comes from the status id (data), not a counter: the
+        // same input gives the same id every time, per member.
+        assert_eq!(
+            consent_alert_id(&consent_status_id("m1")),
+            "training-crops-m1-consent-status-alert"
+        );
+        assert_eq!(
+            consent_alert_id(&consent_status_id("m1")),
+            consent_alert_id(&consent_status_id("m1"))
+        );
+        assert_ne!(
+            consent_alert_id(&consent_status_id("m1")),
+            consent_alert_id(&consent_status_id("m2"))
+        );
+        assert_eq!(consent_alert_id("s"), "s-alert");
+    }
+
+    #[test]
+    fn consent_line_keeps_note_and_failure_apart() {
+        let note = ConsentLine::note(LOADING);
+        assert_eq!(note.note, LOADING);
+        assert_eq!(note.failure, None);
+        assert_eq!(note.failure_text(), "");
+        assert_eq!(note.alert_class(), "account-status training-crops__status");
+        assert_eq!(note.note_class(), "account-status training-crops__status");
+
+        let full = ConsentLine::failure("Saving failed.");
+        assert_eq!(full.note, "");
+        assert_eq!(full.failure.as_deref(), Some("Saving failed."));
+        assert_eq!(
+            full.alert_class(),
+            "account-status training-crops__status is-error"
+        );
+        assert_eq!(full.note_class(), "account-status training-crops__status");
+
+        let partial = ConsentLine::saved(
+            ConsentKind::HeroIcon,
+            false,
+            None,
+            Some("Deleting your icons failed.".to_string()),
+        );
+        assert_eq!(partial.note, "Saved. Hero icons off.");
+        assert_eq!(partial.failure_text(), "Deleting your icons failed.");
+        assert_eq!(
+            partial,
+            ConsentLine::partial("Saved. Hero icons off.", "Deleting your icons failed.")
+        );
+
+        // A detail that worked stays in the note; nothing fails.
+        let kept = ConsentLine::saved(
+            ConsentKind::HeroIcon,
+            false,
+            Some("3 icons kept and hidden."),
+            None,
+        );
+        assert_eq!(kept.note, "Saved. Hero icons off. 3 icons kept and hidden.");
+        assert_eq!(kept.failure, None);
+
+        // Empty failure text is no failure, so the icon never shows alone.
+        assert_eq!(ConsentLine::failure("").failure, None);
+        assert_eq!(ConsentLine::partial("Saved.", "").failure, None);
+        assert_eq!(ConsentLine::default().failure, None);
+
+        let failed = delete_failed_part(&ClientError::Network("offline".into()));
+        assert!(
+            failed.starts_with("Deleting your icons failed."),
+            "{failed}"
+        );
+        assert!(
+            failed.ends_with("Use Delete all my icons to try again."),
+            "{failed}"
+        );
+        assert!(!failed.contains("offline"), "{failed}");
     }
 
     #[test]
@@ -556,6 +686,7 @@ mod tests {
         .iter()
         .map(|s| s.to_string())
         .collect();
+        all.push(delete_failed_part(&ClientError::Network("x".into())));
         for kind in ConsentKind::ALL {
             all.extend([
                 kind.label().to_string(),
