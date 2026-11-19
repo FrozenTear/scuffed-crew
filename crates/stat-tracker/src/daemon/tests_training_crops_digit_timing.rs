@@ -4,6 +4,7 @@
 //! nothing and is not marked offered, so a later Tab of the same game
 //! retries; once a set is saved the game offers no more.
 
+use super::race::crops_settled;
 use super::*;
 use stat_tracker::games::stat_reads::TabReads;
 use stat_tracker::unsure_rule::StatRead;
@@ -155,8 +156,11 @@ async fn a_recorded_spawn_tab_waits_for_a_big_stat_before_its_digit_set() {
     let spawn = o10_board([sure(0), sure(0), sure(0), sure(0), sure(0), sure(0)]);
     let (recorded, _) = record_tab(&ctx, "dt-capture", sure_tab(Some("ana")), spawn).await;
     assert!(recorded, "a spawn Tab still records");
-    // Give a blocking cut, had one started, time to land.
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Let a blocking cut, had one started, land.
+    assert!(
+        crops_settled().await,
+        "the blocking crop tasks did not finish"
+    );
     assert_eq!(queued_digits(dir.path()), 0, "no set from the spawn Tab");
     let (recorded, _) = record_tab(&ctx, "dt-capture", sure_tab(Some("ana")), sure_board()).await;
     assert!(recorded);
@@ -320,9 +324,12 @@ async fn stored_big(ctx: &DaemonCtx, session_id: &str) -> [u32; 3] {
     [last.damage, last.healing, last.mitigation]
 }
 
-/// Let a blocking cut, had one started, land, then count the queued cells.
+/// Let every blocking cut started so far land, then count the queued cells.
 async fn settled_digits(dir: &Path) -> usize {
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        crops_settled().await,
+        "the blocking crop tasks did not finish"
+    );
     queued_digits(dir)
 }
 

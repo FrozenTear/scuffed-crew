@@ -10,10 +10,8 @@
 //! one accent to both.
 
 use dioxus::prelude::*;
-use serde::{Deserialize, Serialize};
 
 use crate::components::{AccessDenied, Toast, use_toast};
-use crate::state::brand_font::{BrandFontField, BrandFontState};
 use crate::state::site_settings::SiteSettingsState;
 use crate::state::unsaved::use_unsaved_guard;
 use crate::state::use_auth;
@@ -25,52 +23,25 @@ use scuffed_api_client::ApiClient;
 use scuffed_types::SiteSettings;
 use scuffed_types::api::UpdateSettingsRequest;
 
-/// `GET` and `PUT /api/settings` as this page reads them: the shared
-/// settings plus the optional display font key (see `state::brand_font`).
-///
-/// Flatten trap: serde hands a flattened key to the first struct that
-/// declares it. This works only while `SiteSettings` has no
-/// `brand_font_display` field. The day the shared type gains one, `settings`
-/// takes the key, `font` reads `None`, the picker stays locked, and
-/// `settings_json_without_the_font_key_still_loads` fails. Drop
-/// `BrandFontField` here in the same change and read the typed field.
-#[derive(Debug, Clone, Deserialize)]
-struct BrandSettingsView {
-    #[serde(flatten)]
-    settings: SiteSettings,
-    #[serde(flatten)]
-    font: BrandFontField,
-}
-
-/// The brand part of a settings save. Every other settings key is omitted,
-/// so the server leaves it as it is.
-#[derive(Debug, Clone, Serialize)]
-struct BrandSaveBody {
-    #[serde(flatten)]
-    settings: UpdateSettingsRequest,
-    /// A [`DisplayFont::id`]. Sent only when the server returned the key.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    brand_font_display: Option<String>,
-}
-
-/// What the server last stored.
+/// What the server last stored, read from the typed `SiteSettings` that
+/// `GET` and `PUT /api/settings` return.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SavedBrand {
     /// Settings record id; element ids are built from it.
     pub id: String,
     pub accent_dark: String,
     pub accent_light: String,
-    /// `None`: the server has no display font field yet.
-    pub font: Option<DisplayFont>,
+    /// The stored `brand_font_display`. Empty or unknown is the default.
+    pub font: DisplayFont,
 }
 
 impl SavedBrand {
-    fn from_view(view: &BrandSettingsView) -> Self {
+    fn from_settings(settings: &SiteSettings) -> Self {
         Self {
-            id: view.settings.id.clone(),
-            accent_dark: view.settings.brand_accent_dark.trim().to_string(),
-            accent_light: view.settings.brand_accent_light.trim().to_string(),
-            font: view.font.font(),
+            id: settings.id.clone(),
+            accent_dark: settings.brand_accent_dark.trim().to_string(),
+            accent_light: settings.brand_accent_light.trim().to_string(),
+            font: DisplayFont::for_settings(Some(settings)),
         }
     }
 
@@ -93,7 +64,7 @@ impl BrandDraft {
     fn from_saved(saved: &SavedBrand) -> Self {
         Self {
             accent: saved.accent_dark.clone(),
-            font: saved.font.unwrap_or_default(),
+            font: saved.font,
         }
     }
 
@@ -102,13 +73,15 @@ impl BrandDraft {
     /// Two spellings of one colour (upper or lower case, with or without the
     /// leading `#`, short or long form) are the same accent, so retyping the
     /// stored value is not an edit.
+    ///
+    /// The same "changed" rules as [`save_body`]: the accent through
+    /// [`accent_changed`], the font by value. When Save is not locked, a
+    /// draft is unsaved exactly when Save would send a request. A locked
+    /// draft (a changed accent that fails the contrast check, or changed
+    /// text that is not a hex colour) is unsaved, but Save sends nothing
+    /// for it.
     fn is_unsaved(&self, saved: &SavedBrand) -> bool {
-        let stored = Self::from_saved(saved);
-        let same_accent = match (normalize_hex(&self.accent), normalize_hex(&stored.accent)) {
-            (Some(a), Some(b)) => a == b,
-            _ => self.accent.trim() == stored.accent.trim(),
-        };
-        !same_accent || self.font != stored.font
+        accent_changed(self, saved) || self.font != saved.font
     }
 
     fn product_default() -> Self {
@@ -142,10 +115,15 @@ impl Verdict {
         } else {
             normalize_hex(typed)
         };
-        // A field that is not a colour keeps the saved accent in the preview.
+        // An untouched accent previews what is stored, a separate light
+        // accent (an identity pack pair) included, because Save keeps it. A
+        // new accent previews the one accent in both themes, which is what
+        // Save writes. A field that is not a colour keeps the stored pair.
+        let stored = || BrandConfig::from_settings(&saved.accent_dark, &saved.accent_light);
         let brand = match &accent {
+            Some(_) if !accent_changed(draft, saved) => stored(),
             Some(hex) => BrandConfig::from_settings(hex, hex),
-            None => BrandConfig::from_settings(&saved.accent_dark, &saved.accent_light),
+            None => stored(),
         };
         let check = AccentCheck::for_brand(&brand);
         let reason = match &accent {
@@ -165,20 +143,64 @@ impl Verdict {
     }
 }
 
+/// Whether the draft accent differs from the stored dark accent. Both are
+/// compared normalized, so a short form, a missing `#` or another letter case
+/// is the same accent.
+/// Text that is not a hex colour counts as changed.
+fn accent_changed(draft: &BrandDraft, saved: &SavedBrand) -> bool {
+    let stored = saved.accent_dark.trim();
+    let stored = normalize_hex(stored).unwrap_or_else(|| stored.to_ascii_lowercase());
+    let typed = draft.accent.trim();
+    if typed.is_empty() {
+        return !stored.is_empty();
+    }
+    normalize_hex(typed).is_none_or(|hex| hex != stored)
+}
+
+/// Whether Save is locked by the contrast check. Only a changed accent can
+/// lock it: an accent the admin did not touch is already stored, so a
+/// font-only Save goes through even when that stored accent fails the check.
+fn save_blocked(draft: &BrandDraft, saved: &SavedBrand) -> bool {
+    accent_changed(draft, saved) && Verdict::of(draft, saved).blocked()
+}
+
 /// The body a Save sends, or `None` when the contrast lock blocks it.
-fn save_body(draft: &BrandDraft, saved: &SavedBrand) -> Option<BrandSaveBody> {
-    let verdict = Verdict::of(draft, saved);
-    if verdict.blocked() {
+///
+/// Only what the admin changed is sent, so the server keeps everything
+/// else, other settings included:
+/// - The accent pair only when the accent changed. A font-only Save keeps
+///   the stored accents, a separate light accent (an identity pack pair)
+///   included.
+/// - `brand_font_display` only when the font changed, as its stored value
+///   ([`DisplayFont::setting_value`]: `""` for the default).
+fn save_body(draft: &BrandDraft, saved: &SavedBrand) -> Option<UpdateSettingsRequest> {
+    if save_blocked(draft, saved) {
         return None;
     }
-    let accent = verdict.accent?;
-    Some(BrandSaveBody {
-        settings: UpdateSettingsRequest {
-            brand_accent_dark: Some(accent.clone()),
-            brand_accent_light: Some(accent),
-            ..UpdateSettingsRequest::default()
-        },
-        brand_font_display: saved.font.map(|_| draft.font.id().to_string()),
+    let accent = if accent_changed(draft, saved) {
+        Some(Verdict::of(draft, saved).accent?)
+    } else {
+        None
+    };
+    Some(UpdateSettingsRequest {
+        brand_accent_dark: accent.clone(),
+        brand_accent_light: accent,
+        brand_font_display: (draft.font != saved.font)
+            .then(|| draft.font.setting_value().to_string()),
+        ..UpdateSettingsRequest::default()
+    })
+}
+
+/// The request Save sends: [`save_body`] when it carries at least one key.
+/// `None` when the contrast lock blocks Save or nothing changed, so an
+/// empty Save sends no `PUT`, writes no audit entry and shows no toast.
+/// Emptiness is judged on the serialized body, which is what would be sent.
+fn save_request(draft: &BrandDraft, saved: &SavedBrand) -> Option<UpdateSettingsRequest> {
+    save_body(draft, saved).filter(|body| {
+        serde_json::to_value(body)
+            .ok()
+            .and_then(|value| value.as_object().map(|keys| !keys.is_empty()))
+            .unwrap_or(true)
     })
 }
 
@@ -206,13 +228,13 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
-async fn load_brand_view() -> Result<BrandSettingsView, String> {
+async fn load_brand_settings() -> Result<SiteSettings, String> {
     #[cfg(test)]
     if let Some(json) = TEST_BRAND_VIEW_JSON.with(|slot| slot.borrow().clone()) {
         return serde_json::from_str(&json).map_err(|err| err.to_string());
     }
     ApiClient::web()
-        .fetch::<BrandSettingsView>("/api/settings")
+        .fetch::<SiteSettings>("/api/settings")
         .await
         .map_err(|err| err.to_string())
 }
@@ -221,15 +243,13 @@ async fn load_brand_view() -> Result<BrandSettingsView, String> {
 pub fn AdminBrandSettings() -> Element {
     let auth = use_auth();
     let mut reload_tick = use_signal(|| 0u32);
-    let brand_font = try_use_context::<BrandFontState>();
+    // Loading only reads: the chrome (accent and display font) follows the
+    // shared settings, and only a successful save hands it a new value.
     let settings = use_resource(move || {
         let _tick = reload_tick();
         async move {
-            let view = load_brand_view().await?;
-            if let Some(brand_font) = brand_font {
-                brand_font.apply_saved(view.font.font());
-            }
-            Ok::<_, String>(SavedBrand::from_view(&view))
+            let settings = load_brand_settings().await?;
+            Ok::<_, String>(SavedBrand::from_settings(&settings))
         }
     });
 
@@ -279,7 +299,6 @@ pub fn AdminBrandSettings() -> Element {
 fn BrandSettingsForm(saved: SavedBrand) -> Element {
     let mut toast = use_toast();
     let site_settings = try_use_context::<SiteSettingsState>();
-    let brand_font = try_use_context::<BrandFontState>();
     let mut saved_now = use_signal(|| saved.clone());
     let mut draft = use_signal(|| BrandDraft::from_saved(&saved));
     let mut saving = use_signal(|| false);
@@ -292,24 +311,23 @@ fn BrandSettingsForm(saved: SavedBrand) -> Element {
         if saving() {
             return;
         }
-        // The contrast lock: a blocked draft has no body, so nothing is sent.
-        let Some(body) = save_body(&draft.read(), &saved_now.read()) else {
+        // The contrast lock and an empty draft: a blocked draft, or one with
+        // nothing changed, has no request, so nothing is sent.
+        let Some(body) = save_request(&draft.read(), &saved_now.read()) else {
             return;
         };
         saving.set(true);
         spawn(async move {
             match ApiClient::web()
-                .put_json::<_, BrandSettingsView>("/api/settings", &body)
+                .put_json::<_, SiteSettings>("/api/settings", &body)
                 .await
             {
                 Ok(view) => {
-                    let next = SavedBrand::from_view(&view);
-                    // Only now does the chrome follow the new brand.
+                    let next = SavedBrand::from_settings(&view);
+                    // Only now does the chrome follow the new brand, accent
+                    // and display font alike.
                     if let Some(site_settings) = site_settings {
-                        site_settings.apply_saved(view.settings);
-                    }
-                    if let Some(brand_font) = brand_font {
-                        brand_font.apply_saved(next.font);
+                        site_settings.apply_saved(view);
                     }
                     draft.set(BrandDraft::from_saved(&next));
                     saved_now.set(next);
@@ -343,7 +361,10 @@ fn BrandFormBody(
 ) -> Element {
     let current = draft();
     let verdict = Verdict::of(&current, &saved);
-    let blocked = verdict.blocked();
+    // Save locks only on a changed accent that fails; the reason line still
+    // reports a stored accent that fails, as information.
+    let blocked = save_blocked(&current, &saved);
+    let changed_accent = accent_changed(&current, &saved);
     let reason = verdict.reason.clone().unwrap_or_default();
     let invalid = verdict.accent.is_none();
 
@@ -356,25 +377,24 @@ fn BrandFormBody(
 
     // The swatch and the colour input show the dark accent of the preview.
     let swatch = verdict.brand.accent_dark.clone();
-    let font_supported = saved.font.is_some();
-    let font_note = if font_supported {
-        String::new()
-    } else {
-        format!(
-            "The display font cannot be changed yet. The site uses {}.",
-            DisplayFont::default().label()
-        )
-    };
-    let save_locked = blocked || saving;
-    // Save rewrites a separate light accent, so the note that says so is
-    // part of what Save is described by, next to the block reason.
+    let font_note = format!(
+        "The site uses {}. Save brand applies a new choice.",
+        saved.font.label()
+    );
+    // Save reads as disabled when it would send nothing: locked by the
+    // contrast check, or nothing changed (the leave guard is off then too).
+    let nothing_to_save = !blocked && save_request(&current, &saved).is_none();
+    let save_locked = blocked || saving || nothing_to_save;
+    // Saving a new accent rewrites a separate light accent, so while the
+    // accent is changed the note that says so is part of what Save is
+    // described by, next to the block reason.
     let light_note_id = field_id(&saved.id, "brand-accent-light-note");
     let separate_light = saved.separate_light_accent().map(str::to_string);
     let mut save_describedby = Vec::new();
     if blocked {
         save_describedby.push(reason_id.clone());
     }
-    if separate_light.is_some() {
+    if separate_light.is_some() && changed_accent {
         save_describedby.push(light_note_id.clone());
     }
     let save_describedby = save_describedby.join(" ");
@@ -428,16 +448,13 @@ fn BrandFormBody(
                 class: "customise-choice-row",
                 role: "radiogroup",
                 "aria-labelledby": "{font_title_id}",
-                "aria-describedby": if !font_supported { "{font_note_id}" },
+                "aria-describedby": "{font_note_id}",
                 for font in DisplayFont::ALL {
                     {
                         let selected = current.font == font;
                         let mut class = String::from("customise-choice");
                         if selected {
                             class.push_str(" is-selected");
-                        }
-                        if !font_supported {
-                            class.push_str(" is-locked");
                         }
                         rsx! {
                             label {
@@ -449,7 +466,6 @@ fn BrandFormBody(
                                     name: "{font_name}",
                                     value: "{font.id()}",
                                     checked: selected,
-                                    disabled: !font_supported,
                                     onchange: move |_| draft.write().font = font,
                                 }
                                 span { class: "customise-choice-mark", "aria-hidden": "true" }
@@ -464,7 +480,7 @@ fn BrandFormBody(
         div { class: "customise-actions",
             if let Some(light) = separate_light {
                 p { class: "customise-note", id: "{light_note_id}",
-                    "The light theme has its own saved accent ({light}). Save brand replaces it: both themes get the one accent above."
+                    "The light theme has its own saved accent ({light}). Saving a new accent replaces it: both themes get the one accent above."
                 }
             }
             button {
@@ -551,8 +567,8 @@ mod tests {
     use crate::components::ToastProvider;
     use crate::state::AuthState;
     use crate::theme::brand::{
-        TEST_BLOCKED_ACCENT, TEST_EDGELESS_ACCENT, TEST_INVALID_ACCENTS, TEST_MINT_ACCENT,
-        TEST_OTHER_ACCENT, TEST_SHORT_ACCENT,
+        TEST_BLOCKED_ACCENT, TEST_EDGELESS_ACCENT, TEST_FILL_ONLY_ACCENT, TEST_INVALID_ACCENTS,
+        TEST_MINT_ACCENT, TEST_OTHER_ACCENT, TEST_SHORT_ACCENT,
     };
     use scuffed_types::{OrgRole, UserInfo};
 
@@ -561,7 +577,7 @@ mod tests {
             id: "site".into(),
             accent_dark: accent.into(),
             accent_light: accent.into(),
-            font: None,
+            font: DisplayFont::Urbanist,
         }
     }
 
@@ -578,11 +594,42 @@ mod tests {
         render_saved(saved(saved_accent), draft_accent)
     }
 
+    /// The form for one stored brand and a full draft.
+    fn render_with_draft(saved: SavedBrand, draft: BrandDraft) -> String {
+        #[component]
+        fn Harness(saved: SavedBrand, start: BrandDraft) -> Element {
+            let draft = use_signal(|| start.clone());
+            rsx! {
+                ToastProvider {
+                    BrandFormBody {
+                        draft,
+                        saved,
+                        saving: false,
+                        on_save: move |_| {},
+                    }
+                }
+            }
+        }
+        let mut dom = VirtualDom::new_with_props(
+            Harness,
+            HarnessProps {
+                saved,
+                start: draft,
+            },
+        );
+        dom.rebuild_in_place();
+        dioxus_ssr::render(&dom)
+    }
+
     /// The form for one stored brand and one typed accent.
     fn render_saved(saved: SavedBrand, draft_accent: &'static str) -> String {
         #[component]
         fn Harness(saved: SavedBrand, draft_accent: &'static str) -> Element {
-            let draft = use_signal(|| draft(draft_accent));
+            // Like the real form, the draft starts from the stored font.
+            let draft = use_signal(|| BrandDraft {
+                accent: draft_accent.into(),
+                font: saved.font,
+            });
             rsx! {
                 ToastProvider {
                     BrandFormBody {
@@ -605,12 +652,28 @@ mod tests {
         dioxus_ssr::render(&dom)
     }
 
-    /// Settings JSON as the server sends it today, with both accents set.
-    fn settings_json(accent: &str) -> String {
-        let accent = serde_json::to_string(accent.trim()).unwrap();
-        format!(
-            r#"{{"id":"site","org_name":"Clan","site_description":"desc","recruitment_open":true,"recruitment_message":"msg","min_age":16,"forum_backend":"local","extra_relay_urls":"","brand_accent_dark":{accent},"brand_accent_light":{accent},"updated_at":"2026-09-21T00:00:00Z"}}"#
+    /// Settings as the server sends them, with both accents set and
+    /// `brand_font_display` stored as `font`. Built through the shared
+    /// `SiteSettings` type, as the server serializes it, so the JSON always
+    /// carries every key that type declares.
+    fn settings_with_font(accent: &str, font: &str) -> SiteSettings {
+        let mut settings: SiteSettings = serde_json::from_str(
+            r#"{"id":"site","org_name":"Clan","site_description":"desc","recruitment_open":true,"recruitment_message":"msg","min_age":16,"forum_backend":"local","extra_relay_urls":"","updated_at":"2026-09-21T00:00:00Z"}"#,
         )
+        .expect("settings JSON");
+        settings.brand_accent_dark = accent.trim().to_string();
+        settings.brand_accent_light = accent.trim().to_string();
+        settings.brand_font_display = font.to_string();
+        settings
+    }
+
+    fn settings_json_with_font(accent: &str, font: &str) -> String {
+        serde_json::to_string(&settings_with_font(accent, font)).expect("serialize settings")
+    }
+
+    /// Settings JSON with the default (empty) display font.
+    fn settings_json(accent: &str) -> String {
+        settings_json_with_font(accent, "")
     }
 
     fn settle(dom: &mut VirtualDom) {
@@ -672,7 +735,7 @@ mod tests {
             .split("let on_save = move |_| {")
             .nth(1)
             .expect("save handler");
-        let guard = handler.find("save_body(").expect("lock check");
+        let guard = handler.find("save_request(").expect("lock check");
         let request = handler.find(".put_json").expect("request");
         assert!(guard < request, "the lock must run before the request");
     }
@@ -791,7 +854,7 @@ mod tests {
             assert!(!html.contains(INVALID_HEX_REASON), "{typed}");
             assert!(!html.contains("aria-invalid"), "{typed}");
             let body = save_body(&draft(typed), &saved(TEST_MINT_ACCENT)).expect(typed);
-            let stored = body.settings.brand_accent_dark.expect("accent");
+            let stored = body.brand_accent_dark.expect("accent");
             assert_eq!(stored.len(), 7, "{typed}");
             assert!(stored.starts_with('#'), "{typed}");
         }
@@ -801,13 +864,24 @@ mod tests {
         }
     }
 
-    /// Save rewrites a separate light accent. The note that says so sits in
-    /// the action row and is part of the Save button's description.
+    /// Saving a new accent rewrites a separate light accent. The note that
+    /// says so sits in the action row, and while the accent is changed it is
+    /// part of the Save button's description.
     #[test]
     fn save_is_described_by_the_separate_light_accent_note() {
         let mut split = saved(TEST_MINT_ACCENT);
         split.accent_light = TEST_OTHER_ACCENT.into();
+
+        // Accent untouched: the note is shown, but Save will not replace the
+        // light accent, so Save is not described by it.
         let html = render_saved(split.clone(), TEST_MINT_ACCENT);
+        assert!(
+            html.contains("id=\"site-brand-accent-light-note\""),
+            "{html}"
+        );
+        assert!(!save_button(&html).contains("aria-describedby"), "{html}");
+
+        let html = render_saved(split.clone(), TEST_SHORT_ACCENT);
         let button = save_button(&html);
         assert!(
             button.contains("aria-describedby=\"site-brand-accent-light-note\""),
@@ -818,7 +892,7 @@ mod tests {
             .nth(1)
             .expect("action row");
         let note = format!(
-            "<p class=\"customise-note\" id=\"site-brand-accent-light-note\">The light theme has its own saved accent ({TEST_OTHER_ACCENT}). Save brand replaces it: both themes get the one accent above.</p>"
+            "<p class=\"customise-note\" id=\"site-brand-accent-light-note\">The light theme has its own saved accent ({TEST_OTHER_ACCENT}). Saving a new accent replaces it: both themes get the one accent above.</p>"
         );
         assert!(actions.contains(&note), "{actions}");
         assert!(actions.find(&note) < actions.find(">Save brand<"));
@@ -950,13 +1024,13 @@ mod tests {
         // Only a successful save hands the brand to the shared settings.
         let src = include_str!("brand_settings.rs");
         let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap();
-        assert_eq!(prod.matches(".apply_saved(view.settings)").count(), 1);
+        assert_eq!(prod.matches(".apply_saved(").count(), 1);
         let save = prod
-            .split(".put_json::<_, BrandSettingsView>(\"/api/settings\", &body)")
+            .split(".put_json::<_, SiteSettings>(\"/api/settings\", &body)")
             .nth(1)
             .expect("settings PUT");
         let ok_arm = &save[..save.find("Err(e) =>").expect("error arm")];
-        assert!(ok_arm.contains("site_settings.apply_saved(view.settings)"));
+        assert!(ok_arm.contains("site_settings.apply_saved(view)"));
         assert!(
             !prod.contains("StyleLive"),
             "the draft must not write a document stylesheet"
@@ -1000,49 +1074,507 @@ mod tests {
         assert_eq!(value["brand_accent_light"], "");
     }
 
+    /// The stored font, as the typed `SiteSettings` carries it, is what the
+    /// picker selects and the note names. Nothing is locked.
     #[test]
-    fn display_font_is_locked_until_the_server_has_the_field() {
-        // No key in the response: radios disabled, the key is never sent.
-        let html = render_form(TEST_MINT_ACCENT, TEST_MINT_ACCENT);
-        assert_eq!(html.matches("type=\"radio\"").count(), 2, "{html}");
-        assert_eq!(html.matches("disabled=true").count(), 2, "{html}");
-        assert!(
-            html.contains("The display font cannot be changed yet. The site uses Urbanist."),
-            "{html}"
-        );
-        let mut plex = draft(TEST_MINT_ACCENT);
-        plex.font = DisplayFont::IbmPlexSans;
-        let body = save_body(&plex, &saved(TEST_MINT_ACCENT)).unwrap();
-        assert!(body.brand_font_display.is_none());
-
-        // The key is there: the choice is sent as a listed id.
-        let mut with_font = saved(TEST_MINT_ACCENT);
-        with_font.font = Some(DisplayFont::Urbanist);
-        let body = save_body(&plex, &with_font).unwrap();
-        let value = serde_json::to_value(&body).unwrap();
-        assert_eq!(
-            value[crate::state::brand_font::BRAND_FONT_FIELD],
-            "ibm-plex-sans"
-        );
+    fn display_font_picker_is_open_and_names_the_stored_font() {
+        for (stored, font) in [
+            ("", DisplayFont::Urbanist),
+            ("urbanist", DisplayFont::Urbanist),
+            ("ibm-plex-sans", DisplayFont::IbmPlexSans),
+        ] {
+            let saved = SavedBrand::from_settings(&settings_with_font(TEST_MINT_ACCENT, stored));
+            assert_eq!(saved.font, font, "{stored:?}");
+            let html = render_saved(saved.clone(), TEST_MINT_ACCENT);
+            assert_eq!(html.matches("type=\"radio\"").count(), 2, "{html}");
+            assert!(!html.contains("disabled=true"), "{stored:?}: {html}");
+            assert!(!html.contains("is-locked"), "{stored:?}: {html}");
+            assert!(!html.contains("cannot be changed"), "{stored:?}: {html}");
+            assert!(
+                html.contains(&format!(
+                    "The site uses {}. Save brand applies a new choice.",
+                    font.label()
+                )),
+                "{stored:?}: {html}"
+            );
+            assert!(
+                html.contains("aria-describedby=\"site-brand-font-display-note\""),
+                "{html}"
+            );
+            // The form starts from the stored font: its chip is the selected one.
+            let draft = BrandDraft::from_saved(&saved);
+            assert_eq!(draft.font, font);
+            assert!(
+                html.contains(&format!(
+                    "class=\"customise-choice is-selected\" style=\"font-family: {};\"",
+                    font.family_var()
+                )),
+                "{stored:?}: {html}"
+            );
+        }
 
         // The picker is a fixed list: no free-text font or URL field.
+        let html = render_form(TEST_MINT_ACCENT, TEST_MINT_ACCENT);
         assert_eq!(html.matches("type=\"text\"").count(), 1, "{html}");
         assert!(!html.contains("type=\"url\""), "{html}");
     }
 
+    /// Save brand sends the font only when the admin changed it, so an
+    /// accent-only save never clobbers the stored font.
     #[test]
-    fn settings_json_without_the_font_key_still_loads() {
-        let json = r#"{"id":"site","org_name":"Clan","site_description":"desc","recruitment_open":true,"recruitment_message":"msg","min_age":16,"forum_backend":"local","extra_relay_urls":"","updated_at":"2026-09-21T00:00:00Z"}"#;
-        let view: BrandSettingsView = serde_json::from_str(json).expect("today's settings JSON");
-        assert_eq!(SavedBrand::from_view(&view).font, None);
+    fn save_sends_the_font_only_when_it_changed() {
+        let font_key = |body: &UpdateSettingsRequest| {
+            serde_json::to_value(body)
+                .unwrap()
+                .get("brand_font_display")
+                .cloned()
+        };
+        let plex_saved =
+            SavedBrand::from_settings(&settings_with_font(TEST_MINT_ACCENT, "ibm-plex-sans"));
 
-        let with_key = json.replacen('{', r#"{"brand_font_display":"ibm-plex-sans","#, 1);
-        let view: BrandSettingsView = serde_json::from_str(&with_key).expect("future JSON");
-        assert_eq!(
-            SavedBrand::from_view(&view).font,
-            Some(DisplayFont::IbmPlexSans)
+        // Accent only, over a stored IBM Plex Sans: the key is not sent.
+        let mut accent_only = BrandDraft::from_saved(&plex_saved);
+        accent_only.accent = TEST_OTHER_ACCENT.into();
+        let body = save_body(&accent_only, &plex_saved).expect("passing accent");
+        assert_eq!(body.brand_font_display, None);
+        assert_eq!(font_key(&body), None);
+
+        // Font changed: its stored value is sent. Urbanist is the default,
+        // stored as "".
+        let mut to_urbanist = BrandDraft::from_saved(&plex_saved);
+        to_urbanist.font = DisplayFont::Urbanist;
+        let body = save_body(&to_urbanist, &plex_saved).unwrap();
+        assert_eq!(font_key(&body), Some(serde_json::json!("")));
+
+        let mut to_plex = draft(TEST_MINT_ACCENT);
+        to_plex.font = DisplayFont::IbmPlexSans;
+        let body = save_body(&to_plex, &saved(TEST_MINT_ACCENT)).unwrap();
+        assert_eq!(font_key(&body), Some(serde_json::json!("ibm-plex-sans")));
+        for font in DisplayFont::ALL {
+            assert!(scuffed_types::is_allowed_brand_font_display(font.id()));
+        }
+
+        // Reset to default over a stored IBM Plex Sans stores the default as
+        // `""`, like the accent half of the same button, never "urbanist".
+        let body = save_body(&BrandDraft::product_default(), &plex_saved).unwrap();
+        assert_eq!(font_key(&body), Some(serde_json::json!("")));
+        assert_eq!(body.brand_accent_dark.as_deref(), Some(""));
+
+        // A blocked accent sends nothing at all, font included.
+        let mut blocked = to_urbanist.clone();
+        blocked.accent = TEST_BLOCKED_ACCENT.into();
+        assert!(save_body(&blocked, &plex_saved).is_none());
+    }
+
+    /// The keys of a save body, sorted.
+    fn body_keys(body: &UpdateSettingsRequest) -> Vec<String> {
+        let mut keys: Vec<String> = serde_json::to_value(body)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        keys
+    }
+
+    /// Site review 3, finding 1: a stored accent that fails the contrast
+    /// check must not lock a Save that only changes the font, and that Save
+    /// sends the font alone.
+    #[test]
+    fn font_only_save_over_a_blocked_stored_accent_sends_just_the_font() {
+        let stored = saved(TEST_BLOCKED_ACCENT);
+        assert!(
+            Verdict::of(&BrandDraft::from_saved(&stored), &stored).blocked(),
+            "the stored accent itself fails the check"
         );
-        assert_eq!(view.settings.org_name, "Clan");
+        let mut font_only = BrandDraft::from_saved(&stored);
+        font_only.font = DisplayFont::IbmPlexSans;
+        let body = save_body(&font_only, &stored).expect("a font-only Save is not locked");
+        assert_eq!(body_keys(&body), ["brand_font_display"]);
+        assert_eq!(body.brand_font_display.as_deref(), Some("ibm-plex-sans"));
+
+        // The rendered button agrees: open, and not described by the reason.
+        let html = render_with_draft(stored.clone(), font_only);
+        let button = save_button(&html);
+        assert!(button.contains("aria-disabled=\"false\""), "{button}");
+        assert!(!button.contains("brand-accent-reason"), "{button}");
+
+        // A stored accent that fails only the 3:1 button fill floor (the
+        // historical purple; its text and ink pairs pass) does not lock a
+        // font-only Save either.
+        let purple = saved(TEST_FILL_ONLY_ACCENT);
+        let purple_check = Verdict::of(&BrandDraft::from_saved(&purple), &purple).check;
+        assert!(purple_check.dark.text_passes() && purple_check.dark.ink_passes());
+        assert!(purple_check.light.text_passes() && purple_check.light.ink_passes());
+        assert!(
+            !purple_check.dark.fill_passes() || !purple_check.light.fill_passes(),
+            "only the fill floor fails"
+        );
+        let reason = purple_check
+            .fail_reason()
+            .expect("blocked by the fill floor");
+        assert!(reason.contains("3:1"), "{reason}");
+        let mut purple_font = BrandDraft::from_saved(&purple);
+        purple_font.font = DisplayFont::IbmPlexSans;
+        let body = save_body(&purple_font, &purple).expect("a font-only Save is not locked");
+        assert_eq!(body_keys(&body), ["brand_font_display"]);
+        let html = render_with_draft(purple.clone(), purple_font);
+        assert!(
+            save_button(&html).contains("aria-disabled=\"false\""),
+            "{html}"
+        );
+        // Typing that purple as a new accent is still locked by the fill floor.
+        assert!(save_body(&draft(TEST_FILL_ONLY_ACCENT), &stored).is_none());
+
+        // The stored failing accent typed in another case is no change, so
+        // it does not lock Save.
+        let mut other = BrandDraft::from_saved(&stored);
+        other.accent = TEST_BLOCKED_ACCENT.to_uppercase();
+        assert!(
+            save_body(&other, &stored).is_some(),
+            "same accent, any case"
+        );
+        // Changing the accent to another failing one still locks Save. The
+        // field takes hex without the `#` too.
+        other.accent = "e91e63".into();
+        assert!(
+            Verdict::of(&other, &stored).blocked(),
+            "e91e63 fails the check"
+        );
+        assert!(
+            save_body(&other, &stored).is_none(),
+            "a changed failing accent"
+        );
+    }
+
+    /// A font-only Save over an identity pack pair (separate dark and light
+    /// accents) sends no accent key, so the pack's light accent survives.
+    #[test]
+    fn font_only_save_over_a_pack_pair_sends_no_accent_key() {
+        let mut pack = saved(TEST_MINT_ACCENT);
+        pack.accent_light = TEST_OTHER_ACCENT.into();
+        let mut font_only = BrandDraft::from_saved(&pack);
+        font_only.font = DisplayFont::IbmPlexSans;
+        let body = save_body(&font_only, &pack).expect("passing");
+        assert_eq!(body_keys(&body), ["brand_font_display"]);
+        assert_eq!(body.brand_accent_dark, None);
+        assert_eq!(body.brand_accent_light, None);
+
+        // The same draft typed in another case or short form is unchanged too.
+        for typed in [
+            TEST_MINT_ACCENT.to_uppercase(),
+            TEST_MINT_ACCENT.trim_start_matches('#').to_string(),
+        ] {
+            let mut same = font_only.clone();
+            same.accent = typed.clone();
+            let body = save_body(&same, &pack).expect("passing");
+            assert_eq!(body_keys(&body), ["brand_font_display"], "{typed}");
+        }
+    }
+
+    /// Site review 4, nit 1: an untouched pack pair previews and measures
+    /// its stored light accent, since Save keeps it. A changed accent
+    /// previews the one accent in both themes, since that is what Save writes.
+    #[test]
+    fn an_untouched_pack_pair_previews_its_stored_light_accent() {
+        let mut pack = saved(TEST_MINT_ACCENT);
+        pack.accent_light = TEST_OTHER_ACCENT.into();
+        let pair = BrandConfig::from_settings(TEST_MINT_ACCENT, TEST_OTHER_ACCENT);
+        let one = |hex: &str| BrandConfig::from_settings(hex, hex);
+        assert_ne!(
+            pair.light.css_decls(),
+            one(TEST_MINT_ACCENT).light.css_decls(),
+            "the pair's light roles differ from the dark accent's"
+        );
+
+        // Untouched, also typed another way: the stored pair, measured as
+        // stored.
+        let upper = TEST_MINT_ACCENT.to_ascii_uppercase();
+        for typed in [TEST_MINT_ACCENT, upper.as_str()] {
+            let mut untouched = BrandDraft::from_saved(&pack);
+            untouched.accent = typed.to_string();
+            let verdict = Verdict::of(&untouched, &pack);
+            assert_eq!(verdict.brand, pair, "{typed}");
+            let measured = AccentCheck::for_brand(&pair);
+            assert_eq!(
+                verdict.check.light.accent_on_bg,
+                measured.light.accent_on_bg
+            );
+            assert_eq!(
+                verdict.check.light.ink_on_accent,
+                measured.light.ink_on_accent
+            );
+            let html = render_with_draft(pack.clone(), untouched);
+            let light_card = html
+                .split("data-preview=\"light\"")
+                .nth(1)
+                .expect("light preview");
+            assert!(
+                light_card.contains(&pair.light.css_decls()),
+                "{typed}: {light_card}"
+            );
+        }
+
+        // Changed: the one accent in both themes, as Save writes it.
+        let changed = draft(TEST_SHORT_ACCENT);
+        let verdict = Verdict::of(&changed, &pack);
+        let short = normalize_hex(TEST_SHORT_ACCENT).expect("hex");
+        assert_eq!(verdict.brand, one(&short));
+        let html = render_with_draft(pack, changed);
+        let light_card = html
+            .split("data-preview=\"light\"")
+            .nth(1)
+            .expect("light preview");
+        assert!(
+            light_card.contains(&one(&short).light.css_decls()),
+            "{light_card}"
+        );
+        assert!(
+            !light_card.contains(&pair.light.css_decls()),
+            "{light_card}"
+        );
+    }
+
+    /// Site review 4, nit 2: Save with nothing changed sends no request.
+    /// It reads as disabled, in step with the leave guard, and its handler
+    /// only ever sends `save_request`, which is `None` for an empty body.
+    #[test]
+    fn an_empty_save_sends_nothing() {
+        let mut pack = saved(TEST_MINT_ACCENT);
+        pack.accent_light = TEST_OTHER_ACCENT.into();
+        for stored in [
+            saved(TEST_MINT_ACCENT),
+            pack,
+            saved(TEST_BLOCKED_ACCENT),
+            saved(TEST_FILL_ONLY_ACCENT),
+            saved(""),
+        ] {
+            let untouched = BrandDraft::from_saved(&stored);
+            assert!(!untouched.is_unsaved(&stored), "{stored:?}");
+            let body = save_body(&untouched, &stored).expect("not locked");
+            assert!(body_keys(&body).is_empty(), "{stored:?}");
+            assert!(save_request(&untouched, &stored).is_none(), "{stored:?}");
+
+            let html = render_with_draft(stored.clone(), untouched.clone());
+            let button = save_button(&html);
+            assert!(
+                button.contains("aria-disabled=\"true\""),
+                "{stored:?}: {button}"
+            );
+            assert!(!button.contains("is-primary"), "{stored:?}: {button}");
+            assert!(
+                !button.contains("brand-accent-reason"),
+                "{stored:?}: {button}"
+            );
+
+            // One change and there is a request again.
+            let mut font = untouched;
+            font.font = DisplayFont::IbmPlexSans;
+            let request = save_request(&font, &stored).expect("a font change is sent");
+            assert_eq!(body_keys(&request), ["brand_font_display"]);
+        }
+
+        // The handler sends only what save_request gives it.
+        let src = include_str!("brand_settings.rs");
+        let handler = src
+            .split("let on_save = move |_| {")
+            .nth(1)
+            .and_then(|rest| rest.split("rsx! {").next())
+            .expect("save handler");
+        assert!(handler.contains("save_request(&draft.read(), &saved_now.read())"));
+        assert!(!handler.contains("save_body("), "{handler}");
+    }
+
+    /// Site review 4, nit 6: the API doc matches the rules. It says the font
+    /// is sent only when it changed, so over a stored "urbanist" a pick of
+    /// Urbanist sends nothing, and that is what Save does.
+    #[test]
+    fn the_api_doc_matches_the_font_save_rule() {
+        // Behaviour the doc describes.
+        let explicit = SavedBrand::from_settings(&settings_with_font(TEST_MINT_ACCENT, "urbanist"));
+        let mut pick_urbanist = BrandDraft::from_saved(&explicit);
+        pick_urbanist.font = DisplayFont::Urbanist;
+        assert!(save_request(&pick_urbanist, &explicit).is_none());
+        let plex =
+            SavedBrand::from_settings(&settings_with_font(TEST_MINT_ACCENT, "ibm-plex-sans"));
+        let mut back = BrandDraft::from_saved(&plex);
+        back.font = DisplayFont::Urbanist;
+        let request = save_request(&back, &plex).expect("font changed");
+        assert_eq!(request.brand_font_display.as_deref(), Some(""));
+
+        // Compared with line breaks folded, as the page wraps at 76 columns.
+        let doc = include_str!("../../../../../docs/api/site-settings.md")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            doc.contains("sends `brand_font_display` only when the font differs from the"),
+            "{doc}"
+        );
+        assert!(
+            doc.contains("over a stored `\"urbanist\"`, picking Urbanist sends nothing"),
+            "{doc}"
+        );
+    }
+
+    /// The leave guard (`is_unsaved`) and Save agree on "changed": when Save
+    /// is not locked, a draft is unsaved exactly when Save would send a
+    /// request. A locked draft is unsaved and gets no request.
+    #[test]
+    fn the_leave_guard_and_save_agree_on_what_changed() {
+        let mut pack = saved(TEST_MINT_ACCENT);
+        pack.accent_light = TEST_OTHER_ACCENT.into();
+        let upper = TEST_MINT_ACCENT.to_ascii_uppercase();
+        let stores = [
+            saved(TEST_MINT_ACCENT),
+            pack,
+            saved(TEST_BLOCKED_ACCENT),
+            saved(TEST_FILL_ONLY_ACCENT),
+            saved(""),
+        ];
+        let accents = [
+            TEST_MINT_ACCENT,
+            upper.as_str(),
+            &TEST_MINT_ACCENT[1..],
+            TEST_OTHER_ACCENT,
+            TEST_SHORT_ACCENT,
+            "",
+        ];
+        for stored in &stores {
+            // Site review 4, nit 5: every store also drafts its own stored
+            // accent, as stored, in upper case and without the `#`. For the
+            // blocked and fill-only stores that adds the untouched case; the
+            // mint and pack stores already had it, through the mint accents
+            // above.
+            let own = stored.accent_dark.clone();
+            let own_upper = own.to_ascii_uppercase();
+            let own_bare = own.trim_start_matches('#').to_string();
+            let drafts =
+                accents
+                    .iter()
+                    .map(|a| a.to_string())
+                    .chain([own.clone(), own_upper, own_bare]);
+            let mut untouched_seen = false;
+            for accent in drafts {
+                for font in DisplayFont::ALL {
+                    let d = BrandDraft {
+                        accent: accent.clone(),
+                        font,
+                    };
+                    if !accent_changed(&d, stored) && font == stored.font {
+                        untouched_seen = true;
+                    }
+                    match save_body(&d, stored) {
+                        // Not locked: unsaved exactly when the body has a
+                        // key, which is exactly when there is a request.
+                        Some(body) => {
+                            assert_eq!(
+                                d.is_unsaved(stored),
+                                !body_keys(&body).is_empty(),
+                                "{stored:?} {d:?}"
+                            );
+                            assert_eq!(
+                                d.is_unsaved(stored),
+                                save_request(&d, stored).is_some(),
+                                "{stored:?} {d:?}"
+                            );
+                        }
+                        // Locked (a changed accent that fails): unsaved, and
+                        // no request.
+                        None => {
+                            assert!(d.is_unsaved(stored), "{stored:?} {d:?}");
+                            assert!(save_request(&d, stored).is_none(), "{stored:?} {d:?}");
+                        }
+                    }
+                }
+            }
+            assert!(untouched_seen, "{stored:?} drafts its own stored brand");
+        }
+    }
+
+    /// Accent and font changed together: both are sent.
+    #[test]
+    fn accent_and_font_changed_send_both() {
+        let stored = saved(TEST_MINT_ACCENT);
+        let mut both = draft(TEST_OTHER_ACCENT);
+        both.font = DisplayFont::IbmPlexSans;
+        let body = save_body(&both, &stored).expect("passing");
+        assert_eq!(
+            body_keys(&body),
+            [
+                "brand_accent_dark",
+                "brand_accent_light",
+                "brand_font_display"
+            ]
+        );
+        assert_eq!(body.brand_accent_dark, body.brand_accent_light);
+        assert_eq!(body.brand_font_display.as_deref(), Some("ibm-plex-sans"));
+
+        // Nothing changed: nothing is sent.
+        let body = save_body(&BrandDraft::from_saved(&stored), &stored).unwrap();
+        assert!(body_keys(&body).is_empty(), "{:?}", body_keys(&body));
+    }
+
+    /// `""` is the stored default. A row with `""` and one with `"urbanist"`
+    /// load as the same font, and neither shows a font change on load or
+    /// after a reset is saved and read back.
+    #[test]
+    fn default_font_round_trips_as_empty_with_no_phantom_change() {
+        assert_eq!(DisplayFont::Urbanist.setting_value(), "");
+        assert_eq!(DisplayFont::IbmPlexSans.setting_value(), "ibm-plex-sans");
+        assert!(scuffed_types::is_allowed_brand_font_display(
+            DisplayFont::Urbanist.setting_value()
+        ));
+        for stored in ["", "urbanist"] {
+            let saved = SavedBrand::from_settings(&settings_with_font(TEST_MINT_ACCENT, stored));
+            assert_eq!(saved.font, DisplayFont::Urbanist, "{stored:?}");
+            let body = save_body(&BrandDraft::from_saved(&saved), &saved).unwrap();
+            assert_eq!(body.brand_font_display, None, "load of {stored:?}");
+        }
+
+        // Reset over Plex sends "", the server stores it, the page reads it
+        // back, and the next diff is empty.
+        let plex =
+            SavedBrand::from_settings(&settings_with_font(TEST_MINT_ACCENT, "ibm-plex-sans"));
+        let reset = BrandDraft::product_default();
+        let body = save_body(&reset, &plex).unwrap();
+        let stored_font = body.brand_font_display.clone().expect("font changed");
+        assert_eq!(stored_font, "");
+        let accent = body.brand_accent_dark.clone().expect("accent changed");
+        let after = SavedBrand::from_settings(&settings_with_font(&accent, &stored_font));
+        assert_eq!(after.font, DisplayFont::Urbanist);
+        let next = save_body(&reset, &after).unwrap();
+        assert!(body_keys(&next).is_empty(), "{:?}", body_keys(&next));
+        assert_eq!(BrandDraft::from_saved(&after), reset);
+    }
+
+    /// The page reads `brand_font_display` from the shared type. A view that
+    /// read it any other way (a second struct flattened next to
+    /// `SiteSettings`, say) loses the key to `SiteSettings` and falls back to
+    /// Urbanist, which this catches.
+    #[test]
+    fn saved_brand_reads_the_typed_font_field() {
+        let json = settings_json_with_font(TEST_MINT_ACCENT, "ibm-plex-sans");
+        assert!(
+            json.contains(r#""brand_font_display":"ibm-plex-sans""#),
+            "{json}"
+        );
+        let settings: SiteSettings = serde_json::from_str(&json).expect("settings JSON");
+        assert_eq!(settings.brand_font_display, "ibm-plex-sans");
+        assert_eq!(
+            SavedBrand::from_settings(&settings).font,
+            DisplayFont::IbmPlexSans
+        );
+        // Unknown values and URLs are the default, never a raw family name.
+        for value in ["Comic Sans MS", "https://fonts.example/x.woff2"] {
+            let settings = settings_with_font(TEST_MINT_ACCENT, value);
+            assert_eq!(
+                SavedBrand::from_settings(&settings).font,
+                DisplayFont::Urbanist
+            );
+        }
     }
 
     #[test]
@@ -1085,12 +1617,31 @@ mod tests {
         }
     }
 
-    /// The page for `viewer`, with the settings fetch answered (through the
-    /// test seam) and polled to the end. Returns the HTML before the fetch
-    /// resolved and after.
-    fn render_page(viewer: Viewer) -> (String, String) {
+    /// The page for `viewer`, with every settings read answered by `json`
+    /// (the embedded block, the shared fetch and the page's own fetch,
+    /// through the test seams) and polled to the end. Returns the HTML before
+    /// the fetch resolved and after. Like the app root, the harness paints
+    /// the display font from the shared settings into `<style id="chrome-font">`.
+    fn render_page_with(viewer: Viewer, json: String) -> (String, String) {
+        render_page_split(viewer, json.clone(), json)
+    }
+
+    /// Like [`render_page_with`], but the page's own `GET /api/settings`
+    /// answers with `page_json` while the embedded block and the shared
+    /// fetch answer with `shared_json`.
+    fn render_page_split(
+        viewer: Viewer,
+        shared_json: String,
+        page_json: String,
+    ) -> (String, String) {
         #[component]
         fn Harness(viewer: Viewer) -> Element {
+            let site = crate::state::provide_site_settings();
+            let chrome_font = {
+                let resolved = site.resolved.read();
+                DisplayFont::for_settings(crate::state::loaded_site_settings(resolved.as_ref()))
+                    .root_css()
+            };
             let auth = use_signal(|| AuthState {
                 user: match viewer {
                     Viewer::Guest => None,
@@ -1108,19 +1659,99 @@ mod tests {
                 std::rc::Rc::new(dioxus::history::MemoryHistory::with_initial_path("/"))
             });
             rsx! {
+                style { id: "chrome-font", "{chrome_font}" }
                 dioxus::router::components::HistoryProvider {
                     history: move |_| history.clone() as std::rc::Rc<dyn dioxus::history::History>,
                     Router::<PageOnly> {}
                 }
             }
         }
-        TEST_BRAND_VIEW_JSON
-            .with(|slot| *slot.borrow_mut() = Some(settings_json(TEST_MINT_ACCENT)));
+        crate::state::site_settings::set_test_embedded_json(Some(shared_json.clone()));
+        crate::state::site_settings::mock_settings_fetch(Some(shared_json));
+        TEST_BRAND_VIEW_JSON.with(|slot| *slot.borrow_mut() = Some(page_json));
         let mut dom = VirtualDom::new_with_props(Harness, HarnessProps { viewer });
         dom.rebuild_in_place();
         let pending = dioxus_ssr::render(&dom);
         settle(&mut dom);
         (pending, dioxus_ssr::render(&dom))
+    }
+
+    fn render_page(viewer: Viewer) -> (String, String) {
+        render_page_with(viewer, settings_json(TEST_MINT_ACCENT))
+    }
+
+    /// The text of `<style id="chrome-font">`.
+    fn chrome_font(html: &str) -> &str {
+        html.split_once("<style id=\"chrome-font\">")
+            .and_then(|(_, rest)| rest.split_once("</style>"))
+            .map(|(css, _)| css)
+            .expect("chrome font style")
+    }
+
+    /// QA's 694 + 695 case: a stored IBM Plex Sans reaches the loaded page
+    /// as the selected, unlocked choice, and the note names it.
+    #[test]
+    fn the_loaded_page_shows_the_stored_font_unlocked() {
+        let _clear = ClearHooks;
+        let json = settings_json_with_font(TEST_MINT_ACCENT, "ibm-plex-sans");
+        let (_, html) = render_page_with(Viewer::Account(Some(OrgRole::Admin)), json);
+        assert!(html.contains(">Save brand<"), "{html}");
+        assert_eq!(html.matches("type=\"radio\"").count(), 2, "{html}");
+        assert!(!html.contains("disabled=true"), "{html}");
+        assert!(!html.contains("is-locked"), "{html}");
+        assert!(
+            html.contains("The site uses IBM Plex Sans. Save brand applies a new choice."),
+            "{html}"
+        );
+        assert!(!html.contains("The site uses Urbanist"), "{html}");
+        assert!(
+            html.contains(&format!(
+                "class=\"customise-choice is-selected\" style=\"font-family: {};\"",
+                DisplayFont::IbmPlexSans.family_var()
+            )),
+            "{html}"
+        );
+    }
+
+    /// Opening `/admin/brand` must not move the admin's chrome font. The
+    /// chrome paints IBM Plex Sans from the shared settings before the page
+    /// loads and still does after, and only a save can change it.
+    #[test]
+    fn opening_the_page_keeps_the_chrome_font() {
+        let _clear = ClearHooks;
+        let plex = DisplayFont::IbmPlexSans.root_css();
+        assert!(!plex.is_empty());
+        // The shared settings (embedded block and shared fetch) say IBM Plex
+        // Sans; the page's own fetch says Urbanist. If loading the page
+        // wrote its font into the chrome, the chrome would turn Urbanist.
+        let shared = settings_json_with_font(TEST_MINT_ACCENT, "ibm-plex-sans");
+        let page = settings_json_with_font(TEST_MINT_ACCENT, "");
+        let (pending, loaded) =
+            render_page_split(Viewer::Account(Some(OrgRole::Admin)), shared, page);
+        assert!(pending.contains("Loading brand settings..."), "{pending}");
+        assert_eq!(chrome_font(&pending), plex, "{pending}");
+        assert!(loaded.contains(">Save brand<"), "{loaded}");
+        // The page did load its own answer...
+        assert!(
+            loaded.contains("The site uses Urbanist. Save brand applies a new choice."),
+            "{loaded}"
+        );
+        // ...and the chrome still follows the shared settings.
+        assert_eq!(chrome_font(&loaded), plex, "{loaded}");
+
+        // The page itself has no path that writes the chrome font except the
+        // success arm of Save, which hands the saved settings over.
+        let src = include_str!("brand_settings.rs");
+        let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        assert!(!prod.contains("BrandFontState"), "no second font state");
+        assert_eq!(prod.matches(".apply_saved(").count(), 1);
+        // The app root paints the font the way this harness does: from the
+        // shared settings, not from a state this page could write.
+        let root = include_str!("../../main.rs");
+        assert!(
+            root.contains("DisplayFont::for_settings(loaded_settings).root_css()"),
+            "the app root reads the display font from the shared settings"
+        );
     }
 
     const BRAND_CONTROLS: [&str; 7] = [

@@ -137,17 +137,6 @@ pub const CUSTOMISE_CSS: &str = r#"
     .customise-choice:focus-within:not(:has(input:focus-visible)) {
         outline: none;
     }
-    /* A locked choice still tells the admin which font the site uses, so
-       its label keeps AA text contrast. The lock reads from the plain
-       surface, the not-allowed cursor and the note under the row; the dot
-       still marks the selected one. */
-    .customise-choice.is-locked {
-        color: var(--text-3);
-        background: var(--surface);
-        border-color: var(--border);
-        cursor: not-allowed;
-    }
-    .customise-choice.is-locked input { cursor: not-allowed; }
 
     .customise-accent-row {
         display: flex;
@@ -313,8 +302,10 @@ pub const CUSTOMISE_CSS: &str = r#"
         color: var(--button-primary-fg);
         border-color: var(--button-primary-border);
     }
-    /* Blocked, not disabled: the button keeps focus so the reason it points
-       at is read out. The click handler does the blocking. */
+    /* Locked, not disabled: the button keeps focus, and the click handler
+       does the blocking. When the contrast check locks Save the button is
+       described by the visible reason, so focus reads it out. When there is
+       nothing to save it has no reason to point at. */
     .customise-btn[aria-disabled="true"] {
         background: var(--surface);
         color: var(--text-disabled);
@@ -372,8 +363,7 @@ pub const CUSTOMISE_CSS: &str = r#"
     /* Forced colours replace author backgrounds and text colours. The ring
        and dot stay (they are borders). Every choice gets the same thick
        border, so nothing shifts when the selection moves; the selected one
-       takes the system selection colour. The locked rule comes last: a
-       locked choice is grey all through, its selected dot included. */
+       takes the system selection colour. */
     @media (forced-colors: active) {
         .customise-choice {
             border-color: ButtonText;
@@ -388,15 +378,15 @@ pub const CUSTOMISE_CSS: &str = r#"
         .customise-choice.is-selected .customise-choice-mark::after {
             border-color: Highlight;
         }
-        .customise-choice.is-locked,
-        .customise-choice.is-locked .customise-choice-mark,
-        .customise-choice.is-locked .customise-choice-mark::after {
-            border-color: GrayText;
-            color: GrayText;
-        }
         .customise-choice:focus-within,
         .customise-swatch:focus-within {
             outline-color: Highlight;
+        }
+        /* aria-disabled is not :disabled, so forced colours would paint a
+           locked Save as enabled. GrayText is the system disabled colour. */
+        .customise-btn[aria-disabled="true"] {
+            color: GrayText;
+            border-color: GrayText;
         }
     }
 "#;
@@ -417,41 +407,6 @@ mod tests {
             .unwrap_or_else(|| panic!("no rule for {selector}"))
             + open.len();
         &css[start..start + css[start..].find('}').expect("end of rule")]
-    }
-
-    /// QA 694 nit 10: the locked font chip read 2.94:1 (dark) and 3.04:1
-    /// (light) in `--text-disabled` on the selected fill. It shows the font
-    /// the site uses, so it keeps AA: `--text-3` on the plain surface, for
-    /// the selected chip too.
-    #[test]
-    fn locked_choice_label_keeps_aa_text_contrast() {
-        use crate::theme::brand::{BrandConfig, TEST_SWEEP_ACCENTS, contrast_ratio};
-        use crate::theme::tokens::{resolved_tokens, theme_css};
-
-        let base = CUSTOMISE_CSS
-            .split_once("@media (forced-colors: active)")
-            .expect("forced colours block")
-            .0;
-        let locked = rule(base, ".customise-choice.is-locked");
-        assert!(locked.contains("color: var(--text-3);"), "{locked}");
-        assert!(locked.contains("background: var(--surface);"), "{locked}");
-        assert!(!locked.contains("--text-disabled"), "{locked}");
-        // It comes after the selected rule, so it wins for a locked selected
-        // chip (same specificity).
-        let selected_at = base
-            .find(".customise-choice.is-selected {")
-            .expect("selected");
-        let locked_at = base.find(".customise-choice.is-locked {").expect("locked");
-        assert!(selected_at < locked_at);
-
-        for accent in TEST_SWEEP_ACCENTS {
-            let css = theme_css(&BrandConfig::from_settings(accent, accent));
-            for theme in ["dark", "light"] {
-                let tokens = resolved_tokens(&css, theme);
-                let ratio = contrast_ratio(&tokens["--text-3"], &tokens["--surface"]);
-                assert!(ratio >= 4.5, "{theme} {accent} {ratio:.2}");
-            }
-        }
     }
 
     /// The selected choice must differ from the others by more than colour
@@ -529,31 +484,31 @@ mod tests {
         assert!(!forced.contains("padding"), "{forced}");
     }
 
-    /// The font picker is locked today, so its selected choice is locked and
-    /// selected at once. In forced colours it is grey all through: no
-    /// `Highlight` border, ring or dot on a control that cannot be used.
+    /// In forced colours only the selected choice and the focus outline take
+    /// `Highlight`.
     #[test]
-    fn a_locked_choice_gets_no_highlight_in_forced_colours() {
+    fn forced_colours_highlight_only_the_selection_and_focus() {
         let (_, forced) = CUSTOMISE_CSS
             .split_once("@media (forced-colors: active)")
             .expect("forced colours block");
-        let selectors = ".customise-choice.is-locked,\n        .customise-choice.is-locked .customise-choice-mark,\n        .customise-choice.is-locked .customise-choice-mark::after";
-        let locked = rule(forced, selectors);
-        assert!(locked.contains("border-color: GrayText;"), "{locked}");
-        assert!(locked.contains("color: GrayText;"), "{locked}");
-        assert!(!locked.contains("Highlight"), "{locked}");
-        // Same specificity as the selected rules, so it must come later to
-        // win on a choice that is both.
-        let selected_dot = forced
-            .find(".customise-choice.is-selected .customise-choice-mark::after")
-            .expect("selected dot rule");
-        let locked_at = forced.find(selectors).expect("locked rule");
-        assert!(selected_dot < locked_at, "the locked rule comes last");
         assert_eq!(
             forced.matches("Highlight").count(),
             3,
             "selected border, selected ring and dot, focus outline: {forced}"
         );
+        assert!(!forced.contains("is-locked"), "{forced}");
+    }
+
+    /// Site review 5, nit 2: a locked Save (`aria-disabled`, not `:disabled`)
+    /// must also look disabled in forced colours.
+    #[test]
+    fn a_locked_button_looks_disabled_in_forced_colours() {
+        let (_, forced) = CUSTOMISE_CSS
+            .split_once("@media (forced-colors: active)")
+            .expect("forced colours block");
+        let locked = rule(forced, ".customise-btn[aria-disabled=\"true\"]");
+        assert!(locked.contains("color: GrayText;"), "{locked}");
+        assert!(locked.contains("border-color: GrayText;"), "{locked}");
     }
 
     /// `:has()` is not everywhere. Without it the focus ring must still show.
