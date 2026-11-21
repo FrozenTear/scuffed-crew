@@ -42,6 +42,8 @@ ipnet = "2"
 semver = "1"
 zeroize = "1"
 sha2 = "0.10"
+# HMAC-SHA256 member keys in the training crop export.
+hmac = "0.12"
 flate2 = "1"
 zip = { version = "9", default-features = false, features = ["deflate"] }
 
