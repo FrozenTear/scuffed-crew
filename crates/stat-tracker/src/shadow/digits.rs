@@ -52,7 +52,7 @@ pub const FIELDS: [&str; 6] = ["E", "A", "D", "DMG", "H", "MIT"];
 pub use crate::model::RECOGNIZER_ID;
 
 /// [`RECOGNIZER_ID`] for a run with OCR off.
-pub const RECOGNIZER_ID_NO_OCR: &str = "cv-v8-noocr";
+pub const RECOGNIZER_ID_NO_OCR: &str = "cv-v9-noocr";
 
 /// The reader id for a run with OCR on or off.
 pub fn recognizer_id(ocr_on: bool) -> &'static str {
@@ -91,6 +91,13 @@ const MIN_INK_PER_GLYPH: f64 = 0.15;
 /// moves by under 0.003 with any one map held out), so `score / PAIR_TYP` is
 /// on the same 1.0-is-typical scale as the glyph margin.
 const PAIR_TYP: f64 = 0.95;
+/// Pair check scale for a 3 next to an 8: the median pair-check score of
+/// correctly read 3s (vs 8) on the labelled 1440 Tab set is 0.44 (0.43 to
+/// 0.45 with any one map held out). The check only tells a 3 from an 8, and
+/// at 1080 it barely does (median 0.04 there), so it seldom lifts at 1080;
+/// it never lowers. Correctly read 8s score -0.19 or lower at both sizes, and
+/// a lift needs at least `PAIR_FLOOR * PAIR_TYP_3V8` (0.11).
+const PAIR_TYP_3V8: f64 = 0.44;
 /// A pair check only runs on a glyph whose own calibrated margin is at least
 /// this: the top read must still lead clearly; the check cannot rescue a
 /// coin flip.
@@ -1302,7 +1309,8 @@ fn recentred_canvas(cell: &Cell, p: usize) -> [f32; CANVAS] {
 /// two templates differ most (`PAIR_MASK`). For 4 vs 6 that is the 4's open
 /// top-left and stem against the 6's curved top-left and closed bottom loop;
 /// for 0 vs 3 the 0's closed left side and hollow centre against the 3's
-/// open left and middle bar. Positive favours `a`; it is antisymmetric, so a
+/// open left and middle bar; for 3 vs 8 the 3's open left side against the
+/// 8's closed left loops. Positive favours `a`; it is antisymmetric, so a
 /// real 6 scores as negative as a real 4 scores positive.
 fn pair_check(v: &[f32; CANVAS], tpl: &Templates, a: usize, b: usize) -> f64 {
     let d: Vec<f64> = (0..CANVAS)
@@ -1328,7 +1336,9 @@ fn pair_check(v: &[f32; CANVAS], tpl: &Templates, a: usize, b: usize) -> f64 {
 /// * a 4 next to a 6, or next to a 1 when the piece is too wide to be a 1
 ///   (the 4's tall stem alone resembles a 1), is checked against the 6;
 /// * a 0 next to a 3 is checked only when the cell is dim, since zeros are
-///   drawn in grey; a bright cell read as 0 gets no help.
+///   drawn in grey; a bright cell read as 0 gets no help;
+/// * a 3 next to an 8 is checked only when the cell is bright: a dim cell
+///   holds a zero, which this check cannot tell from a 3.
 fn pair_margin(
     cell: &Cell,
     tpl: &Templates,
@@ -1337,13 +1347,14 @@ fn pair_margin(
     second: usize,
     dim: bool,
 ) -> Option<f64> {
-    let other = match (best, second) {
-        (4, 6) => 6,
-        (4, 1) if cell.ar[p] > tpl.ar_hi[1] => 6,
-        (0, 3) if dim => 3,
+    let (other, typ) = match (best, second) {
+        (4, 6) => (6, PAIR_TYP),
+        (4, 1) if cell.ar[p] > tpl.ar_hi[1] => (6, PAIR_TYP),
+        (0, 3) if dim => (3, PAIR_TYP),
+        (3, 8) if !dim => (8, PAIR_TYP_3V8),
         _ => return None,
     };
-    Some(pair_check(&recentred_canvas(cell, p), tpl, best, other) / PAIR_TYP)
+    Some(pair_check(&recentred_canvas(cell, p), tpl, best, other) / typ)
 }
 
 /// Value, margin and whether any sanity flag fired.
@@ -1683,13 +1694,37 @@ pub(crate) mod test_glyphs {
     pub(crate) fn draw_stat(img: &mut RgbImage, v: u32, k: usize, cx: usize, top: usize) {
         draw_text(img, &glyph_means(), &text_for(v, k), cx, top, 3);
     }
+
+    /// A one-glyph cell from a template glyph mean (1440 size), optionally
+    /// with one stray ink pixel in the column right of the glyph.
+    pub(super) fn glyph_cell(c: usize, stray: bool) -> Cell {
+        let g = &glyph_means()[c];
+        let (w, h) = (CW + 8, CH + 8);
+        let mut ink = Plane::zeros(w, h);
+        for y in 0..CH {
+            for x in 0..CW {
+                ink.d[(y + 2) * w + x + 4] = g.at(x, y);
+            }
+        }
+        if stray {
+            let (_, x1) = ink_cols(g);
+            ink.d[(2 + CH / 3) * w + 4 + x1] = 0.5;
+        }
+        prepare_cell(segment(ink, 160.0).unwrap()).unwrap()
+    }
+
+    /// Piece id covering the whole (single) run.
+    pub(super) fn whole_piece(cell: &Cell) -> usize {
+        let (s, e) = (cell.runs[0].s, cell.runs[0].e);
+        cell.pieces.iter().position(|&p| p == (s, e)).unwrap()
+    }
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use image::{Rgb, RgbImage};
-    use test_glyphs::{draw_text, glyph_means, ink_cols, text_for};
+    use test_glyphs::{draw_text, glyph_cell, glyph_means, ink_cols, text_for, whole_piece};
 
     /// 1664x1007 scoreboard (a 1440p crop): bright header with six dark labels,
     /// dark rows holding the given stat values. No name or hero pixels.
@@ -2179,67 +2214,6 @@ pub(crate) mod tests {
         assert!(too_little_ink(22.0, 2, 9));
     }
 
-    /// A one-glyph cell from a template glyph mean (1440 size), optionally
-    /// with one stray ink pixel in the column right of the glyph.
-    fn glyph_cell(c: usize, stray: bool) -> Cell {
-        let g = &glyph_means()[c];
-        let (w, h) = (CW + 8, CH + 8);
-        let mut ink = Plane::zeros(w, h);
-        for y in 0..CH {
-            for x in 0..CW {
-                ink.d[(y + 2) * w + x + 4] = g.at(x, y);
-            }
-        }
-        if stray {
-            let (_, x1) = ink_cols(g);
-            ink.d[(2 + CH / 3) * w + 4 + x1] = 0.5;
-        }
-        prepare_cell(segment(ink, 160.0).unwrap()).unwrap()
-    }
-
-    /// Piece id covering the whole (single) run.
-    fn whole_piece(cell: &Cell) -> usize {
-        let (s, e) = (cell.runs[0].s, cell.runs[0].e);
-        cell.pieces.iter().position(|&p| p == (s, e)).unwrap()
-    }
-
-    #[test]
-    fn pair_check_reads_the_region_where_look_alikes_differ() {
-        let tpl = templates_for(REF_H_1440);
-        let canvas = |c: usize| -> [f32; CANVAS] { tpl.t[c].as_slice().try_into().unwrap() };
-        for (a, b) in [(4, 6), (0, 3)] {
-            assert!(pair_check(&canvas(a), tpl, a, b) > 0.9, "{a} vs {b}");
-            assert!(pair_check(&canvas(b), tpl, a, b) < -0.9, "{b} read as {a}");
-            // antisymmetric: swapping the pair flips the sign
-            let (x, y) = (
-                pair_check(&canvas(a), tpl, a, b),
-                pair_check(&canvas(a), tpl, b, a),
-            );
-            assert!((x + y).abs() < 1e-9);
-        }
-    }
-
-    #[test]
-    fn pair_margin_applies_only_to_known_look_alikes() {
-        let tpl = templates_for(REF_H_1440);
-        let four = glyph_cell(4, false);
-        let p = whole_piece(&four);
-        let m = pair_margin(&four, tpl, p, 4, 6, false).unwrap();
-        assert!(m > 0.9, "{m}");
-        // a 4 whose shape runner-up is 1 but which is far too wide to be a 1
-        assert!(four.ar[p] > tpl.ar_hi[1]);
-        assert!(pair_margin(&four, tpl, p, 4, 1, false).is_some());
-        // other pairs get no check
-        assert!(pair_margin(&four, tpl, p, 4, 9, false).is_none());
-        assert!(pair_margin(&four, tpl, p, 6, 4, false).is_none());
-        // a 0 is only helped when the cell is dim
-        let zero = glyph_cell(0, false);
-        let z = whole_piece(&zero);
-        assert!(pair_margin(&zero, tpl, z, 0, 3, true).unwrap() > 0.9);
-        assert!(pair_margin(&zero, tpl, z, 0, 3, false).is_none());
-        assert!(pair_margin(&zero, tpl, z, 3, 0, true).is_none());
-    }
-
     #[test]
     fn recentred_canvas_drops_a_one_pixel_edge_column() {
         let clean = glyph_cell(0, false);
@@ -2508,6 +2482,7 @@ pub(crate) mod tests {
             PM_REF,
             MIN_INK_PER_GLYPH,
             PAIR_TYP,
+            PAIR_TYP_3V8,
             PAIR_FLOOR,
             PAIR_MASK,
             DIM_RATIO,
@@ -2570,8 +2545,8 @@ pub(crate) mod tests {
     /// as `params`.
     #[test]
     fn the_reader_id_says_when_ocr_was_off() {
-        assert_eq!(recognizer_id(true), "cv-v8");
-        assert_eq!(recognizer_id(false), "cv-v8-noocr");
+        assert_eq!(recognizer_id(true), "cv-v9");
+        assert_eq!(recognizer_id(false), "cv-v9-noocr");
         for id in [RECOGNIZER_ID, RECOGNIZER_ID_NO_OCR] {
             assert!(scuffed_types::api::stats::is_recognizer_id(id), "{id}");
         }
@@ -2586,6 +2561,7 @@ pub(crate) mod tests {
         ("cv-v6", 0x3533_9fdc_9a40_b16f),
         ("cv-v7", 0xad1f_8150_9f8a_9963),
         ("cv-v8", 0x0776_09a9_bccc_0662),
+        ("cv-v9", 0x318e_c17d_4d7e_766a),
     ];
 
     /// Readable part of the pinned snapshot for the current id: key, value,
@@ -2824,3 +2800,7 @@ pub(crate) mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "digits_pair_tests.rs"]
+mod pair_tests;
