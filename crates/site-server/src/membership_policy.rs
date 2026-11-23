@@ -250,13 +250,29 @@ pub fn can_set_is_active(
 /// Whether an application reviewer may bring an inactive member back by moving
 /// their application to trial or accepted.
 ///
-/// Trial and accept set `is_active = true` and keep the stored role, so this
-/// is the same rank rule as [`can_set_is_active`]: an officer acts only on
-/// member and recruit, an admin on any rank. Without it an officer could
-/// restore a deactivated officer or admin with their old role.
-pub fn can_reactivate_via_application(actor_role: OrgRole, target_role: OrgRole) -> bool {
-    actor_role == OrgRole::Admin
-        || (actor_role == OrgRole::Officer && officer_may_moderate(target_role))
+/// Trial and accept set `is_active = true` and keep an officer or admin role
+/// (a member or recruit gets the application role instead), so this is the
+/// same rank rule as [`can_set_is_active`]: an officer acts only on member
+/// and recruit, an admin on any rank. Without it an officer could restore a
+/// deactivated officer or admin with their old role.
+///
+/// `actor_role` is `None` when the caller is not a reviewer (an applicant
+/// self-withdraw), which never reactivates. A rank denial is 403 like every
+/// other hierarchy rule here, not 409: the same request succeeds for an admin.
+pub fn can_reactivate_via_application(
+    actor_role: Option<OrgRole>,
+    target_role: OrgRole,
+) -> Result<(), PolicyDenial> {
+    match actor_role {
+        Some(OrgRole::Admin) => Ok(()),
+        Some(OrgRole::Officer) if officer_may_moderate(target_role) => Ok(()),
+        Some(OrgRole::Officer) => Err(PolicyDenial::Forbidden(
+            "Applicant is a deactivated officer or admin. Only an admin can reactivate them",
+        )),
+        _ => Err(PolicyDenial::Forbidden(
+            "Only officers or admins can reactivate a member through an application",
+        )),
+    }
 }
 
 /// Whether deactivating a member (is_active=false) should revoke sessions.
@@ -447,22 +463,19 @@ mod tests {
     #[test]
     fn application_reactivation_follows_rank() {
         // Officers bring back member and recruit only.
-        assert!(can_reactivate_via_application(
-            OrgRole::Officer,
-            OrgRole::Recruit
-        ));
-        assert!(can_reactivate_via_application(
-            OrgRole::Officer,
-            OrgRole::Member
-        ));
-        assert!(!can_reactivate_via_application(
-            OrgRole::Officer,
-            OrgRole::Officer
-        ));
-        assert!(!can_reactivate_via_application(
-            OrgRole::Officer,
-            OrgRole::Admin
-        ));
+        for target in [OrgRole::Recruit, OrgRole::Member] {
+            assert!(can_reactivate_via_application(Some(OrgRole::Officer), target).is_ok());
+        }
+        // An officer or admin target is a rank denial: 403, not 409.
+        for target in [OrgRole::Officer, OrgRole::Admin] {
+            let denial = can_reactivate_via_application(Some(OrgRole::Officer), target)
+                .expect_err("officer may not reactivate this rank");
+            assert_eq!(denial.status(), StatusCode::FORBIDDEN);
+            assert_eq!(
+                denial.message(),
+                "Applicant is a deactivated officer or admin. Only an admin can reactivate them"
+            );
+        }
         // Admins bring back any rank.
         for target in [
             OrgRole::Recruit,
@@ -470,11 +483,18 @@ mod tests {
             OrgRole::Officer,
             OrgRole::Admin,
         ] {
-            assert!(can_reactivate_via_application(OrgRole::Admin, target));
+            assert!(can_reactivate_via_application(Some(OrgRole::Admin), target).is_ok());
         }
-        // Below officer never reviews applications.
-        for actor in [OrgRole::Member, OrgRole::Recruit] {
-            assert!(!can_reactivate_via_application(actor, OrgRole::Recruit));
+        // Below officer never reviews applications, and no reviewer at all
+        // (applicant self-withdraw) never reactivates.
+        for actor in [Some(OrgRole::Member), Some(OrgRole::Recruit), None] {
+            let denial = can_reactivate_via_application(actor, OrgRole::Recruit)
+                .expect_err("not a reviewer");
+            assert_eq!(denial.status(), StatusCode::FORBIDDEN);
+            assert_eq!(
+                denial.message(),
+                "Only officers or admins can reactivate a member through an application"
+            );
         }
     }
 

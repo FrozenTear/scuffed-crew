@@ -546,15 +546,17 @@ async fn ensure_member_for_application(
         // Reactivate if needed
         let mut current = member;
         if !current.is_active {
-            // Reactivation keeps the stored role. Officers cannot set `is_active`
+            // Reactivation keeps an officer or admin role (a member or recruit
+            // gets the application role below). Officers cannot set `is_active`
             // on officers or admins anywhere else (`can_set_is_active`), so only
-            // an admin may bring one back here. 409 before any write: the member
+            // an admin may bring one back here. 403 before any write: the member
             // stays inactive and the application keeps its status.
-            if !reviewer_role
-                .is_some_and(|role| can_reactivate_via_application(role, current.org_role))
-            {
-                return Err(conflict(
-                    "Applicant is a deactivated officer or admin. Only an admin can reactivate them",
+            if let Err(denial) = can_reactivate_via_application(reviewer_role, current.org_role) {
+                return Err((
+                    denial.status(),
+                    Json(ErrorResponse {
+                        error: denial.message().into(),
+                    }),
                 ));
             }
             current = state
@@ -1465,5 +1467,89 @@ mod tests {
                 .is_none(),
             "a rejected provision must not create a member"
         );
+    }
+
+    /// #812: with no reviewer role (the applicant self-withdraw path passes
+    /// `None`) an inactive member is never reactivated, whatever their rank.
+    /// 403, nothing written. An active member needs no reactivation, so `None`
+    /// does not get in the way there.
+    #[tokio::test]
+    async fn provisioning_without_a_reviewer_role_never_reactivates() {
+        let state = test_state().await;
+        seed_user(&state, "lapsed", "Lapsed").await;
+        let member = state
+            .db
+            .create_member("lapsed", "Lapsed", OrgRole::Recruit)
+            .await
+            .expect("lapsed member");
+        state
+            .db
+            .update_member(
+                &member.id,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(false),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("deactivate");
+
+        for to in [ApplicationStatus::Trial, ApplicationStatus::Accepted] {
+            let (status, Json(body)) = ensure_member_for_application(
+                &state,
+                "lapsed",
+                ApplicationStatus::Pending,
+                to,
+                "app1",
+                None,
+            )
+            .await
+            .expect_err("no reviewer role");
+            assert_eq!(status, StatusCode::FORBIDDEN);
+            assert_eq!(
+                body.error,
+                "Only officers or admins can reactivate a member through an application"
+            );
+            let after = state
+                .db
+                .get_member(&member.id)
+                .await
+                .expect("lookup")
+                .expect("member");
+            assert!(
+                !after.is_active,
+                "{to} with no reviewer must not reactivate"
+            );
+            assert_eq!(after.org_role, OrgRole::Recruit);
+        }
+
+        seed_user(&state, "current", "Current").await;
+        let active = state
+            .db
+            .create_member("current", "Current", OrgRole::Recruit)
+            .await
+            .expect("current member");
+        let kept = must_ok(
+            ensure_member_for_application(
+                &state,
+                "current",
+                ApplicationStatus::Pending,
+                ApplicationStatus::Trial,
+                "app2",
+                None,
+            )
+            .await,
+            "an active member needs no reactivation",
+        );
+        assert_eq!(kept.id, active.id);
+        assert!(kept.is_active);
+        assert_eq!(kept.org_role, OrgRole::Recruit);
     }
 }

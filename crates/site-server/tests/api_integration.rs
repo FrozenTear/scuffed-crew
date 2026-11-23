@@ -4737,7 +4737,8 @@ async fn patch_application_status(
 }
 
 /// #812: an officer cannot restore a deactivated officer or admin by moving
-/// their application to trial or accepted. 409, nothing written.
+/// their application to trial or accepted. 403 (a rank denial, like
+/// `can_set_is_active`), nothing written.
 #[tokio::test]
 async fn officer_cannot_reactivate_deactivated_officer_or_admin_via_application() {
     let state = test_state().await;
@@ -4754,7 +4755,7 @@ async fn officer_cannot_reactivate_deactivated_officer_or_admin_via_application(
             let resp = patch_application_status(&state, &app_id, OFFICER_TOKEN, status).await;
             assert_eq!(
                 resp.status(),
-                StatusCode::CONFLICT,
+                StatusCode::FORBIDDEN,
                 "officer {status} of a deactivated {role}"
             );
             let err = body_json(resp).await;
@@ -4780,7 +4781,7 @@ async fn officer_cannot_reactivate_deactivated_officer_or_admin_via_application(
 }
 
 /// #812: an admin may reactivate a deactivated officer or admin through the
-/// application, on trial and on accept. The stored role is kept.
+/// application, on trial and on accept. The officer or admin role is kept.
 #[tokio::test]
 async fn admin_can_reactivate_deactivated_officer_or_admin_via_application() {
     let state = test_state().await;
@@ -4874,6 +4875,103 @@ async fn officer_can_reactivate_deactivated_member_or_recruit_via_application() 
         assert!(member.is_active, "officer {status} reactivates the {role}");
         assert_eq!(member.org_role.to_string(), role_after);
     }
+}
+
+/// #812: the guard also holds on accept from trial. An admin starts the trial
+/// (which reactivates the officer), the officer is deactivated again, and an
+/// officer reviewer then tries to accept. 403, the member stays inactive and
+/// the application stays in trial.
+#[tokio::test]
+async fn officer_cannot_accept_inactive_officer_whose_application_is_in_trial() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    let app_id = seed_inactive_applicant(
+        &state,
+        "extrialuser",
+        "extrial",
+        "extrial",
+        "officer",
+        "tok-ex-trial",
+    )
+    .await;
+
+    let resp = patch_application_status(&state, &app_id, ADMIN_TOKEN, "trial").await;
+    assert_eq!(resp.status(), StatusCode::OK, "admin trial");
+    let member = state.db.get_member("extrial").await.unwrap().unwrap();
+    assert!(member.is_active, "admin trial reactivates the officer");
+
+    state
+        .db
+        .client
+        .query("UPDATE member:extrial SET is_active = false")
+        .await
+        .expect("deactivate again during trial");
+
+    let resp = patch_application_status(&state, &app_id, OFFICER_TOKEN, "accepted").await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "officer accept of a deactivated officer in trial"
+    );
+    assert_eq!(
+        body_json(resp).await["error"],
+        "Applicant is a deactivated officer or admin. Only an admin can reactivate them"
+    );
+
+    let member = state.db.get_member("extrial").await.unwrap().unwrap();
+    assert!(!member.is_active, "officer accept must not reactivate");
+    assert_eq!(member.org_role.to_string(), "officer");
+    let application = state.db.get_application(&app_id).await.unwrap().unwrap();
+    assert_eq!(
+        application.status.to_string(),
+        "trial",
+        "a refused accept must leave the application in trial"
+    );
+}
+
+/// #812 control: the guard is about reactivation only. Once an admin trial has
+/// reactivated the officer and they are still active, an officer reviewer may
+/// finish the accept. 200, the application is accepted, the member stays
+/// active and keeps the officer role (accept never demotes).
+#[tokio::test]
+async fn officer_can_accept_after_admin_trial_while_member_is_still_active() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    let app_id = seed_inactive_applicant(
+        &state,
+        "exstilluser",
+        "exstill",
+        "exstill",
+        "officer",
+        "tok-ex-still",
+    )
+    .await;
+
+    let resp = patch_application_status(&state, &app_id, ADMIN_TOKEN, "trial").await;
+    assert_eq!(resp.status(), StatusCode::OK, "admin trial");
+    let member = state.db.get_member("exstill").await.unwrap().unwrap();
+    assert!(member.is_active, "admin trial reactivates the officer");
+    assert_eq!(member.org_role.to_string(), "officer");
+
+    let resp = patch_application_status(&state, &app_id, OFFICER_TOKEN, "accepted").await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "officer accept of an active officer after an admin trial"
+    );
+    assert_eq!(body_json(resp).await["status"], "accepted");
+
+    let member = state.db.get_member("exstill").await.unwrap().unwrap();
+    assert!(member.is_active);
+    assert_eq!(
+        member.org_role.to_string(),
+        "officer",
+        "accept keeps the officer role"
+    );
+    let application = state.db.get_application(&app_id).await.unwrap().unwrap();
+    assert_eq!(application.status.to_string(), "accepted");
 }
 
 #[tokio::test]
