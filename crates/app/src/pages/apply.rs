@@ -1,5 +1,8 @@
 use dioxus::prelude::*;
-use scuffed_types::{Game, MIN_APPLICATION_MESSAGE_CHARS, application_message_long_enough};
+use scuffed_types::{
+    Game, MAX_APPLICATION_MESSAGE_CHARS, MIN_APPLICATION_MESSAGE_CHARS,
+    application_message_long_enough,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::components::ui::inline_confirm::{focus_element_by_id_soon, focus_field_by_id};
@@ -550,18 +553,27 @@ fn server_reason(err: &ClientError) -> Option<String> {
 /// closed, banned) or a 409 (already applied, already a member) comes back
 /// the same on every retry, so the toast gives the server's reason instead.
 /// A 401 means the session ended, and no answer at all is a network failure.
+///
+/// A 429 is either the per-user wait or cap, whose reason says when or why
+/// ("You can apply again in 42 minutes"), or the per-IP limit, whose body is
+/// the code `rate_limited`. Neither is fixed by trying again at once.
 fn action_failure_text(what: &str, err: &ClientError) -> String {
+    let with_reason = |reason: String| {
+        let stop = if reason.ends_with(['.', '!', '?']) {
+            ""
+        } else {
+            "."
+        };
+        format!("{what}: {reason}{stop}")
+    };
     match err.http_status() {
         Some(400 | 403 | 404 | 409) => match server_reason(err) {
-            Some(reason) => {
-                let stop = if reason.ends_with(['.', '!', '?']) {
-                    ""
-                } else {
-                    "."
-                };
-                format!("{what}: {reason}{stop}")
-            }
+            Some(reason) => with_reason(reason),
             None => format!("{what}. The server refused it."),
+        },
+        Some(429) => match server_reason(err).filter(|reason| reason != "rate_limited") {
+            Some(reason) => with_reason(reason),
+            None => format!("{what}. Too many attempts. Wait a minute, then try again."),
         },
         Some(401) => format!("{what}. Your session has ended. Log in again."),
         Some(_) => format!("{what}. Try again."),
@@ -825,6 +837,9 @@ fn ApplyForm(
                     id: ApplyField::Message.id(),
                     name: "message",
                     required: true,
+                    // The server refuses a longer message (400). The cap is
+                    // shared with it through `scuffed_types`.
+                    maxlength: "{MAX_APPLICATION_MESSAGE_CHARS}",
                     aria_required: "true",
                     aria_invalid: if message_invalid { "true" },
                     aria_describedby: message_describedby(message_invalid),
@@ -2049,6 +2064,53 @@ mod tests {
             action_failure_text(send, &ClientError::http(401, "", None)),
             "Couldn't send the application. Your session has ended. Log in again."
         );
+    }
+
+    #[test]
+    fn a_rate_limited_send_or_withdraw_says_to_wait() {
+        let send = "Couldn't send the application";
+        // Per-user cooldown and withdrawn cap: the server's reason is shown.
+        let cooldown = ClientError::http(
+            429,
+            r#"{"error":"You can apply again in 42 minutes"}"#,
+            None,
+        );
+        assert_eq!(
+            action_failure_text(send, &cooldown),
+            "Couldn't send the application: You can apply again in 42 minutes."
+        );
+        let capped = ClientError::http(
+            429,
+            r#"{"error":"You have reached the limit of withdrawn applications"}"#,
+            None,
+        );
+        assert_eq!(
+            action_failure_text("Couldn't withdraw the application", &capped),
+            "Couldn't withdraw the application: You have reached the limit of withdrawn applications."
+        );
+        // Per-IP limit: the body is a code, not a sentence.
+        let limited = ClientError::http(
+            429,
+            r#"{"code":"rate_limited","error":"rate_limited","retry_after":42}"#,
+            None,
+        );
+        let text = action_failure_text(send, &limited);
+        assert_eq!(
+            text,
+            "Couldn't send the application. Too many attempts. Wait a minute, then try again."
+        );
+        assert!(!text.contains("rate_limited"), "{text}");
+    }
+
+    /// The textarea stops at the cap the server enforces.
+    #[test]
+    fn the_message_cap_is_the_shared_four_thousand() {
+        assert_eq!(MAX_APPLICATION_MESSAGE_CHARS, 4000);
+        // `maxlength` counts UTF-16 units, never fewer than chars, so text
+        // the textarea lets through is within the server's char count.
+        let astral = "🎮".repeat(2000);
+        assert_eq!(astral.encode_utf16().count(), 4000);
+        assert!(scuffed_types::application_message_within_max(&astral));
     }
 
     #[test]

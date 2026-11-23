@@ -10,13 +10,18 @@ use serde::{Deserialize, Serialize};
 use scuffed_auth::server::AuthUser;
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{Application, ApplicationStatus, AuditAction, AuditTargetType, Member, OrgRole};
-use scuffed_types::{MIN_APPLICATION_MESSAGE_CHARS, application_message_long_enough};
+use scuffed_types::{
+    ApplicationPreferenceError, MAX_APPLICATION_MESSAGE_CHARS,
+    MAX_APPLICATION_PREFERENCE_ITEM_CHARS, MAX_APPLICATION_PREFERENCE_ITEMS,
+    MIN_APPLICATION_MESSAGE_CHARS, application_message_long_enough, application_message_within_max,
+    check_application_preferences,
+};
 
 use crate::extractors::OfficerUser;
 use crate::membership_policy::{
-    applicant_may_self_withdraw, application_blocks_resubmit,
+    applicant_may_self_withdraw, application_blocks_resubmit, application_resubmit_wait_minutes,
     application_status_deactivates_member, application_status_ensures_member,
-    is_valid_application_transition, role_on_application_accept,
+    is_valid_application_transition, role_on_application_accept, withdrawn_application_cap_reached,
 };
 use crate::routes::audit_log::audit;
 use crate::state::AppState;
@@ -45,6 +50,16 @@ fn conflict(msg: &str) -> (StatusCode, Json<ErrorResponse>) {
     )
 }
 
+fn too_many_requests(msg: &str) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(ErrorResponse { error: msg.into() }),
+    )
+}
+
+/// 429 text of the per-user withdrawn cap, on submit and on withdraw.
+const WITHDRAWN_CAP_MESSAGE: &str = "You have reached the limit of withdrawn applications";
+
 /// `Ok(true)` is open. `Ok(false)` is 403. A settings read error fails closed
 /// with 500 so a new application is not stored.
 fn application_recruitment_gate(
@@ -62,6 +77,48 @@ fn application_recruitment_gate(
 /// [`scuffed_types::application_message_long_enough`].
 fn application_message_is_long_enough(message: Option<&str>) -> bool {
     application_message_long_enough(message.unwrap_or(""))
+}
+
+/// The text is stored as sent, not trimmed, so the shared caps (which trim
+/// before they count) would let whitespace padding through. This bounds what
+/// is stored: the untrimmed text may not be longer than the cap either.
+fn stored_chars_within(text: &str, max: usize) -> bool {
+    text.chars().count() <= max
+}
+
+/// Upper bounds of a submit body: message length, then both preference
+/// lists (count, then entry length). The 400 text names the field. Runs
+/// after the minimum check and before any DB work.
+fn check_application_caps(body: &SubmitApplicationRequest) -> Result<(), String> {
+    let message = body.message.as_deref().unwrap_or("");
+    if !application_message_within_max(message)
+        || !stored_chars_within(message, MAX_APPLICATION_MESSAGE_CHARS)
+    {
+        return Err(format!(
+            "Message must be at most {MAX_APPLICATION_MESSAGE_CHARS} characters"
+        ));
+    }
+    for (plural, singular, items) in [
+        ("games", "game", &body.preferred_games),
+        ("roles", "role", &body.preferred_roles),
+    ] {
+        let check = check_application_preferences(items);
+        if check == Err(ApplicationPreferenceError::TooMany) {
+            return Err(format!(
+                "Too many preferred {plural} (max {MAX_APPLICATION_PREFERENCE_ITEMS})"
+            ));
+        }
+        if check.is_err()
+            || items
+                .iter()
+                .any(|item| !stored_chars_within(item, MAX_APPLICATION_PREFERENCE_ITEM_CHARS))
+        {
+            return Err(format!(
+                "Preferred {singular} is too long (max {MAX_APPLICATION_PREFERENCE_ITEM_CHARS} characters)"
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -83,6 +140,9 @@ pub async fn submit_application(
         return Err(bad_request(&format!(
             "Message must be at least {MIN_APPLICATION_MESSAGE_CHARS} characters"
         )));
+    }
+    if let Err(msg) = check_application_caps(&body) {
+        return Err(bad_request(&msg));
     }
 
     let recruitment = match state.db.get_settings().await {
@@ -125,16 +185,40 @@ pub async fn submit_application(
     }
 
     // Open pipeline (pending/trial) blocks a second application
-    if let Some(existing) = state
+    let latest = state
         .db
         .get_application_by_user(&user.id)
         .await
-        .map_err(|e| internal_err(e, "get_application_by_user on submit"))?
+        .map_err(|e| internal_err(e, "get_application_by_user on submit"))?;
+    if let Some(ref existing) = latest
         && application_blocks_resubmit(existing.status)
     {
         return Err(conflict(&format!(
             "You already have an open application ({})",
             existing.status
+        )));
+    }
+
+    // Per-user withdrawn cap: apply and withdraw cannot be repeated without
+    // end. Rows already over the cap are left as they are.
+    let withdrawn = state
+        .db
+        .count_withdrawn_applications(&user.id)
+        .await
+        .map_err(|e| internal_err(e, "count_withdrawn_applications on submit"))?;
+    if withdrawn_application_cap_reached(withdrawn) {
+        return Err(too_many_requests(WITHDRAWN_CAP_MESSAGE));
+    }
+
+    // Per-user cooldown: the latest application is closed (withdrawn,
+    // rejected or accepted), so wait from its last status write.
+    if let Some(ref existing) = latest
+        && let Some(minutes) =
+            application_resubmit_wait_minutes(existing.updated_at, chrono::Utc::now())
+    {
+        let unit = if minutes == 1 { "minute" } else { "minutes" };
+        return Err(too_many_requests(&format!(
+            "You can apply again in {minutes} {unit}"
         )));
     }
 
@@ -326,6 +410,17 @@ pub async fn withdraw_my_application(
             "Cannot withdraw application in status {}",
             existing.status
         )));
+    }
+
+    // A withdraw that would put the user over the withdrawn cap is refused,
+    // so a row over the cap is never added. An officer can still close it.
+    let withdrawn = state
+        .db
+        .count_withdrawn_applications(&user.id)
+        .await
+        .map_err(|e| internal_err(e, "count_withdrawn_applications on withdraw"))?;
+    if withdrawn_application_cap_reached(withdrawn) {
+        return Err(too_many_requests(WITHDRAWN_CAP_MESSAGE));
     }
 
     // Audit actor: member id when provisioned (trial), else user id.
@@ -1399,6 +1494,508 @@ mod tests {
         );
         assert_eq!(status, StatusCode::CREATED);
         assert!(app.preferred_roles.is_empty());
+    }
+
+    /// Submit as an account that already exists.
+    async fn submit_existing(
+        state: &AppState,
+        user_id: &str,
+        preferred_games: Vec<String>,
+        preferred_roles: Vec<String>,
+        message: &str,
+    ) -> Result<(StatusCode, Json<Application>), (StatusCode, Json<ErrorResponse>)> {
+        let user = state
+            .db
+            .get_user(user_id)
+            .await
+            .expect("get user")
+            .expect("user");
+        submit_application(
+            State(state.clone()),
+            auth_user(user),
+            Json(SubmitApplicationRequest {
+                preferred_games,
+                preferred_roles,
+                message: Some(message.to_string()),
+            }),
+        )
+        .await
+    }
+
+    /// Seed a fresh account, then submit with the given lists and message.
+    async fn submit_new(
+        state: &AppState,
+        user_id: &str,
+        preferred_games: Vec<String>,
+        preferred_roles: Vec<String>,
+        message: &str,
+    ) -> Result<(StatusCode, Json<Application>), (StatusCode, Json<ErrorResponse>)> {
+        seed_user(state, user_id, user_id).await;
+        submit_existing(state, user_id, preferred_games, preferred_roles, message).await
+    }
+
+    async fn withdraw_existing(
+        state: &AppState,
+        user_id: &str,
+    ) -> Result<Json<Application>, (StatusCode, Json<ErrorResponse>)> {
+        let user = state
+            .db
+            .get_user(user_id)
+            .await
+            .expect("get user")
+            .expect("user");
+        withdraw_my_application(State(state.clone()), auth_user(user)).await
+    }
+
+    async fn assert_refused_400(
+        state: &AppState,
+        user_id: &str,
+        result: Result<(StatusCode, Json<Application>), (StatusCode, Json<ErrorResponse>)>,
+        expected: &str,
+    ) {
+        let (status, body) = must_err(result, "over the cap must fail");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body.error, expected);
+        assert!(
+            state
+                .db
+                .get_application_by_user(user_id)
+                .await
+                .expect("lookup")
+                .is_none(),
+            "a refused submit must not store an application"
+        );
+    }
+
+    #[tokio::test]
+    async fn submit_accepts_a_four_thousand_char_message() {
+        let state = test_state().await;
+        let exact = "a".repeat(4000);
+        let (status, Json(app)) = must_ok(
+            submit_new(&state, "maxmsg", vec![], vec![], &exact).await,
+            "4000 chars",
+        );
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(app.message.as_deref(), Some(exact.as_str()));
+        // 4000 chars, 16000 bytes: chars are the measure.
+        let (status, _) = must_ok(
+            submit_new(&state, "maxemoji", vec![], vec![], &"🎮".repeat(4000)).await,
+            "4000 multibyte chars",
+        );
+        assert_eq!(status, StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn submit_refuses_a_message_over_four_thousand_chars() {
+        let state = test_state().await;
+        let expected = "Message must be at most 4000 characters";
+        let over = "a".repeat(4001);
+        let result = submit_new(&state, "overmsg", vec![], vec![], &over).await;
+        assert_refused_400(&state, "overmsg", result, expected).await;
+        let result = submit_new(&state, "overmb", vec![], vec![], &"æ".repeat(4001)).await;
+        assert_refused_400(&state, "overmb", result, expected).await;
+        // Trimmed before the count, like the minimum: still over.
+        let padded = format!("  {over}  ");
+        let result = submit_new(&state, "overpad", vec![], vec![], &padded).await;
+        assert_refused_400(&state, "overpad", result, expected).await;
+    }
+
+    /// The message is stored as sent, so whitespace padding may not carry a
+    /// short message past the cap.
+    #[tokio::test]
+    async fn submit_refuses_whitespace_padding_past_the_message_cap() {
+        let state = test_state().await;
+        let padded = format!("{}{}", VALID_MESSAGE, " ".repeat(4000));
+        assert!(application_message_within_max(&padded));
+        let result = submit_new(&state, "padmsg", vec![], vec![], &padded).await;
+        assert_refused_400(
+            &state,
+            "padmsg",
+            result,
+            "Message must be at most 4000 characters",
+        )
+        .await;
+        // Padding that still fits is stored as sent.
+        let fits = format!("{}{}", "a".repeat(3990), " ".repeat(10));
+        let (status, Json(app)) = must_ok(
+            submit_new(&state, "padfits", vec![], vec![], &fits).await,
+            "padding inside the cap",
+        );
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(app.message.as_deref(), Some(fits.as_str()));
+    }
+
+    #[tokio::test]
+    async fn submit_accepts_ten_games_and_ten_roles() {
+        let state = test_state().await;
+        let ten: Vec<String> = (0..10).map(|i| format!("item{i}")).collect();
+        let (status, Json(app)) = must_ok(
+            submit_new(&state, "tenitems", ten.clone(), ten.clone(), VALID_MESSAGE).await,
+            "10 games and 10 roles",
+        );
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(app.preferred_games, ten);
+        assert_eq!(app.preferred_roles, ten);
+    }
+
+    #[tokio::test]
+    async fn submit_refuses_eleven_games_or_roles() {
+        let state = test_state().await;
+        let eleven: Vec<String> = (0..11).map(|i| format!("item{i}")).collect();
+        let result = submit_new(&state, "manygames", eleven.clone(), vec![], VALID_MESSAGE).await;
+        assert_refused_400(
+            &state,
+            "manygames",
+            result,
+            "Too many preferred games (max 10)",
+        )
+        .await;
+        let result = submit_new(&state, "manyroles", vec![], eleven, VALID_MESSAGE).await;
+        assert_refused_400(
+            &state,
+            "manyroles",
+            result,
+            "Too many preferred roles (max 10)",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn submit_accepts_sixty_four_char_items() {
+        let state = test_state().await;
+        let exact = "a".repeat(64);
+        // 64 chars, 128 bytes.
+        let multibyte = "æ".repeat(64);
+        let (status, _) = must_ok(
+            submit_new(
+                &state,
+                "longitems",
+                vec![exact.clone(), multibyte.clone()],
+                vec![exact, multibyte],
+                VALID_MESSAGE,
+            )
+            .await,
+            "64 char items",
+        );
+        assert_eq!(status, StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn submit_refuses_a_sixty_five_char_item() {
+        let state = test_state().await;
+        let over = "a".repeat(65);
+        let game_text = "Preferred game is too long (max 64 characters)";
+        let role_text = "Preferred role is too long (max 64 characters)";
+        let result = submit_new(
+            &state,
+            "longgame",
+            vec!["ow2".into(), over.clone()],
+            vec![],
+            VALID_MESSAGE,
+        )
+        .await;
+        assert_refused_400(&state, "longgame", result, game_text).await;
+        let result = submit_new(&state, "longrole", vec![], vec![over], VALID_MESSAGE).await;
+        assert_refused_400(&state, "longrole", result, role_text).await;
+        // Stored as sent, so padding counts toward what is stored.
+        let padded = format!("ow2{}", " ".repeat(64));
+        let result = submit_new(&state, "padgame", vec![padded], vec![], VALID_MESSAGE).await;
+        assert_refused_400(&state, "padgame", result, game_text).await;
+    }
+
+    /// The minimum is still checked first, with its own text.
+    #[tokio::test]
+    async fn short_message_is_refused_before_the_list_caps() {
+        let state = test_state().await;
+        let eleven: Vec<String> = (0..11).map(|i| format!("item{i}")).collect();
+        let result = submit_new(&state, "shortfirst", eleven, vec![], "short").await;
+        assert_refused_400(
+            &state,
+            "shortfirst",
+            result,
+            "Message must be at least 10 characters",
+        )
+        .await;
+    }
+
+    /// Move every `updated_at` of the user's applications into the past.
+    /// `created_at` is left alone: it orders "latest application".
+    async fn age_applications(state: &AppState, user_id: &str, minutes: u32) {
+        // `minutes` is a test literal, so it is safe in the query text
+        // (site-server has no direct surrealdb dep for a datetime bind).
+        state
+            .db
+            .client
+            .query(format!(
+                "UPDATE application SET updated_at = time::now() - {minutes}m WHERE user_id = $uid"
+            ))
+            .bind(("uid", user_id.to_string()))
+            .await
+            .expect("age applications");
+    }
+
+    /// Store `count` withdrawn applications for the user, straight in the DB.
+    async fn seed_withdrawn(state: &AppState, user_id: &str, count: usize) {
+        for _ in 0..count {
+            let app = state
+                .db
+                .submit_application(user_id, vec![], vec![], Some(VALID_MESSAGE))
+                .await
+                .expect("seed application");
+            state
+                .db
+                .update_application_status(
+                    &app.id,
+                    ApplicationStatus::Pending,
+                    ApplicationStatus::Withdrawn,
+                    user_id,
+                    None,
+                )
+                .await
+                .expect("seed withdraw");
+        }
+    }
+
+    async fn application_count(state: &AppState, user_id: &str) -> usize {
+        let mut r = state
+            .db
+            .client
+            .query("SELECT VALUE status FROM application WHERE user_id = $uid")
+            .bind(("uid", user_id.to_string()))
+            .await
+            .expect("count applications");
+        let rows: Vec<String> = r.take(0).expect("take applications");
+        rows.len()
+    }
+
+    #[tokio::test]
+    async fn resubmit_right_after_withdraw_is_429_until_the_cooldown_is_over() {
+        let state = test_state().await;
+        let (status, _) = must_ok(
+            submit_new(&state, "cooldown", vec![], vec![], VALID_MESSAGE).await,
+            "first application",
+        );
+        assert_eq!(status, StatusCode::CREATED);
+        let Json(withdrawn) = must_ok(withdraw_existing(&state, "cooldown").await, "withdraw");
+        assert_eq!(withdrawn.status, ApplicationStatus::Withdrawn);
+
+        let (status, body) = must_err(
+            submit_existing(&state, "cooldown", vec![], vec![], VALID_MESSAGE).await,
+            "resubmit inside the cooldown",
+        );
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body.error, "You can apply again in 60 minutes");
+        assert_eq!(application_count(&state, "cooldown").await, 1);
+
+        // 59 minutes on: still waiting, and the text counts down.
+        age_applications(&state, "cooldown", 59).await;
+        let (status, body) = must_err(
+            submit_existing(&state, "cooldown", vec![], vec![], VALID_MESSAGE).await,
+            "resubmit at 59 minutes",
+        );
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body.error, "You can apply again in 1 minute");
+        assert_eq!(application_count(&state, "cooldown").await, 1);
+
+        // Past the hour: accepted.
+        age_applications(&state, "cooldown", 61).await;
+        let (status, Json(app)) = must_ok(
+            submit_existing(&state, "cooldown", vec![], vec![], VALID_MESSAGE).await,
+            "resubmit after the cooldown",
+        );
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(app.status, ApplicationStatus::Pending);
+        assert_eq!(application_count(&state, "cooldown").await, 2);
+    }
+
+    /// A rejected application does not block a resubmit either, so the same
+    /// cooldown runs from the reject.
+    #[tokio::test]
+    async fn resubmit_right_after_reject_waits_for_the_cooldown() {
+        let state = test_state().await;
+        let (_, Json(app)) = must_ok(
+            submit_new(&state, "rejected", vec![], vec![], VALID_MESSAGE).await,
+            "first application",
+        );
+        let Json(rejected) = must_ok(
+            update_application(
+                State(state.clone()),
+                officer(&state).await,
+                Path(app.id),
+                Json(UpdateApplicationRequest {
+                    status: ApplicationStatus::Rejected,
+                    review_notes: None,
+                }),
+            )
+            .await,
+            "reject",
+        );
+        assert_eq!(rejected.status, ApplicationStatus::Rejected);
+        let (status, body) = must_err(
+            submit_existing(&state, "rejected", vec![], vec![], VALID_MESSAGE).await,
+            "resubmit inside the cooldown",
+        );
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body.error, "You can apply again in 60 minutes");
+
+        age_applications(&state, "rejected", 61).await;
+        let (status, _) = must_ok(
+            submit_existing(&state, "rejected", vec![], vec![], VALID_MESSAGE).await,
+            "resubmit after the cooldown",
+        );
+        assert_eq!(status, StatusCode::CREATED);
+    }
+
+    /// An open application is still the 409 it was, not the cooldown 429.
+    #[tokio::test]
+    async fn open_application_is_still_409_inside_the_cooldown() {
+        let state = test_state().await;
+        let (status, _) = must_ok(
+            submit_new(&state, "openapp", vec![], vec![], VALID_MESSAGE).await,
+            "first application",
+        );
+        assert_eq!(status, StatusCode::CREATED);
+        let (status, body) = must_err(
+            submit_existing(&state, "openapp", vec![], vec![], VALID_MESSAGE).await,
+            "second application",
+        );
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body.error, "You already have an open application (pending)");
+    }
+
+    #[tokio::test]
+    async fn five_withdrawn_applications_refuse_a_new_submit() {
+        let state = test_state().await;
+        seed_user(&state, "capped", "capped").await;
+        seed_withdrawn(&state, "capped", 5).await;
+        // Past the cooldown, so the cap is what refuses.
+        age_applications(&state, "capped", 120).await;
+
+        let (status, body) = must_err(
+            submit_existing(&state, "capped", vec![], vec![], VALID_MESSAGE).await,
+            "submit at the withdrawn cap",
+        );
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            body.error,
+            "You have reached the limit of withdrawn applications"
+        );
+        // Nothing added, nothing deleted or rewritten.
+        assert_eq!(application_count(&state, "capped").await, 5);
+        assert_eq!(
+            state
+                .db
+                .count_withdrawn_applications("capped")
+                .await
+                .expect("count"),
+            5
+        );
+    }
+
+    #[tokio::test]
+    async fn four_withdrawn_applications_can_still_apply_after_the_cooldown() {
+        let state = test_state().await;
+        seed_user(&state, "fourwd", "fourwd").await;
+        seed_withdrawn(&state, "fourwd", 4).await;
+
+        // Under the cap, but the last withdraw was just now: cooldown.
+        let (status, body) = must_err(
+            submit_existing(&state, "fourwd", vec![], vec![], VALID_MESSAGE).await,
+            "submit inside the cooldown",
+        );
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body.error, "You can apply again in 60 minutes");
+
+        age_applications(&state, "fourwd", 61).await;
+        let (status, _) = must_ok(
+            submit_existing(&state, "fourwd", vec![], vec![], VALID_MESSAGE).await,
+            "submit under the cap",
+        );
+        assert_eq!(status, StatusCode::CREATED);
+
+        // The fifth withdraw is allowed and reaches the cap.
+        let Json(app) = must_ok(withdraw_existing(&state, "fourwd").await, "fifth withdraw");
+        assert_eq!(app.status, ApplicationStatus::Withdrawn);
+        age_applications(&state, "fourwd", 61).await;
+        let (status, body) = must_err(
+            submit_existing(&state, "fourwd", vec![], vec![], VALID_MESSAGE).await,
+            "submit at the cap",
+        );
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            body.error,
+            "You have reached the limit of withdrawn applications"
+        );
+    }
+
+    /// An open application next to five withdrawn rows (stored before the
+    /// cap, or withdrawn by an officer) cannot be self-withdrawn into a sixth.
+    #[tokio::test]
+    async fn a_sixth_withdraw_is_refused() {
+        let state = test_state().await;
+        seed_user(&state, "sixth", "sixth").await;
+        seed_withdrawn(&state, "sixth", 5).await;
+        let open = state
+            .db
+            .submit_application("sixth", vec![], vec![], Some(VALID_MESSAGE))
+            .await
+            .expect("open application");
+
+        let (status, body) = must_err(
+            withdraw_existing(&state, "sixth").await,
+            "withdraw at the cap",
+        );
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            body.error,
+            "You have reached the limit of withdrawn applications"
+        );
+        let stored = state
+            .db
+            .get_application(&open.id)
+            .await
+            .expect("reload")
+            .expect("application");
+        assert_eq!(stored.status, ApplicationStatus::Pending);
+        assert_eq!(
+            state
+                .db
+                .count_withdrawn_applications("sixth")
+                .await
+                .expect("count"),
+            5
+        );
+    }
+
+    /// The count is per user and only of withdrawn rows.
+    #[tokio::test]
+    async fn withdrawn_count_ignores_other_users_and_other_statuses() {
+        let state = test_state().await;
+        seed_user(&state, "counta", "counta").await;
+        seed_user(&state, "countb", "countb").await;
+        seed_withdrawn(&state, "counta", 2).await;
+        seed_withdrawn(&state, "countb", 5).await;
+        state
+            .db
+            .submit_application("counta", vec![], vec![], Some(VALID_MESSAGE))
+            .await
+            .expect("open application");
+        assert_eq!(
+            state
+                .db
+                .count_withdrawn_applications("counta")
+                .await
+                .expect("count"),
+            2
+        );
+        assert_eq!(
+            state
+                .db
+                .count_withdrawn_applications("nobody")
+                .await
+                .expect("count"),
+            0
+        );
     }
 
     /// Trial/accept copies the account username into `member.display_name`.

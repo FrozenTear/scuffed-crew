@@ -67,6 +67,31 @@ pub fn application_blocks_resubmit(status: ApplicationStatus) -> bool {
     )
 }
 
+/// Minutes left before a user whose latest application is closed (withdrawn,
+/// rejected or accepted) may apply again, or `None` when the cooldown is
+/// over. The cooldown is [`scuffed_types::APPLICATION_RESUBMIT_COOLDOWN_SECS`]
+/// from the application's `updated_at`, which the status write sets.
+///
+/// Rounded up, so the answer is never "0 minutes". `now` is a parameter so
+/// tests do not wait. A `updated_at` ahead of `now` (clock step) waits one
+/// full cooldown, not longer.
+pub fn application_resubmit_wait_minutes(
+    last_updated_at: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<i64> {
+    let cooldown = scuffed_types::APPLICATION_RESUBMIT_COOLDOWN_SECS;
+    let elapsed = now.signed_duration_since(last_updated_at).num_seconds();
+    let left = (cooldown - elapsed).min(cooldown);
+    (left > 0).then(|| (left + 59) / 60)
+}
+
+/// True when the user holds as many withdrawn applications as allowed
+/// ([`scuffed_types::MAX_WITHDRAWN_APPLICATIONS`]): no new application, and
+/// no withdraw that would add another.
+pub fn withdrawn_application_cap_reached(withdrawn: u64) -> bool {
+    withdrawn >= scuffed_types::MAX_WITHDRAWN_APPLICATIONS
+}
+
 /// Role to assign when creating a member for this application outcome.
 pub fn role_on_application_accept(from: ApplicationStatus) -> OrgRole {
     match from {
@@ -282,6 +307,36 @@ pub fn can_suspend_or_ban_admin(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resubmit_cooldown_is_one_hour_from_the_last_status_write() {
+        use chrono::{Duration, TimeZone, Utc};
+        let closed = Utc.with_ymd_and_hms(2026, 11, 23, 12, 0, 0).unwrap();
+        let at =
+            |secs: i64| application_resubmit_wait_minutes(closed, closed + Duration::seconds(secs));
+        // Right after the close: the full hour.
+        assert_eq!(at(0), Some(60));
+        // Rounded up, so never "0 minutes".
+        assert_eq!(at(1), Some(60));
+        assert_eq!(at(60), Some(59));
+        assert_eq!(at(3540), Some(1));
+        assert_eq!(at(3599), Some(1));
+        // The hour is over at exactly 3600 s.
+        assert_eq!(at(3600), None);
+        assert_eq!(at(3601), None);
+        assert_eq!(at(86_400), None);
+        // `updated_at` ahead of the clock waits one cooldown, not longer.
+        assert_eq!(at(-7200), Some(60));
+    }
+
+    #[test]
+    fn withdrawn_cap_is_reached_at_five_rows() {
+        assert!(!withdrawn_application_cap_reached(0));
+        assert!(!withdrawn_application_cap_reached(4));
+        assert!(withdrawn_application_cap_reached(5));
+        // Rows already over the cap stay refused.
+        assert!(withdrawn_application_cap_reached(6));
+    }
 
     #[test]
     fn application_transitions() {
