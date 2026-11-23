@@ -41,7 +41,7 @@ use crate::components::strategy::{
 };
 use crate::components::{Toast, use_toast};
 use crate::keybindings::{self, CanvasHint, CanvasKey, EditorAction};
-use crate::state::editor::{CanvasState, DrawingState, StrategyState};
+use crate::state::editor::{CanvasState, DrawingState, StrategyState, map_change_allowed};
 use crate::state::maps::{
     PICKER_MODE_ORDER, display_map_name, game_mode_api_str, game_mode_for_map, map_id_for_create,
     maps_for_mode,
@@ -87,6 +87,9 @@ struct EditorHeroEntry {
     hero: String,
     winrate: f64,
 }
+
+/// Shown beside the map name once the map can no longer be changed.
+const MAP_FIXED_NOTE: &str = "fixed after first save";
 
 #[derive(Debug, Serialize)]
 struct UpdateStrategyRequest {
@@ -915,6 +918,13 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
         }
     };
     let has_unsaved = ss.has_unsaved_changes;
+    // The update API takes no map, so the map is fixed once the strategy is
+    // saved (and while a save is in flight).
+    let can_change_map = map_change_allowed(
+        ss.strategy_id.is_some(),
+        *save_in_progress.read(),
+        cs.current_map.is_some(),
+    );
 
     // Clone values needed in callbacks and child components
     let zoom_val = cs.zoom;
@@ -993,10 +1003,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                             composition: composition_val,
                             selected_hero: hero_val.clone(),
                             on_format_change: move |f: TeamFormat| {
-                                strategy_state.with_mut(|s| {
-                                    s.team_format = f;
-                                    s.has_unsaved_changes = true;
-                                });
+                                strategy_state.with_mut(|s| s.set_team_format(f));
                             },
                             on_assign: move |slot: TeamSlot| {
                                 let hero = drawing_state.read().selected_hero.clone();
@@ -1038,10 +1045,8 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                             on_clear_all: move |_| {
                                 let prev = strategy_state.read().team_composition.clone();
                                 if !prev.is_empty() {
-                                    strategy_state.with_mut(|s| {
-                                        s.team_composition.clear();
-                                        s.has_unsaved_changes = true;
-                                    });
+                                    strategy_state
+                                        .with_mut(|s| s.set_team_composition(Vec::new()));
                                     undo_manager.with_mut(|u| {
                                         u.push(UndoableAction::ClearAllSlots { previous: prev });
                                     });
@@ -1513,13 +1518,26 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
             // Status bar
             // ===========================================================
             div { class: "editor-statusbar", inert: behind_picker(picker_open),
-                button {
-                    id: EDITOR_MAP_BUTTON_ID,
-                    class: "status-item status-map-link",
-                    r#type: "button",
-                    title: "Change map",
-                    onclick: move |_| show_map_picker.set(true),
-                    "Map: {map_display}"
+                if can_change_map {
+                    button {
+                        id: EDITOR_MAP_BUTTON_ID,
+                        class: "status-item status-map-link",
+                        r#type: "button",
+                        title: "Change map",
+                        onclick: move |_| show_map_picker.set(true),
+                        "Map: {map_display}"
+                    }
+                } else {
+                    // Not a control: the map of a saved strategy cannot be
+                    // changed, and the reason is in the text itself. It keeps
+                    // the id (and takes script focus) so focus still has a
+                    // place to return to when the picker closes.
+                    span {
+                        id: EDITOR_MAP_BUTTON_ID,
+                        class: "status-item",
+                        tabindex: "-1",
+                        "Map: {map_display} ({MAP_FIXED_NOTE})"
+                    }
                 }
                 span { class: "status-item",
                     "Elements: {element_count}"
@@ -1603,12 +1621,24 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                                                                     r#type: "button",
                                                                     aria_current: if selected { Some("true") } else { None },
                                                                     onclick: move |_| {
-                                                                        canvas_state.with_mut(|c| {
-                                                                            c.select_map(map_id.to_string(), None);
-                                                                        });
-                                                                        strategy_state.with_mut(|s| {
-                                                                            s.has_unsaved_changes = true;
-                                                                        });
+                                                                        let saved = strategy_state.peek().strategy_id.is_some();
+                                                                        let allowed = map_change_allowed(
+                                                                            saved,
+                                                                            *save_in_progress.peek(),
+                                                                            canvas_state.peek().current_map.is_some(),
+                                                                        );
+                                                                        if allowed {
+                                                                            canvas_state.with_mut(|c| {
+                                                                                c.select_map(map_id.to_string(), None);
+                                                                            });
+                                                                            // The map is sent only on create, so it
+                                                                            // is an unsaved change only before that.
+                                                                            if !saved {
+                                                                                strategy_state.with_mut(|s| {
+                                                                                    s.has_unsaved_changes = true;
+                                                                                });
+                                                                            }
+                                                                        }
                                                                         map_picker_error.set(None);
                                                                         close_picker();
                                                                     },
@@ -1879,10 +1909,7 @@ fn apply_undo(strategy_state: &mut Signal<StrategyState>, action: UndoableAction
             });
         }
         UndoableAction::ClearAllSlots { previous } => {
-            strategy_state.with_mut(|s| {
-                s.team_composition = previous;
-                s.has_unsaved_changes = true;
-            });
+            strategy_state.with_mut(|s| s.set_team_composition(previous));
         }
     }
 }
@@ -1936,10 +1963,7 @@ fn apply_redo(strategy_state: &mut Signal<StrategyState>, action: UndoableAction
             });
         }
         UndoableAction::ClearAllSlots { .. } => {
-            strategy_state.with_mut(|s| {
-                s.team_composition.clear();
-                s.has_unsaved_changes = true;
-            });
+            strategy_state.with_mut(|s| s.set_team_composition(Vec::new()));
         }
     }
 }
@@ -2017,5 +2041,71 @@ mod tests {
         );
         assert_eq!(behind_picker(true), Some("true"));
         assert_eq!(behind_picker(false), None);
+    }
+
+    /// This file without its tests, so a pin cannot match itself.
+    fn editor_source() -> &'static str {
+        let src = include_str!("editor.rs");
+        src.split("#[cfg(test)]").next().unwrap_or(src)
+    }
+
+    /// Issue 817: the update body is exactly what the server's update
+    /// handler reads. When team format, composition or map join it, they
+    /// must also join `StrategyState::mark_saved` and the stopgap (team
+    /// edits not dirty, map fixed after the first save) can go.
+    #[test]
+    fn the_update_body_sends_only_what_the_api_stores() {
+        let body = UpdateStrategyRequest {
+            name: Some("n".into()),
+            description: Some(None),
+            visibility: Some("private".into()),
+            elements: Some(Vec::new()),
+            phases: Some(Vec::new()),
+        };
+        let json = serde_json::to_value(&body).unwrap();
+        let mut keys: Vec<_> = json.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            ["description", "elements", "name", "phases", "visibility"]
+        );
+    }
+
+    /// Issue 817: nothing in the editor page marks the strategy unsaved for
+    /// a team edit. Team state changes only through the `StrategyState`
+    /// methods, which leave the flag alone.
+    #[test]
+    fn the_editor_page_never_writes_team_state_directly() {
+        let src = editor_source();
+        for direct in [
+            "s.team_format =",
+            "s.team_composition =",
+            "team_composition.clear()",
+        ] {
+            assert!(!src.contains(direct), "editor.rs still has `{direct}`");
+        }
+    }
+
+    /// Issue 817: Change map is offered only while the map can still be
+    /// sent, the picker re-checks before it switches, and the fixed map says
+    /// why in plain text.
+    #[test]
+    fn change_map_is_offered_only_while_the_map_can_be_saved() {
+        let src = editor_source();
+        let button = src
+            .find("title: \"Change map\"")
+            .expect("Change map button");
+        let gate = src[..button].rfind("if can_change_map {").expect("gate");
+        assert!(
+            !src[gate..button].contains("span {"),
+            "the Change map button sits directly under the gate"
+        );
+        let pick = src
+            .find("c.select_map(map_id.to_string(), None);")
+            .expect("pick");
+        let recheck = src[..pick].rfind("if allowed {").expect("picker re-check");
+        assert!(pick - recheck < 400, "the pick is inside the re-check");
+        assert!(src.contains("\"Map: {map_display} ({MAP_FIXED_NOTE})\""));
+        assert_eq!(MAP_FIXED_NOTE, "fixed after first save");
     }
 }
