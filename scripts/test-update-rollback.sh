@@ -31,8 +31,38 @@ cat >"${BIN}/podman" <<'STUB'
 #        start_running_only_<id>  State.Running turns true, ps status does not
 #        term_on_stop          holds N: the next N compose stop site-server
 #                              each send SIGTERM to update.sh
+#        hang_stop_<n>         the n-th compose stop site-server hangs
+#        hang_start_<n>        the n-th podman start hangs
+#        hang_up_rollback      compose up of the :rollback image hangs
+#        slow_names_ps         holds N: the next ps --format {{.Names}} takes N s
+#        int_group_on_stop     the next compose stop site-server sends SIGINT
+#                              to update.sh's process group (Ctrl-C), then hangs
+#        A hang_* file that says ignore-term also ignores SIGTERM, so only
+#        timeout's SIGKILL ends it. The hang uses /usr/bin/sleep: the sleep
+#        on PATH is a stub that returns at once.
 echo "podman $*" >>"${STUB_STATE}/calls"
 C="${STUB_STATE}/containers"
+# update.sh's pid: the nearest parent that is not timeout(1).
+update_pid() {
+    local pid="${PPID}"
+    while [[ "$(cat "/proc/${pid}/comm" 2>/dev/null)" == timeout ]]; do
+        pid="$(awk '/^PPid:/ { print $2 }' "/proc/${pid}/status")"
+    done
+    echo "${pid}"
+}
+# count <name>: bump and print a per-state call counter.
+count() {
+    local n
+    n="$(cat "${STUB_STATE}/count_$1" 2>/dev/null || echo 0)"
+    n=$((n + 1))
+    echo "${n}" >"${STUB_STATE}/count_$1"
+    echo "${n}"
+}
+hang() {
+    [[ "$(cat "$1")" == ignore-term ]] && trap '' TERM
+    echo "hang ${1##*/}" >>"${STUB_STATE}/calls"
+    /usr/bin/sleep 30
+}
 image_id() {
     awk -F'\t' -v r="$1" '$1 == r { id = $2 } END { if (id != "") print id; else exit 1 }' "${STUB_STATE}/images"
 }
@@ -48,6 +78,7 @@ case "${cmd}" in
             *" up "*)
                 img="${SITE_SERVER_IMAGE:-unset}"
                 echo "compose-up image=${img}" >>"${STUB_STATE}/calls"
+                [[ -f "${STUB_STATE}/hang_up_rollback" && "${img}" == *:rollback ]] && hang "${STUB_STATE}/hang_up_rollback"
                 # up_fails_new: compose cannot start anything but the rollback image.
                 [[ -f "${STUB_STATE}/up_fails_new" && "${img}" != *:rollback ]] && exit 125
                 if ! grep -q 'site-server' "${C}"; then
@@ -56,16 +87,26 @@ case "${cmd}" in
                     printf 's1\tscuffed-crew-site-server-1\t%s\t%s\t%s\n' \
                         "${st}" "${img}" "$(image_id "${img}" || echo none)" >>"${C}"
                 fi ;;
-            *" stop site-server "*|*" rm -f site-server "*)
+            *" stop "*" site-server "*|*" rm -f site-server "*)
+                if [[ " $* " == *" stop "* && -f "${STUB_STATE}/int_group_on_stop" ]]; then
+                    rm -f "${STUB_STATE}/int_group_on_stop"
+                    echo "int-sent" >>"${STUB_STATE}/calls"
+                    kill -INT -- "-$(awk '{ print $5 }' "/proc/$(update_pid)/stat")"
+                    /usr/bin/sleep 30
+                fi
+                if [[ " $* " == *" stop "* ]]; then
+                    n="$(count stop)"
+                    [[ -f "${STUB_STATE}/hang_stop_${n}" ]] && hang "${STUB_STATE}/hang_stop_${n}"
+                fi
                 drop_site_server
-                if [[ " $* " == *" stop site-server "* && -f "${STUB_STATE}/term_on_stop" ]]; then
+                if [[ " $* " == *" stop "* && -f "${STUB_STATE}/term_on_stop" ]]; then
                     left="$(cat "${STUB_STATE}/term_on_stop")"
                     if [[ "${left}" -gt 1 ]]; then
                         echo "$((left - 1))" >"${STUB_STATE}/term_on_stop"
                     else
                         rm -f "${STUB_STATE}/term_on_stop"
                     fi
-                    kill -TERM "${PPID}"
+                    kill -TERM "$(update_pid)"
                 fi ;;
         esac
         exit 0 ;;
@@ -75,6 +116,11 @@ case "${cmd}" in
         while [[ $# -gt 0 ]]; do
             case "$1" in --format) fmt="$2"; shift 2 ;; *) shift ;; esac
         done
+        if [[ "${fmt}" == '{{.Names}}' && -f "${STUB_STATE}/slow_names_ps" ]]; then
+            secs="$(cat "${STUB_STATE}/slow_names_ps")"
+            rm -f "${STUB_STATE}/slow_names_ps"
+            /usr/bin/sleep "${secs}"
+        fi
         while IFS=$'\t' read -r id name status image _imgid; do
             [[ -n "${id}" ]] || continue
             line="${fmt//\{\{.ID\}\}/${id}}"
@@ -117,6 +163,8 @@ case "${cmd}" in
         exit 0 ;;
     start)
         # podman start <cid|name>
+        n="$(count start)"
+        [[ -f "${STUB_STATE}/hang_start_${n}" ]] && hang "${STUB_STATE}/hang_start_${n}"
         cid="$(awk -F'\t' -v k="$1" '$1 == k || $2 == k { print $1; exit }' "${C}")"
         [[ -n "${cid}" ]] || exit 125
         [[ -f "${STUB_STATE}/start_fails_${cid}" ]] && exit 125
@@ -130,7 +178,7 @@ case "${cmd}" in
         exit 0 ;;
     rm)
         # podman rm -f <cid>
-        grep -v "^$2	" "${C}" >"${C}.new" || true
+        grep -v "^${!#}	" "${C}" >"${C}.new" || true
         mv "${C}.new" "${C}"
         exit 0 ;;
     volume)
@@ -248,9 +296,15 @@ new_state() {
     export STUB_STATE
 }
 
+# TEST_PODMAN_SECS, when set, becomes SCUFFED_UPDATE_PODMAN_SECS. Unset, the
+# script's default bound applies. TEST_SETSID=1 runs update.sh in a process
+# group of its own, so a group SIGINT does not reach this test.
 run_update() {
-    env -i PATH="${BIN}:/usr/bin:/bin" HOME="${TMP}" STUB_STATE="${STUB_STATE}" \
-        SURREAL_GUARD_WAIT_SECS=0 bash "${FIX}/scripts/update.sh" "$@" \
+    local extra=() pre=()
+    [[ -z "${TEST_PODMAN_SECS:-}" ]] || extra=(SCUFFED_UPDATE_PODMAN_SECS="${TEST_PODMAN_SECS}")
+    [[ -z "${TEST_SETSID:-}" ]] || pre=(setsid --wait)
+    "${pre[@]}" env -i PATH="${BIN}:/usr/bin:/bin" HOME="${TMP}" STUB_STATE="${STUB_STATE}" \
+        SURREAL_GUARD_WAIT_SECS=0 "${extra[@]}" bash "${FIX}/scripts/update.sh" "$@" \
         >"${STUB_STATE}/out" 2>&1 </dev/null
 }
 
@@ -315,6 +369,7 @@ out_has "Live git_sha: ${NEW_SHA}" || fail "healthy update did not print the new
 [[ ! -e "${FIX}/backups-manual" ]] || fail "update without --backup wrote backups-manual/"
 out_has "warning: no --backup" || fail "update without --backup does not warn that there is no database export"
 out_has "already-migrated database" || fail "update without --backup does not name the migrated-database risk"
+out_has "timed out" && fail "healthy update: a podman call timed out under the default bound. $(tail_out)"
 expect_db_untouched "healthy update"
 
 # A leftover --no-deps argument is a no-op.
@@ -496,6 +551,7 @@ echo 1 >"${STUB_STATE}/term_on_stop"
 if run_update; then fail "update.sh exited 0 after SIGTERM during the removal"; fi
 [[ ! -e "${STUB_STATE}/term_on_stop" ]] || fail "interrupt in removal: the signal was never sent"
 out_has "Waiting for port" && fail "interrupt in removal: the update went on after the signal"
+out_has "timed out" && fail "interrupt in removal: a podman call timed out. $(tail_out)"
 expect_rolled_back "interrupt in removal"
 expect_db_untouched "interrupt in removal"
 
@@ -505,8 +561,110 @@ new_state term-in-rollback "${DB_LINE}${SITE_LINE}"
 echo 2 >"${STUB_STATE}/term_on_stop"
 if run_update; then fail "update.sh exited 0 after SIGTERM during the rollback"; fi
 [[ ! -e "${STUB_STATE}/term_on_stop" ]] || fail "interrupt in rollback: the second signal was never sent"
+out_has "timed out" && fail "interrupt in rollback: a podman call timed out. $(tail_out)"
 expect_rolled_back "interrupt in rollback"
 expect_db_untouched "interrupt in rollback"
+
+# --- f) hung podman: every stop, rm and start is bounded ------------------------
+# The stop before the new image starts hangs and SIGTERM ends it: the
+# removal goes on through rm -f and the update still succeeds.
+new_state hung-stop-update "${DB_LINE}${SITE_LINE}"
+touch "${STUB_STATE}/hang_stop_1"
+TEST_PODMAN_SECS=1 run_update || fail "hung stop before the update: exit $?. $(tail_out)"
+calls_has '^hang hang_stop_1$' || fail "hung stop before the update: the stop never hung"
+out_has "podman compose stop site-server timed out after 1s" || fail "hung stop before the update: no timeout line. $(tail_out)"
+hang_line="$(line_of '^hang hang_stop_1$')"
+rm_after="$(awk -v n="${hang_line}" 'NR > n && /^podman compose .* rm -f site-server$/ { print NR; exit }' "${STUB_STATE}/calls")"
+[[ -n "${rm_after}" ]] || fail "hung stop before the update: no rm -f after the stop timed out"
+out_has "Updated & healthy" || fail "hung stop before the update: the update did not finish. $(tail_out)"
+[[ "$(site_image)" == "${IMG}:main|imgNew" ]] || fail "hung stop before the update: not on the new image: $(site_image)"
+expect_db_untouched "hung stop before the update"
+
+# The stop in the rollback hangs and ignores SIGTERM, so timeout SIGKILLs it.
+# The rollback still removes the container and starts the previous image.
+new_state hung-stop-rollback "${DB_LINE}${SITE_LINE}"
+rm "${STUB_STATE}/health_imgNew"
+echo ignore-term >"${STUB_STATE}/hang_stop_2"
+rc=0
+TEST_PODMAN_SECS=1 run_update || rc=$?
+[[ "${rc}" == "1" ]] || fail "hung stop in the rollback: exit ${rc}, want 1. $(tail_out)"
+calls_has '^hang hang_stop_2$' || fail "hung stop in the rollback: the stop never hung"
+out_has "podman compose stop site-server timed out after 1s" || fail "hung stop in the rollback: no timeout line. $(tail_out)"
+hang_line="$(line_of '^hang hang_stop_2$')"
+rm_after="$(awk -v n="${hang_line}" 'NR > n && /^podman compose .* rm -f site-server$/ { print NR; exit }' "${STUB_STATE}/calls")"
+old_up="$(line_of "^compose-up image=${IMG}:rollback\$")"
+[[ -n "${rm_after}" && -n "${old_up}" && "${rm_after}" -lt "${old_up}" ]] \
+    || fail "hung stop in the rollback: rm -f and the previous image did not follow the killed stop"
+[[ "$(site_image)" == "${IMG}:rollback|imgOld" ]] || fail "hung stop in the rollback: previous image not restored: $(site_image). $(tail_out)"
+out_has "update FAILED. Rolled back" || fail "hung stop in the rollback: message does not mention the rollback. $(tail_out)"
+out_has "Previous git_sha: ${OLD_SHA}" || fail "hung stop in the rollback: message does not name the previous git_sha"
+expect_db_untouched "hung stop in the rollback"
+
+# compose up of the previous image hangs: the rollback FAILED, with the
+# manual command, and compose up is not tried a second time.
+new_state hung-up-rollback "${DB_LINE}${SITE_LINE}"
+rm "${STUB_STATE}/health_imgNew"
+touch "${STUB_STATE}/hang_up_rollback"
+rc=0
+TEST_PODMAN_SECS=1 run_update || rc=$?
+[[ "${rc}" == "1" ]] || fail "hung start in the rollback: exit ${rc}, want 1. $(tail_out)"
+calls_has '^hang hang_up_rollback$' || fail "hung start in the rollback: compose up never hung"
+out_has "podman compose up -d --no-deps site-server timed out after 1s" || fail "hung start in the rollback: no timeout line. $(tail_out)"
+[[ "$(grep -c "^compose-up image=${IMG}:rollback\$" "${STUB_STATE}/calls")" == "1" ]] \
+    || fail "hung start in the rollback: compose up of the previous image ran more than once"
+out_has "rollback FAILED" || fail "hung start in the rollback: the failed rollback is not reported. $(tail_out)"
+out_has "Rolled back:" && fail "hung start in the rollback: claims the previous image is healthy"
+out_has "Manual: SITE_SERVER_IMAGE=${IMG}:rollback" || fail "hung start in the rollback: the manual command is gone. $(tail_out)"
+out_has "data/secrets.env still names the failed image" || fail "hung start in the rollback: the pin note is gone. $(tail_out)"
+expect_db_untouched "hung start in the rollback"
+
+# The previous container is left Created and its podman start hangs: no
+# compose start retry, the health wait fails, the rollback FAILED.
+new_state hung-start-created-rollback "${DB_LINE}${SITE_LINE}"
+touch "${STUB_STATE}/up_created"
+rm "${STUB_STATE}/health_imgNew"
+echo ignore-term >"${STUB_STATE}/hang_start_2"
+rc=0
+TEST_PODMAN_SECS=1 run_update || rc=$?
+[[ "${rc}" == "1" ]] || fail "hung podman start in the rollback: exit ${rc}, want 1. $(tail_out)"
+calls_has '^hang hang_start_2$' || fail "hung podman start in the rollback: the start never hung"
+out_has "podman start ${P}-site-server-1 timed out after 1s" || fail "hung podman start in the rollback: no timeout line. $(tail_out)"
+hang_line="$(line_of '^hang hang_start_2$')"
+awk -v n="${hang_line}" 'NR > n && /^podman compose .* start site-server$/ { f = 1 } END { exit !f }' "${STUB_STATE}/calls" \
+    && fail "hung podman start in the rollback: compose start was tried after the timeout"
+out_has "rollback FAILED" || fail "hung podman start in the rollback: the failed rollback is not reported. $(tail_out)"
+out_has "Rolled back:" && fail "hung podman start in the rollback: claims the previous image is healthy"
+out_has "Manual: SITE_SERVER_IMAGE=${IMG}:rollback" || fail "hung podman start in the rollback: the manual command is gone"
+expect_db_untouched "hung podman start in the rollback"
+
+# Ctrl-C (SIGINT to the process group) while a bounded stop hangs before
+# the new image starts: podman gets it at once and the rollback starts, with
+# no wait for the bound (60s default here).
+new_state int-group-in-removal "${DB_LINE}${SITE_LINE}"
+touch "${STUB_STATE}/int_group_on_stop"
+SECONDS=0
+if TEST_SETSID=1 run_update; then fail "update.sh exited 0 after Ctrl-C during the removal"; fi
+calls_has '^int-sent$' || fail "Ctrl-C in removal: the signal was never sent"
+((SECONDS < 20)) || fail "Ctrl-C in removal: took ${SECONDS}s, the interrupt waited for the bound"
+out_has "timed out" && fail "Ctrl-C in removal: the stop ran into the bound instead of the interrupt. $(tail_out)"
+out_has "Waiting for port" && fail "Ctrl-C in removal: the update went on after the signal"
+expect_rolled_back "Ctrl-C in removal"
+expect_db_untouched "Ctrl-C in removal"
+
+# A podman ps slower than the bound before the removal is not cut short:
+# the rollback target is still recorded and the update goes on.
+new_state slow-ps-before-removal "${DB_LINE}${SITE_LINE}"
+echo 3 >"${STUB_STATE}/slow_names_ps"
+TEST_PODMAN_SECS=1 run_update || fail "slow podman ps before the removal: exit $?. $(tail_out)"
+calls_has "^podman tag imgOld ${IMG}:rollback\$" || fail "slow podman ps before the removal: no rollback target recorded. $(tail_out)"
+out_has "timed out" && fail "slow podman ps before the removal: the lookup was cut short. $(tail_out)"
+out_has "Updated & healthy" || fail "slow podman ps before the removal: the update did not finish"
+
+# A bound that is not a whole number of seconds stops before any container.
+new_state bad-podman-secs "${DB_LINE}${SITE_LINE}"
+if TEST_PODMAN_SECS=abc run_update; then fail "update.sh accepted SCUFFED_UPDATE_PODMAN_SECS=abc"; fi
+out_has "SCUFFED_UPDATE_PODMAN_SECS must be a whole number" || fail "bad SCUFFED_UPDATE_PODMAN_SECS is not reported. $(tail_out)"
+expect_site_untouched "bad SCUFFED_UPDATE_PODMAN_SECS"
 
 # --- e) --backup ----------------------------------------------------------------
 new_state backup-empty "${DB_LINE}${SITE_LINE}"
@@ -577,4 +735,4 @@ new_state bad-arg "${DB_LINE}${SITE_LINE}"
 if run_update --bakcup; then fail "update.sh accepted an unknown argument"; fi
 [[ ! -s "${STUB_STATE}/calls" ]] || fail "unknown argument still ran podman or curl"
 
-echo "ok: update.sh rollback and --backup (28 scenarios)"
+echo "ok: update.sh rollback and --backup (35 scenarios)"
