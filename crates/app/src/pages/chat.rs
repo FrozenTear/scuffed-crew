@@ -66,8 +66,9 @@ fn room_title(teams: Option<&[Team]>, selected: Option<&str>) -> String {
 }
 
 /// The teams the signed-in member is rostered on, as far as the page knows.
-/// A team room is readable and writable by its roster only (the relay read
-/// gate and `send-public` both check `plays_on`), whatever the org role.
+/// A team room is readable by its roster only (the relay read gate checks
+/// `plays_on`), and a public send is refused off the roster (`send-public`
+/// checks it too), whatever the org role.
 #[derive(Clone, Debug, PartialEq)]
 enum OwnTeams {
     /// The roster answer: ids of the member's teams (empty: on no team).
@@ -95,10 +96,10 @@ impl OwnTeams {
 }
 
 /// The part of `GET /api/public/members/{id}` this page reads: the member's
-/// active roster entries.
+/// active roster entries. `teams` is required: a profile without it is a
+/// contract drift, which lands in `OwnTeams::Unknown` and hides no room.
 #[derive(Debug, Deserialize)]
 struct OwnTeamsProfile {
-    #[serde(default)]
     teams: Vec<OwnTeamEntry>,
 }
 
@@ -205,22 +206,85 @@ fn team_picker(
 
 /// What the page shows in place of a room the member is not rostered on: no
 /// socket, no empty message list and no composer that can only answer 403.
-fn off_roster_card(team_name: &str, on_any_team: bool) -> Element {
+/// `can_add_self`: officers and admins edit rosters (`POST
+/// /api/teams/{id}/roster` takes an officer), so they can add themselves.
+fn off_roster_card(team_name: &str, on_any_team: bool, can_add_self: bool) -> Element {
     let message = if on_any_team {
         format!(
             "Only players on the {team_name} roster can read and post in this chat. \
              Pick one of your teams above."
         )
     } else {
+        let next = if can_add_self {
+            "Add yourself to a roster in team admin."
+        } else {
+            "An officer can add you to a roster."
+        };
         format!(
             "Only players on the {team_name} roster can read and post in this chat, \
-             and you are not on a team yet. An officer can add you to a roster."
+             and you are not on a team yet. {next}"
         )
     };
     rsx! {
         EmptyCard { title: "You are not on this team", message }
     }
 }
+
+/// What fills the body under the head bar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BodyKind {
+    /// The team list is not in yet: the member gate on that fetch.
+    TeamsPending,
+    /// The session is known to hold no org membership: the member gate's
+    /// wall (log in, or apply), never a roster card.
+    MemberWall,
+    NoTeams,
+    /// The team list is in, the roster answer is not.
+    LoadingOwnTeams,
+    /// The picked team is known not to be the member's.
+    OffRoster {
+        on_any_team: bool,
+        can_add_self: bool,
+    },
+    /// The room, or the member gate on its channels fetch (`room_body`).
+    Room,
+}
+
+/// The body for a state of the page. The roster card waits for
+/// `channels_loaded`: that fetch takes an active org member, so until it
+/// has loaded the member gate answers first (an inactive or suspended member
+/// gets its wall, not the roster card).
+fn body_kind(
+    list: Option<&[Team]>,
+    selected: Option<&str>,
+    own: Option<&OwnTeams>,
+    auth: &AuthState,
+    channels_loaded: bool,
+) -> BodyKind {
+    let Some(list) = list else {
+        return BodyKind::TeamsPending;
+    };
+    if !auth.loading && !auth.is_org_member() {
+        return BodyKind::MemberWall;
+    }
+    if list.is_empty() {
+        return BodyKind::NoTeams;
+    }
+    match (selected, own) {
+        (None, None) => BodyKind::LoadingOwnTeams,
+        (Some(team_id), Some(own)) if channels_loaded && own.excludes(team_id) => {
+            BodyKind::OffRoster {
+                on_any_team: !own.ids().is_empty(),
+                can_add_self: auth.is_officer_or_above(),
+            }
+        }
+        _ => BodyKind::Room,
+    }
+}
+
+/// The status line of the roster lookup. It is in the head bar in every
+/// state; only its text changes, so the wait is announced.
+const LOADING_OWN_TEAMS: &str = "Loading your teams.";
 
 /// The thread: one region and one head bar for every state of the page.
 /// Only `body` changes between states and teams, so the head bar and its
@@ -305,6 +369,20 @@ pub fn TeamChat() -> Element {
     let own_data = own_teams.read();
     let own = own_data.as_ref().and_then(|o| o.as_ref());
     let own_ids = own.map(OwnTeams::ids).unwrap_or_default();
+    let channels_loaded = channels.data.read().as_ref().is_some_and(Option::is_some);
+    let auth_now = auth();
+    let kind = body_kind(
+        team_list.map(Vec::as_slice),
+        selected.as_deref(),
+        own,
+        &auth_now,
+        channels_loaded,
+    );
+    let own_status = if kind == BodyKind::LoadingOwnTeams {
+        LOADING_OWN_TEAMS
+    } else {
+        ""
+    };
 
     // The picker shows once there is a team to pick. The cap notice is a live
     // region, so it is in the bar in every state.
@@ -324,11 +402,19 @@ pub fn TeamChat() -> Element {
             }))}
         }
         {list_cap_notice(&teams, "teams")}
+        p { class: "visually-hidden", role: "status", "{own_status}" }
     };
 
-    let (body, live) = match team_list {
-        None => (state_body(member_pending(&auth(), &teams, "teams")), false),
-        Some(list) if list.is_empty() => (
+    let (body, live) = match kind {
+        BodyKind::TeamsPending => (
+            state_body(member_pending(&auth_now, &teams, "teams")),
+            false,
+        ),
+        BodyKind::MemberWall => (
+            state_body(member_pending(&auth_now, &channels, "team channels")),
+            false,
+        ),
+        BodyKind::NoTeams => (
             state_body(rsx! {
                 EmptyCard {
                     title: "No teams yet",
@@ -337,22 +423,21 @@ pub fn TeamChat() -> Element {
             }),
             false,
         ),
-        Some(_) if selected.is_none() && own.is_none() => (
+        // The head bar's status line speaks; this copy is for the eye only.
+        BodyKind::LoadingOwnTeams => (
             state_body(rsx! {
-                p { class: "chat-thread__note", "Loading your teams." }
+                p { class: "chat-thread__note", aria_hidden: "true", "{LOADING_OWN_TEAMS}" }
             }),
             false,
         ),
-        Some(_)
-            if let Some(team_id) = selected.as_deref()
-                && own.is_some_and(|own| own.excludes(team_id)) =>
-        {
-            (
-                state_body(off_roster_card(&title, !own_ids.is_empty())),
-                false,
-            )
-        }
-        Some(_) => room_body(&auth(), selected, &channels, room),
+        BodyKind::OffRoster {
+            on_any_team,
+            can_add_self,
+        } => (
+            state_body(off_roster_card(&title, on_any_team, can_add_self)),
+            false,
+        ),
+        BodyKind::Room => room_body(&auth_now, selected, &channels, room),
     };
     #[cfg(feature = "web")]
     let status = live.then(|| {
@@ -599,8 +684,12 @@ mod tests {
         .expect("profile");
         let own: Vec<String> = profile.teams.into_iter().map(|t| t.team_id).collect();
         assert_eq!(own, ["b"]);
-        let bare: OwnTeamsProfile = serde_json::from_str("{}").expect("no teams key");
-        assert!(bare.teams.is_empty());
+        assert!(
+            serde_json::from_str::<OwnTeamsProfile>("{}").is_err(),
+            "a profile with no teams key is a contract drift (Unknown), not on no team"
+        );
+        let none: OwnTeamsProfile = serde_json::from_str(r#"{"teams":[]}"#).expect("no teams");
+        assert!(none.teams.is_empty());
     }
 
     #[test]
@@ -664,8 +753,9 @@ mod tests {
     fn a_room_out_of_reach_says_so_instead_of_mounting_the_room() {
         fn probe() -> Element {
             rsx! {
-                {off_roster_card("Squad Alpha", true)}
-                {off_roster_card("Squad Alpha", false)}
+                {off_roster_card("Squad Alpha", true, false)}
+                {off_roster_card("Squad Alpha", false, false)}
+                {off_roster_card("Squad Alpha", false, true)}
             }
         }
         let mut dom = VirtualDom::new(probe);
@@ -673,7 +763,7 @@ mod tests {
         let html = dioxus_ssr::render(&dom);
         assert_eq!(
             html.matches("<h2>You are not on this team</h2>").count(),
-            2,
+            3,
             "{html}"
         );
         assert!(
@@ -683,15 +773,29 @@ mod tests {
             ),
             "{html}"
         );
-        assert!(html.contains("you are not on a team yet"), "{html}");
+        assert_eq!(
+            html.matches("you are not on a team yet").count(),
+            2,
+            "{html}"
+        );
+        assert_eq!(
+            html.matches("An officer can add you to a roster.").count(),
+            1,
+            "{html}"
+        );
+        assert_eq!(
+            html.matches("Add yourself to a roster in team admin.")
+                .count(),
+            1,
+            "an officer edits rosters: {html}"
+        );
 
         let src = include_str!("chat.rs");
-        let prod = src.split("mod tests").next().expect("production source");
-        let gate = prod
-            .find("own.is_some_and(|own| own.excludes(team_id))")
-            .expect("the page checks the roster");
-        let room = prod.find("Some(_) => room_body(").expect("the room arm");
-        assert!(gate < room, "the roster check comes before the room");
+        let prod = src.split("#[cfg(test)]").next().expect("production source");
+        assert!(
+            prod.contains("let (body, live) = match kind {"),
+            "the page renders the body `body_kind` chose"
+        );
         assert!(
             prod.contains("&& let Some(team) = default_team(list, own.ids())"),
             "the default team comes from the roster answer"
@@ -700,6 +804,85 @@ mod tests {
             !prod.contains("list.first()"),
             "the first team by name is not the default"
         );
+    }
+
+    fn auth_as(role: Option<scuffed_types::OrgRole>) -> AuthState {
+        AuthState {
+            user: Some(scuffed_types::UserInfo {
+                id: "u1".into(),
+                username: "Player01".into(),
+                avatar_url: None,
+                role,
+            }),
+            loading: false,
+        }
+    }
+
+    /// A row of the body table: case, team list, pick, roster answer, auth,
+    /// channels loaded, and the body wanted.
+    type BodyCase<'a> = (
+        &'a str,
+        Option<&'a [Team]>,
+        Option<&'a str>,
+        Option<&'a OwnTeams>,
+        &'a AuthState,
+        bool,
+        BodyKind,
+    );
+
+    /// The body for each state of the page. Review of issue 816: an account
+    /// with no member row, or an inactive member, got the roster card in
+    /// place of the member gate's wall.
+    #[test]
+    fn the_body_follows_the_page_state_and_the_member_gate_answers_first() {
+        use scuffed_types::OrgRole;
+        let teams = vec![team("a", "Squad Alpha"), team("b", "Squad Bravo")];
+        let list = Some(teams.as_slice());
+        let member = auth_as(Some(OrgRole::Member));
+        let officer = auth_as(Some(OrgRole::Officer));
+        let no_member_row = auth_as(None);
+        let signed_out = AuthState {
+            user: None,
+            loading: false,
+        };
+        let auth_loading = AuthState::new();
+        let mine = OwnTeams::Known(ids(&["b"]));
+        let on_none = OwnTeams::Known(Vec::new());
+        let unknown = OwnTeams::Unknown;
+        let off_roster = |on_any_team, can_add_self| BodyKind::OffRoster {
+            on_any_team,
+            can_add_self,
+        };
+
+        #[rustfmt::skip]
+        let table: Vec<BodyCase> = vec![
+            ("teams pending", None, None, None, &member, false, BodyKind::TeamsPending),
+            ("teams pending, no member row", None, None, None, &no_member_row, false, BodyKind::TeamsPending),
+            ("no teams", Some(&teams[..0]), None, None, &member, false, BodyKind::NoTeams),
+            ("roster pending", list, None, None, &member, false, BodyKind::LoadingOwnTeams),
+            ("roster pending, auth loading", list, None, None, &auth_loading, false, BodyKind::LoadingOwnTeams),
+            ("unknown roster: the room", list, Some("a"), Some(&unknown), &member, true, BodyKind::Room),
+            ("own pick: the room", list, Some("b"), Some(&mine), &member, true, BodyKind::Room),
+            ("own pick, channels pending", list, Some("b"), Some(&mine), &member, false, BodyKind::Room),
+            ("off-roster pick", list, Some("a"), Some(&mine), &member, true, off_roster(true, false)),
+            ("off-roster, on no team", list, Some("a"), Some(&on_none), &member, true, off_roster(false, false)),
+            ("off-roster officer, on no team", list, Some("a"), Some(&on_none), &officer, true, off_roster(false, true)),
+            ("off-roster officer, on a team", list, Some("a"), Some(&mine), &officer, true, off_roster(true, true)),
+            // An inactive or suspended member keeps its role in /api/auth/me;
+            // the channels fetch (OrgMember) then fails, so the gate answers.
+            ("off-roster, channels not loaded", list, Some("a"), Some(&on_none), &member, false, BodyKind::Room),
+            ("no member row", list, Some("a"), Some(&on_none), &no_member_row, false, BodyKind::MemberWall),
+            ("no member row, roster pending", list, None, None, &no_member_row, false, BodyKind::MemberWall),
+            ("no member row, no teams", Some(&teams[..0]), None, None, &no_member_row, false, BodyKind::MemberWall),
+            ("signed out", list, Some("a"), Some(&on_none), &signed_out, false, BodyKind::MemberWall),
+        ];
+        for (case, list, selected, own, auth, channels_loaded, want) in table {
+            assert_eq!(
+                body_kind(list, selected, own, auth, channels_loaded),
+                want,
+                "{case}"
+            );
+        }
     }
 
     thread_local! {
