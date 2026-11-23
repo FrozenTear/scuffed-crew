@@ -2304,14 +2304,15 @@ mod tests {
     fn a_conflict_on_add_shows_the_server_reason_on_the_entrant_line() {
         use scuffed_api_client::ClientError;
         // Issue 850: a team already entered answers 409 with a reason.
+        // The body is the live server text (API PR 876).
         let dup = ClientError::http(
             409,
-            r#"{"error":"That team is already in this tournament"}"#,
+            r#"{"error":"Team is already in this tournament"}"#,
             None,
         );
         assert_eq!(
             entrant_conflict_reason(&dup).as_deref(),
-            Some("That team is already in this tournament.")
+            Some("Team is already in this tournament.")
         );
         // Long dashes in a reason are made plain; a full stop is kept once.
         let dashed = ClientError::http(
