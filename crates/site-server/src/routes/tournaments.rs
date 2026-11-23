@@ -505,6 +505,9 @@ pub async fn list_participants(
         .map_err(internal_err)
 }
 
+/// A given seed must be 1 or higher; absent or null means unseeded.
+const SEED_TOO_LOW: &str = "Seed must be 1 or higher";
+
 #[derive(Deserialize)]
 pub struct AddParticipantRequest {
     pub team_id: Option<String>,
@@ -517,10 +520,16 @@ pub async fn add_participant(
     State(state): State<AppState>,
     officer: OfficerUser,
     Path(id): Path<String>,
-    Json(body): Json<AddParticipantRequest>,
+    Json(mut body): Json<AddParticipantRequest>,
 ) -> ApiResult<(StatusCode, Json<TournamentParticipant>)> {
+    // A blank or whitespace-only value counts as missing.
+    body.team_id = body.team_id.filter(|s| !s.trim().is_empty());
+    body.external_name = body.external_name.filter(|s| !s.trim().is_empty());
     if body.team_id.is_none() && body.external_name.is_none() {
         return Err(bad_request("Provide team_id or external_name"));
+    }
+    if body.seed == Some(0) {
+        return Err(bad_request(SEED_TOO_LOW));
     }
 
     // Check max_teams
@@ -546,7 +555,10 @@ pub async fn add_participant(
             body.seed,
         )
         .await
-        .map_err(internal_err)?;
+        .map_err(|e| match e {
+            scuffed_db::DbError::Conflict(msg) => conflict(&msg),
+            other => internal_err(other),
+        })?;
 
     audit(
         &state.db,
@@ -569,6 +581,8 @@ pub async fn add_participant(
 
 #[derive(Deserialize)]
 pub struct UpdateParticipantRequest {
+    /// Absent = leave unchanged, null = clear to unseeded, n = set seed.
+    #[serde(default, deserialize_with = "crate::routes::members::double_option")]
     pub seed: Option<Option<u32>>,
     pub status: Option<String>,
     pub group_label: Option<Option<String>>,
@@ -581,6 +595,11 @@ pub async fn update_participant(
     Path((id, pid)): Path<(String, String)>,
     Json(body): Json<UpdateParticipantRequest>,
 ) -> ApiResult<Json<TournamentParticipant>> {
+    // Absent leaves the seed alone and null clears it; only an explicit 0 is
+    // refused.
+    if body.seed == Some(Some(0)) {
+        return Err(bad_request(SEED_TOO_LOW));
+    }
     let status = body.status.as_deref().map(|s| match s {
         "checked_in" => ParticipantStatus::CheckedIn,
         "active" => ParticipantStatus::Active,

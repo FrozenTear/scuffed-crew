@@ -11,6 +11,22 @@ use crate::types::{
 };
 use crate::{with_timeout, Database, DbResult};
 
+/// Unique index on `(tournament_id, team_id)` for `tournament_participant`.
+const PARTICIPANT_TEAM_INDEX: &str = "tp_tournament_team_idx";
+
+/// Map the unique-index rejection for [`PARTICIPANT_TEAM_INDEX`] (the same
+/// team added twice to one tournament) to `DbError::Conflict`. SurrealDB v3
+/// reports it as "Database index `tp_tournament_team_idx` already contains
+/// [...]"; the index name is matched so no other error is turned into a 409.
+fn map_participant_team_conflict(e: surrealdb::Error) -> crate::DbError {
+    let msg = e.to_string();
+    if msg.contains(PARTICIPANT_TEAM_INDEX) && msg.contains("already contains") {
+        crate::DbError::Conflict("Team is already in this tournament".into())
+    } else {
+        crate::DbError::Surreal(e)
+    }
+}
+
 // ─── Internal DB Structs ───
 
 #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
@@ -502,7 +518,8 @@ impl Database {
                 .client
                 .create("tournament_participant")
                 .content(db)
-                .await?;
+                .await
+                .map_err(map_participant_team_conflict)?;
             Ok(db_to_participant(created.ok_or_else(|| {
                 crate::DbError::NotFound("Failed to add participant".into())
             })?))
