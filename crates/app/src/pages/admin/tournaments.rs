@@ -278,6 +278,19 @@ fn add_participant_body(
     })
 }
 
+/// The entrant field error for a refused Add: the server's own reason when it
+/// answered 409 with a JSON `error` (the team is already entered, issue 850),
+/// with long dashes made plain and a closing full stop. `None` for any other
+/// failure, and for a 409 with no reason: those keep the dialog's error line.
+fn entrant_conflict_reason(err: &scuffed_api_client::ClientError) -> Option<String> {
+    if err.http_status() != Some(409) {
+        return None;
+    }
+    let value = serde_json::from_str::<serde_json::Value>(err.http_body()?).ok()?;
+    let reason = crate::client_error::plain_punctuation(value.get("error")?.as_str()?);
+    (!reason.is_empty()).then(|| crate::client_error::as_sentence(&reason))
+}
+
 /// The seed field error: what the field takes, and that blank is fine.
 const SEED_ERROR: &str = "Seed must be a whole number, 1 or higher, or blank for no seed.";
 
@@ -816,6 +829,20 @@ pub fn AdminTournaments() -> Element {
                         detail_refresh += 1;
                     }
                     Err(e) => {
+                        if let Some(reason) = entrant_conflict_reason(&e) {
+                            // A 409 is about the entrant (already entered):
+                            // the server's reason on the entrant line, a
+                            // toast, and focus on the team, like a check
+                            // made on the page.
+                            crate::util::log_client_error("Could not add the participant", &e);
+                            toast.show(Toast::error(two_sentences(
+                                "Could not add the participant",
+                                &reason,
+                            )));
+                            add_part_entrant_error.set(reason);
+                            focus_element_by_id(PARTICIPANT_TEAM_ID);
+                            return;
+                        }
                         // One line for both, logged once by `SaveState::failed`.
                         let line = SaveState::failed("Could not add the participant", &e).text();
                         add_part_error.set(Some(line.clone()));
@@ -2219,6 +2246,59 @@ mod tests {
             .map(|t| t.id)
             .collect();
         assert!(ids.is_empty(), "{ids:?}");
+    }
+
+    #[test]
+    fn a_conflict_on_add_shows_the_server_reason_on_the_entrant_line() {
+        use scuffed_api_client::ClientError;
+        // Issue 850: a team already entered answers 409 with a reason.
+        let dup = ClientError::http(
+            409,
+            r#"{"error":"That team is already in this tournament"}"#,
+            None,
+        );
+        assert_eq!(
+            entrant_conflict_reason(&dup).as_deref(),
+            Some("That team is already in this tournament.")
+        );
+        // Long dashes in a reason are made plain; a full stop is kept once.
+        let dashed = ClientError::http(
+            409,
+            "{\"error\":\"Already entered \u{2014} remove it first.\"}",
+            None,
+        );
+        assert_eq!(
+            entrant_conflict_reason(&dashed).as_deref(),
+            Some("Already entered. Remove it first.")
+        );
+        // A 409 with no reason, and every other failure, keep the dialog's
+        // error line (`SaveState::failed`).
+        for other in [
+            ClientError::http(409, "", None),
+            ClientError::http(409, r#"{"error":"  "}"#, None),
+            ClientError::http(409, "not json", None),
+            ClientError::http(400, r#"{"error":"Pick a team or type a name"}"#, None),
+            ClientError::http(500, r#"{"error":"Internal error"}"#, None),
+            ClientError::Network("offline".into()),
+            ClientError::Deserialize("eof".into()),
+        ] {
+            assert_eq!(entrant_conflict_reason(&other), None, "{other:?}");
+        }
+
+        // The submit failure arm uses it before the generic line: the reason
+        // goes on the entrant line, focus goes to the team, and the generic
+        // line stays for the rest.
+        let src = include_str!("tournaments.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let arm = prod
+            .split("if let Some(reason) = entrant_conflict_reason(&e) {")
+            .nth(1)
+            .expect("the 409 arm");
+        let conflict = arm.split("return;").next().unwrap();
+        assert!(conflict.contains("add_part_entrant_error.set(reason);"));
+        assert!(conflict.contains("focus_element_by_id(PARTICIPANT_TEAM_ID);"));
+        assert!(conflict.contains("toast.show(Toast::error("));
+        assert!(arm.contains("SaveState::failed(\"Could not add the participant\", &e).text();"));
     }
 
     #[test]
