@@ -670,9 +670,10 @@ for secs in abc 0; do
 done
 
 # A bound over 3600s stops before any container too, including a 20-digit
-# value that bash arithmetic would wrap.
+# value that bash arithmetic would wrap, and 2^64 (18446744073709551616)
+# which wraps to 0, so a length-check-only mutation is caught.
 new_state podman-secs-over-limit "${DB_LINE}${SITE_LINE}"
-for secs in 3601 99999999999999999999; do
+for secs in 3601 99999999999999999999 18446744073709551616; do
     if TEST_PODMAN_SECS="${secs}" run_update; then fail "update.sh accepted SCUFFED_UPDATE_PODMAN_SECS=${secs}"; fi
     out_has "SCUFFED_UPDATE_PODMAN_SECS must be at most 3600 seconds" || fail "SCUFFED_UPDATE_PODMAN_SECS=${secs} is not reported. $(tail_out)"
     expect_site_untouched "SCUFFED_UPDATE_PODMAN_SECS=${secs}"
