@@ -310,6 +310,33 @@ fn entrant_conflict_reason(err: &scuffed_api_client::ClientError) -> Option<Stri
         .or_else(|| server_reason(err, 404).filter(|reason| reason.to_lowercase().contains("team")))
 }
 
+/// Which list a refused Add shows to be stale, so the page refetches it and
+/// the Team picker stops offering the team.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StaleList {
+    /// A 409 (already entered): the participants changed under us.
+    Participants,
+    /// A 404 about the team (gone or not active): the teams changed.
+    Teams,
+}
+
+/// The list to refetch after a refused Add: only for the failures
+/// `entrant_conflict_reason` puts on the entrant line; `None` otherwise.
+fn add_failure_refetch(err: &scuffed_api_client::ClientError) -> Option<StaleList> {
+    entrant_conflict_reason(err)?;
+    match err.http_status() {
+        Some(409) => Some(StaleList::Participants),
+        Some(404) => Some(StaleList::Teams),
+        _ => None,
+    }
+}
+
+/// True when the picked team is no longer among the picker's choices, so
+/// the selection must go back to "No team, use the name below".
+fn selection_left_out(selected: &str, choices: &[Team]) -> bool {
+    !selected.is_empty() && !choices.iter().any(|t| t.id == selected)
+}
+
 /// Where a 400 from Add participant is shown.
 #[derive(Debug, Clone, PartialEq)]
 enum AddBadRequest {
@@ -619,6 +646,31 @@ pub fn AdminTournaments() -> Element {
         }
     });
 
+    // After a refetch (for example once Add failed with a 409 or a team
+    // 404), a picked team the picker no longer offers goes back to "No
+    // team, use the name below". Only once the teams have loaded, so a
+    // failed teams load keeps the pick. The entrant error is left alone.
+    use_effect(move || {
+        let selected = add_part_team_id();
+        let left_out = {
+            let teams = teams.data.read();
+            let Some(Some(list)) = teams.as_ref() else {
+                return;
+            };
+            let bracket = bracket_data.read();
+            let tournament = detail_tournament.read();
+            let choices = team_choices(
+                list,
+                bracket.as_ref(),
+                tournament.as_ref().and_then(|t| t.game_id.as_deref()),
+            );
+            selection_left_out(&selected, &choices)
+        };
+        if left_out {
+            add_part_team_id.set(String::new());
+        }
+    });
+
     // --- List view handlers ---
 
     let mut open_create = move || {
@@ -895,6 +947,15 @@ pub fn AdminTournaments() -> Element {
                             )));
                             add_part_entrant_error.set(reason);
                             focus_element_by_id(PARTICIPANT_TEAM_ID);
+                            // The list that said the team was free is stale:
+                            // refetch it so the picker drops the team. The
+                            // effect below clears a selection that drops out;
+                            // the entrant line and the dialog stay as they are.
+                            match add_failure_refetch(&e) {
+                                Some(StaleList::Participants) => detail_refresh += 1,
+                                Some(StaleList::Teams) => teams.refresh += 1,
+                                None => {}
+                            }
                             return;
                         }
                         if let Some(bad) = add_bad_request_reason(&e) {
@@ -2476,6 +2537,82 @@ mod tests {
         assert!(conflict.contains("focus_element_by_id(PARTICIPANT_TEAM_ID);"));
         assert!(conflict.contains("toast.show(Toast::error("));
         assert!(arm.contains("SaveState::failed(\"Could not add the participant\", &e).text();"));
+    }
+
+    #[test]
+    fn a_refused_add_refetches_the_stale_list_and_drops_a_gone_pick() {
+        use scuffed_api_client::ClientError;
+        // A 409 means the participants are stale; a team 404 means the
+        // teams are; nothing else refetches.
+        let dup = ClientError::http(
+            409,
+            r#"{"error":"Team is already in this tournament"}"#,
+            None,
+        );
+        assert_eq!(add_failure_refetch(&dup), Some(StaleList::Participants));
+        let gone = ClientError::http(404, r#"{"error":"Team not found"}"#, None);
+        assert_eq!(add_failure_refetch(&gone), Some(StaleList::Teams));
+        for other in [
+            ClientError::http(409, "", None),
+            ClientError::http(404, r#"{"error":"Tournament not found"}"#, None),
+            ClientError::http(400, r#"{"error":"Tournament is full"}"#, None),
+            ClientError::http(500, r#"{"error":"Internal error"}"#, None),
+            ClientError::Network("offline".into()),
+        ] {
+            assert_eq!(add_failure_refetch(&other), None, "{other:?}");
+        }
+
+        // A pick that is no longer offered is cleared; a pick still offered,
+        // and no pick, are kept.
+        let teams: Vec<Team> = serde_json::from_value(serde_json::json!([
+            { "id": "team:alpha", "name": "Alpha" },
+            { "id": "team:beta", "name": "Beta" }
+        ]))
+        .unwrap();
+        assert!(selection_left_out("team:gone", &teams));
+        assert!(selection_left_out("team:alpha", &[]));
+        assert!(!selection_left_out("team:beta", &teams));
+        assert!(!selection_left_out("", &teams));
+        assert!(!selection_left_out("", &[]));
+
+        // The failure arm refetches before it returns, and the effect clears
+        // only the pick: never the entrant error, and it never closes the
+        // dialog.
+        let src = include_str!("tournaments.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let arm = prod
+            .split("if let Some(reason) = entrant_conflict_reason(&e) {")
+            .nth(1)
+            .expect("the 409 and 404 arm")
+            .split("return;")
+            .next()
+            .unwrap();
+        assert!(arm.contains("match add_failure_refetch(&e) {"));
+        assert!(arm.contains("Some(StaleList::Participants) => detail_refresh += 1,"));
+        assert!(arm.contains("Some(StaleList::Teams) => teams.refresh += 1,"));
+        assert!(!arm.contains("add_part_modal.close()"));
+        let effect = prod
+            .split("use_effect(move || {\n        let selected = add_part_team_id();")
+            .nth(1)
+            .expect("the effect that clears a gone pick")
+            .split("\n    });")
+            .next()
+            .unwrap();
+        assert!(effect.contains("let Some(Some(list)) = teams.as_ref() else {"));
+        assert!(effect.contains("selection_left_out(&selected, &choices)"));
+        assert!(effect.contains("add_part_team_id.set(String::new());"));
+        assert!(!effect.contains("add_part_entrant_error"));
+        assert!(!effect.contains("add_part_modal"));
+        // The detail loader does not touch the entrant line either.
+        let loader = prod
+            .split("let _detail_loader = use_resource(")
+            .nth(1)
+            .unwrap()
+            .split("\n    });")
+            .next()
+            .unwrap();
+        assert!(!loader.contains("add_part_entrant_error"));
+        assert!(!loader.contains("add_part_modal"));
     }
 
     #[test]
