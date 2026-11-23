@@ -16,7 +16,7 @@ use crate::extractors::OfficerUser;
 use crate::membership_policy::{
     applicant_may_self_withdraw, application_blocks_resubmit,
     application_status_deactivates_member, application_status_ensures_member,
-    is_valid_application_transition, role_on_application_accept,
+    can_reactivate_via_application, is_valid_application_transition, role_on_application_accept,
 };
 use crate::routes::audit_log::audit;
 use crate::state::AppState;
@@ -342,6 +342,8 @@ pub async fn withdraw_my_application(
         &existing,
         ApplicationStatus::Withdrawn,
         &actor_id,
+        // Self-withdraw is not a review and never provisions a member.
+        None,
         Some("Self-withdrawn by applicant"),
     )
     .await?;
@@ -388,6 +390,7 @@ pub async fn update_application(
         &existing,
         body.status,
         &officer.member.id,
+        Some(officer.member.org_role),
         body.review_notes.as_deref(),
     )
     .await?;
@@ -397,11 +400,16 @@ pub async fn update_application(
 
 /// Shared transition path: the atomic CAS status write gates the side effects,
 /// then audit.
+///
+/// `reviewer_role` is the reviewing officer's or admin's role, `None` for an
+/// applicant self-withdraw. It decides who may reactivate an inactive member
+/// on trial/accept.
 async fn apply_application_transition(
     state: &AppState,
     existing: &Application,
     to: ApplicationStatus,
     actor_id: &str,
+    reviewer_role: Option<OrgRole>,
     review_notes: Option<&str>,
 ) -> Result<Application, (StatusCode, Json<ErrorResponse>)> {
     // Provision membership *before* the CAS for trial/accepted so we never move an
@@ -410,8 +418,15 @@ async fn apply_application_transition(
     // under a lost CAS race — the member is left active, which is correct for whichever
     // accept won.
     if application_status_ensures_member(to) {
-        ensure_member_for_application(state, &existing.user_id, existing.status, to, &existing.id)
-            .await?;
+        ensure_member_for_application(
+            state,
+            &existing.user_id,
+            existing.status,
+            to,
+            &existing.id,
+            reviewer_role,
+        )
+        .await?;
     }
 
     // The CAS is the atomic gate: run it FIRST for reject/withdraw so a lost race
@@ -503,6 +518,7 @@ async fn ensure_member_for_application(
     from: ApplicationStatus,
     to: ApplicationStatus,
     application_id: &str,
+    reviewer_role: Option<OrgRole>,
 ) -> Result<Member, (StatusCode, Json<ErrorResponse>)> {
     let desired_role = if to == ApplicationStatus::Accepted {
         role_on_application_accept(from)
@@ -530,6 +546,17 @@ async fn ensure_member_for_application(
         // Reactivate if needed
         let mut current = member;
         if !current.is_active {
+            // Reactivation keeps the stored role. Officers cannot set `is_active`
+            // on officers or admins anywhere else (`can_set_is_active`), so only
+            // an admin may bring one back here. 409 before any write: the member
+            // stays inactive and the application keeps its status.
+            if !reviewer_role
+                .is_some_and(|role| can_reactivate_via_application(role, current.org_role))
+            {
+                return Err(conflict(
+                    "Applicant is a deactivated officer or admin. Only an admin can reactivate them",
+                ));
+            }
             current = state
                 .db
                 .update_member(
@@ -839,6 +866,7 @@ mod tests {
             &stale,
             ApplicationStatus::Withdrawn,
             member.id.as_str(),
+            None,
             Some("Self-withdrawn by applicant"),
         )
         .await;
@@ -939,6 +967,7 @@ mod tests {
             &trial,
             ApplicationStatus::Rejected,
             "officer",
+            Some(OrgRole::Officer),
             Some("not a fit"),
         )
         .await;
@@ -1421,6 +1450,7 @@ mod tests {
             ApplicationStatus::Pending,
             ApplicationStatus::Trial,
             "app1",
+            Some(OrgRole::Officer),
         )
         .await
         .expect_err("taken name");

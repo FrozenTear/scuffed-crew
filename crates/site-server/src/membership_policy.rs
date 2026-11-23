@@ -247,6 +247,18 @@ pub fn can_set_is_active(
     Ok(())
 }
 
+/// Whether an application reviewer may bring an inactive member back by moving
+/// their application to trial or accepted.
+///
+/// Trial and accept set `is_active = true` and keep the stored role, so this
+/// is the same rank rule as [`can_set_is_active`]: an officer acts only on
+/// member and recruit, an admin on any rank. Without it an officer could
+/// restore a deactivated officer or admin with their old role.
+pub fn can_reactivate_via_application(actor_role: OrgRole, target_role: OrgRole) -> bool {
+    actor_role == OrgRole::Admin
+        || (actor_role == OrgRole::Officer && officer_may_moderate(target_role))
+}
+
 /// Whether deactivating a member (is_active=false) should revoke sessions.
 pub fn deactivation_revokes_sessions(was_active: bool, new_active: bool) -> bool {
     was_active && !new_active
@@ -430,6 +442,40 @@ mod tests {
             role_on_application_accept(ApplicationStatus::Pending),
             OrgRole::Recruit
         );
+    }
+
+    #[test]
+    fn application_reactivation_follows_rank() {
+        // Officers bring back member and recruit only.
+        assert!(can_reactivate_via_application(
+            OrgRole::Officer,
+            OrgRole::Recruit
+        ));
+        assert!(can_reactivate_via_application(
+            OrgRole::Officer,
+            OrgRole::Member
+        ));
+        assert!(!can_reactivate_via_application(
+            OrgRole::Officer,
+            OrgRole::Officer
+        ));
+        assert!(!can_reactivate_via_application(
+            OrgRole::Officer,
+            OrgRole::Admin
+        ));
+        // Admins bring back any rank.
+        for target in [
+            OrgRole::Recruit,
+            OrgRole::Member,
+            OrgRole::Officer,
+            OrgRole::Admin,
+        ] {
+            assert!(can_reactivate_via_application(OrgRole::Admin, target));
+        }
+        // Below officer never reviews applications.
+        for actor in [OrgRole::Member, OrgRole::Recruit] {
+            assert!(!can_reactivate_via_application(actor, OrgRole::Recruit));
+        }
     }
 
     #[test]
