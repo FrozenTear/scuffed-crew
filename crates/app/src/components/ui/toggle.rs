@@ -60,6 +60,15 @@ pub const CHIP_CSS: &str = r#"
 }
 /* A save is running: the chip stays focusable but does nothing. */
 .chip[aria-disabled="true"] { cursor: progress; }
+/* The chip cannot be used right now (a limit is reached). It stays focusable
+   so its name can say why, but it does not look pressable, also on hover. */
+.chip.is-disabled,
+.chip.is-disabled:hover {
+  background: var(--surface);
+  color: var(--text-disabled);
+  border-color: var(--border);
+  cursor: not-allowed;
+}
 /* A chip with a shorter phone label shows one of the two. */
 .chip-short { display: none; }
 @supports not (text-box-trim: trim-both) {
@@ -77,6 +86,12 @@ pub const CHIP_CSS: &str = r#"
     text-decoration: underline;
     text-decoration-thickness: var(--focus-ring-width);
     text-underline-offset: 0.25em;
+  }
+  /* Same cue as the pager's dead step: system grey text and a dashed edge. */
+  .chip.is-disabled,
+  .chip.is-disabled:hover {
+    color: GrayText;
+    border: 1px dashed GrayText;
   }
 }
 /* Phone: a row that would wrap scrolls sideways instead. The page does not
@@ -131,6 +146,29 @@ pub fn toggle_class(base: &str, on: bool) -> String {
     }
 }
 
+/// Class of a chip: [`toggle_class`], plus ` is-disabled` when `unavailable`.
+fn chip_class(base: &str, pressed: bool, unavailable: bool) -> String {
+    let class = toggle_class(base, pressed);
+    if unavailable {
+        format!("{class} is-disabled")
+    } else {
+        class
+    }
+}
+
+/// Whether a click on a chip reaches the page. A busy or unavailable chip is
+/// only `aria-disabled`, so the browser still sends the click.
+fn chip_takes_clicks(busy: bool, unavailable: bool) -> bool {
+    !busy && !unavailable
+}
+
+/// The `aria-label` of a chip, if it needs one. `name` wins. Without it, a
+/// chip with a short phone label is named by its full `label`. Otherwise the
+/// text content is the name.
+fn chip_name(label: &str, short_label: Option<&str>, name: Option<String>) -> Option<String> {
+    name.or_else(|| short_label.map(|_| label.to_string()))
+}
+
 /// One tab. Put these inside an element with `role="tablist"`. `id` names
 /// this tab, `controls` is the id of the `role="tabpanel"` element it shows.
 #[component]
@@ -163,6 +201,12 @@ pub fn TabButton(
 /// is a shorter text for phone width; the accessible name stays `label`.
 /// `busy` marks the chip `aria-disabled` while a save runs: it keeps focus and
 /// ignores clicks.
+///
+/// `unavailable` is for a chip that cannot be used right now (a limit is
+/// reached). It is `aria-disabled` too, never native `disabled`, so it keeps
+/// focus and ignores clicks, and it gets the `is-disabled` look. Pass `name`
+/// with it to say why: `name` replaces the accessible name, so it must
+/// contain the visible `label` (WCAG 2.5.3).
 #[component]
 pub fn ChipButton(
     class: String,
@@ -172,19 +216,22 @@ pub fn ChipButton(
     #[props(default)] id: Option<String>,
     #[props(default)] short_label: Option<String>,
     #[props(default = false)] busy: bool,
+    #[props(default = false)] unavailable: bool,
+    #[props(default)] name: Option<String>,
 ) -> Element {
-    let class = toggle_class(&class, pressed);
-    let name = short_label.is_some().then(|| label.clone());
+    let class = chip_class(&class, pressed, unavailable);
+    let name = chip_name(&label, short_label.as_deref(), name);
+    let takes_clicks = chip_takes_clicks(busy, unavailable);
     rsx! {
         button {
             r#type: "button",
             id,
             aria_pressed: if pressed { "true" } else { "false" },
-            aria_disabled: if busy { "true" },
+            aria_disabled: if !takes_clicks { "true" },
             aria_label: name,
             class: "{class}",
             onclick: move |_| {
-                if !busy {
+                if takes_clicks {
                     onclick.call(());
                 }
             },
@@ -320,6 +367,130 @@ mod tests {
             phone.contains(".chip-short { display: inline; }"),
             "{phone}"
         );
+    }
+
+    /// A chip that cannot be used (a limit is reached) is `aria-disabled`, not
+    /// native `disabled`, so it keeps focus. Its name says why and still
+    /// contains the visible label. The busy chip is unchanged.
+    #[test]
+    fn unavailable_chip_is_aria_disabled_named_and_ignores_clicks() {
+        fn app() -> Element {
+            rsx! {
+                ChipButton {
+                    class: "chip".to_string(),
+                    label: "Rocket League".to_string(),
+                    pressed: false,
+                    id: "apply-game-rl".to_string(),
+                    unavailable: true,
+                    name: "Rocket League, limit of 10 games reached".to_string(),
+                    onclick: |_| {},
+                }
+                ChipButton {
+                    class: "chip".to_string(),
+                    label: "Going".to_string(),
+                    pressed: false,
+                    busy: true,
+                    onclick: |_| {},
+                }
+                ChipButton {
+                    class: "chip".to_string(),
+                    label: "Competitive".to_string(),
+                    short_label: "Comp".to_string(),
+                    pressed: true,
+                    unavailable: true,
+                    onclick: |_| {},
+                }
+            }
+        }
+        let html = render(app);
+        assert!(
+            html.contains(
+                "<button type=\"button\" id=\"apply-game-rl\" aria-pressed=\"false\" aria-disabled=\"true\" aria-label=\"Rocket League, limit of 10 games reached\" class=\"chip is-disabled\">Rocket League</button>"
+            ),
+            "{html}"
+        );
+        // Busy alone: no disabled look and no name, as before.
+        assert!(
+            html.contains(
+                "<button type=\"button\" aria-pressed=\"false\" aria-disabled=\"true\" class=\"chip\">Going</button>"
+            ),
+            "{html}"
+        );
+        // Without `name`, the short label rule still names the chip.
+        assert!(
+            html.contains(
+                "<button type=\"button\" aria-pressed=\"true\" aria-disabled=\"true\" aria-label=\"Competitive\" class=\"chip active is-disabled\">"
+            ),
+            "{html}"
+        );
+        // Never the native attribute, which drops focus.
+        assert!(!html.contains(" disabled"), "{html}");
+
+        // The click path: only a chip that is neither busy nor unavailable
+        // passes its click on.
+        assert!(chip_takes_clicks(false, false));
+        assert!(!chip_takes_clicks(true, false));
+        assert!(!chip_takes_clicks(false, true));
+        assert!(!chip_takes_clicks(true, true));
+
+        assert_eq!(chip_class("chip", false, false), "chip");
+        assert_eq!(chip_class("chip", true, false), "chip active");
+        assert_eq!(chip_class("chip", false, true), "chip is-disabled");
+        assert_eq!(chip_name("Tank", None, None), None);
+        assert_eq!(
+            chip_name("Competitive", Some("Comp"), None).as_deref(),
+            Some("Competitive")
+        );
+        assert_eq!(
+            chip_name(
+                "Competitive",
+                Some("Comp"),
+                Some("Competitive, off".to_string())
+            )
+            .as_deref(),
+            Some("Competitive, off")
+        );
+    }
+
+    /// Busy keeps `cursor: progress`. Unavailable reads as disabled: muted
+    /// ink on a flat fill, `not-allowed`, and no hover that looks pressable.
+    #[test]
+    fn unavailable_chip_looks_disabled_and_busy_keeps_its_cursor() {
+        let base = CHIP_CSS.split("@media").next().expect("base rules");
+        assert!(
+            base.contains(".chip[aria-disabled=\"true\"] { cursor: progress; }"),
+            "{base}"
+        );
+        assert!(
+            base.contains(".chip.is-disabled,\n.chip.is-disabled:hover {"),
+            "{base}"
+        );
+        let off = css_rule(CHIP_CSS, ".chip.is-disabled:hover {");
+        for decl in [
+            "background: var(--surface)",
+            "color: var(--text-disabled)",
+            "border-color: var(--border)",
+            "cursor: not-allowed",
+        ] {
+            assert!(has_decl(&off, decl), "missing {decl}: {off}");
+        }
+        // Same specificity as the busy rule and the hover rule, so it has to
+        // come after both to win.
+        let at = |rule: &str| base.find(rule).unwrap_or_else(|| panic!("{rule}"));
+        assert!(at(".chip.is-disabled,") > at(".chip[aria-disabled=\"true\"] {"));
+        assert!(at(".chip.is-disabled,") > at(".chip:hover {"));
+        // Disabled text is exempt from 4.5:1; the house floor is 3:1.
+        assert_ink_clears_aa("--text-disabled", "--surface", 3.0);
+
+        // Forced colours: system grey text and a dashed edge, also on hover.
+        let forced = media_block(CHIP_CSS, "@media (forced-colors: active)");
+        assert!(
+            forced.contains(".chip.is-disabled,\n  .chip.is-disabled:hover {"),
+            "{forced}"
+        );
+        let off = css_rule(&forced, ".chip.is-disabled:hover {");
+        assert!(has_decl(&off, "color: GrayText"), "{off}");
+        assert!(has_decl(&off, "border: 1px dashed GrayText"), "{off}");
     }
 
     #[test]

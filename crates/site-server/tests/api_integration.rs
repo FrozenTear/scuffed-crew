@@ -10490,3 +10490,309 @@ async fn missing_public_content_is_not_found_not_internal_error() {
     assert_eq!(event_body["error"], "Event not found");
     assert_ne!(event_body["error"], "Internal error");
 }
+
+// ── #813: per-IP governor on apply and withdraw ──
+
+/// A request from one fixed untrusted peer, so every call spends the same
+/// per-IP bucket (the other helpers use a fresh peer per request).
+fn request_from_peer(
+    method: Method,
+    uri: &str,
+    token: &str,
+    peer: [u8; 4],
+    body: Value,
+) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            peer, 47000,
+        ))))
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap()
+}
+
+fn apply_json() -> Value {
+    json!({ "preferred_games": ["ow2"], "preferred_roles": [], "message": "I would like to join the crew" })
+}
+
+/// Burst 3 on `POST /api/applications`, then 429 from the governor. The
+/// bucket refills one request per 60 s, so no token comes back mid-test.
+/// The governor is per-`Router`, so one instance serves every call.
+#[tokio::test]
+async fn apply_is_rate_limited_per_ip_after_a_burst_of_three() {
+    assert_eq!(scuffed_types::APPLICATION_IP_BURST, 3);
+    assert_eq!(scuffed_types::APPLICATION_IP_REPLENISH_SECS, 60);
+
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_applicant(&state.db, "ratelim", "RateLim", APPLICANT_TOKEN).await;
+    let app = create_router(state.clone());
+    let peer = [203, 0, 113, 7];
+
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        let resp = app
+            .clone()
+            .oneshot(request_from_peer(
+                Method::POST,
+                "/api/applications",
+                APPLICANT_TOKEN,
+                peer,
+                apply_json(),
+            ))
+            .await
+            .unwrap();
+        seen.push(resp.status());
+        if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+            // The existing governor error handler: Retry-After and JSON.
+            let retry_after: u64 = resp
+                .headers()
+                .get(header::RETRY_AFTER)
+                .expect("Retry-After on the governor 429")
+                .to_str()
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert!((1..=61).contains(&retry_after), "got {retry_after}");
+        }
+    }
+    // First stores the application, the next two reach the handler (open
+    // application, 409), the fourth is stopped by the governor.
+    assert_eq!(
+        seen,
+        vec![
+            StatusCode::CREATED,
+            StatusCode::CONFLICT,
+            StatusCode::CONFLICT,
+            StatusCode::TOO_MANY_REQUESTS,
+        ]
+    );
+
+    // Withdraw spends the same bucket: also 429 from this peer.
+    let resp = app
+        .clone()
+        .oneshot(request_from_peer(
+            Method::POST,
+            "/api/applications/mine/withdraw",
+            APPLICANT_TOKEN,
+            peer,
+            json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        state.db.count_open_applications("ratelim").await.unwrap(),
+        1,
+        "a rate-limited withdraw must not reach the handler"
+    );
+
+    // The read and officer routes are not behind this layer.
+    for (method, uri, token) in [
+        (Method::GET, "/api/applications/mine", APPLICANT_TOKEN),
+        (Method::GET, "/api/applications", OFFICER_TOKEN),
+        (Method::GET, "/api/applications/expiring", OFFICER_TOKEN),
+    ] {
+        for _ in 0..5 {
+            let resp = app
+                .clone()
+                .oneshot(request_from_peer(
+                    method.clone(),
+                    uri,
+                    token,
+                    peer,
+                    json!({}),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{method} {uri}");
+        }
+    }
+    let app_id = state
+        .db
+        .get_application_by_user("ratelim")
+        .await
+        .unwrap()
+        .unwrap()
+        .id;
+    let resp = app
+        .clone()
+        .oneshot(request_from_peer(
+            Method::PATCH,
+            &format!("/api/applications/{app_id}"),
+            OFFICER_TOKEN,
+            peer,
+            json!({ "status": "rejected" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "PATCH is not rate limited here"
+    );
+
+    // Another IP has its own bucket: it reaches the handler (cooldown 429
+    // text from the handler, not the governor's).
+    let resp = app
+        .clone()
+        .oneshot(request_from_peer(
+            Method::POST,
+            "/api/applications",
+            APPLICANT_TOKEN,
+            [203, 0, 113, 8],
+            apply_json(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        body_json(resp).await["error"],
+        "You can apply again in 60 minutes"
+    );
+}
+
+/// Burst 3 on `POST /api/applications/mine/withdraw`, then 429, for callers
+/// with and without a session: the layer runs before the handler.
+#[tokio::test]
+async fn withdraw_is_rate_limited_per_ip_after_a_burst_of_three() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_applicant(&state.db, "ratewd", "RateWd", APPLICANT_TOKEN).await;
+    let app = create_router(state.clone());
+    let peer = [203, 0, 113, 9];
+
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        let resp = app
+            .clone()
+            .oneshot(request_from_peer(
+                Method::POST,
+                "/api/applications/mine/withdraw",
+                APPLICANT_TOKEN,
+                peer,
+                json!({}),
+            ))
+            .await
+            .unwrap();
+        seen.push(resp.status());
+    }
+    // No application yet: 404 from the handler three times, then the governor.
+    assert_eq!(
+        seen,
+        vec![
+            StatusCode::NOT_FOUND,
+            StatusCode::NOT_FOUND,
+            StatusCode::NOT_FOUND,
+            StatusCode::TOO_MANY_REQUESTS,
+        ]
+    );
+
+    // Apply spends the same bucket.
+    let resp = app
+        .clone()
+        .oneshot(request_from_peer(
+            Method::POST,
+            "/api/applications",
+            APPLICANT_TOKEN,
+            peer,
+            apply_json(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(
+        state
+            .db
+            .get_application_by_user("ratewd")
+            .await
+            .unwrap()
+            .is_none(),
+        "a rate-limited apply must not store an application"
+    );
+
+    // Unauthenticated callers spend a bucket too: 401 three times, then 429.
+    let anon_peer = [203, 0, 113, 10];
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/applications")
+                    .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                        anon_peer, 47000,
+                    ))))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&apply_json()).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        seen.push(resp.status());
+    }
+    assert_eq!(
+        seen,
+        vec![
+            StatusCode::UNAUTHORIZED,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::TOO_MANY_REQUESTS,
+        ]
+    );
+}
+
+/// Route-level: withdraw, then an immediate resubmit is the cooldown 429.
+#[tokio::test]
+async fn resubmit_after_withdraw_is_429_over_http() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_applicant(&state.db, "httpcool", "HttpCool", APPLICANT_TOKEN).await;
+
+    for (uri, body, expected) in [
+        ("/api/applications", apply_json(), StatusCode::CREATED),
+        ("/api/applications/mine/withdraw", json!({}), StatusCode::OK),
+        (
+            "/api/applications",
+            apply_json(),
+            StatusCode::TOO_MANY_REQUESTS,
+        ),
+    ] {
+        let resp = create_router(state.clone())
+            .oneshot(authed_json_request(
+                Method::POST,
+                uri,
+                APPLICANT_TOKEN,
+                body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), expected, "{uri}");
+        if expected == StatusCode::TOO_MANY_REQUESTS {
+            assert_eq!(
+                body_json(resp).await["error"],
+                "You can apply again in 60 minutes"
+            );
+        }
+    }
+
+    // Over-max bodies are 400 at the route too.
+    let resp = create_router(state.clone())
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/applications",
+            APPLICANT_TOKEN,
+            json!({ "preferred_games": [], "preferred_roles": [], "message": "a".repeat(4001) }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body_json(resp).await["error"],
+        "Message must be at most 4000 characters"
+    );
+}
