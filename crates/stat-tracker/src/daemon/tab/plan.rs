@@ -411,9 +411,14 @@ pub(crate) fn gate_prev_for_store(
 /// held, carried onto a game that opened long after it (Runasapi, 17 Nov:
 /// the next game was stored with the previous game's final
 /// 3/2007/772/1502). It is then not written onto this game, does not seed
-/// its held cells and is not the row this capture is compared with. Two of the three, as in
-/// [`stats_regressed`], so one misread column does not drop a real first
-/// board. A held or suspect cell has no say.
+/// its held cells and is not the row this capture is compared with. Two
+/// of the three, as in [`stats_regressed`], so one misread column does not
+/// drop a real first board. A held or suspect cell has no say.
+///
+/// Known limit: with fewer than two of elims, deaths and damage read for
+/// sure, nothing can vote the board out, so it fits, is written and can
+/// seed this game's held cells, as before #809. The rule keeps another
+/// game's board off this game only when two of those columns are sure.
 pub(crate) fn carried_board_fits(carried: Counters, facts: &BoardFacts<'_>) -> bool {
     let read = facts.counters;
     let below = [

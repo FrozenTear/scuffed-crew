@@ -11,26 +11,34 @@
 //!
 //! The first board of a game is compared with the last stored board of
 //! the most recent other games. A board on that game's map, equal to it on
-//! every cell read for sure, is that game's board shown again, not this
-//! game's:
-//! it is not stored, and it gives this game no gate, so this game's own
-//! next board is its first.
+//! every cell both boards read for sure, is that game's board shown again,
+//! not this game's: it is not stored, and it gives this game no gate, so
+//! this game's own next board is its first.
 
 use crate::*;
+use stat_tracker::games::stat_reads::STATS;
 
 /// How many of the most recent other games a first board is compared with.
 pub(crate) const FINISHED_BOARDS_CHECKED: usize = 10;
 
-/// Damage, healing and mitigation together a finished board needs before
-/// an exact match counts. A board that big is not reached by another game
-/// to the exact number in every column; an empty or near-empty start of a
-/// game can be.
+/// Damage, healing and mitigation together, over the cells compared, a
+/// finished board needs before an exact match counts. A board that big is
+/// not reached by another game to the exact number in every column; an
+/// empty or near-empty start of a game can be.
 pub(crate) const FINISHED_BOARD_MIN_BIG: u32 = 1000;
 
 /// Whether this Tab's own row is `finished`, another game's last stored
-/// board: every cell read for sure (not held, not suspect) equals it, and
-/// at least [`reader_apply::MIN_SURE_CELLS`] were.
-pub(crate) fn shows_finished_board(facts: &BoardFacts<'_>, finished: Counters) -> bool {
+/// board. Only the cells read for sure on both boards are compared: not
+/// held or suspect on this Tab, and not in `finished_unsure` (the stored
+/// row's suspect fields, which may hold an older value than the board
+/// showed). At least [`reader_apply::MIN_SURE_CELLS`] are compared, every
+/// one is equal, and the damage, healing and mitigation among them come to
+/// [`FINISHED_BOARD_MIN_BIG`] or more.
+pub(crate) fn shows_finished_board(
+    facts: &BoardFacts<'_>,
+    finished: Counters,
+    finished_unsure: [bool; capture_gate::GATE_COLS],
+) -> bool {
     let cols = |c: Counters| {
         [
             c.elims,
@@ -43,13 +51,16 @@ pub(crate) fn shows_finished_board(facts: &BoardFacts<'_>, finished: Counters) -
     };
     let read = cols(facts.counters);
     let board = cols(finished);
-    let big = board[3].saturating_add(board[4]).saturating_add(board[5]);
-    let sure: Vec<usize> = (0..capture_gate::GATE_COLS)
-        .filter(|&col| !facts.held[col] && !facts.suspect[col])
+    let compared: Vec<usize> = (0..capture_gate::GATE_COLS)
+        .filter(|&col| !facts.held[col] && !facts.suspect[col] && !finished_unsure[col])
         .collect();
+    let big = compared
+        .iter()
+        .filter(|&&col| col >= 3)
+        .fold(0u32, |sum, &col| sum.saturating_add(board[col]));
     big >= FINISHED_BOARD_MIN_BIG
-        && sure.len() >= reader_apply::MIN_SURE_CELLS
-        && sure.iter().all(|&col| read[col] == board[col])
+        && compared.len() >= reader_apply::MIN_SURE_CELLS
+        && compared.iter().all(|&col| read[col] == board[col])
 }
 
 fn row_counters(row: &storage::PersonalMatch) -> Counters {
@@ -63,6 +74,11 @@ fn row_counters(row: &storage::PersonalMatch) -> Counters {
     }
 }
 
+/// The stat columns `row` stored as unsure (its `suspect_fields`).
+fn row_unsure(row: &storage::PersonalMatch) -> [bool; capture_gate::GATE_COLS] {
+    std::array::from_fn(|col| row.suspect_fields.iter().any(|f| f == STATS[col]))
+}
+
 /// Whether `row` was stored on `map`, as read or as the member set it.
 fn row_on_map(row: &storage::PersonalMatch, map: &str) -> bool {
     std::iter::once(row.map_name.as_str())
@@ -70,20 +86,31 @@ fn row_on_map(row: &storage::PersonalMatch, map: &str) -> bool {
         .any(|stored| stored.eq_ignore_ascii_case(map))
 }
 
+/// The map this Tab read on its own top bar or banner; empty when none.
+fn tab_map(facts: &BoardFacts<'_>) -> String {
+    resolved_map(None, facts.map_from_panel, facts.parsed_map, &[]).0
+}
+
 /// The other game whose last stored board this capture shows, while the
-/// game it is for has no board of its own yet (`prev_gate` is none). The
-/// board shown again carries its game's top bar too, so the map this Tab
-/// read must be that game's; a Tab with no map read compares nothing. A
-/// store error compares nothing either: the board is then taken as before.
+/// game it is for has no board of its own yet (no gate for the store,
+/// [`gate_prev_for_store`]). The board shown again carries its game's top
+/// bar too, so the map this Tab read must be that game's; a Tab with no
+/// map read compares nothing. A store error compares nothing either: the
+/// board is then taken as before.
+///
+/// A Tab that splits off the open game carries that game's gate, so it is
+/// not compared: a finished board shown again on a split is stored as the
+/// split's first row, as before #809. A split already needs two of elims,
+/// deaths and damage below the board it splits from.
 pub(crate) async fn finished_game_shown(
     store: &storage::LocalStore,
     req: &CaptureRequest,
     facts: &BoardFacts<'_>,
 ) -> Option<String> {
-    if req.prev_gate.is_some() {
+    if gate_prev_for_store(req.prev_gate, req.awaiting_first_board).is_some() {
         return None;
     }
-    let (map, _) = resolved_map(None, facts.map_from_panel, facts.parsed_map, &[]);
+    let map = tab_map(facts);
     if map.is_empty() {
         return None;
     }
@@ -99,11 +126,21 @@ pub(crate) async fn finished_game_shown(
         .filter(|s| s.session_id != req.session_id)
         .take(FINISHED_BOARDS_CHECKED)
     {
-        let Ok(rows) = store.get_session_snapshots(&session.session_id).await else {
-            continue;
+        let rows = match store.get_session_snapshots(&session.session_id).await {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!(
+                    target: "scuffed_stat_tracker",
+                    session_id = %session.session_id,
+                    error = %e,
+                    "recent game's rows unreadable; first board not compared with it"
+                );
+                continue;
+            }
         };
         if rows.last().is_some_and(|last| {
-            row_on_map(last, &map) && shows_finished_board(facts, row_counters(last))
+            row_on_map(last, &map)
+                && shows_finished_board(facts, row_counters(last), row_unsure(last))
         }) {
             return Some(session.session_id.clone());
         }
@@ -125,7 +162,10 @@ pub(crate) async fn finished_board_report(
         target: "scuffed_stat_tracker",
         session_id = %req.session_id,
         finished_session = %shown,
+        map = %tab_map(facts),
         board = ?facts.counters,
+        held = ?facts.held,
+        suspect = ?facts.suspect,
         "Tab shows a finished game's last board: not stored on this game"
     );
     Some(CaptureReport {

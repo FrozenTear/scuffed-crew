@@ -1,5 +1,5 @@
-//! Daemon tests: a new game never stores another game's final stats
-//! (#809). Runasapi, 17 Nov: game A (13c35793) ends 0/0/3/2007/772/1502;
+//! Daemon tests: a new game does not store another game's final stats in
+//! the cases #809 covers, and the known limits stay pinned. Runasapi, 17 Nov: game A (13c35793) ends 0/0/3/2007/772/1502;
 //! Lijiang and Aatlis follow; game B (13c350d8) opens on a Tab 54 minutes
 //! after A's last Tab, and that Tab's board was A's final board again, so
 //! B stored it and its gate held B's own 0/0/2/648/307/600 at A's values.
@@ -327,6 +327,7 @@ const LIJIANG: [[u32; 6]; 3] = [
 const AATLIS: [u32; 6] = [3, 1, 0, 703, 109, 420];
 
 /// One Tab through the daemon's Tab path with the top bar reading `map`.
+/// Returns the probe verdict the report carried, as [`r9_tab`] does.
 async fn tab_on(
     ctx: &DaemonCtx,
     st: &mut SessionState,
@@ -334,7 +335,7 @@ async fn tab_on(
     cells: O10Cells,
     hero: Option<&str>,
     map: &str,
-) {
+) -> Option<boundary::FinishedGameTab> {
     let synced = std::cell::Cell::new(0);
     let mut analysis = o8_analysis(None, hero);
     analysis.map_from_panel = Some(map.into());
@@ -347,7 +348,7 @@ async fn tab_on(
         analysis,
         board: Some(board),
     };
-    r9_tab(st, ctx, press, Ok(capture), &synced).await;
+    r9_tab(st, ctx, press, Ok(capture), &synced).await
 }
 
 /// A map vote opens a new game at `at`, closing the open one. Returns the
@@ -462,24 +463,454 @@ fn a_finished_board_matches_on_its_sure_cells_only() {
     };
     let a = counters_from_cols(A_FINAL);
     let none = [false; 6];
-    assert!(shows_finished_board(&facts(A_FINAL, none), a));
-    assert!(!shows_finished_board(&facts(B_REAL, none), a));
+    assert!(shows_finished_board(&facts(A_FINAL, none), a, none));
+    assert!(!shows_finished_board(&facts(B_REAL, none), a, none));
     let mut held_h = none;
     held_h[4] = true;
     let mut off_in_h = A_FINAL;
     off_in_h[4] = 0;
     assert!(
-        shows_finished_board(&facts(off_in_h, held_h), a),
+        shows_finished_board(&facts(off_in_h, held_h), a, none),
         "a held cell has no say"
     );
     let mut off_in_d = A_FINAL;
     off_in_d[2] = 4;
-    assert!(!shows_finished_board(&facts(off_in_d, none), a));
+    assert!(!shows_finished_board(&facts(off_in_d, none), a, none));
     let small = [0, 0, 1, 300, 0, 200];
     assert!(
-        !shows_finished_board(&facts(small, none), counters_from_cols(small)),
+        !shows_finished_board(&facts(small, none), counters_from_cols(small), none),
         "a near-empty board can be any game's"
     );
-    let three_sure = [true, true, true, false, false, false];
-    assert!(!shows_finished_board(&facts(A_FINAL, three_sure), a));
+    let three_held = [true, true, true, false, false, false];
+    assert!(!shows_finished_board(&facts(A_FINAL, three_held), a, none));
+}
+
+/// Shared [`BoardFacts`] for the bounds tests below: `held` and `suspect`
+/// per column, and the map this Tab read on its top bar (`None`: none).
+fn board_facts(
+    read: [u32; 6],
+    held: [bool; 6],
+    suspect: [bool; 6],
+    map: Option<&'static str>,
+) -> BoardFacts<'static> {
+    BoardFacts {
+        counters: counters_from_cols(read),
+        suspect,
+        trusted_cells: true,
+        held,
+        suspect_row: false,
+        row_id: Some(0),
+        hero: "Unknown",
+        map_from_panel: map,
+        panel_from_banner: false,
+        parsed_map: "",
+        frame_outcome: detect::MatchOutcome::Unknown,
+    }
+}
+
+/// `held` or `suspect` mask with the given columns set.
+fn cols_set(cols: &[usize]) -> [bool; 6] {
+    std::array::from_fn(|col| cols.contains(&col))
+}
+
+/// Review nit 1: the 1000 floor counts only the big cells compared. A
+/// small finished board (2/1/1/1180/0/0) and a new Tab with the same five
+/// small cells but its damage held compare 0 big: not a match, so the new
+/// game keeps its first board. Read for sure, the damage counts.
+#[test]
+fn a_held_big_cell_does_not_count_toward_the_floor() {
+    let finished = [2, 1, 1, 1180, 0, 0];
+    let board = counters_from_cols(finished);
+    let none = [false; 6];
+    let mut read = finished;
+    read[3] = 0;
+    let held_dmg = board_facts(read, cols_set(&[3]), none, None);
+    assert!(!shows_finished_board(&held_dmg, board, none));
+    let sure = board_facts(finished, none, none, None);
+    assert!(shows_finished_board(&sure, board, none));
+    // A_FINAL with healing held still compares 2007 + 1502.
+    let mut off_in_h = A_FINAL;
+    off_in_h[4] = 0;
+    let held_h = board_facts(off_in_h, cols_set(&[4]), none, None);
+    assert!(shows_finished_board(
+        &held_h,
+        counters_from_cols(A_FINAL),
+        none
+    ));
+}
+
+/// The floor's edge: 999 compared is too small, 1000 is enough, over any
+/// mix of damage, healing and mitigation. An unsure big cell on the stored
+/// row drops out of the sum too.
+#[test]
+fn the_floor_is_1000_over_the_compared_big_cells() {
+    let none = [false; 6];
+    let fits = |board: [u32; 6], unsure: [bool; 6]| {
+        let facts = board_facts(board, none, none, None);
+        shows_finished_board(&facts, counters_from_cols(board), unsure)
+    };
+    assert!(!fits([5, 2, 1, 999, 0, 0], none));
+    assert!(fits([5, 2, 1, 1000, 0, 0], none));
+    assert!(!fits([5, 2, 1, 500, 300, 199], none));
+    assert!(fits([5, 2, 1, 500, 300, 200], none));
+    assert!(!fits([5, 2, 1, 600, 400, 0], cols_set(&[4])));
+}
+
+/// The suspect half of "read for sure": a suspect cell has no say, like a
+/// held one, and with three suspect cells too few are left to compare.
+#[test]
+fn a_suspect_cell_has_no_say_in_the_match() {
+    let a = counters_from_cols(A_FINAL);
+    let none = [false; 6];
+    let mut off_in_h = A_FINAL;
+    off_in_h[4] = 0;
+    let suspect_h = board_facts(off_in_h, none, cols_set(&[4]), None);
+    assert!(shows_finished_board(&suspect_h, a, none));
+    let read_h = board_facts(off_in_h, none, none, None);
+    assert!(
+        !shows_finished_board(&read_h, a, none),
+        "a sure cell differs"
+    );
+    let three = board_facts(A_FINAL, none, cols_set(&[0, 1, 2]), None);
+    assert!(!shows_finished_board(&three, a, none));
+    let mixed = board_facts(A_FINAL, cols_set(&[0]), cols_set(&[1, 2]), None);
+    assert!(!shows_finished_board(&mixed, a, none));
+}
+
+/// Review nit 6: a column the finished game's last row stored as unsure
+/// may hold an older value than the board showed. Shown again and read
+/// sure, that column is not compared, so the board still matches.
+#[test]
+fn a_column_the_finished_row_stored_unsure_is_not_compared() {
+    let none = [false; 6];
+    let mut stored = A_FINAL;
+    stored[4] = 480;
+    let shown = board_facts(A_FINAL, none, none, None);
+    let board = counters_from_cols(stored);
+    assert!(shows_finished_board(&shown, board, cols_set(&[4])));
+    assert!(!shows_finished_board(&shown, board, none));
+}
+
+/// Review nit 4: the lower side of the two-of-three vote. Exactly one of
+/// elims, deaths and damage read for sure below the carried board leaves
+/// it fitting (one misread column does not drop a real first board); two
+/// below do not.
+#[test]
+fn one_sure_column_below_a_carried_board_still_fits() {
+    let none = [false; 6];
+    let carried = counters_from_cols([3, 0, 2, 900, 300, 400]);
+    for read in [
+        [2, 0, 2, 1000, 300, 400],
+        [3, 0, 1, 1000, 300, 400],
+        [3, 0, 2, 800, 300, 400],
+    ] {
+        let facts = board_facts(read, none, none, None);
+        assert!(carried_board_fits(carried, &facts), "{read:?}");
+    }
+    let two_below = board_facts([2, 0, 1, 1000, 300, 400], none, none, None);
+    assert!(!carried_board_fits(carried, &two_below));
+}
+
+/// Review nit 3, a known limit kept on purpose (a stronger rule is 0.7
+/// work): A's final board carried, and B's first Tab reads
+/// 0/0/2/(damage held)/307/600. Only deaths is sure and below, so nothing
+/// votes the board out: it fits, as before #809, and can seed B's held
+/// damage with A's 2007.
+#[test]
+fn a_carried_board_with_one_sure_vote_column_below_fits_known_limit() {
+    let none = [false; 6];
+    let b = board_facts([0, 0, 2, 0, 307, 600], cols_set(&[3]), none, None);
+    assert!(carried_board_fits(counters_from_cols(A_FINAL), &b));
+    let all_sure = board_facts(B_REAL, none, none, None);
+    assert!(!carried_board_fits(counters_from_cols(A_FINAL), &all_sure));
+}
+
+/// Stores a game `id` on `map` whose one row is `board`, its last capture
+/// `mins_ago` minutes ago.
+async fn stored_game(
+    store: &storage::LocalStore,
+    id: &str,
+    map: &str,
+    board: [u32; 6],
+    mins_ago: i64,
+) {
+    let at = SurrealDatetime::from(Utc::now() - chrono::Duration::minutes(mins_ago));
+    let session = storage::MatchSession {
+        session_id: id.into(),
+        hero: "Ana".into(),
+        map_name: map.into(),
+        role: "Support".into(),
+        started_at: at,
+        last_capture_at: at,
+        capture_count: 1,
+        final_outcome: "defeat".into(),
+    };
+    store.create_session(&session).await.unwrap();
+    let mut row = test_match(id, "defeat");
+    row.map_name = map.into();
+    [
+        row.elims,
+        row.assists,
+        row.deaths,
+        row.damage,
+        row.healing,
+        row.mitigation,
+    ] = board;
+    row.played_at = at;
+    store.insert_match(row).await.unwrap();
+}
+
+/// The request of a Tab that opened `session_id`: no board of its own yet.
+fn first_board_req(session_id: &str) -> CaptureRequest {
+    let now = test_now();
+    let opened = tab_opened_game(session_id.into(), None, None, now);
+    build_capture_request(&opened, true, now)
+}
+
+/// Review nit 9: the window is the ten most recent other games, newest
+/// capture first. The game the Tab is for is never compared and takes no
+/// place in the ten; an eleventh other game is not compared.
+#[tokio::test]
+async fn a_first_board_is_compared_with_the_last_ten_other_games_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = storage::LocalStore::open(dir.path()).await.unwrap();
+    let none = [false; 6];
+    let facts = board_facts(A_FINAL, none, none, Some("Runasapi"));
+    let req = first_board_req("b");
+    stored_game(&store, "a", "Runasapi", A_FINAL, 100).await;
+    // The Tab's own game, newest, on the same board.
+    stored_game(&store, "b", "Runasapi", A_FINAL, 1).await;
+    for i in 0..9u32 {
+        let board = [i, 0, 0, 1500 + i, 0, 0];
+        stored_game(
+            &store,
+            &format!("other{i}"),
+            "Busan",
+            board,
+            10 + i64::from(i),
+        )
+        .await;
+    }
+    assert_eq!(
+        finished_game_shown(&store, &req, &facts).await.as_deref(),
+        Some("a"),
+        "a is the tenth other game; the own game is skipped"
+    );
+    stored_game(&store, "other9", "Busan", [9, 0, 0, 1509, 0, 0], 50).await;
+    assert_eq!(
+        finished_game_shown(&store, &req, &facts).await,
+        None,
+        "a is the eleventh other game"
+    );
+}
+
+/// Review nit 9: a Tab with no map read compares nothing; a map read
+/// matches the stored map in any case; another map does not match.
+#[tokio::test]
+async fn a_first_board_with_no_map_read_is_not_compared() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = storage::LocalStore::open(dir.path()).await.unwrap();
+    stored_game(&store, "a", "Runasapi", A_FINAL, 5).await;
+    let none = [false; 6];
+    let req = first_board_req("b");
+    for (map, want) in [
+        (None, None),
+        (Some("Busan"), None),
+        (Some("RUNASAPI"), Some("a")),
+    ] {
+        let facts = board_facts(A_FINAL, none, none, map);
+        let shown = finished_game_shown(&store, &req, &facts).await;
+        assert_eq!(shown.as_deref(), want, "{map:?}");
+    }
+}
+
+/// Review nit 1 through the store: a finished Busan row 2/1/1/1180/0/0 and
+/// a first board 2/1/1/(damage held)/0/0 compare no big cell, so the board
+/// is the new game's.
+#[tokio::test]
+async fn a_small_finished_board_does_not_take_a_first_board_with_its_damage_held() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = storage::LocalStore::open(dir.path()).await.unwrap();
+    stored_game(&store, "a", "Busan", [2, 1, 1, 1180, 0, 0], 5).await;
+    let req = first_board_req("b");
+    let none = [false; 6];
+    let held = board_facts([2, 1, 1, 0, 0, 0], cols_set(&[3]), none, Some("Busan"));
+    assert_eq!(finished_game_shown(&store, &req, &held).await, None);
+    let sure = board_facts([2, 1, 1, 1180, 0, 0], none, none, Some("Busan"));
+    assert_eq!(
+        finished_game_shown(&store, &req, &sure).await.as_deref(),
+        Some("a")
+    );
+}
+
+/// Review nits 5 and 7. A request that carries a gate for the store (a
+/// split carries its parent's) is not compared: a finished board shown
+/// again on a split is stored as the split's first row, as before #809.
+/// A gate a session awaiting its first board still holds is not its own
+/// (`gate_prev_for_store`), so that board is compared.
+#[tokio::test]
+async fn a_request_with_a_gate_for_the_store_is_not_compared() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = storage::LocalStore::open(dir.path()).await.unwrap();
+    stored_game(&store, "a", "Runasapi", A_FINAL, 5).await;
+    let none = [false; 6];
+    let facts = board_facts(A_FINAL, none, none, Some("Runasapi"));
+    let mut req = first_board_req("b");
+    req.prev_gate = Some((GateState::default(), Duration::from_secs(5)));
+    req.awaiting_first_board = false;
+    assert_eq!(finished_game_shown(&store, &req, &facts).await, None);
+    req.awaiting_first_board = true;
+    assert_eq!(
+        finished_game_shown(&store, &req, &facts).await.as_deref(),
+        Some("a")
+    );
+}
+
+/// Game A (map vote) on Runasapi: three Tabs, the last `last`. Returns A.
+async fn runasapi_a(
+    ctx: &DaemonCtx,
+    st: &mut SessionState,
+    at: impl Fn(u64) -> Instant,
+    last: O10Cells,
+) -> String {
+    let a = map_vote(ctx, st, at(0)).await;
+    for (secs, cells) in [
+        (216, all_sure([0, 0, 1, 500, 200, 400])),
+        (306, all_sure([0, 0, 2, 1200, 480, 900])),
+        (396, last),
+    ] {
+        tab_on(ctx, st, at(secs), cells, None, "Runasapi").await;
+    }
+    a
+}
+
+/// Review nit 9: the rule on a game a map vote opened. A's final board
+/// shown again on C's first Tab is not stored and gives C no gate; C's own
+/// board is its first row.
+#[tokio::test]
+async fn a_finished_board_shown_again_is_refused_on_a_poll_opened_game() {
+    let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = o8_ctx(dir.path(), true).await;
+    let t0 = test_now();
+    let at = |secs: u64| t0 + Duration::from_secs(secs);
+    let mut st = session(None, t0);
+    let a = runasapi_a(&ctx, &mut st, at, all_sure(A_FINAL)).await;
+    let c = map_vote(&ctx, &mut st, at(500)).await;
+    assert_ne!(a, c);
+    tab_on(&ctx, &mut st, at(600), all_sure(A_FINAL), None, "Runasapi").await;
+    assert_eq!(game_b_id(&st), c, "the Tab stays on the poll-opened game");
+    assert!(o10_rows(&ctx, &c).await.is_empty(), "A's board not on C");
+    assert!(st.active_game.as_ref().unwrap().gate.is_none());
+    let wb = Some("Wrecking Ball");
+    tab_on(&ctx, &mut st, at(640), all_sure(B_REAL), wb, "Runasapi").await;
+    assert_eq!(game_b_id(&st), c);
+    assert_eq!(o10_rows(&ctx, &c).await, vec![B_REAL]);
+    let a_rows = o10_rows(&ctx, &a).await;
+    assert_eq!(a_rows.last(), Some(&A_FINAL), "A unchanged: {a_rows:?}");
+}
+
+/// Review nit 6 in the daemon: A's last Tab holds its healing, so A's last
+/// row stores another healing, marked unsure. A's board shown again, read
+/// sure (healing 772), still matches on the other columns and is refused.
+#[tokio::test]
+async fn a_finished_board_with_an_unsure_stored_column_is_still_refused() {
+    let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = o8_ctx(dir.path(), true).await;
+    let t0 = test_now();
+    let at = |secs: u64| t0 + Duration::from_secs(secs);
+    let mut st = session(None, t0);
+    let mut last = all_sure(A_FINAL);
+    last[4] = Some((700, true));
+    let a = runasapi_a(&ctx, &mut st, at, last).await;
+    let a_rows = ctx.store.get_session_snapshots(&a).await.unwrap();
+    let a_last = a_rows.last().unwrap();
+    assert!(
+        a_last.suspect_fields.iter().any(|f| f == "h"),
+        "A's last healing is unsure: {:?}",
+        a_last.suspect_fields
+    );
+    assert_ne!(
+        a_last.healing, A_FINAL[4],
+        "A's last row holds another healing"
+    );
+    let c = map_vote(&ctx, &mut st, at(500)).await;
+    tab_on(&ctx, &mut st, at(600), all_sure(A_FINAL), None, "Runasapi").await;
+    assert!(o10_rows(&ctx, &c).await.is_empty(), "A's board not on C");
+    let wb = Some("Wrecking Ball");
+    tab_on(&ctx, &mut st, at(640), all_sure(B_REAL), wb, "Runasapi").await;
+    assert_eq!(game_b_id(&st), c);
+    assert_eq!(o10_rows(&ctx, &c).await, vec![B_REAL]);
+}
+
+/// Review nit 9: the rule on the probe path. Aatlis has a result and a
+/// board under two minutes old when a Tab past the grace window shows A's
+/// final board on Runasapi. The probe calls it a new game, the rule
+/// refuses the board, the fresh session opens with no row and no gate, and
+/// B's own board is its first row.
+#[tokio::test]
+async fn a_finished_board_shown_again_is_refused_on_the_probe_path() {
+    let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = o8_ctx(dir.path(), true).await;
+    let t0 = test_now();
+    let at = |secs: u64| t0 + Duration::from_secs(secs);
+    let mut st = session(None, t0);
+    let a = runasapi_a(&ctx, &mut st, at, all_sure(A_FINAL)).await;
+    let aatlis = map_vote(&ctx, &mut st, at(500)).await;
+    let wb = Some("Wrecking Ball");
+    tab_on(&ctx, &mut st, at(600), all_sure(AATLIS), wb, "Aatlis").await;
+    let g = st.active_game.as_mut().unwrap();
+    g.record_outcome_at(detect::MatchOutcome::Victory, at(610));
+    let press = at(690);
+    assert!(finished_game_tab_probe(st.active_game.as_ref(), press));
+    let verdict = tab_on(&ctx, &mut st, press, all_sure(A_FINAL), None, "Runasapi").await;
+    assert_eq!(verdict, Some(boundary::FinishedGameTab::NewGame));
+    let b = game_b_id(&st);
+    assert!(![&a, &aatlis].contains(&&b), "a fresh session opens");
+    assert!(o10_rows(&ctx, &b).await.is_empty(), "A's board not on B");
+    assert!(st.active_game.as_ref().unwrap().gate.is_none());
+    tab_on(&ctx, &mut st, at(730), all_sure(B_REAL), wb, "Runasapi").await;
+    assert_eq!(game_b_id(&st), b);
+    assert_eq!(o10_rows(&ctx, &b).await, vec![B_REAL]);
+    assert_eq!(o10_rows(&ctx, &aatlis).await, vec![AATLIS]);
+}
+
+/// Game A ends on [`A_FINAL`] on Runasapi; a map vote opens C, whose first
+/// Tab shows exactly [`A_FINAL`], all sure, on `map`. Returns C's rows and
+/// its gate.
+async fn a_final_on_the_next_games_first_tab(map: &str) -> (Vec<[u32; 6]>, Option<[u32; 6]>) {
+    let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = o8_ctx(dir.path(), true).await;
+    let t0 = test_now();
+    let at = |secs: u64| t0 + Duration::from_secs(secs);
+    let mut st = session(None, t0);
+    let a = runasapi_a(&ctx, &mut st, at, all_sure(A_FINAL)).await;
+    let c = map_vote(&ctx, &mut st, at(500)).await;
+    assert_ne!(a, c);
+    tab_on(&ctx, &mut st, at(600), all_sure(A_FINAL), None, map).await;
+    assert_eq!(game_b_id(&st), c, "the Tab stays on C ({map})");
+    let a_rows = o10_rows(&ctx, &a).await;
+    assert_eq!(a_rows.last(), Some(&A_FINAL), "A unchanged: {a_rows:?}");
+    let gate = st.active_game.as_ref().unwrap().gate;
+    (
+        o10_rows(&ctx, &c).await,
+        gate.map(|gate| gate_cols(gate.accepted)),
+    )
+}
+
+/// #835: the finished-board rule matches on the map too, through the
+/// daemon. The same first Tab, A's final board all sure, is refused on
+/// Runasapi (A's map) and stored as C's first row, with C's gate at it, on
+/// Busan. The map is the only difference.
+#[tokio::test]
+async fn a_finished_board_read_on_another_map_is_the_next_games_first_row() {
+    let (rows, gate) = a_final_on_the_next_games_first_tab("Runasapi").await;
+    assert!(rows.is_empty(), "A's board on A's map not on C: {rows:?}");
+    assert_eq!(gate, None, "no gate from A's board on A's map");
+    let (rows, gate) = a_final_on_the_next_games_first_tab("Busan").await;
+    assert_eq!(rows, vec![A_FINAL], "the board on Busan is C's own");
+    assert_eq!(gate, Some(A_FINAL), "C's gate is its first row");
 }

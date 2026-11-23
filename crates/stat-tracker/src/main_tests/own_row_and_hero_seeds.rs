@@ -646,8 +646,10 @@ async fn gated_crops_reach_the_seed_store_and_are_trusted_after_two_real_games()
         analysis.own_name_candidate = Some(o9_candidate(i));
         let mut board = o8_board(Some("zenyatta"));
         if session == "g1-split" {
-            // A split starts below the board it splits from. g1's own last
-            // board on a new session is g1's board shown again (#809).
+            // g1-split stands in for a split of g1: a session of its own
+            // whose board is not g1's last (damage lowered). g1's last
+            // board as the first board of a new session would be g1's
+            // board shown again, and is not stored (#809).
             let dmg = board.fields.iter_mut().find(|f| f.name == "r0.dmg");
             dmg.unwrap().value = Some(shadow::Value::Int(1500));
         }
@@ -667,11 +669,14 @@ async fn gated_crops_reach_the_seed_store_and_are_trusted_after_two_real_games()
     assert_eq!(detect::own_row::seed_row(&board.scores(&seeds)), Some(7));
     // a restart reads them back
     assert_eq!(own_name_seeds(Some(&o9_store(dir.path()))).len(), 3);
-    // a Tab without a gated crop offers nothing
+    // a Tab without a gated crop offers nothing. Another map than g1, and
+    // recorded, so the Tab reaches the seed offer: g1's last board on Busan
+    // again, as the first board of a new session, is g1's board shown
+    // again and stops before it (#809).
     let before = std::fs::read(&file).unwrap();
     let analysis = o8_analysis(None, Some("zenyatta"));
     let board = Some(o8_board(Some("zenyatta")));
-    o9_tab(&ctx, "g3", "Busan", analysis, board).await;
+    assert!(o9_tab(&ctx, "g3", "Oasis", analysis, board).await.recorded);
     assert_eq!(std::fs::read(&file).unwrap(), before);
 }
 
