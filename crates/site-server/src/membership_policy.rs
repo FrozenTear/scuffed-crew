@@ -67,6 +67,75 @@ pub fn application_blocks_resubmit(status: ApplicationStatus) -> bool {
     )
 }
 
+/// Minutes left before a user whose latest application is closed (withdrawn,
+/// rejected or accepted) may apply again, or `None` when the cooldown is
+/// over. The cooldown is [`scuffed_types::APPLICATION_RESUBMIT_COOLDOWN_SECS`]
+/// from the application's `updated_at`, which the status write sets.
+///
+/// Rounded up, so the answer is never "0 minutes". `now` is a parameter so
+/// tests do not wait. A `updated_at` ahead of `now` (clock step) waits one
+/// full cooldown, not longer.
+pub fn application_resubmit_wait_minutes(
+    last_updated_at: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<i64> {
+    let cooldown = scuffed_types::APPLICATION_RESUBMIT_COOLDOWN_SECS;
+    let elapsed = now.signed_duration_since(last_updated_at).num_seconds();
+    let left = (cooldown - elapsed).min(cooldown);
+    (left > 0).then(|| (left + 59) / 60)
+}
+
+/// True when the user has withdrawn as many applications inside the rolling
+/// window as allowed ([`scuffed_types::MAX_WITHDRAWN_APPLICATIONS`] in the
+/// last [`scuffed_types::WITHDRAWN_APPLICATION_WINDOW_DAYS`] days): no new
+/// application, and no withdraw that would add another. `withdrawn_in_window`
+/// counts only rows withdrawn after [`withdrawn_application_window_start`].
+pub fn withdrawn_application_cap_reached(withdrawn_in_window: u64) -> bool {
+    withdrawn_in_window >= scuffed_types::MAX_WITHDRAWN_APPLICATIONS
+}
+
+/// Start of the rolling withdrawn window at `now`. A row withdrawn after
+/// this instant counts toward the cap; one withdrawn at or before it does not.
+pub fn withdrawn_application_window_start(
+    now: chrono::DateTime<chrono::Utc>,
+) -> chrono::DateTime<chrono::Utc> {
+    now - chrono::Duration::seconds(scuffed_types::WITHDRAWN_APPLICATION_WINDOW_SECS)
+}
+
+/// How long until a user at the withdrawn cap has a free slot again, as
+/// text for the 429 ("3 days", "1 day", "5 hours", "1 minute").
+///
+/// `slot_withdrawn_at` is when the row that leaves the window next was
+/// withdrawn: the oldest of the newest
+/// [`scuffed_types::MAX_WITHDRAWN_APPLICATIONS`] in-window rows. The slot
+/// opens one window after that.
+///
+/// Rounded up in the unit shown, so the wait is never understated and never
+/// "0 days": a day or more is said in days, an hour or more in hours, less
+/// in minutes (at least 1). `now` is a parameter so tests do not wait. A
+/// `slot_withdrawn_at` ahead of `now` (clock step) waits one full window,
+/// not longer.
+pub fn withdrawn_application_cap_wait(
+    slot_withdrawn_at: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    const MINUTE: i64 = 60;
+    const HOUR: i64 = 60 * MINUTE;
+    const DAY: i64 = 24 * HOUR;
+    let window = scuffed_types::WITHDRAWN_APPLICATION_WINDOW_SECS;
+    let elapsed = now.signed_duration_since(slot_withdrawn_at).num_seconds();
+    let left = (window - elapsed).clamp(1, window);
+    let (count, unit) = if left >= DAY {
+        ((left + DAY - 1) / DAY, "day")
+    } else if left >= HOUR {
+        ((left + HOUR - 1) / HOUR, "hour")
+    } else {
+        ((left + MINUTE - 1) / MINUTE, "minute")
+    };
+    let plural = if count == 1 { "" } else { "s" };
+    format!("{count} {unit}{plural}")
+}
+
 /// Role to assign when creating a member for this application outcome.
 pub fn role_on_application_accept(from: ApplicationStatus) -> OrgRole {
     match from {
@@ -247,6 +316,36 @@ pub fn can_set_is_active(
     Ok(())
 }
 
+/// Whether an application reviewer may bring an inactive member back by moving
+/// their application to trial or accepted.
+///
+/// Trial and accept set `is_active = true` and keep an officer or admin role.
+/// Trial writes no role, so a reactivated member or recruit keeps the role
+/// they had. Accept is what applies the application role, and only to a
+/// member or recruit. Because an officer or admin comes back with their old
+/// role, this is the same rank rule as [`can_set_is_active`]: an officer acts
+/// only on member and recruit, an admin on any rank. Without it an officer
+/// could restore a deactivated officer or admin with their old role.
+///
+/// `actor_role` is `None` when the caller is not a reviewer (an applicant
+/// self-withdraw), which never reactivates. A rank denial is 403 like every
+/// other hierarchy rule here, not 409: the same request succeeds for an admin.
+pub fn can_reactivate_via_application(
+    actor_role: Option<OrgRole>,
+    target_role: OrgRole,
+) -> Result<(), PolicyDenial> {
+    match actor_role {
+        Some(OrgRole::Admin) => Ok(()),
+        Some(OrgRole::Officer) if officer_may_moderate(target_role) => Ok(()),
+        Some(OrgRole::Officer) => Err(PolicyDenial::Forbidden(
+            "Applicant is a deactivated officer or admin. Only an admin can reactivate them",
+        )),
+        _ => Err(PolicyDenial::Forbidden(
+            "Only officers or admins can reactivate a member through an application",
+        )),
+    }
+}
+
 /// Whether deactivating a member (is_active=false) should revoke sessions.
 pub fn deactivation_revokes_sessions(was_active: bool, new_active: bool) -> bool {
     was_active && !new_active
@@ -282,6 +381,86 @@ pub fn can_suspend_or_ban_admin(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resubmit_cooldown_is_one_hour_from_the_last_status_write() {
+        use chrono::{Duration, TimeZone, Utc};
+        let closed = Utc.with_ymd_and_hms(2026, 11, 23, 12, 0, 0).unwrap();
+        let at =
+            |secs: i64| application_resubmit_wait_minutes(closed, closed + Duration::seconds(secs));
+        // Right after the close: the full hour.
+        assert_eq!(at(0), Some(60));
+        // Rounded up, so never "0 minutes".
+        assert_eq!(at(1), Some(60));
+        assert_eq!(at(60), Some(59));
+        assert_eq!(at(3540), Some(1));
+        assert_eq!(at(3599), Some(1));
+        // The hour is over at exactly 3600 s.
+        assert_eq!(at(3600), None);
+        assert_eq!(at(3601), None);
+        assert_eq!(at(86_400), None);
+        // `updated_at` ahead of the clock waits one cooldown, not longer.
+        assert_eq!(at(-7200), Some(60));
+    }
+
+    #[test]
+    fn withdrawn_cap_is_reached_at_five_rows_in_the_window() {
+        assert!(!withdrawn_application_cap_reached(0));
+        assert!(!withdrawn_application_cap_reached(4));
+        assert!(withdrawn_application_cap_reached(5));
+        // Rows already over the cap stay refused while they are in the window.
+        assert!(withdrawn_application_cap_reached(6));
+    }
+
+    #[test]
+    fn withdrawn_window_starts_thirty_days_back() {
+        use chrono::{Duration, TimeZone, Utc};
+        let now = Utc.with_ymd_and_hms(2026, 11, 23, 12, 0, 0).unwrap();
+        assert_eq!(
+            withdrawn_application_window_start(now),
+            now - Duration::days(30)
+        );
+        assert_eq!(
+            withdrawn_application_window_start(now),
+            Utc.with_ymd_and_hms(2026, 10, 24, 12, 0, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn withdrawn_cap_wait_counts_down_from_thirty_days() {
+        use chrono::{Duration, TimeZone, Utc};
+        const DAY: i64 = 86_400;
+        let withdrawn = Utc.with_ymd_and_hms(2026, 11, 23, 12, 0, 0).unwrap();
+        let at = |secs: i64| {
+            withdrawn_application_cap_wait(withdrawn, withdrawn + Duration::seconds(secs))
+        };
+        // Right after the withdraw: the full window.
+        assert_eq!(at(0), "30 days");
+        // Rounded up, so the wait is never understated.
+        assert_eq!(at(1), "30 days");
+        assert_eq!(at(DAY), "29 days");
+        assert_eq!(at(27 * DAY), "3 days");
+        assert_eq!(at(28 * DAY), "2 days");
+        assert_eq!(at(28 * DAY + 1), "2 days");
+        // Exactly one day left is the singular.
+        assert_eq!(at(29 * DAY), "1 day");
+        // Under a day: hours, not "0 days" or "1 day".
+        assert_eq!(at(29 * DAY + 1), "24 hours");
+        assert_eq!(at(29 * DAY + 3600), "23 hours");
+        assert_eq!(at(30 * DAY - 2 * 3600), "2 hours");
+        assert_eq!(at(30 * DAY - 3601), "2 hours");
+        assert_eq!(at(30 * DAY - 3600), "1 hour");
+        // Under an hour: minutes.
+        assert_eq!(at(30 * DAY - 3599), "60 minutes");
+        assert_eq!(at(30 * DAY - 120), "2 minutes");
+        assert_eq!(at(30 * DAY - 60), "1 minute");
+        assert_eq!(at(30 * DAY - 1), "1 minute");
+        // Never "0 minutes", even if asked at or past the end of the window.
+        assert_eq!(at(30 * DAY), "1 minute");
+        assert_eq!(at(31 * DAY), "1 minute");
+        // `updated_at` ahead of the clock waits one window, not longer.
+        assert_eq!(at(-7 * DAY), "30 days");
+    }
 
     #[test]
     fn application_transitions() {
@@ -430,6 +609,61 @@ mod tests {
             role_on_application_accept(ApplicationStatus::Pending),
             OrgRole::Recruit
         );
+    }
+
+    #[test]
+    fn application_reactivation_follows_rank() {
+        // Officers bring back member and recruit only.
+        for target in [OrgRole::Recruit, OrgRole::Member] {
+            assert!(can_reactivate_via_application(Some(OrgRole::Officer), target).is_ok());
+        }
+        // An officer or admin target is a rank denial: 403, not 409.
+        for target in [OrgRole::Officer, OrgRole::Admin] {
+            let denial = can_reactivate_via_application(Some(OrgRole::Officer), target)
+                .expect_err("officer may not reactivate this rank");
+            assert_eq!(denial.status(), StatusCode::FORBIDDEN);
+            assert_eq!(
+                denial.message(),
+                "Applicant is a deactivated officer or admin. Only an admin can reactivate them"
+            );
+        }
+        // Admins bring back any rank.
+        for target in [
+            OrgRole::Recruit,
+            OrgRole::Member,
+            OrgRole::Officer,
+            OrgRole::Admin,
+        ] {
+            assert!(can_reactivate_via_application(Some(OrgRole::Admin), target).is_ok());
+        }
+    }
+
+    /// Below officer never reviews applications, and no reviewer at all
+    /// (applicant self-withdraw) never reactivates. The denial does not depend
+    /// on the target, so pin it for every target rank.
+    #[test]
+    fn application_reactivation_needs_a_reviewer_for_every_target_rank() {
+        for actor in [Some(OrgRole::Member), Some(OrgRole::Recruit), None] {
+            for target in [
+                OrgRole::Recruit,
+                OrgRole::Member,
+                OrgRole::Officer,
+                OrgRole::Admin,
+            ] {
+                let denial =
+                    can_reactivate_via_application(actor, target).expect_err("not a reviewer");
+                assert_eq!(
+                    denial.status(),
+                    StatusCode::FORBIDDEN,
+                    "{actor:?} reviewer, {target:?} target"
+                );
+                assert_eq!(
+                    denial.message(),
+                    "Only officers or admins can reactivate a member through an application",
+                    "{actor:?} reviewer, {target:?} target"
+                );
+            }
+        }
     }
 
     #[test]

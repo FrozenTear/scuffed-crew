@@ -8,8 +8,10 @@
 //    drawing or selection first, then leaves (notes 5 and 10).
 // 4. Vision blocking 2: the map picker is a modal dialog.
 // 5. Vision r4 nits: 3 (ring after a key), 13 (drawer), 14 (Ctrl+S in the
-//    picker), 15 (Cmd chords), 16 (selects and sliders), 17 (stored map id
-//    not the picker's), 20 (no hint on mouse focus), 21 (aria-current).
+//    picker), 15 (Cmd chords), 16 (selects and sliders), 17 (the picked map
+//    is marked; the two strategies whose stored map id is not the picker's
+//    check that a saved map is fixed whatever id is stored, issue 817),
+//    20 (no hint on mouse focus), 21 (aria-current).
 // 6. Vision r5 nits: 22 (Ctrl/Cmd+S behind the drawer), 23 (Tab from outside
 //    the picker), 24 (no Cmd+Y), 25 (arrows on a select), and Tab out of a
 //    group panel closes it.
@@ -517,18 +519,31 @@ for (const role of ['guest', 'member']) {
   await ctx.close();
 }
 
-// Nit 17: a stored map id that is not the picker's exact id. A display name
-// ("Dorado") still marks and focuses its map; an unknown id focuses Close.
+// Nit 17, after issue 817: the map of a saved strategy is fixed (the update
+// API takes no map), so the picker no longer opens there, whatever map id is
+// stored (a display name such as "Dorado", or an id the picker does not
+// list). The map item is text that says so, keeps its id with tabindex -1,
+// and a click opens no picker. Picking a map is checked on a new strategy:
+// the picked map is marked and focused when the picker opens again.
 for (const width of [1440, 390]) {
   const ctx = await makeContext(browser, 'member', width); const page = await ctx.newPage();
-  for (const [what, id, expect] of [['stored by display name', STRATEGIES.byName, 'map-picker-selected'], ['not in the picker', STRATEGIES.unknown, 'map-picker-close']]) {
+  for (const [what, id] of [['stored by display name', STRATEGIES.byName], ['not in the picker', STRATEGIES.unknown]]) {
     const T = `picker ${width} map ${what}`;
     await open(page, '/strategy/editor/' + id);
+    const m = await page.evaluate(() => { const e = document.getElementById('editor-map-button'); return e && { tag: e.tagName, tabindex: e.getAttribute('tabindex'), text: e.textContent.trim() }; });
+    rec(`${T}: issue 817, the saved map is text "Map: ... (fixed once saved)" with tabindex -1`, !!m && m.tag === 'SPAN' && m.tabindex === '-1' && /^Map: .+ \(fixed once saved\)$/.test(m.text), JSON.stringify(m));
+    await page.click('#editor-map-button'); await page.waitForTimeout(300);
+    rec(`${T}: issue 817, a click on the fixed map opens no picker`, !(await page.$('#map-picker')), '');
+  }
+  {
+    const T = `picker ${width} new strategy`;
+    await open(page, '/strategy/editor');
+    await page.click('.map-picker-item >> nth=1'); await page.waitForTimeout(400);
+    const picked = await page.evaluate(() => document.querySelectorAll('.map-picker-item').length === 0 && document.getElementById('editor-map-button')?.textContent.trim());
     await page.click('#editor-map-button'); await page.waitForTimeout(300);
     const a = await active(page);
     const marks = await page.evaluate(() => [...document.querySelectorAll('#map-picker [aria-current]')].map(e => e.textContent.trim()));
-    rec(`${T}: nit 17, focus moves into the picker (${expect})`, a && a.id === expect, JSON.stringify(a));
-    rec(`${T}: nit 17, current map marked: ${expect === 'map-picker-selected' ? 'Dorado' : 'none'}`, same(marks, expect === 'map-picker-selected' ? ['Dorado'] : []), JSON.stringify(marks));
+    rec(`${T}: nit 17, the picked map is marked and focused when the picker opens again`, a && a.id === 'map-picker-selected' && marks.length === 1 && !!picked && picked.includes(marks[0]), JSON.stringify({ a, marks, picked }));
     await page.keyboard.press('Escape'); await page.waitForTimeout(200);
   }
   await ctx.close();

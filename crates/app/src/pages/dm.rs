@@ -5,7 +5,8 @@ use scuffed_types::MeResponse;
 
 use crate::components::dm::{
     ConversationList, ConversationListState, ConversationSummary, DmComposeModal, DmLoadFailure,
-    DmMember, DmMemberPage, MessageThread, SyncResponse, classify_dm_client_error, peer_label,
+    DmMember, DmMemberPage, MessageThread, SyncResponse, classify_dm_client_error,
+    normalize_recipient_pubkey, peer_label,
 };
 use crate::components::member_gate::Wall;
 use crate::components::ui::{PageHeader, PageShell, PageWidth, SkeletonBars, btn_class};
@@ -260,7 +261,16 @@ pub fn DmInbox() -> Element {
 
 #[component]
 pub fn DmThread(peer_pubkey: String) -> Element {
-    rsx! { DmPageInner { selected_peer: Some(peer_pubkey) } }
+    rsx! { DmPageInner { selected_peer: Some(route_peer(&peer_pubkey)) } }
+}
+
+/// The peer a `/dm/:peer_pubkey` link names. A hex key in any case or an
+/// `npub1` address becomes the lowercase hex key the inbox rows and the
+/// server use, so such a link opens the same conversation. Anything else is
+/// passed on as typed: the server refuses it and the thread shows that
+/// failure.
+fn route_peer(param: &str) -> String {
+    normalize_recipient_pubkey(param).unwrap_or_else(|_| param.to_string())
 }
 
 #[component]
@@ -635,6 +645,61 @@ mod tests {
             last_sender_pubkey: String::new(),
             unread_count: 1,
         }
+    }
+
+    #[test]
+    fn a_thread_link_is_read_as_a_hex_key_when_it_is_one() {
+        let hex = "ab".repeat(32);
+        assert_eq!(route_peer(&hex), hex);
+        assert_eq!(route_peer(&hex.to_ascii_uppercase()), hex);
+        let npub = "npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6";
+        // The NIP-19 test vector, paired in identity.rs.
+        assert_eq!(route_peer(npub), NIP19_HEX);
+        // Not a key: kept as typed, and its label does not panic on the
+        // multibyte text (six euro signs and an "a", 19 bytes).
+        let junk = "€€€€€€a";
+        assert_eq!(route_peer(junk), junk);
+        assert_eq!(peer_label(&route_peer(junk), None, &[]), junk);
+        let src = include_str!("dm.rs");
+        let prod = src.split("#[cfg(test)]").next().expect("production half");
+        assert!(prod.contains("selected_peer: Some(route_peer(&peer_pubkey))"));
+    }
+
+    /// The NIP-19 test vector: this hex key is
+    /// `npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6`.
+    const NIP19_HEX: &str = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d";
+
+    /// The thread pane's heading for a `/dm/...` link, through the router.
+    fn thread_heading(path: &str) -> String {
+        let html = render(path, Some(OrgRole::Member));
+        let main = main_of(&html);
+        assert!(main.contains("class=\"dm-page is-thread\""), "{main}");
+        let at = main.find("dm-thread-peer\">").expect("peer heading") + "dm-thread-peer\">".len();
+        let end = main[at..].find("</h").expect("heading end") + at;
+        main[at..end].to_string()
+    }
+
+    #[test]
+    fn a_multibyte_thread_link_renders_without_a_panic() {
+        // Six euro signs and an "a", percent-encoded as a browser sends it:
+        // 19 bytes, and a byte cut at 13 lands inside a euro sign.
+        let path = format!("/dm/{}a", "%E2%82%AC".repeat(6));
+        assert_eq!(thread_heading(&path), "€€€€€€a");
+    }
+
+    #[test]
+    fn an_uppercase_hex_or_npub_link_opens_the_lowercase_hex_thread() {
+        // The label is "npub1…" plus the last six characters of the key the
+        // page uses, so it shows that key is exactly the lowercase hex.
+        let label = format!("npub1…{}", &NIP19_HEX[NIP19_HEX.len() - 6..]);
+        assert_eq!(label, "npub1…fa459d");
+        for link in [
+            NIP19_HEX.to_ascii_uppercase(),
+            "npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6".to_string(),
+        ] {
+            assert_eq!(thread_heading(&format!("/dm/{link}")), label, "{link}");
+        }
+        assert_eq!(route_peer(&NIP19_HEX.to_ascii_uppercase()), NIP19_HEX);
     }
 
     #[test]
