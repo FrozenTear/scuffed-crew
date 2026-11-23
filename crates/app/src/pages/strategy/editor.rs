@@ -47,6 +47,7 @@ use crate::state::maps::{
     maps_for_mode,
 };
 use crate::state::undo::{UndoManager, UndoableAction};
+use crate::state::unsaved::use_unsaved_guard;
 
 // =============================================================================
 // API request/response types
@@ -597,6 +598,10 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
         }
         state
     });
+    // Ask before a link, a reload or closing the tab drops an unsaved
+    // drawing. Up here, ahead of any way out of the component, so it runs
+    // on every render; a save that clears the flag takes the guard off.
+    use_unsaved_guard(strategy_state.read().has_unsaved_changes);
     let mut undo_manager = use_signal(UndoManager::default);
 
     // Sidebar collapse state
@@ -1947,6 +1952,46 @@ fn apply_redo(strategy_state: &mut Signal<StrategyState>, action: UndoableAction
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review 819: leaving the editor with an unsaved drawing asks first.
+    /// The guard follows the same flag as the "Unsaved changes" line, is
+    /// called once in `EditorLayout` ahead of everything that could return,
+    /// and goes off after a save that stored what the editor still holds.
+    #[test]
+    fn the_leave_guard_follows_the_unsaved_drawing() {
+        let mut state = StrategyState::default();
+        assert!(!state.has_unsaved_changes, "a fresh editor has no draft");
+        state.add_phase("Setup".to_string());
+        assert!(state.has_unsaved_changes, "an edit turns the guard on");
+        let snapshot = state.clone();
+        assert!(state.mark_saved(&snapshot, "s1".to_string(), "m1".to_string()));
+        assert!(!state.has_unsaved_changes, "a save turns the guard off");
+        // An edit made while the save was in flight keeps the guard on.
+        state.add_phase("Push".to_string());
+        let stale = snapshot;
+        assert!(!state.mark_saved(&stale, "s1".to_string(), "m1".to_string()));
+        assert!(state.has_unsaved_changes);
+
+        let src = include_str!("editor.rs");
+        let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let guard = "use_unsaved_guard(strategy_state.read().has_unsaved_changes);";
+        assert_eq!(prod.matches(guard).count(), 1, "one guard, on the page");
+        let layout = prod
+            .split("fn EditorLayout(")
+            .nth(1)
+            .expect("EditorLayout is in this file");
+        let before_guard = layout.split(guard).next().unwrap();
+        assert!(
+            before_guard.len() < layout.len(),
+            "EditorLayout owns the guard"
+        );
+        assert!(
+            !before_guard.contains("return") && !before_guard.contains("?;"),
+            "no way out of the component ahead of the guard"
+        );
+        assert!(prod.contains("let has_unsaved = ss.has_unsaved_changes;"));
+        assert!(prod.contains("s.mark_saved(&snapshot, saved.id, saved.owner_id)"));
+    }
 
     /// Vision blocking 2: Esc closes the picker, Tab stays inside it, and
     /// no other key (Space, Delete, a tool letter) reaches the editor.
