@@ -112,7 +112,7 @@ pub async fn get_member(
 /// Deserializer for "omit = leave unchanged, null = clear" fields. A plain
 /// `Option<Option<T>>` maps JSON `null` to the OUTER `None` (indistinguishable
 /// from omitted), so explicit clears were silently dropped without this.
-fn double_option<'de, T, D>(de: D) -> Result<Option<Option<T>>, D::Error>
+pub(crate) fn double_option<'de, T, D>(de: D) -> Result<Option<Option<T>>, D::Error>
 where
     T: serde::Deserialize<'de>,
     D: serde::Deserializer<'de>,
