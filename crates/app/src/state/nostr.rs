@@ -376,6 +376,13 @@ struct SharedRelayState {
     socket: RefCell<Option<WebSocket>>,
     reconnect_attempts: RefCell<u32>,
     reconnect_timer_id: RefCell<Option<i32>>,
+    /// The pending reconnect timer's callback. Owned here, not `forget()`-ed,
+    /// so `cancel_reconnect_timer` frees it with the timer.
+    reconnect_timer: RefCell<Option<Closure<dyn FnMut()>>>,
+    /// Bumped each time a socket is let go (`release_socket`). An async
+    /// answer for an older socket (a NIP-42 fetch) sees a newer value and is
+    /// dropped instead of acting on the current socket.
+    connection_generation: RefCell<u64>,
     intentional_disconnect: RefCell<bool>,
     relay_url: RefCell<Option<String>>,
     /// Endpoint for async NIP-42 challenge-response auth (e.g., "/api/chat/auth-token").
@@ -389,7 +396,9 @@ struct SharedRelayState {
     /// Event id of the AUTH frame just sent, so its OK is not a publish.
     pending_auth_event_id: RefCell<Option<String>>,
     /// The four handlers of the socket in `socket`. Owned here, not
-    /// `forget()`-ed, so `release_socket` can detach and free them.
+    /// `forget()`-ed, so `release_socket` can detach and free them. They
+    /// hold only a `Weak` back to this state, so holding them here is no
+    /// reference cycle.
     handlers: RefCell<Option<SocketHandlers>>,
 }
 
@@ -409,6 +418,17 @@ impl SharedRelayState {
 
     fn emit_event(&self, event: NostrRelayEvent) {
         (self.on_event.borrow_mut())(event);
+    }
+}
+
+/// The last `NostrRelayManager` clone is gone. The socket's handlers and the
+/// reconnect timer hold only a `Weak`, so this runs even without
+/// `disconnect()`: let the socket go and clear the timer, so neither can call
+/// back or leak. No state is emitted; the owner is gone.
+impl Drop for SharedRelayState {
+    fn drop(&mut self) {
+        cancel_reconnect_timer(self);
+        release_socket(self);
     }
 }
 
@@ -438,6 +458,20 @@ fn release_socket(shared: &SharedRelayState) {
         let _ = socket.close();
     }
     shared.handlers.borrow_mut().take();
+    *shared.connection_generation.borrow_mut() += 1;
+}
+
+/// Clear the pending reconnect timer, if any, and free its callback.
+///
+/// Not called from the timer's own callback, so a closure is never freed
+/// while it is running.
+fn cancel_reconnect_timer(shared: &SharedRelayState) {
+    if let Some(timer_id) = shared.reconnect_timer_id.borrow_mut().take()
+        && let Some(window) = web_sys::window()
+    {
+        window.clear_timeout_with_handle(timer_id);
+    }
+    shared.reconnect_timer.borrow_mut().take();
 }
 
 fn setup_relay_connection(shared: &Rc<SharedRelayState>) {
@@ -463,8 +497,14 @@ fn setup_relay_connection(shared: &Rc<SharedRelayState>) {
             ws.set_binary_type(web_sys::BinaryType::Arraybuffer);
 
             // -- On open --
-            let shared_open = shared.clone();
+            // Each handler holds a `Weak`: `SharedRelayState` owns the
+            // handlers, so an `Rc` here would be a cycle that only
+            // `disconnect()` could break.
+            let weak_open = Rc::downgrade(shared);
             let onopen = Closure::wrap(Box::new(move |_: JsValue| {
+                let Some(shared_open) = weak_open.upgrade() else {
+                    return;
+                };
                 tracing::info!("Relay WebSocket connected");
                 shared_open.emit_state(RelayConnectionState::Connected);
                 *shared_open.reconnect_attempts.borrow_mut() = 0;
@@ -499,8 +539,11 @@ fn setup_relay_connection(shared: &Rc<SharedRelayState>) {
             ws.set_onopen(Some(onopen.as_ref().unchecked_ref()));
 
             // -- On message --
-            let shared_msg = shared.clone();
+            let weak_msg = Rc::downgrade(shared);
             let onmessage = Closure::wrap(Box::new(move |e: MessageEvent| {
+                let Some(shared_msg) = weak_msg.upgrade() else {
+                    return;
+                };
                 if let Ok(text) = e.data().dyn_into::<js_sys::JsString>() {
                     let text: String = text.into();
                     match RelayMessage::from_json(&text) {
@@ -516,16 +559,22 @@ fn setup_relay_connection(shared: &Rc<SharedRelayState>) {
             ws.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
 
             // -- On error --
-            let shared_err = shared.clone();
+            let weak_err = Rc::downgrade(shared);
             let onerror = Closure::wrap(Box::new(move |_: JsValue| {
+                let Some(shared_err) = weak_err.upgrade() else {
+                    return;
+                };
                 tracing::error!("Relay WebSocket error");
                 shared_err.emit_state(RelayConnectionState::Error);
             }) as Box<dyn FnMut(JsValue)>);
             ws.set_onerror(Some(onerror.as_ref().unchecked_ref()));
 
             // -- On close --
-            let shared_close = shared.clone();
+            let weak_close = Rc::downgrade(shared);
             let onclose = Closure::wrap(Box::new(move |ev: JsValue| {
+                let Some(shared_close) = weak_close.upgrade() else {
+                    return;
+                };
                 // Transport close only. A NIP-01 CLOSED frame is handled in
                 // `handle_relay_message` and must not reach this path.
                 if let Ok(ev) = ev.dyn_into::<web_sys::CloseEvent>() {
@@ -561,8 +610,13 @@ fn setup_relay_connection(shared: &Rc<SharedRelayState>) {
                         delay
                     );
 
-                    let shared_timer = shared_close.clone();
+                    let weak_timer = Rc::downgrade(&shared_close);
                     let callback = Closure::once(Box::new(move || {
+                        let Some(shared_timer) = weak_timer.upgrade() else {
+                            return;
+                        };
+                        // The callback stays in `reconnect_timer` (it is
+                        // running) until the next cancel or schedule frees it.
                         *shared_timer.reconnect_timer_id.borrow_mut() = None;
                         setup_relay_connection(&shared_timer);
                     }) as Box<dyn FnOnce()>);
@@ -579,7 +633,7 @@ fn setup_relay_connection(shared: &Rc<SharedRelayState>) {
                     {
                         *shared_close.reconnect_timer_id.borrow_mut() = Some(timer_id);
                     }
-                    callback.forget();
+                    *shared_close.reconnect_timer.borrow_mut() = Some(callback);
                 } else {
                     tracing::warn!(
                         "Max relay reconnection attempts ({}) reached",
@@ -631,9 +685,9 @@ fn handle_relay_message(shared: &Rc<SharedRelayState>, msg: RelayMessage) {
             let pending = shared.pending_auth_event_id.borrow().clone();
             if pending.as_deref() == Some(event_id.as_str()) {
                 shared.pending_auth_event_id.borrow_mut().take();
-                // Bind first: as a `match` scrutinee the `RefMut` would live
-                // to the end of the match (edition 2024), and `fail_sign_in`
-                // borrows the gate again.
+                // Bind first: a `match` scrutinee's temporaries, this
+                // `RefMut` included, live to the end of the match in every
+                // edition, and an arm that borrows the gate again panics.
                 let outcome = shared.auth_gate.borrow_mut().on_auth_ok(accepted, &message);
                 match outcome {
                     AuthOkOutcome::Accepted(ids) => {
@@ -666,8 +720,17 @@ fn handle_relay_message(shared: &Rc<SharedRelayState>, msg: RelayMessage) {
             let relay_url = shared.relay_url.borrow().clone().unwrap_or_default();
             if let Some(endpoint) = auth_endpoint {
                 let shared_auth = shared.clone();
+                // The socket this challenge came on. If it is let go while
+                // the fetch runs (disconnect, retry, reconnect), the answer
+                // belongs to no socket: drop it rather than send an old
+                // challenge's AUTH on a new socket.
+                let generation = *shared.connection_generation.borrow();
                 wasm_bindgen_futures::spawn_local(async move {
-                    match fetch_auth_event(&endpoint, &relay_url, &challenge).await {
+                    let result = fetch_auth_event(&endpoint, &relay_url, &challenge).await;
+                    if *shared_auth.connection_generation.borrow() != generation {
+                        return;
+                    }
+                    match result {
                         Ok(event) => {
                             shared_auth.auth_gate.borrow_mut().note_auth_presented();
                             *shared_auth.pending_auth_event_id.borrow_mut() =
@@ -697,7 +760,8 @@ fn handle_relay_message(shared: &Rc<SharedRelayState>, msg: RelayMessage) {
         }
         RelayMessage::Notice(msg) => {
             // Bind first, as above: an `if let` scrutinee's `RefMut` lives
-            // through the block, and `fail_sign_in` borrows the gate again.
+            // through the then-block (edition 2024 only drops it before an
+            // `else`), and an arm that borrows the gate again panics.
             let rejected = shared.auth_gate.borrow_mut().on_notice(&msg);
             if let Some(banner) = rejected {
                 fail_sign_in(shared, banner);
@@ -732,13 +796,10 @@ fn handle_relay_message(shared: &Rc<SharedRelayState>, msg: RelayMessage) {
 }
 
 fn fail_sign_in(shared: &Rc<SharedRelayState>, banner: String) {
+    // The gate already marked itself rejected when it returned the
+    // rejection, so this takes no gate borrow a caller could still hold.
     warn_console(&banner);
-    shared.auth_gate.borrow_mut().mark_rejected();
-    if let Some(timer_id) = shared.reconnect_timer_id.borrow_mut().take()
-        && let Some(window) = web_sys::window()
-    {
-        window.clear_timeout_with_handle(timer_id);
-    }
+    cancel_reconnect_timer(shared);
     // Error first, then the banner event, so the sign-in sentence wins
     // over the generic connection-error copy.
     shared.emit_state(RelayConnectionState::Error);
@@ -843,6 +904,11 @@ pub struct NostrRelayManager {
 impl NostrRelayManager {
     /// Create a new relay manager.
     ///
+    /// Call `disconnect()` before the owner goes away: it closes the
+    /// subscriptions and the socket on purpose. Dropping the last clone
+    /// without it still lets the socket go and clears the reconnect timer
+    /// (see `Drop for SharedRelayState`), but sends no CLOSE frames.
+    ///
     /// - `on_state_change`: called when connection state changes.
     /// - `on_event`: called for incoming relay events.
     pub fn new(
@@ -853,6 +919,8 @@ impl NostrRelayManager {
             socket: RefCell::new(None),
             reconnect_attempts: RefCell::new(0),
             reconnect_timer_id: RefCell::new(None),
+            reconnect_timer: RefCell::new(None),
+            connection_generation: RefCell::new(0),
             intentional_disconnect: RefCell::new(false),
             relay_url: RefCell::new(None),
             auth_endpoint: RefCell::new(None),
@@ -941,6 +1009,9 @@ impl NostrRelayManager {
     pub fn retry(&self) {
         *self.shared.reconnect_attempts.borrow_mut() = 0;
         *self.shared.intentional_disconnect.borrow_mut() = false;
+        // A timer still pending would run its own setup later and let go of
+        // the socket this retry opens.
+        self.cancel_reconnect_timer();
         setup_relay_connection(&self.shared);
     }
 
@@ -1053,11 +1124,7 @@ impl NostrRelayManager {
 
     /// Cancel any pending reconnection timer.
     fn cancel_reconnect_timer(&self) {
-        if let Some(timer_id) = self.shared.reconnect_timer_id.borrow_mut().take()
-            && let Some(window) = web_sys::window()
-        {
-            window.clear_timeout_with_handle(timer_id);
-        }
+        cancel_reconnect_timer(&self.shared);
     }
 }
 
@@ -1083,8 +1150,10 @@ mod tests {
 
     /// What the gate's `RefCell` does when a scrutinee keeps its `RefMut`
     /// and an arm borrows again, and that binding with `let` first is the
-    /// cure. Edition 2024 keeps a `match` scrutinee's temporaries to the end
-    /// of the match, which is the panic a rejected sign-in used to hit.
+    /// cure. A `match` scrutinee's temporaries live to the end of the match
+    /// in every edition, and an `if let` scrutinee's live through the
+    /// then-block (edition 2024 only drops them before an `else`). That is
+    /// the panic a rejected sign-in used to hit.
     #[test]
     fn gate_outcome_bound_with_let_frees_the_gate_for_fail_sign_in() {
         let gate = RefCell::new(RelayCloseGate::default());
@@ -1097,6 +1166,14 @@ mod tests {
         {
             AuthOkOutcome::Rejected(_) => assert!(gate.try_borrow_mut().is_err()),
             AuthOkOutcome::Accepted(_) => panic!("a refused AUTH is not accepted"),
+        }
+        // The old NOTICE shape: still borrowed inside the then-block.
+        let notice = RefCell::new(RelayCloseGate::default());
+        notice.borrow_mut().note_auth_presented();
+        if let Some(_banner) = notice.borrow_mut().on_notice("error: signature mismatch") {
+            assert!(notice.try_borrow_mut().is_err());
+        } else {
+            panic!("a rejecting NOTICE is a rejection");
         }
 
         // The fixed shape: `fail_sign_in`'s `mark_rejected` can borrow.
@@ -1133,9 +1210,121 @@ mod tests {
         }
         assert!(flat.contains("letoutcome=shared.auth_gate.borrow_mut().on_auth_ok("));
         assert!(flat.contains("letrejected=shared.auth_gate.borrow_mut().on_notice(&msg);"));
-        // And `fail_sign_in` itself still takes the gate, which is why.
+        // `fail_sign_in` takes no gate borrow at all: the gate marks itself
+        // rejected before it returns a rejection (see the test below), so a
+        // future scrutinee that keeps the gate borrowed cannot panic there.
         let fail = fn_body(prod_source(), "fn fail_sign_in(");
-        assert!(fail.contains("shared.auth_gate.borrow_mut().mark_rejected()"));
+        assert!(!fail.contains("auth_gate"), "{fail}");
+    }
+
+    /// Every way the gate reports a rejected sign-in has already marked it
+    /// rejected, which is why `fail_sign_in` need not borrow it again.
+    #[test]
+    fn every_rejection_the_gate_returns_is_already_marked() {
+        let mut ok = RelayCloseGate::default();
+        ok.note_auth_presented();
+        assert!(matches!(
+            ok.on_auth_ok(false, "invalid: bad signature"),
+            AuthOkOutcome::Rejected(_)
+        ));
+        assert!(!ok.allows_reconnect());
+        assert!(matches!(
+            ok.on_auth_ok(true, ""),
+            AuthOkOutcome::Rejected(_)
+        ));
+        assert!(!ok.allows_reconnect());
+
+        let mut notice = RelayCloseGate::default();
+        notice.note_auth_presented();
+        assert!(notice.on_notice("error: signature mismatch").is_some());
+        assert!(!notice.allows_reconnect());
+
+        let mut closed = RelayCloseGate::default();
+        closed.note_auth_presented();
+        assert!(matches!(
+            closed.on_closed("sub-1", "auth-required: invalid signature"),
+            CloseOutcome::SignInRejected(_)
+        ));
+        assert!(!closed.allows_reconnect());
+        // Already rejected: a second refusal is still reported as rejected.
+        assert!(matches!(
+            closed.on_closed("sub-2", "invalid: bad signature"),
+            CloseOutcome::SignInRejected(_)
+        ));
+        assert!(!closed.allows_reconnect());
+    }
+
+    /// The socket handlers and the reconnect timer live in
+    /// `SharedRelayState`, so they must hold only a `Weak` to it, or the
+    /// state and the open socket leak whenever `disconnect()` is skipped.
+    /// The timer is owned, not `forget()`-ed, and freed when cancelled.
+    #[test]
+    fn handlers_and_timer_hold_no_strong_reference_to_the_state() {
+        let prod = prod_source();
+        let setup = fn_body(prod, "fn setup_relay_connection(");
+        assert!(!setup.contains(".forget()"), "nothing leaked with forget()");
+        assert!(!setup.contains("shared.clone()"), "{setup}");
+        assert!(!setup.contains("shared_close.clone()"), "{setup}");
+        for weak in [
+            "let weak_open = Rc::downgrade(shared);",
+            "let weak_msg = Rc::downgrade(shared);",
+            "let weak_err = Rc::downgrade(shared);",
+            "let weak_close = Rc::downgrade(shared);",
+            "let weak_timer = Rc::downgrade(&shared_close);",
+        ] {
+            assert!(setup.contains(weak), "{weak}");
+        }
+        assert_eq!(setup.matches(".upgrade() else {").count(), 5);
+        assert!(setup.contains("*shared_close.reconnect_timer.borrow_mut() = Some(callback);"));
+
+        let cancel = fn_body(prod, "fn cancel_reconnect_timer(shared: &SharedRelayState)");
+        assert!(cancel.contains("clear_timeout_with_handle(timer_id)"));
+        assert!(cancel.contains("shared.reconnect_timer.borrow_mut().take();"));
+
+        let drop = fn_body(prod, "impl Drop for SharedRelayState");
+        assert!(drop.contains("cancel_reconnect_timer(self);"));
+        assert!(drop.contains("release_socket(self);"));
+
+        let fail = fn_body(prod, "fn fail_sign_in(");
+        assert!(fail.contains("cancel_reconnect_timer(shared);"));
+    }
+
+    /// Retry cancels a pending reconnect timer, as `connect` does, or the
+    /// timer's later setup lets go of the socket Retry just opened.
+    #[test]
+    fn retry_cancels_a_pending_reconnect_timer() {
+        let prod = prod_source();
+        for signature in ["pub fn retry(&self)", "pub fn connect(&self"] {
+            let body = fn_body(prod, signature);
+            let body = &body[..body.find("\n    }\n").expect("method end")];
+            let cancel = body
+                .find("self.cancel_reconnect_timer();")
+                .unwrap_or_else(|| panic!("{signature} must cancel the timer"));
+            let setup = body.find("setup_relay_connection(").expect("setup");
+            assert!(cancel < setup, "{signature}: cancel before setup");
+        }
+    }
+
+    /// A NIP-42 fetch answers for the socket its challenge came on. Letting
+    /// a socket go bumps the generation, and the fetch drops an answer from
+    /// an older one before either arm runs.
+    #[test]
+    fn a_stale_auth_fetch_is_dropped_by_connection_generation() {
+        let prod = prod_source();
+        let release = fn_body(prod, "fn release_socket(");
+        assert!(release.contains("*shared.connection_generation.borrow_mut() += 1;"));
+        let handler = fn_body(prod, "fn handle_relay_message(");
+        let captured = handler
+            .find("let generation = *shared.connection_generation.borrow();")
+            .expect("generation captured");
+        let spawn = handler.find("spawn_local(").expect("spawn");
+        let check = handler
+            .find("if *shared_auth.connection_generation.borrow() != generation {")
+            .expect("generation checked");
+        let ok_arm = handler.find("Ok(event) => {").expect("Ok arm");
+        let err_arm = handler.find("Err(e) => {").expect("Err arm");
+        assert!(captured < spawn && spawn < check);
+        assert!(check < ok_arm && check < err_arm);
     }
 
     /// Sockets are browser-only, so pin the source: a released socket has
