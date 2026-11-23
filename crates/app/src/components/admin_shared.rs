@@ -1932,6 +1932,7 @@ mod list_cap_notice_tests {
         let resource = ApiResource::<Vec<u8>> {
             data: use_resource(|| async { Some(Vec::new()) }),
             refresh: use_signal(|| 0u64),
+            failed: use_signal(|| false),
             error: use_signal(|| None),
             truncated: use_signal(|| truncated),
             shown: use_signal(|| 1000usize),

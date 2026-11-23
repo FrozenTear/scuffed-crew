@@ -813,6 +813,7 @@ mod tests {
     fn resource_of<T: Clone + 'static>(value: Option<T>) -> ApiResource<T> {
         let refresh = use_signal(|| 0u64);
         let error = use_signal(|| None::<String>);
+        let failed = use_signal(|| false);
         let truncated = use_signal(|| false);
         let shown = use_signal(|| 0usize);
         let page_budget = use_signal(|| 1usize);
@@ -824,6 +825,7 @@ mod tests {
             data,
             refresh,
             error,
+            failed,
             truncated,
             shown,
             page_budget,
