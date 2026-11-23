@@ -1339,6 +1339,41 @@ mod tests {
             .expect("reconnect scheduling");
         assert!(close_drop < close_bump && close_bump < close_reconnect);
 
+        // The bump sits above every early return in `onclose`. The only exit
+        // allowed before it is the `Weak` upgrade guard: with no shared state
+        // there is no generation to bump.
+        let close_start = setup
+            .find("let onclose = Closure::wrap(")
+            .expect("onclose closure");
+        let close_end = setup[close_start..]
+            .find("ws.set_onclose(")
+            .map(|i| close_start + i)
+            .expect("onclose attached");
+        let onclose = &setup[close_start..close_end];
+        let bump_in_close = onclose
+            .find(&format!("*shared_close.{bump}"))
+            .expect("onclose bumps the generation");
+        let before_bump = &onclose[..bump_in_close];
+        let guard = before_bump
+            .find("let Some(shared_close) = weak_close.upgrade() else {")
+            .expect("upgrade guard");
+        let guard_end = before_bump[guard..]
+            .find("};")
+            .map(|i| guard + i)
+            .expect("guard closes");
+        let guard_return = before_bump.find("return").expect("guard returns");
+        assert!(guard < guard_return && guard_return < guard_end);
+        assert_eq!(
+            before_bump.matches("return").count(),
+            1,
+            "no early return in onclose before the generation bump"
+        );
+        assert!(!before_bump.contains('?'), "no `?` before the bump");
+        for exit in ["intentional_disconnect", "allows_reconnect()"] {
+            let at = onclose.find(exit).expect(exit);
+            assert!(bump_in_close < at, "bump before the {exit} check");
+        }
+
         let handler = fn_body(prod, "fn handle_relay_message(");
         assert!(!handler.contains("shared.clone()"), "the fetch holds no Rc");
         let weak = handler
