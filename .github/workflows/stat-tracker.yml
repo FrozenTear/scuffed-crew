@@ -99,7 +99,7 @@ jobs:
       - name: Install system dependencies
         uses: ./.github/actions/apt-install
         with:
-          save: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/wip/0.6' }}
+          save: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/wip/0.6' || github.ref == 'refs/heads/wip/0.7' }}
           packages: >-
             libwayland-dev libxkbcommon-dev
             libegl-dev libgbm-dev
@@ -136,9 +136,9 @@ jobs:
           # changes, or a full-match restore of stale artifacts skips the
           # save and every run rebuilds (v0 -> v1: dev line-tables-only).
           prefix-key: v1-rust
-          # Save on main and the long-lived wip/0.6 lane only: PRs into
-          # wip/0.6 restore from it. Other refs would evict these (repo cap).
-          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/wip/0.6' }}
+          # Save on main and the long-lived wip/0.6 and wip/0.7 lanes only: PRs into
+          # them restore from those. Other refs would evict these (repo cap).
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/wip/0.6' || github.ref == 'refs/heads/wip/0.7' }}
 
       - name: Build
         run: cargo build --locked $TRACKER_PACKAGES
@@ -204,7 +204,7 @@ jobs:
       - name: Install system dependencies
         uses: ./.github/actions/apt-install
         with:
-          save: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/wip/0.6' }}
+          save: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/wip/0.6' || github.ref == 'refs/heads/wip/0.7' }}
           # minisign: not needed by clippy, listed so it shares Build & Test's key.
           packages: >-
             libwayland-dev libxkbcommon-dev
@@ -232,9 +232,9 @@ jobs:
           # changes, or a full-match restore of stale artifacts skips the
           # save and every run rebuilds (v0 -> v1: dev line-tables-only).
           prefix-key: v1-rust
-          # Save on main and the long-lived wip/0.6 lane only: PRs into
-          # wip/0.6 restore from it. Other refs would evict these (repo cap).
-          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/wip/0.6' }}
+          # Save on main and the long-lived wip/0.6 and wip/0.7 lanes only: PRs into
+          # them restore from those. Other refs would evict these (repo cap).
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/wip/0.6' || github.ref == 'refs/heads/wip/0.7' }}
 
       - name: Clippy
         run: cargo clippy --locked $TRACKER_PACKAGES --all-targets -- -D warnings
@@ -266,7 +266,7 @@ jobs:
       - name: Install system dependencies
         uses: ./.github/actions/apt-install
         with:
-          save: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/wip/0.6' }}
+          save: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/wip/0.6' || github.ref == 'refs/heads/wip/0.7' }}
           packages: >-
             libwayland-dev libxkbcommon-dev
             libegl-dev libgbm-dev
@@ -289,9 +289,9 @@ jobs:
           # changes, or a full-match restore of stale artifacts skips the
           # save and every run rebuilds (v0 -> v1: dev line-tables-only).
           prefix-key: v1-rust
-          # Save on main and the long-lived wip/0.6 lane only: PRs into
-          # wip/0.6 restore from it. Other refs would evict these (repo cap).
-          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/wip/0.6' }}
+          # Save on main and the long-lived wip/0.6 and wip/0.7 lanes only: PRs into
+          # them restore from those. Other refs would evict these (repo cap).
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/wip/0.6' || github.ref == 'refs/heads/wip/0.7' }}
 
       - name: Rustfmt
         run: cargo fmt -p scuffed-stat-tracker-ui --check
