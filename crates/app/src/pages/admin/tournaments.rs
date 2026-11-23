@@ -176,6 +176,26 @@ fn participant_name_map(
         .unwrap_or_default()
 }
 
+/// Names of a match's two sides for its Report button and the Report match
+/// result dialog: the row names from `participant_row_labels`, so two sides
+/// with the same name read apart, and agree with the Remove button. A side
+/// with no participant, or one not in the list, reads as its fallback.
+fn match_side_labels(
+    m: &BracketMatch,
+    row_labels: &HashMap<String, String>,
+    fallbacks: (&str, &str),
+) -> (String, String) {
+    let side = |id: Option<&String>, fallback: &str| {
+        id.and_then(|id| row_labels.get(id))
+            .cloned()
+            .unwrap_or_else(|| fallback.to_string())
+    };
+    (
+        side(m.participant_a_id.as_ref(), fallbacks.0),
+        side(m.participant_b_id.as_ref(), fallbacks.1),
+    )
+}
+
 /// Name of each participants table row, keyed by participant id, for the
 /// Remove button and its dialog. A name that repeats (two "Unnamed entrant"
 /// rows, or the same outside name twice) gets its row number, so every row
@@ -1431,6 +1451,13 @@ pub fn AdminTournaments() -> Element {
                                                         };
                                                         let a_won = bm.winner_id.is_some() && bm.winner_id == bm.participant_a_id;
                                                         let b_won = bm.winner_id.is_some() && bm.winner_id == bm.participant_b_id;
+                                                        // Row names, so the Report button tells two
+                                                        // same-name sides apart, as Remove does.
+                                                        let (a_label, b_label) = match_side_labels(
+                                                            bm,
+                                                            &row_labels,
+                                                            ("To be decided", "To be decided"),
+                                                        );
                                                         let bm_report = bm.clone();
                                                         rsx! {
                                                             tr { key: "{bm.id}",
@@ -1449,7 +1476,7 @@ pub fn AdminTournaments() -> Element {
                                                                             r#type: "button",
                                                                             class: "btn is-ghost",
                                                                             id: report_button_id(&bm.id),
-                                                                            aria_label: "Report match {bm.bracket_position}: {a_name} against {b_name}",
+                                                                            aria_label: "Report match {bm.bracket_position}: {a_label} against {b_label}",
                                                                             onclick: move |_| open_match_report(bm_report.clone()),
                                                                             "Report"
                                                                         }
@@ -1789,11 +1816,11 @@ pub fn AdminTournaments() -> Element {
             {
                 let (a_name, b_name, a_id, b_id) = match match_modal.get_target() {
                     Some(m) => {
-                        let pmap = &participant_map;
+                        // Row names, so two same-name sides read apart.
                         let a_id = m.participant_a_id.clone().unwrap_or_default();
                         let b_id = m.participant_b_id.clone().unwrap_or_default();
-                        let a_name = pmap.get(&a_id).cloned().unwrap_or_else(|| "Player A".into());
-                        let b_name = pmap.get(&b_id).cloned().unwrap_or_else(|| "Player B".into());
+                        let (a_name, b_name) =
+                            match_side_labels(&m, &row_labels, ("Player A", "Player B"));
                         (a_name, b_name, a_id, b_id)
                     }
                     None => ("Player A".to_string(), "Player B".to_string(), String::new(), String::new()),
@@ -2247,6 +2274,86 @@ mod tests {
             .and_then(|rest| rest.split("open:").next())
             .expect("the Remove dialog message");
         assert!(dialog.contains("row_labels"), "{dialog}");
+    }
+
+    #[test]
+    fn report_dialog_tells_two_same_name_sides_apart() {
+        // Round 5b: two "Unnamed entrant" sides, or two with the same typed
+        // name, in one match get the row names Remove uses.
+        let entrant = |id: &str, external: Option<&str>| {
+            serde_json::json!({
+                "id": id,
+                "team_id": null,
+                "external_name": external,
+                "seed": null,
+                "status": "registered"
+            })
+        };
+        let bracket: BracketData = serde_json::from_value(serde_json::json!({
+            "participants": [
+                entrant("p1", None),
+                entrant("p2", None),
+                entrant("p3", Some("Guests")),
+                entrant("p4", Some("Guests")),
+            ],
+            "rounds": [],
+            "matches": []
+        }))
+        .unwrap();
+        let names = participant_name_map(Some(&bracket), None);
+        let labels = participant_row_labels(&bracket.participants, &names);
+        let bm = |a: Option<&str>, b: Option<&str>| -> BracketMatch {
+            serde_json::from_value(serde_json::json!({
+                "id": "m1",
+                "round_id": "r1",
+                "bracket_position": 1,
+                "participant_a_id": a,
+                "participant_b_id": b,
+                "score_a": null,
+                "score_b": null,
+                "winner_id": null,
+                "status": "pending"
+            }))
+            .unwrap()
+        };
+        let fb = ("Player A", "Player B");
+        assert_eq!(
+            match_side_labels(&bm(Some("p1"), Some("p2")), &labels, fb),
+            (
+                "Unnamed entrant, row 1".to_string(),
+                "Unnamed entrant, row 2".to_string()
+            )
+        );
+        assert_eq!(
+            match_side_labels(&bm(Some("p3"), Some("p4")), &labels, fb),
+            ("Guests, row 3".to_string(), "Guests, row 4".to_string())
+        );
+        // An empty side reads as its fallback.
+        assert_eq!(
+            match_side_labels(&bm(Some("p3"), None), &labels, fb),
+            ("Guests, row 3".to_string(), "Player B".to_string())
+        );
+
+        // The dialog (score labels and winner options) and the Report
+        // button use the row names, not the plain name map.
+        let src = include_str!("tournaments.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let dialog = prod
+            .split("title: \"Report match result\"")
+            .nth(1)
+            .and_then(|rest| rest.split("option { value: \"{a_id}\"").next())
+            .expect("the Report match result dialog");
+        assert!(
+            dialog.contains("match_side_labels(&m, &row_labels, (\"Player A\", \"Player B\"))"),
+            "{dialog}"
+        );
+        assert!(!dialog.contains("participant_map"), "{dialog}");
+        assert!(
+            prod.contains("\"Report match {bm.bracket_position}: {a_label} against {b_label}\"")
+        );
+        assert!(
+            !prod.contains("\"Report match {bm.bracket_position}: {a_name} against {b_name}\"")
+        );
     }
 
     #[test]
