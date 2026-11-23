@@ -150,12 +150,11 @@ fn entrant_hint_text(teams_error: Option<&str>) -> String {
             &load_error_text("the teams list", reason),
             "You can still type an outside team name.",
         ),
-        None => {
-            "Pick one of your teams, or type the name of a team from outside the org. Not both. \
+        None => "Pick one of your teams, type a name for a team from outside the org, or both. \
+                 With both, the typed name is shown and the entry stays linked to your team. \
                  Teams already entered and teams of another game are not listed; to enter a team \
                  of another game, type its name."
-                .to_string()
-        }
+            .to_string(),
     }
 }
 
@@ -241,8 +240,9 @@ struct AddParticipantErrors {
 }
 
 /// The Add participant form as the body the server takes: a picked team
-/// (`team_id`) or a typed name (`external_name`), never both, and a seed
-/// only when one was typed. A form with errors reports all of them.
+/// (`team_id`), a typed name (`external_name`), or both (the team is the
+/// entrant and the typed name is the name shown for it), and a seed only
+/// when one was typed. A form with errors reports all of them.
 fn add_participant_body(
     team_id: &str,
     external_name: &str,
@@ -252,25 +252,18 @@ fn add_participant_body(
     let external_name = external_name.trim();
     let seed = seed.trim();
     let mut errors = AddParticipantErrors::default();
-    let (team_id, external_name) = match (team_id.is_empty(), external_name.is_empty()) {
-        (true, true) => {
-            errors.entrant = Some("Pick a team or type a name.");
-            (None, None)
-        }
-        (false, false) => {
-            errors.entrant = Some("Pick a team or type a name, not both.");
-            (None, None)
-        }
-        (false, true) => (Some(team_id.to_string()), None),
-        (true, false) => (None, Some(external_name.to_string())),
-    };
+    let team_id = Some(team_id.to_string()).filter(|t| !t.is_empty());
+    let external_name = Some(external_name.to_string()).filter(|n| !n.is_empty());
+    if team_id.is_none() && external_name.is_none() {
+        errors.entrant = Some("Pick a team or type a name.");
+    }
     let seed = if seed.is_empty() {
         None
     } else {
         match seed.parse::<u32>() {
             Ok(n) if n >= 1 => Some(n),
             _ => {
-                errors.seed = Some("Seed must be a whole number, 1 or higher.");
+                errors.seed = Some(SEED_ERROR);
                 None
             }
         }
@@ -284,6 +277,9 @@ fn add_participant_body(
         seed,
     })
 }
+
+/// The seed field error: what the field takes, and that blank is fine.
+const SEED_ERROR: &str = "Seed must be a whole number, 1 or higher, or blank for no seed.";
 
 const FORMATS: [&str; 4] = ["single_elim", "double_elim", "round_robin", "swiss"];
 /// Must match server `TournamentStatus` (no "active"; use `in_progress`).
@@ -314,6 +310,7 @@ const PARTICIPANT_NAME_ID: &str = "participant-name";
 const PARTICIPANT_HINT_ID: &str = "participant-entrant-hint";
 const PARTICIPANT_ERROR_ID: &str = "participant-entrant-error";
 const PARTICIPANT_SEED_ID: &str = "participant-seed";
+const PARTICIPANT_SEED_HINT_ID: &str = "participant-seed-hint";
 const PARTICIPANT_SEED_ERROR_ID: &str = "participant-seed-error";
 const SCORE_A_ID: &str = "report-score-a";
 const SCORE_B_ID: &str = "report-score-b";
@@ -1622,7 +1619,8 @@ pub fn AdminTournaments() -> Element {
             error: add_part_error(),
             restore_focus_id: Some(ADD_PARTICIPANT_ID.to_string()),
 
-            // One entrant: a team or an outside name, never both.
+            // One entrant: a team, an outside name, or a team shown under
+            // a typed name.
             fieldset { class: "admin-check-group", aria_describedby: PARTICIPANT_HINT_ID,
                 legend { class: "field-label", "Entrant" }
                 p { class: "field-hint", id: PARTICIPANT_HINT_ID, "{entrant_hint}" }
@@ -1642,7 +1640,7 @@ pub fn AdminTournaments() -> Element {
                     }
                 }
                 div { class: "form-field",
-                    label { class: "field-label", r#for: PARTICIPANT_NAME_ID, "Outside team name" }
+                    label { class: "field-label", r#for: PARTICIPANT_NAME_ID, "Name to show" }
                     input {
                         class: "field-input",
                         id: PARTICIPANT_NAME_ID,
@@ -1666,10 +1664,11 @@ pub fn AdminTournaments() -> Element {
                     r#type: "text",
                     inputmode: "numeric",
                     aria_invalid: if seed_invalid { "true" },
-                    aria_describedby: PARTICIPANT_SEED_ERROR_ID,
+                    aria_describedby: "{PARTICIPANT_SEED_HINT_ID} {PARTICIPANT_SEED_ERROR_ID}",
                     value: "{add_part_seed}",
                     oninput: move |e| add_part_seed.set(e.value()),
                 }
+                p { class: "field-hint", id: PARTICIPANT_SEED_HINT_ID, "Leave blank for no seed." }
                 FieldError { id: PARTICIPANT_SEED_ERROR_ID.to_string(), text: add_part_seed_error() }
             }
         }
@@ -1976,16 +1975,41 @@ mod tests {
             entrant: Some(text),
             seed: None,
         };
-        let seed_word = "Seed must be a whole number, 1 or higher.";
+        let seed_word = SEED_ERROR;
+        assert!(seed_word.contains("1 or higher"), "{seed_word}");
+        assert!(seed_word.contains("blank for no seed"), "{seed_word}");
         assert_eq!(
             add_participant_body("", "  ", "1"),
             Err(entrant_only("Pick a team or type a name."))
         );
+        // Round 4 (owner decision): a team and a typed name together send
+        // both; the team stays linked and the typed name is the one shown.
+        // This replaces the old "not both" refusal this test pinned.
+        let both = add_participant_body(" team:alpha ", " Alpha Event Roster ", "").unwrap();
         assert_eq!(
-            add_participant_body("team:alpha", "Rival Squad", ""),
-            Err(entrant_only("Pick a team or type a name, not both."))
+            serde_json::to_value(&both).unwrap(),
+            serde_json::json!({ "team_id": "team:alpha", "external_name": "Alpha Event Roster" })
         );
-        for bad in ["0", "-1", "1.5", "first", "1e", "-"] {
+        // A blank or whitespace seed is unseeded: the field is left out.
+        for blank in ["", "   "] {
+            let body = add_participant_body("team:alpha", "", blank).unwrap();
+            assert_eq!(body.seed, None, "{blank:?}");
+            assert!(
+                serde_json::to_value(&body).unwrap().get("seed").is_none(),
+                "{blank:?}"
+            );
+        }
+        // Any whole number from 1 up to the largest u32 is taken.
+        for (typed, want) in [("1", 1), (" 42 ", 42), ("4294967295", u32::MAX)] {
+            let body = add_participant_body("", "Rival Squad", typed).unwrap();
+            assert_eq!(body.seed, Some(want), "{typed}");
+            assert_eq!(
+                serde_json::to_value(&body).unwrap()["seed"],
+                serde_json::json!(want),
+                "{typed}"
+            );
+        }
+        for bad in ["0", "-1", "1.5", "first", "1e", "-", "4294967296"] {
             assert_eq!(
                 add_participant_body("team:alpha", "", bad),
                 Err(AddParticipantErrors {
@@ -2015,7 +2039,7 @@ mod tests {
         let src = include_str!("tournaments.rs");
         let prod = src.split("#[cfg(test)]").next().unwrap();
         // One named group with a tied hint, which also carries a teams
-        // load error, around Team and Outside team name.
+        // load error, around Team and Name to show.
         assert!(prod.contains(
             "fieldset { class: \"admin-check-group\", aria_describedby: PARTICIPANT_HINT_ID,\n                legend { class: \"field-label\", \"Entrant\" }\n                p { class: \"field-hint\", id: PARTICIPANT_HINT_ID, \"{entrant_hint}\" }"
         ));
@@ -2144,6 +2168,99 @@ mod tests {
             .and_then(|rest| rest.split("open:").next())
             .expect("the Remove dialog message");
         assert!(dialog.contains("row_labels"), "{dialog}");
+    }
+
+    #[test]
+    fn a_team_with_a_typed_name_shows_the_typed_name() {
+        // Round 4: with a team and a typed name, the typed name is what the
+        // table and the Remove button and dialog use.
+        let bracket: BracketData = serde_json::from_value(serde_json::json!({
+            "participants": [
+                {
+                    "id": "p1",
+                    "team_id": "team:alpha",
+                    "external_name": "Alpha Event Roster",
+                    "seed": null,
+                    "status": "registered"
+                },
+                {
+                    "id": "p2",
+                    "team_id": "team:alpha2",
+                    "external_name": null,
+                    "seed": 2,
+                    "status": "registered"
+                }
+            ],
+            "rounds": [],
+            "matches": []
+        }))
+        .unwrap();
+        let teams = vec![
+            Team {
+                id: "team:alpha".into(),
+                name: "Squad Alpha".into(),
+                game_id: None,
+            },
+            Team {
+                id: "team:alpha2".into(),
+                name: "Squad Alpha Two".into(),
+                game_id: None,
+            },
+        ];
+        let names = participant_name_map(Some(&bracket), Some(&teams));
+        assert_eq!(names["p1"], "Alpha Event Roster");
+        assert_eq!(names["p2"], "Squad Alpha Two");
+        let labels = participant_row_labels(&bracket.participants, &names);
+        assert_eq!(labels["p1"], "Alpha Event Roster");
+        assert_eq!(labels["p2"], "Squad Alpha Two");
+        // A linked team counts as entered, so the picker hides it.
+        let ids: Vec<String> = team_choices(&teams, Some(&bracket), None)
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        assert!(ids.is_empty(), "{ids:?}");
+    }
+
+    #[test]
+    fn the_add_participant_form_allows_both_and_an_optional_seed() {
+        // Round 4: no "not both" copy is left anywhere in the page code,
+        // and the labels and hints say what the fields take.
+        let src = include_str!("tournaments.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let lower = prod.to_lowercase();
+        assert!(!lower.contains("not both"));
+        assert!(!lower.contains("never both"));
+        let hint = entrant_hint_text(None);
+        assert!(hint.contains("or both"), "{hint}");
+        assert!(
+            hint.contains("the typed name is shown and the entry stays linked to your team"),
+            "{hint}"
+        );
+        assert!(prod.contains(
+            "label { class: \"field-label\", r#for: PARTICIPANT_NAME_ID, \"Name to show\" }"
+        ));
+        assert!(prod.contains(
+            "label { class: \"field-label\", r#for: PARTICIPANT_SEED_ID, \"Seed (optional)\" }"
+        ));
+        // The seed hint is always rendered and tied, next to the error line.
+        let seed = prod
+            .split("id: PARTICIPANT_SEED_ID,")
+            .nth(1)
+            .and_then(|rest| rest.split("// Remove participant confirm").next())
+            .expect("the seed field");
+        assert!(
+            seed.contains(
+                "aria_describedby: \"{PARTICIPANT_SEED_HINT_ID} {PARTICIPANT_SEED_ERROR_ID}\","
+            ),
+            "{seed}"
+        );
+        assert!(
+            seed.contains(
+                "p { class: \"field-hint\", id: PARTICIPANT_SEED_HINT_ID, \"Leave blank for no seed.\" }"
+            ),
+            "{seed}"
+        );
+        assert!(seed.contains("FieldError { id: PARTICIPANT_SEED_ERROR_ID.to_string(),"));
     }
 
     #[test]
