@@ -388,6 +388,18 @@ struct SharedRelayState {
     auth_gate: RefCell<RelayCloseGate>,
     /// Event id of the AUTH frame just sent, so its OK is not a publish.
     pending_auth_event_id: RefCell<Option<String>>,
+    /// The four handlers of the socket in `socket`. Owned here, not
+    /// `forget()`-ed, so `release_socket` can detach and free them.
+    handlers: RefCell<Option<SocketHandlers>>,
+}
+
+/// The closures behind one socket's `onopen`/`onmessage`/`onerror`/`onclose`.
+/// Never read: they are held so they live exactly as long as they are attached.
+struct SocketHandlers {
+    _onopen: Closure<dyn FnMut(JsValue)>,
+    _onmessage: Closure<dyn FnMut(MessageEvent)>,
+    _onerror: Closure<dyn FnMut(JsValue)>,
+    _onclose: Closure<dyn FnMut(JsValue)>,
 }
 
 impl SharedRelayState {
@@ -404,7 +416,34 @@ impl SharedRelayState {
 // WebSocket setup
 // =============================================================================
 
+/// Let go of the current socket, if any: detach its four handlers, then
+/// close it, then free the closures.
+///
+/// The order is the point. The browser fires `close` some time after
+/// `close()` returns. With `onclose` still attached, that late event called
+/// back into the owner's callbacks, and the chat widget's callbacks write
+/// signals of a component that is already gone by then (it disconnects in
+/// `use_drop`), which panics. Detached first, a released socket can never
+/// call back, so the closures are safe to free here.
+///
+/// Call this only from outside the handlers themselves (`disconnect`, and
+/// `setup_relay_connection`, which runs from `connect`, `retry` and the
+/// reconnect timer), so a closure is never freed while it is running.
+fn release_socket(shared: &SharedRelayState) {
+    if let Some(socket) = shared.socket.borrow_mut().take() {
+        socket.set_onopen(None);
+        socket.set_onmessage(None);
+        socket.set_onerror(None);
+        socket.set_onclose(None);
+        let _ = socket.close();
+    }
+    shared.handlers.borrow_mut().take();
+}
+
 fn setup_relay_connection(shared: &Rc<SharedRelayState>) {
+    // One socket at a time: a `retry` or `connect` over a socket that has
+    // not closed yet must not leave the old one calling back.
+    release_socket(shared);
     shared.auth_gate.borrow_mut().reset_connection();
     *shared.pending_auth_event_id.borrow_mut() = None;
 
@@ -458,7 +497,6 @@ fn setup_relay_connection(shared: &Rc<SharedRelayState>) {
                 }
             }) as Box<dyn FnMut(JsValue)>);
             ws.set_onopen(Some(onopen.as_ref().unchecked_ref()));
-            onopen.forget();
 
             // -- On message --
             let shared_msg = shared.clone();
@@ -476,7 +514,6 @@ fn setup_relay_connection(shared: &Rc<SharedRelayState>) {
                 }
             }) as Box<dyn FnMut(MessageEvent)>);
             ws.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
-            onmessage.forget();
 
             // -- On error --
             let shared_err = shared.clone();
@@ -485,7 +522,6 @@ fn setup_relay_connection(shared: &Rc<SharedRelayState>) {
                 shared_err.emit_state(RelayConnectionState::Error);
             }) as Box<dyn FnMut(JsValue)>);
             ws.set_onerror(Some(onerror.as_ref().unchecked_ref()));
-            onerror.forget();
 
             // -- On close --
             let shared_close = shared.clone();
@@ -553,8 +589,13 @@ fn setup_relay_connection(shared: &Rc<SharedRelayState>) {
                 }
             }) as Box<dyn FnMut(JsValue)>);
             ws.set_onclose(Some(onclose.as_ref().unchecked_ref()));
-            onclose.forget();
 
+            *shared.handlers.borrow_mut() = Some(SocketHandlers {
+                _onopen: onopen,
+                _onmessage: onmessage,
+                _onerror: onerror,
+                _onclose: onclose,
+            });
             *shared.socket.borrow_mut() = Some(ws);
         }
         Err(e) => {
@@ -590,7 +631,11 @@ fn handle_relay_message(shared: &Rc<SharedRelayState>, msg: RelayMessage) {
             let pending = shared.pending_auth_event_id.borrow().clone();
             if pending.as_deref() == Some(event_id.as_str()) {
                 shared.pending_auth_event_id.borrow_mut().take();
-                match shared.auth_gate.borrow_mut().on_auth_ok(accepted, &message) {
+                // Bind first: as a `match` scrutinee the `RefMut` would live
+                // to the end of the match (edition 2024), and `fail_sign_in`
+                // borrows the gate again.
+                let outcome = shared.auth_gate.borrow_mut().on_auth_ok(accepted, &message);
+                match outcome {
                     AuthOkOutcome::Accepted(ids) => {
                         for id in &ids {
                             resend_subscription(shared, id);
@@ -637,6 +682,11 @@ fn handle_relay_message(shared: &Rc<SharedRelayState>, msg: RelayMessage) {
                         }
                         Err(e) => {
                             tracing::error!("NIP-42 auth failed: {e}");
+                            // After `disconnect()` the owner may be gone;
+                            // a late answer must not call back into it.
+                            if *shared_auth.intentional_disconnect.borrow() {
+                                return;
+                            }
                             shared_auth.emit_state(RelayConnectionState::Error);
                         }
                     }
@@ -646,7 +696,10 @@ fn handle_relay_message(shared: &Rc<SharedRelayState>, msg: RelayMessage) {
             }
         }
         RelayMessage::Notice(msg) => {
-            if let Some(banner) = shared.auth_gate.borrow_mut().on_notice(&msg) {
+            // Bind first, as above: an `if let` scrutinee's `RefMut` lives
+            // through the block, and `fail_sign_in` borrows the gate again.
+            let rejected = shared.auth_gate.borrow_mut().on_notice(&msg);
+            if let Some(banner) = rejected {
                 fail_sign_in(shared, banner);
                 return;
             }
@@ -809,6 +862,7 @@ impl NostrRelayManager {
             on_event: RefCell::new(Box::new(on_event)),
             auth_gate: RefCell::new(RelayCloseGate::default()),
             pending_auth_event_id: RefCell::new(None),
+            handlers: RefCell::new(None),
         });
 
         Self {
@@ -878,9 +932,8 @@ impl NostrRelayManager {
         }
         self.shared.subscriptions.borrow_mut().clear();
 
-        if let Some(socket) = self.shared.socket.borrow_mut().take() {
-            let _ = socket.close();
-        }
+        // Handlers off before `close()`: see `release_socket`.
+        release_socket(&self.shared);
         self.shared.emit_state(RelayConnectionState::Disconnected);
     }
 
@@ -1011,6 +1064,117 @@ impl NostrRelayManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// This file up to its test module, so the pins below cannot match
+    /// themselves.
+    fn prod_source() -> &'static str {
+        let src = include_str!("nostr.rs");
+        let end = src.find("#[cfg(test)]\nmod tests").expect("test module");
+        &src[..end]
+    }
+
+    /// The body of `fn <name>` up to the next top-level item.
+    fn fn_body(src: &'static str, signature: &str) -> &'static str {
+        let start = src.find(signature).expect(signature);
+        let rest = &src[start..];
+        let end = rest[1..].find("\n}\n").map(|i| i + 1).unwrap_or(rest.len());
+        &rest[..end]
+    }
+
+    /// What the gate's `RefCell` does when a scrutinee keeps its `RefMut`
+    /// and an arm borrows again, and that binding with `let` first is the
+    /// cure. Edition 2024 keeps a `match` scrutinee's temporaries to the end
+    /// of the match, which is the panic a rejected sign-in used to hit.
+    #[test]
+    fn gate_outcome_bound_with_let_frees_the_gate_for_fail_sign_in() {
+        let gate = RefCell::new(RelayCloseGate::default());
+        gate.borrow_mut().note_auth_presented();
+
+        // The old shape: the gate is still borrowed inside the arm.
+        match gate
+            .borrow_mut()
+            .on_auth_ok(false, "invalid: bad signature")
+        {
+            AuthOkOutcome::Rejected(_) => assert!(gate.try_borrow_mut().is_err()),
+            AuthOkOutcome::Accepted(_) => panic!("a refused AUTH is not accepted"),
+        }
+
+        // The fixed shape: `fail_sign_in`'s `mark_rejected` can borrow.
+        let outcome = gate
+            .borrow_mut()
+            .on_auth_ok(false, "invalid: bad signature");
+        match outcome {
+            AuthOkOutcome::Rejected(_) => gate.borrow_mut().mark_rejected(),
+            AuthOkOutcome::Accepted(_) => panic!("a refused AUTH is not accepted"),
+        }
+        let rejected = gate.borrow_mut().on_notice("error: signature mismatch");
+        if rejected.is_some() {
+            gate.borrow_mut().mark_rejected();
+        }
+        assert!(!gate.borrow().allows_reconnect());
+    }
+
+    /// `handle_relay_message` needs a browser, so pin its source: no gate
+    /// borrow may sit in a `match` or `if let` scrutinee there, because the
+    /// arms call `fail_sign_in`, which borrows the gate again.
+    #[test]
+    fn relay_message_handler_never_matches_on_a_live_gate_borrow() {
+        let body = fn_body(prod_source(), "fn handle_relay_message(");
+        assert!(body.contains("fail_sign_in(shared, banner)"));
+        let flat: String = body.split_whitespace().collect();
+        for scrutinee in [
+            "matchshared.auth_gate",
+            "=shared.auth_gate.borrow_mut().on_notice(&msg){",
+        ] {
+            assert!(
+                !flat.contains(scrutinee),
+                "gate borrowed in a scrutinee: {scrutinee}"
+            );
+        }
+        assert!(flat.contains("letoutcome=shared.auth_gate.borrow_mut().on_auth_ok("));
+        assert!(flat.contains("letrejected=shared.auth_gate.borrow_mut().on_notice(&msg);"));
+        // And `fail_sign_in` itself still takes the gate, which is why.
+        let fail = fn_body(prod_source(), "fn fail_sign_in(");
+        assert!(fail.contains("shared.auth_gate.borrow_mut().mark_rejected()"));
+    }
+
+    /// Sockets are browser-only, so pin the source: a released socket has
+    /// its four handlers detached before `close()`, `disconnect` goes through
+    /// that, and no handler closure is leaked with `forget()` where nothing
+    /// could ever detach or free it.
+    #[test]
+    fn a_released_socket_cannot_call_back_after_close() {
+        let prod = prod_source();
+        let release = fn_body(prod, "fn release_socket(");
+        let close = release.find("socket.close()").expect("close");
+        for detach in [
+            "socket.set_onopen(None)",
+            "socket.set_onmessage(None)",
+            "socket.set_onerror(None)",
+            "socket.set_onclose(None)",
+        ] {
+            let at = release.find(detach).expect(detach);
+            assert!(at < close, "{detach} must run before close()");
+        }
+        assert!(release.contains("shared.handlers.borrow_mut().take()"));
+
+        let disconnect = fn_body(prod, "pub fn disconnect(&self)");
+        let disconnect = &disconnect[..disconnect.find("pub fn retry(").expect("retry")];
+        assert!(disconnect.contains("release_socket(&self.shared)"));
+        assert!(!disconnect.contains(".close()"));
+        // The only `close()` on a socket is the one behind the detach.
+        assert_eq!(prod.matches(".close()").count(), 1);
+
+        let setup = fn_body(prod, "fn setup_relay_connection(");
+        assert!(setup.contains("release_socket(shared)"));
+        for handler in ["onopen", "onmessage", "onerror", "onclose"] {
+            assert!(
+                !setup.contains(&format!("{handler}.forget()")),
+                "{handler} must be kept in SharedRelayState, not forgotten"
+            );
+            assert!(setup.contains(&format!("_{handler}: {handler}")));
+        }
+    }
 
     #[test]
     fn req_is_not_held_until_the_relay_asks_for_auth() {

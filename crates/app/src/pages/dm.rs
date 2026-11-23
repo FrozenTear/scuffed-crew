@@ -5,7 +5,8 @@ use scuffed_types::MeResponse;
 
 use crate::components::dm::{
     ConversationList, ConversationListState, ConversationSummary, DmComposeModal, DmLoadFailure,
-    DmMember, DmMemberPage, MessageThread, SyncResponse, classify_dm_client_error, peer_label,
+    DmMember, DmMemberPage, MessageThread, SyncResponse, classify_dm_client_error,
+    normalize_recipient_pubkey, peer_label,
 };
 use crate::components::member_gate::Wall;
 use crate::components::ui::{PageHeader, PageShell, PageWidth, SkeletonBars, btn_class};
@@ -260,7 +261,16 @@ pub fn DmInbox() -> Element {
 
 #[component]
 pub fn DmThread(peer_pubkey: String) -> Element {
-    rsx! { DmPageInner { selected_peer: Some(peer_pubkey) } }
+    rsx! { DmPageInner { selected_peer: Some(route_peer(&peer_pubkey)) } }
+}
+
+/// The peer a `/dm/:peer_pubkey` link names. A hex key in any case or an
+/// `npub1` address becomes the lowercase hex key the inbox rows and the
+/// server use, so such a link opens the same conversation. Anything else is
+/// passed on as typed: the server refuses it and the thread shows that
+/// failure.
+fn route_peer(param: &str) -> String {
+    normalize_recipient_pubkey(param).unwrap_or_else(|_| param.to_string())
 }
 
 #[component]
@@ -635,6 +645,24 @@ mod tests {
             last_sender_pubkey: String::new(),
             unread_count: 1,
         }
+    }
+
+    #[test]
+    fn a_thread_link_is_read_as_a_hex_key_when_it_is_one() {
+        let hex = "ab".repeat(32);
+        assert_eq!(route_peer(&hex), hex);
+        assert_eq!(route_peer(&hex.to_ascii_uppercase()), hex);
+        let npub = "npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6";
+        let from_npub = route_peer(npub);
+        assert_eq!(from_npub.len(), 64);
+        assert!(from_npub.chars().all(|c| c.is_ascii_hexdigit()));
+        // Not a key: kept as typed, and its label does not panic on the
+        // multibyte text (six euro signs and an "a", 19 bytes).
+        let junk = "€€€€€€a";
+        assert_eq!(route_peer(junk), junk);
+        assert_eq!(peer_label(&route_peer(junk), None, &[]), junk);
+        let prod = include_str!("dm.rs");
+        assert!(prod.contains("selected_peer: Some(route_peer(&peer_pubkey))"));
     }
 
     #[test]
