@@ -117,6 +117,83 @@ if ! command -v podman >/dev/null 2>&1; then
     exit 1
 fi
 
+# Seconds one podman or compose stop, rm or start may take (default 60).
+# timeout(1) then sends SIGTERM, and SIGKILL PODMAN_KILL_SECS later, so a
+# hung podman cannot keep update.sh waiting forever. That matters most in
+# the rollback, which ignores INT/TERM/HUP. A call that times out fails.
+PODMAN_SECS="${SCUFFED_UPDATE_PODMAN_SECS:-60}"
+if [[ ! "${PODMAN_SECS}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "error: SCUFFED_UPDATE_PODMAN_SECS must be a whole number of seconds above 0, got '${PODMAN_SECS}'." >&2
+    exit 1
+fi
+# At most 3600s (1 hour). Longer is no real bound, and a huge value would
+# wrap in bash arithmetic, so the length check runs before any comparison.
+if ((${#PODMAN_SECS} > 4)) || ((PODMAN_SECS > 3600)); then
+    echo "error: SCUFFED_UPDATE_PODMAN_SECS must be at most 3600 seconds (1 hour), got '${PODMAN_SECS}'." >&2
+    exit 1
+fi
+PODMAN_KILL_SECS=5
+if ((PODMAN_SECS < PODMAN_KILL_SECS)); then
+    PODMAN_KILL_SECS="${PODMAN_SECS}"
+fi
+# Container stop grace handed to compose stop -t (podman's default 10s),
+# kept under the outer bound so podman kills a slow container first.
+PODMAN_STOP_SECS=10
+if ((PODMAN_SECS <= 2 * PODMAN_STOP_SECS)); then
+    PODMAN_STOP_SECS=$((PODMAN_SECS / 2))
+fi
+if ! command -v timeout >/dev/null 2>&1; then
+    echo "error: timeout (coreutils) is required to bound podman calls; install coreutils." >&2
+    exit 1
+fi
+
+# Set by rollback_on_exit.
+ROLLING_BACK=0
+
+# podman_bounded [--quiet] [--rollback-only] <label> <command...>
+# Runs the command under timeout(1). --quiet sends the command's stderr to
+# /dev/null; the timeout line always goes to stderr. --rollback-only bounds
+# the call only once the rollback has started and runs it as it is before
+# that. Returns the command's status, or 124 (SIGTERM) / 137 (SIGKILL) when
+# it timed out.
+# Before the rollback, timeout runs with --foreground: podman stays in the
+# terminal's process group, so Ctrl-C still stops it at once and the INT
+# trap starts the rollback. In the rollback, which ignores INT/TERM/HUP,
+# timeout puts podman in a process group of its own, out of reach of
+# Ctrl-C, and kills that whole group when the bound runs out.
+podman_bounded() {
+    local quiet=0 rollback_only=0 label rc=0
+    local bound=(timeout --kill-after="${PODMAN_KILL_SECS}" "${PODMAN_SECS}")
+    if [[ "${ROLLING_BACK}" != "1" ]]; then
+        bound=(timeout --foreground --kill-after="${PODMAN_KILL_SECS}" "${PODMAN_SECS}")
+    fi
+    while [[ "${1:-}" == --* ]]; do
+        case "$1" in
+            --quiet) quiet=1 ;;
+            --rollback-only) rollback_only=1 ;;
+        esac
+        shift
+    done
+    label="$1"
+    shift
+    if [[ "${rollback_only}" == "1" && "${ROLLING_BACK}" != "1" ]]; then
+        bound=()
+    fi
+    if [[ "${quiet}" == "1" ]]; then
+        "${bound[@]}" "$@" 2>/dev/null || rc=$?
+    else
+        "${bound[@]}" "$@" || rc=$?
+    fi
+    if [[ "${#bound[@]}" -gt 0 ]] && is_timeout_rc "${rc}"; then
+        echo "error: ${label} timed out after ${PODMAN_SECS}s (SCUFFED_UPDATE_PODMAN_SECS), treated as failed." >&2
+    fi
+    return "${rc}"
+}
+
+is_timeout_rc() {
+    [[ "$1" == "124" || "$1" == "137" ]]
+}
+
 if podman compose version >/dev/null 2>&1; then
     COMPOSE=(podman compose)
 elif command -v podman-compose >/dev/null 2>&1; then
@@ -160,13 +237,20 @@ port_in_use() {
 # Never: kill random PIDs, rm containers that only "publish HOST_PORT", or touch other pods.
 remove_our_site_server() {
     echo "Stopping this project's site-server (${PROJECT_NAME})..."
+    # Each call is bounded. A stop that times out still goes on to rm -f and
+    # the leftover sweep below, so the container is removed either way.
+    # stop -t works for both podman compose (Compose v2) and podman-compose.
     # Scope compose to this directory + project name when supported
-    if "${COMPOSE[@]}" version 2>/dev/null | grep -qi project; then
-        COMPOSE_PROJECT_NAME="${PROJECT_NAME}" "${COMPOSE[@]}" --env-file "$SECRETS" stop site-server 2>/dev/null || true
-        COMPOSE_PROJECT_NAME="${PROJECT_NAME}" "${COMPOSE[@]}" --env-file "$SECRETS" rm -f site-server 2>/dev/null || true
+    if podman_bounded --quiet "${COMPOSE[*]} version" "${COMPOSE[@]}" version | grep -qi project; then
+        COMPOSE_PROJECT_NAME="${PROJECT_NAME}" podman_bounded --quiet "${COMPOSE[*]} stop site-server" \
+            "${COMPOSE[@]}" --env-file "$SECRETS" stop -t "${PODMAN_STOP_SECS}" site-server || true
+        COMPOSE_PROJECT_NAME="${PROJECT_NAME}" podman_bounded --quiet "${COMPOSE[*]} rm -f site-server" \
+            "${COMPOSE[@]}" --env-file "$SECRETS" rm -f site-server || true
     else
-        "${COMPOSE[@]}" --env-file "$SECRETS" stop site-server 2>/dev/null || true
-        "${COMPOSE[@]}" --env-file "$SECRETS" rm -f site-server 2>/dev/null || true
+        podman_bounded --quiet "${COMPOSE[*]} stop site-server" \
+            "${COMPOSE[@]}" --env-file "$SECRETS" stop -t "${PODMAN_STOP_SECS}" site-server || true
+        podman_bounded --quiet "${COMPOSE[*]} rm -f site-server" \
+            "${COMPOSE[@]}" --env-file "$SECRETS" rm -f site-server || true
     fi
 
     # Name match for this project only. Compose naming varies:
@@ -179,10 +263,10 @@ remove_our_site_server() {
             "${PROJECT_NAME}"-site-server|"${PROJECT_NAME}"-site-server-*|\
             "${PROJECT_NAME}"_site-server|"${PROJECT_NAME}"_site-server_*)
                 echo "Removing project container ${name} (${cid})..."
-                podman rm -f "${cid}" 2>/dev/null || true
+                podman_bounded --quiet "podman rm -f ${cid}" podman rm -f "${cid}" || true
                 ;;
         esac
-    done < <(podman ps -a --format '{{.ID}} {{.Names}}' 2>/dev/null || true)
+    done < <(podman_bounded --quiet "podman ps -a" podman ps -a --format '{{.ID}} {{.Names}}' || true)
 }
 
 wait_port_free() {
@@ -321,24 +405,33 @@ cleanup_extra_surreal() {
 
 # $1 = --no-deps  → do not recreate Surreal (day-2).
 # empty           → normal up (fresh install: depends_on may start surrealdb).
+# Bounded in the rollback only. On the update path a fresh install may pull
+# the database image here, which can take longer than the bound.
 start_site_server() {
+    local deps=() label rc=0
     if [[ "${1:-}" == "--no-deps" ]]; then
+        deps=(--no-deps)
         echo "Starting site-server for project ${PROJECT_NAME} (--no-deps; existing Surreal left running)..."
-        if COMPOSE_PROJECT_NAME="${PROJECT_NAME}" "${COMPOSE[@]}" --env-file "$SECRETS" up -d --no-deps site-server 2>/dev/null; then
-            return 0
-        fi
-        "${COMPOSE[@]}" --env-file "$SECRETS" up -d --no-deps site-server
-        return
+    else
+        echo "Starting site-server for project ${PROJECT_NAME} (other pods left alone)..."
     fi
-    echo "Starting site-server for project ${PROJECT_NAME} (other pods left alone)..."
-    if COMPOSE_PROJECT_NAME="${PROJECT_NAME}" "${COMPOSE[@]}" --env-file "$SECRETS" up -d site-server 2>/dev/null; then
-        return 0
+    label="${COMPOSE[*]} up -d ${deps[*]:+--no-deps }site-server"
+    COMPOSE_PROJECT_NAME="${PROJECT_NAME}" podman_bounded --quiet --rollback-only "${label}" \
+        "${COMPOSE[@]}" --env-file "$SECRETS" up -d "${deps[@]}" site-server || rc=$?
+    [[ "${rc}" != "0" ]] || return 0
+    # A bounded call that timed out is not tried again: that doubles the wait.
+    if [[ "${ROLLING_BACK}" == "1" ]] && is_timeout_rc "${rc}"; then
+        return "${rc}"
     fi
-    "${COMPOSE[@]}" --env-file "$SECRETS" up -d site-server
+    podman_bounded --rollback-only "${label}" \
+        "${COMPOSE[@]}" --env-file "$SECRETS" up -d "${deps[@]}" site-server
 }
 
+# Bounded in the rollback only. Before the removal an empty answer means
+# "no container, nothing to roll back to", so a slow podman must not get
+# cut short into that answer.
 our_container_name() {
-    podman ps -a --format '{{.Names}}' 2>/dev/null \
+    podman_bounded --quiet --rollback-only "podman ps -a" podman ps -a --format '{{.Names}}' \
         | grep -E "^${PROJECT_NAME}[-_]site-server([-_][0-9]+)?$" | head -n1
 }
 
@@ -346,16 +439,22 @@ our_container_name() {
 # (container exists, not started). Start it before the health loop. A start
 # that fails here is left to the health loop to report.
 start_created_site_server() {
-    local _ss _st
+    local _ss _st rc=0
     _ss="$(our_container_name || true)"
     [[ -n "${_ss}" ]] || return 0
-    _st="$(podman inspect -f '{{.State.Status}}' "${_ss}" 2>/dev/null || true)"
+    _st="$(podman_bounded --quiet "podman inspect ${_ss}" podman inspect -f '{{.State.Status}}' "${_ss}" || true)"
     [[ "${_st}" == "created" ]] || return 0
     echo "site-server ${_ss} is Created after --no-deps, starting it..."
-    if ! podman start "${_ss}"; then
-        if ! COMPOSE_PROJECT_NAME="${PROJECT_NAME}" "${COMPOSE[@]}" --env-file "$SECRETS" start site-server; then
+    podman_bounded "podman start ${_ss}" podman start "${_ss}" || rc=$?
+    # A start that timed out is not tried again through compose: that would
+    # double the wait, and the health loop reports the outcome either way.
+    if [[ "${rc}" == "0" ]] || is_timeout_rc "${rc}"; then
+        return 0
+    fi
+    if ! COMPOSE_PROJECT_NAME="${PROJECT_NAME}" podman_bounded "${COMPOSE[*]} start site-server" \
+        "${COMPOSE[@]}" --env-file "$SECRETS" start site-server; then
+        podman_bounded "${COMPOSE[*]} start site-server" \
             "${COMPOSE[@]}" --env-file "$SECRETS" start site-server || true
-        fi
     fi
 }
 
@@ -465,6 +564,8 @@ rollback_on_exit() {
     trap '' INT TERM HUP
     set +e
     [[ "${rc}" != "0" ]] || return 0
+    # Every podman stop, rm and start from here on is bounded (podman_bounded).
+    ROLLING_BACK=1
 
     if [[ -z "${ROLLBACK_TAG}" ]]; then
         echo "No rollback target was recorded (no previous site-server): nothing to roll back to." >&2
@@ -473,8 +574,12 @@ rollback_on_exit() {
 
     echo >&2
     echo "Rolling back to ${ROLLBACK_TAG} (image ${ROLLBACK_IMAGE_ID}, previous git_sha ${PREV_GIT_SHA})..." >&2
-    local rollback_ok=0 rollback_missing=0 rollback_deps="--no-deps"
-    if ! podman image inspect "${ROLLBACK_TAG}" --format '{{.Id}}' >/dev/null 2>&1; then
+    local rollback_ok=0 rollback_missing=0 rollback_deps="--no-deps" inspect_rc=0
+    podman_bounded --quiet "podman image inspect ${ROLLBACK_TAG}" \
+        podman image inspect "${ROLLBACK_TAG}" --format '{{.Id}}' >/dev/null || inspect_rc=$?
+    if is_timeout_rc "${inspect_rc}"; then
+        echo "error: podman did not answer, the previous image was not started." >&2
+    elif [[ "${inspect_rc}" != "0" ]]; then
         echo "error: rollback image ${ROLLBACK_TAG} is missing." >&2
         rollback_missing=1
     else
