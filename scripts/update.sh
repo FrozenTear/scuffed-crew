@@ -9,8 +9,10 @@
 # new production env contracts after image upgrades without a crash-loop.
 #
 # Before the running site-server is removed, its image is tagged
-# <repo>:rollback. If the new container is not healthy in time, the previous
-# image is started again and the script exits non-zero.
+# <repo>:rollback. If the new container is not healthy in time, or the update
+# fails anywhere else after that removal (port still busy, the database
+# container does not start), the previous image is started again and the
+# script exits non-zero.
 #
 #   --backup   Take a SurrealDB export into backups-manual/ first (HTTP
 #              /export, mode 600). An empty or failed export stops the
@@ -431,6 +433,83 @@ record_rollback_target() {
     echo "Rollback image: ${ROLLBACK_TAG} (image ${ROLLBACK_IMAGE_ID})"
 }
 
+# What data/secrets.env has to say for the rolled-back build to stay.
+rollback_pin_note() {
+    local repo="${ROLLBACK_TAG%:rollback}"
+    echo "  data/secrets.env still names the failed image: SITE_SERVER_IMAGE=${SITE_SERVER_IMAGE}" >&2
+    echo "  The next compose up of site-server, or ./scripts/update.sh, starts that pin again." >&2
+    echo "  To keep the previous build (git_sha ${PREV_GIT_SHA}, image ${ROLLBACK_IMAGE_ID}), set in data/secrets.env:" >&2
+    echo "    SITE_SERVER_IMAGE=${ROLLBACK_TAG}" >&2
+    echo "  ${ROLLBACK_TAG} is a local tag that update.sh cannot pull. Before the next" >&2
+    if [[ "${PREV_GIT_SHA}" == "unknown" ]]; then
+        echo "  ./scripts/update.sh set a pullable pin: the fixed image, or the ${repo}:sha-<short> tag of the previous build." >&2
+    else
+        echo "  ./scripts/update.sh set a pullable pin: the fixed image, or ${repo}:sha-${PREV_GIT_SHA:0:7} (if that commit was published)." >&2
+    fi
+}
+
+# EXIT trap, installed once this project's site-server has been removed and
+# cleared when the new one is healthy. Every failing exit in between (port
+# still busy, Surreal not started, compose up, health, an interrupt, a
+# command failing under set -e) lands here, so none of them leaves the site removed: the
+# previous image is started again. --no-deps unless this run was allowed to
+# create the database (with-deps) and none is Up, so Surreal is never
+# recreated here either. Always exits non-zero.
+rollback_on_exit() {
+    local rc=$?
+    # Off before the rollback itself: a failure in here must not recurse.
+    trap - EXIT
+    set +e
+    [[ "${rc}" != "0" ]] || return 0
+
+    if [[ -z "${ROLLBACK_TAG}" ]]; then
+        echo "No rollback target was recorded (no previous site-server): nothing to roll back to." >&2
+        exit 1
+    fi
+
+    echo >&2
+    echo "Rolling back to ${ROLLBACK_TAG} (image ${ROLLBACK_IMAGE_ID}, previous git_sha ${PREV_GIT_SHA})..." >&2
+    local rollback_ok=0 rollback_missing=0 rollback_deps="--no-deps"
+    if ! podman image inspect "${ROLLBACK_TAG}" --format '{{.Id}}' >/dev/null 2>&1; then
+        echo "error: rollback image ${ROLLBACK_TAG} is missing." >&2
+        rollback_missing=1
+    else
+        remove_our_site_server >&2
+        wait_port_free "${HOST_PORT}" 40 || true
+        if [[ "${SURREAL_GUARD_ACTION:-}" == "with-deps" ]] && ! pick_canonical_up_surreal; then
+            rollback_deps=""
+        fi
+        # Shell value wins over --env-file, so compose starts the previous image.
+        if SITE_SERVER_IMAGE="${ROLLBACK_TAG}" start_site_server ${rollback_deps:+"${rollback_deps}"} >&2; then
+            if [[ -n "${rollback_deps}" ]]; then
+                start_created_site_server >&2
+            fi
+            echo "Waiting for the previous site-server to answer health (up to ${HEALTH_SECS}s)..." >&2
+            if wait_site_health; then
+                rollback_ok=1
+            fi
+        else
+            echo "error: compose could not start ${ROLLBACK_TAG}." >&2
+        fi
+    fi
+
+    echo >&2
+    if [[ "${rollback_ok}" == "1" ]]; then
+        echo "error: update FAILED. Rolled back: the previous image ${ROLLBACK_TAG} is running and healthy." >&2
+        echo "  Previous git_sha: ${PREV_GIT_SHA}. Live git_sha now: $(live_git_sha)." >&2
+        rollback_pin_note
+        echo "  The rollback is the image only. Database changes made by the failed boot (migrations) are not undone." >&2
+    else
+        echo "error: update FAILED and the rollback FAILED. The site is DOWN." >&2
+        echo "  Previous image: ${ROLLBACK_TAG} (image ${ROLLBACK_IMAGE_ID}, git_sha ${PREV_GIT_SHA})." >&2
+        if [[ "${rollback_missing}" != "1" ]]; then
+            echo "  Manual: SITE_SERVER_IMAGE=${ROLLBACK_TAG} ${COMPOSE[*]} --env-file data/secrets.env up -d --no-deps site-server" >&2
+            rollback_pin_note
+        fi
+    fi
+    exit 1
+}
+
 # --backup: logical export over HTTP from the running project Surreal. The
 # `surreal export` CLI fails on 3.2.x, the image has no curl or shell, and
 # compose does not publish 8000, so the request goes to the container IP on
@@ -512,6 +591,10 @@ record_rollback_target
 
 # Avoid --force-recreate: races with the previous container still holding HOST_PORT.
 remove_our_site_server
+# From here on a failing exit starts the previous image again. An interrupt
+# becomes a failing exit, so it does too.
+trap rollback_on_exit EXIT
+trap 'exit 130' INT TERM HUP
 
 echo "Waiting for port ${HOST_PORT} to free (this project only)..."
 if ! wait_port_free "${HOST_PORT}" 40; then
@@ -548,8 +631,12 @@ CANONICAL_SURREAL_NAME=""
 used_no_deps=0
 start_failed=0
 # A stopped project DB container is started as it is (same image), never
-# recreated through depends_on.
-surreal_guard_apply
+# recreated through depends_on. If it does not start, the new site-server
+# is not started either.
+if ! surreal_guard_apply; then
+    echo "error: ${SURREAL_GUARD_NAME} did not start. Not starting the new site-server." >&2
+    exit 1
+fi
 if pick_canonical_up_surreal; then
     echo "Existing Surreal is Up: ${CANONICAL_SURREAL_NAME} (canonical; hyphen preferred when both exist)."
     stop_noncanonical_up_surreal "${CANONICAL_SURREAL_NAME}"
@@ -604,56 +691,10 @@ if [[ "${healthy}" != "1" ]]; then
     echo "If site-server is Created / public 502 and two Surreal names exist, see docs/deploy.md" >&2
     echo "(duplicate Surreal _ vs -). Do NOT volume rm ${PROJECT_NAME}_surrealdb-data." >&2
 
-    if [[ -z "${ROLLBACK_TAG}" ]]; then
-        echo "No rollback target was recorded (no previous site-server): nothing to roll back to." >&2
-        exit 1
-    fi
-
-    # Roll back: stop the unhealthy container and start the previous image.
-    # --no-deps whenever a project Surreal is Up, so the database is never
-    # recreated here either.
-    echo >&2
-    echo "Rolling back to ${ROLLBACK_TAG} (image ${ROLLBACK_IMAGE_ID}, previous git_sha ${PREV_GIT_SHA})..." >&2
-    rollback_ok=0
-    rollback_missing=0
-    if ! podman image inspect "${ROLLBACK_TAG}" --format '{{.Id}}' >/dev/null 2>&1; then
-        echo "error: rollback image ${ROLLBACK_TAG} is missing." >&2
-        rollback_missing=1
-    else
-        remove_our_site_server >&2
-        wait_port_free "${HOST_PORT}" 40 || true
-        rollback_deps=""
-        if [[ "${used_no_deps}" == "1" ]] || pick_canonical_up_surreal; then
-            rollback_deps="--no-deps"
-        fi
-        # Shell value wins over --env-file, so compose starts the previous image.
-        if SITE_SERVER_IMAGE="${ROLLBACK_TAG}" start_site_server ${rollback_deps:+"${rollback_deps}"} >&2; then
-            if [[ -n "${rollback_deps}" ]]; then
-                start_created_site_server >&2
-            fi
-            echo "Waiting for the previous site-server to answer health (up to ${HEALTH_SECS}s)..." >&2
-            if wait_site_health; then
-                rollback_ok=1
-            fi
-        else
-            echo "error: compose could not start ${ROLLBACK_TAG}." >&2
-        fi
-    fi
-
-    echo >&2
-    if [[ "${rollback_ok}" == "1" ]]; then
-        echo "error: update FAILED. Rolled back: the previous image ${ROLLBACK_TAG} is running and healthy." >&2
-        echo "  Previous git_sha: ${PREV_GIT_SHA}. Live git_sha now: $(live_git_sha)." >&2
-        echo "  SITE_SERVER_IMAGE in data/secrets.env still names ${SITE_SERVER_IMAGE}." >&2
-        echo "  Database changes made by the failed boot (migrations) are not undone." >&2
-    else
-        echo "error: update FAILED and the rollback FAILED. The site is DOWN." >&2
-        echo "  Previous image: ${ROLLBACK_TAG} (image ${ROLLBACK_IMAGE_ID}, git_sha ${PREV_GIT_SHA})." >&2
-        [[ "${rollback_missing}" == "1" ]] \
-            || echo "  Manual: SITE_SERVER_IMAGE=${ROLLBACK_TAG} ${COMPOSE[*]} --env-file data/secrets.env up -d --no-deps site-server" >&2
-    fi
+    # rollback_on_exit starts the previous image.
     exit 1
 fi
+trap - EXIT INT TERM HUP
 
 # Fresh install may have just created Surreal; re-pick if we had none at start.
 if [[ -z "${CANONICAL_SURREAL_NAME}" ]]; then
