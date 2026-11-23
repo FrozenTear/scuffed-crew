@@ -286,6 +286,13 @@ fn body_kind(
 /// state; only its text changes, so the wait is announced.
 const LOADING_OWN_TEAMS: &str = "Loading your teams.";
 
+/// True only once the OrgMember-gated channels fetch has answered with data.
+/// `Some(None)` is a failed (for example 403 for a suspended member) or skipped
+/// fetch and must not count, or the roster card would replace the member gate.
+fn channels_loaded<T>(slot: Option<&Option<T>>) -> bool {
+    matches!(slot, Some(Some(_)))
+}
+
 /// The thread: one region and one head bar for every state of the page.
 /// Only `body` changes between states and teams, so the head bar and its
 /// picker stay mounted (and keep focus) when the room is swapped.
@@ -369,7 +376,7 @@ pub fn TeamChat() -> Element {
     let own_data = own_teams.read();
     let own = own_data.as_ref().and_then(|o| o.as_ref());
     let own_ids = own.map(OwnTeams::ids).unwrap_or_default();
-    let channels_loaded = channels.data.read().as_ref().is_some_and(Option::is_some);
+    let channels_loaded = channels_loaded(channels.data.read().as_ref());
     let auth_now = auth();
     let kind = body_kind(
         team_list.map(Vec::as_slice),
@@ -803,6 +810,49 @@ mod tests {
         assert!(
             !prod.contains("list.first()"),
             "the first team by name is not the default"
+        );
+    }
+
+    #[test]
+    fn channels_count_as_loaded_only_with_data() {
+        // issue 816 review: a 403'd channels fetch leaves Some(None).
+        assert!(channels_loaded(Some(&Some(Vec::<TeamChannel>::new()))));
+        assert!(!channels_loaded(Some(&None::<Vec<TeamChannel>>)));
+        assert!(!channels_loaded(None::<&Option<Vec<TeamChannel>>>));
+
+        let src = include_str!("chat.rs");
+        let prod = src.split("#[cfg(test)]").next().expect("production source");
+        assert!(
+            prod.contains("let channels_loaded = channels_loaded(channels.data.read().as_ref());"),
+            "the page uses the Some(Some(_)) helper for the roster card gate"
+        );
+    }
+
+    #[test]
+    fn own_teams_wait_is_announced_by_an_always_rendered_status_line() {
+        let src = include_str!("chat.rs");
+        let prod = src.split("#[cfg(test)]").next().expect("production source");
+        let toolbar = prod
+            .split("let toolbar = rsx! {")
+            .nth(1)
+            .and_then(|rest| rest.split("let (body, live) = match kind {").next())
+            .expect("toolbar block");
+        assert!(
+            toolbar.contains(r#"p { class: "visually-hidden", role: "status", "{own_status}" }"#),
+            "the head bar status line is rendered in every state with role status"
+        );
+        // The line sits at the toolbar's top level, not inside the picker's `if`.
+        let status_at = toolbar.find(r#"role: "status""#).expect("status line");
+        let cap_at = toolbar.find("list_cap_notice(&teams").expect("cap notice");
+        assert!(
+            cap_at < status_at,
+            "status line follows the always-shown cap notice"
+        );
+        assert!(
+            prod.contains(
+                "let own_status = if kind == BodyKind::LoadingOwnTeams {\n        LOADING_OWN_TEAMS"
+            ),
+            "the status line carries the LoadingOwnTeams text"
         );
     }
 
