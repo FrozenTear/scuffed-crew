@@ -164,8 +164,12 @@ fn team_option(team: &Team, selected: Option<&str>) -> Element {
     }
 }
 
-/// The placeholder the picker shows while the roster lookup is out.
-const PICKER_LOADING: &str = "Loading your teams...";
+/// The placeholder the picker shows while the roster lookup is out. Short:
+/// an auto-width select sizes to its widest option, and the longer "Loading
+/// your teams..." made the select wide enough to wrap the head bar onto a
+/// second row at 360px in Chromium, which then jumped back when the lookup
+/// answered (issue 816 browser check). The status line says the full text.
+const PICKER_LOADING: &str = "Loading...";
 
 /// What the picker shows: the option it selects (`None`: the placeholder)
 /// and whether it waits for the roster lookup.
@@ -905,13 +909,20 @@ mod tests {
             "the picker is drawn but disabled while loading: {html}"
         );
         assert!(
-            html.contains("<option value=\"\" selected=true>Loading your teams...</option>"),
+            html.contains("<option value=\"\" selected=true>Loading...</option>"),
             "{html}"
         );
         assert_eq!(html.matches("selected=true").count(), 1, "{html}");
-        let placeholder = html.find("Loading your teams...").expect("placeholder");
+        let placeholder = html.find("Loading...").expect("placeholder");
         let alpha = html.find("Squad Alpha").expect("team option");
         assert!(placeholder < alpha, "the placeholder is first: {html}");
+
+        // No wider than a short team name, so the select does not grow past
+        // the loaded width and wrap the head bar at 360px while loading.
+        assert!(
+            PICKER_LOADING.chars().count() <= "Squad Alpha".chars().count(),
+            "the placeholder stays short: {PICKER_LOADING}"
+        );
 
         let src = include_str!("chat.rs");
         let prod = src.split("#[cfg(test)]").next().expect("production source");
