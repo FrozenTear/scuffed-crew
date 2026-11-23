@@ -6,6 +6,7 @@ use crate::components::admin_shared::{
 use serde::Deserialize;
 use std::collections::HashMap;
 
+use crate::components::ui::inline_confirm::focus_element_by_id;
 use crate::components::ui::{
     ChipButton, ChipRow, EmptyCard, FieldError, PageHeader, PageShell, PageWidth, Pager, Pill,
     PillTone, SkeletonBars, page_slice, show_list_top,
@@ -16,7 +17,7 @@ use crate::components::{
     use_toast,
 };
 use crate::hooks::{ModalController, use_api_list};
-use crate::pages::tournament::{Participant, participant_names};
+use crate::pages::tournament::{Participant, UNNAMED_ENTRANT, participant_names};
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::{
     AddParticipantRequest, CreateTournamentRequest, MatchReportRequest, StatusChangeRequest,
@@ -110,10 +111,34 @@ struct BracketMatch {
 struct Team {
     id: String,
     name: String,
+    /// The team's game (`game:abc` or `abc`). Missing reads as any game.
+    #[serde(default)]
+    game_id: Option<String>,
 }
 
-/// A participant with neither a team nor a typed name.
-const UNNAMED_PARTICIPANT: &str = "Unnamed entrant";
+/// The teams the Add participant picker offers: every listed team that is
+/// not entered yet (the server holds one row per team and tournament), and,
+/// when the tournament has a game, only that game's teams. Issue 850.
+fn team_choices(teams: &[Team], bracket: Option<&BracketData>, game_id: Option<&str>) -> Vec<Team> {
+    let entered: Vec<&str> = bracket
+        .map(|b| {
+            b.participants
+                .iter()
+                .filter_map(|p| p.team_id.as_deref())
+                .collect()
+        })
+        .unwrap_or_default();
+    let game = game_id.map(bare_game_id).filter(|g| !g.is_empty());
+    teams
+        .iter()
+        .filter(|t| !entered.contains(&t.id.as_str()))
+        .filter(|t| match (game, t.game_id.as_deref().map(bare_game_id)) {
+            (Some(want), Some(have)) if !have.is_empty() => want == have,
+            _ => true,
+        })
+        .cloned()
+        .collect()
+}
 
 /// Display name of each participant, keyed by participant id: the same
 /// naming as the public tournament page.
@@ -133,32 +158,33 @@ fn participant_name_map(
         .unwrap_or_default()
 }
 
-/// Which field of the Add participant form is wrong, and the words for it.
-#[derive(Debug, Clone, PartialEq)]
-enum AddParticipantError {
-    Entrant(&'static str),
-    Seed(&'static str),
+/// What is wrong with the Add participant form, every field in one pass.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct AddParticipantErrors {
+    entrant: Option<&'static str>,
+    seed: Option<&'static str>,
 }
 
 /// The Add participant form as the body the server takes: a picked team
 /// (`team_id`) or a typed name (`external_name`), never both, and a seed
-/// only when one was typed.
+/// only when one was typed. A form with errors reports all of them.
 fn add_participant_body(
     team_id: &str,
     external_name: &str,
     seed: &str,
-) -> Result<AddParticipantRequest, AddParticipantError> {
+) -> Result<AddParticipantRequest, AddParticipantErrors> {
     let team_id = team_id.trim();
     let external_name = external_name.trim();
     let seed = seed.trim();
+    let mut errors = AddParticipantErrors::default();
     let (team_id, external_name) = match (team_id.is_empty(), external_name.is_empty()) {
         (true, true) => {
-            return Err(AddParticipantError::Entrant("Pick a team or type a name."));
+            errors.entrant = Some("Pick a team or type a name.");
+            (None, None)
         }
         (false, false) => {
-            return Err(AddParticipantError::Entrant(
-                "Pick a team or type a name, not both.",
-            ));
+            errors.entrant = Some("Pick a team or type a name, not both.");
+            (None, None)
         }
         (false, true) => (Some(team_id.to_string()), None),
         (true, false) => (None, Some(external_name.to_string())),
@@ -169,12 +195,14 @@ fn add_participant_body(
         match seed.parse::<u32>() {
             Ok(n) if n >= 1 => Some(n),
             _ => {
-                return Err(AddParticipantError::Seed(
-                    "Seed must be a whole number, 1 or higher.",
-                ));
+                errors.seed = Some("Seed must be a whole number, 1 or higher.");
+                None
             }
         }
     };
+    if errors != AddParticipantErrors::default() {
+        return Err(errors);
+    }
     Ok(AddParticipantRequest {
         team_id,
         external_name,
@@ -206,8 +234,9 @@ const MAX_ID: &str = "tournament-max";
 const DATE_ID: &str = "tournament-date";
 const TIME_ID: &str = "tournament-time";
 const TIME_HINT_ID: &str = "tournament-time-hint";
-const PARTICIPANT_ID: &str = "participant-team";
+const PARTICIPANT_TEAM_ID: &str = "participant-team";
 const PARTICIPANT_NAME_ID: &str = "participant-name";
+const PARTICIPANT_HINT_ID: &str = "participant-entrant-hint";
 const PARTICIPANT_ERROR_ID: &str = "participant-entrant-error";
 const PARTICIPANT_SEED_ID: &str = "participant-seed";
 const PARTICIPANT_SEED_ERROR_ID: &str = "participant-seed-error";
@@ -687,12 +716,17 @@ pub fn AdminTournaments() -> Element {
         let body =
             match add_participant_body(&add_part_team_id(), &add_part_name(), &add_part_seed()) {
                 Ok(body) => body,
-                Err(AddParticipantError::Entrant(text)) => {
-                    add_part_entrant_error.set(text.to_string());
-                    return;
-                }
-                Err(AddParticipantError::Seed(text)) => {
-                    add_part_seed_error.set(text.to_string());
+                Err(errors) => {
+                    // Both lines at once, a toast like the sibling forms,
+                    // and focus on the first field to fix.
+                    add_part_entrant_error.set(errors.entrant.unwrap_or_default().to_string());
+                    add_part_seed_error.set(errors.seed.unwrap_or_default().to_string());
+                    toast.show(Toast::error("Check the participant fields."));
+                    focus_element_by_id(if errors.entrant.is_some() {
+                        PARTICIPANT_TEAM_ID
+                    } else {
+                        PARTICIPANT_SEED_ID
+                    });
                     return;
                 }
             };
@@ -1049,7 +1083,31 @@ pub fn AdminTournaments() -> Element {
         let teams = teams.data.read();
         participant_name_map(bracket.as_ref(), teams.as_ref().and_then(|d| d.as_ref()))
     };
-    let dialog_names = participant_map.clone();
+    // Issue 850: teams already entered, or of another game, are not offered.
+    let team_options: Vec<Team> = {
+        let bracket = bracket_data.read();
+        let tournament = detail_tournament.read();
+        let teams = teams.data.read();
+        team_choices(
+            teams
+                .as_ref()
+                .and_then(|d| d.as_deref())
+                .unwrap_or_default(),
+            bracket.as_ref(),
+            tournament.as_ref().and_then(|t| t.game_id.as_deref()),
+        )
+    };
+    // The entrant hint, or why the teams did not load: always rendered.
+    let entrant_hint = match teams.error.read().as_deref() {
+        Some(reason) => format!(
+            "{} You can still type an outside team name.",
+            load_error_text("the teams list", reason)
+        ),
+        None => {
+            "Pick one of your teams, or type the name of a team from outside the org. Not both."
+                .to_string()
+        }
+    };
 
     let detail = if detail_id().is_none() {
         rsx! {}
@@ -1146,7 +1204,7 @@ pub fn AdminTournaments() -> Element {
                                         let pname = participant_map
                                             .get(&p.id)
                                             .cloned()
-                                            .unwrap_or_else(|| UNNAMED_PARTICIPANT.to_string());
+                                            .unwrap_or_else(|| UNNAMED_ENTRANT.to_string());
                                         let seed = seed_label(p.seed);
                                         rsx! {
                                             tr { key: "{p.id}",
@@ -1170,9 +1228,15 @@ pub fn AdminTournaments() -> Element {
                                 }
                             }
                         },
-                        _ => rsx! {
+                        Some(_) => rsx! {
                             p { class: "field-hint", "No participants yet. Use Add participant to enter a team." }
                         },
+                        // Not loaded: the load line or the error above says
+                        // why, so no claim that the list is empty.
+                        None if detail_loading() => rsx! {
+                            p { class: "field-hint", "Loading participants..." }
+                        },
+                        None => rsx! {},
                     }
                 }
 
@@ -1190,7 +1254,7 @@ pub fn AdminTournaments() -> Element {
                                             .filter(|m| m.round_id == round.id)
                                             .cloned()
                                             .collect();
-                                        let pmap = participant_map.clone();
+                                        let pmap = &participant_map;
                                         let stage = status_label(&round.stage);
                                         let round_label = format!("Round {}", round.round_number);
                                         rsx! {
@@ -1479,51 +1543,49 @@ pub fn AdminTournaments() -> Element {
             error: add_part_error(),
             restore_focus_id: Some(ADD_PARTICIPANT_ID.to_string()),
 
-            div { class: "form-field",
-                label { class: "field-label", r#for: PARTICIPANT_ID, "Team" }
-                select {
-                    class: "field-input",
-                    id: PARTICIPANT_ID,
-                    value: "{add_part_team_id}",
-                    aria_invalid: if part_invalid { "true" },
-                    aria_describedby: PARTICIPANT_ERROR_ID,
-                    onchange: move |e| add_part_team_id.set(e.value()),
-                    option { value: "", "No team, use the name below" }
-                    {
-                        let t = teams.data.read();
-                        let t = t.as_ref().and_then(|d| d.as_ref());
-                        match t {
-                            Some(list) => rsx! {
-                                for team in list.iter() {
-                                    option { key: "{team.id}", value: "{team.id}", "{team.name}" }
-                                }
-                            },
-                            None => rsx! {},
+            // One entrant: a team or an outside name, never both.
+            fieldset { class: "admin-check-group", aria_describedby: PARTICIPANT_HINT_ID,
+                legend { class: "field-label", "Entrant" }
+                p { class: "field-hint", id: PARTICIPANT_HINT_ID, "{entrant_hint}" }
+                div { class: "form-field",
+                    label { class: "field-label", r#for: PARTICIPANT_TEAM_ID, "Team" }
+                    select {
+                        class: "field-input",
+                        id: PARTICIPANT_TEAM_ID,
+                        value: "{add_part_team_id}",
+                        aria_invalid: if part_invalid { "true" },
+                        aria_describedby: PARTICIPANT_ERROR_ID,
+                        onchange: move |e| add_part_team_id.set(e.value()),
+                        option { value: "", "No team, use the name below" }
+                        for team in team_options.iter() {
+                            option { key: "{team.id}", value: "{team.id}", "{team.name}" }
                         }
                     }
                 }
-            }
-            div { class: "form-field",
-                label { class: "field-label", r#for: PARTICIPANT_NAME_ID, "Outside team name" }
-                input {
-                    class: "field-input",
-                    id: PARTICIPANT_NAME_ID,
-                    r#type: "text",
-                    aria_invalid: if part_invalid { "true" },
-                    aria_describedby: PARTICIPANT_ERROR_ID,
-                    value: "{add_part_name}",
-                    oninput: move |e| add_part_name.set(e.value()),
+                div { class: "form-field",
+                    label { class: "field-label", r#for: PARTICIPANT_NAME_ID, "Outside team name" }
+                    input {
+                        class: "field-input",
+                        id: PARTICIPANT_NAME_ID,
+                        r#type: "text",
+                        aria_invalid: if part_invalid { "true" },
+                        aria_describedby: PARTICIPANT_ERROR_ID,
+                        value: "{add_part_name}",
+                        oninput: move |e| add_part_name.set(e.value()),
+                    }
+                    FieldError { id: PARTICIPANT_ERROR_ID.to_string(), text: add_part_entrant_error() }
                 }
-                FieldError { id: PARTICIPANT_ERROR_ID.to_string(), text: add_part_entrant_error() }
             }
             div { class: "form-field",
                 label { class: "field-label", r#for: PARTICIPANT_SEED_ID, "Seed (optional)" }
                 input {
                     class: "field-input",
                     id: PARTICIPANT_SEED_ID,
-                    r#type: "number",
+                    // Text, not number: a number input reads unparsable
+                    // text back as "", which would add the entrant unseeded
+                    // with no error. The validator sees what was typed.
+                    r#type: "text",
                     inputmode: "numeric",
-                    min: "1",
                     aria_invalid: if seed_invalid { "true" },
                     aria_describedby: PARTICIPANT_SEED_ERROR_ID,
                     value: "{add_part_seed}",
@@ -1541,10 +1603,10 @@ pub fn AdminTournaments() -> Element {
                 remove_part_modal
                     .get_target()
                     .map(|p| {
-                        dialog_names
+                        participant_map
                             .get(&p.id)
                             .cloned()
-                            .unwrap_or_else(|| UNNAMED_PARTICIPANT.to_string())
+                            .unwrap_or_else(|| UNNAMED_ENTRANT.to_string())
                     })
                     .unwrap_or_default()
             ),
@@ -1570,7 +1632,7 @@ pub fn AdminTournaments() -> Element {
             {
                 let (a_name, b_name, a_id, b_id) = match match_modal.get_target() {
                     Some(m) => {
-                        let pmap = &dialog_names;
+                        let pmap = &participant_map;
                         let a_id = m.participant_a_id.clone().unwrap_or_default();
                         let b_id = m.participant_b_id.clone().unwrap_or_default();
                         let a_name = pmap.get(&a_id).cloned().unwrap_or_else(|| "Player A".into());
@@ -1773,7 +1835,7 @@ mod tests {
             "MAX_ID",
             "DATE_ID",
             "TIME_ID",
-            "PARTICIPANT_ID",
+            "PARTICIPANT_TEAM_ID",
             "PARTICIPANT_NAME_ID",
             "PARTICIPANT_SEED_ID",
             "SCORE_A_ID",
@@ -1831,25 +1893,37 @@ mod tests {
             serde_json::to_value(&outside).unwrap(),
             serde_json::json!({ "external_name": "Rival Squad", "seed": 3 })
         );
+        let entrant_only = |text| AddParticipantErrors {
+            entrant: Some(text),
+            seed: None,
+        };
+        let seed_word = "Seed must be a whole number, 1 or higher.";
         assert_eq!(
             add_participant_body("", "  ", "1"),
-            Err(AddParticipantError::Entrant("Pick a team or type a name."))
+            Err(entrant_only("Pick a team or type a name."))
         );
         assert_eq!(
             add_participant_body("team:alpha", "Rival Squad", ""),
-            Err(AddParticipantError::Entrant(
-                "Pick a team or type a name, not both."
-            ))
+            Err(entrant_only("Pick a team or type a name, not both."))
         );
-        for bad in ["0", "-1", "1.5", "first"] {
+        for bad in ["0", "-1", "1.5", "first", "1e", "-"] {
             assert_eq!(
                 add_participant_body("team:alpha", "", bad),
-                Err(AddParticipantError::Seed(
-                    "Seed must be a whole number, 1 or higher."
-                )),
+                Err(AddParticipantErrors {
+                    entrant: None,
+                    seed: Some(seed_word),
+                }),
                 "{bad}"
             );
         }
+        // Review on PR 828 nit 3: both errors in one pass.
+        assert_eq!(
+            add_participant_body("", "", "first"),
+            Err(AddParticipantErrors {
+                entrant: Some("Pick a team or type a name."),
+                seed: Some(seed_word),
+            })
+        );
         let src = include_str!("tournaments.rs");
         let prod = src.split("#[cfg(test)]").next().unwrap();
         assert!(!prod.contains("member_id"));
@@ -1857,8 +1931,88 @@ mod tests {
     }
 
     #[test]
+    fn the_add_participant_form_groups_the_entrant_and_takes_typed_seeds() {
+        // Review on PR 828 nits 2, 3, 4, 6 and 9.
+        let src = include_str!("tournaments.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        // One named group with a tied hint, which also carries a teams
+        // load error, around Team and Outside team name.
+        assert!(prod.contains(
+            "fieldset { class: \"admin-check-group\", aria_describedby: PARTICIPANT_HINT_ID,\n                legend { class: \"field-label\", \"Entrant\" }\n                p { class: \"field-hint\", id: PARTICIPANT_HINT_ID, \"{entrant_hint}\" }"
+        ));
+        assert!(prod.contains("match teams.error.read().as_deref()"));
+        // The seed is a text box, so text a number box would drop as ""
+        // reaches the validator.
+        let seed = prod
+            .split("id: PARTICIPANT_SEED_ID,")
+            .nth(1)
+            .and_then(|rest| rest.split("value:").next())
+            .expect("the seed input");
+        assert!(seed.contains("r#type: \"text\","), "{seed}");
+        assert!(seed.contains("inputmode: \"numeric\","), "{seed}");
+        assert!(!seed.contains("\"number\""), "{seed}");
+        // A failed check is heard: a toast and focus on the first field.
+        assert!(prod.contains("toast.show(Toast::error(\"Check the participant fields.\"));"));
+        assert!(prod.contains("focus_element_by_id(if errors.entrant.is_some() {"));
+        // Both dialogs borrow the one name map.
+        assert!(!prod.contains("dialog_names"));
+        assert!(!prod.contains("participant_map.clone()"));
+        // The picker lists the filtered teams only.
+        assert!(prod.contains("for team in team_options.iter() {"));
+    }
+
+    #[test]
+    fn the_team_picker_leaves_out_entered_teams_and_other_games() {
+        // Issue 850: a team already entered hits the server's unique index.
+        let team = |id: &str, game: Option<&str>| Team {
+            id: id.into(),
+            name: id.to_uppercase(),
+            game_id: game.map(str::to_string),
+        };
+        let teams = vec![
+            team("team:alpha", Some("game:ow")),
+            team("team:beta", Some("ow")),
+            team("team:gamma", Some("game:rivals")),
+            team("team:delta", None),
+        ];
+        let participant = |id: &str, team_id: Option<&str>| {
+            serde_json::json!({
+                "id": id,
+                "team_id": team_id,
+                "external_name": if team_id.is_none() { Some("Rival Squad") } else { None },
+                "seed": null,
+                "status": "registered"
+            })
+        };
+        let bracket: BracketData = serde_json::from_value(serde_json::json!({
+            "participants": [participant("p1", Some("team:alpha")), participant("p2", None)],
+            "rounds": [],
+            "matches": []
+        }))
+        .unwrap();
+        let ids = |list: Vec<Team>| list.into_iter().map(|t| t.id).collect::<Vec<_>>();
+        assert_eq!(
+            ids(team_choices(&teams, Some(&bracket), None)),
+            ["team:beta", "team:gamma", "team:delta"]
+        );
+        // The tournament's game keeps that game's teams (either id form) and
+        // teams whose game is not known.
+        assert_eq!(
+            ids(team_choices(&teams, Some(&bracket), Some("ow"))),
+            ["team:beta", "team:delta"]
+        );
+        assert_eq!(
+            ids(team_choices(&teams, None, Some("game:ow"))),
+            ["team:alpha", "team:beta", "team:delta"]
+        );
+        assert_eq!(ids(team_choices(&teams, None, Some(" "))).len(), 4);
+    }
+
+    #[test]
     fn a_bracket_with_participants_decodes_and_names_them() {
-        // The server's `TournamentBracket`, field for field (db/src/types.rs).
+        // The server's `TournamentBracket`, field for field (db/src/types.rs):
+        // `Tournament`, `TournamentParticipant`, `TournamentRound` and
+        // `TournamentMatch`.
         let json = serde_json::json!({
             "tournament": {
                 "id": "t1",
@@ -1868,7 +2022,9 @@ mod tests {
                 "status": "registration",
                 "max_teams": 8,
                 "best_of": 3,
+                "swiss_rounds": null,
                 "is_external": false,
+                "is_open": true,
                 "external_url": null,
                 "rules": null,
                 "description": null,
@@ -1910,24 +2066,65 @@ mod tests {
                     "created_at": "2026-11-02T18:06:00Z"
                 }
             ],
-            "rounds": [],
-            "matches": []
+            "rounds": [
+                {
+                    "id": "r1",
+                    "tournament_id": "t1",
+                    "round_number": 1,
+                    "stage": "winners",
+                    "status": "in_progress",
+                    "created_at": "2026-11-03T18:00:00Z"
+                }
+            ],
+            "matches": [
+                {
+                    "id": "m1",
+                    "tournament_id": "t1",
+                    "round_id": "r1",
+                    "bracket_position": 1,
+                    "participant_a_id": "p1",
+                    "participant_b_id": "p2",
+                    "score_a": 2,
+                    "score_b": 1,
+                    "winner_id": "p1",
+                    "status": "completed",
+                    "scheduled_at": null,
+                    "completed_at": "2026-11-03T19:00:00Z",
+                    "match_result_id": null,
+                    "next_match_id": null,
+                    "next_match_slot": null,
+                    "loser_next_match_id": null,
+                    "loser_next_match_slot": null,
+                    "notes": null,
+                    "replay_codes": ["A1B2C3"]
+                }
+            ]
         });
         let bracket: BracketData =
             serde_json::from_value(json).expect("the server's shape decodes");
         assert_eq!(bracket.participants.len(), 3);
+        assert_eq!(bracket.rounds[0].round_number, 1);
+        assert_eq!(bracket.rounds[0].stage, "winners");
+        let m = &bracket.matches[0];
+        assert_eq!(m.round_id, "r1");
+        assert_eq!(m.participant_a_id.as_deref(), Some("p1"));
+        assert_eq!((m.score_a, m.score_b), (Some(2), Some(1)));
+        assert_eq!(m.winner_id.as_deref(), Some("p1"));
+        assert_eq!(m.status, "completed");
         assert_eq!(seed_label(bracket.participants[0].seed), "1");
         assert_eq!(seed_label(bracket.participants[1].seed), "Unseeded");
 
         let teams = vec![Team {
             id: "team:alpha".into(),
             name: "Alpha".into(),
+            game_id: None,
         }];
         let names = participant_name_map(Some(&bracket), Some(&teams));
         assert_eq!(names["p1"], "Alpha");
         assert_eq!(names["p2"], "Rival Squad");
-        // A team the list does not hold still reads as something.
-        assert_eq!(names["p3"], "team:gone");
+        // A team the list does not hold reads a word, not its record key
+        // (review on PR 828 nit 6; this used to pin the raw key).
+        assert_eq!(names["p3"], crate::pages::tournament::UNLISTED_TEAM);
         assert!(participant_name_map(None, Some(&teams)).is_empty());
     }
 }
