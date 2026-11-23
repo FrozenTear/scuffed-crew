@@ -177,6 +177,20 @@ pub fn create_router_with_public_read_limit(
                 .error_handler(rate_limit::governor_error_response),
         );
 
+    // Per-IP rate limit for apply and withdraw only (#813): burst 3, then 1
+    // every 60s, one bucket for both routes. Tighter than the auth governor
+    // because a successful apply writes a row and notifies officers. The
+    // numbers live in `scuffed_types::application_message`. GET list, GET
+    // mine, GET expiring and PATCH update are not behind this layer.
+    let application_governor_config = std::sync::Arc::new(
+        GovernorConfigBuilder::default()
+            .key_extractor(key_extractor.clone())
+            .per_second(scuffed_types::APPLICATION_IP_REPLENISH_SECS)
+            .burst_size(scuffed_types::APPLICATION_IP_BURST)
+            .finish()
+            .expect("valid application governor config"),
+    );
+
     // Stat-report bundles are up to 10 MB, read in full before the daily cap
     // is checked, then inflated to validate every PNG. Same per-IP budget as
     // avatar and image uploads (burst 8, then 1 every 10s), own bucket. Only
@@ -608,8 +622,13 @@ pub fn create_router_with_public_read_limit(
         // Application routes
         .route(
             "/api/applications",
-            get(routes::applications::list_applications)
-                .post(routes::applications::submit_application),
+            get(routes::applications::list_applications).merge(
+                post(routes::applications::submit_application)
+                    .layer::<_, std::convert::Infallible>(
+                        GovernorLayer::new(application_governor_config.clone())
+                            .error_handler(rate_limit::governor_error_response),
+                    ),
+            ),
         )
         .route(
             "/api/applications/mine",
@@ -617,7 +636,11 @@ pub fn create_router_with_public_read_limit(
         )
         .route(
             "/api/applications/mine/withdraw",
-            post(routes::applications::withdraw_my_application),
+            post(routes::applications::withdraw_my_application)
+                .layer::<_, std::convert::Infallible>(
+                    GovernorLayer::new(application_governor_config)
+                        .error_handler(rate_limit::governor_error_response),
+                ),
         )
         .route(
             "/api/applications/expiring",

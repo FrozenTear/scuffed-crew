@@ -22,6 +22,8 @@ data/reports/
 data/packs/
 # Member-contributed hero icons (HERO_ICONS_DIR default). Never committed.
 data/hero-icons/
+# update.sh --backup exports (database contents). Never committed.
+backups-manual/
 dist/
 # Exception: prebuilt-release installer sources (not app SPA output)
 !crates/stat-tracker/dist/

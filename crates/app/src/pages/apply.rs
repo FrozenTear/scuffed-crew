@@ -1,5 +1,9 @@
 use dioxus::prelude::*;
-use scuffed_types::{Game, MIN_APPLICATION_MESSAGE_CHARS, application_message_long_enough};
+use scuffed_types::{
+    APPLICATION_RESUBMIT_COOLDOWN_SECS, Game, MAX_APPLICATION_MESSAGE_CHARS,
+    MAX_APPLICATION_PREFERENCE_ITEMS, MAX_WITHDRAWN_APPLICATIONS, MIN_APPLICATION_MESSAGE_CHARS,
+    WITHDRAWN_APPLICATION_WINDOW_DAYS, application_message_long_enough,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::components::ui::inline_confirm::{focus_element_by_id_soon, focus_field_by_id};
@@ -198,7 +202,11 @@ fn mine_slot(screen: ApplyScreen, body: Option<ApplyBodyView>, retrying: bool) -
 /// screen shows, so the region is mounted from first paint but stays empty;
 /// a games fetch that fails early is announced as a text change once the form
 /// appears, not lost in a region that mounts with the failure already in it.
-fn games_slot(form: bool, phase: SlotPhase, retrying: bool) -> MineSlot {
+///
+/// `at_cap` is [`games_at_cap`] for the current choice. With the fetch idle
+/// (Ready) the line says the limit is reached, and empties again once a game
+/// is deselected. Loading and failure text always win over it.
+fn games_slot(form: bool, phase: SlotPhase, retrying: bool, at_cap: bool) -> MineSlot {
     if !form {
         return MineSlot {
             text: "",
@@ -208,6 +216,7 @@ fn games_slot(form: bool, phase: SlotPhase, retrying: bool) -> MineSlot {
     let text = match phase {
         SlotPhase::Loading => "Loading games",
         SlotPhase::Failed => "Couldn't load games.",
+        SlotPhase::Ready if at_cap => GAMES_CAP_REACHED,
         SlotPhase::Ready => "",
     };
     MineSlot {
@@ -231,10 +240,13 @@ fn game_items(games: Vec<(String, String)>, selected: &[String]) -> Vec<(String,
         .collect()
 }
 
+/// Select or deselect one game. A game past
+/// [`MAX_APPLICATION_PREFERENCE_ITEMS`] is not added, since the server
+/// refuses a longer list. Deselecting always works.
 fn toggle_game(selected: &mut Vec<String>, id: &str) {
     if let Some(pos) = selected.iter().position(|x| x == id) {
         selected.remove(pos);
-    } else {
+    } else if selected.len() < MAX_APPLICATION_PREFERENCE_ITEMS {
         selected.push(id.to_string());
     }
 }
@@ -304,8 +316,31 @@ fn GamesStatus(slot: MineSlot, on_retry: EventHandler<()>) -> Element {
     }
 }
 
-/// DOM id of the "choose at least one" hint under the Games legend.
+/// DOM id of the "choose at least one, at most 10" hint under the Games
+/// legend.
 const GAMES_HINT_ID: &str = "apply-games-hint";
+
+/// The hint under the Games legend: the minimum and the cap, said before the
+/// first click.
+fn games_hint() -> String {
+    format!("Choose at least one, at most {MAX_APPLICATION_PREFERENCE_ITEMS}.")
+}
+
+/// Games status line text once the cap is reached. A literal so
+/// [`MineSlot::text`] stays `&'static str`; a test pins it to
+/// [`MAX_APPLICATION_PREFERENCE_ITEMS`].
+const GAMES_CAP_REACHED: &str = "Limit of 10 games reached";
+
+/// Whether the games cap is reached, so no further game can be added.
+fn games_at_cap(selected: &[String]) -> bool {
+    selected.len() >= MAX_APPLICATION_PREFERENCE_ITEMS
+}
+
+/// Accessible name of a game chip that cannot be added at the cap. It starts
+/// with the visible game name (WCAG 2.5.3) and says why.
+fn game_at_cap_name(game: &str) -> String {
+    format!("{game}, limit of {MAX_APPLICATION_PREFERENCE_ITEMS} games reached")
+}
 
 /// Ids that describe the Games group: its hint, the page-level status line
 /// and, after a failed submit, its error message.
@@ -325,6 +360,11 @@ fn games_describedby(invalid: bool) -> String {
 /// A group cannot carry `required` or `aria-invalid`, so the requirement is a
 /// visible hint and the error is a described-by message. The group takes
 /// focus from the error summary link.
+///
+/// At the cap ([`MAX_APPLICATION_PREFERENCE_ITEMS`] chosen) the unselected
+/// chips are `aria-disabled`, look disabled and are named with the reason.
+/// The selected chips stay toggles, so a deselect frees a slot and the others
+/// come back.
 #[component]
 fn GamesField(
     phase: SlotPhase,
@@ -334,6 +374,7 @@ fn GamesField(
     on_toggle: EventHandler<String>,
     children: Element,
 ) -> Element {
+    let at_cap = games_at_cap(&selected);
     rsx! {
         fieldset {
             class: if invalid { "apply-field apply-fieldset is-error" } else { "apply-field apply-fieldset" },
@@ -344,7 +385,7 @@ fn GamesField(
                 "{ApplyField::Games.label()}"
                 {required_mark()}
             }
-            p { class: "field-hint", id: GAMES_HINT_ID, "Choose at least one." }
+            p { class: "field-hint", id: GAMES_HINT_ID, "{games_hint()}" }
             if phase == SlotPhase::Ready {
                 // The fieldset is the named group, so this row is a plain box.
                 div { class: "chip-row",
@@ -352,9 +393,11 @@ fn GamesField(
                         ChipButton {
                             key: "{id}",
                             class: "chip",
+                            name: (at_cap && !is_selected).then(|| game_at_cap_name(&name)),
                             label: name,
                             pressed: is_selected,
                             id: "apply-game-{id}",
+                            unavailable: at_cap && !is_selected,
                             onclick: move |_| on_toggle.call(id.clone()),
                         }
                     }
@@ -550,18 +593,27 @@ fn server_reason(err: &ClientError) -> Option<String> {
 /// closed, banned) or a 409 (already applied, already a member) comes back
 /// the same on every retry, so the toast gives the server's reason instead.
 /// A 401 means the session ended, and no answer at all is a network failure.
+///
+/// A 429 is either the per-user wait or cap, whose reason says when or why
+/// ("You can apply again in 42 minutes"), or the per-IP limit, whose body is
+/// the code `rate_limited`. Neither is fixed by trying again at once.
 fn action_failure_text(what: &str, err: &ClientError) -> String {
+    let with_reason = |reason: String| {
+        let stop = if reason.ends_with(['.', '!', '?']) {
+            ""
+        } else {
+            "."
+        };
+        format!("{what}: {reason}{stop}")
+    };
     match err.http_status() {
         Some(400 | 403 | 404 | 409) => match server_reason(err) {
-            Some(reason) => {
-                let stop = if reason.ends_with(['.', '!', '?']) {
-                    ""
-                } else {
-                    "."
-                };
-                format!("{what}: {reason}{stop}")
-            }
+            Some(reason) => with_reason(reason),
             None => format!("{what}. The server refused it."),
+        },
+        Some(429) => match server_reason(err).filter(|reason| reason != "rate_limited") {
+            Some(reason) => with_reason(reason),
+            None => format!("{what}. Too many attempts. Wait a minute, then try again."),
         },
         Some(401) => format!("{what}. Your session has ended. Log in again."),
         Some(_) => format!("{what}. Try again."),
@@ -603,11 +655,27 @@ fn session_ended(logged_in: bool, mine_error: Option<&str>) -> bool {
 
 /// Body of the withdraw confirm. Withdrawing during a trial also ends the
 /// trial and logs the applicant out, so the strip says so before the click.
-fn withdraw_confirm_body(status: &str) -> &'static str {
-    if status == "trial" {
-        "This ends your trial and logs you out. You can apply again later if recruitment is open."
+///
+/// Applying again is not promised: the server makes them wait
+/// [`APPLICATION_RESUBMIT_COOLDOWN_SECS`], refuses past
+/// [`MAX_WITHDRAWN_APPLICATIONS`] withdrawals in
+/// [`WITHDRAWN_APPLICATION_WINDOW_DAYS`] days, and recruitment may be closed.
+fn withdraw_confirm_body(status: &str) -> String {
+    let minutes = APPLICATION_RESUBMIT_COOLDOWN_SECS / 60;
+    let wait = if minutes == 60 {
+        "an hour".to_string()
     } else {
-        "You can apply again later if recruitment is open."
+        format!("{minutes} minutes")
+    };
+    let again = format!(
+        "You have to wait {wait} before you can apply again, and only while recruitment is open. \
+         After {MAX_WITHDRAWN_APPLICATIONS} withdrawals in {WITHDRAWN_APPLICATION_WINDOW_DAYS} \
+         days you have to wait longer."
+    );
+    if status == "trial" {
+        format!("This ends your trial and logs you out. {again}")
+    } else {
+        again
     }
 }
 
@@ -815,16 +883,19 @@ fn ApplyForm(
                     "{ApplyField::Message.label()}"
                     {required_mark()}
                 }
-                // The minimum is said before the first submit, not only after
-                // a failed one.
+                // The minimum and the maximum are said before the first
+                // submit, not only after a failed one.
                 p { class: "field-hint", id: MESSAGE_HINT_ID,
-                    "At least {MIN_MESSAGE_CHARS} characters."
+                    "At least {MIN_MESSAGE_CHARS} characters, at most {MAX_APPLICATION_MESSAGE_CHARS}."
                 }
                 textarea {
                     class: "field-input",
                     id: ApplyField::Message.id(),
                     name: "message",
                     required: true,
+                    // The server refuses a longer message (400). The cap is
+                    // shared with it through `scuffed_types`.
+                    maxlength: "{MAX_APPLICATION_MESSAGE_CHARS}",
                     aria_required: "true",
                     aria_invalid: if message_invalid { "true" },
                     aria_describedby: message_describedby(message_invalid),
@@ -983,6 +1054,7 @@ pub fn Apply() -> Element {
         body_view == Some(ApplyBodyView::Form),
         games_phase,
         games_retrying(),
+        games_at_cap(&selected_games.read()),
     );
     let lead = (body_view == Some(ApplyBodyView::Form)).then(|| FORM_LEAD.to_string());
 
@@ -1099,7 +1171,7 @@ pub fn Apply() -> Element {
                                             InlineConfirm {
                                                 id: WITHDRAW_ID.to_string(),
                                                 title: "Withdraw your application?".to_string(),
-                                                body: withdraw_confirm_body(app.status.as_str()).to_string(),
+                                                body: withdraw_confirm_body(app.status.as_str()),
                                                 confirm_label: withdraw_label.to_string(),
                                                 busy: submitting(),
                                                 on_confirm: move |_| {
@@ -1465,6 +1537,33 @@ mod tests {
     }
 
     #[test]
+    fn an_eleventh_game_is_ignored_and_deselect_still_works_at_ten() {
+        let mut selected: Vec<String> = Vec::new();
+        for n in 0..MAX_APPLICATION_PREFERENCE_ITEMS {
+            toggle_game(&mut selected, &format!("game-{n}"));
+        }
+        assert_eq!(MAX_APPLICATION_PREFERENCE_ITEMS, 10);
+        assert_eq!(selected.len(), 10);
+        let ten = selected.clone();
+
+        // The eleventh is not added, however often it is tried.
+        toggle_game(&mut selected, "game-10");
+        toggle_game(&mut selected, "game-10");
+        assert_eq!(selected, ten);
+
+        // Deselect still works at ten, and frees a place.
+        toggle_game(&mut selected, "game-3");
+        assert_eq!(selected.len(), 9);
+        assert!(!selected.contains(&"game-3".to_string()));
+        toggle_game(&mut selected, "game-10");
+        assert_eq!(selected.len(), 10);
+        assert_eq!(selected.last().map(String::as_str), Some("game-10"));
+        toggle_game(&mut selected, "game-3");
+        assert_eq!(selected.len(), 10);
+        assert!(!selected.contains(&"game-3".to_string()));
+    }
+
+    #[test]
     fn game_items_mark_the_selected_games() {
         let items = game_items(games(), &["game-val".to_string()]);
         assert_eq!(
@@ -1481,7 +1580,7 @@ mod tests {
         for phase in [SlotPhase::Loading, SlotPhase::Failed, SlotPhase::Ready] {
             for retrying in [false, true] {
                 assert_eq!(
-                    games_slot(false, phase, retrying),
+                    games_slot(false, phase, retrying, false),
                     MineSlot {
                         text: "",
                         retry: None
@@ -1490,33 +1589,122 @@ mod tests {
             }
         }
         assert_eq!(
-            games_slot(true, SlotPhase::Ready, false),
+            games_slot(true, SlotPhase::Ready, false, false),
             MineSlot {
                 text: "",
                 retry: None
             }
         );
         assert_eq!(
-            games_slot(true, SlotPhase::Loading, false),
+            games_slot(true, SlotPhase::Loading, false, false),
             MineSlot {
                 text: "Loading games",
                 retry: None
             }
         );
         assert_eq!(
-            games_slot(true, SlotPhase::Failed, false),
+            games_slot(true, SlotPhase::Failed, false, false),
             MineSlot {
                 text: "Couldn't load games.",
                 retry: Some(false)
             }
         );
         assert_eq!(
-            games_slot(true, SlotPhase::Loading, true),
+            games_slot(true, SlotPhase::Loading, true, false),
             MineSlot {
                 text: "Loading games",
                 retry: Some(true)
             }
         );
+    }
+
+    #[test]
+    fn games_slot_says_the_cap_only_when_idle() {
+        // The literal tracks the shared cap.
+        assert_eq!(
+            GAMES_CAP_REACHED,
+            format!("Limit of {MAX_APPLICATION_PREFERENCE_ITEMS} games reached")
+        );
+        assert_eq!(GAMES_CAP_REACHED, "Limit of 10 games reached");
+
+        // Set: picking the 10th game while the fetch is idle.
+        let mut selected: Vec<String> = Vec::new();
+        for n in 0..MAX_APPLICATION_PREFERENCE_ITEMS {
+            assert_eq!(
+                games_slot(true, SlotPhase::Ready, false, games_at_cap(&selected)).text,
+                ""
+            );
+            toggle_game(&mut selected, &format!("game-{n}"));
+        }
+        assert_eq!(
+            games_slot(true, SlotPhase::Ready, false, games_at_cap(&selected)),
+            MineSlot {
+                text: "Limit of 10 games reached",
+                retry: None
+            }
+        );
+
+        // Clear: a deselect frees a place and empties the line.
+        toggle_game(&mut selected, "game-3");
+        assert_eq!(selected.len(), MAX_APPLICATION_PREFERENCE_ITEMS - 1);
+        assert_eq!(
+            games_slot(true, SlotPhase::Ready, false, games_at_cap(&selected)),
+            MineSlot {
+                text: "",
+                retry: None
+            }
+        );
+        assert_eq!(
+            games_slot(true, SlotPhase::Ready, false, games_at_cap(&[])),
+            MineSlot {
+                text: "",
+                retry: None
+            }
+        );
+
+        // Loading wins over the cap (for example a refetch), retry unchanged.
+        for retrying in [false, true] {
+            assert_eq!(
+                games_slot(true, SlotPhase::Loading, retrying, true),
+                games_slot(true, SlotPhase::Loading, retrying, false)
+            );
+        }
+        assert_eq!(
+            games_slot(true, SlotPhase::Loading, false, true),
+            MineSlot {
+                text: "Loading games",
+                retry: None
+            }
+        );
+        assert_eq!(
+            games_slot(true, SlotPhase::Loading, true, true),
+            MineSlot {
+                text: "Loading games",
+                retry: Some(true)
+            }
+        );
+
+        // The failure wins over the cap, and Retry still shows.
+        assert_eq!(
+            games_slot(true, SlotPhase::Failed, false, true),
+            MineSlot {
+                text: "Couldn't load games.",
+                retry: Some(false)
+            }
+        );
+
+        // Before the form shows the line stays empty, even at the cap.
+        for phase in [SlotPhase::Loading, SlotPhase::Failed, SlotPhase::Ready] {
+            for retrying in [false, true] {
+                assert_eq!(
+                    games_slot(false, phase, retrying, true),
+                    MineSlot {
+                        text: "",
+                        retry: None
+                    }
+                );
+            }
+        }
     }
 
     #[test]
@@ -1638,23 +1826,23 @@ mod tests {
     #[test]
     fn games_status_is_one_text_region_with_retry_outside() {
         fn before_form() -> Element {
-            let slot = games_slot(false, SlotPhase::Failed, false);
+            let slot = games_slot(false, SlotPhase::Failed, false, false);
             rsx! { GamesStatus { slot, on_retry: |_| {} } }
         }
         fn loading() -> Element {
-            let slot = games_slot(true, SlotPhase::Loading, false);
+            let slot = games_slot(true, SlotPhase::Loading, false, false);
             rsx! { GamesStatus { slot, on_retry: |_| {} } }
         }
         fn failed() -> Element {
-            let slot = games_slot(true, SlotPhase::Failed, false);
+            let slot = games_slot(true, SlotPhase::Failed, false, false);
             rsx! { GamesStatus { slot, on_retry: |_| {} } }
         }
         fn retrying() -> Element {
-            let slot = games_slot(true, SlotPhase::Loading, true);
+            let slot = games_slot(true, SlotPhase::Loading, true, false);
             rsx! { GamesStatus { slot, on_retry: |_| {} } }
         }
         fn ready() -> Element {
-            let slot = games_slot(true, SlotPhase::Ready, false);
+            let slot = games_slot(true, SlotPhase::Ready, false, false);
             rsx! { GamesStatus { slot, on_retry: |_| {} } }
         }
 
@@ -1681,6 +1869,26 @@ mod tests {
         assert_retry_label_in_name(&html, "Retrying...", "Retrying... loading games");
         assert!(!html.contains("Retry loading"), "{html}");
         assert_keeps_focus_while_busy(&html);
+    }
+
+    #[test]
+    fn games_status_says_the_limit_is_reached_at_the_cap() {
+        fn at_cap() -> Element {
+            let slot = games_slot(true, SlotPhase::Ready, false, true);
+            rsx! { GamesStatus { slot, on_retry: |_| {} } }
+        }
+        let html = html_of(at_cap);
+        assert_one_status(&html, "Limit of 10 games reached");
+        // The cap text sits in the element that carries the games status id.
+        let at = html
+            .find(r#"id="apply-games-status""#)
+            .unwrap_or_else(|| panic!("games status id in {html}"));
+        let end = at + html[at..].find("</p>").unwrap();
+        assert!(
+            html[at..end].ends_with(">Limit of 10 games reached"),
+            "{html}"
+        );
+        assert!(!html.contains("<button"), "{html}");
     }
 
     #[test]
@@ -1746,6 +1954,146 @@ mod tests {
             button_for("Overwatch").contains(r#"type="button""#),
             "{html}"
         );
+    }
+
+    /// `count` games, `game-0` ("Game 0") upward.
+    fn many_games(count: usize) -> Vec<(String, String)> {
+        (0..count)
+            .map(|n| (format!("game-{n}"), format!("Game {n}")))
+            .collect()
+    }
+
+    /// The opening tag of the chip for `game-{n}`.
+    fn game_chip_tag(html: &str, n: usize) -> String {
+        tag_with_id(html, &format!("apply-game-game-{n}")).to_string()
+    }
+
+    #[test]
+    fn games_hint_and_cap_name_take_the_number_from_the_shared_cap() {
+        assert_eq!(MAX_APPLICATION_PREFERENCE_ITEMS, 10);
+        assert_eq!(games_hint(), "Choose at least one, at most 10.");
+        assert_eq!(
+            game_at_cap_name("Overwatch"),
+            "Overwatch, limit of 10 games reached"
+        );
+        let cap = MAX_APPLICATION_PREFERENCE_ITEMS.to_string();
+        assert!(games_hint().contains(&cap));
+        assert!(game_at_cap_name("Overwatch").contains(&cap));
+        // The name starts with the visible label (WCAG 2.5.3).
+        assert!(game_at_cap_name("Overwatch").starts_with("Overwatch"));
+
+        fn field() -> Element {
+            rsx! {
+                GamesField {
+                    phase: SlotPhase::Ready,
+                    games: games(),
+                    selected: vec![],
+                    on_toggle: |_| {},
+                }
+            }
+        }
+        let html = html_of(field);
+        assert!(
+            html.contains(
+                r#"<p class="field-hint" id="apply-games-hint">Choose at least one, at most 10.</p>"#
+            ),
+            "{html}"
+        );
+        // Below the cap no chip is disabled, selected or not.
+        assert!(!html.contains("aria-disabled"), "{html}");
+        assert!(!html.contains("is-disabled"), "{html}");
+        assert!(!html.contains("limit of"), "{html}");
+    }
+
+    /// Site blocker on 825: at the cap an unselected chip must not look or
+    /// act like a toggle that does nothing. It is `aria-disabled` (never
+    /// native `disabled`, which drops focus), looks disabled and is named
+    /// with the reason. Selected chips stay toggles.
+    #[test]
+    fn at_the_cap_unselected_game_chips_are_disabled_and_say_why() {
+        fn at_cap() -> Element {
+            // 12 games, the first 10 chosen: game-10 and game-11 are left.
+            let selected = (0..MAX_APPLICATION_PREFERENCE_ITEMS)
+                .map(|n| format!("game-{n}"))
+                .collect::<Vec<_>>();
+            rsx! {
+                GamesField {
+                    phase: SlotPhase::Ready,
+                    games: many_games(12),
+                    selected,
+                    on_toggle: |_| {},
+                }
+            }
+        }
+        let html = html_of(at_cap);
+        assert!(!html.contains(" disabled"), "{html}");
+        assert_eq!(html.matches(r#"aria-pressed="true""#).count(), 10, "{html}");
+        assert_eq!(html.matches(r#"aria-pressed="false""#).count(), 2, "{html}");
+        assert_eq!(html.matches(r#"aria-disabled="true""#).count(), 2, "{html}");
+
+        for n in 10..12 {
+            let tag = game_chip_tag(&html, n);
+            assert!(tag.starts_with("<button"), "{tag}");
+            assert!(tag.contains(r#"type="button""#), "{tag}");
+            assert!(tag.contains(r#"aria-disabled="true""#), "{tag}");
+            assert!(tag.contains(r#"aria-pressed="false""#), "{tag}");
+            assert!(tag.contains(r#"class="chip is-disabled""#), "{tag}");
+            assert!(
+                tag.contains(&format!(
+                    r#"aria-label="Game {n}, limit of 10 games reached""#
+                )),
+                "{tag}"
+            );
+            // The visible label is still only the game name.
+            assert!(html.contains(&format!(">Game {n}</button>")), "{html}");
+        }
+        for n in 0..10 {
+            let tag = game_chip_tag(&html, n);
+            assert!(tag.contains(r#"aria-pressed="true""#), "{tag}");
+            assert!(tag.contains(r#"class="chip active""#), "{tag}");
+            assert!(!tag.contains("aria-disabled"), "{tag}");
+            assert!(!tag.contains("is-disabled"), "{tag}");
+            assert!(!tag.contains("aria-label"), "{tag}");
+        }
+    }
+
+    /// Deselecting one game at the cap frees a slot: the chips that were
+    /// disabled are plain toggles again, and so is the one just deselected.
+    #[test]
+    fn deselecting_at_the_cap_enables_the_other_game_chips_again() {
+        fn after_deselect() -> Element {
+            let mut selected = (0..MAX_APPLICATION_PREFERENCE_ITEMS)
+                .map(|n| format!("game-{n}"))
+                .collect::<Vec<_>>();
+            assert!(games_at_cap(&selected));
+            // A click on a disabled chip never reaches `toggle_game`, and
+            // `toggle_game` would refuse the add anyway.
+            toggle_game(&mut selected, "game-10");
+            assert!(games_at_cap(&selected));
+            toggle_game(&mut selected, "game-3");
+            assert!(!games_at_cap(&selected));
+            rsx! {
+                GamesField {
+                    phase: SlotPhase::Ready,
+                    games: many_games(12),
+                    selected,
+                    on_toggle: |_| {},
+                }
+            }
+        }
+        let html = html_of(after_deselect);
+        assert!(!html.contains("aria-disabled"), "{html}");
+        assert!(!html.contains("is-disabled"), "{html}");
+        assert!(!html.contains("limit of"), "{html}");
+        assert!(!html.contains(" disabled"), "{html}");
+        assert_eq!(html.matches(r#"aria-pressed="true""#).count(), 9, "{html}");
+        assert_eq!(html.matches(r#"aria-pressed="false""#).count(), 3, "{html}");
+        for n in [3, 10, 11] {
+            let tag = game_chip_tag(&html, n);
+            assert!(tag.contains(r#"aria-pressed="false""#), "{tag}");
+            assert!(tag.contains(r#"class="chip""#), "{tag}");
+            assert!(!tag.contains("aria-label"), "{tag}");
+        }
     }
 
     #[test]
@@ -2052,6 +2400,53 @@ mod tests {
     }
 
     #[test]
+    fn a_rate_limited_send_or_withdraw_says_to_wait() {
+        let send = "Couldn't send the application";
+        // Per-user cooldown and withdrawn cap: the server's reason is shown.
+        let cooldown = ClientError::http(
+            429,
+            r#"{"error":"You can apply again in 42 minutes"}"#,
+            None,
+        );
+        assert_eq!(
+            action_failure_text(send, &cooldown),
+            "Couldn't send the application: You can apply again in 42 minutes."
+        );
+        let capped = ClientError::http(
+            429,
+            r#"{"error":"You have withdrawn 5 applications in the last 30 days. You can withdraw again in 3 days"}"#,
+            None,
+        );
+        assert_eq!(
+            action_failure_text("Couldn't withdraw the application", &capped),
+            "Couldn't withdraw the application: You have withdrawn 5 applications in the last 30 days. You can withdraw again in 3 days."
+        );
+        // Per-IP limit: the body is a code, not a sentence.
+        let limited = ClientError::http(
+            429,
+            r#"{"code":"rate_limited","error":"rate_limited","retry_after":42}"#,
+            None,
+        );
+        let text = action_failure_text(send, &limited);
+        assert_eq!(
+            text,
+            "Couldn't send the application. Too many attempts. Wait a minute, then try again."
+        );
+        assert!(!text.contains("rate_limited"), "{text}");
+    }
+
+    /// The textarea stops at the cap the server enforces.
+    #[test]
+    fn the_message_cap_is_the_shared_four_thousand() {
+        assert_eq!(MAX_APPLICATION_MESSAGE_CHARS, 4000);
+        // `maxlength` counts UTF-16 units, never fewer than chars, so text
+        // the textarea lets through is within the server's char count.
+        let astral = "🎮".repeat(2000);
+        assert_eq!(astral.encode_utf16().count(), 4000);
+        assert!(scuffed_types::application_message_within_max(&astral));
+    }
+
+    #[test]
     fn only_failures_a_retry_can_fix_say_try_again() {
         let send = "Couldn't send the application";
         // The server's text for a 500 is not shown; a retry may work.
@@ -2099,7 +2494,19 @@ mod tests {
         assert!(trial.contains("logs you out"), "{trial}");
         let pending = withdraw_confirm_body("pending");
         assert!(!pending.contains("trial"), "{pending}");
-        assert_eq!(pending, "You can apply again later if recruitment is open.");
+        assert_eq!(
+            pending,
+            "You have to wait an hour before you can apply again, and only while recruitment is open. After 5 withdrawals in 30 days you have to wait longer."
+        );
+        // Both variants name the cooldown, and neither promises a later
+        // application without it.
+        assert_eq!(
+            trial,
+            format!("This ends your trial and logs you out. {pending}")
+        );
+        for body in [&trial, &pending] {
+            assert!(!body.contains("apply again later"), "{body}");
+        }
     }
 
     #[test]
@@ -2278,11 +2685,12 @@ mod tests {
             "{html}"
         );
         assert!(!html.contains("apply-role-err"), "{html}");
-        // The 10 character minimum is said before the first submit: a hint
-        // that is always there and always describes the field.
+        // The 10 character minimum and the 4000 maximum are said before the
+        // first submit: a hint that is always there and always describes the
+        // field.
         assert!(
             html.contains(
-                r#"<p class="field-hint" id="apply-message-hint">At least 10 characters.</p>"#
+                r#"<p class="field-hint" id="apply-message-hint">At least 10 characters, at most 4000.</p>"#
             ),
             "{html}"
         );
@@ -2293,7 +2701,7 @@ mod tests {
         );
         assert!(
             html.contains(
-                r#"<p class="field-hint" id="apply-games-hint">Choose at least one.</p>"#
+                r#"<p class="field-hint" id="apply-games-hint">Choose at least one, at most 10.</p>"#
             ),
             "{html}"
         );

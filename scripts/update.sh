@@ -7,7 +7,34 @@
 #
 # Also hardens data/secrets.env (idempotent appends) so older installs pick up
 # new production env contracts after image upgrades without a crash-loop.
+#
+# Before the running site-server is removed, its image is tagged
+# <repo>:rollback. If the new container is not healthy in time, or the update
+# fails anywhere else after that removal (port still busy, the database
+# container does not start), the previous image is started again and the
+# script exits non-zero.
+#
+#   --backup   Take a SurrealDB export into backups-manual/ first (HTTP
+#              /export, mode 600). A failed or empty export, or a body
+#              that is not a SurrealQL export, stops the update with the
+#              site still running.
+#   --no-deps  Accepted and ignored. The script already starts site-server
+#              with --no-deps when a project Surreal is Up.
 set -euo pipefail
+
+# "$@" is left untouched: the re-exec after git pull passes it on.
+DO_BACKUP=0
+for _arg in "$@"; do
+    case "${_arg}" in
+        --backup) DO_BACKUP=1 ;;
+        --no-deps) ;;
+        *)
+            echo "error: unknown argument: ${_arg}" >&2
+            echo "usage: $0 [--backup]" >&2
+            exit 2
+            ;;
+    esac
+done
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SECRETS="$ROOT/data/secrets.env"
@@ -310,6 +337,251 @@ start_site_server() {
     "${COMPOSE[@]}" --env-file "$SECRETS" up -d site-server
 }
 
+our_container_name() {
+    podman ps -a --format '{{.Names}}' 2>/dev/null \
+        | grep -E "^${PROJECT_NAME}[-_]site-server([-_][0-9]+)?$" | head -n1
+}
+
+# Day-2 --no-deps: Contabo / podman-compose may leave site-server Created
+# (container exists, not started). Start it before the health loop. A start
+# that fails here is left to the health loop to report.
+start_created_site_server() {
+    local _ss _st
+    _ss="$(our_container_name || true)"
+    [[ -n "${_ss}" ]] || return 0
+    _st="$(podman inspect -f '{{.State.Status}}' "${_ss}" 2>/dev/null || true)"
+    [[ "${_st}" == "created" ]] || return 0
+    echo "site-server ${_ss} is Created after --no-deps, starting it..."
+    if ! podman start "${_ss}"; then
+        if ! COMPOSE_PROJECT_NAME="${PROJECT_NAME}" "${COMPOSE[@]}" --env-file "$SECRETS" start site-server; then
+            "${COMPOSE[@]}" --env-file "$SECRETS" start site-server || true
+        fi
+    fi
+}
+
+HEALTH_URL="http://127.0.0.1:${HOST_PORT}/api/health"
+# Health wait in seconds (default 60). A site that is not healthy by then is
+# rolled back, so raise it for a first boot with a long startup migration.
+HEALTH_SECS="${SCUFFED_UPDATE_HEALTH_SECS:-60}"
+
+wait_site_health() {
+    local _
+    for _ in $(seq 1 $((HEALTH_SECS / 2))); do
+        if curl -sf --max-time 2 "${HEALTH_URL}" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 2
+    done
+    return 1
+}
+
+# git_sha from /api/health, or "unknown" (site down, no sha in the body).
+live_git_sha() {
+    local body sha
+    body="$(curl -s --max-time 5 "${HEALTH_URL}" 2>/dev/null || true)"
+    sha="$(sed -n 's/.*"git_sha"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' <<<"${body}" | head -n1)"
+    echo "${sha:-unknown}"
+}
+
+# Tag the image of this project's running (or last) site-server container as
+# <repo>:rollback before that container is removed. Sets ROLLBACK_TAG,
+# ROLLBACK_IMAGE_ID and PREV_GIT_SHA. No container (fresh install) leaves
+# ROLLBACK_TAG empty: nothing to roll back to.
+ROLLBACK_TAG=""
+ROLLBACK_IMAGE_ID=""
+PREV_GIT_SHA="unknown"
+record_rollback_target() {
+    local cname img_name repo kept_id
+    cname="$(our_container_name || true)"
+    if [[ -z "${cname}" ]]; then
+        echo "No existing site-server container: no rollback target recorded."
+        return 0
+    fi
+    PREV_GIT_SHA="$(live_git_sha)"
+    ROLLBACK_IMAGE_ID="$(podman inspect -f '{{.Image}}' "${cname}" 2>/dev/null || true)"
+    if [[ -z "${ROLLBACK_IMAGE_ID}" ]]; then
+        echo "warning: could not read the image of ${cname}: no rollback target recorded."
+        return 0
+    fi
+    img_name="$(podman inspect -f '{{.ImageName}}' "${cname}" 2>/dev/null || true)"
+    # A container created from a bare image ID has no repo name.
+    if [[ -z "${img_name}" || "${img_name}" == sha256:* || "${img_name}" != */* ]]; then
+        img_name="${SITE_SERVER_IMAGE}"
+    fi
+    repo="${img_name%%@*}"
+    if [[ "${repo##*/}" == *:* ]]; then
+        repo="${repo%:*}"
+    fi
+    ROLLBACK_TAG="${repo}:rollback"
+    # A site that does not answer health may be the leftover of an earlier
+    # failed update. Do not let it replace a rollback image that is already
+    # tagged. (A healthy build without a sha also reports "unknown".)
+    if ! curl -sf --max-time 5 "${HEALTH_URL}" >/dev/null 2>&1; then
+        kept_id="$(podman image inspect "${ROLLBACK_TAG}" --format '{{.Id}}' 2>/dev/null || true)"
+        if [[ -n "${kept_id}" ]]; then
+            ROLLBACK_IMAGE_ID="${kept_id}"
+            echo "Live site does not answer health. Keeping the existing rollback image:"
+            echo "  ${ROLLBACK_TAG} (image ${ROLLBACK_IMAGE_ID})"
+            return 0
+        fi
+    fi
+    if ! podman tag "${ROLLBACK_IMAGE_ID}" "${ROLLBACK_TAG}"; then
+        echo "error: could not tag ${ROLLBACK_IMAGE_ID} as ${ROLLBACK_TAG}." >&2
+        echo "update.sh stopped before removing the running site-server." >&2
+        exit 1
+    fi
+    echo "Live git_sha before update: ${PREV_GIT_SHA}"
+    echo "Rollback image: ${ROLLBACK_TAG} (image ${ROLLBACK_IMAGE_ID})"
+}
+
+# What data/secrets.env has to say for the rolled-back build to stay.
+rollback_pin_note() {
+    local repo="${ROLLBACK_TAG%:rollback}"
+    echo "  data/secrets.env still names the failed image: SITE_SERVER_IMAGE=${SITE_SERVER_IMAGE}" >&2
+    echo "  The next compose up of site-server, or ./scripts/update.sh, starts that pin again." >&2
+    echo "  To keep the previous build (git_sha ${PREV_GIT_SHA}, image ${ROLLBACK_IMAGE_ID}), set in data/secrets.env:" >&2
+    echo "    SITE_SERVER_IMAGE=${ROLLBACK_TAG}" >&2
+    echo "  ${ROLLBACK_TAG} is a local tag that update.sh cannot pull. Before the next" >&2
+    if [[ "${PREV_GIT_SHA}" == "unknown" ]]; then
+        echo "  ./scripts/update.sh set a pullable pin: the fixed image, or the ${repo}:sha-<short> tag of the previous build." >&2
+    else
+        echo "  ./scripts/update.sh set a pullable pin: the fixed image, or ${repo}:sha-${PREV_GIT_SHA:0:7} (if that commit was published)." >&2
+    fi
+}
+
+# EXIT trap, installed once the rollback target is recorded, before this
+# project's site-server is removed, and cleared when the new one is
+# healthy. Every failing exit in between (an interrupt during the removal, port
+# still busy, Surreal not started, compose up, health, an interrupt, a
+# command failing under set -e) lands here, so none of them leaves the site removed: the
+# previous image is started again. --no-deps unless this run was allowed to
+# create the database (with-deps) and none is Up, so Surreal is never
+# recreated here either. Always exits non-zero.
+rollback_on_exit() {
+    local rc=$?
+    # Off before the rollback itself: a failure in here must not recurse.
+    trap - EXIT
+    # A second interrupt must not stop the restore halfway.
+    trap '' INT TERM HUP
+    set +e
+    [[ "${rc}" != "0" ]] || return 0
+
+    if [[ -z "${ROLLBACK_TAG}" ]]; then
+        echo "No rollback target was recorded (no previous site-server): nothing to roll back to." >&2
+        exit 1
+    fi
+
+    echo >&2
+    echo "Rolling back to ${ROLLBACK_TAG} (image ${ROLLBACK_IMAGE_ID}, previous git_sha ${PREV_GIT_SHA})..." >&2
+    local rollback_ok=0 rollback_missing=0 rollback_deps="--no-deps"
+    if ! podman image inspect "${ROLLBACK_TAG}" --format '{{.Id}}' >/dev/null 2>&1; then
+        echo "error: rollback image ${ROLLBACK_TAG} is missing." >&2
+        rollback_missing=1
+    else
+        remove_our_site_server >&2
+        wait_port_free "${HOST_PORT}" 40 || true
+        if [[ "${SURREAL_GUARD_ACTION:-}" == "with-deps" ]] && ! pick_canonical_up_surreal; then
+            rollback_deps=""
+        fi
+        # Shell value wins over --env-file, so compose starts the previous image.
+        if SITE_SERVER_IMAGE="${ROLLBACK_TAG}" start_site_server ${rollback_deps:+"${rollback_deps}"} >&2; then
+            if [[ -n "${rollback_deps}" ]]; then
+                start_created_site_server >&2
+            fi
+            echo "Waiting for the previous site-server to answer health (up to ${HEALTH_SECS}s)..." >&2
+            if wait_site_health; then
+                rollback_ok=1
+            fi
+        else
+            echo "error: compose could not start ${ROLLBACK_TAG}." >&2
+        fi
+    fi
+
+    echo >&2
+    if [[ "${rollback_ok}" == "1" ]]; then
+        echo "error: update FAILED. Rolled back: the previous image ${ROLLBACK_TAG} is running and healthy." >&2
+        echo "  Previous git_sha: ${PREV_GIT_SHA}. Live git_sha now: $(live_git_sha)." >&2
+        rollback_pin_note
+        echo "  The rollback is the image only. Database changes made by the failed boot (migrations) are not undone." >&2
+    else
+        echo "error: update FAILED and the rollback FAILED. The site is DOWN." >&2
+        echo "  Previous image: ${ROLLBACK_TAG} (image ${ROLLBACK_IMAGE_ID}, git_sha ${PREV_GIT_SHA})." >&2
+        if [[ "${rollback_missing}" != "1" ]]; then
+            echo "  Manual: SITE_SERVER_IMAGE=${ROLLBACK_TAG} ${COMPOSE[*]} --env-file data/secrets.env up -d --no-deps site-server" >&2
+            rollback_pin_note
+        fi
+    fi
+    exit 1
+}
+
+# --backup: logical export over HTTP from the running project Surreal. The
+# `surreal export` CLI fails on 3.2.x, the image has no curl or shell, and
+# compose does not publish 8000, so the request goes to the container IP on
+# the compose network. Never recreates or restarts Surreal. Separate from
+# scripts/backup.sh (restic). Any failure exits before a container is touched.
+# An export starts with a comment or a statement and has OPTION IMPORT, a
+# DEFINE or an INSERT at the start of a line. An HTML or JSON error body
+# has neither.
+looks_like_surql_export() {
+    local first
+    first="$(grep -a -m1 -v '^[[:space:]]*$' "$1" 2>/dev/null || true)"
+    [[ "${first}" == --* || "${first}" == OPTION* || "${first}" == DEFINE* ]] || return 1
+    grep -a -qE '^(OPTION IMPORT|DEFINE |INSERT )' "$1"
+}
+
+backup_surreal_export() {
+    local ip dir file size user pw http
+    if ! pick_canonical_up_surreal; then
+        echo "error: --backup needs a running project Surreal, none is Up." >&2
+        return 1
+    fi
+    ip="$(podman inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}' "${CANONICAL_SURREAL_CID}" 2>/dev/null || true)"
+    read -r ip _ <<<"${ip}" || true
+    if [[ -z "${ip}" ]]; then
+        echo "error: --backup could not read the IP of ${CANONICAL_SURREAL_NAME}." >&2
+        return 1
+    fi
+    dir="$ROOT/backups-manual"
+    mkdir -p "${dir}"
+    chmod 700 "${dir}"
+    file="${dir}/surreal-export-$(date -u +%Y%m%dT%H%M%SZ).surql"
+    user="${SURREALDB_USER:-root}"
+    # Credentials go to curl on stdin, not argv (ps) and not the terminal.
+    pw="${SURREALDB_PASSWORD:-}"
+    pw="${pw//\\/\\\\}"
+    pw="${pw//\"/\\\"}"
+    echo "Backup: exporting ${SURREALDB_NS:-scuffed_crew}/${SURREALDB_DB:-main} from ${CANONICAL_SURREAL_NAME} (${ip}) ..."
+    # -f fails on HTTP 400 and up. The status is checked as well, so any
+    # answer that is not 2xx fails even when a body was written.
+    if ! http="$(umask 077 && printf 'user = "%s:%s"\n' "${user}" "${pw}" \
+        | curl -sS -f -K - --max-time "${SCUFFED_BACKUP_MAX_SECS:-600}" \
+            -H "surreal-ns: ${SURREALDB_NS:-scuffed_crew}" \
+            -H "surreal-db: ${SURREALDB_DB:-main}" \
+            -H "Accept: application/octet-stream" \
+            -w '%{http_code}' \
+            -o "${file}" "http://${ip}:8000/export")" \
+        || [[ "${http}" != 2[0-9][0-9] ]]; then
+        rm -f "${file}"
+        echo "error: --backup export request failed (http://${ip}:8000/export, HTTP status ${http:-none})." >&2
+        echo "  The container IP is only reachable from the host with rootful podman." >&2
+        return 1
+    fi
+    if [[ ! -s "${file}" ]]; then
+        rm -f "${file}"
+        echo "error: --backup export is missing or empty." >&2
+        return 1
+    fi
+    if ! looks_like_surql_export "${file}"; then
+        size="$(wc -c <"${file}" | tr -d '[:space:]')"
+        rm -f "${file}"
+        echo "error: --backup export (${size} bytes) is not a SurrealQL export (an HTML or JSON error body?)." >&2
+        return 1
+    fi
+    chmod 600 "${file}"
+    size="$(wc -c <"${file}" | tr -d '[:space:]')"
+    echo "Backup: ${file} (${size} bytes, mode 600)"
+}
+
 # Discover the compose-network gateway while site-server still exists, and
 # write TRUSTED_PROXIES if it is missing. Re-source so an empty shell export
 # does not override the value compose reads from --env-file.
@@ -331,6 +603,25 @@ if ! surreal_guard_plan; then
     echo "update.sh stopped before touching any container." >&2
     exit 1
 fi
+
+if [[ "${DO_BACKUP}" == "1" ]]; then
+    if ! backup_surreal_export; then
+        echo "update.sh stopped before touching any container. The site is still running." >&2
+        exit 1
+    fi
+else
+    echo "warning: no --backup, this update takes no database export."
+    echo "  If the new build migrates the database and then fails to boot, the rollback"
+    echo "  leaves the old image on an already-migrated database."
+fi
+
+record_rollback_target
+# From here on a failing exit starts the previous image again. An interrupt
+# becomes a failing exit, so it does too. Armed before the removal (an
+# interrupt during it must not leave the site down) and not before the
+# rollback tag exists.
+trap rollback_on_exit EXIT
+trap 'exit 130' INT TERM HUP
 
 # Avoid --force-recreate: races with the previous container still holding HOST_PORT.
 remove_our_site_server
@@ -368,13 +659,18 @@ fi
 CANONICAL_SURREAL_CID=""
 CANONICAL_SURREAL_NAME=""
 used_no_deps=0
+start_failed=0
 # A stopped project DB container is started as it is (same image), never
-# recreated through depends_on.
-surreal_guard_apply
+# recreated through depends_on. If it does not start, the new site-server
+# is not started either.
+if ! surreal_guard_apply; then
+    echo "error: ${SURREAL_GUARD_NAME} did not start. Not starting the new site-server." >&2
+    exit 1
+fi
 if pick_canonical_up_surreal; then
     echo "Existing Surreal is Up: ${CANONICAL_SURREAL_NAME} (canonical; hyphen preferred when both exist)."
     stop_noncanonical_up_surreal "${CANONICAL_SURREAL_NAME}"
-    start_site_server --no-deps
+    start_site_server --no-deps || start_failed=1
     used_no_deps=1
 elif [[ "${SURREAL_GUARD_ACTION}" == "with-deps" ]]; then
     if surreal_db_volume_exists; then
@@ -382,7 +678,7 @@ elif [[ "${SURREAL_GUARD_ACTION}" == "with-deps" ]]; then
     else
         echo "No project Surreal container or volume — starting site-server with dependencies (fresh install)."
     fi
-    start_site_server
+    start_site_server || start_failed=1
 else
     echo "error: no project Surreal container is Up after starting ${SURREAL_GUARD_NAME:-it}." >&2
     echo "  Not starting site-server with dependencies: that would recreate the database." >&2
@@ -390,44 +686,27 @@ else
     exit 1
 fi
 
-# Verify the new container actually serves before declaring success — a
+# Verify the new container actually serves before declaring success. A
 # crash-looping boot (bad env contract, failed DB bootstrap) otherwise looks
 # identical to a good deploy from this script's output.
-our_container_name() {
-    podman ps -a --format '{{.Names}}' 2>/dev/null \
-        | grep -E "^${PROJECT_NAME}[-_]site-server([-_][0-9]+)?$" | head -n1
-}
-
-# Day-2 --no-deps: Contabo / podman-compose may leave site-server Created
-# (container exists, not started). Start it before the health loop.
-if [[ "${used_no_deps}" == "1" ]]; then
-    _ss="$(our_container_name)"
-    if [[ -n "${_ss}" ]]; then
-        _st="$(podman inspect -f '{{.State.Status}}' "${_ss}" 2>/dev/null || true)"
-        if [[ "${_st}" == "created" ]]; then
-            echo "site-server ${_ss} is Created after --no-deps — starting it..."
-            if ! podman start "${_ss}"; then
-                if ! COMPOSE_PROJECT_NAME="${PROJECT_NAME}" "${COMPOSE[@]}" --env-file "$SECRETS" start site-server; then
-                    "${COMPOSE[@]}" --env-file "$SECRETS" start site-server
-                fi
-            fi
-        fi
+healthy=0
+if [[ "${start_failed}" == "1" ]]; then
+    echo "error: compose could not start site-server." >&2
+else
+    if [[ "${used_no_deps}" == "1" ]]; then
+        start_created_site_server
+    fi
+    echo "Waiting for site-server health on 127.0.0.1:${HOST_PORT} (up to ${HEALTH_SECS}s)..."
+    if wait_site_health; then
+        healthy=1
     fi
 fi
 
-echo "Waiting for site-server health on 127.0.0.1:${HOST_PORT} (up to 60s)..."
-healthy=0
-for _ in $(seq 1 30); do
-    if curl -sf --max-time 2 "http://127.0.0.1:${HOST_PORT}/api/health" >/dev/null 2>&1; then
-        healthy=1
-        break
-    fi
-    sleep 2
-done
-
 if [[ "${healthy}" != "1" ]]; then
-    cname="$(our_container_name)"
-    echo "error: site-server is not healthy after 60s — deploy FAILED." >&2
+    cname="$(our_container_name || true)"
+    if [[ "${start_failed}" != "1" ]]; then
+        echo "error: site-server is not healthy after ${HEALTH_SECS}s, deploy FAILED." >&2
+    fi
     echo "Container status:" >&2
     podman ps -a --filter "name=${PROJECT_NAME}" --format 'table {{.Names}}\t{{.Status}}' >&2 || true
     echo "Project Surreal containers (name-skew: hyphen vs underscore twins share one volume):" >&2
@@ -441,8 +720,11 @@ if [[ "${healthy}" != "1" ]]; then
     fi
     echo "If site-server is Created / public 502 and two Surreal names exist, see docs/deploy.md" >&2
     echo "(duplicate Surreal _ vs -). Do NOT volume rm ${PROJECT_NAME}_surrealdb-data." >&2
+
+    # rollback_on_exit starts the previous image.
     exit 1
 fi
+trap - EXIT INT TERM HUP
 
 # Fresh install may have just created Surreal; re-pick if we had none at start.
 if [[ -z "${CANONICAL_SURREAL_NAME}" ]]; then
@@ -454,3 +736,7 @@ fi
 
 echo
 echo "Updated & healthy: http://127.0.0.1:${HOST_PORT}/api/health OK"
+echo "Live git_sha: $(live_git_sha)"
+if [[ -n "${ROLLBACK_TAG}" ]]; then
+    echo "Rollback image: ${ROLLBACK_TAG} (previous git_sha ${PREV_GIT_SHA})"
+fi
