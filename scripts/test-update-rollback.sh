@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # scripts/update.sh must record a rollback target before it removes the
 # running site-server, start the previous image again when the new one is not
-# healthy or the update fails anywhere else after that removal, and with
-# --backup stop on an empty export with the site left alone. No real podman, no network: stub podman / curl / ss / sleep on PATH.
+# healthy or the update fails anywhere else from that removal on, and with
+# --backup stop on an empty or junk export with the site left alone. No real podman, no network: stub podman / curl / ss / sleep on PATH.
 
 set -euo pipefail
 
@@ -29,6 +29,8 @@ cat >"${BIN}/podman" <<'STUB'
 #        start_fails_<id>      podman start <id> fails
 #        start_noop_<id>       podman start <id> exits 0, container stays down
 #        start_running_only_<id>  State.Running turns true, ps status does not
+#        term_on_stop          holds N: the next N compose stop site-server
+#                              each send SIGTERM to update.sh
 echo "podman $*" >>"${STUB_STATE}/calls"
 C="${STUB_STATE}/containers"
 image_id() {
@@ -54,7 +56,17 @@ case "${cmd}" in
                     printf 's1\tscuffed-crew-site-server-1\t%s\t%s\t%s\n' \
                         "${st}" "${img}" "$(image_id "${img}" || echo none)" >>"${C}"
                 fi ;;
-            *" stop site-server "*|*" rm -f site-server "*) drop_site_server ;;
+            *" stop site-server "*|*" rm -f site-server "*)
+                drop_site_server
+                if [[ " $* " == *" stop site-server "* && -f "${STUB_STATE}/term_on_stop" ]]; then
+                    left="$(cat "${STUB_STATE}/term_on_stop")"
+                    if [[ "${left}" -gt 1 ]]; then
+                        echo "$((left - 1))" >"${STUB_STATE}/term_on_stop"
+                    else
+                        rm -f "${STUB_STATE}/term_on_stop"
+                    fi
+                    kill -TERM "${PPID}"
+                fi ;;
         esac
         exit 0 ;;
     pull) exit 0 ;;
@@ -135,12 +147,14 @@ cat >"${BIN}/curl" <<'STUB'
 # means the site is not healthy.
 # $STUB_STATE/health_once: an image answers once, then never again.
 # /export copies $STUB_STATE/export_body to the -o file (empty when absent).
+# With -w it prints $STUB_STATE/export_http (200 when absent) as the status.
 echo "curl $*" >>"${STUB_STATE}/calls"
-out="" url="" stdin_cfg=0
+out="" url="" stdin_cfg=0 write_out=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -o) out="$2"; shift 2 ;;
         -K) [[ "$2" == "-" ]] && stdin_cfg=1; shift 2 ;;
+        -w) write_out=1; shift 2 ;;
         -H|--max-time|-u) shift 2 ;;
         http*) url="$1"; shift ;;
         *) shift ;;
@@ -160,6 +174,9 @@ case "${url}" in
             cat "${STUB_STATE}/export_body" >"${out}"
         else
             : >"${out}"
+        fi
+        if [[ "${write_out}" == "1" ]]; then
+            cat "${STUB_STATE}/export_http" 2>/dev/null || printf '200'
         fi
         exit 0 ;;
 esac
@@ -296,6 +313,8 @@ out_has "Updated & healthy" || fail "healthy update lost the Updated & healthy l
 out_has "Live git_sha: ${NEW_SHA}" || fail "healthy update did not print the new live git_sha. $(tail_out)"
 [[ "$(site_image)" == "${IMG}:main|imgNew" ]] || fail "healthy update: site-server is not on the new image: $(site_image)"
 [[ ! -e "${FIX}/backups-manual" ]] || fail "update without --backup wrote backups-manual/"
+out_has "warning: no --backup" || fail "update without --backup does not warn that there is no database export"
+out_has "already-migrated database" || fail "update without --backup does not name the migrated-database risk"
 expect_db_untouched "healthy update"
 
 # A leftover --no-deps argument is a no-op.
@@ -471,6 +490,24 @@ out_has "is not healthy after" && fail "interrupt: the health wait ran to its en
 out_has "update FAILED. Rolled back" || fail "interrupt: message does not mention the rollback. $(tail_out)"
 expect_db_untouched "interrupt"
 
+# Interrupted (SIGTERM) during the removal itself, before the port wait.
+new_state term-in-removal "${DB_LINE}${SITE_LINE}"
+echo 1 >"${STUB_STATE}/term_on_stop"
+if run_update; then fail "update.sh exited 0 after SIGTERM during the removal"; fi
+[[ ! -e "${STUB_STATE}/term_on_stop" ]] || fail "interrupt in removal: the signal was never sent"
+out_has "Waiting for port" && fail "interrupt in removal: the update went on after the signal"
+expect_rolled_back "interrupt in removal"
+expect_db_untouched "interrupt in removal"
+
+# A second SIGTERM while the rollback removes the container: the restore
+# still runs to its end.
+new_state term-in-rollback "${DB_LINE}${SITE_LINE}"
+echo 2 >"${STUB_STATE}/term_on_stop"
+if run_update; then fail "update.sh exited 0 after SIGTERM during the rollback"; fi
+[[ ! -e "${STUB_STATE}/term_on_stop" ]] || fail "interrupt in rollback: the second signal was never sent"
+expect_rolled_back "interrupt in rollback"
+expect_db_untouched "interrupt in rollback"
+
 # --- e) --backup ----------------------------------------------------------------
 new_state backup-empty "${DB_LINE}${SITE_LINE}"
 if run_update --backup; then fail "update.sh --backup went on after an empty export"; fi
@@ -483,6 +520,30 @@ new_state backup-http-error "${DB_LINE}${SITE_LINE}"
 touch "${STUB_STATE}/export_fails"
 if run_update --backup; then fail "update.sh --backup went on after a failed export request"; fi
 expect_site_untouched "--backup, failed request"
+
+# A 200 with an error page instead of an export.
+new_state backup-junk-html "${DB_LINE}${SITE_LINE}"
+printf '<!DOCTYPE html>\n<html><body><h1>502 Bad Gateway</h1></body></html>\n' >"${STUB_STATE}/export_body"
+if run_update --backup; then fail "update.sh --backup went on after an HTML export body"; fi
+out_has "is not a SurrealQL export" || fail "HTML export body is not reported. $(tail_out)"
+expect_site_untouched "--backup, HTML body"
+[[ -z "$(ls -A "${FIX}/backups-manual" 2>/dev/null)" ]] || fail "HTML export file was left behind"
+
+new_state backup-junk-json "${DB_LINE}${SITE_LINE}"
+printf '{"code":400,"details":"Request problems detected","information":"DEFINE TABLE was not expected"}\n' >"${STUB_STATE}/export_body"
+if run_update --backup; then fail "update.sh --backup went on after a JSON export body"; fi
+out_has "is not a SurrealQL export" || fail "JSON export body is not reported. $(tail_out)"
+expect_site_untouched "--backup, JSON body"
+[[ -z "$(ls -A "${FIX}/backups-manual" 2>/dev/null)" ]] || fail "JSON export file was left behind"
+
+# A status that is not 2xx fails even with a body that looks like an export.
+new_state backup-http-status "${DB_LINE}${SITE_LINE}"
+printf -- '-- export\nDEFINE TABLE member;\n' >"${STUB_STATE}/export_body"
+printf '302' >"${STUB_STATE}/export_http"
+if run_update --backup; then fail "update.sh --backup went on after HTTP 302"; fi
+out_has "HTTP status 302" || fail "non-2xx export status is not reported. $(tail_out)"
+expect_site_untouched "--backup, HTTP 302"
+[[ -z "$(ls -A "${FIX}/backups-manual" 2>/dev/null)" ]] || fail "export file of a non-2xx answer was left behind"
 
 new_state backup-no-db "${SITE_LINE}"
 if run_update --backup; then fail "update.sh --backup went on with no Surreal Up"; fi
@@ -508,6 +569,7 @@ backup_line="$(line_of '^curl .*/export$')"
 rm_line="$(line_of '^podman (compose .* )?(stop|rm) ')"
 [[ "${backup_line}" -lt "${rm_line}" ]] || fail "--backup ran after the site-server was removed"
 out_has "Live git_sha: ${NEW_SHA}" || fail "--backup update did not finish"
+out_has "warning: no --backup" && fail "--backup update still warns that there is no database export"
 expect_db_untouched "--backup"
 
 # --- argv -----------------------------------------------------------------------
@@ -515,4 +577,4 @@ new_state bad-arg "${DB_LINE}${SITE_LINE}"
 if run_update --bakcup; then fail "update.sh accepted an unknown argument"; fi
 [[ ! -s "${STUB_STATE}/calls" ]] || fail "unknown argument still ran podman or curl"
 
-echo "ok: update.sh rollback and --backup (23 scenarios)"
+echo "ok: update.sh rollback and --backup (28 scenarios)"

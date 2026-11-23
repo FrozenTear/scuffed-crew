@@ -91,16 +91,19 @@ On Contabo-style day-2 hosts, if a project Surreal is already Up, `update.sh` re
 
 Before `update.sh` removes the running site-server it reads the live `git_sha` from `/api/health` and tags that container's image as `<repo>:rollback` (for example `ghcr.io/frozentear/scuffed-crew:rollback`). It prints both. If the new container is not healthy within 60 s (`SCUFFED_UPDATE_HEALTH_SECS` to change it), the script stops it, starts the `:rollback` image again (with `--no-deps`, the database is left alone) and **exits non-zero**, naming the previous `git_sha`. A non-zero exit means the update failed even when the old site is back up. If the rollback also fails, the output says so and gives the manual command. On success the script prints the new live `git_sha`.
 
-The same rollback runs for every failure after the site-server was removed, not only a failed health check: `HOST_PORT` still busy after the removal, a stopped database container that does not start (or is not Up afterwards), `compose up` failing, and an interrupt (Ctrl-C, SIGTERM). The database container is never created or recreated on these paths either. If the cause is still there (port taken, database down), the previous image cannot serve and the output says the rollback failed.
+The same rollback runs for every failure from the removal of the site-server on, not only a failed health check: `HOST_PORT` still busy after the removal, a stopped database container that does not start (or is not Up afterwards), `compose up` failing, and an interrupt (Ctrl-C, SIGTERM), including one during the removal itself. Once the rollback has started, further interrupts are ignored until it is done. The database container is never created or recreated on these paths either. If the cause is still there (port taken, database down), the previous image cannot serve and the output says the rollback failed.
 
 - The tag is local to the host and is replaced on every update, so it only reaches back one update. If the site does not answer `/api/health` before the update and a `:rollback` tag already exists, that tag is kept.
 - After a rollback the container runs `<repo>:rollback`, but `SITE_SERVER_IMAGE` in `data/secrets.env` still names the image that failed. The next `compose up` of site-server, or the next `update.sh`, starts that pin again. The output prints what to set:
   - To stay on the previous build, set `SITE_SERVER_IMAGE=<repo>:rollback`. The output names its image ID and `git_sha`.
   - `:rollback` is a local tag and `update.sh` pulls its pin, so before the next `update.sh` set a tag that can be pulled: the fixed image, or `<repo>:sha-<short>` of the previous `git_sha` if that commit was published.
-- The rollback is the image only, on every path above. Database changes made by the failed boot (startup migrations) stay. Use `--backup` before an update that migrates data (DB7).
+- The rollback is the image only, on every path above. Database changes made by the failed boot (startup migrations) stay, so the old image can end up on an already-migrated database. Without `--backup` the script prints a warning that says so and goes on. `--backup` plus `scripts/backup.sh` or a volume snapshot is mandatory for the DB7 run. For an ordinary day-2 update `--backup` stays optional.
+- The rollback starts `:rollback` through the `compose.yml` as it is after the `git pull` and the current `data/secrets.env`, with only `SITE_SERVER_IMAGE` overridden. Env, volumes, ports and networks are not a snapshot of the old container.
 - A fresh install has no previous container, so there is nothing to tag and a failed health check only fails.
 
-`./scripts/update.sh --backup` takes a SurrealDB export first, before any container is touched. It calls the HTTP `/export` endpoint of the running project Surreal on its compose-network IP as the root user (`SURREALDB_USER`, `SURREALDB_NS`, `SURREALDB_DB` from `secrets.env`) and writes `backups-manual/surreal-export-<UTC timestamp>.surql` (directory mode 700, file mode 600, ignored by git). If the request fails or the file is empty, the script exits non-zero and the site keeps running on the old image. The host must be able to reach the container IP, which is the case for rootful podman. The export holds the whole database in plain text: keep it off shared storage and delete it when it is no longer needed. This is a one-off logical export on the host. It does not replace `scripts/backup.sh` (restic, off-host, see [Backups](#backups)).
+`./scripts/update.sh --backup` takes a SurrealDB export first, before any container is touched. It calls the HTTP `/export` endpoint of the running project Surreal on its compose-network IP as the root user (`SURREALDB_USER`, `SURREALDB_NS`, `SURREALDB_DB` from `secrets.env`) and writes `backups-manual/surreal-export-<UTC timestamp>.surql` (directory mode 700, file mode 600, ignored by git). If the request fails, the HTTP status is not 2xx, the file is empty, or the body is not a SurrealQL export (an HTML or JSON error page, for example), the script exits non-zero and the site keeps running on the old image. The host must be able to reach the container IP, which is the case for rootful podman. The export holds the whole database in plain text: keep it off shared storage and delete it when it is no longer needed. This is a one-off logical export on the host. It does not replace `scripts/backup.sh` (restic, off-host, see [Backups](#backups)).
+
+Tested so far: the stub tests in `scripts/test-update-rollback.sh` (28 scenarios, stubbed podman and curl, no real containers), and one rootless dry run of commit 94e12813 by Soot, recorded in [PR 824](https://github.com/FrozenTear/scuffed-crew/pull/824#issuecomment-7101602787). Rootful podman and a Contabo-like host have not been tested yet.
 
 ### Which variables reach the server
 
@@ -864,9 +867,10 @@ deleted edge is logged at info. Later boots see the index and skip the pass.
 
 1. **Back up first.** Roll out with `./scripts/update.sh --backup`: it
    writes a SurrealDB HTTP export to `backups-manual/` (mode 600) before it
-   touches a container, and an empty or failed export stops the update with
-   the site still running. Run `scripts/backup.sh` (restic, off-host) as
-   well, or snapshot the volume. Plain `./scripts/update.sh` takes no backup.
+   touches a container, and an empty, failed or junk export stops the
+   update with the site still running. Run `scripts/backup.sh` (restic,
+   off-host) as well, or snapshot the volume. Both are mandatory for this
+   run. Plain `./scripts/update.sh` takes no backup and only warns.
    The `update.sh` with `--backup` and rollback must be merged and on the
    host before any DB7 deploy.
 2. **Run the read-only duplicate count first** and note it:

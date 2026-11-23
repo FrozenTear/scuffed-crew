@@ -15,8 +15,9 @@
 # script exits non-zero.
 #
 #   --backup   Take a SurrealDB export into backups-manual/ first (HTTP
-#              /export, mode 600). An empty or failed export stops the
-#              update with the site still running.
+#              /export, mode 600). A failed or empty export, or a body
+#              that is not a SurrealQL export, stops the update with the
+#              site still running.
 #   --no-deps  Accepted and ignored. The script already starts site-server
 #              with --no-deps when a project Surreal is Up.
 set -euo pipefail
@@ -448,8 +449,9 @@ rollback_pin_note() {
     fi
 }
 
-# EXIT trap, installed once this project's site-server has been removed and
-# cleared when the new one is healthy. Every failing exit in between (port
+# EXIT trap, installed once the rollback target is recorded, before this
+# project's site-server is removed, and cleared when the new one is
+# healthy. Every failing exit in between (an interrupt during the removal, port
 # still busy, Surreal not started, compose up, health, an interrupt, a
 # command failing under set -e) lands here, so none of them leaves the site removed: the
 # previous image is started again. --no-deps unless this run was allowed to
@@ -459,6 +461,8 @@ rollback_on_exit() {
     local rc=$?
     # Off before the rollback itself: a failure in here must not recurse.
     trap - EXIT
+    # A second interrupt must not stop the restore halfway.
+    trap '' INT TERM HUP
     set +e
     [[ "${rc}" != "0" ]] || return 0
 
@@ -515,8 +519,18 @@ rollback_on_exit() {
 # compose does not publish 8000, so the request goes to the container IP on
 # the compose network. Never recreates or restarts Surreal. Separate from
 # scripts/backup.sh (restic). Any failure exits before a container is touched.
+# An export starts with a comment or a statement and has OPTION IMPORT, a
+# DEFINE or an INSERT at the start of a line. An HTML or JSON error body
+# has neither.
+looks_like_surql_export() {
+    local first
+    first="$(grep -a -m1 -v '^[[:space:]]*$' "$1" 2>/dev/null || true)"
+    [[ "${first}" == --* || "${first}" == OPTION* || "${first}" == DEFINE* ]] || return 1
+    grep -a -qE '^(OPTION IMPORT|DEFINE |INSERT )' "$1"
+}
+
 backup_surreal_export() {
-    local ip dir file size user pw
+    local ip dir file size user pw http
     if ! pick_canonical_up_surreal; then
         echo "error: --backup needs a running project Surreal, none is Up." >&2
         return 1
@@ -537,20 +551,30 @@ backup_surreal_export() {
     pw="${pw//\\/\\\\}"
     pw="${pw//\"/\\\"}"
     echo "Backup: exporting ${SURREALDB_NS:-scuffed_crew}/${SURREALDB_DB:-main} from ${CANONICAL_SURREAL_NAME} (${ip}) ..."
-    if ! (umask 077 && printf 'user = "%s:%s"\n' "${user}" "${pw}" \
+    # -f fails on HTTP 400 and up. The status is checked as well, so any
+    # answer that is not 2xx fails even when a body was written.
+    if ! http="$(umask 077 && printf 'user = "%s:%s"\n' "${user}" "${pw}" \
         | curl -sS -f -K - --max-time "${SCUFFED_BACKUP_MAX_SECS:-600}" \
             -H "surreal-ns: ${SURREALDB_NS:-scuffed_crew}" \
             -H "surreal-db: ${SURREALDB_DB:-main}" \
             -H "Accept: application/octet-stream" \
-            -o "${file}" "http://${ip}:8000/export"); then
+            -w '%{http_code}' \
+            -o "${file}" "http://${ip}:8000/export")" \
+        || [[ "${http}" != 2[0-9][0-9] ]]; then
         rm -f "${file}"
-        echo "error: --backup export request failed (http://${ip}:8000/export)." >&2
+        echo "error: --backup export request failed (http://${ip}:8000/export, HTTP status ${http:-none})." >&2
         echo "  The container IP is only reachable from the host with rootful podman." >&2
         return 1
     fi
     if [[ ! -s "${file}" ]]; then
         rm -f "${file}"
         echo "error: --backup export is missing or empty." >&2
+        return 1
+    fi
+    if ! looks_like_surql_export "${file}"; then
+        size="$(wc -c <"${file}" | tr -d '[:space:]')"
+        rm -f "${file}"
+        echo "error: --backup export (${size} bytes) is not a SurrealQL export (an HTML or JSON error body?)." >&2
         return 1
     fi
     chmod 600 "${file}"
@@ -585,16 +609,22 @@ if [[ "${DO_BACKUP}" == "1" ]]; then
         echo "update.sh stopped before touching any container. The site is still running." >&2
         exit 1
     fi
+else
+    echo "warning: no --backup, this update takes no database export."
+    echo "  If the new build migrates the database and then fails to boot, the rollback"
+    echo "  leaves the old image on an already-migrated database."
 fi
 
 record_rollback_target
+# From here on a failing exit starts the previous image again. An interrupt
+# becomes a failing exit, so it does too. Armed before the removal (an
+# interrupt during it must not leave the site down) and not before the
+# rollback tag exists.
+trap rollback_on_exit EXIT
+trap 'exit 130' INT TERM HUP
 
 # Avoid --force-recreate: races with the previous container still holding HOST_PORT.
 remove_our_site_server
-# From here on a failing exit starts the previous image again. An interrupt
-# becomes a failing exit, so it does too.
-trap rollback_on_exit EXIT
-trap 'exit 130' INT TERM HUP
 
 echo "Waiting for port ${HOST_PORT} to free (this project only)..."
 if ! wait_port_free "${HOST_PORT}" 40; then
