@@ -1,4 +1,5 @@
-//! Minimum length of the "Why you want to join" application message.
+//! Limits of an application: the "Why you want to join" message, the
+//! preferred games and roles lists, and the apply and withdraw rate.
 //!
 //! One place so `POST /api/applications` and the apply page in the app
 //! measure a message the same way and cannot drift.
@@ -19,6 +20,78 @@ pub fn application_message_chars(message: &str) -> usize {
 pub fn application_message_long_enough(message: &str) -> bool {
     application_message_chars(message) >= MIN_APPLICATION_MESSAGE_CHARS
 }
+
+/// Maximum application message length, in Unicode chars after trim.
+pub const MAX_APPLICATION_MESSAGE_CHARS: usize = 4000;
+
+/// True when the trimmed message has at most
+/// [`MAX_APPLICATION_MESSAGE_CHARS`] chars. Counted like the minimum:
+/// [`application_message_chars`].
+pub fn application_message_within_max(message: &str) -> bool {
+    application_message_chars(message) <= MAX_APPLICATION_MESSAGE_CHARS
+}
+
+/// Most entries `preferred_games` or `preferred_roles` may hold.
+pub const MAX_APPLICATION_PREFERENCE_ITEMS: usize = 10;
+
+/// Longest entry of `preferred_games` or `preferred_roles`, in Unicode
+/// chars after trim.
+pub const MAX_APPLICATION_PREFERENCE_ITEM_CHARS: usize = 64;
+
+/// Why a `preferred_games` or `preferred_roles` list is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplicationPreferenceError {
+    /// More than [`MAX_APPLICATION_PREFERENCE_ITEMS`] entries.
+    TooMany,
+    /// An entry longer than [`MAX_APPLICATION_PREFERENCE_ITEM_CHARS`].
+    ItemTooLong,
+}
+
+/// Check one preference list (`preferred_games` or `preferred_roles`): at
+/// most [`MAX_APPLICATION_PREFERENCE_ITEMS`] entries, each at most
+/// [`MAX_APPLICATION_PREFERENCE_ITEM_CHARS`] chars, counted like the message
+/// (trim, then `char`s). An empty list passes. The count is checked first.
+pub fn check_application_preferences<S: AsRef<str>>(
+    items: &[S],
+) -> Result<(), ApplicationPreferenceError> {
+    if items.len() > MAX_APPLICATION_PREFERENCE_ITEMS {
+        return Err(ApplicationPreferenceError::TooMany);
+    }
+    if items.iter().any(|item| {
+        application_message_chars(item.as_ref()) > MAX_APPLICATION_PREFERENCE_ITEM_CHARS
+    }) {
+        return Err(ApplicationPreferenceError::ItemTooLong);
+    }
+    Ok(())
+}
+
+/// Requests one client IP may send to `POST /api/applications` and
+/// `POST /api/applications/mine/withdraw` (one shared bucket) before waiting.
+///
+/// Tighter than the auth governor (burst 5, one every 2 s): a successful
+/// apply writes a row and notifies officers.
+pub const APPLICATION_IP_BURST: u32 = 3;
+
+/// Seconds until the apply and withdraw per-IP governor replenishes one
+/// request.
+pub const APPLICATION_IP_REPLENISH_SECS: u64 = 60;
+
+/// Seconds a user waits after their latest application was closed
+/// (withdrawn, rejected or accepted) before a new one is accepted.
+pub const APPLICATION_RESUBMIT_COOLDOWN_SECS: i64 = 60 * 60;
+
+/// Withdrawn applications one user may add inside the rolling window
+/// ([`WITHDRAWN_APPLICATION_WINDOW_DAYS`]). At the cap a new application is
+/// refused, and so is a withdraw that would add another, until the oldest
+/// counted one leaves the window.
+pub const MAX_WITHDRAWN_APPLICATIONS: u64 = 5;
+
+/// Days a withdrawn application counts toward
+/// [`MAX_WITHDRAWN_APPLICATIONS`], from the moment it was withdrawn.
+pub const WITHDRAWN_APPLICATION_WINDOW_DAYS: i64 = 30;
+
+/// [`WITHDRAWN_APPLICATION_WINDOW_DAYS`] in seconds.
+pub const WITHDRAWN_APPLICATION_WINDOW_SECS: i64 = WITHDRAWN_APPLICATION_WINDOW_DAYS * 24 * 60 * 60;
 
 #[cfg(test)]
 mod tests {
@@ -91,5 +164,103 @@ mod tests {
         assert_eq!(application_message_chars(""), 0);
         assert!(!application_message_long_enough(""));
         assert!(!application_message_long_enough("          "));
+    }
+
+    #[test]
+    fn the_maximum_is_four_thousand() {
+        assert_eq!(MAX_APPLICATION_MESSAGE_CHARS, 4000);
+    }
+
+    #[test]
+    fn four_thousand_chars_after_trim_is_within_max() {
+        let exact = "a".repeat(4000);
+        assert!(application_message_within_max(&exact));
+        // Padding is trimmed before the count, like the minimum.
+        let padded = format!("  \n{exact}\t \u{3000}");
+        assert_eq!(application_message_chars(&padded), 4000);
+        assert!(application_message_within_max(&padded));
+        assert!(application_message_within_max(""));
+        assert!(application_message_within_max("Hi, I heal"));
+    }
+
+    #[test]
+    fn four_thousand_and_one_chars_is_over_max() {
+        let over = "a".repeat(4001);
+        assert!(!application_message_within_max(&over));
+        assert!(!application_message_within_max(&format!("  {over}  ")));
+    }
+
+    #[test]
+    fn the_maximum_counts_chars_not_bytes() {
+        // 4000 chars, 8000 bytes: within. Bytes are not the measure.
+        let multibyte = "æ".repeat(4000);
+        assert_eq!(multibyte.len(), 8000);
+        assert!(application_message_within_max(&multibyte));
+        assert!(!application_message_within_max(&"æ".repeat(4001)));
+        // 4000 chars, 16000 bytes.
+        assert!(application_message_within_max(&"🎮".repeat(4000)));
+        assert!(!application_message_within_max(&"🎮".repeat(4001)));
+    }
+
+    #[test]
+    fn the_preference_caps_are_ten_items_of_sixty_four_chars() {
+        assert_eq!(MAX_APPLICATION_PREFERENCE_ITEMS, 10);
+        assert_eq!(MAX_APPLICATION_PREFERENCE_ITEM_CHARS, 64);
+    }
+
+    #[test]
+    fn ten_preferences_pass_and_eleven_are_too_many() {
+        let ten = vec!["ow2".to_string(); 10];
+        assert_eq!(check_application_preferences(&ten), Ok(()));
+        let eleven = vec!["ow2".to_string(); 11];
+        assert_eq!(
+            check_application_preferences(&eleven),
+            Err(ApplicationPreferenceError::TooMany)
+        );
+        let none: [&str; 0] = [];
+        assert_eq!(check_application_preferences(&none), Ok(()));
+    }
+
+    #[test]
+    fn a_sixty_four_char_preference_passes_and_sixty_five_is_too_long() {
+        let exact = "a".repeat(64);
+        assert_eq!(check_application_preferences(&[exact.as_str()]), Ok(()));
+        let over = "a".repeat(65);
+        assert_eq!(
+            check_application_preferences(&["ow2", over.as_str()]),
+            Err(ApplicationPreferenceError::ItemTooLong)
+        );
+    }
+
+    #[test]
+    fn a_preference_is_trimmed_and_counted_in_chars() {
+        // 64 chars after trim, 128+ bytes.
+        let padded = format!(" \u{3000}{}\n", "æ".repeat(64));
+        assert_eq!(check_application_preferences(&[padded.as_str()]), Ok(()));
+        let over = "🎮".repeat(65);
+        assert_eq!(
+            check_application_preferences(&[over.as_str()]),
+            Err(ApplicationPreferenceError::ItemTooLong)
+        );
+    }
+
+    #[test]
+    fn too_many_is_reported_before_a_long_item() {
+        let mut items = vec!["a".repeat(65)];
+        items.extend(vec!["ow2".to_string(); 10]);
+        assert_eq!(
+            check_application_preferences(&items),
+            Err(ApplicationPreferenceError::TooMany)
+        );
+    }
+
+    #[test]
+    fn the_rate_limits_are_the_documented_ones() {
+        assert_eq!(APPLICATION_IP_BURST, 3);
+        assert_eq!(APPLICATION_IP_REPLENISH_SECS, 60);
+        assert_eq!(APPLICATION_RESUBMIT_COOLDOWN_SECS, 3600);
+        assert_eq!(MAX_WITHDRAWN_APPLICATIONS, 5);
+        assert_eq!(WITHDRAWN_APPLICATION_WINDOW_DAYS, 30);
+        assert_eq!(WITHDRAWN_APPLICATION_WINDOW_SECS, 2_592_000);
     }
 }
