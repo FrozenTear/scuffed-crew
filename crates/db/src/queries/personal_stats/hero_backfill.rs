@@ -507,13 +507,33 @@ mod tests {
         assert_eq!(by_session(&rows, "s1"), pair("ana", "Damage"));
     }
 
-    /// Records `(level, message)` of every event while installed.
-    type Events = std::sync::Arc<std::sync::Mutex<Vec<(tracing::Level, String)>>>;
+    thread_local! {
+        /// `(level, message)` of each INFO-or-louder event on this thread.
+        static THREAD_EVENTS: std::cell::RefCell<Vec<(tracing::Level, String)>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
 
-    #[derive(Clone, Default)]
-    struct Capture(Events);
+    /// Set once the process-wide [`Capture`] is the global default.
+    static CAPTURE_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    /// Process-wide layer that files each event under the thread that
+    /// emitted it, so parallel tests that also hit the skip log cannot
+    /// inflate this thread's count.
+    struct Capture;
 
     impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+        /// `OFF` until armed: registering the dispatch rebuilds the cache
+        /// before it becomes the global default, and a callsite first hit
+        /// in that gap would be cached as never. Keeping the max level off
+        /// until then means no `info!` reaches its callsite in the gap.
+        fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
+            Some(if CAPTURE_ARMED.load(std::sync::atomic::Ordering::SeqCst) {
+                tracing::level_filters::LevelFilter::INFO
+            } else {
+                tracing::level_filters::LevelFilter::OFF
+            })
+        }
+
         fn on_event(
             &self,
             event: &tracing::Event<'_>,
@@ -533,27 +553,46 @@ mod tests {
             }
             let mut msg = Message(String::new());
             event.record(&mut msg);
-            self.0
-                .lock()
-                .unwrap()
-                .push((*event.metadata().level(), msg.0));
+            let level = *event.metadata().level();
+            THREAD_EVENTS.with(|events| events.borrow_mut().push((level, msg.0)));
         }
+    }
+
+    /// The INFO-or-louder events `fut` emits on this thread.
+    ///
+    /// A scoped `set_default` subscriber flaked here (CI run 45250500352):
+    /// with one registered dispatch, tracing-core caches a callsite's
+    /// interest from whatever the registering thread's default is. A
+    /// parallel test with no subscriber that hit the skip log first cached
+    /// it as never and the event was dropped on every thread. With a
+    /// global subscriber every thread's default is this one, so the
+    /// callsite is always cached as enabled. The rebuild after arming
+    /// lifts the max level off `OFF`.
+    async fn capture_thread_events<T>(
+        fut: impl std::future::Future<Output = T>,
+    ) -> (T, Vec<(tracing::Level, String)>) {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        INSTALL.call_once(|| {
+            let subscriber = tracing_subscriber::registry().with(Capture);
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("no other global subscriber in scuffed-db tests");
+            CAPTURE_ARMED.store(true, std::sync::atomic::Ordering::SeqCst);
+            tracing::callsite::rebuild_interest_cache();
+        });
+        THREAD_EVENTS.with(|events| events.borrow_mut().clear());
+        let out = fut.await;
+        (out, THREAD_EVENTS.with(|events| events.take()))
     }
 
     #[tokio::test]
     async fn marker_skip_logs_at_info() {
-        use tracing_subscriber::layer::SubscriberExt;
-
         let db = test_db().await;
         assert_eq!(marker_count(&db).await, 1);
-        let capture = Capture::default();
-        let subscriber = tracing_subscriber::registry().with(capture.clone());
-        let (scanned, updated) = {
-            let _guard = tracing::subscriber::set_default(subscriber);
-            backfill_personal_match_hero_keys(&db.client).await.unwrap()
-        };
-        assert_eq!((scanned, updated), (0, 0));
-        let events = capture.0.lock().unwrap().clone();
+        let (result, events) =
+            capture_thread_events(backfill_personal_match_hero_keys(&db.client)).await;
+        assert_eq!(result.unwrap(), (0, 0));
         let skip: Vec<_> = events
             .iter()
             .filter(|(_, m)| m.contains("hero key backfill already done"))
