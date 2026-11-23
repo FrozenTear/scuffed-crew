@@ -113,22 +113,36 @@ impl Database {
         .await
     }
 
-    /// Count a user's withdrawn applications (the per-user withdrawn cap).
-    pub async fn count_withdrawn_applications(&self, user_id: &str) -> DbResult<u64> {
+    /// When a user's most recent withdrawn applications were withdrawn: the
+    /// `updated_at` of each row with `status = 'withdrawn'` and `updated_at`
+    /// after `since`, newest first, at most `limit` rows (the per-user
+    /// rolling withdrawn cap).
+    ///
+    /// `updated_at` is the withdrawn timestamp: the status write sets it and
+    /// a withdrawn row is not written again. A row withdrawn at or before
+    /// `since` is outside the window and is not returned. With `limit` set to
+    /// the cap, the length says whether the cap is reached, and the last
+    /// entry is the row whose leaving the window opens the next slot.
+    pub async fn withdrawn_application_times_since(
+        &self,
+        user_id: &str,
+        since: chrono::DateTime<Utc>,
+        limit: u64,
+    ) -> DbResult<Vec<chrono::DateTime<Utc>>> {
         with_timeout(async {
-            #[derive(Deserialize, SurrealValue)]
-            struct CountResult {
-                count: u64,
-            }
             let mut result = self
                 .client
                 .query(
-                    "SELECT count() FROM application WHERE user_id = $uid AND status = 'withdrawn' GROUP ALL",
+                    "SELECT VALUE updated_at FROM application \
+                     WHERE user_id = $uid AND status = 'withdrawn' AND updated_at > $since \
+                     ORDER BY updated_at DESC LIMIT $lim",
                 )
                 .bind(("uid", user_id.to_string()))
+                .bind(("since", SurrealDatetime::from(since)))
+                .bind(("lim", i64::try_from(limit).unwrap_or(i64::MAX)))
                 .await?;
-            let counts: Vec<CountResult> = result.take(0)?;
-            Ok(counts.first().map(|c| c.count).unwrap_or(0))
+            let times: Vec<SurrealDatetime> = result.take(0)?;
+            Ok(times.into_iter().map(Into::into).collect())
         })
         .await
     }

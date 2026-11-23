@@ -1,7 +1,8 @@
 use dioxus::prelude::*;
 use scuffed_types::{
-    Game, MAX_APPLICATION_MESSAGE_CHARS, MIN_APPLICATION_MESSAGE_CHARS,
-    application_message_long_enough,
+    APPLICATION_RESUBMIT_COOLDOWN_SECS, Game, MAX_APPLICATION_MESSAGE_CHARS,
+    MAX_APPLICATION_PREFERENCE_ITEMS, MAX_WITHDRAWN_APPLICATIONS, MIN_APPLICATION_MESSAGE_CHARS,
+    WITHDRAWN_APPLICATION_WINDOW_DAYS, application_message_long_enough,
 };
 use serde::{Deserialize, Serialize};
 
@@ -234,10 +235,13 @@ fn game_items(games: Vec<(String, String)>, selected: &[String]) -> Vec<(String,
         .collect()
 }
 
+/// Select or deselect one game. A game past
+/// [`MAX_APPLICATION_PREFERENCE_ITEMS`] is not added, since the server
+/// refuses a longer list. Deselecting always works.
 fn toggle_game(selected: &mut Vec<String>, id: &str) {
     if let Some(pos) = selected.iter().position(|x| x == id) {
         selected.remove(pos);
-    } else {
+    } else if selected.len() < MAX_APPLICATION_PREFERENCE_ITEMS {
         selected.push(id.to_string());
     }
 }
@@ -615,11 +619,27 @@ fn session_ended(logged_in: bool, mine_error: Option<&str>) -> bool {
 
 /// Body of the withdraw confirm. Withdrawing during a trial also ends the
 /// trial and logs the applicant out, so the strip says so before the click.
-fn withdraw_confirm_body(status: &str) -> &'static str {
-    if status == "trial" {
-        "This ends your trial and logs you out. You can apply again later if recruitment is open."
+///
+/// Applying again is not promised: the server makes them wait
+/// [`APPLICATION_RESUBMIT_COOLDOWN_SECS`], refuses past
+/// [`MAX_WITHDRAWN_APPLICATIONS`] withdrawals in
+/// [`WITHDRAWN_APPLICATION_WINDOW_DAYS`] days, and recruitment may be closed.
+fn withdraw_confirm_body(status: &str) -> String {
+    let minutes = APPLICATION_RESUBMIT_COOLDOWN_SECS / 60;
+    let wait = if minutes == 60 {
+        "an hour".to_string()
     } else {
-        "You can apply again later if recruitment is open."
+        format!("{minutes} minutes")
+    };
+    let again = format!(
+        "You have to wait {wait} before you can apply again, and only while recruitment is open. \
+         After {MAX_WITHDRAWN_APPLICATIONS} withdrawals in {WITHDRAWN_APPLICATION_WINDOW_DAYS} \
+         days you have to wait longer."
+    );
+    if status == "trial" {
+        format!("This ends your trial and logs you out. {again}")
+    } else {
+        again
     }
 }
 
@@ -827,10 +847,10 @@ fn ApplyForm(
                     "{ApplyField::Message.label()}"
                     {required_mark()}
                 }
-                // The minimum is said before the first submit, not only after
-                // a failed one.
+                // The minimum and the maximum are said before the first
+                // submit, not only after a failed one.
                 p { class: "field-hint", id: MESSAGE_HINT_ID,
-                    "At least {MIN_MESSAGE_CHARS} characters."
+                    "At least {MIN_MESSAGE_CHARS} characters, at most {MAX_APPLICATION_MESSAGE_CHARS}."
                 }
                 textarea {
                     class: "field-input",
@@ -1114,7 +1134,7 @@ pub fn Apply() -> Element {
                                             InlineConfirm {
                                                 id: WITHDRAW_ID.to_string(),
                                                 title: "Withdraw your application?".to_string(),
-                                                body: withdraw_confirm_body(app.status.as_str()).to_string(),
+                                                body: withdraw_confirm_body(app.status.as_str()),
                                                 confirm_label: withdraw_label.to_string(),
                                                 busy: submitting(),
                                                 on_confirm: move |_| {
@@ -1477,6 +1497,33 @@ mod tests {
         assert_eq!(selected, ["ow", "val"]);
         toggle_game(&mut selected, "ow");
         assert_eq!(selected, ["val"]);
+    }
+
+    #[test]
+    fn an_eleventh_game_is_ignored_and_deselect_still_works_at_ten() {
+        let mut selected: Vec<String> = Vec::new();
+        for n in 0..MAX_APPLICATION_PREFERENCE_ITEMS {
+            toggle_game(&mut selected, &format!("game-{n}"));
+        }
+        assert_eq!(MAX_APPLICATION_PREFERENCE_ITEMS, 10);
+        assert_eq!(selected.len(), 10);
+        let ten = selected.clone();
+
+        // The eleventh is not added, however often it is tried.
+        toggle_game(&mut selected, "game-10");
+        toggle_game(&mut selected, "game-10");
+        assert_eq!(selected, ten);
+
+        // Deselect still works at ten, and frees a place.
+        toggle_game(&mut selected, "game-3");
+        assert_eq!(selected.len(), 9);
+        assert!(!selected.contains(&"game-3".to_string()));
+        toggle_game(&mut selected, "game-10");
+        assert_eq!(selected.len(), 10);
+        assert_eq!(selected.last().map(String::as_str), Some("game-10"));
+        toggle_game(&mut selected, "game-3");
+        assert_eq!(selected.len(), 10);
+        assert!(!selected.contains(&"game-3".to_string()));
     }
 
     #[test]
@@ -2081,12 +2128,12 @@ mod tests {
         );
         let capped = ClientError::http(
             429,
-            r#"{"error":"You have reached the limit of withdrawn applications"}"#,
+            r#"{"error":"You have withdrawn 5 applications in the last 30 days. You can withdraw again in 3 days"}"#,
             None,
         );
         assert_eq!(
             action_failure_text("Couldn't withdraw the application", &capped),
-            "Couldn't withdraw the application: You have reached the limit of withdrawn applications."
+            "Couldn't withdraw the application: You have withdrawn 5 applications in the last 30 days. You can withdraw again in 3 days."
         );
         // Per-IP limit: the body is a code, not a sentence.
         let limited = ClientError::http(
@@ -2161,7 +2208,19 @@ mod tests {
         assert!(trial.contains("logs you out"), "{trial}");
         let pending = withdraw_confirm_body("pending");
         assert!(!pending.contains("trial"), "{pending}");
-        assert_eq!(pending, "You can apply again later if recruitment is open.");
+        assert_eq!(
+            pending,
+            "You have to wait an hour before you can apply again, and only while recruitment is open. After 5 withdrawals in 30 days you have to wait longer."
+        );
+        // Both variants name the cooldown, and neither promises a later
+        // application without it.
+        assert_eq!(
+            trial,
+            format!("This ends your trial and logs you out. {pending}")
+        );
+        for body in [&trial, &pending] {
+            assert!(!body.contains("apply again later"), "{body}");
+        }
     }
 
     #[test]
@@ -2340,11 +2399,12 @@ mod tests {
             "{html}"
         );
         assert!(!html.contains("apply-role-err"), "{html}");
-        // The 10 character minimum is said before the first submit: a hint
-        // that is always there and always describes the field.
+        // The 10 character minimum and the 4000 maximum are said before the
+        // first submit: a hint that is always there and always describes the
+        // field.
         assert!(
             html.contains(
-                r#"<p class="field-hint" id="apply-message-hint">At least 10 characters.</p>"#
+                r#"<p class="field-hint" id="apply-message-hint">At least 10 characters, at most 4000.</p>"#
             ),
             "{html}"
         );

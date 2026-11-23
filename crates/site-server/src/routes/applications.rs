@@ -13,8 +13,8 @@ use scuffed_db::{Application, ApplicationStatus, AuditAction, AuditTargetType, M
 use scuffed_types::{
     ApplicationPreferenceError, MAX_APPLICATION_MESSAGE_CHARS,
     MAX_APPLICATION_PREFERENCE_ITEM_CHARS, MAX_APPLICATION_PREFERENCE_ITEMS,
-    MIN_APPLICATION_MESSAGE_CHARS, application_message_long_enough, application_message_within_max,
-    check_application_preferences,
+    MAX_WITHDRAWN_APPLICATIONS, MIN_APPLICATION_MESSAGE_CHARS, WITHDRAWN_APPLICATION_WINDOW_DAYS,
+    application_message_long_enough, application_message_within_max, check_application_preferences,
 };
 
 use crate::extractors::OfficerUser;
@@ -22,6 +22,7 @@ use crate::membership_policy::{
     applicant_may_self_withdraw, application_blocks_resubmit, application_resubmit_wait_minutes,
     application_status_deactivates_member, application_status_ensures_member,
     is_valid_application_transition, role_on_application_accept, withdrawn_application_cap_reached,
+    withdrawn_application_cap_wait, withdrawn_application_window_start,
 };
 use crate::routes::audit_log::audit;
 use crate::state::AppState;
@@ -57,8 +58,44 @@ fn too_many_requests(msg: &str) -> (StatusCode, Json<ErrorResponse>) {
     )
 }
 
-/// 429 text of the per-user withdrawn cap, on submit and on withdraw.
-const WITHDRAWN_CAP_MESSAGE: &str = "You have reached the limit of withdrawn applications";
+/// The rolling withdrawn cap: `Some(reason)` for the 429 when the user has
+/// withdrawn [`MAX_WITHDRAWN_APPLICATIONS`] applications in the last
+/// [`WITHDRAWN_APPLICATION_WINDOW_DAYS`] days, `None` when a slot is free.
+///
+/// `again` is what the user was doing ("apply" or "withdraw"). The reason
+/// says when the next slot opens: when the oldest of the newest
+/// [`MAX_WITHDRAWN_APPLICATIONS`] in-window rows leaves the window. Rows
+/// withdrawn longer ago do not count, and no row is rewritten or deleted.
+async fn withdrawn_cap_refusal(
+    state: &AppState,
+    user_id: &str,
+    again: &str,
+) -> Result<Option<String>, scuffed_db::DbError> {
+    let now = chrono::Utc::now();
+    let recent = state
+        .db
+        .withdrawn_application_times_since(
+            user_id,
+            withdrawn_application_window_start(now),
+            MAX_WITHDRAWN_APPLICATIONS,
+        )
+        .await?;
+    if !withdrawn_application_cap_reached(recent.len() as u64) {
+        return Ok(None);
+    }
+    // Newest first, so the last one is the next to leave the window.
+    let wait = recent
+        .last()
+        .map(|slot| withdrawn_application_cap_wait(*slot, now));
+    let limit = format!(
+        "You have withdrawn {MAX_WITHDRAWN_APPLICATIONS} applications in the last \
+         {WITHDRAWN_APPLICATION_WINDOW_DAYS} days"
+    );
+    Ok(Some(match wait {
+        Some(wait) => format!("{limit}. You can {again} again in {wait}"),
+        None => limit,
+    }))
+}
 
 /// `Ok(true)` is open. `Ok(false)` is 403. A settings read error fails closed
 /// with 500 so a new application is not stored.
@@ -199,15 +236,14 @@ pub async fn submit_application(
         )));
     }
 
-    // Per-user withdrawn cap: apply and withdraw cannot be repeated without
-    // end. Rows already over the cap are left as they are.
-    let withdrawn = state
-        .db
-        .count_withdrawn_applications(&user.id)
+    // Per-user rolling withdrawn cap: apply and withdraw cannot be repeated
+    // without end. Only rows withdrawn inside the window count, and rows
+    // already over the cap are left as they are.
+    if let Some(reason) = withdrawn_cap_refusal(&state, &user.id, "apply")
         .await
-        .map_err(|e| internal_err(e, "count_withdrawn_applications on submit"))?;
-    if withdrawn_application_cap_reached(withdrawn) {
-        return Err(too_many_requests(WITHDRAWN_CAP_MESSAGE));
+        .map_err(|e| internal_err(e, "withdrawn cap on submit"))?
+    {
+        return Err(too_many_requests(&reason));
     }
 
     // Per-user cooldown: the latest application is closed (withdrawn,
@@ -412,15 +448,14 @@ pub async fn withdraw_my_application(
         )));
     }
 
-    // A withdraw that would put the user over the withdrawn cap is refused,
-    // so a row over the cap is never added. An officer can still close it.
-    let withdrawn = state
-        .db
-        .count_withdrawn_applications(&user.id)
+    // A withdraw that would put the user over the rolling withdrawn cap is
+    // refused, so a row over the cap is never added inside the window. The
+    // open row is left as it is. An officer can still close it.
+    if let Some(reason) = withdrawn_cap_refusal(&state, &user.id, "withdraw")
         .await
-        .map_err(|e| internal_err(e, "count_withdrawn_applications on withdraw"))?;
-    if withdrawn_application_cap_reached(withdrawn) {
-        return Err(too_many_requests(WITHDRAWN_CAP_MESSAGE));
+        .map_err(|e| internal_err(e, "withdrawn cap on withdraw"))?
+    {
+        return Err(too_many_requests(&reason));
     }
 
     // Audit actor: member id when provisioned (trial), else user id.
@@ -1863,13 +1898,45 @@ mod tests {
         assert_eq!(body.error, "You already have an open application (pending)");
     }
 
+    /// Move every `updated_at` of the user's applications further into the
+    /// past by `by` (a SurrealQL duration such as `61m` or `31d`), keeping
+    /// the distance between rows: the same as that much time passing.
+    async fn let_time_pass(state: &AppState, user_id: &str, by: &str) {
+        // `by` is a test literal, so it is safe in the query text.
+        state
+            .db
+            .client
+            .query(format!(
+                "UPDATE application SET updated_at = updated_at - {by} WHERE user_id = $uid"
+            ))
+            .bind(("uid", user_id.to_string()))
+            .await
+            .expect("let time pass");
+    }
+
+    /// Withdrawn rows of the user inside the rolling window, uncapped.
+    async fn withdrawn_in_window(state: &AppState, user_id: &str) -> usize {
+        state
+            .db
+            .withdrawn_application_times_since(
+                user_id,
+                withdrawn_application_window_start(chrono::Utc::now()),
+                1000,
+            )
+            .await
+            .expect("withdrawn in window")
+            .len()
+    }
+
+    const CAP_REASON: &str = "You have withdrawn 5 applications in the last 30 days";
+
     #[tokio::test]
-    async fn five_withdrawn_applications_refuse_a_new_submit() {
+    async fn five_withdrawn_applications_in_the_window_refuse_a_new_submit() {
         let state = test_state().await;
         seed_user(&state, "capped", "capped").await;
         seed_withdrawn(&state, "capped", 5).await;
         // Past the cooldown, so the cap is what refuses.
-        age_applications(&state, "capped", 120).await;
+        let_time_pass(&state, "capped", "2h").await;
 
         let (status, body) = must_err(
             submit_existing(&state, "capped", vec![], vec![], VALID_MESSAGE).await,
@@ -1878,25 +1945,39 @@ mod tests {
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(
             body.error,
-            "You have reached the limit of withdrawn applications"
+            format!("{CAP_REASON}. You can apply again in 30 days")
         );
         // Nothing added, nothing deleted or rewritten.
         assert_eq!(application_count(&state, "capped").await, 5);
-        assert_eq!(
-            state
-                .db
-                .count_withdrawn_applications("capped")
-                .await
-                .expect("count"),
-            5
+        assert_eq!(withdrawn_in_window(&state, "capped").await, 5);
+
+        // 29 days on, all five are still inside the window.
+        let_time_pass(&state, "capped", "29d").await;
+        let (status, body) = must_err(
+            submit_existing(&state, "capped", vec![], vec![], VALID_MESSAGE).await,
+            "submit on day 29",
         );
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            body.error,
+            format!("{CAP_REASON}. You can apply again in 22 hours")
+        );
+        assert_eq!(application_count(&state, "capped").await, 5);
     }
 
+    /// Four withdrawn rows in the window and older ones outside it: the
+    /// older rows do not count, so the user can apply after the cooldown.
     #[tokio::test]
-    async fn four_withdrawn_applications_can_still_apply_after_the_cooldown() {
+    async fn four_withdrawn_in_the_window_plus_older_ones_can_still_apply() {
         let state = test_state().await;
         seed_user(&state, "fourwd", "fourwd").await;
+        // Two withdrawn more than 30 days ago.
+        seed_withdrawn(&state, "fourwd", 2).await;
+        let_time_pass(&state, "fourwd", "31d").await;
+        // Four withdrawn just now.
         seed_withdrawn(&state, "fourwd", 4).await;
+        assert_eq!(application_count(&state, "fourwd").await, 6);
+        assert_eq!(withdrawn_in_window(&state, "fourwd").await, 4);
 
         // Under the cap, but the last withdraw was just now: cooldown.
         let (status, body) = must_err(
@@ -1906,32 +1987,37 @@ mod tests {
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(body.error, "You can apply again in 60 minutes");
 
-        age_applications(&state, "fourwd", 61).await;
+        let_time_pass(&state, "fourwd", "61m").await;
         let (status, _) = must_ok(
             submit_existing(&state, "fourwd", vec![], vec![], VALID_MESSAGE).await,
             "submit under the cap",
         );
         assert_eq!(status, StatusCode::CREATED);
 
-        // The fifth withdraw is allowed and reaches the cap.
+        // The fifth in-window withdraw is allowed and reaches the cap.
         let Json(app) = must_ok(withdraw_existing(&state, "fourwd").await, "fifth withdraw");
         assert_eq!(app.status, ApplicationStatus::Withdrawn);
-        age_applications(&state, "fourwd", 61).await;
+        assert_eq!(withdrawn_in_window(&state, "fourwd").await, 5);
+        let_time_pass(&state, "fourwd", "61m").await;
         let (status, body) = must_err(
             submit_existing(&state, "fourwd", vec![], vec![], VALID_MESSAGE).await,
             "submit at the cap",
         );
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        // The slot opens when the oldest of the five leaves the window.
         assert_eq!(
             body.error,
-            "You have reached the limit of withdrawn applications"
+            format!("{CAP_REASON}. You can apply again in 30 days")
         );
+        // The old rows are still stored.
+        assert_eq!(application_count(&state, "fourwd").await, 7);
     }
 
-    /// An open application next to five withdrawn rows (stored before the
-    /// cap, or withdrawn by an officer) cannot be self-withdrawn into a sixth.
+    /// An open application next to five rows withdrawn in the window (stored
+    /// before the cap, or withdrawn by an officer) cannot be self-withdrawn
+    /// into a sixth.
     #[tokio::test]
-    async fn a_sixth_withdraw_is_refused() {
+    async fn a_sixth_withdraw_in_the_window_is_refused() {
         let state = test_state().await;
         seed_user(&state, "sixth", "sixth").await;
         seed_withdrawn(&state, "sixth", 5).await;
@@ -1948,7 +2034,7 @@ mod tests {
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(
             body.error,
-            "You have reached the limit of withdrawn applications"
+            format!("{CAP_REASON}. You can withdraw again in 30 days")
         );
         let stored = state
             .db
@@ -1957,45 +2043,263 @@ mod tests {
             .expect("reload")
             .expect("application");
         assert_eq!(stored.status, ApplicationStatus::Pending);
+        assert_eq!(withdrawn_in_window(&state, "sixth").await, 5);
+        assert_eq!(application_count(&state, "sixth").await, 6);
+    }
+
+    /// The cap is a window, not a lifetime count: once the oldest counted
+    /// withdraw is more than 30 days old, a new application is accepted.
+    #[tokio::test]
+    async fn apply_is_allowed_again_once_the_oldest_withdraw_leaves_the_window() {
+        let state = test_state().await;
+        seed_user(&state, "rollapply", "rollapply").await;
+        // One withdrawn 29 days and 11 hours ago, four withdrawn 11 hours ago.
+        seed_withdrawn(&state, "rollapply", 1).await;
+        let_time_pass(&state, "rollapply", "29d").await;
+        seed_withdrawn(&state, "rollapply", 4).await;
+        let_time_pass(&state, "rollapply", "11h").await;
+
+        let (status, body) = must_err(
+            submit_existing(&state, "rollapply", vec![], vec![], VALID_MESSAGE).await,
+            "submit at the cap",
+        );
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        // Under a day left is said in hours, not "0 days" or "1 day".
         assert_eq!(
-            state
-                .db
-                .count_withdrawn_applications("sixth")
-                .await
-                .expect("count"),
-            5
+            body.error,
+            format!("{CAP_REASON}. You can apply again in 13 hours")
+        );
+        assert_eq!(application_count(&state, "rollapply").await, 5);
+
+        // A day and an hour later the oldest is past 30 days.
+        let_time_pass(&state, "rollapply", "25h").await;
+        assert_eq!(withdrawn_in_window(&state, "rollapply").await, 4);
+        let (status, Json(app)) = must_ok(
+            submit_existing(&state, "rollapply", vec![], vec![], VALID_MESSAGE).await,
+            "submit after the oldest left the window",
+        );
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(app.status, ApplicationStatus::Pending);
+        // The row that left the window is not deleted or rewritten.
+        assert_eq!(application_count(&state, "rollapply").await, 6);
+
+        // The freed slot can be used for one more withdraw, and then the
+        // cap is reached again.
+        let Json(app) = must_ok(withdraw_existing(&state, "rollapply").await, "withdraw");
+        assert_eq!(app.status, ApplicationStatus::Withdrawn);
+        assert_eq!(withdrawn_in_window(&state, "rollapply").await, 5);
+        let_time_pass(&state, "rollapply", "61m").await;
+        let (status, body) = must_err(
+            submit_existing(&state, "rollapply", vec![], vec![], VALID_MESSAGE).await,
+            "submit at the cap again",
+        );
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        // The next to leave is one of the four from 11 hours (now 37 hours)
+        // ago.
+        assert_eq!(
+            body.error,
+            format!("{CAP_REASON}. You can apply again in 29 days")
         );
     }
 
-    /// The count is per user and only of withdrawn rows.
+    /// The same for a withdraw: refused while five are in the window, and
+    /// allowed once the oldest of them is more than 30 days old.
     #[tokio::test]
-    async fn withdrawn_count_ignores_other_users_and_other_statuses() {
+    async fn withdraw_is_allowed_again_once_the_oldest_withdraw_leaves_the_window() {
+        let state = test_state().await;
+        seed_user(&state, "rollwd", "rollwd").await;
+        seed_withdrawn(&state, "rollwd", 1).await;
+        let_time_pass(&state, "rollwd", "29d12h").await;
+        seed_withdrawn(&state, "rollwd", 4).await;
+        let open = state
+            .db
+            .submit_application("rollwd", vec![], vec![], Some(VALID_MESSAGE))
+            .await
+            .expect("open application");
+
+        let (status, body) = must_err(
+            withdraw_existing(&state, "rollwd").await,
+            "withdraw at the cap",
+        );
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            body.error,
+            format!("{CAP_REASON}. You can withdraw again in 12 hours")
+        );
+        let stored = state
+            .db
+            .get_application(&open.id)
+            .await
+            .expect("reload")
+            .expect("application");
+        assert_eq!(stored.status, ApplicationStatus::Pending);
+
+        // 13 hours later the oldest is past 30 days.
+        let_time_pass(&state, "rollwd", "13h").await;
+        assert_eq!(withdrawn_in_window(&state, "rollwd").await, 4);
+        let Json(app) = must_ok(
+            withdraw_existing(&state, "rollwd").await,
+            "withdraw after the oldest left the window",
+        );
+        assert_eq!(app.status, ApplicationStatus::Withdrawn);
+        assert_eq!(app.id, open.id);
+        assert_eq!(withdrawn_in_window(&state, "rollwd").await, 5);
+        assert_eq!(application_count(&state, "rollwd").await, 6);
+    }
+
+    /// The query is per user, only of withdrawn rows, only inside the
+    /// window, newest first, and stops at the limit.
+    #[tokio::test]
+    async fn withdrawn_times_ignore_other_users_other_statuses_and_old_rows() {
         let state = test_state().await;
         seed_user(&state, "counta", "counta").await;
         seed_user(&state, "countb", "countb").await;
-        seed_withdrawn(&state, "counta", 2).await;
-        seed_withdrawn(&state, "countb", 5).await;
+        // One old row, then two recent ones, then an open application.
+        seed_withdrawn(&state, "counta", 1).await;
+        let_time_pass(&state, "counta", "30d1h").await;
+        seed_withdrawn(&state, "counta", 1).await;
+        let_time_pass(&state, "counta", "3d").await;
+        seed_withdrawn(&state, "counta", 1).await;
+        seed_withdrawn(&state, "countb", 7).await;
         state
             .db
             .submit_application("counta", vec![], vec![], Some(VALID_MESSAGE))
             .await
             .expect("open application");
+
+        let now = chrono::Utc::now();
+        let since = withdrawn_application_window_start(now);
+        let times = state
+            .db
+            .withdrawn_application_times_since("counta", since, 5)
+            .await
+            .expect("times");
+        assert_eq!(times.len(), 2);
+        assert!(times[0] > times[1], "newest first: {times:?}");
+        assert!(now - times[0] < chrono::Duration::hours(1), "{times:?}");
+        assert!(now - times[1] >= chrono::Duration::days(3), "{times:?}");
+        assert!(now - times[1] < chrono::Duration::days(4), "{times:?}");
+        // The limit bounds the answer: the cap is all the handler needs.
         assert_eq!(
             state
                 .db
-                .count_withdrawn_applications("counta")
+                .withdrawn_application_times_since("countb", since, 5)
                 .await
-                .expect("count"),
-            2
+                .expect("times")
+                .len(),
+            5
         );
-        assert_eq!(
-            state
-                .db
-                .count_withdrawn_applications("nobody")
-                .await
-                .expect("count"),
-            0
+        assert_eq!(withdrawn_in_window(&state, "countb").await, 7);
+        assert_eq!(withdrawn_in_window(&state, "nobody").await, 0);
+    }
+
+    /// Accept one application as an officer and return the member it made.
+    async fn accept_application(state: &AppState, app_id: String, user_id: &str) -> Member {
+        let Json(accepted) = must_ok(
+            update_application(
+                State(state.clone()),
+                officer(state).await,
+                Path(app_id),
+                Json(UpdateApplicationRequest {
+                    status: ApplicationStatus::Accepted,
+                    review_notes: None,
+                }),
+            )
+            .await,
+            "accept",
         );
+        assert_eq!(accepted.status, ApplicationStatus::Accepted);
+        state
+            .db
+            .get_member_by_user(user_id)
+            .await
+            .expect("get member")
+            .expect("member")
+    }
+
+    /// An accepted applicant is an active member: the 409 it always was,
+    /// and it comes before the cooldown 429.
+    #[tokio::test]
+    async fn active_accepted_member_is_still_409_inside_the_cooldown() {
+        let state = test_state().await;
+        let (_, Json(app)) = must_ok(
+            submit_new(&state, "accepted", vec![], vec![], VALID_MESSAGE).await,
+            "first application",
+        );
+        let member = accept_application(&state, app.id, "accepted").await;
+        assert!(member.is_active);
+
+        let (status, body) = must_err(
+            submit_existing(&state, "accepted", vec![], vec![], VALID_MESSAGE).await,
+            "resubmit as an active member",
+        );
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body.error, "Already an active org member");
+        // Still the 409 after the cooldown, and nothing was stored.
+        age_applications(&state, "accepted", 61).await;
+        let (status, body) = must_err(
+            submit_existing(&state, "accepted", vec![], vec![], VALID_MESSAGE).await,
+            "resubmit as an active member after the cooldown",
+        );
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body.error, "Already an active org member");
+        assert_eq!(application_count(&state, "accepted").await, 1);
+    }
+
+    /// An accepted application is closed too. A member who was accepted and
+    /// then deactivated (not banned) may apply again, but only after the
+    /// cooldown from the accept.
+    #[tokio::test]
+    async fn resubmit_right_after_accept_waits_for_the_cooldown() {
+        let state = test_state().await;
+        let (_, Json(app)) = must_ok(
+            submit_new(&state, "acceptcd", vec![], vec![], VALID_MESSAGE).await,
+            "first application",
+        );
+        let member = accept_application(&state, app.id, "acceptcd").await;
+        state
+            .db
+            .update_member(
+                &member.id,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(false),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("deactivate");
+
+        let (status, body) = must_err(
+            submit_existing(&state, "acceptcd", vec![], vec![], VALID_MESSAGE).await,
+            "resubmit inside the cooldown",
+        );
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body.error, "You can apply again in 60 minutes");
+        assert_eq!(application_count(&state, "acceptcd").await, 1);
+
+        age_applications(&state, "acceptcd", 59).await;
+        let (status, body) = must_err(
+            submit_existing(&state, "acceptcd", vec![], vec![], VALID_MESSAGE).await,
+            "resubmit at 59 minutes",
+        );
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body.error, "You can apply again in 1 minute");
+
+        age_applications(&state, "acceptcd", 61).await;
+        let (status, Json(again)) = must_ok(
+            submit_existing(&state, "acceptcd", vec![], vec![], VALID_MESSAGE).await,
+            "resubmit after the cooldown",
+        );
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(again.status, ApplicationStatus::Pending);
+        assert_eq!(application_count(&state, "acceptcd").await, 2);
     }
 
     /// Trial/accept copies the account username into `member.display_name`.

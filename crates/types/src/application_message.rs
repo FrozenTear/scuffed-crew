@@ -80,9 +80,18 @@ pub const APPLICATION_IP_REPLENISH_SECS: u64 = 60;
 /// (withdrawn, rejected or accepted) before a new one is accepted.
 pub const APPLICATION_RESUBMIT_COOLDOWN_SECS: i64 = 60 * 60;
 
-/// Withdrawn applications one user may hold. At the cap a new application
-/// is refused, and so is a withdraw that would add another.
+/// Withdrawn applications one user may add inside the rolling window
+/// ([`WITHDRAWN_APPLICATION_WINDOW_DAYS`]). At the cap a new application is
+/// refused, and so is a withdraw that would add another, until the oldest
+/// counted one leaves the window.
 pub const MAX_WITHDRAWN_APPLICATIONS: u64 = 5;
+
+/// Days a withdrawn application counts toward
+/// [`MAX_WITHDRAWN_APPLICATIONS`], from the moment it was withdrawn.
+pub const WITHDRAWN_APPLICATION_WINDOW_DAYS: i64 = 30;
+
+/// [`WITHDRAWN_APPLICATION_WINDOW_DAYS`] in seconds.
+pub const WITHDRAWN_APPLICATION_WINDOW_SECS: i64 = WITHDRAWN_APPLICATION_WINDOW_DAYS * 24 * 60 * 60;
 
 #[cfg(test)]
 mod tests {
@@ -251,5 +260,7 @@ mod tests {
         assert_eq!(APPLICATION_IP_REPLENISH_SECS, 60);
         assert_eq!(APPLICATION_RESUBMIT_COOLDOWN_SECS, 3600);
         assert_eq!(MAX_WITHDRAWN_APPLICATIONS, 5);
+        assert_eq!(WITHDRAWN_APPLICATION_WINDOW_DAYS, 30);
+        assert_eq!(WITHDRAWN_APPLICATION_WINDOW_SECS, 2_592_000);
     }
 }
