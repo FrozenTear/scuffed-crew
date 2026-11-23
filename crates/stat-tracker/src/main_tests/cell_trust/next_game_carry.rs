@@ -475,7 +475,7 @@ fn a_finished_board_matches_on_its_sure_cells_only() {
     assert!(!shows_finished_board(&facts(A_FINAL, three_held), a, none));
 }
 
-/// Shared [`BoardFacts`] for the bounds tests below: `held` and `suspect`
+/// Shared [`BoardFacts`] for the tests in this file: `held` and `suspect`
 /// per column, and the map this Tab read on its top bar (`None`: none).
 fn board_facts(
     read: [u32; 6],
@@ -543,8 +543,10 @@ fn the_floor_is_1000_over_the_compared_big_cells() {
     assert!(fits([5, 2, 1, 1000, 0, 0], none));
     assert!(!fits([5, 2, 1, 500, 300, 199], none));
     assert!(fits([5, 2, 1, 500, 300, 200], none));
-    let read = board_facts([5, 2, 1, 600, 400, 0], none, none, None);
-    let stored = counters_from_cols([5, 2, 1, 600, 300, 0]);
+    // Only the damage's 600 is summed; the skipped healing's 400 would
+    // bring the sum to 1000.
+    let read = board_facts([5, 2, 1, 600, 500, 0], none, none, None);
+    let stored = counters_from_cols([5, 2, 1, 600, 400, 0]);
     assert!(!shows_finished_board(&read, stored, cols_set(&[4])));
 }
 
@@ -621,9 +623,8 @@ fn one_sure_column_below_a_carried_board_still_fits() {
 
 /// A known limit kept on purpose (a stronger rule is 0.7 work): A's final
 /// board carried, and B's first Tab reads 0/0/2/(damage held)/307/600.
-/// Only deaths is sure and below, so nothing
-/// votes the board out: it fits, as before #809, and can seed B's held
-/// damage with A's 2007.
+/// Only deaths is sure and below, so nothing votes the board out: it fits,
+/// as before #809, and can seed B's held damage with A's 2007.
 #[test]
 fn a_carried_board_with_one_sure_vote_column_below_fits_known_limit() {
     let none = [false; 6];
@@ -796,8 +797,8 @@ async fn a_finished_row_is_compared_at_the_members_edit() {
 }
 
 /// An older row's `rN.field` suspect name marks that column unsure too:
-/// A's last row stored damage 2907 as `r0.dmg`, and A's board read sure
-/// with 2007 still matches on the other columns.
+/// A's last row stored damage 2907, marked unsure as `r0.dmg`, and A's
+/// board read sure with 2007 still matches on the other columns.
 #[tokio::test]
 async fn a_legacy_row_suspect_name_marks_its_column_unsure() {
     let dir = tempfile::tempdir().unwrap();
