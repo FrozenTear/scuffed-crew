@@ -379,9 +379,10 @@ struct SharedRelayState {
     /// The pending reconnect timer's callback. Owned here, not `forget()`-ed,
     /// so `cancel_reconnect_timer` frees it with the timer.
     reconnect_timer: RefCell<Option<Closure<dyn FnMut()>>>,
-    /// Bumped each time a socket is let go (`release_socket`). An async
-    /// answer for an older socket (a NIP-42 fetch) sees a newer value and is
-    /// dropped instead of acting on the current socket.
+    /// Bumped each time a socket is let go: by `release_socket`, and by
+    /// `onclose` when a transport close drops the socket. An async answer
+    /// for an older socket (a NIP-42 fetch) sees a newer value and is
+    /// dropped instead of acting on the current socket or the owner.
     connection_generation: RefCell<u64>,
     intentional_disconnect: RefCell<bool>,
     relay_url: RefCell<Option<String>>,
@@ -421,8 +422,9 @@ impl SharedRelayState {
     }
 }
 
-/// The last `NostrRelayManager` clone is gone. The socket's handlers and the
-/// reconnect timer hold only a `Weak`, so this runs even without
+/// The last `NostrRelayManager` clone is gone. The socket's handlers, the
+/// reconnect timer and a pending NIP-42 fetch hold only a `Weak`, so this
+/// runs at once, even mid-fetch and without
 /// `disconnect()`: let the socket go and clear the timer, so neither can call
 /// back or leak. No state is emitted; the owner is gone.
 impl Drop for SharedRelayState {
@@ -585,6 +587,10 @@ fn setup_relay_connection(shared: &Rc<SharedRelayState>) {
                     ));
                 }
                 *shared_close.socket.borrow_mut() = None;
+                // That socket is let go: a NIP-42 fetch for it is now stale.
+                // The handlers stay (this one is running) until the next
+                // `release_socket` frees them.
+                *shared_close.connection_generation.borrow_mut() += 1;
 
                 if *shared_close.intentional_disconnect.borrow() {
                     shared_close.emit_state(RelayConnectionState::Disconnected);
@@ -719,14 +725,22 @@ fn handle_relay_message(shared: &Rc<SharedRelayState>, msg: RelayMessage) {
             let auth_endpoint = shared.auth_endpoint.borrow().clone();
             let relay_url = shared.relay_url.borrow().clone().unwrap_or_default();
             if let Some(endpoint) = auth_endpoint {
-                let shared_auth = shared.clone();
+                // A `Weak`, so a fetch in flight keeps neither the state
+                // nor its socket alive: if the owner is gone by the answer,
+                // there is nothing to act on or emit into.
+                let weak_auth = Rc::downgrade(shared);
                 // The socket this challenge came on. If it is let go while
-                // the fetch runs (disconnect, retry, reconnect), the answer
-                // belongs to no socket: drop it rather than send an old
-                // challenge's AUTH on a new socket.
+                // the fetch runs (disconnect, retry, reconnect, a transport
+                // close), the answer belongs to no socket: drop it rather
+                // than send an old challenge's AUTH on a new socket or emit
+                // a stale Error. `disconnect` lets its socket go too, so
+                // this also covers a late answer after it.
                 let generation = *shared.connection_generation.borrow();
                 wasm_bindgen_futures::spawn_local(async move {
                     let result = fetch_auth_event(&endpoint, &relay_url, &challenge).await;
+                    let Some(shared_auth) = weak_auth.upgrade() else {
+                        return;
+                    };
                     if *shared_auth.connection_generation.borrow() != generation {
                         return;
                     }
@@ -745,11 +759,6 @@ fn handle_relay_message(shared: &Rc<SharedRelayState>, msg: RelayMessage) {
                         }
                         Err(e) => {
                             tracing::error!("NIP-42 auth failed: {e}");
-                            // After `disconnect()` the owner may be gone;
-                            // a late answer must not call back into it.
-                            if *shared_auth.intentional_disconnect.borrow() {
-                                return;
-                            }
                             shared_auth.emit_state(RelayConnectionState::Error);
                         }
                     }
@@ -1306,25 +1315,60 @@ mod tests {
     }
 
     /// A NIP-42 fetch answers for the socket its challenge came on. Letting
-    /// a socket go bumps the generation, and the fetch drops an answer from
-    /// an older one before either arm runs.
+    /// a socket go (`release_socket`, or a transport close in `onclose`)
+    /// bumps the generation. The fetch holds only a `Weak`, and after the
+    /// `.await` it upgrades, then drops an answer from an older socket,
+    /// before either arm runs. A check above the `.await` would miss every
+    /// socket let go during the fetch, so the order is pinned.
     #[test]
     fn a_stale_auth_fetch_is_dropped_by_connection_generation() {
         let prod = prod_source();
+        let bump = "connection_generation.borrow_mut() += 1;";
         let release = fn_body(prod, "fn release_socket(");
-        assert!(release.contains("*shared.connection_generation.borrow_mut() += 1;"));
+        assert!(release.contains(&format!("*shared.{bump}")));
+
+        let setup = fn_body(prod, "fn setup_relay_connection(");
+        let close_drop = setup
+            .find("*shared_close.socket.borrow_mut() = None;")
+            .expect("onclose drops the socket");
+        let close_bump = setup
+            .find(&format!("*shared_close.{bump}"))
+            .expect("onclose bumps the generation");
+        let close_reconnect = setup
+            .find("let attempts = *shared_close.reconnect_attempts.borrow();")
+            .expect("reconnect scheduling");
+        assert!(close_drop < close_bump && close_bump < close_reconnect);
+
         let handler = fn_body(prod, "fn handle_relay_message(");
+        assert!(!handler.contains("shared.clone()"), "the fetch holds no Rc");
+        let weak = handler
+            .find("let weak_auth = Rc::downgrade(shared);")
+            .expect("fetch holds a Weak");
         let captured = handler
             .find("let generation = *shared.connection_generation.borrow();")
             .expect("generation captured");
         let spawn = handler.find("spawn_local(").expect("spawn");
+        let fetched = handler
+            .find("fetch_auth_event(&endpoint, &relay_url, &challenge).await;")
+            .expect("fetch awaited");
+        let upgrade = handler
+            .find("let Some(shared_auth) = weak_auth.upgrade() else {")
+            .expect("upgrade after the fetch");
         let check = handler
             .find("if *shared_auth.connection_generation.borrow() != generation {")
             .expect("generation checked");
         let ok_arm = handler.find("Ok(event) => {").expect("Ok arm");
         let err_arm = handler.find("Err(e) => {").expect("Err arm");
-        assert!(captured < spawn && spawn < check);
+        assert!(weak < spawn && captured < spawn);
+        assert!(spawn < fetched && fetched < upgrade && upgrade < check);
         assert!(check < ok_arm && check < err_arm);
+        assert_eq!(handler.matches("weak_auth.upgrade()").count(), 1);
+        assert_eq!(
+            handler
+                .matches("connection_generation.borrow() != generation")
+                .count(),
+            1
+        );
     }
 
     /// Sockets are browser-only, so pin the source: a released socket has
