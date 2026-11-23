@@ -4680,6 +4680,300 @@ async fn application_trial_then_accept_promotes_to_member() {
     assert_eq!(member.org_role.to_string(), "member");
 }
 
+/// Seed a deactivated member with a live session who has a pending application.
+/// Returns the application id.
+async fn seed_inactive_applicant(
+    state: &AppState,
+    user_key: &str,
+    member_key: &str,
+    username: &str,
+    role: &str,
+    token: &str,
+) -> String {
+    seed_user(&state.db, user_key, member_key, username, role, token).await;
+    state
+        .db
+        .client
+        .query(format!("UPDATE member:{member_key} SET is_active = false"))
+        .await
+        .unwrap_or_else(|e| panic!("deactivate {member_key}: {e}"));
+    let before = state.db.get_member(member_key).await.unwrap().unwrap();
+    assert!(!before.is_active, "fixture member must start inactive");
+    assert_eq!(before.org_role.to_string(), role);
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/applications",
+            token,
+            json!({ "preferred_games": [], "preferred_roles": [], "message": "I would like to rejoin the crew" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "a deactivated, non-banned member can apply"
+    );
+    body_json(resp).await["id"].as_str().unwrap().to_string()
+}
+
+async fn patch_application_status(
+    state: &AppState,
+    app_id: &str,
+    token: &str,
+    status: &str,
+) -> axum::response::Response {
+    create_router(state.clone())
+        .oneshot(authed_json_request(
+            Method::PATCH,
+            &format!("/api/applications/{app_id}"),
+            token,
+            json!({ "status": status }),
+        ))
+        .await
+        .unwrap()
+}
+
+/// #812: an officer cannot restore a deactivated officer or admin by moving
+/// their application to trial or accepted. 403 (a rank denial, like
+/// `can_set_is_active`), nothing written.
+#[tokio::test]
+async fn officer_cannot_reactivate_deactivated_officer_or_admin_via_application() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    for (user_key, member_key, role, token) in [
+        ("exofficeruser", "exofficer", "officer", "tok-ex-officer"),
+        ("exadminuser", "exadmin", "admin", "tok-ex-admin"),
+    ] {
+        let app_id =
+            seed_inactive_applicant(&state, user_key, member_key, member_key, role, token).await;
+
+        for status in ["trial", "accepted"] {
+            let resp = patch_application_status(&state, &app_id, OFFICER_TOKEN, status).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "officer {status} of a deactivated {role}"
+            );
+            let err = body_json(resp).await;
+            assert_eq!(
+                err["error"],
+                "Applicant is a deactivated officer or admin. Only an admin can reactivate them"
+            );
+
+            let member = state.db.get_member(member_key).await.unwrap().unwrap();
+            assert!(
+                !member.is_active,
+                "officer {status} must not reactivate a {role}"
+            );
+            assert_eq!(member.org_role.to_string(), role);
+            let application = state.db.get_application(&app_id).await.unwrap().unwrap();
+            assert_eq!(
+                application.status.to_string(),
+                "pending",
+                "a refused {status} must leave the application pending"
+            );
+        }
+    }
+}
+
+/// #812: an admin may reactivate a deactivated officer or admin through the
+/// application, on trial and on accept. The officer or admin role is kept.
+#[tokio::test]
+async fn admin_can_reactivate_deactivated_officer_or_admin_via_application() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    for (user_key, member_key, role, token, status) in [
+        ("exoff1user", "exoff1", "officer", "tok-ex-off-1", "trial"),
+        (
+            "exoff2user",
+            "exoff2",
+            "officer",
+            "tok-ex-off-2",
+            "accepted",
+        ),
+        ("exadm1user", "exadm1", "admin", "tok-ex-adm-1", "trial"),
+        ("exadm2user", "exadm2", "admin", "tok-ex-adm-2", "accepted"),
+    ] {
+        let app_id =
+            seed_inactive_applicant(&state, user_key, member_key, member_key, role, token).await;
+
+        let resp = patch_application_status(&state, &app_id, ADMIN_TOKEN, status).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "admin {status} of a deactivated {role}"
+        );
+        assert_eq!(body_json(resp).await["status"], status);
+
+        let member = state.db.get_member(member_key).await.unwrap().unwrap();
+        assert!(member.is_active, "admin {status} reactivates the {role}");
+        assert_eq!(
+            member.org_role.to_string(),
+            role,
+            "admin {status} keeps the {role} role"
+        );
+    }
+}
+
+/// #812 control: the officer path still brings back a deactivated member or
+/// recruit, the ranks an officer may set `is_active` on.
+#[tokio::test]
+async fn officer_can_reactivate_deactivated_member_or_recruit_via_application() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    for (user_key, member_key, role, token, status, role_after) in [
+        (
+            "exmem1user",
+            "exmem1",
+            "member",
+            "tok-ex-mem-1",
+            "trial",
+            "member",
+        ),
+        (
+            "exmem2user",
+            "exmem2",
+            "member",
+            "tok-ex-mem-2",
+            "accepted",
+            "recruit",
+        ),
+        (
+            "exrec1user",
+            "exrec1",
+            "recruit",
+            "tok-ex-rec-1",
+            "trial",
+            "recruit",
+        ),
+        (
+            "exrec2user",
+            "exrec2",
+            "recruit",
+            "tok-ex-rec-2",
+            "accepted",
+            "recruit",
+        ),
+    ] {
+        let app_id =
+            seed_inactive_applicant(&state, user_key, member_key, member_key, role, token).await;
+
+        let resp = patch_application_status(&state, &app_id, OFFICER_TOKEN, status).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "officer {status} of a deactivated {role}"
+        );
+
+        let member = state.db.get_member(member_key).await.unwrap().unwrap();
+        assert!(member.is_active, "officer {status} reactivates the {role}");
+        assert_eq!(member.org_role.to_string(), role_after);
+    }
+}
+
+/// #812: the guard also holds on accept from trial. An admin starts the trial
+/// (which reactivates the officer), the officer is deactivated again, and an
+/// officer reviewer then tries to accept. 403, the member stays inactive and
+/// the application stays in trial.
+#[tokio::test]
+async fn officer_cannot_accept_inactive_officer_whose_application_is_in_trial() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    let app_id = seed_inactive_applicant(
+        &state,
+        "extrialuser",
+        "extrial",
+        "extrial",
+        "officer",
+        "tok-ex-trial",
+    )
+    .await;
+
+    let resp = patch_application_status(&state, &app_id, ADMIN_TOKEN, "trial").await;
+    assert_eq!(resp.status(), StatusCode::OK, "admin trial");
+    let member = state.db.get_member("extrial").await.unwrap().unwrap();
+    assert!(member.is_active, "admin trial reactivates the officer");
+
+    state
+        .db
+        .client
+        .query("UPDATE member:extrial SET is_active = false")
+        .await
+        .expect("deactivate again during trial");
+
+    let resp = patch_application_status(&state, &app_id, OFFICER_TOKEN, "accepted").await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "officer accept of a deactivated officer in trial"
+    );
+    assert_eq!(
+        body_json(resp).await["error"],
+        "Applicant is a deactivated officer or admin. Only an admin can reactivate them"
+    );
+
+    let member = state.db.get_member("extrial").await.unwrap().unwrap();
+    assert!(!member.is_active, "officer accept must not reactivate");
+    assert_eq!(member.org_role.to_string(), "officer");
+    let application = state.db.get_application(&app_id).await.unwrap().unwrap();
+    assert_eq!(
+        application.status.to_string(),
+        "trial",
+        "a refused accept must leave the application in trial"
+    );
+}
+
+/// #812 control: the guard is about reactivation only. Once an admin trial has
+/// reactivated the officer and they are still active, an officer reviewer may
+/// finish the accept. 200, the application is accepted, the member stays
+/// active and keeps the officer role (accept never demotes).
+#[tokio::test]
+async fn officer_can_accept_after_admin_trial_while_member_is_still_active() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    let app_id = seed_inactive_applicant(
+        &state,
+        "exstilluser",
+        "exstill",
+        "exstill",
+        "officer",
+        "tok-ex-still",
+    )
+    .await;
+
+    let resp = patch_application_status(&state, &app_id, ADMIN_TOKEN, "trial").await;
+    assert_eq!(resp.status(), StatusCode::OK, "admin trial");
+    let member = state.db.get_member("exstill").await.unwrap().unwrap();
+    assert!(member.is_active, "admin trial reactivates the officer");
+    assert_eq!(member.org_role.to_string(), "officer");
+
+    let resp = patch_application_status(&state, &app_id, OFFICER_TOKEN, "accepted").await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "officer accept of an active officer after an admin trial"
+    );
+    assert_eq!(body_json(resp).await["status"], "accepted");
+
+    let member = state.db.get_member("exstill").await.unwrap().unwrap();
+    assert!(member.is_active);
+    assert_eq!(
+        member.org_role.to_string(),
+        "officer",
+        "accept keeps the officer role"
+    );
+    let application = state.db.get_application(&app_id).await.unwrap().unwrap();
+    assert_eq!(application.status.to_string(), "accepted");
+}
+
 #[tokio::test]
 async fn application_invalid_transition_rejected() {
     let state = test_state().await;
@@ -10489,4 +10783,310 @@ async fn missing_public_content_is_not_found_not_internal_error() {
     let event_body = body_json(missing_event).await;
     assert_eq!(event_body["error"], "Event not found");
     assert_ne!(event_body["error"], "Internal error");
+}
+
+// ── #813: per-IP governor on apply and withdraw ──
+
+/// A request from one fixed untrusted peer, so every call spends the same
+/// per-IP bucket (the other helpers use a fresh peer per request).
+fn request_from_peer(
+    method: Method,
+    uri: &str,
+    token: &str,
+    peer: [u8; 4],
+    body: Value,
+) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            peer, 47000,
+        ))))
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap()
+}
+
+fn apply_json() -> Value {
+    json!({ "preferred_games": ["ow2"], "preferred_roles": [], "message": "I would like to join the crew" })
+}
+
+/// Burst 3 on `POST /api/applications`, then 429 from the governor. The
+/// bucket refills one request per 60 s, so no token comes back mid-test.
+/// The governor is per-`Router`, so one instance serves every call.
+#[tokio::test]
+async fn apply_is_rate_limited_per_ip_after_a_burst_of_three() {
+    assert_eq!(scuffed_types::APPLICATION_IP_BURST, 3);
+    assert_eq!(scuffed_types::APPLICATION_IP_REPLENISH_SECS, 60);
+
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_applicant(&state.db, "ratelim", "RateLim", APPLICANT_TOKEN).await;
+    let app = create_router(state.clone());
+    let peer = [203, 0, 113, 7];
+
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        let resp = app
+            .clone()
+            .oneshot(request_from_peer(
+                Method::POST,
+                "/api/applications",
+                APPLICANT_TOKEN,
+                peer,
+                apply_json(),
+            ))
+            .await
+            .unwrap();
+        seen.push(resp.status());
+        if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+            // The existing governor error handler: Retry-After and JSON.
+            let retry_after: u64 = resp
+                .headers()
+                .get(header::RETRY_AFTER)
+                .expect("Retry-After on the governor 429")
+                .to_str()
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert!((1..=61).contains(&retry_after), "got {retry_after}");
+        }
+    }
+    // First stores the application, the next two reach the handler (open
+    // application, 409), the fourth is stopped by the governor.
+    assert_eq!(
+        seen,
+        vec![
+            StatusCode::CREATED,
+            StatusCode::CONFLICT,
+            StatusCode::CONFLICT,
+            StatusCode::TOO_MANY_REQUESTS,
+        ]
+    );
+
+    // Withdraw spends the same bucket: also 429 from this peer.
+    let resp = app
+        .clone()
+        .oneshot(request_from_peer(
+            Method::POST,
+            "/api/applications/mine/withdraw",
+            APPLICANT_TOKEN,
+            peer,
+            json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        state.db.count_open_applications("ratelim").await.unwrap(),
+        1,
+        "a rate-limited withdraw must not reach the handler"
+    );
+
+    // The read and officer routes are not behind this layer.
+    for (method, uri, token) in [
+        (Method::GET, "/api/applications/mine", APPLICANT_TOKEN),
+        (Method::GET, "/api/applications", OFFICER_TOKEN),
+        (Method::GET, "/api/applications/expiring", OFFICER_TOKEN),
+    ] {
+        for _ in 0..5 {
+            let resp = app
+                .clone()
+                .oneshot(request_from_peer(
+                    method.clone(),
+                    uri,
+                    token,
+                    peer,
+                    json!({}),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{method} {uri}");
+        }
+    }
+    let app_id = state
+        .db
+        .get_application_by_user("ratelim")
+        .await
+        .unwrap()
+        .unwrap()
+        .id;
+    let resp = app
+        .clone()
+        .oneshot(request_from_peer(
+            Method::PATCH,
+            &format!("/api/applications/{app_id}"),
+            OFFICER_TOKEN,
+            peer,
+            json!({ "status": "rejected" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "PATCH is not rate limited here"
+    );
+
+    // Another IP has its own bucket: it reaches the handler (cooldown 429
+    // text from the handler, not the governor's).
+    let resp = app
+        .clone()
+        .oneshot(request_from_peer(
+            Method::POST,
+            "/api/applications",
+            APPLICANT_TOKEN,
+            [203, 0, 113, 8],
+            apply_json(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        body_json(resp).await["error"],
+        "You can apply again in 60 minutes"
+    );
+}
+
+/// Burst 3 on `POST /api/applications/mine/withdraw`, then 429, for callers
+/// with and without a session: the layer runs before the handler.
+#[tokio::test]
+async fn withdraw_is_rate_limited_per_ip_after_a_burst_of_three() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_applicant(&state.db, "ratewd", "RateWd", APPLICANT_TOKEN).await;
+    let app = create_router(state.clone());
+    let peer = [203, 0, 113, 9];
+
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        let resp = app
+            .clone()
+            .oneshot(request_from_peer(
+                Method::POST,
+                "/api/applications/mine/withdraw",
+                APPLICANT_TOKEN,
+                peer,
+                json!({}),
+            ))
+            .await
+            .unwrap();
+        seen.push(resp.status());
+    }
+    // No application yet: 404 from the handler three times, then the governor.
+    assert_eq!(
+        seen,
+        vec![
+            StatusCode::NOT_FOUND,
+            StatusCode::NOT_FOUND,
+            StatusCode::NOT_FOUND,
+            StatusCode::TOO_MANY_REQUESTS,
+        ]
+    );
+
+    // Apply spends the same bucket.
+    let resp = app
+        .clone()
+        .oneshot(request_from_peer(
+            Method::POST,
+            "/api/applications",
+            APPLICANT_TOKEN,
+            peer,
+            apply_json(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(
+        state
+            .db
+            .get_application_by_user("ratewd")
+            .await
+            .unwrap()
+            .is_none(),
+        "a rate-limited apply must not store an application"
+    );
+
+    // Unauthenticated callers spend a bucket too: 401 three times, then 429.
+    let anon_peer = [203, 0, 113, 10];
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/applications")
+                    .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                        anon_peer, 47000,
+                    ))))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&apply_json()).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        seen.push(resp.status());
+    }
+    assert_eq!(
+        seen,
+        vec![
+            StatusCode::UNAUTHORIZED,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::TOO_MANY_REQUESTS,
+        ]
+    );
+}
+
+/// Route-level: withdraw, then an immediate resubmit is the cooldown 429.
+#[tokio::test]
+async fn resubmit_after_withdraw_is_429_over_http() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_applicant(&state.db, "httpcool", "HttpCool", APPLICANT_TOKEN).await;
+
+    for (uri, body, expected) in [
+        ("/api/applications", apply_json(), StatusCode::CREATED),
+        ("/api/applications/mine/withdraw", json!({}), StatusCode::OK),
+        (
+            "/api/applications",
+            apply_json(),
+            StatusCode::TOO_MANY_REQUESTS,
+        ),
+    ] {
+        let resp = create_router(state.clone())
+            .oneshot(authed_json_request(
+                Method::POST,
+                uri,
+                APPLICANT_TOKEN,
+                body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), expected, "{uri}");
+        if expected == StatusCode::TOO_MANY_REQUESTS {
+            assert_eq!(
+                body_json(resp).await["error"],
+                "You can apply again in 60 minutes"
+            );
+        }
+    }
+
+    // Over-max bodies are 400 at the route too.
+    let resp = create_router(state.clone())
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/applications",
+            APPLICANT_TOKEN,
+            json!({ "preferred_games": [], "preferred_roles": [], "message": "a".repeat(4001) }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body_json(resp).await["error"],
+        "Message must be at most 4000 characters"
+    );
 }

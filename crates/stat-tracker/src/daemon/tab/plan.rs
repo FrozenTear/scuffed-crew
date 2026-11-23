@@ -167,7 +167,22 @@ pub(crate) fn stage_capture(
     } else {
         req.session_id.clone()
     };
-    let carried = carried_counters_to_write(req.carried_deferred, split, req.deferred_imported);
+    let carried = carried_counters_to_write(req.carried_deferred, split, req.deferred_imported)
+        .filter(|&board| {
+            // Only a board imported from a session that closed. One held on
+            // this session and written by its split is this run of boards.
+            let fits = !req.deferred_imported || carried_board_fits(board, facts);
+            if !fits {
+                tracing::warn!(
+                    target: "scuffed_stat_tracker",
+                    session_id = %target_session,
+                    carried = ?board,
+                    read = ?facts.counters,
+                    "carried board is above this game's own reads: another game's board, not written or used"
+                );
+            }
+            fits
+        });
     let carried_at = req
         .carried_deferred_at
         .unwrap_or(captured_at - chrono::Duration::seconds(1));
@@ -386,6 +401,35 @@ pub(crate) fn gate_prev_for_store(
     awaiting_first_board: bool,
 ) -> Option<(GateState, std::time::Duration)> {
     prev.filter(|_| !awaiting_first_board)
+}
+
+/// Whether `carried`, a board imported from the session that closed
+/// (`deferred_imported`), can be an earlier board of the game this capture
+/// reads (#809). Elims, deaths and damage only grow within one game, so
+/// when at least two of them are read for sure below the carried board,
+/// that board is another game's: a deferred board the closed game still
+/// held, carried onto a game that opened long after it (Runasapi, 17 Nov:
+/// the next game was stored with the previous game's final
+/// 3/2007/772/1502). It is then not written onto this game, does not seed
+/// its held cells and is not the row this capture is compared with. Two
+/// of the three, as in [`stats_regressed`], so one misread column does not
+/// drop a real first board. A held or suspect cell has no say.
+///
+/// Known limit: with fewer than two of elims, deaths and damage read for
+/// sure, nothing can vote the board out, so it fits, is written and can
+/// seed this game's held cells, as before #809. The rule keeps another
+/// game's board off this game only when two of those columns are sure.
+pub(crate) fn carried_board_fits(carried: Counters, facts: &BoardFacts<'_>) -> bool {
+    let read = facts.counters;
+    let below = [
+        (0, read.elims, carried.elims),
+        (2, read.deaths, carried.deaths),
+        (3, read.damage, carried.damage),
+    ]
+    .into_iter()
+    .filter(|&(col, cur, board)| !facts.held[col] && !facts.suspect[col] && cur < board)
+    .count();
+    below < 2
 }
 
 /// A held board is written when this capture splits, or when it was carried

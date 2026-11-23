@@ -908,6 +908,10 @@ pub(crate) async fn handle_capture(
             let rejoin = rejoin_board(&req, &facts);
             note_rejoin(&req, &rejoin, raw_counters);
             facts.counters = rejoin.counters;
+            if let Some(report) = finished_board_report(ctx, &req, &facts, finished_game_tab).await
+            {
+                return Ok(report);
+            }
             let plan = plan_from_board(&req, &facts);
             if plan.skip_store {
                 if plan.defer {

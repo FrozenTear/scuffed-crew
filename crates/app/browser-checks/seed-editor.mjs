@@ -1,8 +1,8 @@
 // Step 5: a saved public strategy with a map, so /strategy/editor/:id opens
 // with no map picker (the Tab walk from page load runs there). Plus two
 // strategies whose stored map id is not the picker's exact id (a display
-// name, and an id the picker does not list) for the picker focus check
-// (Vision nit 17). Fake data only.
+// name, and an id the picker does not list), so keys.mjs can check that a
+// saved map is fixed whatever id is stored. Fake data only.
 import { Jar, writeState } from './lib.mjs';
 
 const admin = await new Jar().login('TestAdmin');

@@ -87,6 +87,24 @@ On Contabo-style day-2 hosts, if a project Surreal is already Up, `update.sh` re
 
 `update.sh` never creates or recreates the `surrealdb` container while one exists or its volume holds data. It starts `site-server` with `--no-deps` (starting a stopped database container as it is), and it stops with an error when the database container runs another image than `compose.yml` names. A new SurrealDB tag in `compose.yml` is applied only by [Upgrading the SurrealDB server](#upgrading-the-surrealdb-server). `SCUFFED_ALLOW_DB_IMAGE_MISMATCH=1 ./scripts/update.sh` updates the app and leaves the database on its current image.
 
+#### Rollback and `--backup`
+
+Before `update.sh` removes the running site-server it reads the live `git_sha` from `/api/health` and tags that container's image as `<repo>:rollback` (for example `ghcr.io/frozentear/scuffed-crew:rollback`). It prints both. If the new container is not healthy within 60 s (`SCUFFED_UPDATE_HEALTH_SECS` to change it), the script stops it, starts the `:rollback` image again (with `--no-deps`, the database is left alone) and **exits non-zero**, naming the previous `git_sha`. A non-zero exit means the update failed even when the old site is back up. If the rollback also fails, the output says so and gives the manual command. On success the script prints the new live `git_sha`.
+
+The same rollback runs for every failure from the removal of the site-server on, not only a failed health check: `HOST_PORT` still busy after the removal, a stopped database container that does not start (or is not Up afterwards), `compose up` failing, and an interrupt (Ctrl-C, SIGTERM), including one during the removal itself. Once the rollback has started, further interrupts are ignored until it is done. Run `update.sh` in the foreground, not under `nohup` and not with SIGINT ignored (for example `./scripts/update.sh &` from a script): bash cannot trap an ignored SIGINT, so Ctrl-C does nothing, though SIGTERM still rolls back. INT and TERM are ignored only during the rollback. Each podman or compose stop, rm and start in the removal and the rollback gets 60 s (`SCUFFED_UPDATE_PODMAN_SECS` to change it, 1 to 3600), then is killed and counts as failed, so a hung stop, rm or start cannot block the rollback. A SIGTERM sent only to the `update.sh` pid (`kill <pid>`, systemd `KillMode=process`) during a hung podman call before the rollback starts the rollback only when the bound ends that call, up to `SCUFFED_UPDATE_PODMAN_SECS` + 5 s (65 s by default). The database container is never created or recreated on these paths either. If the cause is still there (port taken, database down), the previous image cannot serve and the output says the rollback failed.
+
+- The tag is local to the host and is replaced on every update, so it only reaches back one update. If the site does not answer `/api/health` before the update and a `:rollback` tag already exists, that tag is kept.
+- After a rollback the container runs `<repo>:rollback`, but `SITE_SERVER_IMAGE` in `data/secrets.env` still names the image that failed. The next `compose up` of site-server, or the next `update.sh`, starts that pin again. The output prints what to set:
+  - To stay on the previous build, set `SITE_SERVER_IMAGE=<repo>:rollback`. The output names its image ID and `git_sha`.
+  - `:rollback` is a local tag and `update.sh` pulls its pin, so before the next `update.sh` set a tag that can be pulled: the fixed image, or `<repo>:sha-<short>` of the previous `git_sha` if that commit was published.
+- The rollback is the image only, on every path above. Database changes made by the failed boot (startup migrations) stay, so the old image can end up on an already-migrated database. Without `--backup` the script prints a warning that says so and goes on. `--backup` plus `scripts/backup.sh` or a volume snapshot is mandatory for the DB7 run. For an ordinary day-2 update `--backup` stays optional.
+- The rollback starts `:rollback` through the `compose.yml` as it is after the `git pull` and the current `data/secrets.env`, with only `SITE_SERVER_IMAGE` overridden. Env, volumes, ports and networks are not a snapshot of the old container.
+- A fresh install has no previous container, so there is nothing to tag and a failed health check only fails.
+
+`./scripts/update.sh --backup` takes a SurrealDB export first, before any container is touched. It calls the HTTP `/export` endpoint of the running project Surreal on its compose-network IP as the root user (`SURREALDB_USER`, `SURREALDB_NS`, `SURREALDB_DB` from `secrets.env`) and writes `backups-manual/surreal-export-<UTC timestamp>.surql` (directory mode 700, file mode 600, ignored by git). If the request fails, the HTTP status is not 2xx, the file is empty, or the body is not a SurrealQL export (an HTML or JSON error page, for example), the script exits non-zero and the site keeps running on the old image. The host must be able to reach the container IP, which is the case for rootful podman. The export holds the whole database in plain text: keep it off shared storage and delete it when it is no longer needed. This is a one-off logical export on the host. It does not replace `scripts/backup.sh` (restic, off-host, see [Backups](#backups)).
+
+Tested so far: the stub tests in `scripts/test-update-rollback.sh` (36 scenarios, stubbed podman and curl, no real containers), and one rootless dry run of commit 94e12813 by Soot, recorded in [PR 824](https://github.com/FrozenTear/scuffed-crew/pull/824#issuecomment-7101602787). Rootful podman and a Contabo-like host have not been tested yet.
+
 ### Which variables reach the server
 
 `compose.yml` has no `env_file:`. `data/secrets.env` only fills in the `${...}` values, so a variable reaches the server only when it is listed under `site-server` → `environment:`. Setting an unlisted name in `secrets.env` does nothing. `scripts/check-compose-env.sh` (CI) fails when the server reads a name that compose does not pass, apart from a short allow-list (`PORT`, `SURREALDB_MIGRATE_ONLY`, and the test-only `SCUFFED_EXTRA_INDEX`).
@@ -847,8 +865,14 @@ The first start of a 0.6 build collapses duplicate `plays_on` roster edges
 `plays_on_member_team_idx` on (in, out). The deletes are permanent and every
 deleted edge is logged at info. Later boots see the index and skip the pass.
 
-1. **Back up first.** `scripts/update.sh` has no backup step. Run
-   `scripts/backup.sh` (or snapshot the volume) before rollout.
+1. **Back up first.** Roll out with `./scripts/update.sh --backup`: it
+   writes a SurrealDB HTTP export to `backups-manual/` (mode 600) before it
+   touches a container, and an empty, failed or junk export stops the
+   update with the site still running. Run `scripts/backup.sh` (restic,
+   off-host) as well, or snapshot the volume. Both are mandatory for this
+   run. Plain `./scripts/update.sh` takes no backup and only warns.
+   The `update.sh` with `--backup` and rollback must be merged and on the
+   host before any DB7 deploy.
 2. **Run the read-only duplicate count first** and note it:
    ```surql
    SELECT * FROM (SELECT in, out, count() AS n FROM plays_on GROUP BY in, out) WHERE n > 1;
@@ -857,6 +881,9 @@ deleted edge is logged at info. Later boots see the index and skip the pass.
    It handles about 74 duplicate groups per second (1783 groups took about
    23 s in QA), so a large count means a longer wait before health is green.
    Raise the health or start timeout if needed rather than restarting.
+   `update.sh` waits 60 s and then rolls the image back, which stops a boot
+   that is still migrating: for a large count run it with
+   `SCUFFED_UPDATE_HEALTH_SECS=<seconds>`.
 3. **Stop the old site-server first.** During a rolling deploy an old
    container that still adds roster entries can create a duplicate between
    the dedupe and the index, which blocks the new container from starting
@@ -883,6 +910,12 @@ login problem, not a migration.
 which the index rejects (500 on re-add or double click). Run
 `REMOVE INDEX plays_on_member_team_idx ON plays_on` as root, or accept that.
 Deleted duplicates come back only from the backup.
+
+`update.sh` does this image rollback by itself when the new container fails
+its health check: it restarts the image tagged `<repo>:rollback` and exits
+non-zero (see [Rollback and `--backup`](#rollback-and---backup)). That puts
+the old build back. It does not undo a dedupe that already ran, so the
+note above applies and the `--backup` export is the way back for the data.
 
 ## Upgrading the SurrealDB server
 

@@ -204,14 +204,6 @@ fn npub_from_hex(hex: &str) -> Option<String> {
     bech32::encode::<bech32::Bech32>(hrp, &bytes).ok()
 }
 
-fn truncate_pubkey(pk: &str) -> String {
-    if pk.len() > 16 {
-        format!("{}...{}", &pk[..8], &pk[pk.len() - 8..])
-    } else {
-        pk.to_string()
-    }
-}
-
 fn has_nip07_extension() -> bool {
     // Only a browser has `window.nostr`. The native test build has no
     // window, and web-sys calls panic there.

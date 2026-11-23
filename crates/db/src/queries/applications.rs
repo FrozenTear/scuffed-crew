@@ -113,6 +113,40 @@ impl Database {
         .await
     }
 
+    /// When a user's most recent withdrawn applications were withdrawn: the
+    /// `updated_at` of each row with `status = 'withdrawn'` and `updated_at`
+    /// after `since`, newest first, at most `limit` rows (the per-user
+    /// rolling withdrawn cap).
+    ///
+    /// `updated_at` is the withdrawn timestamp: the status write sets it and
+    /// a withdrawn row is not written again. A row withdrawn at or before
+    /// `since` is outside the window and is not returned. With `limit` set to
+    /// the cap, the length says whether the cap is reached, and the last
+    /// entry is the row whose leaving the window opens the next slot.
+    pub async fn withdrawn_application_times_since(
+        &self,
+        user_id: &str,
+        since: chrono::DateTime<Utc>,
+        limit: u64,
+    ) -> DbResult<Vec<chrono::DateTime<Utc>>> {
+        with_timeout(async {
+            let mut result = self
+                .client
+                .query(
+                    "SELECT VALUE updated_at FROM application \
+                     WHERE user_id = $uid AND status = 'withdrawn' AND updated_at > $since \
+                     ORDER BY updated_at DESC LIMIT $lim",
+                )
+                .bind(("uid", user_id.to_string()))
+                .bind(("since", SurrealDatetime::from(since)))
+                .bind(("lim", i64::try_from(limit).unwrap_or(i64::MAX)))
+                .await?;
+            let times: Vec<SurrealDatetime> = result.take(0)?;
+            Ok(times.into_iter().map(Into::into).collect())
+        })
+        .await
+    }
+
     /// Delete an application by id (used to roll back concurrent double-submit).
     pub async fn delete_application(&self, id: &str) -> DbResult<()> {
         with_timeout(async {
