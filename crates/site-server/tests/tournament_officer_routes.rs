@@ -974,6 +974,62 @@ async fn add_participant_out_of_range_seed_is_400_and_writes_nothing() {
     assert_eq!(body["seed"], 4_294_967_295_u64);
 }
 
+/// POST a raw JSON body, so number tokens such as `1e0` reach the server as
+/// written (a `Value` would re-serialize them as `1.0`).
+async fn post_participant_raw(state: &AppState, tid: &str, raw: &str) -> (StatusCode, Value) {
+    let req = authed(
+        Method::POST,
+        &format!("/api/tournaments/{tid}/participants"),
+        OFFICER_TOKEN,
+        None,
+    )
+    .map(|_| Body::from(raw.to_owned()));
+    let resp = create_router(state.clone()).oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
+}
+
+/// #850 review nit: a float token with a whole value counts as that number.
+/// 1.0, 1e0 and 1E0 are seed 1; 0.0 and -1.0 are below 1 and write nothing;
+/// 1.5 and 4294967296.0 are still not a whole number from 1 to u32::MAX.
+#[tokio::test]
+async fn add_participant_integral_float_seed() {
+    let state = seeded().await;
+    let tid = create_tournament(&state, "Float Cup", "single_elim").await;
+
+    for (name, token) in [("One", "1.0"), ("Sci", "1e0"), ("SciUpper", "1E0")] {
+        let raw = format!(r#"{{"external_name":"{name}","seed":{token}}}"#);
+        let (status, body) = post_participant_raw(&state, &tid, &raw).await;
+        assert_eq!(status, StatusCode::CREATED, "{token}: {body}");
+        assert_eq!(body["seed"], 1, "{token}");
+    }
+    let (status, body) =
+        post_participant_raw(&state, &tid, r#"{"external_name":"Two","seed":2.0}"#).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["seed"], 2);
+
+    let before = snapshot(&state).await;
+    for (token, msg) in [
+        ("0.0", "Seed must be 1 or higher"),
+        ("-1.0", "Seed must be 1 or higher"),
+        ("1.5", "Seed must be a whole number from 1 to 4294967295"),
+        (
+            "4294967296.0",
+            "Seed must be a whole number from 1 to 4294967295",
+        ),
+    ] {
+        let raw = format!(r#"{{"external_name":"Bad","seed":{token}}}"#);
+        let (status, body) = post_participant_raw(&state, &tid, &raw).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{token}: {body}");
+        assert_eq!(body["error"], msg, "{token}");
+    }
+    assert_eq!(snapshot(&state).await, before, "no rows written");
+}
+
 /// #850 review: on update, the same out-of-range seeds are a 400 `{error}`
 /// naming the seed and leave the stored seed unchanged.
 #[tokio::test]

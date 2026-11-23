@@ -524,6 +524,16 @@ fn parse_seed(n: &serde_json::Number) -> ApiResult<u32> {
         // A negative whole number is below 1.
         return Err(bad_request(SEED_TOO_LOW));
     }
+    // A float token with a whole value (1.0, 1e0, -1.0) counts as that whole
+    // number. Every u32 is exact in f64, so the cast below is lossless.
+    if let Some(f) = n.as_f64().filter(|f| f.is_finite() && f.fract() == 0.0) {
+        if f < 1.0 {
+            return Err(bad_request(SEED_TOO_LOW));
+        }
+        if f <= f64::from(u32::MAX) {
+            return Ok(f as u32);
+        }
+    }
     Err(bad_request(SEED_NOT_WHOLE))
 }
 
