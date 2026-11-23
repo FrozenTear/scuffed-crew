@@ -1,9 +1,11 @@
 //! Daemon tests: a new game does not store another game's final stats in
-//! the cases #809 covers, and the known limits stay pinned. Runasapi, 17 Nov: game A (13c35793) ends 0/0/3/2007/772/1502;
-//! Lijiang and Aatlis follow; game B (13c350d8) opens on a Tab 54 minutes
-//! after A's last Tab, and that Tab's board was A's final board again, so
-//! B stored it and its gate held B's own 0/0/2/648/307/600 at A's values.
-//! A first board equal to a recent game's last stored board is not stored
+//! the cases #809 covers, and the known limits stay pinned.
+//!
+//! Runasapi, 17 Nov: game A (13c35793) ends 0/0/3/2007/772/1502; Lijiang
+//! and Aatlis follow; game B (13c350d8) opens on a Tab 54 minutes after
+//! A's last Tab, and that Tab's board was A's final board again, so B
+//! stored it and its gate held B's own 0/0/2/648/307/600 at A's values. A
+//! first board equal to a recent game's last stored board is not stored
 //! (`finished_board_report`). Separately, a board carried in from the game
 //! that closed (a deferred board, `ActiveGame::deferred`) whose numbers are
 //! above this game's own sure reads is another game's board and is neither
@@ -448,21 +450,9 @@ async fn a_finished_games_board_shown_again_is_not_the_next_games() {
 /// a board of some size, and needs every sure cell equal.
 #[test]
 fn a_finished_board_matches_on_its_sure_cells_only() {
-    let facts = |read: [u32; 6], held: [bool; 6]| BoardFacts {
-        counters: counters_from_cols(read),
-        suspect: [false; 6],
-        trusted_cells: true,
-        held,
-        suspect_row: false,
-        row_id: Some(0),
-        hero: "Unknown",
-        map_from_panel: None,
-        panel_from_banner: false,
-        parsed_map: "",
-        frame_outcome: detect::MatchOutcome::Unknown,
-    };
-    let a = counters_from_cols(A_FINAL);
     let none = [false; 6];
+    let facts = |read: [u32; 6], held: [bool; 6]| board_facts(read, held, none, None);
+    let a = counters_from_cols(A_FINAL);
     assert!(shows_finished_board(&facts(A_FINAL, none), a, none));
     assert!(!shows_finished_board(&facts(B_REAL, none), a, none));
     let mut held_h = none;
@@ -513,10 +503,10 @@ fn cols_set(cols: &[usize]) -> [bool; 6] {
     std::array::from_fn(|col| cols.contains(&col))
 }
 
-/// Review nit 1: the 1000 floor counts only the big cells compared. A
-/// small finished board (2/1/1/1180/0/0) and a new Tab with the same five
-/// small cells but its damage held compare 0 big: not a match, so the new
-/// game keeps its first board. Read for sure, the damage counts.
+/// The 1000 floor counts only the big cells compared. A small finished
+/// board (2/1/1/1180/0/0) and a new Tab with the same five small cells but
+/// its damage held compare 0 big: not a match, so the new game keeps its
+/// first board. Read for sure, the damage counts.
 #[test]
 fn a_held_big_cell_does_not_count_toward_the_floor() {
     let finished = [2, 1, 1, 1180, 0, 0];
@@ -541,7 +531,7 @@ fn a_held_big_cell_does_not_count_toward_the_floor() {
 
 /// The floor's edge: 999 compared is too small, 1000 is enough, over any
 /// mix of damage, healing and mitigation. An unsure big cell on the stored
-/// row drops out of the sum too.
+/// row that differs from the read drops out of the sum too.
 #[test]
 fn the_floor_is_1000_over_the_compared_big_cells() {
     let none = [false; 6];
@@ -553,7 +543,26 @@ fn the_floor_is_1000_over_the_compared_big_cells() {
     assert!(fits([5, 2, 1, 1000, 0, 0], none));
     assert!(!fits([5, 2, 1, 500, 300, 199], none));
     assert!(fits([5, 2, 1, 500, 300, 200], none));
-    assert!(!fits([5, 2, 1, 600, 400, 0], cols_set(&[4])));
+    let read = board_facts([5, 2, 1, 600, 400, 0], none, none, None);
+    let stored = counters_from_cols([5, 2, 1, 600, 300, 0]);
+    assert!(!shows_finished_board(&read, stored, cols_set(&[4])));
+}
+
+/// An unsure cell of the finished row that equals this Tab's sure read is
+/// compared and counts toward the floor: X ends 20/5/6/9000/0/0 with its
+/// damage unsure at 9000, and the same board read all sure is X's. Only
+/// the damage reaches 1000, so skipping it would leave nothing to match.
+#[test]
+fn an_unsure_finished_cell_equal_to_the_read_counts_toward_the_floor() {
+    let none = [false; 6];
+    let x = [20, 5, 6, 9000, 0, 0];
+    let shown = board_facts(x, none, none, None);
+    let board = counters_from_cols(x);
+    assert!(shows_finished_board(&shown, board, cols_set(&[3])));
+    assert!(shows_finished_board(&shown, board, [true; 6]));
+    let equal_h = board_facts([5, 2, 1, 600, 400, 0], none, none, None);
+    let stored = counters_from_cols([5, 2, 1, 600, 400, 0]);
+    assert!(shows_finished_board(&equal_h, stored, cols_set(&[4])));
 }
 
 /// The suspect half of "read for sure": a suspect cell has no say, like a
@@ -577,9 +586,9 @@ fn a_suspect_cell_has_no_say_in_the_match() {
     assert!(!shows_finished_board(&mixed, a, none));
 }
 
-/// Review nit 6: a column the finished game's last row stored as unsure
-/// may hold an older value than the board showed. Shown again and read
-/// sure, that column is not compared, so the board still matches.
+/// A column the finished game's last row stored as unsure may hold an
+/// older value than the board showed. Shown again and read sure with
+/// another value, that column is not compared, so the board still matches.
 #[test]
 fn a_column_the_finished_row_stored_unsure_is_not_compared() {
     let none = [false; 6];
@@ -591,10 +600,9 @@ fn a_column_the_finished_row_stored_unsure_is_not_compared() {
     assert!(!shows_finished_board(&shown, board, none));
 }
 
-/// Review nit 4: the lower side of the two-of-three vote. Exactly one of
-/// elims, deaths and damage read for sure below the carried board leaves
-/// it fitting (one misread column does not drop a real first board); two
-/// below do not.
+/// The lower side of the two-of-three vote. Exactly one of elims, deaths
+/// and damage read for sure below the carried board leaves it fitting (one
+/// misread column does not drop a real first board); two below do not.
 #[test]
 fn one_sure_column_below_a_carried_board_still_fits() {
     let none = [false; 6];
@@ -611,9 +619,9 @@ fn one_sure_column_below_a_carried_board_still_fits() {
     assert!(!carried_board_fits(carried, &two_below));
 }
 
-/// Review nit 3, a known limit kept on purpose (a stronger rule is 0.7
-/// work): A's final board carried, and B's first Tab reads
-/// 0/0/2/(damage held)/307/600. Only deaths is sure and below, so nothing
+/// A known limit kept on purpose (a stronger rule is 0.7 work): A's final
+/// board carried, and B's first Tab reads 0/0/2/(damage held)/307/600.
+/// Only deaths is sure and below, so nothing
 /// votes the board out: it fits, as before #809, and can seed B's held
 /// damage with A's 2007.
 #[test]
@@ -633,6 +641,18 @@ async fn stored_game(
     map: &str,
     board: [u32; 6],
     mins_ago: i64,
+) {
+    stored_game_unsure(store, id, map, board, mins_ago, &[]).await;
+}
+
+/// [`stored_game`] with `unsure` as the row's `suspect_fields`.
+async fn stored_game_unsure(
+    store: &storage::LocalStore,
+    id: &str,
+    map: &str,
+    board: [u32; 6],
+    mins_ago: i64,
+    unsure: &[&str],
 ) {
     let at = SurrealDatetime::from(Utc::now() - chrono::Duration::minutes(mins_ago));
     let session = storage::MatchSession {
@@ -657,6 +677,7 @@ async fn stored_game(
         row.mitigation,
     ] = board;
     row.played_at = at;
+    row.suspect_fields = unsure.iter().map(|f| f.to_string()).collect();
     store.insert_match(row).await.unwrap();
 }
 
@@ -667,9 +688,9 @@ fn first_board_req(session_id: &str) -> CaptureRequest {
     build_capture_request(&opened, true, now)
 }
 
-/// Review nit 9: the window is the ten most recent other games, newest
-/// capture first. The game the Tab is for is never compared and takes no
-/// place in the ten; an eleventh other game is not compared.
+/// The window is the ten most recent other games, newest capture first.
+/// The game the Tab is for is never compared and takes no place in the
+/// ten; an eleventh other game is not compared.
 #[tokio::test]
 async fn a_first_board_is_compared_with_the_last_ten_other_games_only() {
     let dir = tempfile::tempdir().unwrap();
@@ -704,13 +725,15 @@ async fn a_first_board_is_compared_with_the_last_ten_other_games_only() {
     );
 }
 
-/// Review nit 9: a Tab with no map read compares nothing; a map read
-/// matches the stored map in any case; another map does not match.
+/// A Tab with no map read compares nothing, even with a game stored on no
+/// map (whose blank map an empty read would equal); a map read matches the
+/// stored map in any case; another map does not match.
 #[tokio::test]
 async fn a_first_board_with_no_map_read_is_not_compared() {
     let dir = tempfile::tempdir().unwrap();
     let store = storage::LocalStore::open(dir.path()).await.unwrap();
     stored_game(&store, "a", "Runasapi", A_FINAL, 5).await;
+    stored_game(&store, "blank", "", A_FINAL, 1).await;
     let none = [false; 6];
     let req = first_board_req("b");
     for (map, want) in [
@@ -724,7 +747,7 @@ async fn a_first_board_with_no_map_read_is_not_compared() {
     }
 }
 
-/// Review nit 1 through the store: a finished Busan row 2/1/1/1180/0/0 and
+/// The floor through the store: a finished Busan row 2/1/1/1180/0/0 and
 /// a first board 2/1/1/(damage held)/0/0 compare no big cell, so the board
 /// is the new game's.
 #[tokio::test]
@@ -743,10 +766,55 @@ async fn a_small_finished_board_does_not_take_a_first_board_with_its_damage_held
     );
 }
 
-/// Review nits 5 and 7. A request that carries a gate for the store (a
-/// split carries its parent's) is not compared: a finished board shown
-/// again on a split is stored as the split's first row, as before #809.
-/// A gate a session awaiting its first board still holds is not its own
+/// A member's stat edit counts as the finished row's value. A's last row
+/// read damage 2907, unsure, where the board showed 2007; the member
+/// corrects it to 2007, which also clears the unsure mark. A's board shown
+/// again is compared at the member's 2007 and refused, as before the edit.
+#[tokio::test]
+async fn a_finished_row_is_compared_at_the_members_edit() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = storage::LocalStore::open(dir.path()).await.unwrap();
+    let mut misread = A_FINAL;
+    misread[3] = 2907;
+    stored_game_unsure(&store, "a", "Runasapi", misread, 5, &["dmg"]).await;
+    let req = first_board_req("b");
+    let none = [false; 6];
+    let facts = board_facts(A_FINAL, none, none, Some("Runasapi"));
+    let before = finished_game_shown(&store, &req, &facts).await;
+    assert_eq!(before.as_deref(), Some("a"), "before the edit");
+    let edit = storage::MatchEdit {
+        damage: Some(2007),
+        ..Default::default()
+    };
+    store.edit_match("a", &edit).await.unwrap();
+    let rows = store.get_session_snapshots("a").await.unwrap();
+    let last = rows.last().unwrap();
+    assert_eq!(last.corrected_damage, Some(2007));
+    assert!(last.suspect_fields.is_empty(), "{:?}", last.suspect_fields);
+    let after = finished_game_shown(&store, &req, &facts).await;
+    assert_eq!(after.as_deref(), Some("a"), "after the edit");
+}
+
+/// An older row's `rN.field` suspect name marks that column unsure too:
+/// A's last row stored damage 2907 as `r0.dmg`, and A's board read sure
+/// with 2007 still matches on the other columns.
+#[tokio::test]
+async fn a_legacy_row_suspect_name_marks_its_column_unsure() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = storage::LocalStore::open(dir.path()).await.unwrap();
+    let mut misread = A_FINAL;
+    misread[3] = 2907;
+    stored_game_unsure(&store, "a", "Runasapi", misread, 5, &["r0.dmg"]).await;
+    let none = [false; 6];
+    let facts = board_facts(A_FINAL, none, none, Some("Runasapi"));
+    let shown = finished_game_shown(&store, &first_board_req("b"), &facts).await;
+    assert_eq!(shown.as_deref(), Some("a"));
+}
+
+/// A request that carries a gate for the store (a split carries its
+/// parent's) is not compared: a finished board shown again on a split is
+/// stored as the split's first row, as before #809. A gate a session
+/// awaiting its first board still holds is not its own
 /// (`gate_prev_for_store`), so that board is compared.
 #[tokio::test]
 async fn a_request_with_a_gate_for_the_store_is_not_compared() {
@@ -784,9 +852,9 @@ async fn runasapi_a(
     a
 }
 
-/// Review nit 9: the rule on a game a map vote opened. A's final board
-/// shown again on C's first Tab is not stored and gives C no gate; C's own
-/// board is its first row.
+/// The rule on a game a map vote opened. A's final board shown again on
+/// C's first Tab is not stored and gives C no gate; C's own board is its
+/// first row.
 #[tokio::test]
 async fn a_finished_board_shown_again_is_refused_on_a_poll_opened_game() {
     let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
@@ -810,9 +878,10 @@ async fn a_finished_board_shown_again_is_refused_on_a_poll_opened_game() {
     assert_eq!(a_rows.last(), Some(&A_FINAL), "A unchanged: {a_rows:?}");
 }
 
-/// Review nit 6 in the daemon: A's last Tab holds its healing, so A's last
-/// row stores another healing, marked unsure. A's board shown again, read
-/// sure (healing 772), still matches on the other columns and is refused.
+/// An unsure stored column in the daemon: A's last Tab holds its healing,
+/// so A's last row stores another healing, marked unsure. A's board shown
+/// again, read sure (healing 772), still matches on the other columns and
+/// is refused.
 #[tokio::test]
 async fn a_finished_board_with_an_unsure_stored_column_is_still_refused() {
     let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
@@ -844,11 +913,55 @@ async fn a_finished_board_with_an_unsure_stored_column_is_still_refused() {
     assert_eq!(o10_rows(&ctx, &c).await, vec![B_REAL]);
 }
 
-/// Review nit 9: the rule on the probe path. Aatlis has a result and a
-/// board under two minutes old when a Tab past the grace window shows A's
-/// final board on Runasapi. The probe calls it a new game, the rule
-/// refuses the board, the fresh session opens with no row and no gate, and
-/// B's own board is its first row.
+/// An unsure stored cell equal to the board is compared, through the
+/// daemon. Game X on Busan ends 20/5/6/9000/0/0 with its last Tab's damage
+/// unsure at 9000, so X's last row stores 9000 with `dmg` unsure. Y's
+/// first Tab on Busan shows that board, all sure: only the damage reaches
+/// the 1000 floor, and it is X's, so the board is refused.
+#[tokio::test]
+async fn a_finished_board_with_an_equal_unsure_stored_cell_is_refused() {
+    let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = o8_ctx(dir.path(), true).await;
+    let t0 = test_now();
+    let at = |secs: u64| t0 + Duration::from_secs(secs);
+    let mut st = session(None, t0);
+    let x_final = [20, 5, 6, 9000, 0, 0];
+    let x = map_vote(&ctx, &mut st, at(0)).await;
+    let mut last = all_sure(x_final);
+    last[3] = Some((9000, true));
+    for (secs, cells) in [
+        (216, all_sure([10, 2, 3, 4000, 0, 0])),
+        (306, all_sure([18, 4, 5, 9000, 0, 0])),
+        (396, last),
+    ] {
+        tab_on(&ctx, &mut st, at(secs), cells, None, "Busan").await;
+    }
+    let x_rows = ctx.store.get_session_snapshots(&x).await.unwrap();
+    let x_last = x_rows.last().unwrap();
+    assert_eq!(x_last.damage, 9000, "X's last damage");
+    assert!(
+        x_last.suspect_fields.iter().any(|f| f == "dmg"),
+        "X's last damage is unsure: {:?}",
+        x_last.suspect_fields
+    );
+    let y = map_vote(&ctx, &mut st, at(500)).await;
+    assert_ne!(x, y);
+    tab_on(&ctx, &mut st, at(600), all_sure(x_final), None, "Busan").await;
+    assert_eq!(game_b_id(&st), y, "the Tab stays on Y");
+    assert!(o10_rows(&ctx, &y).await.is_empty(), "X's board not on Y");
+    assert!(st.active_game.as_ref().unwrap().gate.is_none());
+    let wb = Some("Wrecking Ball");
+    tab_on(&ctx, &mut st, at(640), all_sure(B_REAL), wb, "Busan").await;
+    assert_eq!(game_b_id(&st), y);
+    assert_eq!(o10_rows(&ctx, &y).await, vec![B_REAL]);
+}
+
+/// The rule on the probe path. Aatlis has a result and a board under two
+/// minutes old when a Tab past the grace window shows A's final board on
+/// Runasapi. The probe calls it a new game, the rule refuses the board,
+/// the fresh session opens with no row and no gate, and B's own board is
+/// its first row.
 #[tokio::test]
 async fn a_finished_board_shown_again_is_refused_on_the_probe_path() {
     let _serial = INJECTED_CAPTURE_SERIAL.lock().await;

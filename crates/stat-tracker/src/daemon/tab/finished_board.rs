@@ -17,6 +17,7 @@
 
 use crate::*;
 use stat_tracker::games::stat_reads::STATS;
+use stat_tracker::suspect;
 
 /// How many of the most recent other games a first board is compared with.
 pub(crate) const FINISHED_BOARDS_CHECKED: usize = 10;
@@ -28,12 +29,13 @@ pub(crate) const FINISHED_BOARDS_CHECKED: usize = 10;
 pub(crate) const FINISHED_BOARD_MIN_BIG: u32 = 1000;
 
 /// Whether this Tab's own row is `finished`, another game's last stored
-/// board. Only the cells read for sure on both boards are compared: not
-/// held or suspect on this Tab, and not in `finished_unsure` (the stored
-/// row's suspect fields, which may hold an older value than the board
-/// showed). At least [`reader_apply::MIN_SURE_CELLS`] are compared, every
-/// one is equal, and the damage, healing and mitigation among them come to
-/// [`FINISHED_BOARD_MIN_BIG`] or more.
+/// board. Only the cells this Tab read for sure are compared: not held or
+/// suspect on this Tab. A cell in `finished_unsure` (the stored row's
+/// suspect fields) is left out only when it differs from this Tab's read,
+/// since it may hold an older value than the board showed; an equal one is
+/// compared and counts. At least [`reader_apply::MIN_SURE_CELLS`] are
+/// compared, every one is equal, and the damage, healing and mitigation
+/// among them come to [`FINISHED_BOARD_MIN_BIG`] or more.
 pub(crate) fn shows_finished_board(
     facts: &BoardFacts<'_>,
     finished: Counters,
@@ -52,7 +54,8 @@ pub(crate) fn shows_finished_board(
     let read = cols(facts.counters);
     let board = cols(finished);
     let compared: Vec<usize> = (0..capture_gate::GATE_COLS)
-        .filter(|&col| !facts.held[col] && !facts.suspect[col] && !finished_unsure[col])
+        .filter(|&col| !facts.held[col] && !facts.suspect[col])
+        .filter(|&col| !finished_unsure[col] || read[col] == board[col])
         .collect();
     let big = compared
         .iter()
@@ -63,20 +66,26 @@ pub(crate) fn shows_finished_board(
         && compared.iter().all(|&col| read[col] == board[col])
 }
 
+/// `row`'s stats as the member sees them: a hand edit over the read.
 fn row_counters(row: &storage::PersonalMatch) -> Counters {
     Counters {
-        elims: row.elims,
-        assists: row.assists,
-        deaths: row.deaths,
-        damage: row.damage,
-        healing: row.healing,
-        mitigation: row.mitigation,
+        elims: row.display_elims(),
+        assists: row.display_assists(),
+        deaths: row.display_deaths(),
+        damage: row.display_damage(),
+        healing: row.display_healing(),
+        mitigation: row.display_mitigation(),
     }
 }
 
-/// The stat columns `row` stored as unsure (its `suspect_fields`).
+/// The stat columns `row` stored as unsure (its `suspect_fields`, flat
+/// names or the older `rN.field` ones).
 fn row_unsure(row: &storage::PersonalMatch) -> [bool; capture_gate::GATE_COLS] {
-    std::array::from_fn(|col| row.suspect_fields.iter().any(|f| f == STATS[col]))
+    std::array::from_fn(|col| {
+        row.suspect_fields
+            .iter()
+            .any(|f| suspect::flat_suspect_name(f) == Some(STATS[col]))
+    })
 }
 
 /// Whether `row` was stored on `map`, as read or as the member set it.
@@ -100,8 +109,10 @@ fn tab_map(facts: &BoardFacts<'_>) -> String {
 ///
 /// A Tab that splits off the open game carries that game's gate, so it is
 /// not compared: a finished board shown again on a split is stored as the
-/// split's first row, as before #809. A split already needs two of elims,
-/// deaths and damage below the board it splits from.
+/// split's first row, as before #809. A gap split also needs two of elims,
+/// deaths and damage below the board it splits from; a split on a hinted
+/// different map (`boundary::plan` `hinted_different_map`) has no stat
+/// condition.
 pub(crate) async fn finished_game_shown(
     store: &storage::LocalStore,
     req: &CaptureRequest,
