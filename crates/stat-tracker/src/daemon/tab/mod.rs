@@ -2,6 +2,7 @@
 
 mod cells;
 mod commit;
+mod finished_board;
 mod grab;
 mod plan;
 mod request;
@@ -10,6 +11,7 @@ mod vision;
 
 pub(crate) use cells::*;
 pub(crate) use commit::*;
+pub(crate) use finished_board::*;
 pub(crate) use grab::*;
 pub(crate) use plan::*;
 pub(crate) use request::*;

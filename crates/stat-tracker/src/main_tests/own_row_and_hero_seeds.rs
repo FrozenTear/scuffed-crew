@@ -644,8 +644,14 @@ async fn gated_crops_reach_the_seed_store_and_are_trusted_after_two_real_games()
     {
         let mut analysis = o8_analysis(None, Some("zenyatta"));
         analysis.own_name_candidate = Some(o9_candidate(i));
-        let board = Some(o8_board(Some("zenyatta")));
-        let report = o9_tab(&ctx, session, map, analysis, board).await;
+        let mut board = o8_board(Some("zenyatta"));
+        if session == "g1-split" {
+            // A split starts below the board it splits from. g1's own last
+            // board on a new session is g1's board shown again (#809).
+            let dmg = board.fields.iter_mut().find(|f| f.name == "r0.dmg");
+            dmg.unwrap().value = Some(shadow::Value::Int(1500));
+        }
+        let report = o9_tab(&ctx, session, map, analysis, Some(board)).await;
         assert!(report.recorded, "tab {i}");
         assert_eq!(
             own_name_seeds(ctx.own_name.as_ref()).len(),
@@ -801,10 +807,12 @@ async fn ocr_v1_never_offers_a_crop_or_creates_the_private_folder() {
         }
         assert_eq!(store.trusted().len(), 3);
     }
+    // Another map than g1: g1's last board on Busan again, as the first
+    // board of a new session, is g1's board shown again (#809).
     for _ in 0..2 * detect::own_row::DISAGREE_DROPS {
         let mut analysis = o8_analysis(Some("Ana"), None);
         analysis.own_seed_verdict = detect::own_row::Verdict::Disagree(88);
-        assert!(o9_tab(&ctx, "g3", "Busan", analysis, None).await.recorded);
+        assert!(o9_tab(&ctx, "g3", "Oasis", analysis, None).await.recorded);
     }
     assert_eq!(own_name_seeds(ctx.own_name.as_ref()).len(), 3);
 }
