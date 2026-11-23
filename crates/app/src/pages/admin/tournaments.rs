@@ -148,7 +148,7 @@ fn entrant_hint_text(teams_error: Option<&str>) -> String {
     match teams_error {
         Some(reason) => two_sentences(
             &load_error_text("the teams list", reason),
-            "You can still type an outside team name.",
+            "You can still type a name to show.",
         ),
         None => "Pick one of your teams, type a name for a team from outside the org, or both. \
                  With both, the typed name is shown and the entry stays linked to your team. \
@@ -283,7 +283,36 @@ fn add_participant_body(
 /// with long dashes made plain and a closing full stop. `None` for any other
 /// failure, and for a 409 with no reason: those keep the dialog's error line.
 fn entrant_conflict_reason(err: &scuffed_api_client::ClientError) -> Option<String> {
-    if err.http_status() != Some(409) {
+    server_reason(err, 409)
+}
+
+/// Where a 400 from Add participant is shown.
+#[derive(Debug, Clone, PartialEq)]
+enum AddBadRequest {
+    /// The reason is about the seed: the seed error line.
+    Seed(String),
+    /// Any other reason: the dialog's error line.
+    General(String),
+}
+
+/// The server's reason for a 400 on Add (for example a seed below 1), as a
+/// sentence, and the line it belongs on: the seed line when it mentions the
+/// seed, else the dialog line. `None` for any other status and for a 400 with
+/// no reason: those keep the existing handling.
+fn add_bad_request_reason(err: &scuffed_api_client::ClientError) -> Option<AddBadRequest> {
+    let reason = server_reason(err, 400)?;
+    Some(if reason.to_lowercase().contains("seed") {
+        AddBadRequest::Seed(reason)
+    } else {
+        AddBadRequest::General(reason)
+    })
+}
+
+/// The JSON `error` of an HTTP `status` answer, with long dashes made plain
+/// and a closing full stop; `None` when the status differs or the reason is
+/// missing, blank or not JSON.
+fn server_reason(err: &scuffed_api_client::ClientError, status: u16) -> Option<String> {
+    if err.http_status() != Some(status) {
         return None;
     }
     let value = serde_json::from_str::<serde_json::Value>(err.http_body()?).ok()?;
@@ -841,6 +870,29 @@ pub fn AdminTournaments() -> Element {
                             )));
                             add_part_entrant_error.set(reason);
                             focus_element_by_id(PARTICIPANT_TEAM_ID);
+                            return;
+                        }
+                        if let Some(bad) = add_bad_request_reason(&e) {
+                            // A 400 shows the server's own words: on the
+                            // seed line (with focus) when about the seed,
+                            // else on the dialog line. A toast either way.
+                            crate::util::log_client_error("Could not add the participant", &e);
+                            match bad {
+                                AddBadRequest::Seed(reason) => {
+                                    toast.show(Toast::error(two_sentences(
+                                        "Could not add the participant",
+                                        &reason,
+                                    )));
+                                    add_part_seed_error.set(reason);
+                                    focus_element_by_id(PARTICIPANT_SEED_ID);
+                                }
+                                AddBadRequest::General(reason) => {
+                                    let line =
+                                        two_sentences("Could not add the participant", &reason);
+                                    add_part_error.set(Some(line.clone()));
+                                    toast.show(Toast::error(line));
+                                }
+                            }
                             return;
                         }
                         // One line for both, logged once by `SaveState::failed`.
@@ -2302,6 +2354,80 @@ mod tests {
     }
 
     #[test]
+    fn a_bad_request_on_add_shows_the_server_text_on_the_right_line() {
+        use scuffed_api_client::ClientError;
+        // The paired server PR answers 400 for a seed below 1.
+        let seed = ClientError::http(400, r#"{"error":"Seed must be 1 or higher"}"#, None);
+        assert_eq!(
+            add_bad_request_reason(&seed),
+            Some(AddBadRequest::Seed("Seed must be 1 or higher.".into()))
+        );
+        // "seed" is matched in any case.
+        let upper = ClientError::http(400, r#"{"error":"Invalid SEED value."}"#, None);
+        assert_eq!(
+            add_bad_request_reason(&upper),
+            Some(AddBadRequest::Seed("Invalid SEED value.".into()))
+        );
+        // Any other 400 reason goes on the dialog line.
+        let other = ClientError::http(400, r#"{"error":"Pick a team or type a name"}"#, None);
+        assert_eq!(
+            add_bad_request_reason(&other),
+            Some(AddBadRequest::General("Pick a team or type a name.".into()))
+        );
+        // A 409 still goes to the entrant line, not here.
+        let dup = ClientError::http(409, r#"{"error":"Seed 1 is already taken"}"#, None);
+        assert_eq!(add_bad_request_reason(&dup), None);
+        assert_eq!(
+            entrant_conflict_reason(&dup).as_deref(),
+            Some("Seed 1 is already taken.")
+        );
+        // A blank, missing or non-JSON 400 body, and every other failure,
+        // keep the existing handling (`SaveState::failed`).
+        for rest in [
+            ClientError::http(400, "", None),
+            ClientError::http(400, r#"{"error":"  "}"#, None),
+            ClientError::http(400, r#"{"message":"seed"}"#, None),
+            ClientError::http(400, "seed must be positive", None),
+            ClientError::http(500, r#"{"error":"seed failed"}"#, None),
+            ClientError::Network("offline".into()),
+            ClientError::Deserialize("eof".into()),
+        ] {
+            assert_eq!(add_bad_request_reason(&rest), None, "{rest:?}");
+        }
+
+        // The submit failure arm: 409 first, then the 400 arm, then the
+        // generic line. A seed reason sets the seed line and focuses the seed
+        // field; any other reason sets the dialog line. Both show a toast.
+        let src = include_str!("tournaments.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let after_409 = prod
+            .split("if let Some(reason) = entrant_conflict_reason(&e) {")
+            .nth(1)
+            .expect("the 409 arm");
+        let arm = after_409
+            .split("if let Some(bad) = add_bad_request_reason(&e) {")
+            .nth(1)
+            .expect("the 400 arm after the 409 arm");
+        let bad = arm.split("return;").next().unwrap();
+        let seed_arm = bad
+            .split("AddBadRequest::Seed(reason) => {")
+            .nth(1)
+            .and_then(|r| r.split("AddBadRequest::General(reason) => {").next())
+            .expect("the seed arm");
+        assert!(seed_arm.contains("toast.show(Toast::error("), "{seed_arm}");
+        assert!(seed_arm.contains("add_part_seed_error.set(reason);"));
+        assert!(seed_arm.contains("focus_element_by_id(PARTICIPANT_SEED_ID);"));
+        let general = bad
+            .split("AddBadRequest::General(reason) => {")
+            .nth(1)
+            .expect("the general arm");
+        assert!(general.contains("two_sentences(\"Could not add the participant\", &reason)"));
+        assert!(general.contains("add_part_error.set(Some(line.clone()));"));
+        assert!(general.contains("toast.show(Toast::error(line));"));
+        assert!(arm.contains("SaveState::failed(\"Could not add the participant\", &e).text();"));
+    }
+
+    #[test]
     fn the_add_participant_form_allows_both_and_an_optional_seed() {
         // Round 4: no "not both" copy is left anywhere in the page code,
         // and the labels and hints say what the fields take.
@@ -2357,11 +2483,11 @@ mod tests {
         assert_eq!(
             entrant_hint_text(Some("HTTP error 500: Internal error")),
             "Could not load the teams list. HTTP error 500: Internal error. \
-             You can still type an outside team name."
+             You can still type a name to show."
         );
         assert_eq!(
             entrant_hint_text(Some("Offline.")),
-            "Could not load the teams list. Offline. You can still type an outside team name."
+            "Could not load the teams list. Offline. You can still type a name to show."
         );
         assert!(!entrant_hint_text(Some("")).contains(".."));
     }
