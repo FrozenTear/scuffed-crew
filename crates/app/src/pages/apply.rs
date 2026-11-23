@@ -311,8 +311,26 @@ fn GamesStatus(slot: MineSlot, on_retry: EventHandler<()>) -> Element {
     }
 }
 
-/// DOM id of the "choose at least one" hint under the Games legend.
+/// DOM id of the "choose at least one, at most 10" hint under the Games
+/// legend.
 const GAMES_HINT_ID: &str = "apply-games-hint";
+
+/// The hint under the Games legend: the minimum and the cap, said before the
+/// first click.
+fn games_hint() -> String {
+    format!("Choose at least one, at most {MAX_APPLICATION_PREFERENCE_ITEMS}.")
+}
+
+/// Whether the games cap is reached, so no further game can be added.
+fn games_at_cap(selected: &[String]) -> bool {
+    selected.len() >= MAX_APPLICATION_PREFERENCE_ITEMS
+}
+
+/// Accessible name of a game chip that cannot be added at the cap. It starts
+/// with the visible game name (WCAG 2.5.3) and says why.
+fn game_at_cap_name(game: &str) -> String {
+    format!("{game}, limit of {MAX_APPLICATION_PREFERENCE_ITEMS} games reached")
+}
 
 /// Ids that describe the Games group: its hint, the page-level status line
 /// and, after a failed submit, its error message.
@@ -332,6 +350,11 @@ fn games_describedby(invalid: bool) -> String {
 /// A group cannot carry `required` or `aria-invalid`, so the requirement is a
 /// visible hint and the error is a described-by message. The group takes
 /// focus from the error summary link.
+///
+/// At the cap ([`MAX_APPLICATION_PREFERENCE_ITEMS`] chosen) the unselected
+/// chips are `aria-disabled`, look disabled and are named with the reason.
+/// The selected chips stay toggles, so a deselect frees a slot and the others
+/// come back.
 #[component]
 fn GamesField(
     phase: SlotPhase,
@@ -341,6 +364,7 @@ fn GamesField(
     on_toggle: EventHandler<String>,
     children: Element,
 ) -> Element {
+    let at_cap = games_at_cap(&selected);
     rsx! {
         fieldset {
             class: if invalid { "apply-field apply-fieldset is-error" } else { "apply-field apply-fieldset" },
@@ -351,7 +375,7 @@ fn GamesField(
                 "{ApplyField::Games.label()}"
                 {required_mark()}
             }
-            p { class: "field-hint", id: GAMES_HINT_ID, "Choose at least one." }
+            p { class: "field-hint", id: GAMES_HINT_ID, "{games_hint()}" }
             if phase == SlotPhase::Ready {
                 // The fieldset is the named group, so this row is a plain box.
                 div { class: "chip-row",
@@ -359,9 +383,11 @@ fn GamesField(
                         ChipButton {
                             key: "{id}",
                             class: "chip",
+                            name: (at_cap && !is_selected).then(|| game_at_cap_name(&name)),
                             label: name,
                             pressed: is_selected,
                             id: "apply-game-{id}",
+                            unavailable: at_cap && !is_selected,
                             onclick: move |_| on_toggle.call(id.clone()),
                         }
                     }
@@ -1810,6 +1836,146 @@ mod tests {
         );
     }
 
+    /// `count` games, `game-0` ("Game 0") upward.
+    fn many_games(count: usize) -> Vec<(String, String)> {
+        (0..count)
+            .map(|n| (format!("game-{n}"), format!("Game {n}")))
+            .collect()
+    }
+
+    /// The opening tag of the chip for `game-{n}`.
+    fn game_chip_tag(html: &str, n: usize) -> String {
+        tag_with_id(html, &format!("apply-game-game-{n}")).to_string()
+    }
+
+    #[test]
+    fn games_hint_and_cap_name_take_the_number_from_the_shared_cap() {
+        assert_eq!(MAX_APPLICATION_PREFERENCE_ITEMS, 10);
+        assert_eq!(games_hint(), "Choose at least one, at most 10.");
+        assert_eq!(
+            game_at_cap_name("Overwatch"),
+            "Overwatch, limit of 10 games reached"
+        );
+        let cap = MAX_APPLICATION_PREFERENCE_ITEMS.to_string();
+        assert!(games_hint().contains(&cap));
+        assert!(game_at_cap_name("Overwatch").contains(&cap));
+        // The name starts with the visible label (WCAG 2.5.3).
+        assert!(game_at_cap_name("Overwatch").starts_with("Overwatch"));
+
+        fn field() -> Element {
+            rsx! {
+                GamesField {
+                    phase: SlotPhase::Ready,
+                    games: games(),
+                    selected: vec![],
+                    on_toggle: |_| {},
+                }
+            }
+        }
+        let html = html_of(field);
+        assert!(
+            html.contains(
+                r#"<p class="field-hint" id="apply-games-hint">Choose at least one, at most 10.</p>"#
+            ),
+            "{html}"
+        );
+        // Below the cap no chip is disabled, selected or not.
+        assert!(!html.contains("aria-disabled"), "{html}");
+        assert!(!html.contains("is-disabled"), "{html}");
+        assert!(!html.contains("limit of"), "{html}");
+    }
+
+    /// Site blocker on 825: at the cap an unselected chip must not look or
+    /// act like a toggle that does nothing. It is `aria-disabled` (never
+    /// native `disabled`, which drops focus), looks disabled and is named
+    /// with the reason. Selected chips stay toggles.
+    #[test]
+    fn at_the_cap_unselected_game_chips_are_disabled_and_say_why() {
+        fn at_cap() -> Element {
+            // 12 games, the first 10 chosen: game-10 and game-11 are left.
+            let selected = (0..MAX_APPLICATION_PREFERENCE_ITEMS)
+                .map(|n| format!("game-{n}"))
+                .collect::<Vec<_>>();
+            rsx! {
+                GamesField {
+                    phase: SlotPhase::Ready,
+                    games: many_games(12),
+                    selected,
+                    on_toggle: |_| {},
+                }
+            }
+        }
+        let html = html_of(at_cap);
+        assert!(!html.contains(" disabled"), "{html}");
+        assert_eq!(html.matches(r#"aria-pressed="true""#).count(), 10, "{html}");
+        assert_eq!(html.matches(r#"aria-pressed="false""#).count(), 2, "{html}");
+        assert_eq!(html.matches(r#"aria-disabled="true""#).count(), 2, "{html}");
+
+        for n in 10..12 {
+            let tag = game_chip_tag(&html, n);
+            assert!(tag.starts_with("<button"), "{tag}");
+            assert!(tag.contains(r#"type="button""#), "{tag}");
+            assert!(tag.contains(r#"aria-disabled="true""#), "{tag}");
+            assert!(tag.contains(r#"aria-pressed="false""#), "{tag}");
+            assert!(tag.contains(r#"class="chip is-disabled""#), "{tag}");
+            assert!(
+                tag.contains(&format!(
+                    r#"aria-label="Game {n}, limit of 10 games reached""#
+                )),
+                "{tag}"
+            );
+            // The visible label is still only the game name.
+            assert!(html.contains(&format!(">Game {n}</button>")), "{html}");
+        }
+        for n in 0..10 {
+            let tag = game_chip_tag(&html, n);
+            assert!(tag.contains(r#"aria-pressed="true""#), "{tag}");
+            assert!(tag.contains(r#"class="chip active""#), "{tag}");
+            assert!(!tag.contains("aria-disabled"), "{tag}");
+            assert!(!tag.contains("is-disabled"), "{tag}");
+            assert!(!tag.contains("aria-label"), "{tag}");
+        }
+    }
+
+    /// Deselecting one game at the cap frees a slot: the chips that were
+    /// disabled are plain toggles again, and so is the one just deselected.
+    #[test]
+    fn deselecting_at_the_cap_enables_the_other_game_chips_again() {
+        fn after_deselect() -> Element {
+            let mut selected = (0..MAX_APPLICATION_PREFERENCE_ITEMS)
+                .map(|n| format!("game-{n}"))
+                .collect::<Vec<_>>();
+            assert!(games_at_cap(&selected));
+            // A click on a disabled chip never reaches `toggle_game`, and
+            // `toggle_game` would refuse the add anyway.
+            toggle_game(&mut selected, "game-10");
+            assert!(games_at_cap(&selected));
+            toggle_game(&mut selected, "game-3");
+            assert!(!games_at_cap(&selected));
+            rsx! {
+                GamesField {
+                    phase: SlotPhase::Ready,
+                    games: many_games(12),
+                    selected,
+                    on_toggle: |_| {},
+                }
+            }
+        }
+        let html = html_of(after_deselect);
+        assert!(!html.contains("aria-disabled"), "{html}");
+        assert!(!html.contains("is-disabled"), "{html}");
+        assert!(!html.contains("limit of"), "{html}");
+        assert!(!html.contains(" disabled"), "{html}");
+        assert_eq!(html.matches(r#"aria-pressed="true""#).count(), 9, "{html}");
+        assert_eq!(html.matches(r#"aria-pressed="false""#).count(), 3, "{html}");
+        for n in [3, 10, 11] {
+            let tag = game_chip_tag(&html, n);
+            assert!(tag.contains(r#"aria-pressed="false""#), "{tag}");
+            assert!(tag.contains(r#"class="chip""#), "{tag}");
+            assert!(!tag.contains("aria-label"), "{tag}");
+        }
+    }
+
     #[test]
     fn rejected_application_is_not_accepted_and_neutral() {
         let (tone, label) = status_pill("rejected");
@@ -2415,7 +2581,7 @@ mod tests {
         );
         assert!(
             html.contains(
-                r#"<p class="field-hint" id="apply-games-hint">Choose at least one.</p>"#
+                r#"<p class="field-hint" id="apply-games-hint">Choose at least one, at most 10.</p>"#
             ),
             "{html}"
         );
