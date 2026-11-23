@@ -6,6 +6,7 @@ use crate::components::admin_shared::{
 use serde::Deserialize;
 use std::collections::HashMap;
 
+use crate::client_error::two_sentences;
 use crate::components::ui::inline_confirm::focus_element_by_id;
 use crate::components::ui::{
     ChipButton, ChipRow, EmptyCard, FieldError, PageHeader, PageShell, PageWidth, Pager, Pill,
@@ -138,6 +139,24 @@ fn team_choices(teams: &[Team], bracket: Option<&BracketData>, game_id: Option<&
         })
         .cloned()
         .collect()
+}
+
+/// The Add participant entrant hint, or why the teams did not load. The
+/// default names the teams the picker leaves out (issue 850), so an admin
+/// whose team is missing knows why and can type the name.
+fn entrant_hint_text(teams_error: Option<&str>) -> String {
+    match teams_error {
+        Some(reason) => two_sentences(
+            &load_error_text("the teams list", reason),
+            "You can still type an outside team name.",
+        ),
+        None => {
+            "Pick one of your teams, or type the name of a team from outside the org. Not both. \
+                 Teams already entered and teams of another game are not listed; to enter a team \
+                 of another game, type its name."
+                .to_string()
+        }
+    }
 }
 
 /// Display name of each participant, keyed by participant id: the same
@@ -1098,16 +1117,7 @@ pub fn AdminTournaments() -> Element {
         )
     };
     // The entrant hint, or why the teams did not load: always rendered.
-    let entrant_hint = match teams.error.read().as_deref() {
-        Some(reason) => format!(
-            "{} You can still type an outside team name.",
-            load_error_text("the teams list", reason)
-        ),
-        None => {
-            "Pick one of your teams, or type the name of a team from outside the org. Not both."
-                .to_string()
-        }
-    };
+    let entrant_hint = entrant_hint_text(teams.error.read().as_deref());
 
     let detail = if detail_id().is_none() {
         rsx! {}
@@ -1242,83 +1252,85 @@ pub fn AdminTournaments() -> Element {
 
                 section { class: "ui-stack", aria_labelledby: "tournament-bracket-title",
                     h2 { class: "ui-section-title", id: "tournament-bracket-title", "Bracket" }
-                    {
-                        let rounds = bracket.as_ref().map(|b| &b.rounds);
-                        let matches = bracket.as_ref().map(|b| &b.matches);
-                        match (rounds, matches) {
-                            (Some(rnds), Some(mtchs)) if !rnds.is_empty() => rsx! {
-                                for round in rnds.iter() {
-                                    Fragment { key: "{round.id}", {
-                                        let round_matches: Vec<BracketMatch> = mtchs
-                                            .iter()
-                                            .filter(|m| m.round_id == round.id)
-                                            .cloned()
-                                            .collect();
-                                        let pmap = &participant_map;
-                                        let stage = status_label(&round.stage);
-                                        let round_label = format!("Round {}", round.round_number);
-                                        rsx! {
-                                            div { key: "{round.id}", class: "tournament-round",
-                                                h3 { "{round_label}, {stage}" }
-                                                DataTable {
-                                                    headers: vec!["Match", "Status", "Player A", "Score", "Player B", "Actions"],
-                                                    num_cols: vec![3],
-                                                    cards: true,
-                                                    label: round_label.clone(),
-                                                    for bm in round_matches.iter() {
-                                                        Fragment { key: "{bm.id}", {
-                                                            let a_name = bm.participant_a_id.as_ref()
-                                                                .and_then(|id| pmap.get(id))
-                                                                .cloned()
-                                                                .unwrap_or_else(|| "To be decided".into());
-                                                            let b_name = bm.participant_b_id.as_ref()
-                                                                .and_then(|id| pmap.get(id))
-                                                                .cloned()
-                                                                .unwrap_or_else(|| "To be decided".into());
-                                                            let score_display = match (bm.score_a, bm.score_b) {
-                                                                (Some(a), Some(b)) => format!("{a} - {b}"),
-                                                                _ => "No score".to_string(),
-                                                            };
-                                                            let a_won = bm.winner_id.is_some() && bm.winner_id == bm.participant_a_id;
-                                                            let b_won = bm.winner_id.is_some() && bm.winner_id == bm.participant_b_id;
-                                                            let bm_report = bm.clone();
-                                                            rsx! {
-                                                                tr { key: "{bm.id}",
-                                                                    td { class: "cell-who", "Match {bm.bracket_position}" }
-                                                                    td { class: "cell-badge", StatusPill { status: bm.status.clone() } }
-                                                                    td { "data-label": "Player A",
-                                                                        BracketSide { name: a_name.clone(), won: a_won }
-                                                                    }
-                                                                    td { class: "num", "data-label": "Score", "{score_display}" }
-                                                                    td { "data-label": "Player B",
-                                                                        BracketSide { name: b_name.clone(), won: b_won }
-                                                                    }
-                                                                    td { class: "cell-actions",
-                                                                        RowActions {
-                                                                            button {
-                                                                                r#type: "button",
-                                                                                class: "btn is-ghost",
-                                                                                id: report_button_id(&bm.id),
-                                                                                aria_label: "Report match {bm.bracket_position}: {a_name} against {b_name}",
-                                                                                onclick: move |_| open_match_report(bm_report.clone()),
-                                                                                "Report"
-                                                                            }
+                    match bracket.as_ref().map(|b| (&b.rounds, &b.matches)) {
+                        Some((rnds, mtchs)) if !rnds.is_empty() => rsx! {
+                            for round in rnds.iter() {
+                                Fragment { key: "{round.id}", {
+                                    let round_matches: Vec<BracketMatch> = mtchs
+                                        .iter()
+                                        .filter(|m| m.round_id == round.id)
+                                        .cloned()
+                                        .collect();
+                                    let pmap = &participant_map;
+                                    let stage = status_label(&round.stage);
+                                    let round_label = format!("Round {}", round.round_number);
+                                    rsx! {
+                                        div { key: "{round.id}", class: "tournament-round",
+                                            h3 { "{round_label}, {stage}" }
+                                            DataTable {
+                                                headers: vec!["Match", "Status", "Player A", "Score", "Player B", "Actions"],
+                                                num_cols: vec![3],
+                                                cards: true,
+                                                label: round_label.clone(),
+                                                for bm in round_matches.iter() {
+                                                    Fragment { key: "{bm.id}", {
+                                                        let a_name = bm.participant_a_id.as_ref()
+                                                            .and_then(|id| pmap.get(id))
+                                                            .cloned()
+                                                            .unwrap_or_else(|| "To be decided".into());
+                                                        let b_name = bm.participant_b_id.as_ref()
+                                                            .and_then(|id| pmap.get(id))
+                                                            .cloned()
+                                                            .unwrap_or_else(|| "To be decided".into());
+                                                        let score_display = match (bm.score_a, bm.score_b) {
+                                                            (Some(a), Some(b)) => format!("{a} - {b}"),
+                                                            _ => "No score".to_string(),
+                                                        };
+                                                        let a_won = bm.winner_id.is_some() && bm.winner_id == bm.participant_a_id;
+                                                        let b_won = bm.winner_id.is_some() && bm.winner_id == bm.participant_b_id;
+                                                        let bm_report = bm.clone();
+                                                        rsx! {
+                                                            tr { key: "{bm.id}",
+                                                                td { class: "cell-who", "Match {bm.bracket_position}" }
+                                                                td { class: "cell-badge", StatusPill { status: bm.status.clone() } }
+                                                                td { "data-label": "Player A",
+                                                                    BracketSide { name: a_name.clone(), won: a_won }
+                                                                }
+                                                                td { class: "num", "data-label": "Score", "{score_display}" }
+                                                                td { "data-label": "Player B",
+                                                                    BracketSide { name: b_name.clone(), won: b_won }
+                                                                }
+                                                                td { class: "cell-actions",
+                                                                    RowActions {
+                                                                        button {
+                                                                            r#type: "button",
+                                                                            class: "btn is-ghost",
+                                                                            id: report_button_id(&bm.id),
+                                                                            aria_label: "Report match {bm.bracket_position}: {a_name} against {b_name}",
+                                                                            onclick: move |_| open_match_report(bm_report.clone()),
+                                                                            "Report"
                                                                         }
                                                                     }
                                                                 }
                                                             }
-                                                        } }
-                                                    }
+                                                        }
+                                                    } }
                                                 }
                                             }
                                         }
-                                    } }
-                                }
-                            },
-                            _ => rsx! {
-                                p { class: "field-hint", "No bracket yet. Generate it once the participants are in, before the tournament starts." }
-                            },
-                        }
+                                    }
+                                } }
+                            }
+                        },
+                        Some(_) => rsx! {
+                            p { class: "field-hint", "No bracket yet. Generate it once the participants are in, before the tournament starts." }
+                        },
+                        // Not loaded: the load line or the error above says
+                        // why, so no claim that there is no bracket.
+                        None if detail_loading() => rsx! {
+                            p { class: "field-hint", "Loading bracket..." }
+                        },
+                        None => rsx! {},
                     }
                 }
 
@@ -1940,7 +1952,9 @@ mod tests {
         assert!(prod.contains(
             "fieldset { class: \"admin-check-group\", aria_describedby: PARTICIPANT_HINT_ID,\n                legend { class: \"field-label\", \"Entrant\" }\n                p { class: \"field-hint\", id: PARTICIPANT_HINT_ID, \"{entrant_hint}\" }"
         ));
-        assert!(prod.contains("match teams.error.read().as_deref()"));
+        assert!(
+            prod.contains("let entrant_hint = entrant_hint_text(teams.error.read().as_deref());")
+        );
         // The seed is a text box, so text a number box would drop as ""
         // reaches the validator.
         let seed = prod
@@ -1974,6 +1988,8 @@ mod tests {
             team("team:beta", Some("ow")),
             team("team:gamma", Some("game:rivals")),
             team("team:delta", None),
+            // The server's `Team.game_id` is a plain string: no game reads "".
+            team("team:epsilon", Some("")),
         ];
         let participant = |id: &str, team_id: Option<&str>| {
             serde_json::json!({
@@ -1993,19 +2009,79 @@ mod tests {
         let ids = |list: Vec<Team>| list.into_iter().map(|t| t.id).collect::<Vec<_>>();
         assert_eq!(
             ids(team_choices(&teams, Some(&bracket), None)),
-            ["team:beta", "team:gamma", "team:delta"]
+            ["team:beta", "team:gamma", "team:delta", "team:epsilon"]
         );
         // The tournament's game keeps that game's teams (either id form) and
         // teams whose game is not known.
         assert_eq!(
             ids(team_choices(&teams, Some(&bracket), Some("ow"))),
-            ["team:beta", "team:delta"]
+            ["team:beta", "team:delta", "team:epsilon"]
         );
         assert_eq!(
             ids(team_choices(&teams, None, Some("game:ow"))),
-            ["team:alpha", "team:beta", "team:delta"]
+            ["team:alpha", "team:beta", "team:delta", "team:epsilon"]
         );
-        assert_eq!(ids(team_choices(&teams, None, Some(" "))).len(), 4);
+        assert_eq!(ids(team_choices(&teams, None, Some(" "))).len(), 5);
+    }
+
+    #[test]
+    fn the_entrant_hint_names_the_hidden_teams_and_joins_a_load_error() {
+        // Review on PR 828 round 3, new nits 1 and 3.
+        let hint = entrant_hint_text(None);
+        assert!(hint.starts_with("Pick one of your teams"), "{hint}");
+        assert!(
+            hint.contains("Teams already entered and teams of another game are not listed"),
+            "{hint}"
+        );
+        assert!(hint.contains("type its name"), "{hint}");
+        // A reason with no full stop does not run into the next sentence.
+        assert_eq!(
+            entrant_hint_text(Some("HTTP error 500: Internal error")),
+            "Could not load the teams list. HTTP error 500: Internal error. \
+             You can still type an outside team name."
+        );
+        assert_eq!(
+            entrant_hint_text(Some("Offline.")),
+            "Could not load the teams list. Offline. You can still type an outside team name."
+        );
+        assert!(!entrant_hint_text(Some("")).contains(".."));
+    }
+
+    #[test]
+    fn participants_and_bracket_claim_empty_only_once_loaded() {
+        // Review on PR 828 round 2 nit 7 and round 3 new nit 5: the empty
+        // line shows for a loaded, empty bracket only; a loading line while
+        // it loads; nothing after a failed load (the alert says why).
+        let src = include_str!("tournaments.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let section = |title: &str| {
+            prod.split(&format!("aria_labelledby: \"{title}\""))
+                .nth(1)
+                .and_then(|rest| rest.split("section {").next())
+                .unwrap_or_else(|| panic!("the {title} section"))
+                .to_string()
+        };
+        let parts = section("tournament-participants-title");
+        assert!(parts.contains("match bracket.as_ref().map(|b| &b.participants) {"));
+        assert!(parts.contains(
+            "Some(_) => rsx! {\n                            p { class: \"field-hint\", \"No participants yet."
+        ));
+        assert!(parts.contains(
+            "None if detail_loading() => rsx! {\n                            p { class: \"field-hint\", \"Loading participants...\" }"
+        ));
+        assert!(parts.contains("None => rsx! {},"));
+        let bracket = section("tournament-bracket-title");
+        assert!(bracket.contains("match bracket.as_ref().map(|b| (&b.rounds, &b.matches)) {"));
+        assert!(bracket.contains("Some((rnds, mtchs)) if !rnds.is_empty() => rsx! {"));
+        assert!(bracket.contains(
+            "Some(_) => rsx! {\n                            p { class: \"field-hint\", \"No bracket yet."
+        ));
+        assert!(bracket.contains(
+            "None if detail_loading() => rsx! {\n                            p { class: \"field-hint\", \"Loading bracket...\" }"
+        ));
+        assert!(bracket.contains("None => rsx! {},"));
+        assert!(!bracket.contains("_ => rsx! {"));
+        assert_eq!(prod.matches("\"No bracket yet.").count(), 1);
     }
 
     #[test]
