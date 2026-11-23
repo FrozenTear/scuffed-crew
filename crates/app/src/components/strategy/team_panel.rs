@@ -155,10 +155,11 @@ const TEAM_PANEL_CSS: &str = r#"
     }
 "#;
 
-/// The strategy API stores no team format or composition yet (issue 817),
-/// so the panel says so instead of letting Save imply it kept them.
-const TEAM_NOT_SAVED_NOTE: &str =
-    "Not saved yet. The team here is a planning aid and is lost when you leave the editor.";
+/// The strategy API stores no team format or composition (issue 817), so
+/// the panel says so instead of letting Save imply it kept them. The first
+/// save of a new strategy hands the team to the strategy's own editor
+/// (`StrategyState::hand_off_team`), so only a reload or leaving clears it.
+const TEAM_NOT_SAVED_NOTE: &str = "Not saved with the strategy. The team here is a planning aid and is cleared when you reload or leave the editor.";
 
 /// Name and role for a filled slot. The role is the catalog's `role`, which
 /// the roster sets from `role_for_hero_name`. Unknown ids stay "Unknown" and
@@ -386,7 +387,7 @@ mod tests {
     /// panel always says the team is not saved, right under its heading.
     #[test]
     fn the_panel_says_the_team_is_not_saved() {
-        assert!(TEAM_NOT_SAVED_NOTE.starts_with("Not saved yet."));
+        assert!(TEAM_NOT_SAVED_NOTE.starts_with("Not saved with the strategy."));
         let src = include_str!("team_panel.rs");
         let src = src.split("#[cfg(test)]").next().unwrap_or(src);
         let heading = src

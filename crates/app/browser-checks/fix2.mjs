@@ -1,7 +1,8 @@
 // FIX2 (PR 693): on /strategy/editor Tab moves focus as on any page. The Tab
 // panel toggle fires only while the map canvas holds focus; Esc and Shift+Tab
 // leave it. Runs on a saved strategy with a map (seed-editor.mjs), so no map
-// picker opens on load; the picker modal itself is covered in keys.mjs.
+// picker opens on load and the map is fixed (issue 817); the map change runs
+// on a new strategy. The picker modal itself is covered in keys.mjs.
 import { launch, makeContext, open, readState, reporter } from './lib.mjs';
 
 const { rec, finish } = reporter('fix2');
@@ -73,12 +74,28 @@ for (const role of ['guest', 'member', 'admin']) {
     await page.keyboard.press('Shift+Tab'); a = await info(page);
     rec(`${T}: Shift+Tab from #main goes back to the top bar`, a.zone === 'top', JSON.stringify(a));
 
-    // ---- 3. Change the map through the picker, then work inside the canvas.
+    // ---- 3. The map of a saved strategy is fixed (issue 817: the update
+    // API takes no map). It is plain text that says so, not a button, and a
+    // click on it opens no picker.
+    const fixedMap = await page.evaluate(() => { const m = document.getElementById('editor-map-button'); return m && { tag: m.tagName, tabindex: m.getAttribute('tabindex'), text: m.textContent.trim() }; });
+    rec(`${T}: a saved strategy's map is text "Map: ... (fixed once saved)", not a button`, !!fixedMap && fixedMap.tag === 'SPAN' && fixedMap.tabindex === '-1' && /^Map: .+ \(fixed once saved\)$/.test(fixedMap.text), JSON.stringify(fixedMap));
     await page.click('#editor-map-button'); await page.waitForTimeout(300);
-    rec(`${T}: the Map button opens the picker`, !!(await page.$('#map-picker[role="dialog"]')));
-    await page.click('.map-picker-item >> nth=1'); await page.waitForTimeout(500);
-    a = await info(page);
-    rec(`${T}: picking a map closes the picker, focus back on the Map button`, !(await page.$('.map-picker-overlay')) && a.id === 'editor-map-button', JSON.stringify(a));
+    rec(`${T}: a click on the fixed map opens no picker`, !(await page.$('#map-picker')) && !(await page.$('.map-picker-overlay')));
+    // Changing the map is for a new strategy only. In its own page, closed
+    // without running beforeunload, so its unsaved pick prompts nothing.
+    {
+      const fresh = await ctx.newPage();
+      await open(fresh, '/strategy/editor');
+      rec(`${T}: a new strategy opens the picker`, !!(await fresh.$('#map-picker[role="dialog"]')));
+      await fresh.click('.map-picker-item >> nth=1'); await fresh.waitForTimeout(500);
+      const n = await info(fresh);
+      const btn = await fresh.evaluate(() => { const m = document.getElementById('editor-map-button'); return m && { tag: m.tagName, text: m.textContent.trim() }; });
+      rec(`${T}: picking a map closes the picker, focus back on the Map button`, !(await fresh.$('.map-picker-overlay')) && n.id === 'editor-map-button' && !!btn && btn.tag === 'BUTTON' && !btn.text.includes('('), JSON.stringify({ n, btn }));
+      await fresh.click('#editor-map-button'); await fresh.waitForTimeout(300);
+      rec(`${T}: before the first save the Map button opens the picker again`, !!(await fresh.$('#map-picker[role="dialog"]')));
+      await fresh.close();
+    }
+    await page.bringToFront();
     if (width === 390) {
       // Known gap from S2: with both side panels open the phone canvas is 0px wide. Close them.
       await page.click('.editor-sidebar-left .sidebar-collapse-btn');

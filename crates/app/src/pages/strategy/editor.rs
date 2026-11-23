@@ -41,7 +41,9 @@ use crate::components::strategy::{
 };
 use crate::components::{Toast, use_toast};
 use crate::keybindings::{self, CanvasHint, CanvasKey, EditorAction};
-use crate::state::editor::{CanvasState, DrawingState, StrategyState, map_change_allowed};
+use crate::state::editor::{
+    CanvasState, DrawingState, StrategyState, map_change_allowed, map_is_kept,
+};
 use crate::state::maps::{
     PICKER_MODE_ORDER, display_map_name, game_mode_api_str, game_mode_for_map, map_id_for_create,
     maps_for_mode,
@@ -89,7 +91,22 @@ struct EditorHeroEntry {
 }
 
 /// Shown beside the map name once the map can no longer be changed.
-const MAP_FIXED_NOTE: &str = "fixed after first save";
+const MAP_FIXED_NOTE: &str = "fixed once saved";
+/// Shown beside a map picked for a saved strategy that has none stored: the
+/// update API takes no map, so the pick is never sent (issue 817).
+const MAP_NOT_SAVED_NOTE: &str = "not saved";
+
+/// The note beside the map name in the status bar, if any: why it cannot
+/// change, or that a map picked for a saved strategy is not kept.
+fn map_status_note(saved: bool, can_change: bool, has_current_map: bool) -> Option<&'static str> {
+    if !can_change {
+        Some(MAP_FIXED_NOTE)
+    } else if saved && has_current_map {
+        Some(MAP_NOT_SAVED_NOTE)
+    } else {
+        None
+    }
+}
 
 #[derive(Debug, Serialize)]
 struct UpdateStrategyRequest {
@@ -321,6 +338,13 @@ const EDITOR_CSS: &str = r#"
     .status-item {
         white-space: nowrap;
     }
+    /* The map item gives way first, so Phase, Saving... and Unsaved
+       changes stay visible on a narrow bar. */
+    .status-map {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
     .status-map-link {
         background: none;
         border: none;
@@ -457,8 +481,9 @@ const MAP_PICKER_ID: &str = "map-picker";
 const MAP_PICKER_TITLE_ID: &str = "map-picker-title";
 const MAP_PICKER_CLOSE_ID: &str = "map-picker-close";
 const MAP_PICKER_SELECTED_ID: &str = "map-picker-selected";
-/// The status bar's "Map:" button: it opens the picker, so focus returns to
-/// it when the picker closes.
+/// The status bar's map item: the "Map:" button that opens the picker while
+/// the map can change, otherwise plain text with `tabindex="-1"`. Focus
+/// returns to it when the picker closes.
 const EDITOR_MAP_BUTTON_ID: &str = "editor-map-button";
 
 /// The picker id of the stored map, through the same lookup the rest of the
@@ -598,6 +623,8 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
         if let Some(ref strategy) = initial_strategy {
             state.load_strategy(strategy.clone());
         }
+        // The team of a strategy that was just created here (issue 817).
+        state.take_team_hand_off();
         state
     });
     let mut undo_manager = use_signal(UndoManager::default);
@@ -920,11 +947,16 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
     let has_unsaved = ss.has_unsaved_changes;
     // The update API takes no map, so the map is fixed once the strategy is
     // saved (and while a save is in flight).
+    let saved = ss.strategy_id.is_some();
     let can_change_map = map_change_allowed(
-        ss.strategy_id.is_some(),
+        saved,
         *save_in_progress.read(),
-        cs.current_map.is_some(),
+        map_is_kept(saved, ss.map_saved, cs.current_map.is_some()),
     );
+    let map_label = match map_status_note(saved, can_change_map, cs.current_map.is_some()) {
+        Some(note) => format!("Map: {map_display} ({note})"),
+        None => format!("Map: {map_display}"),
+    };
 
     // Clone values needed in callbacks and child components
     let zoom_val = cs.zoom;
@@ -1521,11 +1553,11 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                 if can_change_map {
                     button {
                         id: EDITOR_MAP_BUTTON_ID,
-                        class: "status-item status-map-link",
+                        class: "status-item status-map status-map-link",
                         r#type: "button",
                         title: "Change map",
                         onclick: move |_| show_map_picker.set(true),
-                        "Map: {map_display}"
+                        "{map_label}"
                     }
                 } else {
                     // Not a control: the map of a saved strategy cannot be
@@ -1534,9 +1566,9 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                     // place to return to when the picker closes.
                     span {
                         id: EDITOR_MAP_BUTTON_ID,
-                        class: "status-item",
+                        class: "status-item status-map",
                         tabindex: "-1",
-                        "Map: {map_display} ({MAP_FIXED_NOTE})"
+                        "{map_label}"
                     }
                 }
                 span { class: "status-item",
@@ -1621,11 +1653,18 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                                                                     r#type: "button",
                                                                     aria_current: if selected { Some("true") } else { None },
                                                                     onclick: move |_| {
-                                                                        let saved = strategy_state.peek().strategy_id.is_some();
+                                                                        let (saved, map_saved) = {
+                                                                            let s = strategy_state.peek();
+                                                                            (s.strategy_id.is_some(), s.map_saved)
+                                                                        };
                                                                         let allowed = map_change_allowed(
                                                                             saved,
                                                                             *save_in_progress.peek(),
-                                                                            canvas_state.peek().current_map.is_some(),
+                                                                            map_is_kept(
+                                                                                saved,
+                                                                                map_saved,
+                                                                                canvas_state.peek().current_map.is_some(),
+                                                                            ),
                                                                         );
                                                                         if allowed {
                                                                             canvas_state.with_mut(|c| {
@@ -1802,13 +1841,19 @@ fn save_strategy(ctx: SaveContext) {
         match result {
             Ok(saved) => {
                 let id = saved.id.clone();
-                let clean =
-                    strategy_state.with_mut(|s| s.mark_saved(&snapshot, saved.id, saved.owner_id));
+                let map_saved = !saved.map_id.trim().is_empty();
+                let clean = strategy_state.with_mut(|s| {
+                    s.map_saved = map_saved;
+                    s.mark_saved(&snapshot, saved.id, saved.owner_id)
+                });
                 tracing::info!("Strategy saved successfully");
                 toast.show(Toast::success("Strategy saved."));
                 if opened_as_new && clean {
                     // Leave `/strategy/editor` so a reload or a second save
                     // works on this strategy instead of creating another.
+                    // The new route's editor loads from the server, which
+                    // has no team, so the team goes across by hand.
+                    strategy_state.peek().hand_off_team();
                     navigator.replace(crate::routes::Route::StrategyEditor { id });
                 }
             }
@@ -2071,9 +2116,44 @@ mod tests {
         );
     }
 
+    /// Issue 817, the other half: the server's update body. If the server
+    /// starts reading a map or a team field, this fails along with the
+    /// stopgap it no longer needs.
+    #[test]
+    fn the_server_update_body_reads_only_those_five_fields() {
+        let route = include_str!("../../../../server/src/routes/strategy.rs");
+        let body = route
+            .split("struct UpdateStrategyRequest {")
+            .nth(1)
+            .expect("server UpdateStrategyRequest");
+        let body = &body[..body.find('}').expect("end of UpdateStrategyRequest")];
+        let mut fields: Vec<&str> = body
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.starts_with('#') && !l.starts_with("//") && l.contains(':'))
+            .map(|l| l.split(':').next().unwrap_or("").trim())
+            .collect();
+        fields.sort();
+        assert_eq!(
+            fields,
+            ["description", "elements", "name", "phases", "visibility"]
+        );
+    }
+
+    /// The source between `start` and the next `end` after it.
+    fn slice<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
+        let from = src.find(start).unwrap_or_else(|| panic!("`{start}`"));
+        let rest = &src[from..];
+        let to = rest
+            .find(end)
+            .unwrap_or_else(|| panic!("`{end}` after `{start}`"));
+        &rest[..to]
+    }
+
     /// Issue 817: nothing in the editor page marks the strategy unsaved for
     /// a team edit. Team state changes only through the `StrategyState`
-    /// methods, which leave the flag alone.
+    /// methods, which leave the flag alone, and no team handler or team
+    /// undo or redo arm sets the flag itself.
     #[test]
     fn the_editor_page_never_writes_team_state_directly() {
         let src = editor_source();
@@ -2081,31 +2161,117 @@ mod tests {
             "s.team_format =",
             "s.team_composition =",
             "team_composition.clear()",
+            "team_composition.push(",
+            "team_composition.retain(",
+            "team_composition.insert(",
+            "team_composition.remove(",
+            "team_composition.truncate(",
         ] {
             assert!(!src.contains(direct), "editor.rs still has `{direct}`");
+        }
+        let panel = slice(src, "TeamPanel {", "HeroPicker {");
+        for handler in [
+            "on_format_change:",
+            "on_assign:",
+            "on_clear_slot:",
+            "on_clear_all:",
+        ] {
+            assert!(panel.contains(handler), "TeamPanel has no `{handler}`");
+        }
+        assert!(
+            !panel.contains("has_unsaved_changes"),
+            "a team handler marks the strategy unsaved"
+        );
+        let undo = slice(src, "fn apply_undo(", "fn apply_redo(");
+        let redo = slice(src, "fn apply_redo(", "\n}\n");
+        for (name, body) in [("undo", undo), ("redo", redo)] {
+            let arms = &body[body
+                .find("UndoableAction::AssignHeroToSlot")
+                .unwrap_or_else(|| panic!("{name} has no team arms"))..];
+            assert!(arms.contains("UndoableAction::ClearSlot"));
+            assert!(arms.contains("UndoableAction::ClearAllSlots"));
+            assert!(
+                !arms.contains("has_unsaved_changes"),
+                "a team {name} arm marks the strategy unsaved"
+            );
         }
     }
 
     /// Issue 817: Change map is offered only while the map can still be
-    /// sent, the picker re-checks before it switches, and the fixed map says
-    /// why in plain text.
+    /// sent, the picker re-checks before it switches and marks the strategy
+    /// unsaved only before the first save, and the fixed map is focusable
+    /// text with the same id, so focus can return to it.
     #[test]
     fn change_map_is_offered_only_while_the_map_can_be_saved() {
         let src = editor_source();
-        let button = src
-            .find("title: \"Change map\"")
-            .expect("Change map button");
-        let gate = src[..button].rfind("if can_change_map {").expect("gate");
+        let bar = slice(src, "if can_change_map {", "span { class: \"status-item\",");
+        let (offered, fixed) = bar.split_once("} else {").expect("fixed branch");
+        assert!(offered.contains("title: \"Change map\""));
+        assert!(offered.contains("onclick: move |_| show_map_picker.set(true),"));
+        assert!(offered.contains("\"{map_label}\""));
+        assert!(!fixed.contains("onclick"), "the fixed map is not a control");
+        assert!(!fixed.contains("button {"));
+        assert!(fixed.contains("span {"));
+        assert!(fixed.contains("id: EDITOR_MAP_BUTTON_ID,"));
+        assert!(fixed.contains("tabindex: \"-1\","));
+        assert!(fixed.contains("\"{map_label}\""));
+        assert!(fixed.contains("status-map"));
+        assert!(offered.contains("status-map"));
+
+        let pick = slice(src, "let allowed = map_change_allowed(", "close_picker();");
+        assert!(pick.contains("map_is_kept("));
+        let (_, guarded) = pick.split_once("if allowed {").expect("picker re-check");
+        assert!(guarded.contains("c.select_map(map_id.to_string(), None);"));
+        let (_, dirty) = guarded
+            .split_once("if !saved {")
+            .expect("unsaved only before save");
+        assert!(dirty.contains("s.has_unsaved_changes = true;"));
         assert!(
-            !src[gate..button].contains("span {"),
-            "the Change map button sits directly under the gate"
+            !guarded
+                .split_once("if !saved {")
+                .unwrap()
+                .0
+                .contains("has_unsaved_changes"),
+            "the pick marks a saved strategy unsaved"
         );
-        let pick = src
-            .find("c.select_map(map_id.to_string(), None);")
-            .expect("pick");
-        let recheck = src[..pick].rfind("if allowed {").expect("picker re-check");
-        assert!(pick - recheck < 400, "the pick is inside the re-check");
-        assert!(src.contains("\"Map: {map_display} ({MAP_FIXED_NOTE})\""));
-        assert_eq!(MAP_FIXED_NOTE, "fixed after first save");
+        assert!(src.contains("map_is_kept(saved, ss.map_saved, cs.current_map.is_some())"));
+    }
+
+    /// Issue 817: the note beside the map name says why it is fixed, or that
+    /// a map picked for a saved strategy with none stored is not kept.
+    #[test]
+    fn the_map_note_matches_what_is_kept() {
+        assert_eq!(map_status_note(true, false, true), Some(MAP_FIXED_NOTE));
+        assert_eq!(map_status_note(false, false, true), Some(MAP_FIXED_NOTE));
+        // Saved, no stored map, one picked: shown but never sent.
+        assert_eq!(map_status_note(true, true, true), Some(MAP_NOT_SAVED_NOTE));
+        // Saved, nothing picked yet, or a new strategy: no note.
+        assert_eq!(map_status_note(true, true, false), None);
+        assert_eq!(map_status_note(false, true, true), None);
+        assert_eq!(map_status_note(false, true, false), None);
+        assert_eq!(MAP_FIXED_NOTE, "fixed once saved");
+        assert_eq!(MAP_NOT_SAVED_NOTE, "not saved");
+    }
+
+    /// Issue 817: the first save of a new strategy moves to the strategy's
+    /// own route, whose editor loads from the server (no team). The team is
+    /// handed across right before the move and taken when the editor mounts,
+    /// and the saved map state comes from the server's answer.
+    #[test]
+    fn the_team_survives_the_move_after_the_first_save() {
+        let src = editor_source();
+        let saved = slice(src, "Ok(saved) => {", "Err(e) => {");
+        let hand_off = saved.find("hand_off_team();").expect("hand-off");
+        let replace = saved
+            .find("navigator.replace(crate::routes::Route::StrategyEditor { id });")
+            .expect("replace");
+        assert!(hand_off < replace);
+        assert!(saved.contains("s.map_saved = map_saved;"));
+        let init = slice(
+            src,
+            "let mut strategy_state = use_signal(",
+            "let mut undo_manager",
+        );
+        assert!(init.contains("state.take_team_hand_off();"));
     }
 }
