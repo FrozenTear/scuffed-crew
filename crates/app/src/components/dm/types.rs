@@ -125,17 +125,21 @@ pub fn normalize_recipient_pubkey(input: &str) -> Result<String, String> {
 }
 
 /// Format a pubkey as a short truncated label when no display name is known.
+///
+/// Counts and cuts by character, never by byte: the text can be a raw
+/// `/dm/:peer_pubkey` route parameter, and a byte cut inside a multibyte
+/// character panics.
 pub fn truncate_pubkey(pubkey: &str) -> String {
+    let len = pubkey.chars().count();
+    if len <= 16 {
+        return pubkey.to_string();
+    }
+    let tail = |n: usize| pubkey.chars().skip(len - n).collect::<String>();
     if pubkey.starts_with("npub1") {
-        if pubkey.len() > 16 {
-            format!("{}…{}", &pubkey[..10], &pubkey[pubkey.len() - 4..])
-        } else {
-            pubkey.to_string()
-        }
-    } else if pubkey.len() > 16 {
-        format!("npub1…{}", &pubkey[pubkey.len() - 6..])
+        let head: String = pubkey.chars().take(10).collect();
+        format!("{head}…{}", tail(4))
     } else {
-        pubkey.to_string()
+        format!("npub1…{}", tail(6))
     }
 }
 
@@ -207,6 +211,36 @@ pub fn relative_time(rfc3339: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncate_pubkey_cuts_by_character_not_by_byte() {
+        // `/dm/%E2%82%AC%E2%82%AC%E2%82%AC%E2%82%AC%E2%82%AC%E2%82%ACa`:
+        // six euro signs and an "a" is 19 bytes, and byte 13 (19 - 6) is
+        // inside a euro sign. Seven characters is short, so it shows whole.
+        let euros = "€€€€€€a";
+        assert_eq!(euros.len(), 19);
+        assert!(!euros.is_char_boundary(euros.len() - 6));
+        assert_eq!(truncate_pubkey(euros), euros);
+
+        // Long multibyte text is cut on character boundaries.
+        let long = "€".repeat(20);
+        assert_eq!(truncate_pubkey(&long), format!("npub1…{}", "€".repeat(6)));
+        let npub = format!("npub1{}", "€".repeat(20));
+        assert_eq!(truncate_pubkey(&npub), "npub1€€€€€…€€€€");
+    }
+
+    #[test]
+    fn truncate_pubkey_keeps_short_input_and_shortens_real_keys() {
+        assert_eq!(truncate_pubkey(""), "");
+        assert_eq!(truncate_pubkey("abc"), "abc");
+        assert_eq!(truncate_pubkey("0123456789abcdef"), "0123456789abcdef");
+        assert_eq!(truncate_pubkey("npub1short"), "npub1short");
+        // Unchanged for the ASCII keys it is meant for.
+        let hex = format!("{}123456", "ab".repeat(29));
+        assert_eq!(truncate_pubkey(&hex), "npub1…123456");
+        let npub = "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsxyzw";
+        assert_eq!(truncate_pubkey(npub), "npub1qqqqq…xyzw");
+    }
 
     fn member(name: &str, pk: Option<&str>) -> DmMember {
         DmMember {
