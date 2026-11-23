@@ -177,6 +177,62 @@ fn participant_name_map(
         .unwrap_or_default()
 }
 
+/// Name of each participants table row, keyed by participant id, for the
+/// Remove button and its dialog. A name that repeats (two "Unnamed entrant"
+/// rows, or the same outside name twice) gets its row number, so every row
+/// has its own name. A unique name that happens to read like a numbered one
+/// gets its row number too, so the result is unique for every row.
+fn participant_row_labels(
+    parts: &[Participant],
+    names: &HashMap<String, String>,
+) -> HashMap<String, String> {
+    let base: Vec<String> = parts
+        .iter()
+        .map(|p| {
+            names
+                .get(&p.id)
+                .cloned()
+                .unwrap_or_else(|| UNNAMED_ENTRANT.to_string())
+        })
+        .collect();
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for name in &base {
+        *counts.entry(name.as_str()).or_default() += 1;
+    }
+    let mut numbered: Vec<bool> = base.iter().map(|n| counts[n.as_str()] > 1).collect();
+    loop {
+        let labels: Vec<String> = base
+            .iter()
+            .zip(&numbered)
+            .enumerate()
+            .map(|(i, (name, &num))| {
+                if num {
+                    format!("{name}, row {}", i + 1)
+                } else {
+                    name.clone()
+                }
+            })
+            .collect();
+        // Numbered labels end in distinct row numbers, so only a plain
+        // label can clash with one; number it and check again.
+        let taken: std::collections::HashSet<&str> = labels
+            .iter()
+            .zip(&numbered)
+            .filter(|(_, num)| **num)
+            .map(|(l, _)| l.as_str())
+            .collect();
+        let clashes: Vec<usize> = (0..labels.len())
+            .filter(|&i| !numbered[i] && taken.contains(labels[i].as_str()))
+            .collect();
+        if clashes.is_empty() {
+            return parts.iter().map(|p| p.id.clone()).zip(labels).collect();
+        }
+        for i in clashes {
+            numbered[i] = true;
+        }
+    }
+}
+
 /// What is wrong with the Add participant form, every field in one pass.
 #[derive(Debug, Clone, Default, PartialEq)]
 struct AddParticipantErrors {
@@ -1102,6 +1158,13 @@ pub fn AdminTournaments() -> Element {
         let teams = teams.data.read();
         participant_name_map(bracket.as_ref(), teams.as_ref().and_then(|d| d.as_ref()))
     };
+    // Participant id to a name unique to its row, for the Remove button and
+    // its dialog (QA Q3: two "Unnamed entrant" rows must not share a name).
+    let row_labels: HashMap<String, String> = bracket_data
+        .read()
+        .as_ref()
+        .map(|b| participant_row_labels(&b.participants, &participant_map))
+        .unwrap_or_default();
     // Issue 850: teams already entered, or of another game, are not offered.
     let team_options: Vec<Team> = {
         let bracket = bracket_data.read();
@@ -1215,6 +1278,10 @@ pub fn AdminTournaments() -> Element {
                                             .get(&p.id)
                                             .cloned()
                                             .unwrap_or_else(|| UNNAMED_ENTRANT.to_string());
+                                        let row_label = row_labels
+                                            .get(&p.id)
+                                            .cloned()
+                                            .unwrap_or_else(|| pname.clone());
                                         let seed = seed_label(p.seed);
                                         rsx! {
                                             tr { key: "{p.id}",
@@ -1226,7 +1293,7 @@ pub fn AdminTournaments() -> Element {
                                                             r#type: "button",
                                                             class: "btn is-danger",
                                                             id: remove_participant_id(&p.id),
-                                                            aria_label: "Remove {pname}",
+                                                            aria_label: "Remove {row_label}",
                                                             onclick: move |_| open_remove_part(p_rm.clone()),
                                                             "Remove"
                                                         }
@@ -1615,7 +1682,7 @@ pub fn AdminTournaments() -> Element {
                 remove_part_modal
                     .get_target()
                     .map(|p| {
-                        participant_map
+                        row_labels
                             .get(&p.id)
                             .cloned()
                             .unwrap_or_else(|| UNNAMED_ENTRANT.to_string())
@@ -2022,6 +2089,61 @@ mod tests {
             ["team:alpha", "team:beta", "team:delta", "team:epsilon"]
         );
         assert_eq!(ids(team_choices(&teams, None, Some(" "))).len(), 5);
+    }
+
+    #[test]
+    fn every_participant_row_has_its_own_remove_name() {
+        // QA Q3: two nameless entrants (no team and no name, or a blank
+        // name) and two with the same outside name must not share a name.
+        let entrant = |id: &str, team_id: Option<&str>, external: Option<&str>| {
+            serde_json::json!({
+                "id": id,
+                "team_id": team_id,
+                "external_name": external,
+                "seed": null,
+                "status": "registered"
+            })
+        };
+        let bracket: BracketData = serde_json::from_value(serde_json::json!({
+            "participants": [
+                entrant("p1", None, None),
+                entrant("p2", Some("team:alpha"), None),
+                entrant("p3", None, Some("   ")),
+                entrant("p4", None, Some("Guests")),
+                entrant("p5", None, Some("Guests")),
+                // A unique name that reads like a numbered one.
+                entrant("p6", None, Some("Guests, row 4")),
+            ],
+            "rounds": [],
+            "matches": []
+        }))
+        .unwrap();
+        // No teams list: the team entrant reads "Unlisted team".
+        let names = participant_name_map(Some(&bracket), None);
+        let labels = participant_row_labels(&bracket.participants, &names);
+        let label = |id: &str| labels.get(id).map(String::as_str).unwrap();
+        assert_eq!(label("p1"), "Unnamed entrant, row 1");
+        assert_eq!(label("p3"), "Unnamed entrant, row 3");
+        // A name that is unique stays as it is.
+        assert_eq!(label("p2"), "Unlisted team");
+        assert_eq!(label("p4"), "Guests, row 4");
+        assert_eq!(label("p5"), "Guests, row 5");
+        assert_eq!(label("p6"), "Guests, row 4, row 6");
+        let distinct: std::collections::HashSet<&String> = labels.values().collect();
+        assert_eq!(distinct.len(), bracket.participants.len());
+        assert_eq!(labels.len(), bracket.participants.len());
+
+        // The Remove button and its dialog both use the row name.
+        let src = include_str!("tournaments.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(prod.contains("aria_label: \"Remove {row_label}\","));
+        assert!(!prod.contains("aria_label: \"Remove {pname}\""));
+        let dialog = prod
+            .split("\"Remove \\\"{}\\\" from this tournament?\",")
+            .nth(1)
+            .and_then(|rest| rest.split("open:").next())
+            .expect("the Remove dialog message");
+        assert!(dialog.contains("row_labels"), "{dialog}");
     }
 
     #[test]
