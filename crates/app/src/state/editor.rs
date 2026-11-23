@@ -7,6 +7,7 @@ use scuffed_types::strategy::{
     Color, ElementType, GameMode, HeroId, HeroRole, HeroSelection, MapMetadata, PlaybackState,
     Position, Strategy, StrategyElement, TeamFormat, TeamSlot, TimelinePhase, Tool, Visibility,
 };
+use std::cell::RefCell;
 use uuid::Uuid;
 
 // =============================================================================
@@ -139,6 +140,10 @@ pub struct StrategyState {
     pub has_unsaved_changes: bool,
     /// Strategy visibility.
     pub visibility: Visibility,
+    /// Whether the server holds a map for this strategy (the loaded or
+    /// saved strategy's `map_id` is not blank). A map picked after that on
+    /// a strategy with none is shown but never sent (issue 817).
+    pub map_saved: bool,
 }
 
 impl Default for StrategyState {
@@ -157,6 +162,7 @@ impl Default for StrategyState {
             playback_state: PlaybackState::Stopped,
             has_unsaved_changes: false,
             visibility: Visibility::Private,
+            map_saved: false,
         }
     }
 }
@@ -295,7 +301,18 @@ impl StrategyState {
     // Team composition
     // =========================================================================
 
-    /// Assign a hero to a specific team slot.
+    // The strategy API stores no team format or composition (issue 817), so
+    // these edits are a planning aid for the open editor only. They never
+    // mark the strategy unsaved: Save would send nothing for them and would
+    // then report a save that did not happen.
+
+    /// Switch the team format. Not saved, so it is not an unsaved change.
+    pub fn set_team_format(&mut self, format: TeamFormat) {
+        self.team_format = format;
+    }
+
+    /// Assign a hero to a specific team slot. Not saved, so it is not an
+    /// unsaved change.
     pub fn assign_hero_to_slot(&mut self, slot: TeamSlot, hero_id: HeroId) {
         // Remove any existing assignment for this slot.
         self.team_composition.retain(|h| h.slot != slot);
@@ -305,14 +322,18 @@ impl StrategyState {
             player_name: None,
             slot,
         });
-
-        self.has_unsaved_changes = true;
     }
 
-    /// Clear a hero from a team slot.
+    /// Clear a hero from a team slot. Not saved, so it is not an unsaved
+    /// change.
     pub fn clear_slot(&mut self, slot: TeamSlot) {
         self.team_composition.retain(|h| h.slot != slot);
-        self.has_unsaved_changes = true;
+    }
+
+    /// Replace the whole composition (clear all, and its undo). Not saved,
+    /// so it is not an unsaved change.
+    pub fn set_team_composition(&mut self, composition: Vec<HeroSelection>) {
+        self.team_composition = composition;
     }
 
     /// Find the next available slot for a given role.
@@ -385,7 +406,39 @@ impl StrategyState {
         self.visibility = strategy.visibility;
         self.elements = strategy.elements;
         self.phases = strategy.phases;
+        self.map_saved = !strategy.map_id.trim().is_empty();
         self.has_unsaved_changes = false;
+    }
+
+    /// Stash the team for the editor that opens this strategy next. The
+    /// first save of a new strategy replaces `/strategy/editor` with the
+    /// strategy's own route, which mounts a fresh editor from the server's
+    /// copy, and the server stores no team (issue 817). Without the hand-off
+    /// the team would be cleared right after "Strategy saved.".
+    pub fn hand_off_team(&self) {
+        let Some(id) = self.strategy_id.clone() else {
+            return;
+        };
+        TEAM_HAND_OFF.with(|slot| {
+            *slot.borrow_mut() = Some(TeamHandOff {
+                strategy_id: id,
+                format: self.team_format,
+                composition: self.team_composition.clone(),
+            });
+        });
+    }
+
+    /// Take the stashed team, once. It is applied only when it was stashed
+    /// for this strategy; any other stash is dropped, so a stale team never
+    /// reaches another editor.
+    pub fn take_team_hand_off(&mut self) {
+        let Some(team) = TEAM_HAND_OFF.with(|slot| slot.borrow_mut().take()) else {
+            return;
+        };
+        if self.strategy_id.as_deref() == Some(team.strategy_id.as_str()) {
+            self.team_format = team.format;
+            self.team_composition = team.composition;
+        }
     }
 
     /// One playback step, run when a phase's time is up: go to the next
@@ -425,6 +478,37 @@ impl StrategyState {
         }
         !self.has_unsaved_changes
     }
+}
+
+/// The team of a just created strategy, on its way from the
+/// `/strategy/editor` editor to the one on the strategy's own route.
+#[derive(Debug, Clone)]
+struct TeamHandOff {
+    strategy_id: String,
+    format: TeamFormat,
+    composition: Vec<HeroSelection>,
+}
+
+thread_local! {
+    static TEAM_HAND_OFF: RefCell<Option<TeamHandOff>> = const { RefCell::new(None) };
+}
+
+/// Whether the map on the canvas is the one the strategy keeps: for a saved
+/// strategy only a map the server holds, for a new one any picked map (it
+/// goes out with the create request).
+pub fn map_is_kept(saved: bool, map_saved: bool, has_current_map: bool) -> bool {
+    if saved { map_saved } else { has_current_map }
+}
+
+/// Whether the editor may offer another map.
+///
+/// The map is sent only when a strategy is created; the update API takes no
+/// map (issue 817). So once the strategy has been saved the map is fixed,
+/// and so it is while a save is in flight (the create may land at any
+/// moment). A saved strategy with no stored map may still pick one to draw
+/// on. `has_map` is `map_is_kept`.
+pub fn map_change_allowed(saved: bool, saving: bool, has_map: bool) -> bool {
+    !has_map || !(saved || saving)
 }
 
 // =============================================================================
@@ -880,5 +964,145 @@ mod tests {
         assert!(!state.mark_saved(&snapshot, "s1".into(), "u1".into()));
         assert!(state.has_unsaved_changes);
         assert_eq!(state.strategy_id.as_deref(), Some("s1"));
+    }
+
+    /// Issue 817: the API stores no team format or composition, so editing
+    /// them must not raise "Unsaved changes" (Save would send nothing and
+    /// still say "Strategy saved.").
+    #[test]
+    fn team_edits_are_not_unsaved_changes() {
+        let mut state = StrategyState::default();
+        state.set_team_format(TeamFormat::SixVSix);
+        assert_eq!(state.team_format, TeamFormat::SixVSix);
+        state.assign_hero_to_slot(TeamSlot::Tank1, "reinhardt".to_string());
+        state.assign_hero_to_slot(TeamSlot::Dps1, "tracer".to_string());
+        state.clear_slot(TeamSlot::Dps1);
+        let filled = state.team_composition.clone();
+        assert_eq!(filled.len(), 1);
+        state.set_team_composition(Vec::new());
+        assert!(state.team_composition.is_empty());
+        state.set_team_composition(filled);
+        assert_eq!(state.team_composition.len(), 1);
+        assert!(!state.has_unsaved_changes);
+    }
+
+    /// Issue 817: a team edit made while a save is in flight does not keep
+    /// the editor dirty, and one made before it does not block a clean save.
+    #[test]
+    fn mark_saved_ignores_team_edits() {
+        let mut state = StrategyState::default();
+        state.add_element(StrategyElement::new(
+            ElementType::PlayerMarker,
+            Position::new(1.0, 2.0),
+        ));
+        state.assign_hero_to_slot(TeamSlot::Tank1, "reinhardt".to_string());
+        let snapshot = state.clone();
+        state.set_team_format(TeamFormat::SixVSix);
+        state.assign_hero_to_slot(TeamSlot::Tank2, "orisa".to_string());
+        assert!(state.mark_saved(&snapshot, "s1".into(), "u1".into()));
+        assert!(!state.has_unsaved_changes);
+        // The plan itself stays in the open editor.
+        assert_eq!(state.team_composition.len(), 2);
+        assert_eq!(state.team_format, TeamFormat::SixVSix);
+    }
+
+    /// Issue 817: the update API takes no map, so the map is fixed once the
+    /// strategy is saved or a save is in flight. Only a strategy with no map
+    /// at all may always pick one.
+    #[test]
+    fn the_map_is_fixed_once_the_strategy_is_saved() {
+        // New strategy, nothing in flight: free to pick and to change.
+        assert!(map_change_allowed(false, false, false));
+        assert!(map_change_allowed(false, false, true));
+        // Create in flight with a map: fixed.
+        assert!(!map_change_allowed(false, true, true));
+        // Saved with a map: fixed, saving or not.
+        assert!(!map_change_allowed(true, false, true));
+        assert!(!map_change_allowed(true, true, true));
+        // No map to draw on: picking one is always allowed.
+        assert!(map_change_allowed(true, false, false));
+        assert!(map_change_allowed(false, true, false));
+        assert!(map_change_allowed(true, true, false));
+    }
+
+    /// Issue 817: the team crosses the move from `/strategy/editor` to the
+    /// strategy's own route once, and only into that strategy's editor.
+    #[test]
+    fn the_team_is_handed_to_the_saved_strategys_editor_once() {
+        let mut creator = StrategyState::default();
+        creator.set_team_format(TeamFormat::SixVSix);
+        creator.assign_hero_to_slot(TeamSlot::Tank1, "reinhardt".to_string());
+        // Nothing is stashed before the strategy has an id.
+        creator.hand_off_team();
+        let mut fresh = loaded("s1");
+        fresh.take_team_hand_off();
+        assert!(fresh.team_composition.is_empty());
+
+        creator.strategy_id = Some("s1".to_string());
+        creator.hand_off_team();
+        let mut fresh = loaded("s1");
+        fresh.take_team_hand_off();
+        assert_eq!(fresh.team_format, TeamFormat::SixVSix);
+        assert_eq!(fresh.team_composition, creator.team_composition);
+        assert!(!fresh.has_unsaved_changes);
+        // Taken once: a later editor for the same strategy starts empty.
+        let mut again = loaded("s1");
+        again.take_team_hand_off();
+        assert!(again.team_composition.is_empty());
+
+        // A stash for another strategy is dropped, not applied.
+        creator.hand_off_team();
+        let mut other = loaded("s2");
+        other.take_team_hand_off();
+        assert!(other.team_composition.is_empty());
+        assert_eq!(other.team_format, TeamFormat::FiveVFive);
+        let mut late = loaded("s1");
+        late.take_team_hand_off();
+        assert!(late.team_composition.is_empty());
+    }
+
+    fn loaded(id: &str) -> StrategyState {
+        let mut strategy = StrategyState::default().to_strategy();
+        strategy.id = id.to_string();
+        strategy.owner_id = "u1".to_string();
+        strategy.map_id = "kings_row".to_string();
+        let mut state = StrategyState::default();
+        state.load_strategy(strategy);
+        state
+    }
+
+    /// Issue 817: a saved strategy keeps only the map the server holds; a
+    /// new one keeps whatever was picked (it goes out with the create).
+    #[test]
+    fn the_kept_map_is_the_stored_one_once_saved() {
+        assert!(loaded("s1").map_saved);
+        let mut strategy = StrategyState::default().to_strategy();
+        strategy.map_id = "  ".to_string();
+        let mut legacy = StrategyState::default();
+        legacy.load_strategy(strategy);
+        assert!(!legacy.map_saved);
+
+        assert!(map_is_kept(false, false, true));
+        assert!(!map_is_kept(false, false, false));
+        assert!(map_is_kept(true, true, true));
+        // Saved with no stored map: a picked map is not kept, so the picker
+        // stays open to it.
+        assert!(!map_is_kept(true, false, true));
+        assert!(map_change_allowed(
+            true,
+            false,
+            map_is_kept(true, false, true)
+        ));
+        assert!(!map_change_allowed(
+            true,
+            false,
+            map_is_kept(true, true, true)
+        ));
+        // A create in flight keeps the picked map fixed.
+        assert!(!map_change_allowed(
+            false,
+            true,
+            map_is_kept(false, false, true)
+        ));
     }
 }
