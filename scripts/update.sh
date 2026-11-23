@@ -126,6 +126,12 @@ if [[ ! "${PODMAN_SECS}" =~ ^[1-9][0-9]*$ ]]; then
     echo "error: SCUFFED_UPDATE_PODMAN_SECS must be a whole number of seconds above 0, got '${PODMAN_SECS}'." >&2
     exit 1
 fi
+# At most 3600s (1 hour). Longer is no real bound, and a huge value would
+# wrap in bash arithmetic, so the length check runs before any comparison.
+if ((${#PODMAN_SECS} > 4)) || ((PODMAN_SECS > 3600)); then
+    echo "error: SCUFFED_UPDATE_PODMAN_SECS must be at most 3600 seconds (1 hour), got '${PODMAN_SECS}'." >&2
+    exit 1
+fi
 PODMAN_KILL_SECS=5
 if ((PODMAN_SECS < PODMAN_KILL_SECS)); then
     PODMAN_KILL_SECS="${PODMAN_SECS}"

@@ -660,11 +660,23 @@ calls_has "^podman tag imgOld ${IMG}:rollback\$" || fail "slow podman ps before 
 out_has "timed out" && fail "slow podman ps before the removal: the lookup was cut short. $(tail_out)"
 out_has "Updated & healthy" || fail "slow podman ps before the removal: the update did not finish"
 
-# A bound that is not a whole number of seconds stops before any container.
+# A bound that is not a whole number of seconds above 0 stops before any
+# container. 0 matters: timeout(1) treats 0 as no bound at all.
 new_state bad-podman-secs "${DB_LINE}${SITE_LINE}"
-if TEST_PODMAN_SECS=abc run_update; then fail "update.sh accepted SCUFFED_UPDATE_PODMAN_SECS=abc"; fi
-out_has "SCUFFED_UPDATE_PODMAN_SECS must be a whole number" || fail "bad SCUFFED_UPDATE_PODMAN_SECS is not reported. $(tail_out)"
-expect_site_untouched "bad SCUFFED_UPDATE_PODMAN_SECS"
+for secs in abc 0; do
+    if TEST_PODMAN_SECS="${secs}" run_update; then fail "update.sh accepted SCUFFED_UPDATE_PODMAN_SECS=${secs}"; fi
+    out_has "SCUFFED_UPDATE_PODMAN_SECS must be a whole number of seconds above 0" || fail "SCUFFED_UPDATE_PODMAN_SECS=${secs} is not reported. $(tail_out)"
+    expect_site_untouched "SCUFFED_UPDATE_PODMAN_SECS=${secs}"
+done
+
+# A bound over 3600s stops before any container too, including a 20-digit
+# value that bash arithmetic would wrap.
+new_state podman-secs-over-limit "${DB_LINE}${SITE_LINE}"
+for secs in 3601 99999999999999999999; do
+    if TEST_PODMAN_SECS="${secs}" run_update; then fail "update.sh accepted SCUFFED_UPDATE_PODMAN_SECS=${secs}"; fi
+    out_has "SCUFFED_UPDATE_PODMAN_SECS must be at most 3600 seconds" || fail "SCUFFED_UPDATE_PODMAN_SECS=${secs} is not reported. $(tail_out)"
+    expect_site_untouched "SCUFFED_UPDATE_PODMAN_SECS=${secs}"
+done
 
 # --- e) --backup ----------------------------------------------------------------
 new_state backup-empty "${DB_LINE}${SITE_LINE}"
@@ -735,4 +747,4 @@ new_state bad-arg "${DB_LINE}${SITE_LINE}"
 if run_update --bakcup; then fail "update.sh accepted an unknown argument"; fi
 [[ ! -s "${STUB_STATE}/calls" ]] || fail "unknown argument still ran podman or curl"
 
-echo "ok: update.sh rollback and --backup (35 scenarios)"
+echo "ok: update.sh rollback and --backup (36 scenarios)"
