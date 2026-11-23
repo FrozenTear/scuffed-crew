@@ -92,13 +92,15 @@ flatten_subject_dashes() {
   printf '%s' "$text"
 }
 
-# "HOLD-MERGE:", "[HOLD-MERGE]" and "(HOLD-MERGE)" are internal merge-gate
-# markers in PR titles. Members read the commit list, so drop a leading
-# "HOLD-MERGE:" or "[HOLD-MERGE]" from each "- subject" line (or bare
-# subject line), and a "(HOLD-MERGE)" anywhere in it. The rest is kept.
+# "HOLD-MERGE:", a leading "HOLD-MERGE ", "[HOLD-MERGE]" and "(HOLD-MERGE)"
+# are internal merge-gate markers in PR titles. Members read the commit
+# list, so drop a leading "HOLD-MERGE:", "HOLD-MERGE " or "[HOLD-MERGE]"
+# from each "- subject" line (or bare subject line), a "[HOLD-MERGE]"
+# anywhere in it, and a "(HOLD-MERGE)" anywhere in it. The rest is kept.
 strip_hold_merge() {
   printf '%s' "$1" | sed -E \
-    -e 's/^(-[[:space:]]+)?(HOLD-MERGE:|\[HOLD-MERGE\])[[:space:]]*/\1/' \
+    -e 's/^(-[[:space:]]+)?(HOLD-MERGE:|HOLD-MERGE[[:space:]]+|\[HOLD-MERGE\])[[:space:]]*/\1/' \
+    -e 's/[[:space:]]*\[HOLD-MERGE\]//g' \
     -e 's/[[:space:]]*\(HOLD-MERGE\)//g'
 }
 
