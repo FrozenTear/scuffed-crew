@@ -16,6 +16,7 @@ use crate::components::{
     use_toast,
 };
 use crate::hooks::{ModalController, use_api_list};
+use crate::pages::tournament::{Participant, participant_names};
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::{
     AddParticipantRequest, CreateTournamentRequest, MatchReportRequest, StatusChangeRequest,
@@ -86,13 +87,6 @@ struct BracketData {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct Participant {
-    id: String,
-    name: String,
-    seed: u32,
-}
-
-#[derive(Debug, Clone, Deserialize)]
 struct Round {
     id: String,
     round_number: u32,
@@ -113,9 +107,79 @@ struct BracketMatch {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct Member {
+struct Team {
     id: String,
-    display_name: String,
+    name: String,
+}
+
+/// A participant with neither a team nor a typed name.
+const UNNAMED_PARTICIPANT: &str = "Unnamed entrant";
+
+/// Display name of each participant, keyed by participant id: the same
+/// naming as the public tournament page.
+fn participant_name_map(
+    bracket: Option<&BracketData>,
+    teams: Option<&Vec<Team>>,
+) -> HashMap<String, String> {
+    let team_names: HashMap<String, String> = teams
+        .map(|list| {
+            list.iter()
+                .map(|t| (t.id.clone(), t.name.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    bracket
+        .map(|b| participant_names(&b.participants, &team_names))
+        .unwrap_or_default()
+}
+
+/// Which field of the Add participant form is wrong, and the words for it.
+#[derive(Debug, Clone, PartialEq)]
+enum AddParticipantError {
+    Entrant(&'static str),
+    Seed(&'static str),
+}
+
+/// The Add participant form as the body the server takes: a picked team
+/// (`team_id`) or a typed name (`external_name`), never both, and a seed
+/// only when one was typed.
+fn add_participant_body(
+    team_id: &str,
+    external_name: &str,
+    seed: &str,
+) -> Result<AddParticipantRequest, AddParticipantError> {
+    let team_id = team_id.trim();
+    let external_name = external_name.trim();
+    let seed = seed.trim();
+    let (team_id, external_name) = match (team_id.is_empty(), external_name.is_empty()) {
+        (true, true) => {
+            return Err(AddParticipantError::Entrant("Pick a team or type a name."));
+        }
+        (false, false) => {
+            return Err(AddParticipantError::Entrant(
+                "Pick a team or type a name, not both.",
+            ));
+        }
+        (false, true) => (Some(team_id.to_string()), None),
+        (true, false) => (None, Some(external_name.to_string())),
+    };
+    let seed = if seed.is_empty() {
+        None
+    } else {
+        match seed.parse::<u32>() {
+            Ok(n) if n >= 1 => Some(n),
+            _ => {
+                return Err(AddParticipantError::Seed(
+                    "Seed must be a whole number, 1 or higher.",
+                ));
+            }
+        }
+    };
+    Ok(AddParticipantRequest {
+        team_id,
+        external_name,
+        seed,
+    })
 }
 
 const FORMATS: [&str; 4] = ["single_elim", "double_elim", "round_robin", "swiss"];
@@ -142,8 +206,11 @@ const MAX_ID: &str = "tournament-max";
 const DATE_ID: &str = "tournament-date";
 const TIME_ID: &str = "tournament-time";
 const TIME_HINT_ID: &str = "tournament-time-hint";
-const PARTICIPANT_ID: &str = "participant-member";
-const PARTICIPANT_ERROR_ID: &str = "participant-member-error";
+const PARTICIPANT_ID: &str = "participant-team";
+const PARTICIPANT_NAME_ID: &str = "participant-name";
+const PARTICIPANT_ERROR_ID: &str = "participant-entrant-error";
+const PARTICIPANT_SEED_ID: &str = "participant-seed";
+const PARTICIPANT_SEED_ERROR_ID: &str = "participant-seed-error";
 const SCORE_A_ID: &str = "report-score-a";
 const SCORE_B_ID: &str = "report-score-b";
 const SCORES_ERROR_ID: &str = "report-scores-error";
@@ -264,6 +331,12 @@ fn view_button_id(tournament_id: &str) -> String {
     format!("tournament-view-{tournament_id}")
 }
 
+/// The Seed cell: the number, or a word when the participant has none.
+fn seed_label(seed: Option<u32>) -> String {
+    seed.map(|n| n.to_string())
+        .unwrap_or_else(|| "Unseeded".to_string())
+}
+
 /// Id of a participant's Remove button, from the participant id.
 fn remove_participant_id(participant_id: &str) -> String {
     format!("participant-remove-{participant_id}")
@@ -290,7 +363,7 @@ fn split_starts_at(raw: &str) -> (String, String) {
 pub fn AdminTournaments() -> Element {
     let mut tournaments = use_api_list::<Tournament>("/api/tournaments");
     let mut games = use_api_list::<Game>("/api/games");
-    let mut members = use_api_list::<Member>("/api/members");
+    let mut teams = use_api_list::<Team>("/api/teams");
     let mut toast = use_toast();
 
     // View toggle: None = list, Some(id) = detail
@@ -325,8 +398,11 @@ pub fn AdminTournaments() -> Element {
 
     // Add participant
     let mut add_part_modal = ModalController::<()>::new();
-    let mut add_part_member_id = use_signal(String::new);
-    let mut add_part_member_error = use_signal(String::new);
+    let mut add_part_team_id = use_signal(String::new);
+    let mut add_part_name = use_signal(String::new);
+    let mut add_part_seed = use_signal(String::new);
+    let mut add_part_entrant_error = use_signal(String::new);
+    let mut add_part_seed_error = use_signal(String::new);
     let mut add_part_error = use_signal(|| None::<String>);
 
     // Remove participant confirm
@@ -470,7 +546,7 @@ pub fn AdminTournaments() -> Element {
                     modal.close();
                     tournaments.refresh += 1;
                     games.refresh += 1;
-                    members.refresh += 1;
+                    teams.refresh += 1;
                 }
                 Err(e) => {
                     save_error.set(Some(
@@ -530,7 +606,7 @@ pub fn AdminTournaments() -> Element {
                         tournaments.refresh += 1;
                         focus_after_delete_soon(view_button_id(&id), focus_next);
                         games.refresh += 1;
-                        members.refresh += 1;
+                        teams.refresh += 1;
                         detail_id.set(None);
                     }
                     Err(e) => toast.show(Toast::error_from("Archive failed", &e)),
@@ -568,7 +644,7 @@ pub fn AdminTournaments() -> Element {
                         focus_next,
                     );
                     games.refresh += 1;
-                    members.refresh += 1;
+                    teams.refresh += 1;
                     detail_refresh += 1;
                 }
                 Err(e) => toast.show(Toast::error_from("Status change failed", &e)),
@@ -593,8 +669,11 @@ pub fn AdminTournaments() -> Element {
     // --- Detail view handlers ---
 
     let on_add_part_open = move |_| {
-        add_part_member_id.set(String::new());
-        add_part_member_error.set(String::new());
+        add_part_team_id.set(String::new());
+        add_part_name.set(String::new());
+        add_part_seed.set(String::new());
+        add_part_entrant_error.set(String::new());
+        add_part_seed_error.set(String::new());
         add_part_error.set(None);
         add_part_modal.show_empty();
     };
@@ -602,15 +681,22 @@ pub fn AdminTournaments() -> Element {
     let on_add_part_close = move |_| add_part_modal.close();
 
     let on_add_part_submit = move |_| {
-        let mid = add_part_member_id().trim().to_string();
         add_part_error.set(None);
-        if mid.is_empty() {
-            add_part_member_error.set("Pick a member to add.".to_string());
-            return;
-        }
-        add_part_member_error.set(String::new());
+        add_part_entrant_error.set(String::new());
+        add_part_seed_error.set(String::new());
+        let body =
+            match add_participant_body(&add_part_team_id(), &add_part_name(), &add_part_seed()) {
+                Ok(body) => body,
+                Err(AddParticipantError::Entrant(text)) => {
+                    add_part_entrant_error.set(text.to_string());
+                    return;
+                }
+                Err(AddParticipantError::Seed(text)) => {
+                    add_part_seed_error.set(text.to_string());
+                    return;
+                }
+            };
         if let Some(id) = detail_id() {
-            let body = AddParticipantRequest { member_id: mid };
             add_part_modal.start_submit();
             spawn(async move {
                 let result = ApiClient::web()
@@ -956,19 +1042,19 @@ pub fn AdminTournaments() -> Element {
         }
     };
 
+    // Participant id to display name, for the table, the bracket and both
+    // participant dialogs.
+    let participant_map: HashMap<String, String> = {
+        let bracket = bracket_data.read();
+        let teams = teams.data.read();
+        participant_name_map(bracket.as_ref(), teams.as_ref().and_then(|d| d.as_ref()))
+    };
+    let dialog_names = participant_map.clone();
+
     let detail = if detail_id().is_none() {
         rsx! {}
     } else if let Some(tournament) = detail_tournament() {
         let bracket = bracket_data();
-        let participant_map: HashMap<String, String> = bracket
-            .as_ref()
-            .map(|b| {
-                b.participants
-                    .iter()
-                    .map(|p| (p.id.clone(), p.name.clone()))
-                    .collect()
-            })
-            .unwrap_or_default();
         let t_id = tournament.id.clone();
         let is_swiss = tournament.format == "swiss";
         let is_in_progress = tournament.status == "in_progress";
@@ -1057,11 +1143,15 @@ pub fn AdminTournaments() -> Element {
                                 for p in parts.iter() {
                                     Fragment { key: "{p.id}", {
                                         let p_rm = p.clone();
-                                        let pname = p.name.clone();
+                                        let pname = participant_map
+                                            .get(&p.id)
+                                            .cloned()
+                                            .unwrap_or_else(|| UNNAMED_PARTICIPANT.to_string());
+                                        let seed = seed_label(p.seed);
                                         rsx! {
                                             tr { key: "{p.id}",
-                                                td { class: "cell-who", "{p.name}" }
-                                                td { class: "num", "data-label": "Seed", "{p.seed}" }
+                                                td { class: "cell-who", "{pname}" }
+                                                td { class: "num", "data-label": "Seed", "{seed}" }
                                                 td { class: "cell-actions",
                                                     RowActions {
                                                         button {
@@ -1081,7 +1171,7 @@ pub fn AdminTournaments() -> Element {
                             }
                         },
                         _ => rsx! {
-                            p { class: "field-hint", "No participants yet. Use Add participant to sign members up." }
+                            p { class: "field-hint", "No participants yet. Use Add participant to enter a team." }
                         },
                     }
                 }
@@ -1168,7 +1258,7 @@ pub fn AdminTournaments() -> Element {
                     }
                 }
 
-                {list_cap_notice(&members, "members")}
+                {list_cap_notice(&teams, "teams")}
             }
         }
     } else if detail_loading() || detail_error().is_none() {
@@ -1205,7 +1295,8 @@ pub fn AdminTournaments() -> Element {
         .map(|p| remove_participant_id(&p.id));
     let report_focus = match_modal.get_target().map(|m| report_button_id(&m.id));
     let name_invalid = !name_error().is_empty();
-    let part_invalid = !add_part_member_error().is_empty();
+    let part_invalid = !add_part_entrant_error().is_empty();
+    let seed_invalid = !add_part_seed_error().is_empty();
     let scores_invalid = !scores_error().is_empty();
     let winner_invalid = !winner_error().is_empty();
 
@@ -1256,7 +1347,7 @@ pub fn AdminTournaments() -> Element {
 
                 {list_cap_notice(&tournaments, "tournaments")}
                 {list_cap_notice(&games, "games")}
-                {list_cap_notice(&members, "members")}
+                {list_cap_notice(&teams, "teams")}
             }
         }
 
@@ -1389,29 +1480,56 @@ pub fn AdminTournaments() -> Element {
             restore_focus_id: Some(ADD_PARTICIPANT_ID.to_string()),
 
             div { class: "form-field",
-                label { class: "field-label", r#for: PARTICIPANT_ID, "Member" }
+                label { class: "field-label", r#for: PARTICIPANT_ID, "Team" }
                 select {
                     class: "field-input",
                     id: PARTICIPANT_ID,
-                    value: "{add_part_member_id}",
+                    value: "{add_part_team_id}",
                     aria_invalid: if part_invalid { "true" },
                     aria_describedby: PARTICIPANT_ERROR_ID,
-                    onchange: move |e| add_part_member_id.set(e.value()),
-                    option { value: "", "Pick a member" }
+                    onchange: move |e| add_part_team_id.set(e.value()),
+                    option { value: "", "No team, use the name below" }
                     {
-                        let m = members.data.read();
-                        let m = m.as_ref().and_then(|d| d.as_ref());
-                        match m {
+                        let t = teams.data.read();
+                        let t = t.as_ref().and_then(|d| d.as_ref());
+                        match t {
                             Some(list) => rsx! {
-                                for mem in list.iter() {
-                                    option { key: "{mem.id}", value: "{mem.id}", "{mem.display_name}" }
+                                for team in list.iter() {
+                                    option { key: "{team.id}", value: "{team.id}", "{team.name}" }
                                 }
                             },
                             None => rsx! {},
                         }
                     }
                 }
-                FieldError { id: PARTICIPANT_ERROR_ID.to_string(), text: add_part_member_error() }
+            }
+            div { class: "form-field",
+                label { class: "field-label", r#for: PARTICIPANT_NAME_ID, "Outside team name" }
+                input {
+                    class: "field-input",
+                    id: PARTICIPANT_NAME_ID,
+                    r#type: "text",
+                    aria_invalid: if part_invalid { "true" },
+                    aria_describedby: PARTICIPANT_ERROR_ID,
+                    value: "{add_part_name}",
+                    oninput: move |e| add_part_name.set(e.value()),
+                }
+                FieldError { id: PARTICIPANT_ERROR_ID.to_string(), text: add_part_entrant_error() }
+            }
+            div { class: "form-field",
+                label { class: "field-label", r#for: PARTICIPANT_SEED_ID, "Seed (optional)" }
+                input {
+                    class: "field-input",
+                    id: PARTICIPANT_SEED_ID,
+                    r#type: "number",
+                    inputmode: "numeric",
+                    min: "1",
+                    aria_invalid: if seed_invalid { "true" },
+                    aria_describedby: PARTICIPANT_SEED_ERROR_ID,
+                    value: "{add_part_seed}",
+                    oninput: move |e| add_part_seed.set(e.value()),
+                }
+                FieldError { id: PARTICIPANT_SEED_ERROR_ID.to_string(), text: add_part_seed_error() }
             }
         }
 
@@ -1420,7 +1538,15 @@ pub fn AdminTournaments() -> Element {
             title: "Remove participant".to_string(),
             message: format!(
                 "Remove \"{}\" from this tournament?",
-                remove_part_modal.get_target().map(|p| p.name).unwrap_or_default()
+                remove_part_modal
+                    .get_target()
+                    .map(|p| {
+                        dialog_names
+                            .get(&p.id)
+                            .cloned()
+                            .unwrap_or_else(|| UNNAMED_PARTICIPANT.to_string())
+                    })
+                    .unwrap_or_default()
             ),
             open: remove_part_modal.is_open(),
             danger: true,
@@ -1444,11 +1570,7 @@ pub fn AdminTournaments() -> Element {
             {
                 let (a_name, b_name, a_id, b_id) = match match_modal.get_target() {
                     Some(m) => {
-                        let bd = bracket_data();
-                        let pmap: HashMap<String, String> = bd
-                            .as_ref()
-                            .map(|b| b.participants.iter().map(|p| (p.id.clone(), p.name.clone())).collect())
-                            .unwrap_or_default();
+                        let pmap = &dialog_names;
                         let a_id = m.participant_a_id.clone().unwrap_or_default();
                         let b_id = m.participant_b_id.clone().unwrap_or_default();
                         let a_name = pmap.get(&a_id).cloned().unwrap_or_else(|| "Player A".into());
@@ -1652,6 +1774,8 @@ mod tests {
             "DATE_ID",
             "TIME_ID",
             "PARTICIPANT_ID",
+            "PARTICIPANT_NAME_ID",
+            "PARTICIPANT_SEED_ID",
             "SCORE_A_ID",
             "SCORE_B_ID",
             "WINNER_ID",
@@ -1691,5 +1815,119 @@ mod tests {
             "focus_after_refresh_soon(\n                        status_cell_id(&id),\n                        status_label(&new_status),\n                        focus_next,\n                    );"
         ));
         assert!(prod.contains("id: tournament_filter_id(s),"));
+    }
+
+    #[test]
+    fn add_participant_sends_what_the_server_takes() {
+        // Issue 689: the server reads team_id, external_name and seed, and
+        // answers 400 when both team_id and external_name are missing.
+        let team = add_participant_body(" team:alpha ", "", "").unwrap();
+        assert_eq!(
+            serde_json::to_value(&team).unwrap(),
+            serde_json::json!({ "team_id": "team:alpha" })
+        );
+        let outside = add_participant_body("", "  Rival Squad ", " 3 ").unwrap();
+        assert_eq!(
+            serde_json::to_value(&outside).unwrap(),
+            serde_json::json!({ "external_name": "Rival Squad", "seed": 3 })
+        );
+        assert_eq!(
+            add_participant_body("", "  ", "1"),
+            Err(AddParticipantError::Entrant("Pick a team or type a name."))
+        );
+        assert_eq!(
+            add_participant_body("team:alpha", "Rival Squad", ""),
+            Err(AddParticipantError::Entrant(
+                "Pick a team or type a name, not both."
+            ))
+        );
+        for bad in ["0", "-1", "1.5", "first"] {
+            assert_eq!(
+                add_participant_body("team:alpha", "", bad),
+                Err(AddParticipantError::Seed(
+                    "Seed must be a whole number, 1 or higher."
+                )),
+                "{bad}"
+            );
+        }
+        let src = include_str!("tournaments.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(!prod.contains("member_id"));
+        assert!(!prod.contains("/api/members"));
+    }
+
+    #[test]
+    fn a_bracket_with_participants_decodes_and_names_them() {
+        // The server's `TournamentBracket`, field for field (db/src/types.rs).
+        let json = serde_json::json!({
+            "tournament": {
+                "id": "t1",
+                "name": "Winter Cup",
+                "game_id": null,
+                "format": "single_elim",
+                "status": "registration",
+                "max_teams": 8,
+                "best_of": 3,
+                "is_external": false,
+                "external_url": null,
+                "rules": null,
+                "description": null,
+                "starts_at": null,
+                "ends_at": null,
+                "created_by": "member:1",
+                "created_at": "2026-11-01T18:00:00Z",
+                "updated_at": "2026-11-01T18:00:00Z"
+            },
+            "participants": [
+                {
+                    "id": "p1",
+                    "tournament_id": "t1",
+                    "team_id": "team:alpha",
+                    "external_name": null,
+                    "seed": 1,
+                    "group_label": null,
+                    "status": "registered",
+                    "created_at": "2026-11-02T18:00:00Z"
+                },
+                {
+                    "id": "p2",
+                    "tournament_id": "t1",
+                    "team_id": null,
+                    "external_name": "Rival Squad",
+                    "seed": null,
+                    "group_label": null,
+                    "status": "checked_in",
+                    "created_at": "2026-11-02T18:05:00Z"
+                },
+                {
+                    "id": "p3",
+                    "tournament_id": "t1",
+                    "team_id": "team:gone",
+                    "external_name": null,
+                    "seed": null,
+                    "group_label": null,
+                    "status": "registered",
+                    "created_at": "2026-11-02T18:06:00Z"
+                }
+            ],
+            "rounds": [],
+            "matches": []
+        });
+        let bracket: BracketData =
+            serde_json::from_value(json).expect("the server's shape decodes");
+        assert_eq!(bracket.participants.len(), 3);
+        assert_eq!(seed_label(bracket.participants[0].seed), "1");
+        assert_eq!(seed_label(bracket.participants[1].seed), "Unseeded");
+
+        let teams = vec![Team {
+            id: "team:alpha".into(),
+            name: "Alpha".into(),
+        }];
+        let names = participant_name_map(Some(&bracket), Some(&teams));
+        assert_eq!(names["p1"], "Alpha");
+        assert_eq!(names["p2"], "Rival Squad");
+        // A team the list does not hold still reads as something.
+        assert_eq!(names["p3"], "team:gone");
+        assert!(participant_name_map(None, Some(&teams)).is_empty());
     }
 }

@@ -41,12 +41,11 @@ struct TournamentDetail {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-struct Participant {
-    id: String,
-    team_id: Option<String>,
-    external_name: Option<String>,
-    #[allow(dead_code)]
-    seed: Option<u32>,
+pub(crate) struct Participant {
+    pub(crate) id: String,
+    pub(crate) team_id: Option<String>,
+    pub(crate) external_name: Option<String>,
+    pub(crate) seed: Option<u32>,
     #[allow(dead_code)]
     status: String,
 }
@@ -83,8 +82,9 @@ fn summary_lead(format: &str, teams: usize, best_of: u32) -> String {
 }
 
 /// Display name of each participant, keyed by participant id. An entrant
-/// with nothing to show yet has no entry and reads "To be decided".
-fn participant_names(
+/// with nothing to show yet has no entry and reads "To be decided". The
+/// admin tournaments page names its participants with this too.
+pub(crate) fn participant_names(
     participants: &[Participant],
     team_names: &HashMap<String, String>,
 ) -> HashMap<String, String> {
