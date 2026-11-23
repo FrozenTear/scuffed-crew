@@ -8,8 +8,10 @@
 //    drawing or selection first, then leaves (notes 5 and 10).
 // 4. Vision blocking 2: the map picker is a modal dialog.
 // 5. Vision r4 nits: 3 (ring after a key), 13 (drawer), 14 (Ctrl+S in the
-//    picker), 15 (Cmd chords), 16 (selects and sliders), 17 (stored map id
-//    not the picker's), 20 (no hint on mouse focus), 21 (aria-current).
+//    picker), 15 (Cmd chords), 16 (selects and sliders), 17 (the picked map
+//    is marked; the two strategies whose stored map id is not the picker's
+//    check that a saved map is fixed whatever id is stored, issue 817),
+//    20 (no hint on mouse focus), 21 (aria-current).
 // 6. Vision r5 nits: 22 (Ctrl/Cmd+S behind the drawer), 23 (Tab from outside
 //    the picker), 24 (no Cmd+Y), 25 (arrows on a select), and Tab out of a
 //    group panel closes it.

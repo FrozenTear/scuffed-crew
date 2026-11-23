@@ -2157,9 +2157,17 @@ mod tests {
     #[test]
     fn the_editor_page_never_writes_team_state_directly() {
         let src = editor_source();
+        // Any binding: `s.`, `strategy_state.write().`, and so on. A
+        // comparison (`==`) is a read, not a write.
+        for field in [".team_format =", ".team_composition ="] {
+            for (at, _) in src.match_indices(field) {
+                assert!(
+                    src[at + field.len()..].starts_with('='),
+                    "editor.rs writes `{field}` directly"
+                );
+            }
+        }
         for direct in [
-            "s.team_format =",
-            "s.team_composition =",
             "team_composition.clear()",
             "team_composition.push(",
             "team_composition.retain(",
@@ -2261,12 +2269,25 @@ mod tests {
     fn the_team_survives_the_move_after_the_first_save() {
         let src = editor_source();
         let saved = slice(src, "Ok(saved) => {", "Err(e) => {");
-        let hand_off = saved.find("hand_off_team();").expect("hand-off");
-        let replace = saved
+        assert!(saved.contains("s.map_saved = map_saved;"));
+        // Only the move hands the team across: outside this block every save
+        // would stash it, and reopening the strategy later would bring it back.
+        let (before, moving) = saved
+            .split_once("if opened_as_new && clean {")
+            .expect("first-save block");
+        assert!(
+            !before.contains("hand_off_team()"),
+            "hand-off outside the move"
+        );
+        let moving = &moving[..moving.find("\n                }\n").expect("block end")];
+        assert_eq!(saved.matches("hand_off_team()").count(), 1);
+        let hand_off = moving
+            .find("hand_off_team();")
+            .expect("hand-off in the block");
+        let replace = moving
             .find("navigator.replace(crate::routes::Route::StrategyEditor { id });")
             .expect("replace");
         assert!(hand_off < replace);
-        assert!(saved.contains("s.map_saved = map_saved;"));
         let init = slice(
             src,
             "let mut strategy_state = use_signal(",

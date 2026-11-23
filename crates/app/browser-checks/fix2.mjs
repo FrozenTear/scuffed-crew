@@ -85,6 +85,7 @@ for (const role of ['guest', 'member', 'admin']) {
     // without running beforeunload, so its unsaved pick prompts nothing.
     {
       const fresh = await ctx.newPage();
+      fresh.on('pageerror', e => errors.push(String(e).slice(0, 120)));
       await open(fresh, '/strategy/editor');
       rec(`${T}: a new strategy opens the picker`, !!(await fresh.$('#map-picker[role="dialog"]')));
       await fresh.click('.map-picker-item >> nth=1'); await fresh.waitForTimeout(500);
