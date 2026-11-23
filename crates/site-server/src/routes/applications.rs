@@ -546,11 +546,13 @@ async fn ensure_member_for_application(
         // Reactivate if needed
         let mut current = member;
         if !current.is_active {
-            // Reactivation keeps an officer or admin role (a member or recruit
-            // gets the application role below). Officers cannot set `is_active`
-            // on officers or admins anywhere else (`can_set_is_active`), so only
-            // an admin may bring one back here. 403 before any write: the member
-            // stays inactive and the application keeps its status.
+            // Reactivation keeps an officer or admin role. Trial writes no
+            // role, so a member or recruit keeps theirs; accept is what applies
+            // the application role to a member or recruit below. Officers
+            // cannot set `is_active` on officers or admins anywhere else
+            // (`can_set_is_active`), so only an admin may bring one back here.
+            // 403 before any write: the member stays inactive and the
+            // application keeps its status.
             if let Err(denial) = can_reactivate_via_application(reviewer_role, current.org_role) {
                 return Err((
                     denial.status(),

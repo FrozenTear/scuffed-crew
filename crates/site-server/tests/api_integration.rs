@@ -4815,7 +4815,7 @@ async fn admin_can_reactivate_deactivated_officer_or_admin_via_application() {
         assert_eq!(
             member.org_role.to_string(),
             role,
-            "admin {status} keeps the stored role"
+            "admin {status} keeps the {role} role"
         );
     }
 }
