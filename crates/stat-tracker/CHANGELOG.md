@@ -28,6 +28,8 @@ summary, then the highlights, and tucks the remaining text under Details.
 
 The notes for each step are in the 0.6.0-alpha.1 to 0.6.0-rc.3 sections below. If you stayed on the stable channel, this is the first 0.6.0 build the app and bootstrap.sh offer you, and the new desktop app, the rank reader and the bans and picks reader all arrive with it.
 
+A new Overwatch game is much less likely to save an earlier game's final stats. When the first scoreboard of a game shows exactly the last scoreboard of one of the last ten games on the same map, the tracker now takes it as that game's scoreboard shown again and does not save it, so the new game starts from its own numbers. A scoreboard held over from the last game is also dropped when two of the new game's own elims, deaths and damage read lower than it (#809). Both checks look only at stats read for sure, so a scoreboard with too few sure stats is still saved as before.
+
 ### Install
 
 ```sh

@@ -215,3 +215,39 @@ async fn name_recognizer_survives_restart_and_is_resent() {
         "a resend still sends the stored recognizer"
     );
 }
+
+/// #809: `recent_sessions` orders by the newest capture (not the start),
+/// newest first, and keeps `limit`.
+#[tokio::test]
+async fn recent_sessions_are_newest_capture_first_and_limited() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalStore::open(dir.path()).await.expect("open store");
+    let now = Utc::now();
+    for (id, mins) in [
+        ("s30", 30),
+        ("s10", 10),
+        ("s50", 50),
+        ("s20", 20),
+        ("s40", 40),
+    ] {
+        let mut row = session_row(id, "defeat");
+        // Started in the opposite order to the last capture.
+        row.started_at = SurrealDatetime::from(now - chrono::Duration::minutes(100 - mins));
+        row.last_capture_at = SurrealDatetime::from(now - chrono::Duration::minutes(mins));
+        store.create_session(&row).await.unwrap();
+    }
+    let ids = |sessions: Vec<MatchSession>| {
+        sessions
+            .into_iter()
+            .map(|s| s.session_id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        ids(store.recent_sessions(3).await.unwrap()),
+        ["s10", "s20", "s30"]
+    );
+    assert_eq!(
+        ids(store.recent_sessions(10).await.unwrap()),
+        ["s10", "s20", "s30", "s40", "s50"]
+    );
+}

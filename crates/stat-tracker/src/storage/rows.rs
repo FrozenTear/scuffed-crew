@@ -252,6 +252,20 @@ impl LocalStore {
         Ok(sessions)
     }
 
+    /// The `limit` sessions with the newest capture, newest first.
+    pub async fn recent_sessions(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<MatchSession>, Box<dyn std::error::Error + Send + Sync>> {
+        let mut result = self
+            .db
+            .query("SELECT * FROM match_session ORDER BY last_capture_at DESC LIMIT $limit")
+            .bind(("limit", limit as i64))
+            .await?;
+        let sessions: Vec<MatchSession> = result.take(0)?;
+        Ok(sessions)
+    }
+
     pub async fn get_session_snapshots(
         &self,
         session_id: &str,
