@@ -507,12 +507,32 @@ pub async fn list_participants(
 
 /// A given seed must be 1 or higher; absent or null means unseeded.
 const SEED_TOO_LOW: &str = "Seed must be 1 or higher";
+/// A seed that is not a whole number, or is above `u32::MAX`.
+const SEED_NOT_WHOLE: &str = "Seed must be a whole number from 1 to 4294967295";
+
+/// Check a seed read as a raw JSON number. Reading it as `u32` directly let
+/// -1, 4294967296 and 1.5 fail in the JSON extractor with a 422 that is not
+/// the `{error}` shape; these are now 400 with a message that names the seed.
+fn parse_seed(n: &serde_json::Number) -> ApiResult<u32> {
+    if let Some(v) = n.as_u64() {
+        if v == 0 {
+            return Err(bad_request(SEED_TOO_LOW));
+        }
+        return u32::try_from(v).map_err(|_| bad_request(SEED_NOT_WHOLE));
+    }
+    if n.as_i64().is_some() {
+        // A negative whole number is below 1.
+        return Err(bad_request(SEED_TOO_LOW));
+    }
+    Err(bad_request(SEED_NOT_WHOLE))
+}
 
 #[derive(Deserialize)]
 pub struct AddParticipantRequest {
     pub team_id: Option<String>,
     pub external_name: Option<String>,
-    pub seed: Option<u32>,
+    /// Checked by [`parse_seed`] in the handler.
+    pub seed: Option<serde_json::Number>,
 }
 
 /// POST /api/tournaments/:id/participants
@@ -522,18 +542,28 @@ pub async fn add_participant(
     Path(id): Path<String>,
     Json(mut body): Json<AddParticipantRequest>,
 ) -> ApiResult<(StatusCode, Json<TournamentParticipant>)> {
-    // A blank or whitespace-only value counts as missing.
-    body.team_id = body.team_id.filter(|s| !s.trim().is_empty());
+    // A blank or whitespace-only value counts as missing. team_id is trimmed
+    // so " team-alpha " hits the unique index as "team-alpha".
+    body.team_id = body
+        .team_id
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     body.external_name = body.external_name.filter(|s| !s.trim().is_empty());
     if body.team_id.is_none() && body.external_name.is_none() {
         return Err(bad_request("Provide team_id or external_name"));
     }
-    if body.seed == Some(0) {
-        return Err(bad_request(SEED_TOO_LOW));
-    }
+    let seed = body.seed.as_ref().map(parse_seed).transpose()?;
 
     // Check max_teams
     let tournament = require_tournament(&state, &id).await?;
+
+    // The team must exist and be active (same 404 as GET /api/teams/:id).
+    if let Some(team_id) = body.team_id.as_deref() {
+        let team = state.db.get_team(team_id).await.map_err(internal_err)?;
+        if !team.is_some_and(|t| t.is_active) {
+            return Err(not_found("Team not found"));
+        }
+    }
 
     if let Some(max) = tournament.max_teams {
         let count = state
@@ -552,7 +582,7 @@ pub async fn add_participant(
             &id,
             body.team_id.as_deref(),
             body.external_name.as_deref(),
-            body.seed,
+            seed,
         )
         .await
         .map_err(|e| match e {
@@ -582,8 +612,9 @@ pub async fn add_participant(
 #[derive(Deserialize)]
 pub struct UpdateParticipantRequest {
     /// Absent = leave unchanged, null = clear to unseeded, n = set seed.
+    /// The value is checked by [`parse_seed`] in the handler.
     #[serde(default, deserialize_with = "crate::routes::members::double_option")]
-    pub seed: Option<Option<u32>>,
+    pub seed: Option<Option<serde_json::Number>>,
     pub status: Option<String>,
     pub group_label: Option<Option<String>>,
 }
@@ -595,11 +626,13 @@ pub async fn update_participant(
     Path((id, pid)): Path<(String, String)>,
     Json(body): Json<UpdateParticipantRequest>,
 ) -> ApiResult<Json<TournamentParticipant>> {
-    // Absent leaves the seed alone and null clears it; only an explicit 0 is
-    // refused.
-    if body.seed == Some(Some(0)) {
-        return Err(bad_request(SEED_TOO_LOW));
-    }
+    // Absent leaves the seed alone and null clears it; a given seed must be a
+    // whole number from 1 to u32::MAX.
+    let seed = match &body.seed {
+        None => None,
+        Some(None) => Some(None),
+        Some(Some(n)) => Some(Some(parse_seed(n)?)),
+    };
     let status = body.status.as_deref().map(|s| match s {
         "checked_in" => ParticipantStatus::CheckedIn,
         "active" => ParticipantStatus::Active,
@@ -614,7 +647,7 @@ pub async fn update_participant(
         .db
         .update_tournament_participant(
             &pid,
-            body.seed,
+            seed,
             status,
             body.group_label.as_ref().map(|g| g.as_deref()),
         )

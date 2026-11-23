@@ -187,6 +187,19 @@ async fn seeded() -> AppState {
         MEMBER_TOKEN,
     )
     .await;
+    // Teams that participant tests add by team_id. team-gone is inactive.
+    state
+        .db
+        .client
+        .query(
+            "CREATE team:⟨team-alpha⟩ SET name = 'Alpha', game_id = 'ow2', is_active = true;
+             CREATE team:⟨team-bravo⟩ SET name = 'Bravo', game_id = 'ow2', is_active = true;
+             CREATE team:⟨team-gone⟩ SET name = 'Gone', game_id = 'ow2', is_active = false;",
+        )
+        .await
+        .unwrap()
+        .check()
+        .expect("seed teams");
     state
 }
 
@@ -868,4 +881,130 @@ async fn update_participant_seed_zero_400_null_clears_absent_keeps() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["seed"], Value::Null, "null clears the seed");
     assert_eq!(seed_of(&state, &tid).await, None);
+}
+
+/// #850 review: team_id is trimmed before the existence check and the store,
+/// so " team-alpha " is the same team and hits the unique index (409, no
+/// second row). A team_id that is not a real, active team is 404 "Team not
+/// found" (as GET /api/teams/:id) and writes nothing; that includes a case
+/// variant of a real id.
+#[tokio::test]
+async fn add_participant_trims_team_id_and_404s_unknown_team() {
+    let state = seeded().await;
+    let tid = create_tournament(&state, "Trim Cup", "single_elim").await;
+
+    let (status, body) =
+        post_participant(&state, &tid, json!({ "team_id": " team-bravo\t" })).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["team_id"], "team-bravo", "stored trimmed");
+
+    let (status, body) = post_participant(&state, &tid, json!({ "team_id": "team-alpha" })).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let before = snapshot(&state).await;
+
+    let (status, body) = post_participant(&state, &tid, json!({ "team_id": " team-alpha " })).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["error"], "Team is already in this tournament");
+
+    for unknown in ["Team-Alpha", "no-such-team", "team-gone"] {
+        let (status, body) = post_participant(
+            &state,
+            &tid,
+            json!({ "team_id": unknown, "external_name": "Typed" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{unknown}: {body}");
+        assert_eq!(body["error"], "Team not found", "{unknown}");
+    }
+    assert_eq!(snapshot(&state).await, before, "no rows written");
+    let teams: Vec<Option<String>> = state
+        .db
+        .list_tournament_participants(&tid)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|p| p.team_id)
+        .collect();
+    assert_eq!(teams.len(), 2, "{teams:?}");
+    assert!(
+        teams
+            .iter()
+            .all(|t| matches!(t.as_deref(), Some("team-alpha") | Some("team-bravo"))),
+        "{teams:?}"
+    );
+}
+
+/// #850 review: a seed that is negative, above u32::MAX, or not a whole
+/// number is a 400 `{error}` naming the seed (it was Axum's 422), and writes
+/// nothing. u32::MAX itself is accepted.
+#[tokio::test]
+async fn add_participant_out_of_range_seed_is_400_and_writes_nothing() {
+    let state = seeded().await;
+    let tid = create_tournament(&state, "Range Cup", "single_elim").await;
+    let before = snapshot(&state).await;
+
+    for seed in [json!(-1), json!(4_294_967_296_u64), json!(1.5)] {
+        let (status, body) = post_participant(
+            &state,
+            &tid,
+            json!({ "external_name": "Echo", "seed": seed }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{seed}: {body}");
+        let err = body["error"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{seed}: {body}"));
+        assert!(err.to_lowercase().contains("seed"), "{seed}: {err}");
+    }
+    let (_, body) =
+        post_participant(&state, &tid, json!({ "external_name": "Echo", "seed": -1 })).await;
+    assert_eq!(
+        body["error"], "Seed must be 1 or higher",
+        "negative is below 1"
+    );
+    assert_eq!(snapshot(&state).await, before, "no rows written");
+
+    let (status, body) = post_participant(
+        &state,
+        &tid,
+        json!({ "external_name": "Max", "seed": 4_294_967_295_u64 }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["seed"], 4_294_967_295_u64);
+}
+
+/// #850 review: on update, the same out-of-range seeds are a 400 `{error}`
+/// naming the seed and leave the stored seed unchanged.
+#[tokio::test]
+async fn update_participant_out_of_range_seed_is_400_and_keeps_seed() {
+    let state = seeded().await;
+    let tid = create_tournament(&state, "Range Update Cup", "single_elim").await;
+    let pid = add_participant(&state, &tid, "Team A").await;
+    let uri = format!("/api/tournaments/{tid}/participants/{pid}");
+
+    let (status, body) = call(&state, Method::PUT, &uri, Some(json!({ "seed": 3 }))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    for seed in [json!(-1), json!(4_294_967_296_u64), json!(1.5)] {
+        let (status, body) = call(
+            &state,
+            Method::PUT,
+            &uri,
+            Some(json!({ "seed": seed, "status": "checked_in" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{seed}: {body}");
+        let err = body["error"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{seed}: {body}"));
+        assert!(err.to_lowercase().contains("seed"), "{seed}: {err}");
+        assert_eq!(seed_of(&state, &tid).await, Some(3), "{seed} kept the seed");
+    }
+    let p = &state.db.list_tournament_participants(&tid).await.unwrap()[0];
+    assert_eq!(
+        serde_json::to_value(p.status).unwrap(),
+        json!("registered"),
+        "status not written either"
+    );
 }
