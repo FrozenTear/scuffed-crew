@@ -15,6 +15,27 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## 0.6.0
+
+0.6.0 is the first stable release since 0.5.0 and brings together everything from the 0.6.0 alphas and release candidates. The desktop app has a new look with Overview, Games, Heroes, Maps and Seasons tabs and a rebuilt Settings page, and Read my rank after Comp games now reads your rank screen after each Comp game.
+
+### Highlights
+
+- Each game card shows the bans and picks the tracker read, and reads pause while another window is in front of Overwatch.
+- A Check first stat whose read is already right can be confirmed by opening Edit and saving with no changes.
+- If you turn them on on the website, the tracker sends rank screen training crops after Comp games. Digit training crops now wait until your damage, healing or mitigation has reached 1000.
+- Games the site refuses sit aside with a Retry button while newer games still upload, and the Games tab shows each game's real length.
+
+The notes for each step are in the 0.6.0-alpha.1 to 0.6.0-rc.3 sections below. If you stayed on the stable channel, this is the first 0.6.0 build the app and bootstrap.sh offer you, and the new desktop app, the rank reader and the bans and picks reader all arrive with it.
+
+### Install
+
+```sh
+curl --proto '=https' -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/stat-tracker-v0.6.0/crates/stat-tracker/dist/bootstrap.sh | STAT_TRACKER_TAG=stat-tracker-v0.6.0 bash
+```
+
+Or extract the tarball and run `./install.sh`.
+
 ## 0.6.0-rc.3
 
 A stat marked Check first whose read value is already right can now be confirmed: open Edit and save without changing anything, and the mark clears. A stat marked No read is the exception: there was no read to confirm, so a save without changes leaves it marked. The app names the stats it confirmed (for example "Elims confirmed") instead of saying "No changes to save". A save that corrects anything else leaves Check first stats as they were.
