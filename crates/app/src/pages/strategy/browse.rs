@@ -231,7 +231,7 @@ const PAGE_CSS: &str = r#"
 ///
 /// The mode goes out as its stored token (`escort`, not `Escort`): the server
 /// compares `game_mode` exactly against the lowercase value it saved, so a
-/// chip label there matches nothing (#818).
+/// chip label there matches nothing (issue 818).
 fn strategy_list_path(search: &str, mode: Option<GameMode>) -> String {
     let mut path = String::from("/api/strategy/strategies");
     let mut params: Vec<String> = Vec::new();
@@ -440,7 +440,7 @@ mod tests {
         assert!(!path.contains('#'));
     }
 
-    /// #818: the server filters `game_mode = $game_mode` exactly against the
+    /// Issue 818: the server filters `game_mode = $game_mode` exactly against the
     /// lowercase token it stored (`game_mode_to_string` in
     /// db/src/queries/strategies.rs), so each chip must send that token and
     /// never its capitalised label.
