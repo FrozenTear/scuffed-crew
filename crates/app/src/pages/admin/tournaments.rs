@@ -299,11 +299,15 @@ fn add_participant_body(
 }
 
 /// The entrant field error for a refused Add: the server's own reason when it
-/// answered 409 with a JSON `error` (the team is already entered, issue 850),
-/// with long dashes made plain and a closing full stop. `None` for any other
-/// failure, and for a 409 with no reason: those keep the dialog's error line.
+/// answered 409 with a JSON `error` (the team is already entered, issue 850)
+/// or 404 with a JSON `error` about the team (the picked team is gone or not
+/// active), with long dashes made plain and a closing full stop. `None` for
+/// any other failure, for a 409 or 404 with no reason, and for a 404 that is
+/// not about the team (the tournament itself is gone): those keep the
+/// dialog's error line.
 fn entrant_conflict_reason(err: &scuffed_api_client::ClientError) -> Option<String> {
     server_reason(err, 409)
+        .or_else(|| server_reason(err, 404).filter(|reason| reason.to_lowercase().contains("team")))
 }
 
 /// Where a 400 from Add participant is shown.
@@ -879,8 +883,9 @@ pub fn AdminTournaments() -> Element {
                     }
                     Err(e) => {
                         if let Some(reason) = entrant_conflict_reason(&e) {
-                            // A 409 is about the entrant (already entered):
-                            // the server's reason on the entrant line, a
+                            // A 409 (already entered) or a 404 about the team
+                            // (team gone) is about the entrant: the server's
+                            // reason on the entrant line, a
                             // toast, and focus on the team, like a check
                             // made on the page.
                             crate::util::log_client_error("Could not add the participant", &e);
@@ -2431,12 +2436,24 @@ mod tests {
             entrant_conflict_reason(&dashed).as_deref(),
             Some("Already entered. Remove it first.")
         );
-        // A 409 with no reason, and every other failure, keep the dialog's
+        // A team that is gone or not active answers 404 with the live server
+        // text (API PR 876): the same entrant line.
+        let gone = ClientError::http(404, r#"{"error":"Team not found"}"#, None);
+        assert_eq!(
+            entrant_conflict_reason(&gone).as_deref(),
+            Some("Team not found.")
+        );
+        // A 409 or 404 with no reason, a 404 that is about the tournament
+        // rather than the team, and every other failure, keep the dialog's
         // error line (`SaveState::failed`).
         for other in [
             ClientError::http(409, "", None),
             ClientError::http(409, r#"{"error":"  "}"#, None),
             ClientError::http(409, "not json", None),
+            ClientError::http(404, "", None),
+            ClientError::http(404, r#"{"error":"  "}"#, None),
+            ClientError::http(404, "Team not found", None),
+            ClientError::http(404, r#"{"error":"Tournament not found"}"#, None),
             ClientError::http(400, r#"{"error":"Pick a team or type a name"}"#, None),
             ClientError::http(500, r#"{"error":"Internal error"}"#, None),
             ClientError::Network("offline".into()),
@@ -2453,7 +2470,7 @@ mod tests {
         let arm = prod
             .split("if let Some(reason) = entrant_conflict_reason(&e) {")
             .nth(1)
-            .expect("the 409 arm");
+            .expect("the 409 and 404 arm");
         let conflict = arm.split("return;").next().unwrap();
         assert!(conflict.contains("add_part_entrant_error.set(reason);"));
         assert!(conflict.contains("focus_element_by_id(PARTICIPANT_TEAM_ID);"));
@@ -2470,6 +2487,18 @@ mod tests {
             add_bad_request_reason(&seed),
             Some(AddBadRequest::Seed("Seed must be 1 or higher.".into()))
         );
+        // The other live seed 400 (API PR 876): the seed line, number intact.
+        let whole = ClientError::http(
+            400,
+            r#"{"error":"Seed must be a whole number from 1 to 4294967295"}"#,
+            None,
+        );
+        assert_eq!(
+            add_bad_request_reason(&whole),
+            Some(AddBadRequest::Seed(
+                "Seed must be a whole number from 1 to 4294967295.".into()
+            ))
+        );
         // "seed" is matched in any case.
         let upper = ClientError::http(400, r#"{"error":"Invalid SEED value."}"#, None);
         assert_eq!(
@@ -2482,7 +2511,9 @@ mod tests {
             add_bad_request_reason(&other),
             Some(AddBadRequest::General("Pick a team or type a name.".into()))
         );
-        // A 409 still goes to the entrant line, not here.
+        // A 409 or a team 404 still goes to the entrant line, not here.
+        let gone = ClientError::http(404, r#"{"error":"Team not found"}"#, None);
+        assert_eq!(add_bad_request_reason(&gone), None);
         let dup = ClientError::http(409, r#"{"error":"Seed 1 is already taken"}"#, None);
         assert_eq!(add_bad_request_reason(&dup), None);
         assert_eq!(
@@ -2503,7 +2534,7 @@ mod tests {
             assert_eq!(add_bad_request_reason(&rest), None, "{rest:?}");
         }
 
-        // The submit failure arm: 409 first, then the 400 arm, then the
+        // The submit failure arm: 409 and team 404 first, then the 400 arm, then the
         // generic line. A seed reason sets the seed line and focuses the seed
         // field; any other reason sets the dialog line. Both show a toast.
         let src = include_str!("tournaments.rs");
@@ -2511,7 +2542,7 @@ mod tests {
         let after_409 = prod
             .split("if let Some(reason) = entrant_conflict_reason(&e) {")
             .nth(1)
-            .expect("the 409 arm");
+            .expect("the 409 and 404 arm");
         let arm = after_409
             .split("if let Some(bad) = add_bad_request_reason(&e) {")
             .nth(1)
