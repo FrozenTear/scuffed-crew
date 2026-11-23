@@ -601,7 +601,10 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
     // Ask before a link, a reload or closing the tab drops an unsaved
     // drawing. Up here, ahead of any way out of the component, so it runs
     // on every render; a save that clears the flag takes the guard off.
-    use_unsaved_guard(strategy_state.read().has_unsaved_changes);
+    // The same `has_unsaved` feeds the toolbar and the "Unsaved changes"
+    // line below, so the prompt and the line cannot disagree.
+    let has_unsaved = strategy_state.read().has_unsaved_changes;
+    use_unsaved_guard(has_unsaved);
     let mut undo_manager = use_signal(UndoManager::default);
 
     // Sidebar collapse state
@@ -919,7 +922,6 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
             None => format!("0/{}", total),
         }
     };
-    let has_unsaved = ss.has_unsaved_changes;
 
     // Clone values needed in callbacks and child components
     let zoom_val = cs.zoom;
@@ -1954,27 +1956,21 @@ mod tests {
     use super::*;
 
     /// Review 819: leaving the editor with an unsaved drawing asks first.
-    /// The guard follows the same flag as the "Unsaved changes" line, is
-    /// called once in `EditorLayout` ahead of everything that could return,
-    /// and goes off after a save that stored what the editor still holds.
+    ///
+    /// The guard is a no-op off wasm, so this test cannot run it: the
+    /// wiring rests on these source pins alone. How `mark_saved` clears the
+    /// flag is covered in `state/editor.rs`; the prompt itself needs a
+    /// browser pass (see the PR's QA steps). The pins: one guard call, in
+    /// `EditorLayout`, ahead of anything that could leave the component; it
+    /// reads the same `has_unsaved` as the toolbar and the "Unsaved
+    /// changes" line; the save path still calls `mark_saved` and only
+    /// replaces the route when that save left the editor clean.
     #[test]
     fn the_leave_guard_follows_the_unsaved_drawing() {
-        let mut state = StrategyState::default();
-        assert!(!state.has_unsaved_changes, "a fresh editor has no draft");
-        state.add_phase("Setup".to_string());
-        assert!(state.has_unsaved_changes, "an edit turns the guard on");
-        let snapshot = state.clone();
-        assert!(state.mark_saved(&snapshot, "s1".to_string(), "m1".to_string()));
-        assert!(!state.has_unsaved_changes, "a save turns the guard off");
-        // An edit made while the save was in flight keeps the guard on.
-        state.add_phase("Push".to_string());
-        let stale = snapshot;
-        assert!(!state.mark_saved(&stale, "s1".to_string(), "m1".to_string()));
-        assert!(state.has_unsaved_changes);
-
         let src = include_str!("editor.rs");
         let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap();
-        let guard = "use_unsaved_guard(strategy_state.read().has_unsaved_changes);";
+        let flag = "let has_unsaved = strategy_state.read().has_unsaved_changes;";
+        let guard = "use_unsaved_guard(has_unsaved);";
         assert_eq!(prod.matches(guard).count(), 1, "one guard, on the page");
         let layout = prod
             .split("fn EditorLayout(")
@@ -1986,11 +1982,21 @@ mod tests {
             "EditorLayout owns the guard"
         );
         assert!(
-            !before_guard.contains("return") && !before_guard.contains("?;"),
+            !before_guard.contains("return") && !before_guard.contains('?'),
             "no way out of the component ahead of the guard"
         );
-        assert!(prod.contains("let has_unsaved = ss.has_unsaved_changes;"));
+        // One binding, read just before the guard, reused below.
+        assert_eq!(prod.matches("let has_unsaved =").count(), 1);
+        assert!(
+            before_guard.trim_end().ends_with(flag),
+            "the guard reads the flag bound right above it"
+        );
+        assert!(prod.contains("has_unsaved_changes: has_unsaved,"));
+        assert!(prod.contains("} else if has_unsaved {"));
         assert!(prod.contains("s.mark_saved(&snapshot, saved.id, saved.owner_id)"));
+        // A first save only moves to the new route when nothing was edited
+        // during it; a replace skips the guard and would drop that edit.
+        assert!(prod.contains("if opened_as_new && clean {"));
     }
 
     /// Vision blocking 2: Esc closes the picker, Tab stays inside it, and
