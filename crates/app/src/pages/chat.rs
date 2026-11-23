@@ -164,13 +164,53 @@ fn team_option(team: &Team, selected: Option<&str>) -> Element {
     }
 }
 
+/// The placeholder the picker shows while the roster lookup is out.
+const PICKER_LOADING: &str = "Loading your teams...";
+
+/// What the picker shows: the option it selects (`None`: the placeholder)
+/// and whether it waits for the roster lookup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PickerView<'a> {
+    selected: Option<&'a str>,
+    loading: bool,
+}
+
+/// The picker for a state of the page. Issue 816 QA: while the roster lookup
+/// was out the picker showed the first team by name and took picks, then
+/// jumped to the member's own team. Until the answer is in it stays drawn (no
+/// layout jump) but disabled on a placeholder. Once the answer is in, or the
+/// lookup failed, it shows the team the page opens (`default_team`) even in
+/// the render before the effect stores that pick.
+fn picker_view<'a>(
+    list: &'a [Team],
+    own: Option<&OwnTeams>,
+    selected: Option<&'a str>,
+) -> PickerView<'a> {
+    match (selected, own) {
+        (Some(id), _) => PickerView {
+            selected: Some(id),
+            loading: false,
+        },
+        (None, Some(own)) => PickerView {
+            selected: default_team(list, own.ids()),
+            loading: false,
+        },
+        (None, None) => PickerView {
+            selected: None,
+            loading: true,
+        },
+    }
+}
+
 /// The picker. Each option carries `selected`, so a re-render never shows
 /// the first team while the room is another's (the `value` attribute alone
 /// is set before the options exist). The member's own teams come first.
+/// `loading`: disabled, with the placeholder selected and no team picked.
 fn team_picker(
     list: &[Team],
     own: &[String],
     selected: Option<&str>,
+    loading: bool,
     on_pick: EventHandler<String>,
 ) -> Element {
     let (mine, others) = own_first(list, own);
@@ -181,8 +221,12 @@ fn team_picker(
             select {
                 id: TEAM_SELECT_ID,
                 class: "field-input",
+                disabled: loading,
                 value: selected.unwrap_or_default(),
                 onchange: move |evt| on_pick.call(evt.value()),
+                if loading {
+                    option { value: "", selected: true, "{PICKER_LOADING}" }
+                }
                 if grouped {
                     optgroup { label: OWN_TEAMS_LABEL,
                         for team in mine.iter() {
@@ -393,10 +437,16 @@ pub fn TeamChat() -> Element {
 
     // The picker shows once there is a team to pick. The cap notice is a live
     // region, so it is in the bar in every state.
-    let toolbar = rsx! {
-        if let Some(list) = team_list.filter(|list| !list.is_empty()) {
-            {team_picker(list, own_ids, selected.as_deref(), EventHandler::new(move |id: String| {
-                if selected_team.peek().as_deref() == Some(id.as_str()) {
+    let picker = team_list.filter(|list| !list.is_empty()).map(|list| {
+        let view = picker_view(list, own, selected.as_deref());
+        team_picker(
+            list,
+            own_ids,
+            view.selected,
+            view.loading,
+            EventHandler::new(move |id: String| {
+                // The placeholder is not a team.
+                if id.is_empty() || selected_team.peek().as_deref() == Some(id.as_str()) {
                     return;
                 }
                 // The next room has not dialled yet.
@@ -406,8 +456,11 @@ pub fn TeamChat() -> Element {
                     state.set(RelayConnectionState::Connecting);
                 }
                 selected_team.set(Some(id));
-            }))}
-        }
+            }),
+        )
+    });
+    let toolbar = rsx! {
+        {picker}
         {list_cap_notice(&teams, "teams")}
         p { class: "visually-hidden", role: "status", "{own_status}" }
     };
@@ -592,7 +645,13 @@ mod tests {
         thread(
             "Squad Alpha".to_string(),
             None,
-            team_picker(&teams, &[], Some("team:a"), EventHandler::new(|_| {})),
+            team_picker(
+                &teams,
+                &[],
+                Some("team:a"),
+                false,
+                EventHandler::new(|_| {}),
+            ),
             state_body(rsx! {
                 EmptyCard {
                     title: "No chat channels",
@@ -606,7 +665,13 @@ mod tests {
     fn the_picked_team_is_the_selected_option() {
         fn probe() -> Element {
             let teams = vec![team("team:a", "Squad Alpha"), team("team:b", "Squad Bravo")];
-            team_picker(&teams, &[], Some("team:b"), EventHandler::new(|_| {}))
+            team_picker(
+                &teams,
+                &[],
+                Some("team:b"),
+                false,
+                EventHandler::new(|_| {}),
+            )
         }
         let mut dom = VirtualDom::new(probe);
         dom.rebuild_in_place();
@@ -708,7 +773,13 @@ mod tests {
                 team("team:c", "Squad Charlie"),
             ];
             let own = vec!["team:c".to_string()];
-            team_picker(&teams, &own, Some("team:c"), EventHandler::new(|_| {}))
+            team_picker(
+                &teams,
+                &own,
+                Some("team:c"),
+                false,
+                EventHandler::new(|_| {}),
+            )
         }
         let mut dom = VirtualDom::new(probe);
         dom.rebuild_in_place();
@@ -742,7 +813,13 @@ mod tests {
             fn probe() -> Element {
                 let teams = vec![team("team:a", "Squad Alpha"), team("team:b", "Squad Bravo")];
                 let own = ids(OWN.with(|o| o.get()));
-                team_picker(&teams, &own, Some("team:a"), EventHandler::new(|_| {}))
+                team_picker(
+                    &teams,
+                    &own,
+                    Some("team:a"),
+                    false,
+                    EventHandler::new(|_| {}),
+                )
             }
             OWN.with(|o| o.set(own));
             let mut dom = VirtualDom::new(probe);
@@ -754,6 +831,106 @@ mod tests {
             assert!(!html.contains("<optgroup"), "{own:?}: {html}");
             assert_eq!(html.matches("<option").count(), 2, "{html}");
         }
+    }
+
+    /// Issue 816 QA: while the roster lookup was out the picker showed the
+    /// first team by name, took picks, then jumped to the member's own team.
+    #[test]
+    fn the_picker_waits_for_the_roster_lookup() {
+        let teams = vec![team("team:a", "Squad Alpha"), team("team:b", "Squad Bravo")];
+        let mine = OwnTeams::Known(ids(&["team:b"]));
+        let on_none = OwnTeams::Known(Vec::new());
+        let unknown = OwnTeams::Unknown;
+        let view = |own: Option<&OwnTeams>, selected: Option<&'static str>| {
+            picker_view(&teams, own, selected)
+        };
+        assert_eq!(
+            view(None, None),
+            PickerView {
+                selected: None,
+                loading: true
+            },
+            "loading: no team picked, picker disabled"
+        );
+        assert_eq!(
+            view(Some(&mine), None),
+            PickerView {
+                selected: Some("team:b"),
+                loading: false
+            },
+            "loaded: the member's own team, before the effect stores it"
+        );
+        assert_eq!(
+            view(Some(&on_none), None),
+            PickerView {
+                selected: Some("team:a"),
+                loading: false
+            },
+            "on no team: the first team, as default_team opens it"
+        );
+        assert_eq!(
+            view(Some(&unknown), None),
+            PickerView {
+                selected: Some("team:a"),
+                loading: false
+            },
+            "failed lookup: the first team, enabled, as before the lookup"
+        );
+        assert_eq!(
+            view(Some(&mine), Some("team:a")),
+            PickerView {
+                selected: Some("team:a"),
+                loading: false
+            },
+            "a stored pick wins"
+        );
+        assert_eq!(
+            view(None, Some("team:a")),
+            PickerView {
+                selected: Some("team:a"),
+                loading: false
+            },
+            "a pick already made is not taken back by a lookup rerun"
+        );
+
+        fn probe() -> Element {
+            let teams = vec![team("team:a", "Squad Alpha"), team("team:b", "Squad Bravo")];
+            team_picker(&teams, &[], None, true, EventHandler::new(|_| {}))
+        }
+        let mut dom = VirtualDom::new(probe);
+        dom.rebuild_in_place();
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("<select id=\"team-chat-team\" class=\"field-input\" disabled=true"),
+            "the picker is drawn but disabled while loading: {html}"
+        );
+        assert!(
+            html.contains("<option value=\"\" selected=true>Loading your teams...</option>"),
+            "{html}"
+        );
+        assert_eq!(html.matches("selected=true").count(), 1, "{html}");
+        let placeholder = html.find("Loading your teams...").expect("placeholder");
+        let alpha = html.find("Squad Alpha").expect("team option");
+        assert!(placeholder < alpha, "the placeholder is first: {html}");
+
+        let src = include_str!("chat.rs");
+        let prod = src.split("#[cfg(test)]").next().expect("production source");
+        assert!(
+            prod.contains("disabled: loading,"),
+            "the select is disabled while loading"
+        );
+        assert!(
+            prod.contains("let view = picker_view(list, own, selected.as_deref());"),
+            "the page asks picker_view what the picker shows"
+        );
+        assert!(
+            prod.contains("view.selected,\n            view.loading,"),
+            "the page passes the view's pick and loading state"
+        );
+        assert!(
+            prod.contains("if id.is_empty() ||"),
+            "the placeholder never opens a room"
+        );
     }
 
     #[test]
@@ -948,7 +1125,7 @@ mod tests {
         thread(
             title,
             None,
-            team_picker(&teams, &[], Some(picked), EventHandler::new(|_| {})),
+            team_picker(&teams, &[], Some(picked), false, EventHandler::new(|_| {})),
             rsx! {
                 ProbeRoom { key: "{picked}", picked }
             },
