@@ -17,14 +17,14 @@ summary, then the highlights, and tucks the remaining text under Details.
 
 ## 0.6.0
 
-0.6.0 is the first stable release since 0.5.0 and brings together everything from the 0.6.0 alphas and release candidates. The desktop app has a new look with Overview, Games, Heroes, Maps and Seasons tabs and a rebuilt Settings page, and Read my rank after Comp games now reads your rank screen after each Comp game.
+0.6.0 is the first stable release since 0.5.0 and brings together everything from the 0.6.0 alphas and release candidates. The desktop app has a new look with Overview, Games, Heroes, Maps and Seasons tabs and a rebuilt Settings page. With Read my rank after Comp games on (it starts off), the tracker reads your rank screen after each Comp game at 2560x1440 and sends the rank with your game uploads.
 
 ### Highlights
 
-- Each game card shows the bans and picks the tracker read, and reads pause while another window is in front of Overwatch.
-- A Check first stat whose read is already right can be confirmed by opening Edit and saving with no changes.
-- If you turn them on on the website, the tracker sends rank screen training crops after Comp games. Digit training crops now wait until your damage, healing or mitigation has reached 1000.
-- Games the site refuses sit aside with a Retry button while newer games still upload, and the Games tab shows each game's real length.
+- Each game card shows the bans and picks the tracker read. With Read bans and picks on (it starts on), those values are sent with your game uploads, never a picture, and only at 2560x1440. Reads pause while another window is in front of Overwatch.
+- Memory stays flat over days of running, instead of climbing past 1 GB, and you can save more than one in-game name so a game on an alt account still finds your row.
+- If you allow training crops on the website, the tracker sends the kinds you turned on: the map banner, parts of the rank screen after Comp games, and with the New reader your hero portrait and your own stat cells once damage, healing or mitigation has reached 1000. Delete my training crops, in Settings, removes them from the website.
+- A game the site refuses no longer holds up newer games, even at the head of the queue, and shows the site's reason next to Retry. The Games tab shows a game's real length when the tracker saw its start and its result. A game recorded on 0.5.0, or one whose start or result was missed, shows a floor such as 9:14+.
 
 The notes for each step are in the 0.6.0-alpha.1 to 0.6.0-rc.3 sections below. If you stayed on the stable channel, this is the first 0.6.0 build the app and bootstrap.sh offer you, and the new desktop app, the rank reader and the bans and picks reader all arrive with it.
 
