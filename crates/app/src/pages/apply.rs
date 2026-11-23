@@ -202,7 +202,11 @@ fn mine_slot(screen: ApplyScreen, body: Option<ApplyBodyView>, retrying: bool) -
 /// screen shows, so the region is mounted from first paint but stays empty;
 /// a games fetch that fails early is announced as a text change once the form
 /// appears, not lost in a region that mounts with the failure already in it.
-fn games_slot(form: bool, phase: SlotPhase, retrying: bool) -> MineSlot {
+///
+/// `at_cap` is [`games_at_cap`] for the current choice. With the fetch idle
+/// (Ready) the line says the limit is reached, and empties again once a game
+/// is deselected. Loading and failure text always win over it.
+fn games_slot(form: bool, phase: SlotPhase, retrying: bool, at_cap: bool) -> MineSlot {
     if !form {
         return MineSlot {
             text: "",
@@ -212,6 +216,7 @@ fn games_slot(form: bool, phase: SlotPhase, retrying: bool) -> MineSlot {
     let text = match phase {
         SlotPhase::Loading => "Loading games",
         SlotPhase::Failed => "Couldn't load games.",
+        SlotPhase::Ready if at_cap => GAMES_CAP_REACHED,
         SlotPhase::Ready => "",
     };
     MineSlot {
@@ -320,6 +325,11 @@ const GAMES_HINT_ID: &str = "apply-games-hint";
 fn games_hint() -> String {
     format!("Choose at least one, at most {MAX_APPLICATION_PREFERENCE_ITEMS}.")
 }
+
+/// Games status line text once the cap is reached. A literal so
+/// [`MineSlot::text`] stays `&'static str`; a test pins it to
+/// [`MAX_APPLICATION_PREFERENCE_ITEMS`].
+const GAMES_CAP_REACHED: &str = "Limit of 10 games reached";
 
 /// Whether the games cap is reached, so no further game can be added.
 fn games_at_cap(selected: &[String]) -> bool {
@@ -1044,6 +1054,7 @@ pub fn Apply() -> Element {
         body_view == Some(ApplyBodyView::Form),
         games_phase,
         games_retrying(),
+        games_at_cap(&selected_games.read()),
     );
     let lead = (body_view == Some(ApplyBodyView::Form)).then(|| FORM_LEAD.to_string());
 
@@ -1569,7 +1580,7 @@ mod tests {
         for phase in [SlotPhase::Loading, SlotPhase::Failed, SlotPhase::Ready] {
             for retrying in [false, true] {
                 assert_eq!(
-                    games_slot(false, phase, retrying),
+                    games_slot(false, phase, retrying, false),
                     MineSlot {
                         text: "",
                         retry: None
@@ -1578,33 +1589,122 @@ mod tests {
             }
         }
         assert_eq!(
-            games_slot(true, SlotPhase::Ready, false),
+            games_slot(true, SlotPhase::Ready, false, false),
             MineSlot {
                 text: "",
                 retry: None
             }
         );
         assert_eq!(
-            games_slot(true, SlotPhase::Loading, false),
+            games_slot(true, SlotPhase::Loading, false, false),
             MineSlot {
                 text: "Loading games",
                 retry: None
             }
         );
         assert_eq!(
-            games_slot(true, SlotPhase::Failed, false),
+            games_slot(true, SlotPhase::Failed, false, false),
             MineSlot {
                 text: "Couldn't load games.",
                 retry: Some(false)
             }
         );
         assert_eq!(
-            games_slot(true, SlotPhase::Loading, true),
+            games_slot(true, SlotPhase::Loading, true, false),
             MineSlot {
                 text: "Loading games",
                 retry: Some(true)
             }
         );
+    }
+
+    #[test]
+    fn games_slot_says_the_cap_only_when_idle() {
+        // The literal tracks the shared cap.
+        assert_eq!(
+            GAMES_CAP_REACHED,
+            format!("Limit of {MAX_APPLICATION_PREFERENCE_ITEMS} games reached")
+        );
+        assert_eq!(GAMES_CAP_REACHED, "Limit of 10 games reached");
+
+        // Set: picking the 10th game while the fetch is idle.
+        let mut selected: Vec<String> = Vec::new();
+        for n in 0..MAX_APPLICATION_PREFERENCE_ITEMS {
+            assert_eq!(
+                games_slot(true, SlotPhase::Ready, false, games_at_cap(&selected)).text,
+                ""
+            );
+            toggle_game(&mut selected, &format!("game-{n}"));
+        }
+        assert_eq!(
+            games_slot(true, SlotPhase::Ready, false, games_at_cap(&selected)),
+            MineSlot {
+                text: "Limit of 10 games reached",
+                retry: None
+            }
+        );
+
+        // Clear: a deselect frees a place and empties the line.
+        toggle_game(&mut selected, "game-3");
+        assert_eq!(selected.len(), MAX_APPLICATION_PREFERENCE_ITEMS - 1);
+        assert_eq!(
+            games_slot(true, SlotPhase::Ready, false, games_at_cap(&selected)),
+            MineSlot {
+                text: "",
+                retry: None
+            }
+        );
+        assert_eq!(
+            games_slot(true, SlotPhase::Ready, false, games_at_cap(&[])),
+            MineSlot {
+                text: "",
+                retry: None
+            }
+        );
+
+        // Loading wins over the cap (for example a refetch), retry unchanged.
+        for retrying in [false, true] {
+            assert_eq!(
+                games_slot(true, SlotPhase::Loading, retrying, true),
+                games_slot(true, SlotPhase::Loading, retrying, false)
+            );
+        }
+        assert_eq!(
+            games_slot(true, SlotPhase::Loading, false, true),
+            MineSlot {
+                text: "Loading games",
+                retry: None
+            }
+        );
+        assert_eq!(
+            games_slot(true, SlotPhase::Loading, true, true),
+            MineSlot {
+                text: "Loading games",
+                retry: Some(true)
+            }
+        );
+
+        // The failure wins over the cap, and Retry still shows.
+        assert_eq!(
+            games_slot(true, SlotPhase::Failed, false, true),
+            MineSlot {
+                text: "Couldn't load games.",
+                retry: Some(false)
+            }
+        );
+
+        // Before the form shows the line stays empty, even at the cap.
+        for phase in [SlotPhase::Loading, SlotPhase::Failed, SlotPhase::Ready] {
+            for retrying in [false, true] {
+                assert_eq!(
+                    games_slot(false, phase, retrying, true),
+                    MineSlot {
+                        text: "",
+                        retry: None
+                    }
+                );
+            }
+        }
     }
 
     #[test]
@@ -1726,23 +1826,23 @@ mod tests {
     #[test]
     fn games_status_is_one_text_region_with_retry_outside() {
         fn before_form() -> Element {
-            let slot = games_slot(false, SlotPhase::Failed, false);
+            let slot = games_slot(false, SlotPhase::Failed, false, false);
             rsx! { GamesStatus { slot, on_retry: |_| {} } }
         }
         fn loading() -> Element {
-            let slot = games_slot(true, SlotPhase::Loading, false);
+            let slot = games_slot(true, SlotPhase::Loading, false, false);
             rsx! { GamesStatus { slot, on_retry: |_| {} } }
         }
         fn failed() -> Element {
-            let slot = games_slot(true, SlotPhase::Failed, false);
+            let slot = games_slot(true, SlotPhase::Failed, false, false);
             rsx! { GamesStatus { slot, on_retry: |_| {} } }
         }
         fn retrying() -> Element {
-            let slot = games_slot(true, SlotPhase::Loading, true);
+            let slot = games_slot(true, SlotPhase::Loading, true, false);
             rsx! { GamesStatus { slot, on_retry: |_| {} } }
         }
         fn ready() -> Element {
-            let slot = games_slot(true, SlotPhase::Ready, false);
+            let slot = games_slot(true, SlotPhase::Ready, false, false);
             rsx! { GamesStatus { slot, on_retry: |_| {} } }
         }
 
@@ -1769,6 +1869,26 @@ mod tests {
         assert_retry_label_in_name(&html, "Retrying...", "Retrying... loading games");
         assert!(!html.contains("Retry loading"), "{html}");
         assert_keeps_focus_while_busy(&html);
+    }
+
+    #[test]
+    fn games_status_says_the_limit_is_reached_at_the_cap() {
+        fn at_cap() -> Element {
+            let slot = games_slot(true, SlotPhase::Ready, false, true);
+            rsx! { GamesStatus { slot, on_retry: |_| {} } }
+        }
+        let html = html_of(at_cap);
+        assert_one_status(&html, "Limit of 10 games reached");
+        // The cap text sits in the element that carries the games status id.
+        let at = html
+            .find(r#"id="apply-games-status""#)
+            .unwrap_or_else(|| panic!("games status id in {html}"));
+        let end = at + html[at..].find("</p>").unwrap();
+        assert!(
+            html[at..end].ends_with(">Limit of 10 games reached"),
+            "{html}"
+        );
+        assert!(!html.contains("<button"), "{html}");
     }
 
     #[test]
