@@ -644,8 +644,16 @@ async fn gated_crops_reach_the_seed_store_and_are_trusted_after_two_real_games()
     {
         let mut analysis = o8_analysis(None, Some("zenyatta"));
         analysis.own_name_candidate = Some(o9_candidate(i));
-        let board = Some(o8_board(Some("zenyatta")));
-        let report = o9_tab(&ctx, session, map, analysis, board).await;
+        let mut board = o8_board(Some("zenyatta"));
+        if session == "g1-split" {
+            // g1-split stands in for a split of g1: a session of its own
+            // whose board is not g1's last (damage lowered). g1's last
+            // board as the first board of a new session would be g1's
+            // board shown again, and is not stored (#809).
+            let dmg = board.fields.iter_mut().find(|f| f.name == "r0.dmg");
+            dmg.unwrap().value = Some(shadow::Value::Int(1500));
+        }
+        let report = o9_tab(&ctx, session, map, analysis, Some(board)).await;
         assert!(report.recorded, "tab {i}");
         assert_eq!(
             own_name_seeds(ctx.own_name.as_ref()).len(),
@@ -661,11 +669,14 @@ async fn gated_crops_reach_the_seed_store_and_are_trusted_after_two_real_games()
     assert_eq!(detect::own_row::seed_row(&board.scores(&seeds)), Some(7));
     // a restart reads them back
     assert_eq!(own_name_seeds(Some(&o9_store(dir.path()))).len(), 3);
-    // a Tab without a gated crop offers nothing
+    // a Tab without a gated crop offers nothing. Another map than g1, and
+    // recorded, so the Tab reaches the seed offer: g1's last board on Busan
+    // again, as the first board of a new session, is g1's board shown
+    // again and stops before it (#809).
     let before = std::fs::read(&file).unwrap();
     let analysis = o8_analysis(None, Some("zenyatta"));
     let board = Some(o8_board(Some("zenyatta")));
-    o9_tab(&ctx, "g3", "Busan", analysis, board).await;
+    assert!(o9_tab(&ctx, "g3", "Oasis", analysis, board).await.recorded);
     assert_eq!(std::fs::read(&file).unwrap(), before);
 }
 
@@ -801,10 +812,12 @@ async fn ocr_v1_never_offers_a_crop_or_creates_the_private_folder() {
         }
         assert_eq!(store.trusted().len(), 3);
     }
+    // Another map than g1: g1's last board on Busan again, as the first
+    // board of a new session, is g1's board shown again (#809).
     for _ in 0..2 * detect::own_row::DISAGREE_DROPS {
         let mut analysis = o8_analysis(Some("Ana"), None);
         analysis.own_seed_verdict = detect::own_row::Verdict::Disagree(88);
-        assert!(o9_tab(&ctx, "g3", "Busan", analysis, None).await.recorded);
+        assert!(o9_tab(&ctx, "g3", "Oasis", analysis, None).await.recorded);
     }
     assert_eq!(own_name_seeds(ctx.own_name.as_ref()).len(), 3);
 }
