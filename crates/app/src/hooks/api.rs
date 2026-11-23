@@ -13,8 +13,10 @@ pub struct ApiResource<T: 'static> {
     pub error: Signal<Option<String>>,
     /// True when the last finished fetch failed. Unlike `error` it is not
     /// cleared when a refetch starts, only when a fetch succeeds or is
-    /// skipped (empty URL), so a retry after a failure can be told from the
-    /// first real fetch after a skip. Both leave `data` holding `None`.
+    /// skipped (an empty URL, or `use_api_when` while disabled), so a retry
+    /// after a failure can be told from the first real fetch after a skip.
+    /// Only an empty-URL skip and a failure leave `data` holding `None`; the
+    /// disabled skip leaves `Some(T::default())`.
     pub failed: Signal<bool>,
     /// True when a cursor page remains after the loaded page budget.
     pub truncated: Signal<bool>,
@@ -541,5 +543,10 @@ mod tests {
         // Starting a fetch clears the error but never the flag.
         assert_eq!(squashed.matches("error.set(None);").count(), 6);
         assert!(!squashed.contains("error.set(None); failed.set(false);"));
+
+        // And nothing else lowers it: the two empty-URL skips, the disabled
+        // return, the three plain successes and remember_batch are all of
+        // them, so a lowering added anywhere a fetch starts fails here.
+        assert_eq!(squashed.matches("failed.set(false);").count(), 7);
     }
 }
