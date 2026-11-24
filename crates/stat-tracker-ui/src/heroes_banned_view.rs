@@ -7,10 +7,12 @@
 //! chrome: Hero (portrait, role, name), Games, Decided (the count, muted,
 //! then the record), Win rate (the shared bar and a whole percent from 10
 //! decided games, else "Too few games (n of 10)") and Banned by ("Your
-//! ban N" as a tinted tag in words, "Enemy N", and "Side not read N" when
-//! there is one). Headers sort like Maps: the active one in the accent
-//! with a chevron. No Best or Worst rail, so nothing ranks as a pick.
-//! With no rows, one empty card says why, with no Sort and no stats line.
+//! ban N", tinted as a tag only above 0, "Enemy N", then "Side not read
+//! N" and "Lobby N" when there is one). Headers sort like Maps: the
+//! active one in the accent with a chevron. No Best or Worst rail, so
+//! nothing ranks as a pick. With no rows, one empty card says why, with
+//! no Sort and no stats line. Below an 860 px window the columns narrow
+//! and the hero name and the stats line wrap rather than clip.
 
 use iced::widget::text::Wrapping;
 use iced::widget::{Column, Row, button, column, container, row, space, text};
@@ -35,6 +37,12 @@ pub const YOUR_BAN: &str = "Your ban";
 pub const ENEMY: &str = "Enemy";
 /// A ban whose team was not read.
 pub const SIDE_NOT_READ: &str = "Side not read";
+/// A lobby ban that is not one of the four slots, so it has no side.
+pub const LOBBY: &str = "Lobby";
+
+/// Windows narrower than this get the compact columns, so the hero name
+/// keeps room at the 720 px minimum.
+const COMPACT_BELOW: f32 = 860.0;
 
 const PORTRAIT: f32 = 32.0;
 const HEAD_H: f32 = 36.0;
@@ -89,6 +97,13 @@ pub fn cols(width: f32) -> Cols {
             decided: 128.0,
             rate: 200.0,
             split: 240.0,
+        }
+    } else if crate::overview_page::window_for(width) < COMPACT_BELOW {
+        Cols {
+            games: 44.0,
+            decided: 112.0,
+            rate: 120.0,
+            split: 140.0,
         }
     } else {
         Cols {
@@ -145,7 +160,8 @@ pub fn view(app: &TrackerApp, width: f32) -> Element<'_, Message> {
     page.push(table(&t, ui, cols(width))).into()
 }
 
-/// The stats line and Sort: Games, Win rate, Recent.
+/// The stats line and Sort: Games, Win rate, Recent. The line wraps in
+/// its share of the row when the window is too narrow for one line.
 fn sort_line(line: &str, ui: BanUi) -> Element<'static, Message> {
     let seg = |label, key| Segment {
         label,
@@ -153,7 +169,7 @@ fn sort_line(line: &str, ui: BanUi) -> Element<'static, Message> {
         msg: Some(msg(model::Msg::Sort(key))),
     };
     row![
-        container(tab_bits::label(line)).width(Fill),
+        container(crate::widgets::label_text(line)).width(Fill),
         text("Sort").size(SIZE_META).font(FONT_MEDIUM).color(TEXT_2),
         segmented(vec![
             seg("Games", SortKey::Games),
@@ -226,13 +242,8 @@ fn ban_line(r: &BanRow, c: Cols) -> Element<'static, Message> {
                 .color(theme::role_color(r.role)),
         );
     }
-    names = names.push(
-        text(r.hero)
-            .size(SIZE_BODY)
-            .font(FONT_BOLD)
-            .color(TEXT)
-            .wrapping(Wrapping::None),
-    );
+    // Wraps at word breaks in a narrow window instead of clipping.
+    names = names.push(text(r.hero).size(SIZE_BODY).font(FONT_BOLD).color(TEXT));
     let rate: Element<'static, Message> = match (r.rate(), r.too_few()) {
         (Some(p), _) => row![
             text(format!("{p}%"))
@@ -284,28 +295,44 @@ fn ban_line(r: &BanRow, c: Cols) -> Element<'static, Message> {
     .into()
 }
 
-/// "Your ban N" (a tinted tag, in words), "Enemy N", and "Side not read N"
-/// when any ban of this hero had no team read. Wraps inside the cell.
-pub fn split_words(r: &BanRow) -> Vec<String> {
-    let mut words = vec![
-        format!("{YOUR_BAN} {}", r.own),
-        format!("{ENEMY} {}", r.enemy),
-    ];
-    if r.side_not_read > 0 {
-        words.push(format!("{SIDE_NOT_READ} {}", r.side_not_read));
+/// One part of the Banned by cell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SplitPart {
+    pub words: String,
+    /// Drawn as the accent-tinted Your ban tag: only when our team banned
+    /// the hero at least once.
+    pub tag: bool,
+}
+
+/// "Your ban N" and "Enemy N" when either side banned the hero (Your ban
+/// tinted only above 0), then "Side not read N" and "Lobby N" when there
+/// is one. A hero named only by unread sides or lobby bans shows just
+/// those, not "Your ban 0" and "Enemy 0". Wraps inside the cell.
+pub fn split_parts(r: &BanRow) -> Vec<SplitPart> {
+    let part = |words: String, tag| SplitPart { words, tag };
+    let mut parts = Vec::new();
+    if r.own > 0 || r.enemy > 0 {
+        parts.push(part(format!("{YOUR_BAN} {}", r.own), r.own > 0));
+        parts.push(part(format!("{ENEMY} {}", r.enemy), false));
     }
-    words
+    if r.side_not_read > 0 {
+        parts.push(part(format!("{SIDE_NOT_READ} {}", r.side_not_read), false));
+    }
+    if r.lobby > 0 {
+        parts.push(part(format!("{LOBBY} {}", r.lobby), false));
+    }
+    parts
 }
 
 fn split(r: &BanRow) -> Element<'static, Message> {
     let mut cell = Row::new().spacing(8).align_y(Alignment::Center);
-    for (i, words) in split_words(r).into_iter().enumerate() {
-        let t = text(words)
+    for part in split_parts(r) {
+        let t = text(part.words)
             .size(12)
             .font(FONT_SEMIBOLD)
-            .color(if i == 0 { TEXT } else { TEXT_2 })
+            .color(if part.tag { TEXT } else { TEXT_2 })
             .wrapping(Wrapping::None);
-        cell = cell.push(if i == 0 {
+        cell = cell.push(if part.tag {
             container(t)
                 .padding(Padding::from([2, 8]))
                 .style(|_: &Theme| container::Style {

@@ -15,6 +15,10 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## Unreleased
+
+- The Heroes tab has a When banned view: for each hero banned in your games, how often it was banned and your record and win rate in those games, split by your team's bans and the enemy's (#779).
+
 ## 0.6.0
 
 0.6.0 is the first stable release since 0.5.0 and brings together everything from the 0.6.0 alphas and release candidates. The desktop app has a new look with Overview, Games, Heroes, Maps and Seasons tabs and a rebuilt Settings page. With Read my rank after Comp games on (it starts off), the tracker reads your rank screen after each Comp game at 2560x1440 and sends the rank with your game uploads.

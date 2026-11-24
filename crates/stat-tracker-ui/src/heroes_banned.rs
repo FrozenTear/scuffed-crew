@@ -11,7 +11,8 @@
 //!   ([`scuffed_types::hero_key_to_name`]); an unread or unknown one never
 //!   gets a row.
 //! - The lobby ban, when it is a known hero and not one of the counted
-//!   slots. It has no team, so it adds to Games and the record only.
+//!   slots. It has no team, so it adds to Games, the record and the
+//!   Lobby count, never to Your ban or Enemy.
 //! - Never the ban votes (`ban_vote`, `ban_votes`): votes, not results.
 //!
 //! A game counts once per hero, whatever the number of slots, and once on
@@ -92,6 +93,8 @@ pub struct Sides {
     pub enemy: bool,
     /// A slot whose team was not read, with no read side for this hero.
     pub unread: bool,
+    /// Counted only through a lobby ban that is not one of the slots.
+    pub lobby: bool,
 }
 
 /// The heroes counted as banned in one game, each once, by display name,
@@ -132,7 +135,13 @@ pub fn game_bans(g: &Game) -> Vec<(&'static str, Sides)> {
         && let Some(hero) = scuffed_types::hero_key_to_name(name)
         && !out.iter().any(|(h, _)| *h == hero)
     {
-        out.push((hero, Sides::default()));
+        out.push((
+            hero,
+            Sides {
+                lobby: true,
+                ..Sides::default()
+            },
+        ));
     }
     out
 }
@@ -170,6 +179,8 @@ pub struct BanRow {
     pub enemy: usize,
     /// Games where only a ban with no team read named it.
     pub side_not_read: usize,
+    /// Games where only a lobby ban, not one of the slots, named it.
+    pub lobby: usize,
     /// The newest game where it was banned.
     pub last: DateTime<Utc>,
 }
@@ -231,6 +242,7 @@ pub fn aggregate(games: &[&Game]) -> BanTable {
                         own: 0,
                         enemy: 0,
                         side_not_read: 0,
+                        lobby: 0,
                         last: g.played_at,
                     });
                     t.rows.len() - 1
@@ -247,6 +259,7 @@ pub fn aggregate(games: &[&Game]) -> BanTable {
             r.own += usize::from(sides.own);
             r.enemy += usize::from(sides.enemy);
             r.side_not_read += usize::from(sides.unread);
+            r.lobby += usize::from(sides.lobby);
             r.last = r.last.max(g.played_at);
         }
     }

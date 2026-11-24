@@ -179,7 +179,8 @@ fn a_distinct_lobby_ban_counts_with_no_side() {
     let s = row(&t, "Sigma");
     assert_eq!(s.record.games, 1);
     assert_eq!((s.own, s.enemy, s.side_not_read), (0, 0, 0), "no tag");
-    assert_eq!(row(&t, "Ana").own, 1);
+    assert_eq!(s.lobby, 1, "counted through the lobby ban only");
+    assert_eq!((row(&t, "Ana").own, row(&t, "Ana").lobby), (1, 0));
 
     let alone = game(
         &bans_lobby(&[(None, None)], Some("sigma")),
@@ -201,7 +202,7 @@ fn a_lobby_ban_already_in_a_slot_is_not_counted_twice() {
     let t = table(&[g]);
     let s = row(&t, "Sigma");
     assert_eq!(s.record.games, 1);
-    assert_eq!((s.own, s.enemy), (0, 1));
+    assert_eq!((s.own, s.enemy, s.lobby), (0, 1, 0), "the slot places it");
     let unknown = game(&bans_lobby(&[], Some("mystery-hero")), Outcome::Win, 2);
     assert!(table(&[unknown]).rows.is_empty(), "unknown lobby hero");
 }
@@ -466,4 +467,82 @@ fn the_copy_never_reads_as_advice() {
         assert!(!source.contains(banned), "{banned:?}");
     }
     assert!(CAPTION.contains("not a suggestion of who to ban"));
+}
+
+#[test]
+fn the_lobby_count_is_games_named_only_by_a_lobby_ban() {
+    let games = [
+        game(&bans_lobby(&[(None, None)], Some("sigma")), Outcome::Win, 1),
+        game(&bans_lobby(&[], Some("sigma")), Outcome::Loss, 2),
+        game(
+            &bans_lobby(&[(Some("sigma"), Some("own"))], Some("sigma")),
+            Outcome::Win,
+            3,
+        ),
+        game(
+            &bans_lobby(&[(Some("sigma"), None)], Some("sigma")),
+            Outcome::Win,
+            4,
+        ),
+        game(&bans(&[(Some("ana"), Some("enemy"))]), Outcome::Win, 5),
+    ];
+    let t = table(&games);
+    let s = row(&t, "Sigma");
+    assert_eq!(s.record.games, 4);
+    assert_eq!(
+        (s.own, s.enemy, s.side_not_read, s.lobby),
+        (1, 0, 1, 2),
+        "a lobby ban that is also a slot adds no Lobby count"
+    );
+    assert_eq!(row(&t, "Ana").lobby, 0);
+}
+
+/// `hero` banned by the enemy in one lost game on each Oct day, in the
+/// order given.
+fn on_days(hero: &str, days: &[u32]) -> Vec<Game> {
+    days.iter()
+        .map(|&day| {
+            let mut g = game(&bans(&[(Some(hero), Some("enemy"))]), Outcome::Loss, day);
+            g.session_id = format!("{hero}-{day}");
+            g
+        })
+        .collect()
+}
+
+fn oct(day: u32) -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 10, day, 20, 0, 0).unwrap()
+}
+
+#[test]
+fn recent_is_the_newest_game_when_the_list_is_newest_first() {
+    // app.games is newest first, so the last game seen is the oldest.
+    let mut games = on_days("ana", &[9, 5, 1]);
+    games.extend(on_days("mercy", &[8, 7, 6]));
+    let t = table(&games);
+    assert_eq!(row(&t, "Ana").last, oct(9));
+    assert_eq!(row(&t, "Mercy").last, oct(8));
+    let mut rows = t.rows;
+    sort_rows(&mut rows, SortKey::Recent, false);
+    assert_eq!(names(&rows), ["Ana", "Mercy"]);
+    sort_rows(&mut rows, SortKey::Recent, true);
+    assert_eq!(names(&rows), ["Mercy", "Ana"]);
+}
+
+#[test]
+fn recent_is_the_newest_game_in_any_order() {
+    // Mixed dates, the two heroes interleaved: ana 3, mercy 6, ana 7,
+    // mercy 2, ana 1, mercy 4.
+    let ana = on_days("ana", &[3, 7, 1]);
+    let mercy = on_days("mercy", &[6, 2, 4]);
+    let games: Vec<Game> = ana
+        .into_iter()
+        .zip(mercy)
+        .flat_map(|(a, m)| [a, m])
+        .collect();
+    let t = table(&games);
+    assert_eq!(row(&t, "Ana").last, oct(7));
+    assert_eq!(row(&t, "Mercy").last, oct(6));
+    let mut rows = t.rows;
+    sort_rows(&mut rows, SortKey::Recent, false);
+    assert_eq!(names(&rows), ["Ana", "Mercy"]);
 }
