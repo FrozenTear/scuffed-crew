@@ -15,6 +15,10 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## Unreleased
+
+Each square in the companion's Tonight strip now shows W, L or D, so a result no longer reads from its colour alone. After 13 games in a day the strip shows the newest 13 and a +N for the rest. A row of four dots and the page name now sits at the top of the companion. Settings can hold the companion on the stream page, and next, previous and safe-page keys (Super+Shift+N, Super+Shift+B and Super+Shift+T by default) change the page.
+
 ## 0.6.0
 
 0.6.0 is the first stable release since 0.5.0 and brings together everything from the 0.6.0 alphas and release candidates. The desktop app has a new look with Overview, Games, Heroes, Maps and Seasons tabs and a rebuilt Settings page. With Read my rank after Comp games on (it starts off), the tracker reads your rank screen after each Comp game at 2560x1440 and sends the rank with your game uploads.

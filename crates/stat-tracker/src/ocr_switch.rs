@@ -220,6 +220,7 @@ impl Switch {
             focus_gate: crate::ocr_status::focus_gate(),
             input_notice: crate::ocr_status::input_notice(),
             vision_size: crate::ocr_status::vision_size(),
+            companion_stage: crate::companion_stage::companion_stage_for(&self.data_dir),
         }
     }
 
@@ -396,5 +397,33 @@ mod tests {
                 assert!(!PackReadiness::default().has(*group), "{name}");
             }
         }
+    }
+
+    #[test]
+    fn a_switch_write_after_a_publish_keeps_the_stage() {
+        let dir = tempfile::tempdir().unwrap();
+        let vote = crate::companion_stage::CompanionStage::new(
+            crate::companion_stage::StageKind::MapVote,
+            vec!["Ilios".into()],
+            20,
+        );
+        crate::companion_stage::publish_companion_stage(
+            dir.path(),
+            Some((vote.kind, vote.maps.clone(), vote.since)),
+        );
+        let config = crate::config::Config {
+            data_dir: dir.path().to_path_buf(),
+            ..crate::config::Config::default()
+        };
+        // OCR on: start_with does not load packs. The write goes through
+        // Switch::status, which copies the held stage for this data dir.
+        let _switch = Switch::start_with(&config, &[Read::StatCells], |_| {
+            panic!("the reader should not be loaded")
+        });
+        let pid = std::process::id();
+        assert_eq!(
+            crate::companion_stage::read_companion_stage(dir.path(), pid),
+            Some(vote)
+        );
     }
 }

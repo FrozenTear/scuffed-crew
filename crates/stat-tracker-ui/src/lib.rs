@@ -27,6 +27,9 @@ pub mod cli;
 pub mod clipboard;
 pub mod commands;
 pub mod companion_gate;
+pub mod companion_keys;
+#[cfg(test)]
+mod companion_wiring;
 #[cfg(test)]
 mod copy_rules;
 pub mod daemon;
@@ -66,6 +69,8 @@ pub mod nav;
 pub mod nav_fit;
 pub mod notes;
 pub mod overlay;
+mod overlay_marks;
+pub mod overlay_pages;
 #[cfg(feature = "companion")]
 pub mod overlay_shell;
 pub mod overview;

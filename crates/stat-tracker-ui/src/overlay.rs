@@ -24,6 +24,7 @@ use stat_tracker::game_running::GameProcessGate;
 use crate::aggregate::{Record, aggregate};
 use crate::cli::{Cli, FixtureKind};
 use crate::model::{Game, Outcome, Role, SeasonSel, display_hero_name};
+use crate::overlay_pages::{self, Page, PageState};
 use crate::overview::tonight_games;
 use crate::seasons;
 use crate::snapshot::{self, games_from_snapshot};
@@ -32,7 +33,7 @@ use crate::theme::{
     SIZE_LABEL, SIZE_META, SIZE_TITLE, STRIPE, TEXT, TEXT_2, TEXT_3,
 };
 
-/// Design §4.6, width 360, margins 24, exclusive zone 0.
+/// UX Spec companion-spec: width 360, bottom-right, margins 24, exclusive zone 0.
 pub const OVERLAY_WIDTH: u32 = 360;
 pub const OVERLAY_MARGIN: i32 = 24;
 pub const OVERLAY_EXCLUSIVE_ZONE: i32 = 0;
@@ -232,6 +233,9 @@ pub struct OverlayShellSpec {
     pub width: u32,
     pub height: u32,
     pub margin: i32,
+    /// Bottom-right, 24 px margin: clear of the pick and ban map name.
+    pub anchor_bottom: bool,
+    pub anchor_right: bool,
     pub exclusive_zone: i32,
     pub layer_overlay: bool,
     pub keyboard_none: bool,
@@ -245,6 +249,8 @@ pub fn overlay_shell_spec(height: u32, capture_output: Option<&str>) -> OverlayS
         width: OVERLAY_WIDTH,
         height: height.max(200),
         margin: OVERLAY_MARGIN,
+        anchor_bottom: true,
+        anchor_right: true,
         exclusive_zone: OVERLAY_EXCLUSIVE_ZONE,
         layer_overlay: true,
         keyboard_none: true,
@@ -312,6 +318,10 @@ pub struct OverlayModel {
     pub live: bool,
     /// One-line footer when a companion shortcut is on. `None` when disabled.
     pub hotkey_hint: Option<String>,
+    /// The page on show and the safe-page hold (`overlay_pages`).
+    pub pages: PageState,
+    /// The safe-page bind shown in the hold footer.
+    pub safe_bind: String,
 }
 
 impl OverlayModel {
@@ -373,6 +383,8 @@ pub fn build_model(
         },
         live,
         hotkey_hint: None,
+        pages: PageState::default(),
+        safe_bind: overlay_pages::DEFAULT_SAFE_BIND.to_string(),
     }
 }
 
@@ -390,7 +402,20 @@ fn season_label(sel: &SeasonSel, seasons: &[Season]) -> String {
 /// Height of the layer surface. Layer-shell needs an explicit size; this
 /// tracks the card stack so the panel is "height to content".
 pub fn content_height(model: &OverlayModel) -> u32 {
-    let mut h: u32 = 16 + 48 + 12;
+    // The page indicator row, on every page.
+    let mut h: u32 = 16 + 18 + 12;
+    if model.pages.held {
+        h += 22;
+    }
+    if model.pages.page != Page::Tonight {
+        // Pages other than Tonight are stubs for now: indicator and footer.
+        h += 36 + 16;
+        if model.hotkey_hint.is_some() {
+            h += 22;
+        }
+        return h.clamp(200, 900);
+    }
+    h += 48 + 12;
     h += if model.last_game.is_some() { 196 } else { 72 };
     h += 12 + 28;
     h += 12 + 18;
@@ -547,10 +572,17 @@ pub enum OverlayViewMessage {
 }
 
 pub fn view<'a>(model: &'a OverlayModel) -> Element<'a, OverlayViewMessage> {
-    let mut body = column![header_row(model)].spacing(GRID_GAP).width(Fill);
-    body = body.push(last_game_card(model.last_game.as_ref()));
-    body = body.push(tonight_strip(&model.tonight_outcomes));
-    body = body.push(heroes_block(&model.top_heroes));
+    let mut body = column![page_indicator(&model.pages)]
+        .spacing(GRID_GAP)
+        .width(Fill);
+    // Only Tonight has its content yet; the other pages show the indicator
+    // and the footer. Nothing hint-related is ever drawn on Tonight.
+    if model.pages.page == Page::Tonight {
+        body = body.push(header_row(model));
+        body = body.push(last_game_card(model.last_game.as_ref()));
+        body = body.push(tonight_strip(&model.tonight_outcomes));
+        body = body.push(heroes_block(&model.top_heroes));
+    }
     body = body.push(footer_row(model));
 
     container(body)
@@ -691,16 +723,122 @@ fn format_stat(n: u32) -> String {
     }
 }
 
+/// The letter in a Tonight square, so the result is not colour alone. An
+/// unknown result has no letter.
+pub fn outcome_letter(outcome: Outcome) -> &'static str {
+    match outcome {
+        Outcome::Win => "W",
+        Outcome::Loss => "L",
+        Outcome::Draw => "D",
+        Outcome::Unknown => "",
+    }
+}
+
+use crate::overlay_marks::{page_indicator_labels, tonight_strip_cells, tonight_strip_labels};
+
 fn tonight_strip(outcomes: &[Outcome]) -> Element<'static, OverlayViewMessage> {
+    let labels = tonight_strip_labels(outcomes);
     let mut row = row![label("Tonight")].spacing(6).align_y(Alignment::Center);
     if outcomes.is_empty() {
-        row = row.push(text("-").size(SIZE_META).font(FONT_MEDIUM).color(TEXT_3));
+        row = row.push(
+            text(labels[0].clone())
+                .size(SIZE_META)
+                .font(FONT_MEDIUM)
+                .color(TEXT_3),
+        );
     } else {
-        for outcome in outcomes {
-            row = row.push(container(space().width(10).height(16)).style(theme::stripe(*outcome)));
+        let (shown, _) = tonight_strip_cells(outcomes);
+        for (outcome, letter) in shown.iter().zip(labels.iter()) {
+            let mark = text(letter.clone())
+                .size(SIZE_LABEL)
+                .font(FONT_BOLD)
+                .color(theme::BG);
+            row = row.push(
+                container(mark)
+                    .center_x(14)
+                    .center_y(16)
+                    .style(theme::stripe(*outcome)),
+            );
+        }
+        if let Some(plus) = labels.iter().find(|s| s.starts_with('+')) {
+            row = row.push(
+                text(plus.clone())
+                    .size(SIZE_META)
+                    .font(FONT_SEMIBOLD)
+                    .color(TEXT_2),
+            );
         }
     }
     row.into()
+}
+
+/// Four dots and the page name in words, on every in-match page. The
+/// Tonight pip carries a T, the lit dot is larger and filled, and the name
+/// is spelled out, so colour is never the only cue. Tip shows only its
+/// name. The hold adds its tag beside the name.
+fn page_indicator(pages: &PageState) -> Element<'static, OverlayViewMessage> {
+    let ind = overlay_pages::indicator(pages);
+    let labels = page_indicator_labels(pages);
+    let mut row = row![].spacing(6).align_y(Alignment::Center);
+    let mut label_i = 0;
+    if let Some(lit) = ind.dot {
+        for i in 0..Page::IN_MATCH.len() {
+            let dot = page_dot(i == lit);
+            row = if i == 0 {
+                let pip = text(labels[label_i])
+                    .size(SIZE_LABEL)
+                    .font(FONT_BOLD)
+                    .color(if lit == 0 { TEXT } else { TEXT_3 });
+                label_i += 1;
+                row.push(row![pip, dot].spacing(3).align_y(Alignment::Center))
+            } else {
+                row.push(dot)
+            };
+        }
+    }
+    row = row.push(
+        text(labels[label_i])
+            .size(SIZE_META)
+            .font(FONT_SEMIBOLD)
+            .color(TEXT),
+    );
+    label_i += 1;
+    if ind.held {
+        row = row.push(
+            container(
+                text(labels[label_i])
+                    .size(SIZE_LABEL)
+                    .font(FONT_SEMIBOLD)
+                    .color(TEXT),
+            )
+            .padding(Padding::from([2, 8]))
+            .style(|_t| container::Style {
+                background: Some(Background::Color(theme::ACCENT_SOFT)),
+                border: Border {
+                    color: theme::ACCENT,
+                    width: 1.0,
+                    radius: theme::RADIUS_CHIP.into(),
+                },
+                ..container::Style::default()
+            }),
+        );
+    }
+    container(row).height(18).center_y(18).into()
+}
+
+fn page_dot(lit: bool) -> Element<'static, OverlayViewMessage> {
+    let size = if lit { 8.0 } else { 6.0 };
+    container(space().width(size).height(size))
+        .style(move |_| container::Style {
+            background: lit.then_some(Background::Color(theme::ACCENT)),
+            border: Border {
+                color: if lit { theme::ACCENT } else { TEXT_3 },
+                width: 1.0,
+                radius: 999.0.into(),
+            },
+            ..container::Style::default()
+        })
+        .into()
 }
 
 fn heroes_block(heroes: &[OverlayHero]) -> Element<'static, OverlayViewMessage> {
@@ -756,20 +894,18 @@ fn footer_row(model: &OverlayModel) -> Element<'_, OverlayViewMessage> {
     .spacing(8)
     .align_y(Alignment::Center);
 
-    match &model.hotkey_hint {
-        Some(hint) => column![
-            chips,
+    let safe = crate::overlay_marks::safe_page_footer_label(&model.pages, &model.safe_bind);
+    let mut col = column![chips].spacing(6).width(Fill);
+    for hint in [model.hotkey_hint.clone(), safe].into_iter().flatten() {
+        col = col.push(
             text(hint)
                 .size(SIZE_LABEL)
                 .font(FONT_MEDIUM)
                 .color(TEXT_3)
                 .width(Fill),
-        ]
-        .spacing(6)
-        .width(Fill)
-        .into(),
-        None => chips.into(),
+        );
     }
+    col.into()
 }
 
 fn chip<'a>(label_s: &'a str) -> Element<'a, OverlayViewMessage> {
@@ -875,6 +1011,9 @@ impl OverlayApp {
             ),
         );
         model.hotkey_hint = seasons::load_overlay_hotkey(&cli.data_dir).footer_hint();
+        let keys = crate::companion_keys::load_page_keys(&cli.data_dir);
+        model.safe_bind = keys.safe_bind;
+        model.pages = crate::companion_keys::start_companion_pages(&cli.data_dir);
         let surface_height = content_height(&model);
         Self {
             data_dir: cli.data_dir.clone(),
@@ -898,29 +1037,30 @@ impl OverlayApp {
 
     pub(crate) fn refresh(&mut self) {
         let hint = seasons::load_overlay_hotkey(&self.data_dir).footer_hint();
-        if self.fixture.is_some() {
-            self.model.hotkey_hint = hint;
-            return;
+        let keys = crate::companion_keys::load_page_keys(&self.data_dir);
+        if self.fixture.is_none() {
+            let mtime = snapshot::snapshot_mtime(&self.data_dir);
+            if mtime != self.snapshot_mtime {
+                self.snapshot_mtime = mtime;
+                let snap = snapshot::load_snapshot(&self.data_dir);
+                let games = games_from_snapshot(&snap);
+                let seasons = seasons::load_cache(&self.data_dir);
+                let persisted = seasons::load_ui_state(&self.data_dir);
+                let season = seasons::resolve_selection(persisted, &seasons.seasons);
+                self.clock = Utc::now();
+                let config = stat_tracker::config::Config::load().unwrap_or_default();
+                self.model = build_model(
+                    &games,
+                    &seasons.seasons,
+                    &season,
+                    self.clock,
+                    config.sync.is_some(),
+                    detect_game_running(&self.data_dir, &config.game_process_names, false),
+                );
+            }
         }
-        let mtime = snapshot::snapshot_mtime(&self.data_dir);
-        if mtime != self.snapshot_mtime {
-            self.snapshot_mtime = mtime;
-            let snap = snapshot::load_snapshot(&self.data_dir);
-            let games = games_from_snapshot(&snap);
-            let seasons = seasons::load_cache(&self.data_dir);
-            let persisted = seasons::load_ui_state(&self.data_dir);
-            let season = seasons::resolve_selection(persisted, &seasons.seasons);
-            self.clock = Utc::now();
-            let config = stat_tracker::config::Config::load().unwrap_or_default();
-            self.model = build_model(
-                &games,
-                &seasons.seasons,
-                &season,
-                self.clock,
-                config.sync.is_some(),
-                detect_game_running(&self.data_dir, &config.game_process_names, false),
-            );
-        }
+        self.model.pages = crate::companion_keys::load_page_state(&self.data_dir);
+        self.model.safe_bind = keys.safe_bind;
         self.model.hotkey_hint = hint;
     }
 }
@@ -945,6 +1085,10 @@ mod tests {
     use crate::cli::FixtureKind;
     use crate::fixtures;
     use crate::model::Game;
+    use crate::overlay_marks::{
+        TONIGHT_PIP, TONIGHT_STRIP_MAX, page_indicator_labels, safe_page_footer_label,
+        tonight_strip_labels,
+    };
     use crate::snapshot::games_from_snapshot;
     use chrono::{TimeZone, Utc};
 
@@ -1117,6 +1261,8 @@ mod tests {
         let spec = overlay_shell_spec(412, Some("DP-1"));
         assert_eq!(spec.width, 360);
         assert_eq!(spec.margin, 24);
+        assert!(spec.anchor_bottom, "bottom-right, not top-right");
+        assert!(spec.anchor_right, "bottom-right, not top-right");
         assert_eq!(spec.exclusive_zone, 0);
         assert!(spec.layer_overlay);
         assert!(spec.keyboard_none);
@@ -1217,6 +1363,108 @@ mod tests {
             true,
         );
         let _ = view(&sample);
+    }
+
+    #[test]
+    fn tonight_squares_carry_a_letter() {
+        assert_eq!(outcome_letter(Outcome::Win), "W");
+        assert_eq!(outcome_letter(Outcome::Loss), "L");
+        assert_eq!(outcome_letter(Outcome::Draw), "D");
+        assert_eq!(outcome_letter(Outcome::Unknown), "");
+        let games = sample_games();
+        let model = build_model(
+            &games,
+            &sample_seasons(),
+            &SeasonSel::AllTime,
+            games[0].played_at,
+            true,
+            true,
+        );
+        let _ = view(&model);
+        // tonight_strip_labels is what the view is given for the strip.
+        assert_eq!(
+            tonight_strip_labels(&model.tonight_outcomes),
+            vec!["W".to_string(), "L".to_string(), "W".to_string()],
+        );
+        assert!(page_indicator_labels(&model.pages).contains(&TONIGHT_PIP));
+    }
+
+    #[test]
+    fn tonight_strip_shows_newest_13_and_plus_n() {
+        // Newest first: W, D, then 13 L. Taking the oldest 13 would be
+        // all L, so the first two labels would not be W and D.
+        let mut outcomes = vec![Outcome::Win, Outcome::Draw];
+        outcomes.extend(vec![Outcome::Loss; 13]);
+        let labels = tonight_strip_labels(&outcomes);
+        assert_eq!(&labels[..2], ["W", "D"]);
+        assert_eq!(labels[TONIGHT_STRIP_MAX], "+2");
+        let mut model = build_model(
+            &sample_games(),
+            &sample_seasons(),
+            &SeasonSel::AllTime,
+            sample_games()[0].played_at,
+            true,
+            true,
+        );
+        model.tonight_outcomes = outcomes;
+        let _ = view(&model);
+        assert_eq!(tonight_strip_labels(&[Outcome::Win; 13]).len(), 13);
+    }
+
+    #[test]
+    fn every_page_and_the_hold_build_a_view() {
+        let games = sample_games();
+        let clock = games[0].played_at;
+        let tonight = build_model(
+            &games,
+            &sample_seasons(),
+            &SeasonSel::AllTime,
+            clock,
+            true,
+            true,
+        );
+        let tonight_h = content_height(&tonight);
+        let _ = view(&tonight);
+        assert_eq!(
+            page_indicator_labels(&tonight.pages),
+            vec![TONIGHT_PIP, "Tonight"]
+        );
+        for page in [Page::MapVote, Page::PicksAndBans, Page::Matchup, Page::Tip] {
+            let model = OverlayModel {
+                pages: PageState {
+                    page,
+                    ..PageState::default()
+                },
+                ..tonight.clone()
+            };
+            let _ = view(&model);
+            let labels = page_indicator_labels(&model.pages);
+            if page == Page::Tip {
+                assert_eq!(labels, vec!["Tip"], "{page:?}");
+            } else {
+                assert!(labels.contains(&TONIGHT_PIP), "{page:?}");
+                assert!(labels.contains(&page.name()), "{page:?}");
+            }
+            // A stub page draws no Tonight content.
+            assert!(content_height(&model) < tonight_h, "{page:?}");
+        }
+        let held = OverlayModel {
+            pages: overlay_pages::safe_page(PageState::default()),
+            ..tonight.clone()
+        };
+        let _ = view(&held);
+        assert_eq!(
+            page_indicator_labels(&held.pages),
+            vec![TONIGHT_PIP, "Tonight", overlay_pages::HELD_TAG]
+        );
+        assert_eq!(
+            safe_page_footer_label(&held.pages, overlay_pages::DEFAULT_SAFE_BIND).as_deref(),
+            Some("Safe page with Super+Shift+T")
+        );
+        assert_eq!(
+            safe_page_footer_label(&tonight.pages, overlay_pages::DEFAULT_SAFE_BIND),
+            None
+        );
     }
 
     #[test]

@@ -53,6 +53,11 @@ const SYNC_HELP: &str = "Both are needed to upload. Blank either and Apply to tu
 const SHORTCUT_LABEL: &str = "Keyboard shortcut to hide or show the overlay";
 const SHORTCUT_HELP: &str = "Works in fullscreen. Overlay is click-through.";
 const SHORTCUT_FIELD_HELP: &str = "Super = Windows key. Join with +. Press Enter to apply.";
+const HOLD_STREAM_LABEL: &str = "Hold the stream page";
+const HOLD_STREAM_HELP: &str = "Pages stay on Tonight unless you change them with a key.";
+const NEXT_PAGE_LABEL: &str = "Next page";
+const PREV_PAGE_LABEL: &str = "Previous page";
+const SAFE_PAGE_LABEL: &str = "Safe page";
 
 /// A boxed toggle handler, or none when the switch is disabled.
 type Toggle<'a> = Option<Box<dyn Fn(bool) -> Message + 'a>>;
@@ -127,7 +132,64 @@ pub(crate) fn companion(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
             .spacing(4),
         );
     }
-    divided(vec![show, shortcut.into()])
+    let mut rows = vec![show, shortcut.into()];
+    rows.extend(companion_page_rows(app, demo));
+    divided(rows)
+}
+
+/// "Hold the stream page" and the next, previous and safe-page binds.
+pub(crate) fn companion_page_rows(app: &TrackerApp, demo: bool) -> Vec<Element<'_, Message>> {
+    use crate::companion_keys::PageBind;
+    use crate::settings_update::Msg;
+    let hold = setting_row(
+        row_title(HOLD_STREAM_LABEL),
+        vec![hint(HOLD_STREAM_HELP)],
+        switch(
+            app.page_keys.hold_stream_page,
+            toggle(!demo, |v| Message::SettingsPage(Msg::HoldStreamPage(v))),
+        ),
+    );
+    let binds = [
+        (
+            PageBind::Next,
+            NEXT_PAGE_LABEL,
+            crate::companion_keys::DEFAULT_NEXT_BIND,
+        ),
+        (
+            PageBind::Prev,
+            PREV_PAGE_LABEL,
+            crate::companion_keys::DEFAULT_PREV_BIND,
+        ),
+        (
+            PageBind::Safe,
+            SAFE_PAGE_LABEL,
+            crate::companion_keys::DEFAULT_SAFE_BIND,
+        ),
+    ];
+    let mut rows = vec![hold];
+    for (kind, label, placeholder) in binds {
+        let shown = kind.shown(&app.page_keys, &app.page_state.page_bind_drafts);
+        let mut input = text_input(placeholder, shown)
+            .padding(Padding::from([8, 10]))
+            .size(SIZE_BODY)
+            .style(theme::text_input_style)
+            .width(Fill);
+        if !demo {
+            input = input
+                .on_input(move |v| Message::SettingsPage(Msg::PageBindDraft(kind, v)))
+                .on_submit(Message::SettingsPage(Msg::PageBindCommit(kind)));
+        }
+        rows.push(
+            column![
+                field_caption(label),
+                container(input).width(Fill).max_width(FIELD_SHORT),
+            ]
+            .spacing(4)
+            .into(),
+        );
+    }
+    rows.push(hint(SHORTCUT_FIELD_HELP));
+    rows
 }
 
 /// The line under a refused token. Under `SCUFFED_TOKEN` the Website

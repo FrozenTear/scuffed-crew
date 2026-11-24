@@ -43,14 +43,10 @@ pub(crate) const FIELD_SHORT: f32 = 280.0;
 /// URL, token, process list. Capped so they do not become a full-pane bar.
 pub(crate) const FIELD_TEXT: f32 = 480.0;
 
-/// Help copy follows the card up to this width (about 130 characters at
-/// `SIZE_LABEL`). At 520 px the two-line hints on a 760-790 px card ended in
-/// a line of one or two words.
+/// Help copy follows the card up to this width (about 130 characters at `SIZE_LABEL`).
 pub(crate) const HELP_MEASURE: f32 = 640.0;
 /// Widest a "text … button" row gets inside a card that spans the pane
-/// (Report a problem, Uninstall, the Save strip). Past this the button was
-/// 2200-3000 px from its label on a wide window. It equals the one-column
-/// pane cap, so those rows are unchanged on a narrow or portrait window.
+/// (Report a problem, Uninstall, the Save strip). Equals the one-column pane cap.
 pub(crate) const ACTION_ROW_MAX: f32 = SETTINGS_SINGLE_MAX;
 
 const _: () = {
@@ -1371,6 +1367,9 @@ pub(crate) fn companion_body(app: &TrackerApp, demo: bool) -> Element<'_, Messag
             demo,
             Some("Super = Windows key. Join with +."),
         ));
+    }
+    for row in crate::settings_cards::companion_page_rows(app, demo) {
+        body = body.push(row);
     }
 
     body.into()
