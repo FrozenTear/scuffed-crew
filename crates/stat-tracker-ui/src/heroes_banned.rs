@@ -197,11 +197,22 @@ impl BanRow {
     }
 
     /// "Too few games (8 of 10)" in place of the rate, or `None` when the
-    /// hero has one.
+    /// hero has one. The view draws [`Self::too_few_parts`].
+    #[cfg(test)]
     pub fn too_few(&self) -> Option<String> {
-        self.rate()
-            .is_none()
-            .then(|| format!("{TOO_FEW} ({} of {RATE_MIN})", self.decided()))
+        self.too_few_parts()
+            .map(|(words, count)| format!("{words} {count}"))
+    }
+
+    /// [`Self::too_few`] in its two unbreakable parts, "Too few games" and
+    /// "(8 of 10)": a narrow column breaks only between them.
+    pub fn too_few_parts(&self) -> Option<(String, String)> {
+        self.rate().is_none().then(|| {
+            (
+                TOO_FEW.to_string(),
+                format!("({} of {RATE_MIN})", self.decided()),
+            )
+        })
     }
 }
 

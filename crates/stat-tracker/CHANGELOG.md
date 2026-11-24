@@ -17,7 +17,7 @@ summary, then the highlights, and tucks the remaining text under Details.
 
 ## Unreleased
 
-- The Heroes tab has a When banned view: for each hero banned in your games, how often it was banned and your record and win rate in those games, split by your team's bans and the enemy's (#779).
+- In the top tabs layout, the Heroes tab has a When banned view: for each hero banned in your games, how often it was banned and your record and win rate in those games, split by your team's bans and the enemy's. The classic sidebar layout does not have it yet (#779).
 
 ## 0.6.0
 

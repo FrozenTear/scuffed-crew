@@ -321,6 +321,8 @@ fn nothing_is_cut_at_the_720_px_minimum() {
     for words in ["Wrecking Ball", "Junker Queen"] {
         assert!(!fit_of(&fit, words).overflows());
     }
+    too_few_stays_whole(&all, &fit, CONTENT_720);
+
     // Each text ends before the next one in its row starts.
     let line = "ALL TIME · 3 HEROES · 16 GAMES WITH A BAN READ · 1 GAME WITH NO BAN READ LEFT OUT";
     for (words, next) in [
@@ -394,4 +396,57 @@ fn the_compact_columns_fill_the_same_row_as_before() {
     // Games grew so its sorted header fits; Banned by gave the pixels.
     let c = cols(CONTENT_720);
     assert_eq!(c.games + c.decided + c.rate + c.split, 416.0, "{c:?}");
+}
+
+/// Junker Queen and Sigma have too few decided games: in each row
+/// "Too few games" and "(n of 10)" are drawn whole, one line each, the
+/// count right after the words. Returns, per row, whether the count sat
+/// on the same line.
+fn too_few_stays_whole(all: &[(String, Rectangle)], fit: &[Fit], width: f32) -> Vec<bool> {
+    let mut same_line = Vec::new();
+    for count in ["(4 of 10)", "(2 of 10)"] {
+        let i = all
+            .iter()
+            .position(|(t, _)| t == count)
+            .unwrap_or_else(|| panic!("{count} not drawn whole at {width}: {all:?}"));
+        let (words, at) = (&all[i - 1], &all[i].1);
+        assert_eq!(words.0, crate::small_sample::TOO_FEW, "at {width}: {all:?}");
+        let f = fit_of(fit, count);
+        assert!(f.one_line() && !f.overflows(), "{count} at {width}: {f:?}");
+        same_line.push((words.1.y - at.y).abs() < 0.5);
+    }
+    let words: Vec<&Fit> = fit
+        .iter()
+        .filter(|f| f.words == crate::small_sample::TOO_FEW)
+        .collect();
+    assert_eq!(words.len(), 2, "at {width}: {fit:?}");
+    for f in words {
+        assert!(f.one_line() && !f.overflows(), "at {width}: {f:?}");
+    }
+    same_line
+}
+
+#[test]
+fn too_few_breaks_only_before_the_count() {
+    // At 720 the 120 px column puts the count whole on the next line.
+    let (_dir, app) = app_720();
+    let (all, fit) = lay_out(crate::heroes_page::view(&app, CONTENT_720), CONTENT_720);
+    assert_eq!(too_few_stays_whole(&all, &fit, CONTENT_720), [false, false]);
+    // At 1280 both parts sit on one line.
+    let (all, fit) = lay_out(crate::heroes_page::view(&app, 1232.0), 1232.0);
+    assert_eq!(too_few_stays_whole(&all, &fit, 1232.0), [true, true]);
+}
+
+#[test]
+fn neither_too_few_part_breaks_even_squeezed() {
+    // A cell narrower than either part: each still keeps one line (a
+    // break inside "(4 of 10)" would split the count from its total).
+    let cell = too_few(("Too few games".to_string(), "(4 of 10)".to_string()));
+    let (all, fit) = lay_out(cell, 30.0);
+    let drawn: Vec<&str> = all.iter().map(|(t, _)| t.as_str()).collect();
+    assert_eq!(drawn, ["Too few games", "(4 of 10)"]);
+    for words in drawn {
+        let f = fit_of(&fit, words);
+        assert!(f.one_line(), "{words} breaks: {f:?}");
+    }
 }

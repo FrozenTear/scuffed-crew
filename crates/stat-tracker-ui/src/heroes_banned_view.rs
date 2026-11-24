@@ -6,15 +6,16 @@
 //! line with Sort (Games, Win rate, Recent) and one table card in the Maps
 //! chrome: Hero (portrait, role, name), Games, Decided (the count, muted,
 //! then the record), Win rate (the shared bar and a whole percent from 10
-//! decided games, else "Too few games (n of 10)") and Banned by ("Your
-//! ban N", tinted as a tag only above 0, and "Enemy N" in TEXT_2 on every
-//! row, then "Side not read N" and "Lobby N" when there is one, muted in
-//! TEXT_3 like the Decided count; its tooltip, the spoken label too, names
-//! every part in order). Headers sort like Maps: the active one in the
-//! accent with a chevron. No Best or Worst rail, so
-//! nothing ranks as a pick. With no rows, one empty card says why, with
-//! no Sort and no stats line. Below an 860 px window the columns narrow
-//! and the hero name and the stats line wrap rather than clip.
+//! decided games, else "Too few games (n of 10)", breaking only before the
+//! parenthesis) and Banned by ("Your ban N", tinted as a tag only above
+//! 0, and "Enemy N" in TEXT_2 on every row, then "Side not read N" and
+//! "Lobby N" when there is one, muted in TEXT_3 like the Decided count;
+//! its tooltip, the spoken label too, names every part in order). Headers
+//! sort like Maps: the active one in the accent with a chevron. No Best
+//! or Worst rail, so nothing ranks as a pick. With no rows, one empty
+//! card says why, with no Sort and no stats line. Below an 860 px window
+//! the columns narrow and the hero name and the stats line wrap rather
+//! than clip.
 
 use iced::widget::text::Wrapping;
 use iced::widget::{Column, Row, button, column, container, row, space, text};
@@ -49,6 +50,8 @@ const COMPACT_BELOW: f32 = 860.0;
 const PORTRAIT: f32 = 32.0;
 const HEAD_H: f32 = 36.0;
 const PCT_W: f32 = 44.0;
+/// About one space at the Too few size, between its two parts.
+const TOO_FEW_GAP: f32 = 3.0;
 
 fn msg(m: model::Msg) -> Message {
     Message::HeroesPage(PageMsg::Banned(m))
@@ -248,7 +251,7 @@ fn ban_line(r: &BanRow, c: Cols) -> Element<'static, Message> {
     }
     // Wraps at word breaks in a narrow window instead of clipping.
     names = names.push(text(r.hero).size(SIZE_BODY).font(FONT_BOLD).color(TEXT));
-    let rate: Element<'static, Message> = match (r.rate(), r.too_few()) {
+    let rate: Element<'static, Message> = match (r.rate(), r.too_few_parts()) {
         (Some(p), _) => row![
             text(format!("{p}%"))
                 .size(SIZE_BODY)
@@ -260,11 +263,7 @@ fn ban_line(r: &BanRow, c: Cols) -> Element<'static, Message> {
         .spacing(8)
         .align_y(Alignment::Center)
         .into(),
-        (None, words) => text(words.unwrap_or_default())
-            .size(12)
-            .font(FONT_MEDIUM)
-            .color(TEXT_3)
-            .into(),
+        (None, parts) => too_few(parts.unwrap_or_default()),
     };
     row![
         container(
@@ -297,6 +296,26 @@ fn ban_line(r: &BanRow, c: Cols) -> Element<'static, Message> {
     .align_y(Alignment::Center)
     .padding(Padding::from([10, 16]))
     .into()
+}
+
+/// "Too few games (n of 10)" in place of the rate: two unbreakable
+/// texts in a wrapping row, so a narrow column puts "(n of 10)" whole on
+/// the next line rather than breaking inside it.
+fn too_few((words, count): (String, String)) -> Element<'static, Message> {
+    let part = |s: String| {
+        text(s)
+            .size(12)
+            .font(FONT_MEDIUM)
+            .color(TEXT_3)
+            .wrapping(Wrapping::None)
+    };
+    Row::new()
+        .spacing(TOO_FEW_GAP)
+        .push(part(words))
+        .push(part(count))
+        .wrap()
+        .vertical_spacing(0)
+        .into()
 }
 
 /// One part of the Banned by cell.

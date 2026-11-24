@@ -189,7 +189,12 @@ fn under_ten_decided_shows_too_few_and_no_percent() {
     let (_dir, mut app) = app_with(banned("ana", 9, 4, 5));
     when_banned(&mut app);
     let words = page(&app);
-    assert!(has(&words, "Too few games (9 of 10)"), "{words:?}");
+    // Two texts, so a narrow column breaks only between them.
+    let i = words
+        .iter()
+        .position(|w| w == "Too few games")
+        .unwrap_or_else(|| panic!("{words:?}"));
+    assert_eq!(words[i + 1], "(9 of 10)", "{words:?}");
     assert!(!words.iter().any(|w| w.ends_with('%')), "{words:?}");
     assert!(
         has(&words, "Your ban 4") && has(&words, "Enemy 5"),

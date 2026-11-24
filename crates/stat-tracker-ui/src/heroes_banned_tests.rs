@@ -258,9 +258,14 @@ fn a_rate_needs_ten_decided_games_for_that_hero() {
     let ana = row(&t, "Ana");
     assert_eq!(ana.rate(), None);
     assert_eq!(ana.too_few().as_deref(), Some("Too few games (9 of 10)"));
+    assert_eq!(
+        ana.too_few_parts(),
+        Some(("Too few games".to_string(), "(9 of 10)".to_string()))
+    );
     let mercy = row(&t, "Mercy");
     assert_eq!(mercy.rate(), Some(60));
     assert_eq!(mercy.too_few(), None);
+    assert_eq!(mercy.too_few_parts(), None);
 }
 
 #[test]
