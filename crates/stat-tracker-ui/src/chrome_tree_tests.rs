@@ -784,27 +784,150 @@ fn shares_page_clicks(bare: &[String], over: &[String]) -> bool {
 /// The reserved bottom inset is at least as tall as a toast and the
 /// restart bar stacked with the bottom gap, including a long wrapped
 /// toast, so the slot cannot cover the last control when both show.
+///
+/// The slot is laid out at a page width narrow enough that an uncapped
+/// wrap of this toast would overflow both [`crate::widgets::TOAST_MAX`]
+/// and the inset. At 640 px, and even at the classic 720 pane width
+/// (488 px), an uncapped wrap still fitted; 400 px is the width that
+/// pins the cap. The toast bar itself is also checked to stay within
+/// [`crate::widgets::TOAST_MAX`].
 #[test]
 fn the_prompts_inset_covers_a_toast_and_the_restart_bar() {
     use iced::advanced::layout::Limits;
     let renderer = headless();
+    // Narrower than FLOAT_MAX and the classic 720 page (488). At those
+    // widths an uncapped wrap of WRAPPED_TOAST still fitted in the inset.
+    let page = 400.0;
     for (name, toast) in [("one line", "Report sent"), ("wrapped", WRAPPED_TOAST)] {
-        let mut slot = super::prompts_slot(toast, 640.0);
+        let mut slot = super::prompts_slot(toast, page);
         let mut tree = Tree::new(&slot);
         let node = slot.as_widget_mut().layout(
             &mut tree,
             &renderer,
-            &Limits::new(Size::ZERO, Size::new(640.0, 400.0)),
+            &Limits::new(Size::ZERO, Size::new(page, 400.0)),
         );
         let height = node.size().height;
         assert!(
             height <= super::PROMPTS_INSET,
-            "{name}: inset {} is short of the slot {height}",
+            "{name}: inset {} is short of the slot {height} at page {page}",
             super::PROMPTS_INSET
         );
         assert!(
             height > super::PROMPTS_INSET / 2.0,
             "{name}: slot {height} looks too small; the inset may be guessing"
+        );
+        let mut bar = crate::widgets::toast_bar(toast, None);
+        let mut tree = Tree::new(&bar);
+        let node = bar.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &Limits::new(Size::ZERO, Size::new(page, 400.0)),
+        );
+        let toast_h = node.size().height;
+        assert!(
+            toast_h <= crate::widgets::TOAST_MAX + 0.5,
+            "{name}: toast bar {toast_h} taller than TOAST_MAX {} at page {page}",
+            crate::widgets::TOAST_MAX
+        );
+    }
+}
+
+/// When the toast overflows its four lines, the scrollbar sits in a
+/// gutter: no glyph of the text is drawn under the bar. Measured at
+/// 400 px, the width where this toast overflows the cap.
+#[test]
+fn the_overflowing_toast_keeps_its_text_clear_of_the_scrollbar() {
+    use crate::layout::SCROLLBAR_WIDTH;
+    use iced::advanced::Layout;
+    use iced::advanced::layout::Limits;
+    use iced::advanced::widget::operation::{Operation, Scrollable};
+
+    struct Found {
+        scroll: Rectangle,
+        content: Rectangle,
+        texts: Vec<(Rectangle, String)>,
+    }
+    #[derive(Default)]
+    struct Collect {
+        depth: usize,
+        scroll: Option<(usize, Rectangle, Rectangle)>,
+        texts: Vec<(Rectangle, String)>,
+        found: Option<Found>,
+    }
+    impl Operation<()> for Collect {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<()>)) {
+            self.depth += 1;
+            operate(self);
+            self.depth -= 1;
+            // Keep the innermost scrollable after leaving its subtree.
+            // Clearing `scroll` alone would drop it before the assert.
+            if let Some((d, bounds, content)) = self.scroll
+                && d > self.depth
+            {
+                self.found = Some(Found {
+                    scroll: bounds,
+                    content,
+                    texts: std::mem::take(&mut self.texts),
+                });
+                self.scroll = None;
+            }
+        }
+        fn scrollable(
+            &mut self,
+            _id: Option<&Id>,
+            bounds: Rectangle,
+            content: Rectangle,
+            _translation: Vector,
+            _state: &mut dyn Scrollable,
+        ) {
+            self.scroll = Some((self.depth, bounds, content));
+            self.texts.clear();
+        }
+        fn text(&mut self, _id: Option<&Id>, bounds: Rectangle, text: &str) {
+            if self.scroll.is_some() {
+                self.texts.push((bounds, text.to_string()));
+            }
+        }
+    }
+
+    let page = 400.0;
+    let renderer = headless();
+    let mut bar = crate::widgets::toast_bar(WRAPPED_TOAST, None);
+    let mut tree = Tree::new(&bar);
+    let node = bar.as_widget_mut().layout(
+        &mut tree,
+        &renderer,
+        &Limits::new(Size::ZERO, Size::new(page, 400.0)),
+    );
+    let mut collect = Collect::default();
+    bar.as_widget_mut()
+        .operate(&mut tree, Layout::new(&node), &renderer, &mut collect);
+    let found = collect.found.take();
+    let Found {
+        scroll,
+        content,
+        texts,
+    } = found
+        .or_else(|| {
+            collect.scroll.map(|(_, bounds, content)| Found {
+                scroll: bounds,
+                content,
+                texts: collect.texts.clone(),
+            })
+        })
+        .expect("the overflowing toast scrolls");
+    let overflows = content.height > scroll.height + 0.5;
+    assert!(
+        overflows,
+        "the wrapped toast should overflow at {page} px so the bar shows (scroll {scroll:?}, content {content:?})"
+    );
+    assert!(!texts.is_empty(), "the toast text is in the tree");
+    let bar_left = scroll.x + scroll.width - SCROLLBAR_WIDTH;
+    for (bounds, text) in &texts {
+        let right = bounds.x + bounds.width;
+        assert!(
+            right <= bar_left + 0.5,
+            "toast text ends at {right}, under the bar which starts at {bar_left};              scroll={scroll:?} content={content:?} text={text:?} bounds={bounds:?}"
         );
     }
 }

@@ -14,6 +14,7 @@ use iced::keyboard::{self, Key, Modifiers, key::Named};
 use iced::{Event, Point, Rectangle, Size, mouse};
 
 use crate::dialog_focus::DIALOG_ID;
+use crate::theme::SIDEBAR_WIDTH;
 
 const SIZE: Size = Size::new(1280.0, 860.0);
 
@@ -23,6 +24,7 @@ struct Ui {
     renderer: iced::Renderer,
     tree: Option<Tree>,
     view: View,
+    size: Size,
 }
 
 type View = for<'a> fn(&'a TrackerApp) -> Element<'a, Message>;
@@ -46,6 +48,16 @@ impl Ui {
             renderer: headless(),
             tree: None,
             view: production,
+            size: SIZE,
+        }
+    }
+
+    fn with_size(size: Size) -> Self {
+        Self {
+            renderer: headless(),
+            tree: None,
+            view: production,
+            size,
         }
     }
 
@@ -62,7 +74,7 @@ impl Ui {
             }
             None => self.tree.insert(Tree::new(&element)),
         };
-        let limits = Limits::new(Size::ZERO, SIZE);
+        let limits = Limits::new(Size::ZERO, self.size);
         let node = element
             .as_widget_mut()
             .layout(tree, &self.renderer, &limits);
@@ -70,6 +82,7 @@ impl Ui {
     }
 
     fn send(&mut self, app: &TrackerApp, event: Event) -> Sent {
+        let size = self.size;
         self.with(app, |element, tree, layout, renderer| {
             let mut messages = Vec::new();
             let mut shell = Shell::new(&mut messages);
@@ -81,7 +94,7 @@ impl Ui {
                 renderer,
                 &mut clipboard::Null,
                 &mut shell,
-                &Rectangle::new(Point::ORIGIN, SIZE),
+                &Rectangle::new(Point::ORIGIN, size),
             );
             let captured = shell.is_event_captured();
             let typing = matches!(
@@ -96,20 +109,35 @@ impl Ui {
         })
     }
 
-    /// A left click at `point` on the production window.
-    fn click_at(&mut self, app: &TrackerApp, point: Point) -> Sent {
+    /// A left press at `point` on the production window.
+    fn press_at(&mut self, app: &TrackerApp, point: Point) -> Sent {
+        self.mouse_at(app, point, mouse::Event::ButtonPressed(mouse::Button::Left))
+    }
+
+    /// A left release at `point` on the production window. iced buttons
+    /// publish `on_press` on the release.
+    fn release_at(&mut self, app: &TrackerApp, point: Point) -> Sent {
+        self.mouse_at(
+            app,
+            point,
+            mouse::Event::ButtonReleased(mouse::Button::Left),
+        )
+    }
+
+    fn mouse_at(&mut self, app: &TrackerApp, point: Point, event: mouse::Event) -> Sent {
+        let size = self.size;
         self.with(app, |element, tree, layout, renderer| {
             let mut messages = Vec::new();
             let mut shell = Shell::new(&mut messages);
             element.as_widget_mut().update(
                 tree,
-                &Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                &Event::Mouse(event),
                 layout,
                 mouse::Cursor::Available(point),
                 renderer,
                 &mut clipboard::Null,
                 &mut shell,
-                &Rectangle::new(Point::ORIGIN, SIZE),
+                &Rectangle::new(Point::ORIGIN, size),
             );
             let captured = shell.is_event_captured();
             Sent {
@@ -120,6 +148,47 @@ impl Ui {
         })
     }
 
+    /// A left press and release at `point`. Both events are sent, because
+    /// iced buttons publish `on_press` on the release, and `last_id` is
+    /// kept through that release when the click opens a dialog.
+    fn click_at(&mut self, app: &TrackerApp, point: Point) -> Sent {
+        let press = self.press_at(app, point);
+        let release = self.release_at(app, point);
+        Sent {
+            messages: [press.messages, release.messages].concat(),
+            captured: press.captured || release.captured,
+            typing: false,
+        }
+    }
+
+    /// Center of a text block whose string contains `needle`. `pick`
+    /// chooses among matches (the rightmost in-page button, for example).
+    fn click_point_for(
+        &mut self,
+        app: &TrackerApp,
+        needle: &str,
+        pick: impl Fn(&[Rectangle]) -> Rectangle,
+    ) -> Point {
+        let mut found = TextHits {
+            needle: needle.to_string(),
+            hits: Vec::new(),
+        };
+        self.operate(app, &mut found);
+        if found.hits.is_empty() {
+            let mut all = DumpTexts { texts: Vec::new() };
+            self.operate(app, &mut all);
+            panic!(
+                "no text containing {needle:?}; saw {} text blocks: {:?}",
+                all.texts.len(),
+                all.texts
+            );
+        }
+        let chosen = pick(&found.hits);
+        Point::new(
+            chosen.x + chosen.width / 2.0,
+            chosen.y + chosen.height / 2.0,
+        )
+    }
     /// The first event after a view change, as iced sends one each frame.
     fn redraw(&mut self, app: &TrackerApp) -> Sent {
         let now = std::time::Instant::now();
@@ -273,6 +342,12 @@ const LAYOUTS: [NavStyle; 2] = [NavStyle::TopTabs, NavStyle::ClassicSidebar];
 /// Settings form saves with its Save button, not on Enter, so there it is
 /// the first field that takes typing.
 fn settings_field_in(nav: NavStyle) -> (tempfile::TempDir, TrackerApp, Ui, usize) {
+    settings_field_in_at(nav, SIZE)
+}
+
+/// [`settings_field_in`] laid out at `size`. A taller window is used when
+/// a test needs to press a page button that sits below the 860 px fold.
+fn settings_field_in_at(nav: NavStyle, size: Size) -> (tempfile::TempDir, TrackerApp, Ui, usize) {
     let (dir, mut app) = crate::fixtures::test_app();
     super::tree_tests::close_launch_notes(&mut app);
     // Not a demo, so the fields take input. Nothing here applies a save.
@@ -280,7 +355,7 @@ fn settings_field_in(nav: NavStyle) -> (tempfile::TempDir, TrackerApp, Ui, usize
     app.nav_style = nav;
     app.screen = Screen::Settings;
     app.toast = None;
-    let mut ui = Ui::new();
+    let mut ui = Ui::with_size(size);
     ui.redraw(&app);
     let total = ui.focuses(&app).all.len();
     let fields: Vec<(usize, bool)> = (0..total)
@@ -769,6 +844,39 @@ impl Operation for UnfocusAll {
     }
 }
 
+/// Every text block in the tree, for a missing-label panic.
+struct DumpTexts {
+    texts: Vec<String>,
+}
+
+impl Operation<()> for DumpTexts {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<()>)) {
+        operate(self);
+    }
+
+    fn text(&mut self, _id: Option<&Id>, _bounds: Rectangle, text: &str) {
+        self.texts.push(text.to_string());
+    }
+}
+
+/// Text blocks whose string contains `needle`.
+struct TextHits {
+    needle: String,
+    hits: Vec<Rectangle>,
+}
+
+impl Operation<()> for TextHits {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<()>)) {
+        operate(self);
+    }
+
+    fn text(&mut self, _id: Option<&Id>, bounds: Rectangle, text: &str) {
+        if self.needle.is_empty() || text.contains(&self.needle) {
+            self.hits.push(bounds);
+        }
+    }
+}
+
 /// A click on a page button blurs the field before the dialog opens. Esc
 /// still returns focus to the field that was focused before that click.
 #[test]
@@ -835,6 +943,93 @@ fn a_click_on_the_live_page_clears_last_id_unless_it_opens_a_dialog() {
         assert!(
             !focused.contains(&page_field),
             "{nav:?}: Esc restored the field left by a click on the page: {focused:?}"
+        );
+    }
+}
+
+/// A real press and release on a page button that opens a dialog: Esc
+/// returns focus to the field, in both layouts. The release is the event
+/// that publishes the open message, and it must not clear `last_id`.
+#[test]
+fn esc_restores_the_field_after_a_press_and_release_on_a_page_button() {
+    fn apply(ui: &mut Ui, app: &mut TrackerApp, sent: Sent) {
+        assert!(
+            !sent.messages.is_empty(),
+            "the page button should open a dialog: {:?}",
+            sent.messages
+        );
+        for message in sent.messages {
+            let _ = app.update(message);
+        }
+        ui.redraw(app);
+    }
+
+    fn restore(
+        nav: NavStyle,
+        label: &str,
+        point: Point,
+        app: &mut TrackerApp,
+        ui: &mut Ui,
+        field: Focus,
+    ) {
+        let sent = ui.click_at(app, point);
+        apply(ui, app, sent);
+        let esc = ui.send(app, named(Named::Escape));
+        assert!(
+            !esc.messages.is_empty(),
+            "{nav:?}, {label}: Esc does nothing"
+        );
+        for message in esc.messages {
+            let _ = app.update(message);
+        }
+        ui.redraw(app);
+        let focused = ui.focuses(app).focused();
+        assert_eq!(
+            focused,
+            vec![field],
+            "{nav:?}, {label}: the field focused before the click should have it back"
+        );
+        assert!(
+            types_into_settings(&ui.send(app, type_x())),
+            "{nav:?}, {label}: typing should reach the field again"
+        );
+    }
+
+    // Top tabs: "What leaves your PC" on the Everyday Website account
+    // card. Classic: the in-page "Report a problem" (not the sidebar
+    // button, which already restored focus).
+    {
+        let nav = NavStyle::TopTabs;
+        let (_dir, mut app, mut ui, field) = settings_field_in_at(nav, Size::new(1280.0, 2000.0));
+        let page_field = ui.focuses(&app).all[field];
+        let point = ui.click_point_for(&app, "What leaves your PC", |hits| hits[0]);
+        restore(
+            nav,
+            "What leaves your PC",
+            point,
+            &mut app,
+            &mut ui,
+            page_field,
+        );
+    }
+    {
+        let nav = NavStyle::ClassicSidebar;
+        let (_dir, mut app, mut ui, field) = settings_field_in_at(nav, Size::new(1280.0, 2000.0));
+        let page_field = ui.focuses(&app).all[field];
+        let point = ui.click_point_for(&app, "Report a problem", |hits| {
+            *hits
+                .iter()
+                .filter(|b| b.x >= SIDEBAR_WIDTH)
+                .max_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)))
+                .expect("classic Settings has an in-page Report a problem")
+        });
+        restore(
+            nav,
+            "in-page Report a problem",
+            point,
+            &mut app,
+            &mut ui,
+            page_field,
         );
     }
 }

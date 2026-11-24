@@ -1,9 +1,12 @@
 use iced::Color;
+use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::text::Wrapping;
 use iced::widget::{
     Row, button, column, container, mouse_area, row, scrollable, space, text, text_input, toggler,
 };
 use iced::{Alignment, Element, Fill, Length, Padding};
+
+use crate::layout::SCROLLBAR_WIDTH;
 
 use crate::aggregate::{HeroAgg, MapAgg, Record};
 use crate::app::{Message, TrackerApp};
@@ -267,14 +270,30 @@ const TOAST_BORDER: f32 = 1.0;
 pub(crate) const TOAST_MAX: f32 = TOAST_BORDER * 2.0 + TOAST_PAD_Y * 2.0 + TOAST_LINE * TOAST_LINES;
 
 pub fn toast_bar(msg: &str, action: Option<Message>) -> Element<'static, Message> {
+    // Right padding keeps glyphs out from under the bar: iced draws the
+    // scrollbar over the last SCROLLBAR_WIDTH px of the scrollable.
     let body = scrollable(
-        text(msg.to_string())
-            .size(SIZE_META)
-            .font(FONT_SEMIBOLD)
-            .color(TEXT)
-            .width(Fill)
-            .wrapping(Wrapping::WordOrGlyph),
+        container(
+            text(msg.to_string())
+                .size(SIZE_META)
+                .font(FONT_SEMIBOLD)
+                .color(TEXT)
+                .width(Fill)
+                .wrapping(Wrapping::WordOrGlyph),
+        )
+        .padding(Padding {
+            top: 0.0,
+            right: SCROLLBAR_WIDTH,
+            bottom: 0.0,
+            left: 0.0,
+        })
+        .width(Fill),
     )
+    .direction(Direction::Vertical(
+        Scrollbar::new()
+            .width(SCROLLBAR_WIDTH)
+            .scroller_width(SCROLLBAR_WIDTH),
+    ))
     .width(Fill);
     let mut line = row![
         container(body)
