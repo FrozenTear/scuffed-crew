@@ -294,8 +294,14 @@ where
 mod tests {
     use super::*;
     use crate::ocr_status::Status;
+
     #[cfg(unix)]
-    use std::os::unix::fs::MetadataExt;
+    fn status_inode(dir: &Path) -> u64 {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(crate::ocr_status::status_path(dir))
+            .unwrap()
+            .ino()
+    }
 
     fn publish_tick(dir: &Path, kind: StageKind, maps: Vec<String>, now: i64) {
         publish_companion_stage(dir, Some((kind, maps, now)));
@@ -321,14 +327,13 @@ mod tests {
 
         // The same stage two seconds later keeps its first time and does
         // not rewrite the file (`seen` is not due yet).
-        let path = crate::ocr_status::status_path(dir.path());
         #[cfg(unix)]
-        let inode = std::fs::metadata(&path).unwrap().ino();
+        let inode = status_inode(dir.path());
         let later = CompanionStage::new(StageKind::MapVote, vote.maps.clone(), 102);
         publish_tick(dir.path(), later.kind, later.maps.clone(), later.since);
         assert_eq!(read_companion_stage(dir.path(), 0), Some(vote.clone()));
         #[cfg(unix)]
-        assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
+        assert_eq!(status_inode(dir.path()), inode);
 
         // Another writer of the file (the OCR switch) builds its Status
         // from the held slots: the stage survives that write.
@@ -358,9 +363,8 @@ mod tests {
         let first = CompanionStage::new(StageKind::MapVote, Vec::new(), 1_000);
         publish_tick(dir.path(), first.kind, first.maps.clone(), first.since);
         assert_eq!(written_stage(dir.path()).unwrap().since, 1_000);
-        let path = crate::ocr_status::status_path(dir.path());
         #[cfg(unix)]
-        let inode = std::fs::metadata(&path).unwrap().ino();
+        let inode = status_inode(dir.path());
 
         // t + 2: same since, no write.
         let soon = CompanionStage::new(StageKind::MapVote, Vec::new(), 1_002);
@@ -369,7 +373,7 @@ mod tests {
         assert_eq!(held.since, 1_000);
         assert_eq!(held.seen, 1_000);
         #[cfg(unix)]
-        assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
+        assert_eq!(status_inode(dir.path()), inode);
 
         // t + 600: new since, file rewritten.
         let later = CompanionStage::new(StageKind::MapVote, Vec::new(), 1_600);
@@ -477,6 +481,11 @@ mod tests {
                 !stage_is_current(i64::MAX, now, poll),
                 "i64::MAX seen {poll:?}"
             );
+            assert!(
+                !stage_is_current(i64::MIN, now, poll),
+                "i64::MIN seen {poll:?}"
+            );
+            assert!(stage_is_current(now + 1, now, poll), "1 s ahead {poll:?}");
         }
         // A huge poll must not overflow or panic.
         let huge = Duration::from_secs(u64::MAX);
@@ -493,9 +502,8 @@ mod tests {
             "Throne of Anubis".into(),
         ];
         publish_tick(dir.path(), StageKind::MapVote, maps.clone(), 1_000);
-        let path = crate::ocr_status::status_path(dir.path());
         #[cfg(unix)]
-        let inode = std::fs::metadata(&path).unwrap().ino();
+        let inode = status_inode(dir.path());
         let held = written_stage(dir.path()).unwrap();
         assert_eq!(held.since, 1_000);
         assert_eq!(held.seen, 1_000);
@@ -506,7 +514,7 @@ mod tests {
         assert_eq!(held.since, 1_000);
         assert_eq!(held.seen, 1_000);
         #[cfg(unix)]
-        assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
+        assert_eq!(status_inode(dir.path()), inode);
 
         // t + 5: rewritten, same since, seen is t + 5.
         publish_tick(dir.path(), StageKind::MapVote, maps, 1_005);
