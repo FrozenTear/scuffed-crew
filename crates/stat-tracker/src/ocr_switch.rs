@@ -220,6 +220,7 @@ impl Switch {
             focus_gate: crate::ocr_status::focus_gate(),
             input_notice: crate::ocr_status::input_notice(),
             vision_size: crate::ocr_status::vision_size(),
+            companion_stage: crate::companion_stage::companion_stage(),
         }
     }
 

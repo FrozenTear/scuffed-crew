@@ -6,6 +6,7 @@
 //! `main.rs` and `main_tests` name them as before.
 
 pub(crate) mod bans_picks;
+mod companion_stage;
 mod debug_dumps;
 mod event_loop;
 pub(crate) mod focus;

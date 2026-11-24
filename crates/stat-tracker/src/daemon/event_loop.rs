@@ -880,7 +880,9 @@ pub(crate) async fn run_loop(
                         // seals it. A hero select only arms. A confirmed word
                         // on a trusted different map opens the next session.
                         // A start screen still inside the debounce does not
-                        // open another session.
+                        // open another session. The companion reads the
+                        // known phases as its pre-game stage.
+                        daemon::companion_stage::publish(data_dir, &phase);
                         let start_screen = match &phase {
                             detect::GamePhase::MapVote { maps } => {
                                 let candidates: Vec<String> = maps
