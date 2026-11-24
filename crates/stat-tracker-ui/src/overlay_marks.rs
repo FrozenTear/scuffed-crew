@@ -1,7 +1,7 @@
-//! Labels the companion Tonight strip and page indicator draw (0.7.1 C4).
-//!
-//! The view uses these lists, so a test that reads them fails if a letter,
-//! the Tonight pip, the held tag, or the +N overflow mark is dropped.
+//! Helpers for the labels the Tonight strip, the page indicator, and the
+//! safe-page footer pass to the view. Tests that call `view` and then
+//! read these helpers check the labels the view was given; they do not
+//! parse the view tree.
 
 use crate::model::Outcome;
 use crate::overlay::outcome_letter;
@@ -56,4 +56,10 @@ pub(crate) fn page_indicator_labels(pages: &PageState) -> Vec<&'static str> {
         labels.push(overlay_pages::HELD_TAG);
     }
     labels
+}
+
+/// The safe-page footer line the view is given, or `None` when the hold
+/// is off.
+pub(crate) fn safe_page_footer_label(pages: &PageState, bind: &str) -> Option<String> {
+    pages.held.then(|| overlay_pages::safe_page_footer(bind))
 }
