@@ -1,6 +1,6 @@
 use super::*;
 use crate::games_rows::tests::game;
-use crate::games_rows::{columns, Col, Grid, Width};
+use crate::games_rows::{Col, Grid, Width, columns};
 use crate::model::Outcome;
 use stat_tracker::model::{QueueTitle, RankNumber, RankText, RankUpdate};
 
