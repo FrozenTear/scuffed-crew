@@ -1,13 +1,14 @@
-//! The page scroll must survive a toast or a dialog coming and going.
-//! iced keeps a widget's state (the pane's scroll offset) only while
+//! The page scroll must survive a toast or a dialog coming and going, in
+//! both layouts. iced keeps a widget's state (a scroll offset) only while
 //! the widget sits at the same place in the tree with the same tag, so these
-//! tests walk the laid-out tree from the root to the page pane
-//! ([`crate::focus_status::PANE_SCROLL_ID`]) and compare that path.
+//! tests walk the laid-out tree from the root to the scrollable they follow
+//! (the page pane, [`crate::focus_status::PANE_SCROLL_ID`], or the classic
+//! Settings form) and compare that path, the offset and the content size.
 
 use super::*;
 use iced::advanced::Layout;
 use iced::advanced::layout::{Limits, Node};
-use iced::advanced::widget::operation::scrollable::{AbsoluteOffset, scroll_to};
+use iced::advanced::widget::operation::scrollable::AbsoluteOffset;
 use iced::advanced::widget::operation::{self, Operation};
 use iced::advanced::widget::{Id, Tree, tree};
 use iced::widget::{scrollable, text};
@@ -15,12 +16,18 @@ use iced::{Rectangle, Size, Vector};
 
 use crate::focus_status::PANE_SCROLL_ID;
 
-/// A short window, so the demo Overview is taller than the pane.
+/// A short window, so the demo page is taller than the pane.
 const WINDOW: Size = Size::new(1280.0, 300.0);
+
+/// The windows the click grid runs over.
+const CLICK_WINDOWS: [Size; 3] = [WINDOW, Size::new(1280.0, 860.0), Size::new(1000.0, 768.0)];
+
+/// How far the tests scroll down before the change.
+const SCROLL_Y: f32 = 120.0;
 
 type View = for<'a> fn(&'a TrackerApp) -> Element<'a, Message>;
 
-fn headless() -> iced::Renderer {
+pub(super) fn headless() -> iced::Renderer {
     use iced::advanced::renderer::Headless;
     let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
         theme::FONT_MEDIUM,
@@ -50,6 +57,28 @@ fn app() -> (tempfile::TempDir, TrackerApp) {
     (dir, app)
 }
 
+/// A demo app in the classic sidebar layout on `screen`, on the fixture
+/// with games, so Games is taller than the pane.
+fn classic_app(screen: Screen) -> (tempfile::TempDir, TrackerApp) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut cli = crate::fixtures::test_cli(dir.path());
+    cli.fixture = Some(crate::cli::FixtureKind::Games);
+    let mut app = TrackerApp::new(cli).0;
+    close_launch_notes(&mut app);
+    app.nav_style = NavStyle::ClassicSidebar;
+    app.screen = screen;
+    app.toast = None;
+    (dir, app)
+}
+
+/// Closes What's new, which a fixture app may open at start.
+pub(super) fn close_launch_notes(app: &mut TrackerApp) {
+    if app.notes_layer().is_some() {
+        let _ = app.update(Message::DismissNotes);
+    }
+    assert!(app.notes_layer().is_none());
+}
+
 /// `top_tabs` as it was before the scroll-reset fix: the prompts layer
 /// only while there is a toast or the restart bar, the window alone
 /// otherwise.
@@ -67,10 +96,18 @@ fn current_top_tabs(app: &TrackerApp) -> Element<'_, Message> {
     top_tabs(app)
 }
 
+/// The production window with no dialog open, in the app's layout.
+fn whole_window(app: &TrackerApp) -> Element<'_, Message> {
+    window(app)
+}
+
+fn a_dialog_layer<'a>() -> Dialog<'a> {
+    Dialog::new(container(text("A dialog")), None)
+}
+
 /// The whole window with one dialog open, or none.
 fn window_with(app: &TrackerApp, dialog: bool) -> Element<'_, Message> {
-    let layer = dialog.then(|| container(text("A dialog")).into());
-    with_layers(app, [layer])
+    with_layers(app, [dialog.then(a_dialog_layer)])
 }
 
 fn no_dialog(app: &TrackerApp) -> Element<'_, Message> {
@@ -88,11 +125,10 @@ fn closed_three_slots(app: &TrackerApp) -> Element<'_, Message> {
 /// A dialog over the page, with two closed slots under it and the usual
 /// trailing What leaves slot, all empty.
 fn dialog_with_empty_slots_above(app: &TrackerApp) -> Element<'_, Message> {
-    let layer = container(text("A dialog")).into();
-    with_layers(app, [None, None, Some(layer)])
+    with_layers(app, [None, None, Some(a_dialog_layer())])
 }
 
-/// The page and one dialog, with no empty slots after the dialog.
+/// The page and one dialog, with no empty slots and no focus layers.
 fn dialog_only(app: &TrackerApp) -> Element<'_, Message> {
     let page = container(top_tabs(app))
         .width(Fill)
@@ -118,7 +154,7 @@ fn stacked_prompts(app: &TrackerApp) -> Element<'_, Message> {
     .into()
 }
 
-fn show_restart_bar(app: &mut TrackerApp) {
+pub(super) fn show_restart_bar(app: &mut TrackerApp) {
     use crate::restart_prompt::{BinStamp, RestartWatch};
     let first = BinStamp {
         modified: None,
@@ -134,17 +170,12 @@ fn show_restart_bar(app: &mut TrackerApp) {
     };
     let mut watch = RestartWatch::new("own-build-id", Some(first));
     let probe = watch.on_tick(Some(next), false).expect("probe");
-    watch.on_probe(
-        probe,
-        Ok("other-build-id
-"
-        .into()),
-    );
+    watch.on_probe(probe, Ok("other-build-id\n".into()));
     assert!(
         watch.prompt_pending(),
         "a different installed binary should show the bar"
     );
-    app.restart_watch = watch;
+    app.set_restart_watch(watch);
     app.update_progress = crate::update::UpdateProgress::Idle;
     assert!(
         app.restart_bar_visible(),
@@ -152,10 +183,23 @@ fn show_restart_bar(app: &mut TrackerApp) {
     );
 }
 
-fn lay_out(element: &mut Element<'_, Message>, tree: &mut Tree, renderer: &iced::Renderer) -> Node {
+fn hide_restart_bar(app: &mut TrackerApp) {
+    app.set_restart_watch(crate::restart_prompt::RestartWatch::new(
+        "own-build-id",
+        None,
+    ));
+    assert!(!app.restart_bar_visible());
+}
+
+fn lay_out(
+    element: &mut Element<'_, Message>,
+    tree: &mut Tree,
+    renderer: &iced::Renderer,
+    size: Size,
+) -> Node {
     element
         .as_widget_mut()
-        .layout(tree, renderer, &Limits::new(Size::ZERO, WINDOW))
+        .layout(tree, renderer, &Limits::new(Size::ZERO, size))
 }
 
 fn run(
@@ -170,15 +214,52 @@ fn run(
         .operate(tree, Layout::new(node), renderer, operation);
 }
 
-/// Finds the page pane: the address of its state in the tree, and how far
-/// it is scrolled.
-#[derive(Default)]
-struct FindPane {
-    state: Option<usize>,
-    offset: Option<Vector>,
+/// Which scrollable a test follows.
+#[derive(Debug, Clone, Copy)]
+enum Target {
+    /// The page pane ([`PANE_SCROLL_ID`]).
+    Pane,
+    /// The classic Settings form. It has no id, so: the biggest scrollable
+    /// whose content is taller than it.
+    Form,
 }
 
-impl Operation<()> for FindPane {
+/// One scrollable as an operation sees it.
+#[derive(Debug, Clone, Copy)]
+struct Seen {
+    pane: bool,
+    /// The address of its state in the tree.
+    state: usize,
+    bounds: Rectangle,
+    content: Rectangle,
+    offset: Vector,
+}
+
+impl Target {
+    fn pick(self, seen: &[Seen]) -> Option<Seen> {
+        match self {
+            Target::Pane => seen.iter().find(|s| s.pane).copied(),
+            Target::Form => seen
+                .iter()
+                .filter(|s| !s.pane && s.content.height > s.bounds.height + 1.0)
+                .max_by(|a, b| {
+                    let area = |s: &Seen| s.bounds.width * s.bounds.height;
+                    area(a).total_cmp(&area(b))
+                })
+                .copied(),
+        }
+    }
+}
+
+/// Every scrollable in the tree, in order; scrolls the one whose state is
+/// at `scroll.0` to `scroll.1` on the way.
+#[derive(Default)]
+struct Scrollables {
+    seen: Vec<Seen>,
+    scroll: Option<(usize, f32)>,
+}
+
+impl Operation<()> for Scrollables {
     fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<()>)) {
         operate(self);
     }
@@ -186,27 +267,40 @@ impl Operation<()> for FindPane {
     fn scrollable(
         &mut self,
         id: Option<&Id>,
-        _bounds: Rectangle,
-        _content_bounds: Rectangle,
-        translation: Vector,
+        bounds: Rectangle,
+        content: Rectangle,
+        offset: Vector,
         state: &mut dyn operation::Scrollable,
     ) {
-        if id == Some(&Id::new(PANE_SCROLL_ID)) {
-            self.state = Some(state as *mut dyn operation::Scrollable as *const () as usize);
-            self.offset = Some(translation);
+        let address = state as *mut dyn operation::Scrollable as *const () as usize;
+        if let Some((target, y)) = self.scroll
+            && target == address
+        {
+            state.scroll_to(AbsoluteOffset {
+                x: None,
+                y: Some(y),
+            });
         }
+        self.seen.push(Seen {
+            pane: id == Some(&Id::new(PANE_SCROLL_ID)),
+            state: address,
+            bounds,
+            content,
+            offset,
+        });
     }
 }
 
-fn find_pane(
+fn find(
     element: &mut Element<'_, Message>,
     tree: &mut Tree,
     node: &Node,
     renderer: &iced::Renderer,
-) -> FindPane {
-    let mut find = FindPane::default();
-    run(element, tree, node, renderer, &mut find);
-    find
+    target: Target,
+) -> Option<Seen> {
+    let mut all = Scrollables::default();
+    run(element, tree, node, renderer, &mut all);
+    target.pick(&all.seen)
 }
 
 fn state_address(tree: &Tree) -> Option<usize> {
@@ -234,21 +328,30 @@ fn path_to(tree: &Tree, target: usize, path: &mut Vec<(usize, tree::Tag)>) -> bo
     false
 }
 
-/// The path of widget tags from the root to the page pane.
-fn pane_path(app: &TrackerApp, view: View) -> Vec<(usize, tree::Tag)> {
+/// The path of widget tags from the root to the followed scrollable.
+fn scroll_path(
+    app: &TrackerApp,
+    view: View,
+    target: Target,
+    size: Size,
+) -> Vec<(usize, tree::Tag)> {
     let renderer = headless();
     let mut element = view(app);
     let mut tree = Tree::new(&element);
-    let node = lay_out(&mut element, &mut tree, &renderer);
-    let pane = find_pane(&mut element, &mut tree, &node, &renderer)
-        .state
-        .expect("the page pane is in the tree");
+    let node = lay_out(&mut element, &mut tree, &renderer, size);
+    let found = find(&mut element, &mut tree, &node, &renderer, target)
+        .unwrap_or_else(|| panic!("{target:?} is in the tree"));
     let mut path = vec![(0, tree.tag)];
     assert!(
-        path_to(&tree, pane, &mut path),
-        "the pane state is in the tree"
+        path_to(&tree, found.state, &mut path),
+        "the scrollable's state is in the tree"
     );
     path
+}
+
+/// The path of widget tags from the root to the page pane.
+fn pane_path(app: &TrackerApp, view: View) -> Vec<(usize, tree::Tag)> {
+    scroll_path(app, view, Target::Pane, WINDOW)
 }
 
 /// A readable name for a tag, for the failure messages.
@@ -269,39 +372,56 @@ fn readable(path: &[(usize, tree::Tag)]) -> Vec<String> {
         .collect()
 }
 
+/// The followed scrollable after scrolling it down in `view`, and again
+/// after calling `change` on the app and diffing the tree against `next`,
+/// as iced does.
+fn scroll_across(
+    app: &mut TrackerApp,
+    (view, next): (View, View),
+    (target, size): (Target, Size),
+    change: impl FnOnce(&mut TrackerApp),
+) -> (Seen, Seen) {
+    let renderer = headless();
+    let mut tree;
+    let before;
+    {
+        let mut element = view(app);
+        tree = Tree::new(&element);
+        let node = lay_out(&mut element, &mut tree, &renderer, size);
+        let found = find(&mut element, &mut tree, &node, &renderer, target)
+            .unwrap_or_else(|| panic!("{target:?} is in the tree"));
+        let mut scroll = Scrollables {
+            scroll: Some((found.state, SCROLL_Y)),
+            ..Scrollables::default()
+        };
+        run(&mut element, &mut tree, &node, &renderer, &mut scroll);
+        let node = lay_out(&mut element, &mut tree, &renderer, size);
+        before = find(&mut element, &mut tree, &node, &renderer, target).expect("still there");
+        assert!(
+            before.offset.y > 0.0,
+            "{target:?}: the page is taller than the view: {before:?}"
+        );
+    }
+    change(app);
+    let mut element = next(app);
+    tree.diff(&element);
+    let node = lay_out(&mut element, &mut tree, &renderer, size);
+    let after = find(&mut element, &mut tree, &node, &renderer, target).expect("still there");
+    (before, after)
+}
+
 /// The pane's scroll offset after scrolling it down in `view`, then calling
-/// `change` on the app and diffing the tree against `next`, as iced does.
+/// `change` on the app and diffing the tree against `next`.
 fn offset_after(
     app: &mut TrackerApp,
     view: View,
     next: View,
     change: impl FnOnce(&mut TrackerApp),
 ) -> f32 {
-    let renderer = headless();
-    let mut tree;
-    {
-        let mut element = view(app);
-        tree = Tree::new(&element);
-        let node = lay_out(&mut element, &mut tree, &renderer);
-        let mut scroll = scroll_to::<()>(
-            Id::new(PANE_SCROLL_ID),
-            AbsoluteOffset {
-                x: None,
-                y: Some(120.0),
-            },
-        );
-        run(&mut element, &mut tree, &node, &renderer, &mut scroll);
-        let node = lay_out(&mut element, &mut tree, &renderer);
-        let before = find_pane(&mut element, &mut tree, &node, &renderer).offset;
-        let before = before.expect("the pane is there").y;
-        assert!(before > 0.0, "the page is taller than the pane: {before}");
-    }
-    change(app);
-    let mut element = next(app);
-    tree.diff(&element);
-    let node = lay_out(&mut element, &mut tree, &renderer);
-    let after = find_pane(&mut element, &mut tree, &node, &renderer).offset;
-    after.expect("the pane is there").y
+    scroll_across(app, (view, next), (Target::Pane, WINDOW), change)
+        .1
+        .offset
+        .y
 }
 
 fn show_toast(app: &mut TrackerApp) {
@@ -391,8 +511,7 @@ fn a_restart_bar_keeps_the_pane_and_its_scroll() {
     app.toast = None;
     // offset_after starts from the current app (bar showing) after we
     // reset the toast; go back to a quiet app first.
-    app.restart_watch = crate::restart_prompt::RestartWatch::new("own-build-id", None);
-    assert!(!app.restart_bar_visible());
+    hide_restart_bar(&mut app);
     let kept = offset_after(
         &mut app,
         current_top_tabs,
@@ -437,18 +556,98 @@ fn a_dialog_with_empty_slots_above_keeps_the_pane_and_its_scroll() {
     );
 }
 
-/// What clicking at each point of a grid over the window publishes.
-fn clicks(app: &TrackerApp, view: View) -> Vec<String> {
+/// The prompts that come and go in the classic tests, each from a quiet
+/// app, and how to take them away again.
+type Prompt = (&'static str, fn(&mut TrackerApp));
+
+const PROMPTS: [Prompt; 3] = [
+    ("a toast", show_toast),
+    ("the restart bar", show_restart_bar),
+    ("a toast and the restart bar", |app| {
+        show_toast(app);
+        show_restart_bar(app);
+    }),
+];
+
+fn quiet(app: &mut TrackerApp) {
+    app.toast = None;
+    hide_restart_bar(app);
+}
+
+/// The classic layout keeps `target` where it was when each prompt shows
+/// and goes: the same path in the tree, the same scroll offset (above 0),
+/// and the same content size, so nothing was pushed into the scrolled page.
+fn classic_keeps_its_place(screen: Screen, target: Target, size: Size) {
+    let (_dir, mut app) = classic_app(screen);
+    let path = |app: &TrackerApp| scroll_path(app, whole_window, target, size);
+    let quiet_path = path(&app);
+    eprintln!("classic {screen:?}, quiet: {:?}", readable(&quiet_path));
+    for (name, show) in PROMPTS {
+        quiet(&mut app);
+        show(&mut app);
+        let shown = path(&app);
+        assert_eq!(
+            quiet_path,
+            shown,
+            "classic {screen:?}, {name}: {:?} vs {:?}",
+            readable(&quiet_path),
+            readable(&shown)
+        );
+        quiet(&mut app);
+        for (when, from_quiet) in [("shows", true), ("goes", false)] {
+            if !from_quiet {
+                show(&mut app);
+            }
+            let views = (whole_window as View, whole_window as View);
+            let change = |app: &mut TrackerApp| {
+                if from_quiet {
+                    show(app);
+                } else {
+                    quiet(app);
+                }
+            };
+            let (before, after) = scroll_across(&mut app, views, (target, size), change);
+            assert!(
+                after.offset.y > 0.0,
+                "classic {screen:?}: {name} {when}: reset"
+            );
+            assert_eq!(
+                (before.offset, before.content.size()),
+                (after.offset, after.content.size()),
+                "classic {screen:?}: {name} {when}: the page moved or grew"
+            );
+            quiet(&mut app);
+        }
+    }
+}
+
+/// Classic Games scrolls the whole pane: a toast or the restart bar floats
+/// over it, so the pane stays, scrolled, and its content is not pushed down.
+#[test]
+fn classic_games_keeps_the_pane_and_its_scroll() {
+    classic_keeps_its_place(Screen::Games, Target::Pane, WINDOW);
+}
+
+/// Classic Settings scrolls its own form (no id; found by walking the
+/// tree): a toast or the restart bar coming or going keeps its scroll.
+#[test]
+fn classic_settings_keeps_the_form_scroll() {
+    classic_keeps_its_place(Screen::Settings, Target::Form, Size::new(1280.0, 500.0));
+}
+
+/// What clicking at each point of a 16 px grid over a `size` window
+/// publishes.
+fn clicks(app: &TrackerApp, view: View, size: Size) -> Vec<String> {
     use iced::advanced::{Shell, clipboard};
     use iced::mouse::{Button, Cursor, Event as Mouse};
     let renderer = headless();
     let mut element = view(app);
     let mut tree = Tree::new(&element);
-    let node = lay_out(&mut element, &mut tree, &renderer);
-    let viewport = Rectangle::new(iced::Point::ORIGIN, WINDOW);
+    let node = lay_out(&mut element, &mut tree, &renderer, size);
+    let viewport = Rectangle::new(iced::Point::ORIGIN, size);
     let mut published = Vec::new();
-    for y in (4..300).step_by(16) {
-        for x in (4..1280).step_by(16) {
+    for y in (4..size.height as u32).step_by(16) {
+        for x in (4..size.width as u32).step_by(16) {
             let cursor = Cursor::Available(iced::Point::new(x as f32, y as f32));
             let mut messages = Vec::new();
             for event in [
@@ -481,27 +680,61 @@ fn bare_window(app: &TrackerApp) -> Element<'_, Message> {
         .into()
 }
 
+/// The classic window alone: the sidebar and the pane, no prompts layer.
+fn bare_classic(app: &TrackerApp) -> Element<'_, Message> {
+    row![
+        container(widgets::sidebar(app.screen))
+            .width(SIDEBAR_WIDTH)
+            .height(Fill)
+            .padding(Padding {
+                top: PAGE_PAD_Y,
+                bottom: PAGE_PAD_Y,
+                left: PAGE_PAD_X,
+                right: 8.0,
+            }),
+        responsive(move |size| sidebar_pane_parts(app, size.width).0)
+            .width(Fill)
+            .height(Fill),
+    ]
+    .into()
+}
+
+fn classic(app: &TrackerApp) -> Element<'_, Message> {
+    sidebar(app)
+}
+
 /// The empty layers take no clicks: every click on the page does what it
-/// does with nothing over the page.
+/// does with nothing over the page, in both layouts.
 #[test]
 fn the_empty_layers_let_clicks_through() {
     let (_dir, app) = app();
-    let bare = clicks(&app, bare_window);
-    assert!(!bare.is_empty(), "the grid hits something on the page");
-    assert_eq!(clicks(&app, current_top_tabs), bare);
-    assert_eq!(clicks(&app, no_dialog), bare);
+    let (_classic_dir, classic_app) = classic_app(Screen::Games);
+    for size in CLICK_WINDOWS {
+        let bare = clicks(&app, bare_window, size);
+        assert!(!bare.is_empty(), "{size:?}: the grid hits the page");
+        assert_eq!(clicks(&app, current_top_tabs, size), bare, "{size:?}");
+        assert_eq!(clicks(&app, no_dialog, size), bare, "{size:?}");
+
+        let bare = clicks(&classic_app, bare_classic, size);
+        assert!(!bare.is_empty(), "{size:?}: the grid hits the page");
+        assert_eq!(clicks(&classic_app, classic, size), bare, "{size:?}");
+        assert_eq!(clicks(&classic_app, whole_window, size), bare, "{size:?}");
+    }
 }
 
 /// Trailing empty slots over an open dialog do not steal clicks from
-/// the dialog or the page: the published clicks match a stack that has
-/// only that dialog.
+/// the dialog or the page, nor do the focus layers: the published clicks
+/// match a stack that has only that dialog.
 #[test]
 fn an_open_dialog_with_empty_slots_keeps_its_clicks() {
     let (_dir, app) = app();
-    let only = clicks(&app, dialog_only);
-    assert!(!only.is_empty(), "the grid hits the page or the dialog");
-    assert_eq!(clicks(&app, a_dialog), only);
-    assert_eq!(clicks(&app, dialog_with_empty_slots_above), only);
+    for size in CLICK_WINDOWS {
+        let only = clicks(&app, dialog_only, size);
+        assert!(!only.is_empty(), "{size:?}: the grid hits the page");
+        assert_eq!(clicks(&app, a_dialog, size), only, "{size:?}");
+        let slots = clicks(&app, dialog_with_empty_slots_above, size);
+        assert_eq!(slots, only, "{size:?}");
+    }
 }
 
 /// Clicks beside a toast or the restart bar still reach the page, and
@@ -510,33 +743,25 @@ fn an_open_dialog_with_empty_slots_keeps_its_clicks() {
 #[test]
 fn a_toast_or_restart_bar_keeps_page_clicks() {
     let (_dir, mut app) = app();
-    let bare = clicks(&app, bare_window);
-    assert!(!bare.is_empty(), "the grid hits something on the page");
-
-    show_toast(&mut app);
-    let toast = clicks(&app, current_top_tabs);
-    assert_eq!(toast, clicks(&app, stacked_prompts));
-    assert!(
-        shares_page_clicks(&bare, &toast),
-        "clicks beside the toast should still reach the page"
-    );
-
-    app.toast = None;
-    show_restart_bar(&mut app);
-    let bar = clicks(&app, current_top_tabs);
-    assert_eq!(bar, clicks(&app, stacked_prompts));
-    assert!(
-        shares_page_clicks(&bare, &bar),
-        "clicks beside the restart bar should still reach the page"
-    );
-
-    show_toast(&mut app);
-    let both = clicks(&app, current_top_tabs);
-    assert_eq!(both, clicks(&app, stacked_prompts));
-    assert!(
-        shares_page_clicks(&bare, &both),
-        "clicks beside the toast and the restart bar should still reach the page"
-    );
+    for size in CLICK_WINDOWS {
+        quiet(&mut app);
+        let bare = clicks(&app, bare_window, size);
+        assert!(!bare.is_empty(), "{size:?}: the grid hits the page");
+        for (name, show) in PROMPTS {
+            quiet(&mut app);
+            show(&mut app);
+            let over = clicks(&app, current_top_tabs, size);
+            assert_eq!(
+                over,
+                clicks(&app, stacked_prompts, size),
+                "{size:?}: {name}"
+            );
+            assert!(
+                shares_page_clicks(&bare, &over),
+                "{size:?}: clicks beside {name} should still reach the page"
+            );
+        }
+    }
 }
 
 /// Some grid points publish the same message with the overlay as they
@@ -544,81 +769,4 @@ fn a_toast_or_restart_bar_keeps_page_clicks() {
 fn shares_page_clicks(bare: &[String], over: &[String]) -> bool {
     let over: std::collections::HashSet<&String> = over.iter().collect();
     bare.iter().any(|click| over.contains(click))
-}
-
-/// A focused field on the page keeps that focus when a dialog opens, now
-/// the page is not remounted. This records the current behaviour; it does
-/// not change focus. QA should still Tab and type with a Games edit field
-/// focused and a dialog open.
-#[test]
-fn a_dialog_leaves_page_focus_in_place() {
-    use iced::advanced::widget::operation::focusable::{self, Focusable};
-    use iced::widget::text_input;
-
-    const FIELD: &str = "page-field";
-
-    fn field_stack(dialog: bool) -> Element<'static, Message> {
-        let field = text_input("Name", "held").id(Id::new(FIELD)).into();
-        let dialog_layer = if dialog {
-            container(text("A dialog")).into()
-        } else {
-            empty_layer()
-        };
-        Stack::with_children([field, empty_layer(), dialog_layer, empty_layer()])
-            .width(Fill)
-            .height(Fill)
-            .into()
-    }
-
-    fn focused(
-        element: &mut Element<'_, Message>,
-        tree: &mut Tree,
-        node: &Node,
-        renderer: &iced::Renderer,
-    ) -> bool {
-        let mut find = FocusOf {
-            target: Id::new(FIELD),
-            focused: None,
-        };
-        element
-            .as_widget_mut()
-            .operate(tree, Layout::new(node), renderer, &mut find);
-        find.focused == Some(true)
-    }
-
-    struct FocusOf {
-        target: Id,
-        focused: Option<bool>,
-    }
-
-    impl Operation<()> for FocusOf {
-        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<()>)) {
-            operate(self);
-        }
-
-        fn focusable(&mut self, id: Option<&Id>, _bounds: Rectangle, state: &mut dyn Focusable) {
-            if id == Some(&self.target) {
-                self.focused = Some(state.is_focused());
-            }
-        }
-    }
-
-    let renderer = headless();
-    let mut element = field_stack(false);
-    let mut tree = Tree::new(&element);
-    let node = lay_out(&mut element, &mut tree, &renderer);
-    let mut focus = focusable::focus::<()>(Id::new(FIELD));
-    run(&mut element, &mut tree, &node, &renderer, &mut focus);
-    assert!(
-        focused(&mut element, &mut tree, &node, &renderer),
-        "the field should be focused before the dialog opens"
-    );
-
-    let mut next = field_stack(true);
-    tree.diff(&next);
-    let node = lay_out(&mut next, &mut tree, &renderer);
-    assert!(
-        focused(&mut next, &mut tree, &node, &renderer),
-        "opening the dialog should not remount the page field or drop its focus"
-    );
 }
