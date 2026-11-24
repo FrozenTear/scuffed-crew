@@ -51,6 +51,10 @@ pub const SIGHTING_GAP_SECS: i64 = 60;
 /// stage is still on screen, `now - seen` can reach [`seen_current_for_secs`].
 pub const SEEN_REFRESH_SECS: i64 = 5;
 
+/// Slack for a `seen` slightly ahead of `now` (whole-second rounding
+/// or a small clock skew). Further ahead is not current.
+pub const SEEN_FUTURE_SLACK_SECS: i64 = 2;
+
 /// The largest `now - seen` a reader should treat as current while the
 /// stage is still on screen: [`SEEN_REFRESH_SECS`] plus two poll
 /// intervals plus 1 s (`seen` is a whole second, rounded down). The
@@ -68,10 +72,6 @@ pub fn seen_current_for_secs(poll_interval: std::time::Duration) -> i64 {
         .saturating_add(poll_secs.saturating_mul(2))
         .saturating_add(1)
 }
-
-/// Slack for a `seen` slightly ahead of `now` (whole-second rounding
-/// or a small clock skew). Further ahead is not current.
-const SEEN_FUTURE_SLACK_SECS: i64 = 2;
 
 /// True when `now - seen` is in `-2..=seen_current_for_secs` (`-2` is
 /// [`SEEN_FUTURE_SLACK_SECS`]). A `seen` further in the future is not
@@ -120,10 +120,13 @@ pub struct CompanionStage {
     pub since: i64,
     /// When the daemon last saw this sighting, in Unix seconds. Refreshed
     /// once [`SEEN_REFRESH_SECS`] have passed since the last `seen`.
-    /// While the stage is on screen, `now - seen` is at most
-    /// [`seen_current_for_secs`]; treat the stage as current only within
-    /// that bound. A missed screen or a stopped daemon leaves `seen`
-    /// behind, including across an update restart that keeps the same pid.
+    /// While the stage is on screen and the daemon misses at most one
+    /// poll in a row, `now - seen` is at most [`seen_current_for_secs`].
+    /// A longer gap reads as stale until the next known tick. Treat the
+    /// stage as current only when [`stage_is_current`] is true; that also
+    /// rejects a `seen` more than [`SEEN_FUTURE_SLACK_SECS`] ahead. A
+    /// missed screen or a stopped daemon leaves `seen` behind, including
+    /// across an update restart that keeps the same pid.
     pub seen: i64,
 }
 
@@ -210,11 +213,11 @@ fn settle_stage(slot: &mut Slot, kind: StageKind, maps: Vec<String>, now: i64) {
 /// everything else there. `tick` is `(kind, maps, now)`: `now` is this
 /// tick's Unix time, used as `since` on a new sighting and to refresh
 /// `seen`. Pass that tick time; do not pass a `since` copied from a
-/// `CompanionStage` that was read back. A repeat of
-/// the same kind within [`SIGHTING_GAP_SECS`] keeps the first `since`
-/// (map names may change). The held slot is keyed by `data_dir` and is
-/// marked written only after the file write succeeds. Later status writes
-/// keep the stage too.
+/// `CompanionStage` that was read back. A repeat of the same kind
+/// within [`SIGHTING_GAP_SECS`] keeps the first `since` (map names may
+/// change). The held slot is keyed by `data_dir` and is marked written
+/// only after the file write succeeds. Later status writes keep the
+/// stage too.
 pub fn publish_companion_stage(data_dir: &Path, tick: Option<(StageKind, Vec<String>, i64)>) {
     let _guard = status_write_lock();
     let to_write = {
