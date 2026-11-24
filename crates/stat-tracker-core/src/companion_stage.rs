@@ -317,18 +317,14 @@ mod tests {
 
         // The same stage two seconds later keeps its first time and does
         // not rewrite the file (`seen` is not due yet).
-        let mtime = std::fs::metadata(crate::ocr_status::status_path(dir.path()))
-            .unwrap()
-            .modified()
-            .unwrap();
+        let path = crate::ocr_status::status_path(dir.path());
+        #[cfg(unix)]
+        let inode = std::fs::metadata(&path).unwrap().ino();
         let later = CompanionStage::new(StageKind::MapVote, vote.maps.clone(), 102);
         publish_tick(dir.path(), later.kind, later.maps.clone(), later.since);
         assert_eq!(read_companion_stage(dir.path(), 0), Some(vote.clone()));
-        let mtime_later = std::fs::metadata(crate::ocr_status::status_path(dir.path()))
-            .unwrap()
-            .modified()
-            .unwrap();
-        assert_eq!(mtime, mtime_later);
+        #[cfg(unix)]
+        assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
 
         // Another writer of the file (the OCR switch) builds its Status
         // from the held slots: the stage survives that write.
@@ -358,6 +354,9 @@ mod tests {
         let first = CompanionStage::new(StageKind::MapVote, Vec::new(), 1_000);
         publish_tick(dir.path(), first.kind, first.maps.clone(), first.since);
         assert_eq!(written_stage(dir.path()).unwrap().since, 1_000);
+        let path = crate::ocr_status::status_path(dir.path());
+        #[cfg(unix)]
+        let inode = std::fs::metadata(&path).unwrap().ino();
 
         // t + 2: same since, no write.
         let soon = CompanionStage::new(StageKind::MapVote, Vec::new(), 1_002);
@@ -365,6 +364,8 @@ mod tests {
         let held = written_stage(dir.path()).unwrap();
         assert_eq!(held.since, 1_000);
         assert_eq!(held.seen, 1_000);
+        #[cfg(unix)]
+        assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
 
         // t + 600: new since, file rewritten.
         let later = CompanionStage::new(StageKind::MapVote, Vec::new(), 1_600);
@@ -435,6 +436,51 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn freshness_helpers_cover_poll_edges_and_a_future_seen() {
+        use std::time::Duration;
+        let cases: &[(Duration, i64)] = &[
+            (Duration::ZERO, 8),
+            (Duration::from_millis(1), 8),
+            (Duration::from_secs(1), 8),
+            (Duration::from_millis(1500), 10),
+            (Duration::from_secs(4), 14),
+        ];
+        let now = 1_000;
+        for &(poll, bound) in cases {
+            assert_eq!(seen_current_for_secs(poll), bound, "{poll:?}");
+            assert!(stage_is_current(now, now, poll), "age 0 {poll:?}");
+            assert!(
+                stage_is_current(now - bound, now, poll),
+                "age == bound {poll:?}"
+            );
+            assert!(
+                !stage_is_current(now - bound - 1, now, poll),
+                "age == bound+1 {poll:?}"
+            );
+            assert!(
+                stage_is_current(now + SEEN_FUTURE_SLACK_SECS, now, poll),
+                "2 s ahead {poll:?}"
+            );
+            assert!(
+                !stage_is_current(now + SEEN_FUTURE_SLACK_SECS + 1, now, poll),
+                "3 s ahead {poll:?}"
+            );
+            assert!(
+                !stage_is_current(now + 3_600, now, poll),
+                "1 h ahead {poll:?}"
+            );
+            assert!(
+                !stage_is_current(i64::MAX, now, poll),
+                "i64::MAX seen {poll:?}"
+            );
+        }
+        // A huge poll must not overflow or panic.
+        let huge = Duration::from_secs(u64::MAX);
+        assert_eq!(seen_current_for_secs(huge), i64::MAX);
+        assert!(stage_is_current(now, now, huge));
+    }
+
     fn seen_is_refreshed_after_the_interval_and_keeps_the_inode_before() {
         let dir = tempfile::tempdir().unwrap();
         let maps = vec![
@@ -449,18 +495,18 @@ mod tests {
         assert_eq!(held.since, 1_000);
         assert_eq!(held.seen, 1_000);
 
-        // t + 3: same inode, seen stays t (refresh is 5 s).
-        publish_tick(dir.path(), StageKind::MapVote, maps.clone(), 1_003);
+        // t + 4: same inode, seen stays t (refresh is 5 s).
+        publish_tick(dir.path(), StageKind::MapVote, maps.clone(), 1_004);
         let held = written_stage(dir.path()).unwrap();
         assert_eq!(held.since, 1_000);
         assert_eq!(held.seen, 1_000);
         assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
 
-        // t + 6: rewritten, same since, seen is t + 6.
-        publish_tick(dir.path(), StageKind::MapVote, maps, 1_006);
+        // t + 5: rewritten, same since, seen is t + 5.
+        publish_tick(dir.path(), StageKind::MapVote, maps, 1_005);
         let held = written_stage(dir.path()).unwrap();
         assert_eq!(held.since, 1_000);
-        assert_eq!(held.seen, 1_006);
+        assert_eq!(held.seen, 1_005);
     }
 
     #[test]
