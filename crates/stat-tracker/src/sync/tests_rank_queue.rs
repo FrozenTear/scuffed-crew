@@ -334,20 +334,22 @@ fn each_rank_screen_field_alone_sends_a_rank_object() {
 
 #[test]
 fn an_upper_case_role_line_sends_no_role_and_an_unknown_queue() {
-    // `TANK` is not a `RankRole` spelling: it is neither sent as the role
-    // nor used to decide the queue.
-    let m = game(
-        None,
-        Some(6),
-        Some(RankUpdate {
-            role: t("TANK", 0.9),
-            hero_sr: n(3412, 0.85),
-            ..RankUpdate::default()
-        }),
-    );
-    let rank = sent(&m);
-    assert!(rank.get("role").is_none(), "{rank}");
-    assert_eq!(rank["queue"]["value"], json!("unknown"));
-    assert_eq!(rank["queue"]["confidence"], Value::Null);
-    assert_eq!(rank["hero_sr"]["value"], json!(3412));
+    // These are not `RankRole` spellings: they are neither sent as the
+    // role nor used to decide the queue.
+    for role in ["TANK", " Tank", "Tank "] {
+        let m = game(
+            None,
+            Some(6),
+            Some(RankUpdate {
+                role: t(role, 0.9),
+                hero_sr: n(3412, 0.85),
+                ..RankUpdate::default()
+            }),
+        );
+        let rank = sent(&m);
+        assert!(rank.get("role").is_none(), "{role}: {rank}");
+        assert_eq!(rank["queue"]["value"], json!("unknown"), "{role}");
+        assert_eq!(rank["queue"]["confidence"], Value::Null, "{role}");
+        assert_eq!(rank["hero_sr"]["value"], json!(3412), "{role}");
+    }
 }

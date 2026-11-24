@@ -403,7 +403,9 @@ fn upload_cases() -> Vec<(RankUpdate, Option<QueueTitle>)> {
         "x".repeat(64),
         "x".repeat(65),
     ];
-    let roles = ["Tank", "Damage", "Support", "Open", "Healer"];
+    let roles = [
+        "Tank", "Damage", "Support", "Open", "Healer", "TANK", " Tank",
+    ];
     let queues = [
         None,
         Some("ROLE QUEUE"),
