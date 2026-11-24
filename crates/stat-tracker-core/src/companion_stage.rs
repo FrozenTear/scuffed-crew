@@ -437,7 +437,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn freshness_helpers_cover_poll_edges_and_a_future_seen() {
         use std::time::Duration;
         let cases: &[(Duration, i64)] = &[
@@ -482,6 +481,7 @@ mod tests {
         assert!(stage_is_current(now, now, huge));
     }
 
+    #[test]
     fn seen_is_refreshed_after_the_interval_and_keeps_the_inode_before() {
         let dir = tempfile::tempdir().unwrap();
         let maps = vec![
