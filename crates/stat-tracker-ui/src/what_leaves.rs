@@ -72,9 +72,10 @@ pub(crate) const SECTIONS: [(&str, &[&str]); 6] = [
     ),
 ];
 
-/// The dialog as a layer over the window, while it is open.
-pub(crate) fn layer(app: &TrackerApp) -> Option<Element<'_, Message>> {
-    app.page_state.opened.what_leaves_open.then(dialog)
+/// The dialog as a layer over the window, while it is open. Esc closes it.
+pub(crate) fn layer(app: &TrackerApp) -> Option<crate::dialog_focus::Dialog<'_>> {
+    let open = app.page_state.opened.what_leaves_open;
+    open.then(|| crate::dialog_focus::Dialog::new(dialog(), Some(close())))
 }
 
 fn close() -> Message {

@@ -30,6 +30,7 @@ pub mod companion_gate;
 #[cfg(test)]
 mod copy_rules;
 pub mod daemon;
+mod dialog_focus;
 mod filter_chips;
 pub mod fixtures;
 mod fixtures_bans;

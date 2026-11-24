@@ -1,8 +1,12 @@
 use iced::Color;
+use iced::widget::scrollable::{Direction, Scrollbar};
+use iced::widget::text::Wrapping;
 use iced::widget::{
-    Row, button, column, container, mouse_area, row, space, text, text_input, toggler,
+    Row, button, column, container, mouse_area, row, scrollable, space, text, text_input, toggler,
 };
 use iced::{Alignment, Element, Fill, Length, Padding};
+
+use crate::layout::SCROLLBAR_WIDTH;
 
 use crate::aggregate::{HeroAgg, MapAgg, Record};
 use crate::app::{Message, TrackerApp};
@@ -254,13 +258,47 @@ pub fn status_stub<'a>(
     .into()
 }
 
+/// One meta-size line in the toast, including the font's line box
+/// (`SIZE_META` * 1.3, rounded up).
+pub(crate) const TOAST_LINE: f32 = 17.0;
+/// How many lines of toast text stay visible; longer messages scroll
+/// inside the toast so the reserved page inset can stay fixed.
+pub(crate) const TOAST_LINES: f32 = 4.0;
+const TOAST_PAD_Y: f32 = 8.0;
+const TOAST_BORDER: f32 = 1.0;
+/// Tallest the toast bar gets: padding, border, and [`TOAST_LINES`].
+pub(crate) const TOAST_MAX: f32 = TOAST_BORDER * 2.0 + TOAST_PAD_Y * 2.0 + TOAST_LINE * TOAST_LINES;
+
 pub fn toast_bar(msg: &str, action: Option<Message>) -> Element<'static, Message> {
+    // Right padding keeps glyphs out from under the bar: iced draws the
+    // scrollbar over the last SCROLLBAR_WIDTH px of the scrollable.
+    let body = scrollable(
+        container(
+            text(msg.to_string())
+                .size(SIZE_META)
+                .font(FONT_SEMIBOLD)
+                .color(TEXT)
+                .width(Fill)
+                .wrapping(Wrapping::WordOrGlyph),
+        )
+        .padding(Padding {
+            top: 0.0,
+            right: SCROLLBAR_WIDTH,
+            bottom: 0.0,
+            left: 0.0,
+        })
+        .width(Fill),
+    )
+    .direction(Direction::Vertical(
+        Scrollbar::new()
+            .width(SCROLLBAR_WIDTH)
+            .scroller_width(SCROLLBAR_WIDTH),
+    ))
+    .width(Fill);
     let mut line = row![
-        text(msg.to_string())
-            .size(SIZE_META)
-            .font(FONT_SEMIBOLD)
-            .color(TEXT)
+        container(body)
             .width(Fill)
+            .max_height(TOAST_LINE * TOAST_LINES)
     ];
     if let Some(action) = action {
         line = line.push(
@@ -287,11 +325,12 @@ pub fn toast_bar(msg: &str, action: Option<Message>) -> Element<'static, Message
             .style(theme::ghost_btn())
             .on_press(Message::DismissToast),
         )
-        .align_y(Alignment::Center)
+        .align_y(Alignment::Start)
         .spacing(12),
     )
-    .padding(Padding::from([8, 14]))
+    .padding(Padding::from([TOAST_PAD_Y, 14.0]))
     .width(Fill)
+    .max_height(TOAST_MAX)
     .style(|_t| container::Style {
         background: Some(iced::Background::Color(theme::SURFACE)),
         border: iced::Border {
@@ -933,10 +972,25 @@ pub(crate) fn edit_form<'a>(form: &'a EditForm, _sid: &str) -> Element<'a, Messa
     .into()
 }
 
+fn edit_input_id(field: EditField) -> iced::widget::Id {
+    iced::widget::Id::new(match field {
+        EditField::Hero => "edit-hero",
+        EditField::Role => "edit-role",
+        EditField::Map => "edit-map",
+        EditField::Elims => "edit-elims",
+        EditField::Deaths => "edit-deaths",
+        EditField::Assists => "edit-assists",
+        EditField::Damage => "edit-damage",
+        EditField::Healing => "edit-healing",
+        EditField::Mitigation => "edit-mitigation",
+    })
+}
+
 fn field_input<'a>(label: &'static str, value: &'a str, field: EditField) -> Element<'a, Message> {
     column![
         label_text(label),
         text_input(label, value)
+            .id(edit_input_id(field))
             .on_input(move |v| Message::EditField(field, v))
             .padding(Padding::from([8, 10]))
             .size(SIZE_BODY)
