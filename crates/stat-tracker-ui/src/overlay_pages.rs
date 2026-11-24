@@ -33,8 +33,11 @@
 //!   lock itself as `map_read: true`.
 //! - `in_game`: [`Stage::MatchStart`].
 
+use serde::{Deserialize, Serialize};
+
 /// One companion page. The first four are the in-match pages, in dot order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Page {
     /// The stream page: no picks, bans, hints or death rates.
     #[default]
@@ -74,7 +77,8 @@ impl Page {
 
 /// What the tracker last said about the pre-game stage, as the page rules
 /// see it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Stage {
     /// No pre-game screen known.
     #[default]
@@ -95,7 +99,7 @@ pub fn vote_maps_read(maps: &[String]) -> bool {
 }
 
 /// The page on show, the safe-page hold, and whether the match has started.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct PageState {
     pub page: Page,
     /// The safe-page hold: Tonight stays up and auto-advance is off.

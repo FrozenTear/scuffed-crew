@@ -27,6 +27,7 @@ pub mod cli;
 pub mod clipboard;
 pub mod commands;
 pub mod companion_gate;
+pub mod companion_keys;
 #[cfg(test)]
 mod copy_rules;
 pub mod daemon;

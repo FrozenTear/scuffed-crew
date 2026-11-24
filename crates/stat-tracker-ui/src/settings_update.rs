@@ -71,6 +71,12 @@ pub enum Msg {
     ChipRemove(ChipList, usize),
     /// "Show Companion during games".
     CompanionDuringGames(bool),
+    /// "Hold the stream page".
+    HoldStreamPage(bool),
+    /// Typed text in a companion page-bind field.
+    PageBindDraft(crate::companion_keys::PageBind, String),
+    /// Enter on a companion page-bind field.
+    PageBindCommit(crate::companion_keys::PageBind),
     /// Check now, under Updates.
     CheckUpdates,
     UpdatesChecked(Result<Option<UpdateInfo>, CheckFailed>),
@@ -479,6 +485,27 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> Task<Message> {
             match crate::seasons::save_companion_during_games(&app.data_dir, on) {
                 Ok(()) => app.page_state.companion_during_games = on,
                 Err(e) => app.replace_toast(format!("Could not save the Companion setting: {e}")),
+            }
+        }
+        Msg::HoldStreamPage(on) => {
+            app.page_keys.hold_stream_page = on;
+            match crate::companion_keys::save_page_keys(&app.data_dir, &app.page_keys) {
+                Ok(()) => {}
+                Err(e) => {
+                    app.page_keys.hold_stream_page = !on;
+                    app.replace_toast(format!("Could not save the Companion setting: {e}"));
+                }
+            }
+        }
+        Msg::PageBindDraft(kind, value) => kind.set(&mut app.page_keys, value),
+        Msg::PageBindCommit(kind) => {
+            let _ = kind;
+            match app.page_keys.validate_for_save() {
+                Ok(keys) => match crate::companion_keys::save_page_keys(&app.data_dir, &keys) {
+                    Ok(()) => app.page_keys = keys,
+                    Err(e) => app.replace_toast(format!("Could not save the page shortcut: {e}")),
+                },
+                Err(e) => app.replace_toast(format!("Could not save the page shortcut: {e}")),
             }
         }
         Msg::CheckUpdates => {
@@ -1197,5 +1224,36 @@ mod tests {
         assert!(!app.overlay_showing());
         let _ = app.update(page(Msg::CompanionDuringGames(true)));
         assert!(crate::seasons::load_companion_during_games(dir.path()));
+    }
+
+    #[test]
+    fn page_keys_save_at_once_and_do_not_count_as_waiting() {
+        use crate::companion_keys::PageBind;
+        let (dir, mut app) = live_app();
+        assert_eq!(app.changes_waiting(), 0);
+        let _ = app.update(page(Msg::HoldStreamPage(true)));
+        assert!(app.page_keys.hold_stream_page);
+        assert!(crate::companion_keys::load_page_keys(dir.path()).hold_stream_page);
+        assert_eq!(app.changes_waiting(), 0);
+        let _ = app.update(page(Msg::PageBindDraft(
+            PageBind::Next,
+            "Super+Shift+J".into(),
+        )));
+        let _ = app.update(page(Msg::PageBindCommit(PageBind::Next)));
+        assert_eq!(app.page_keys.next_bind, "Super+Shift+J");
+        assert_eq!(
+            crate::companion_keys::load_page_keys(dir.path()).next_bind,
+            "Super+Shift+J"
+        );
+        assert_eq!(app.changes_waiting(), 0);
+        let _ = app.update(page(Msg::PageBindDraft(PageBind::Prev, "N".into())));
+        let _ = app.update(page(Msg::PageBindCommit(PageBind::Prev)));
+        assert_eq!(app.page_keys.prev_bind, "N");
+        assert_eq!(
+            crate::companion_keys::load_page_keys(dir.path()).prev_bind,
+            crate::companion_keys::DEFAULT_PREV_BIND
+        );
+        assert!(app.toast.is_some());
+        assert_eq!(app.changes_waiting(), 0);
     }
 }

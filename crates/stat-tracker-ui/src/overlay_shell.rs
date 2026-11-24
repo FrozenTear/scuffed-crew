@@ -1,8 +1,6 @@
 //! iced_layershell runner for `--companion`. Feature-gated so a host that
 //! cannot build iced_layershell can still compile visibility tests.
 
-use std::time::Duration;
-
 use iced::{Color, Element, Font, Task};
 use iced_layershell::application;
 use iced_layershell::reexport::{Anchor, KeyboardInteractivity, Layer};
@@ -54,7 +52,7 @@ fn overlay_theme(_app: &OverlayApp) -> iced::Theme {
 }
 
 fn overlay_subscription(_app: &OverlayApp) -> iced::Subscription<Message> {
-    iced::time::every(Duration::from_secs(1)).map(|_| Message::Tick)
+    iced::time::every(crate::companion_keys::COMPANION_TICK).map(|_| Message::Tick)
 }
 
 pub fn run(cli: Cli) -> anyhow::Result<()> {

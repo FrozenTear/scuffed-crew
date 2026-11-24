@@ -446,12 +446,26 @@ pub fn consume_toggle(data_dir: &Path, last: &mut Option<SystemTime>) -> bool {
     }
 }
 
-pub fn subscription(bind: Keybind) -> Subscription<Message> {
-    Subscription::run_with(bind, listen_stream)
+/// Which companion shortcut the evdev thread should fire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HotkeyAction {
+    Toggle,
+    NextPage,
+    PrevPage,
+    SafePage,
 }
 
-fn listen_stream(bind: &Keybind) -> BoxStream<'static, Message> {
+pub fn subscription(bind: Keybind) -> Subscription<Message> {
+    subscription_with(bind, HotkeyAction::Toggle)
+}
+
+pub fn subscription_with(bind: Keybind, action: HotkeyAction) -> Subscription<Message> {
+    Subscription::run_with((bind, action), listen_stream)
+}
+
+fn listen_stream((bind, action): &(Keybind, HotkeyAction)) -> BoxStream<'static, Message> {
     let bind = *bind;
+    let action = *action;
     Box::pin(iced::stream::channel(4, async move |mut output| {
         let (tx, mut rx) = mpsc::unbounded_channel();
         if let Err(e) = std::thread::Builder::new()
@@ -461,8 +475,14 @@ fn listen_stream(bind: &Keybind) -> BoxStream<'static, Message> {
             tracing::warn!(error = %e, "companion shortcut thread failed to start");
             return;
         }
+        let message = match action {
+            HotkeyAction::Toggle => Message::ToggleOverlay,
+            HotkeyAction::NextPage => Message::CompanionPage(crate::companion_keys::PageCmd::Next),
+            HotkeyAction::PrevPage => Message::CompanionPage(crate::companion_keys::PageCmd::Prev),
+            HotkeyAction::SafePage => Message::CompanionPage(crate::companion_keys::PageCmd::Safe),
+        };
         while rx.recv().await.is_some() {
-            if output.send(Message::ToggleOverlay).await.is_err() {
+            if output.send(message.clone()).await.is_err() {
                 break;
             }
         }

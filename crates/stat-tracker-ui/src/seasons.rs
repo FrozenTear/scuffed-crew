@@ -68,6 +68,18 @@ struct UiStateFile {
     /// the GUI compares this with the version it is actually running.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_seen_version: Option<String>,
+    /// Companion next-page bind. Missing -> Super+Shift+N.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    companion_next_bind: Option<String>,
+    /// Companion previous-page bind. Missing -> Super+Shift+P.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    companion_prev_bind: Option<String>,
+    /// Companion safe-page bind. Missing -> Super+Shift+T.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    companion_safe_bind: Option<String>,
+    /// "Hold the stream page". Missing -> off (auto-advance on).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    hold_stream_page: Option<bool>,
 }
 
 pub fn cache_path(data_dir: &Path) -> PathBuf {
@@ -200,6 +212,38 @@ pub fn save_last_seen_version(data_dir: &Path, version: &str) -> std::io::Result
     let mut file = read_ui_state_file(data_dir).unwrap_or_default();
     let trimmed = version.trim();
     file.last_seen_version = (!trimmed.is_empty()).then(|| trimmed.to_string());
+    write_ui_state_file(data_dir, &file)
+}
+
+/// Missing file / fields -> the C5 defaults (auto-advance on).
+pub fn load_page_keys(data_dir: &Path) -> crate::companion_keys::PageKeys {
+    match read_ui_state_file(data_dir) {
+        Some(file) => crate::companion_keys::PageKeys::normalized(
+            file.companion_next_bind
+                .as_deref()
+                .unwrap_or(crate::companion_keys::DEFAULT_NEXT_BIND),
+            file.companion_prev_bind
+                .as_deref()
+                .unwrap_or(crate::companion_keys::DEFAULT_PREV_BIND),
+            file.companion_safe_bind
+                .as_deref()
+                .unwrap_or(crate::companion_keys::DEFAULT_SAFE_BIND),
+            file.hold_stream_page.unwrap_or(false),
+        ),
+        None => crate::companion_keys::PageKeys::default(),
+    }
+}
+
+/// Other `ui_state.json` fields are left as they were.
+pub fn save_page_keys(
+    data_dir: &Path,
+    keys: &crate::companion_keys::PageKeys,
+) -> std::io::Result<()> {
+    let mut file = read_ui_state_file(data_dir).unwrap_or_default();
+    file.companion_next_bind = Some(keys.next_bind.clone());
+    file.companion_prev_bind = Some(keys.prev_bind.clone());
+    file.companion_safe_bind = Some(keys.safe_bind.clone());
+    file.hold_stream_page = Some(keys.hold_stream_page);
     write_ui_state_file(data_dir, &file)
 }
 
@@ -614,6 +658,39 @@ mod tests {
         );
         save_companion_during_games(dir.path(), true).unwrap();
         assert!(load_companion_during_games(dir.path()));
+    }
+
+    #[test]
+    fn page_keys_default_and_keep_other_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = load_page_keys(dir.path());
+        assert_eq!(keys.next_bind, crate::companion_keys::DEFAULT_NEXT_BIND);
+        assert_eq!(keys.prev_bind, crate::companion_keys::DEFAULT_PREV_BIND);
+        assert_eq!(keys.safe_bind, crate::companion_keys::DEFAULT_SAFE_BIND);
+        assert!(!keys.hold_stream_page);
+        save_ui_state(dir.path(), &SeasonSel::Season("s5".into())).unwrap();
+        save_overlay_hotkey(
+            dir.path(),
+            &crate::hotkey::OverlayHotkey::normalized(true, "Super+Shift+C"),
+        )
+        .unwrap();
+        let custom = crate::companion_keys::PageKeys {
+            next_bind: "Super+Shift+J".into(),
+            hold_stream_page: true,
+            ..crate::companion_keys::PageKeys::default()
+        };
+        save_page_keys(dir.path(), &custom).unwrap();
+        let loaded = load_page_keys(dir.path());
+        assert_eq!(loaded.next_bind, "Super+Shift+J");
+        assert!(loaded.hold_stream_page);
+        assert_eq!(
+            load_ui_state(dir.path()),
+            Some(SeasonSel::Season("s5".into()))
+        );
+        assert_eq!(
+            load_overlay_hotkey(dir.path()).bind,
+            crate::hotkey::DEFAULT_BIND
+        );
     }
 
     #[test]

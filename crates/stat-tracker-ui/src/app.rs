@@ -203,6 +203,7 @@ pub enum Message {
     WindowClosed(window::Id),
     Tray(TrayAction),
     ToggleOverlay,
+    CompanionPage(crate::companion_keys::PageCmd),
     OpenAbout,
     DismissNotes,
     DismissToast,
@@ -433,6 +434,8 @@ pub struct TrackerApp {
     pub live_game_session: Option<String>,
     pub overlay_hotkey: OverlayHotkey,
     companion_toggle_mtime: Option<SystemTime>,
+    pub page_keys: crate::companion_keys::PageKeys,
+    pub(crate) page_triggers: crate::companion_keys::TriggerMtimes,
     pub setup: crate::setup_guide::GuideUi,
     /// This process's path at launch, for [`TrackerApp::restart_target`].
     own_exe: PathBuf,
@@ -506,6 +509,7 @@ impl TrackerApp {
                 .map(|s| (s.server_url.as_str(), s.token.as_str())),
         );
         let overlay_hotkey = seasons::load_overlay_hotkey(&cli.data_dir);
+        let page_keys = crate::companion_keys::load_page_keys(&cli.data_dir);
         let installed_version = update::current_version();
         let mut notes_seen = NotesSeen::default();
         let notes_dialog = match notes_dialog_for(&cli.data_dir, installed_version.as_deref(), None)
@@ -657,8 +661,6 @@ impl TrackerApp {
             update_gate: &update::LIVE_GATE,
             window_id: Some(window_id),
             tick_count: 0,
-            // Unit tests build several apps on parallel threads, and GTK's
-            // tray is not thread-safe (SIGSEGV). Tests never need it.
             tray: if cfg!(test) { None } else { tray::try_create() },
             overlay_hold,
             overlay_child: None,
@@ -667,6 +669,8 @@ impl TrackerApp {
             live_game_session,
             overlay_hotkey,
             companion_toggle_mtime: None,
+            page_keys,
+            page_triggers: crate::companion_keys::TriggerMtimes::default(),
             setup,
             own_exe,
             restart_watch,
@@ -743,7 +747,6 @@ impl TrackerApp {
         (app, Task::batch(tasks))
     }
 
-    /// What the update plan knows about the package that owns this binary.
     pub fn package_probe(&self) -> update::PackageProbe<'_> {
         if self.package_probed {
             update::PackageProbe::Done(self.package_owner.as_ref())
@@ -761,12 +764,7 @@ impl TrackerApp {
             iced::time::every(Duration::from_secs(1)).map(|_| Message::Tick),
             window::close_events().map(Message::WindowClosed),
         ];
-        if self.overlay_hotkey.enabled
-            && self.companion_enabled()
-            && let Ok(bind) = hotkey::parse_bind(&self.overlay_hotkey.bind)
-        {
-            subs.push(hotkey::subscription(bind));
-        }
+        subs.extend(crate::companion_keys::hotkey_subscriptions(self));
         if self.report.is_some() {
             subs.push(iced::event::listen_with(report_dialog_escape));
         } else if self.uninstall_dialog.is_some() {
@@ -1688,6 +1686,7 @@ impl TrackerApp {
             }
             Message::Tray(action) => self.apply_tray(action),
             Message::ToggleOverlay => self.toggle_overlay(),
+            Message::CompanionPage(cmd) => self.apply_companion_page(cmd),
             Message::Setup(message) => self.on_setup(message),
             Message::Report(message) => self.on_report(message),
         }
@@ -2432,6 +2431,7 @@ impl TrackerApp {
         if hotkey::consume_toggle(&self.data_dir, &mut self.companion_toggle_mtime) {
             return self.toggle_overlay();
         }
+        self.tick_companion_pages();
 
         self.apply_overlay_policy();
         let want_overlay = self.overlay_showing();

@@ -315,6 +315,8 @@ pub struct OverlayModel {
     pub hotkey_hint: Option<String>,
     /// The page on show and the safe-page hold (`overlay_pages`).
     pub pages: PageState,
+    /// The safe-page bind shown in the hold footer.
+    pub safe_bind: String,
 }
 
 impl OverlayModel {
@@ -377,6 +379,7 @@ pub fn build_model(
         live,
         hotkey_hint: None,
         pages: PageState::default(),
+        safe_bind: overlay_pages::DEFAULT_SAFE_BIND.to_string(),
     }
 }
 
@@ -889,7 +892,7 @@ fn footer_row(model: &OverlayModel) -> Element<'_, OverlayViewMessage> {
     let safe = model
         .pages
         .held
-        .then(|| overlay_pages::safe_page_footer(overlay_pages::DEFAULT_SAFE_BIND));
+        .then(|| overlay_pages::safe_page_footer(&model.safe_bind));
     let mut col = column![chips].spacing(6).width(Fill);
     for hint in [model.hotkey_hint.clone(), safe].into_iter().flatten() {
         col = col.push(
@@ -1006,6 +1009,9 @@ impl OverlayApp {
             ),
         );
         model.hotkey_hint = seasons::load_overlay_hotkey(&cli.data_dir).footer_hint();
+        let keys = crate::companion_keys::load_page_keys(&cli.data_dir);
+        model.safe_bind = keys.safe_bind;
+        model.pages = crate::companion_keys::load_page_state(&cli.data_dir);
         let surface_height = content_height(&model);
         Self {
             data_dir: cli.data_dir.clone(),
@@ -1029,8 +1035,10 @@ impl OverlayApp {
 
     pub(crate) fn refresh(&mut self) {
         let hint = seasons::load_overlay_hotkey(&self.data_dir).footer_hint();
+        let keys = crate::companion_keys::load_page_keys(&self.data_dir);
         if self.fixture.is_some() {
             self.model.hotkey_hint = hint;
+            self.model.safe_bind = keys.safe_bind;
             return;
         }
         let mtime = snapshot::snapshot_mtime(&self.data_dir);
@@ -1043,7 +1051,6 @@ impl OverlayApp {
             let season = seasons::resolve_selection(persisted, &seasons.seasons);
             self.clock = Utc::now();
             let config = stat_tracker::config::Config::load().unwrap_or_default();
-            let pages = self.model.pages;
             self.model = build_model(
                 &games,
                 &seasons.seasons,
@@ -1052,8 +1059,9 @@ impl OverlayApp {
                 config.sync.is_some(),
                 detect_game_running(&self.data_dir, &config.game_process_names, false),
             );
-            self.model.pages = pages;
         }
+        self.model.pages = crate::companion_keys::load_page_state(&self.data_dir);
+        self.model.safe_bind = keys.safe_bind;
         self.model.hotkey_hint = hint;
     }
 }
