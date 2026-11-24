@@ -138,6 +138,11 @@ fn each_part_has_its_colour_token() {
     );
 }
 
+/// How far, per 0-255 channel, a part's brightest pixel may sit from its
+/// token. The nearest other token is 33 or more away on some channel
+/// (TEXT to TEXT_2).
+const TOKEN_TOLERANCE: f32 = 3.0;
+
 #[test]
 fn the_cell_is_drawn_in_each_parts_colour() {
     // Draw the cell on black: a glyph pixel is its colour times its
@@ -192,7 +197,7 @@ fn the_cell_is_drawn_in_each_parts_colour() {
                 let p = [px[i] as f32, px[i + 1] as f32, px[i + 2] as f32];
                 for c in 0..3 {
                     assert!(
-                        p[c] <= want[c] + 3.0,
+                        p[c] <= want[c] + TOKEN_TOLERANCE,
                         "{words}: pixel {p:?} brighter than {want:?}"
                     );
                 }
@@ -201,9 +206,12 @@ fn the_cell_is_drawn_in_each_parts_colour() {
                 }
             }
         }
+        // A well covered stem is the token itself, within rounding, so a
+        // part drawn in a neighbouring token (TEXT_2 for TEXT, or for
+        // TEXT_3) is caught.
         for c in 0..3 {
             assert!(
-                brightest[c] >= want[c] * 0.85,
+                (brightest[c] - want[c]).abs() <= TOKEN_TOLERANCE,
                 "{words}: brightest {brightest:?}, want {want:?}"
             );
         }
