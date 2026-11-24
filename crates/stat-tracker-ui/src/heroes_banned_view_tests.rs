@@ -260,6 +260,16 @@ fn part(words: &str, tag: bool) -> SplitPart {
     SplitPart {
         words: words.into(),
         tag,
+        muted: false,
+    }
+}
+
+/// Side not read or Lobby: never the tag, drawn muted.
+fn muted(words: &str) -> SplitPart {
+    SplitPart {
+        words: words.into(),
+        tag: false,
+        muted: true,
     }
 }
 
@@ -297,7 +307,7 @@ fn a_lobby_only_row_still_shows_your_ban_and_enemy_at_zero() {
         [
             part("Your ban 0", false),
             part("Enemy 0", false),
-            part("Lobby 2", false),
+            muted("Lobby 2"),
         ]
     );
 
@@ -309,7 +319,7 @@ fn a_lobby_only_row_still_shows_your_ban_and_enemy_at_zero() {
         [
             part("Your ban 0", false),
             part("Enemy 0", false),
-            part("Side not read 1", false),
+            muted("Side not read 1"),
         ]
     );
 
@@ -455,8 +465,8 @@ fn a_mixed_row_keeps_both_sides_and_adds_lobby_and_side_not_read() {
         [
             part("Your ban 0", false),
             part("Enemy 2", false),
-            part("Side not read 1", false),
-            part("Lobby 1", false),
+            muted("Side not read 1"),
+            muted("Lobby 1"),
         ]
     );
 }
@@ -589,48 +599,6 @@ fn texts_at(mut element: Element<'_, Message>, width: f32) -> Vec<(String, Recta
 }
 
 #[test]
-fn nothing_is_cut_at_the_720_px_minimum() {
-    // 720 px window, 24 px gutters.
-    const CONTENT_720: f32 = 672.0;
-    let mut games = banned("wrecking-ball", 10, 3, 6);
-    games.extend(banned("junker-queen", 4, 1, 2));
-    let mut none = sample().remove(0);
-    none.session_id = "no-ban".into();
-    none.bans_picks = None;
-    games.push(none);
-    let (_dir, mut app) = app_with(games);
-    when_banned(&mut app);
-    let line = "ALL TIME · 2 HEROES · 14 GAMES WITH A BAN READ · 1 GAME WITH NO BAN READ LEFT OUT";
-    let all = texts_at(crate::heroes_page::view(&app, CONTENT_720), CONTENT_720);
-    let wide = texts_at(crate::heroes_page::view(&app, 10_000.0), 10_000.0);
-    // Each text, whole, gets its one-line width or wraps to more lines,
-    // and ends before the next one in its row starts: the stats line
-    // before Sort, a hero name before its Games count.
-    for (words, next) in [
-        (line, "Sort"),
-        ("Wrecking Ball", "10"),
-        ("Junker Queen", "4"),
-    ] {
-        let i = all
-            .iter()
-            .position(|(t, _)| t == words)
-            .unwrap_or_else(|| panic!("{words} not drawn whole: {all:?}"));
-        let (at, after) = (all[i].1, all[i + 1].clone());
-        let whole = wide.iter().find(|(t, _)| t == words).expect("drawn wide").1;
-        assert!(
-            at.width + 0.5 >= whole.width || at.height > whole.height + 1.0,
-            "{words} cut at 720: {at:?}, needs {whole:?} on one line"
-        );
-        assert_eq!(after.0, next, "{all:?}");
-        assert!(
-            at.x + at.width <= after.1.x + 0.5,
-            "{words} cut at 720: {at:?} runs into {after:?}"
-        );
-        assert!(at.x + at.width <= CONTENT_720 + 0.5, "{words}: {at:?}");
-    }
-}
-
-#[test]
 fn only_a_real_own_ban_is_drawn_as_the_tag() {
     let mut games = banned("ana", 2, 1, 1);
     games.extend(banned("mercy", 2, 0, 1));
@@ -671,44 +639,5 @@ fn sort_messages_reach_the_page_state() {
     }
 }
 
-#[test]
-fn hovering_the_banned_by_cell_opens_its_tooltip() {
-    // The tooltip's words are [`split_name`] (tested above); iced's
-    // tooltip overlay does not take operations, so this checks it opens.
-    use iced::advanced::{Shell, clipboard, mouse};
-    let row = only_row(&[lobby_only("sigma", 0)]);
-    let mut cell = split(&row);
-    let renderer = headless();
-    let mut tree = Tree::new(&cell);
-    let node = cell.as_widget_mut().layout(
-        &mut tree,
-        &renderer,
-        &Limits::new(iced::Size::ZERO, iced::Size::new(240.0, 400.0)),
-    );
-    let viewport = Rectangle::with_size(iced::Size::new(240.0, 400.0));
-    let tip_open = |cell: &mut Element<'_, Message>, tree: &mut Tree| {
-        cell.as_widget_mut()
-            .overlay(
-                tree,
-                Layout::new(&node),
-                &renderer,
-                &viewport,
-                iced::Vector::ZERO,
-            )
-            .is_some()
-    };
-    assert!(!tip_open(&mut cell, &mut tree), "closed until hovered");
-    let at = iced::Point::new(4.0, node.bounds().height / 2.0);
-    let mut messages = Vec::new();
-    cell.as_widget_mut().update(
-        &mut tree,
-        &iced::Event::Mouse(mouse::Event::CursorMoved { position: at }),
-        Layout::new(&node),
-        mouse::Cursor::Available(at),
-        &renderer,
-        &mut clipboard::Null,
-        &mut Shell::new(&mut messages),
-        &viewport,
-    );
-    assert!(tip_open(&mut cell, &mut tree), "the tooltip opens on hover");
-}
+#[path = "heroes_banned_view_fit_tests.rs"]
+mod fit;

@@ -7,10 +7,11 @@
 //! chrome: Hero (portrait, role, name), Games, Decided (the count, muted,
 //! then the record), Win rate (the shared bar and a whole percent from 10
 //! decided games, else "Too few games (n of 10)") and Banned by ("Your
-//! ban N", tinted as a tag only above 0, and "Enemy N" on every row, then
-//! "Side not read N" and "Lobby N" when there is one, in the muted style;
-//! its tooltip, the spoken label too, names every part in order). Headers sort like Maps: the
-//! active one in the accent with a chevron. No Best or Worst rail, so
+//! ban N", tinted as a tag only above 0, and "Enemy N" in TEXT_2 on every
+//! row, then "Side not read N" and "Lobby N" when there is one, muted in
+//! TEXT_3 like the Decided count; its tooltip, the spoken label too, names
+//! every part in order). Headers sort like Maps: the active one in the
+//! accent with a chevron. No Best or Worst rail, so
 //! nothing ranks as a pick. With no rows, one empty card says why, with
 //! no Sort and no stats line. Below an 860 px window the columns narrow
 //! and the hero name and the stats line wrap rather than clip.
@@ -100,11 +101,13 @@ pub fn cols(width: f32) -> Cols {
             split: 240.0,
         }
     } else if crate::overview_page::window_for(width) < COMPACT_BELOW {
+        // Games keeps its sorted header (label, gap, chevron) whole;
+        // Banned by wraps its parts, so it gives up the 12 px.
         Cols {
-            games: 44.0,
+            games: 56.0,
             decided: 112.0,
             rate: 120.0,
-            split: 140.0,
+            split: 128.0,
         }
     } else {
         Cols {
@@ -303,22 +306,41 @@ pub struct SplitPart {
     /// Drawn as the accent-tinted Your ban tag: only when our team banned
     /// the hero at least once.
     pub tag: bool,
+    /// Drawn muted in TEXT_3, like the Decided count: Side not read and
+    /// Lobby, the bans with no side.
+    pub muted: bool,
+}
+
+/// The colour a part's words are drawn in: TEXT in the Your ban tag,
+/// TEXT_3 for a muted part, else TEXT_2 (Enemy, and Your ban at 0).
+pub fn part_color(p: &SplitPart) -> iced::Color {
+    if p.tag {
+        TEXT
+    } else if p.muted {
+        TEXT_3
+    } else {
+        TEXT_2
+    }
 }
 
 /// "Your ban N" and "Enemy N" on every row, 0 included (Your ban tinted
 /// only above 0), then "Side not read N" and "Lobby N" only above 0, both
-/// muted, never the tag. Wraps inside the cell.
+/// muted in TEXT_3, never the tag. Wraps inside the cell.
 pub fn split_parts(r: &BanRow) -> Vec<SplitPart> {
-    let part = |words: String, tag| SplitPart { words, tag };
+    let part = |words: String, tag, muted| SplitPart { words, tag, muted };
     let mut parts = vec![
-        part(format!("{YOUR_BAN} {}", r.own), r.own > 0),
-        part(format!("{ENEMY} {}", r.enemy), false),
+        part(format!("{YOUR_BAN} {}", r.own), r.own > 0, false),
+        part(format!("{ENEMY} {}", r.enemy), false, false),
     ];
     if r.side_not_read > 0 {
-        parts.push(part(format!("{SIDE_NOT_READ} {}", r.side_not_read), false));
+        parts.push(part(
+            format!("{SIDE_NOT_READ} {}", r.side_not_read),
+            false,
+            true,
+        ));
     }
     if r.lobby > 0 {
-        parts.push(part(format!("{LOBBY} {}", r.lobby), false));
+        parts.push(part(format!("{LOBBY} {}", r.lobby), false, true));
     }
     parts
 }
@@ -335,10 +357,10 @@ pub fn split_name(r: &BanRow) -> String {
 fn split(r: &BanRow) -> Element<'static, Message> {
     let mut cell = Row::new().spacing(8).align_y(Alignment::Center);
     for part in split_parts(r) {
-        let t = text(part.words)
+        let t = text(part.words.clone())
             .size(12)
             .font(FONT_SEMIBOLD)
-            .color(if part.tag { TEXT } else { TEXT_2 })
+            .color(part_color(&part))
             .wrapping(Wrapping::None);
         cell = cell.push(if part.tag {
             container(t)
