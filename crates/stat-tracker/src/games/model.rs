@@ -233,6 +233,11 @@ pub struct Game {
     /// read was weak ([`crate::model::QueueTitle::warning`]). `None` with
     /// the queue title reader off.
     pub queue_title: Option<crate::model::QueueTitle>,
+    /// The rank update screen read after this game
+    /// ([`PersonalMatch::rank_update`]). `None` with the rank reader off, when
+    /// the screen was not read, and on games recorded before it existed.
+    #[serde(default)]
+    pub rank_update: Option<crate::model::RankUpdate>,
     /// The game's real start and end ([`crate::model::MatchTimes`]). `None`
     /// on a game recorded before the tracker stored them.
     #[serde(default)]
@@ -304,6 +309,7 @@ impl Game {
             bans_picks: m.bans_picks.clone(),
             bans_picks_status: m.bans_picks_status.clone(),
             queue_title: m.queue_title.clone(),
+            rank_update: m.rank_update.clone(),
             match_times: m.match_times.as_ref().map(GameTimes::from_stored),
         }
     }
@@ -624,6 +630,7 @@ mod tests {
             bans_picks: None,
             bans_picks_status: None,
             queue_title: None,
+            rank_update: None,
             match_times: None,
         };
         assert!(game.field_unsure("dmg"));
@@ -661,6 +668,7 @@ mod tests {
             bans_picks: None,
             bans_picks_status: None,
             queue_title: None,
+            rank_update: None,
             match_times: None,
         };
         for field in [
@@ -701,6 +709,7 @@ mod review_tests {
             bans_picks: None,
             bans_picks_status: None,
             queue_title: None,
+            rank_update: None,
             match_times: None,
         }
     }

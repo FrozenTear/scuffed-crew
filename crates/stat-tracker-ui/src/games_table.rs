@@ -682,17 +682,31 @@ fn game_row(
                 } else {
                     iced::Font::DEFAULT
                 };
-                // The sign right after the name and before the chips, so a
-                // narrow column clips the chips first. The Map column is a
-                // share, so with the sign the cell reads its width to cap the
-                // name, which wraps inside the cap, and keep the sign's
-                // full width (map_name_max_width).
+                // The sign right after the name and before the chips. The
+                // Map column is a share, so the cell reads its width: with
+                // the sign it caps the name, which wraps inside the cap, and
+                // keeps the sign's full width (map_name_max_width), and a
+                // chip that does not fit is shortened with "…" and the cell
+                // gets a tooltip with the full names (games_map_fit).
                 let parts = crate::games_detail::map_cell_parts(g, doubt);
-                if parts.contains(&MapPart::Warn) {
+                if parts.len() > 1 {
+                    let mode = games_rows::mode_chip(&g.map_name);
                     responsive(move |size| {
-                        let max = crate::games_detail::map_name_max_width(size.width, &parts);
-                        let m = map_cell(&name, color, font, &parts, max);
-                        container(m).center_y(Fill).into()
+                        let fit = crate::games_map_fit::fit(
+                            size.width,
+                            size.height,
+                            &name,
+                            font,
+                            &parts,
+                            mode,
+                        );
+                        let shown = fit.name.as_deref().unwrap_or(&name);
+                        let m = map_cell(shown, color, font, &fit.parts, fit.name_max);
+                        let m = container(m).center_y(Fill);
+                        match fit.tip {
+                            Some(tip) => crate::games_bans_view::with_tip(m, tip),
+                            None => m.into(),
+                        }
                     })
                     .width(Fill)
                     .height(Length::Fixed(h))
@@ -714,8 +728,9 @@ fn game_row(
                 Some(len) => text(len).size(SIZE_META).color(TEXT_2).into(),
                 None => text("-").size(SIZE_META).color(TEXT_3).into(),
             },
+            Col::Rank => crate::games_rank::cell(g),
             // Not recorded by the tracker (the Sort note says so).
-            Col::Rank | Col::Crew => text("-").size(SIZE_META).color(TEXT_3).into(),
+            Col::Crew => text("-").size(SIZE_META).color(TEXT_3).into(),
             Col::Time => {
                 let (date, hm) = games_rows::time_cell_in(g, state.grouping, &chrono::Local);
                 let hm = text(hm).size(SIZE_META).color(TEXT_2);
@@ -810,8 +825,9 @@ fn warn_sign() -> Element<'static, Message> {
 /// The list row's Map cell from `parts` in order. With `name_max` the name
 /// is capped at that width (a long name wraps inside the cap, like a sure
 /// one wraps in its cell), so the sign after it keeps its width; without
-/// it the name draws as before. In the list row a squeezed
-/// chip clips on one line instead of becoming a two-line pill.
+/// it the name draws as before. In the list row a chip stays on one line
+/// instead of becoming a two-line pill; `parts` already has any chip too
+/// wide for the cell shortened with "…" (`games_map_fit::fit`).
 fn map_cell(
     name: &str,
     color: Color,
@@ -976,8 +992,8 @@ pub(crate) fn small_chip_owned(
 }
 
 /// A small outline chip with its label wrapped as `wrapping` says. The list
-/// row's Map cell passes `Wrapping::None`: its cell clips, so a squeezed
-/// chip there clips on one line.
+/// row's Map cell passes `Wrapping::None` and a label that fits, shortened
+/// with "…" when the full one would not (`games_map_fit::fit`).
 fn chip_box(
     label: String,
     color: Color,
@@ -1002,6 +1018,14 @@ fn chip_box(
     })
     .into()
 }
+
+#[cfg(test)]
+#[path = "games_table_fit_tests.rs"]
+mod fit_tests;
+
+#[cfg(test)]
+#[path = "games_map_fit_tests.rs"]
+mod map_fit_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1372,9 +1396,11 @@ mod tests {
     /// laid out with the tiny-skia renderer for every real window from 720
     /// to 1920 px in 1 px steps: the window's grid, and its width minus both
     /// page gutters as the row width, so the Map cell's `responsive` runs.
-    /// Also with the two names that wrap in real windows, where an uncapped
-    /// sign shrinks: "Wuxing University - Water College" (1100 to 1239 px)
-    /// and "Workshop Green Screen" (1100 to 1107 px). The sign keeps its
+    /// Also with two long names that wrap in some real windows, where an
+    /// uncapped sign shrinks: "Wuxing University - Water College" and
+    /// "Workshop Green Screen", both from 1100 px up. With the 96 px Rank
+    /// column (`games_rows::RANK_W`) more names wrap, over slightly wider
+    /// window ranges than under the spec's 64 and 72 px. The sign keeps its
     /// full width inside the cell, after the name and its gap, and the name
     /// stays within its cap, wrapping inside it.
     #[test]
@@ -1420,7 +1446,20 @@ mod tests {
                 let cell = &cells[map_at];
                 let cell_w = cell.bounds().width;
                 let inner = row_node(cell);
-                assert_eq!(inner.children().len(), parts.len(), "{grid:?} at {width}");
+                // The name, the sign and the mode chip always show (the
+                // mode chip may end in "…"). A queue chip with no room
+                // even for "…" is left out, and then the tooltip names it.
+                let mode = games_rows::mode_chip(&g.map_name);
+                let h = cell.bounds().height;
+                let fit =
+                    crate::games_map_fit::fit(cell_w, h, &g.map_name, FONT_BOLD, &parts, mode);
+                let shown = &fit.parts;
+                super::map_fit_tests::shows_mode_and_names_queue(
+                    &parts,
+                    &fit,
+                    &format!("{grid:?} at {width}"),
+                );
+                assert_eq!(inner.children().len(), shown.len(), "{grid:?} at {width}");
                 let [name, sign, ..] = inner.children() else {
                     panic!("name and sign first");
                 };
@@ -1429,7 +1468,7 @@ mod tests {
                     "{} {grid:?} window {window} row {width}: cell {cell_w}, name {name:?}, sign {sign:?}",
                     g.map_name
                 );
-                let cap = map_name_max_width(cell_w, &parts).unwrap();
+                let cap = map_name_max_width(cell_w, shown).unwrap();
                 assert!(name.width > 0.0 && name.width <= cap + 0.5, "{at}");
                 assert_eq!(sign.width, MAP_WARN_W, "{at}");
                 assert!(sign.x + 0.5 >= name.x + name.width + MAP_CELL_GAP, "{at}");
