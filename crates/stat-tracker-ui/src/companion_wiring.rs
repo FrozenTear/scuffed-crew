@@ -41,13 +41,19 @@ fn companion_page_message_and_tick_write_the_page_file() {
     let _ = app.update(Message::Tick);
     assert_eq!(load_page_state(dir.path()).page, Page::PicksAndBans);
 
+    app.daemon.pid = Some(7);
+    let seen = chrono::Utc::now().timestamp();
     let status = stat_tracker::ocr_status::status_path(dir.path());
     std::fs::write(
         &status,
-        r#"{"companion_stage":{"kind":"in_game","maps":[],"since":3}}"#,
+        format!(
+            r#"{{"pid":7,"companion_stage":{{"kind":"in_game","maps":[],"since":{seen},"seen":{seen}}}}}"#
+        ),
     )
     .unwrap();
-    let _ = app.update(Message::Tick);
+    // Tick's refresh_view clears a pid that is not a live tracker, so
+    // call the page tick directly after setting the live pid.
+    app.tick_companion_pages();
     assert_eq!(load_page_state(dir.path()).page, Page::Tonight);
 }
 

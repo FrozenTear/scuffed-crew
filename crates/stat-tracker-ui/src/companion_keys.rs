@@ -5,13 +5,15 @@
 //! handles the evdev binds and the `companion_next`, `companion_prev` and
 //! `companion_safe` file triggers, writes `<data_dir>/companion_page.json`,
 //! and applies auto-advance from the status file's `companion_stage` (the C3
-//! shape). The companion process reads the page file on its tick.
+//! shape), through `read_companion_stage` and the C3 freshness bound. A
+//! missing pid, a pid that does not match, or a stale `seen` is ignored,
+//! so the last page stays. The companion process reads the page file on
+//! its tick.
 
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use iced::{Subscription, Task};
-use serde::Deserialize;
 
 use crate::app::{Message, TrackerApp};
 use crate::hotkey::{self, HotkeyAction};
@@ -236,43 +238,52 @@ pub fn consume_page_triggers(data_dir: &Path, last: &mut TriggerMtimes) -> Optio
 
 /// Map the status file's `companion_stage` (C3) to a page-model stage.
 ///
-/// Missing file, missing field, or `unknown` -> `None`, so the last page
-/// stays. Hero select and hero ban are `MapLocked { map_read: false }`
-/// until detect produces InGame or another match-on signal, so the page
-/// does not auto-advance to Bans and picks (Tonight comes back, or stays,
-/// through a lock and a later unread vote). Flip `map_read` in the PR
-/// that adds InGame.
-pub fn stage_from_status(data_dir: &Path) -> Option<Stage> {
-    let bytes = std::fs::read(stat_tracker::ocr_status::status_path(data_dir)).ok()?;
-    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    let stage = value.get("companion_stage")?;
-    if stage.is_null() {
+/// Reads through [`stat_tracker::companion_stage::read_companion_stage`]
+/// and ignores a stage whose `seen` is older than
+/// [`stat_tracker::companion_stage::stage_is_current`]. Missing file,
+/// missing field, no live pid, a pid that does not match, a stale
+/// `seen`, or `unknown` -> `None`, so the last page stays. Hero select
+/// and hero ban are `MapLocked { map_read: false }` until detect produces
+/// InGame or another match-on signal, so the page does not auto-advance
+/// to Bans and picks (Tonight comes back, or stays, through a lock and a
+/// later unread vote). Flip `map_read` in the PR that adds InGame.
+pub fn stage_from_status(
+    data_dir: &Path,
+    live_pid: Option<u32>,
+    now: i64,
+    poll_interval: Duration,
+) -> Option<Stage> {
+    let pid = live_pid?;
+    let stage = stat_tracker::companion_stage::read_companion_stage(data_dir, pid)?;
+    if !stat_tracker::companion_stage::stage_is_current(stage.seen, now, poll_interval) {
         return None;
     }
-    let dto: StageDto = serde_json::from_value(stage.clone()).ok()?;
-    match dto.kind.as_str() {
-        "map_vote" => Some(Stage::MapVote {
-            maps_read: vote_maps_read(&dto.maps),
+    match stage.kind {
+        stat_tracker::companion_stage::StageKind::MapVote => Some(Stage::MapVote {
+            maps_read: vote_maps_read(&stage.maps),
         }),
         // map_read stays false until detect produces InGame (or another
         // match-on signal). Auto-advance to Bans and picks would leave
         // that page up through the match, because InGame is not produced
         // today and C3 leaves the last lock in the status file.
-        "hero_select" | "hero_ban" => Some(Stage::MapLocked { map_read: false }),
-        "in_game" => Some(Stage::MatchStart),
-        _ => None,
+        stat_tracker::companion_stage::StageKind::HeroSelect
+        | stat_tracker::companion_stage::StageKind::HeroBan => {
+            Some(Stage::MapLocked { map_read: false })
+        }
+        stat_tracker::companion_stage::StageKind::InGame => Some(Stage::MatchStart),
+        stat_tracker::companion_stage::StageKind::Unknown => None,
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct StageDto {
-    kind: String,
-    #[serde(default)]
-    maps: Vec<String>,
-}
-
-pub fn apply_status(state: PageState, data_dir: &Path, hold_stream_page: bool) -> PageState {
-    match stage_from_status(data_dir) {
+pub fn apply_status(
+    state: PageState,
+    data_dir: &Path,
+    live_pid: Option<u32>,
+    now: i64,
+    poll_interval: Duration,
+    hold_stream_page: bool,
+) -> PageState {
+    match stage_from_status(data_dir, live_pid, now, poll_interval) {
         Some(stage) => overlay_pages::on_stage(state, stage, hold_stream_page),
         None => state,
     }
@@ -294,7 +305,19 @@ impl TrackerApp {
             let _ = self.apply_companion_page(cmd);
         }
         let state = load_page_state(&self.data_dir);
-        let next = apply_status(state, &self.data_dir, self.page_keys.hold_stream_page);
+        let now = chrono::Utc::now().timestamp();
+        let poll = self
+            .saved_config
+            .auto_detect
+            .poll_interval(self.saved_config.reader.is_new());
+        let next = apply_status(
+            state,
+            &self.data_dir,
+            self.daemon.pid,
+            now,
+            poll,
+            self.page_keys.hold_stream_page,
+        );
         if next != state
             && let Err(e) = save_page_state(&self.data_dir, next)
         {
@@ -490,43 +513,57 @@ mod tests {
         assert_eq!(next.page, Page::MapVote);
     }
 
+    const LIVE_PID: u32 = 7;
+    const NOW: i64 = 1_000;
+
+    fn poll() -> std::time::Duration {
+        stat_tracker::config::NEW_READER_POLL_INTERVAL
+    }
+
+    fn write_stage(dir: &std::path::Path, pid: u32, kind: &str, maps: &str, seen: i64) {
+        let status = stat_tracker::ocr_status::status_path(dir);
+        std::fs::write(
+            status,
+            format!(
+                r#"{{"pid":{pid},"companion_stage":{{"kind":"{kind}","maps":{maps},"since":{seen},"seen":{seen}}}}}"#
+            ),
+        )
+        .unwrap();
+    }
+
+    fn apply_now(state: PageState, dir: &std::path::Path, hold: bool) -> PageState {
+        apply_status(state, dir, Some(LIVE_PID), NOW, poll(), hold)
+    }
+
     #[test]
     fn hold_the_stream_page_suppresses_auto_advance() {
         let dir = tempfile::tempdir().unwrap();
-        let status = stat_tracker::ocr_status::status_path(dir.path());
-        std::fs::write(
-            &status,
-            r#"{"companion_stage":{"kind":"map_vote","maps":["Busan","Ilios","Lijiang Tower"],"since":1}}"#,
-        )
-        .unwrap();
+        write_stage(
+            dir.path(),
+            LIVE_PID,
+            "map_vote",
+            r#"["Busan","Ilios","Lijiang Tower"]"#,
+            NOW,
+        );
         let start = PageState::default();
-        let held = apply_status(start, dir.path(), true);
+        let held = apply_now(start, dir.path(), true);
         assert_eq!(held.page, Page::Tonight);
         assert_eq!(held.stage, Stage::MapVote { maps_read: true });
-        let advanced = apply_status(start, dir.path(), false);
+        let advanced = apply_now(start, dir.path(), false);
         assert_eq!(advanced.page, Page::MapVote);
     }
 
     #[test]
     fn status_maps_lock_and_match_start() {
         let dir = tempfile::tempdir().unwrap();
-        let status = stat_tracker::ocr_status::status_path(dir.path());
-        std::fs::write(
-            &status,
-            r#"{"companion_stage":{"kind":"hero_select","maps":[],"since":2}}"#,
-        )
-        .unwrap();
+        write_stage(dir.path(), LIVE_PID, "hero_select", "[]", NOW);
         let start = PageState::default();
-        let locked = apply_status(start, dir.path(), false);
+        let locked = apply_now(start, dir.path(), false);
         assert_eq!(locked.page, Page::Tonight);
         assert_eq!(locked.stage, Stage::MapLocked { map_read: false });
 
-        std::fs::write(
-            &status,
-            r#"{"companion_stage":{"kind":"in_game","maps":[],"since":3}}"#,
-        )
-        .unwrap();
-        let back = apply_status(locked, dir.path(), true);
+        write_stage(dir.path(), LIVE_PID, "in_game", "[]", NOW);
+        let back = apply_now(locked, dir.path(), true);
         assert_eq!(back.page, Page::Tonight);
         assert_eq!(back.stage, Stage::MatchStart);
     }
@@ -534,20 +571,11 @@ mod tests {
     #[test]
     fn hero_select_then_unread_vote_leaves_tonight() {
         let dir = tempfile::tempdir().unwrap();
-        let status = stat_tracker::ocr_status::status_path(dir.path());
-        std::fs::write(
-            &status,
-            r#"{"companion_stage":{"kind":"hero_select","maps":[],"since":2}}"#,
-        )
-        .unwrap();
-        let s = apply_status(PageState::default(), dir.path(), false);
+        write_stage(dir.path(), LIVE_PID, "hero_select", "[]", NOW);
+        let s = apply_now(PageState::default(), dir.path(), false);
         assert_eq!(s.page, Page::Tonight);
-        std::fs::write(
-            &status,
-            r#"{"companion_stage":{"kind":"map_vote","maps":[],"since":3}}"#,
-        )
-        .unwrap();
-        let s = apply_status(s, dir.path(), false);
+        write_stage(dir.path(), LIVE_PID, "map_vote", "[]", NOW);
+        let s = apply_now(s, dir.path(), false);
         assert_eq!(s.page, Page::Tonight);
         assert_ne!(s.page, Page::PicksAndBans);
         assert!(!s.in_match);
@@ -565,14 +593,38 @@ mod tests {
         save_page_state(dir.path(), state).unwrap();
         assert_eq!(load_page_state(dir.path()), state);
 
-        let status = stat_tracker::ocr_status::status_path(dir.path());
-        std::fs::write(
-            &status,
-            r#"{"companion_stage":{"kind":"unknown","maps":[],"since":9}}"#,
-        )
-        .unwrap();
-        assert_eq!(apply_status(state, dir.path(), false), state);
-        std::fs::write(&status, r#"{}"#).unwrap();
-        assert_eq!(apply_status(state, dir.path(), false), state);
+        write_stage(dir.path(), LIVE_PID, "unknown", "[]", NOW);
+        assert_eq!(apply_now(state, dir.path(), false), state);
+        std::fs::write(stat_tracker::ocr_status::status_path(dir.path()), r#"{}"#).unwrap();
+        assert_eq!(apply_now(state, dir.path(), false), state);
+    }
+
+    #[test]
+    fn a_stale_seen_or_wrong_pid_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let start = PageState::default();
+        // Bound at the new reader's 1.5 s poll is 7 s; 8 s old is stale.
+        write_stage(
+            dir.path(),
+            LIVE_PID,
+            "map_vote",
+            r#"["Busan","Ilios","Lijiang Tower"]"#,
+            NOW - 8,
+        );
+        assert_eq!(apply_now(start, dir.path(), false), start);
+
+        write_stage(
+            dir.path(),
+            LIVE_PID,
+            "map_vote",
+            r#"["Busan","Ilios","Lijiang Tower"]"#,
+            NOW,
+        );
+        let wrong = apply_status(start, dir.path(), Some(LIVE_PID + 1), NOW, poll(), false);
+        assert_eq!(wrong, start);
+        let none = apply_status(start, dir.path(), None, NOW, poll(), false);
+        assert_eq!(none, start);
+        let current = apply_now(start, dir.path(), false);
+        assert_eq!(current.page, Page::MapVote);
     }
 }
