@@ -25,8 +25,8 @@
 //! refreshed at least every [`SEEN_REFRESH_SECS`] while the stage is still
 //! on screen. A reader should treat the stage as current only while
 //! `now - seen` is at most [`seen_current_for_secs`] (that refresh plus
-//! one poll interval plus 1 s, because `seen` is a whole second rounded
-//! down).
+//! two poll intervals plus 1 s, because `seen` is a whole second rounded
+//! down, and one poll may be skipped).
 //!
 //! Read across versions like the rest of the status file: a file from an
 //! older build has no stage (`None`), and a stage name a newer daemon adds
@@ -52,22 +52,34 @@ pub const SIGHTING_GAP_SECS: i64 = 60;
 pub const SEEN_REFRESH_SECS: i64 = 5;
 
 /// The largest `now - seen` a reader should treat as current while the
-/// stage is still on screen: [`SEEN_REFRESH_SECS`] plus one poll interval
-/// plus 1 s (`seen` is a whole second, rounded down). A shorter poll
-/// still counts as 1 s in this bound.
+/// stage is still on screen: [`SEEN_REFRESH_SECS`] plus two poll
+/// intervals plus 1 s (`seen` is a whole second, rounded down). The
+/// second poll is room for one skipped poll. A poll shorter than 1 s,
+/// including zero, counts as 1 s; a fractional poll rounds up.
 pub fn seen_current_for_secs(poll_interval: std::time::Duration) -> i64 {
-    let poll_secs = poll_interval.as_secs() as i64;
-    let poll_secs = if poll_interval.is_zero() {
-        0
+    let poll_secs = i64::try_from(poll_interval.as_secs()).unwrap_or(i64::MAX);
+    let poll_secs = if poll_interval.subsec_nanos() > 0 {
+        poll_secs.saturating_add(1)
     } else {
-        poll_secs.max(1)
-    };
-    SEEN_REFRESH_SECS + poll_secs + 1
+        poll_secs
+    }
+    .max(1);
+    SEEN_REFRESH_SECS
+        .saturating_add(poll_secs.saturating_mul(2))
+        .saturating_add(1)
 }
 
-/// True when `seen` is still within [`seen_current_for_secs`] of `now`.
+/// Slack for a `seen` slightly ahead of `now` (whole-second rounding
+/// or a small clock skew). Further ahead is not current.
+const SEEN_FUTURE_SLACK_SECS: i64 = 2;
+
+/// True when `now - seen` is in `-2..=seen_current_for_secs` (`-2` is
+/// [`SEEN_FUTURE_SLACK_SECS`]). A `seen` further in the future is not
+/// current.
 pub fn stage_is_current(seen: i64, now: i64, poll_interval: std::time::Duration) -> bool {
-    now.saturating_sub(seen) <= seen_current_for_secs(poll_interval)
+    let age = now.saturating_sub(seen);
+    let bound = seen_current_for_secs(poll_interval);
+    age >= -SEEN_FUTURE_SLACK_SECS && age <= bound
 }
 
 /// Which pre-game screen the daemon last saw. Written in snake case.
@@ -108,7 +120,7 @@ pub struct CompanionStage {
     pub since: i64,
     /// When the daemon last saw this sighting, in Unix seconds. Refreshed
     /// once [`SEEN_REFRESH_SECS`] have passed since the last write.
-    /// While the stage is on screen, `now - seen` stays under
+    /// While the stage is on screen, `now - seen` is at most
     /// [`seen_current_for_secs`]; treat the stage as current only within
     /// that bound. A missed screen or a stopped daemon leaves `seen`
     /// behind, including across an update restart that keeps the same pid.
