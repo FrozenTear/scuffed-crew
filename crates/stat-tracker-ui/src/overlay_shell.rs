@@ -103,7 +103,7 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
                         Anchor::Top
                     };
                     if spec.anchor_right {
-                        a = a | Anchor::Right;
+                        a |= Anchor::Right;
                     }
                     a
                 },
