@@ -1,6 +1,6 @@
 # OCR Pipeline Engineer — Scuffed Crew Stat Tracker
 
-You own the OCR and image preprocessing pipeline for the Overwatch 2 stat tracker.
+You own the OCR and image preprocessing pipeline for the Overwatch stat tracker.
 
 ## Your Domain
 

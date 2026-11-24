@@ -4,6 +4,7 @@
 //! `stat_tracker::storage::read_snapshot` so the spike exercises the real API.
 
 use chrono::{TimeZone, Utc};
+use stat_tracker::model::{RankNumber, RankText, RankUpdate};
 use stat_tracker::storage::{HeroSegment, MatchSession, PersonalMatch, Snapshot};
 use surrealdb_types::Datetime as SurrealDatetime;
 
@@ -147,24 +148,64 @@ pub(crate) fn pm(
     }
 }
 
+/// A rank update screen read, every value at 0.9 confidence.
+fn rank(
+    role: &str,
+    tier: &str,
+    division: Option<i64>,
+    progress: Option<i64>,
+    change: Option<i64>,
+) -> RankUpdate {
+    let word = |value: &str| {
+        Some(RankText {
+            value: value.into(),
+            confidence: 0.9,
+        })
+    };
+    let num = |value: Option<i64>| {
+        value.map(|value| RankNumber {
+            value,
+            confidence: 0.9,
+        })
+    };
+    RankUpdate {
+        role: word(role),
+        role_rank: word(tier),
+        division: num(division),
+        progress_pct: num(progress),
+        progress_change: num(change),
+        ..RankUpdate::default()
+    }
+}
+
 fn sample_snapshot() -> Snapshot {
     // Newest first, matching `get_all_matches` / live_snapshot.json.
     // Each session_id is one game (latest_per_game). Tonight is the local day.
+    // The first four have a rank for the Games table's Rank column: full
+    // and up, Champion full and down, tier only, and Grandmaster 5 at
+    // -100% -100% (the widest rank text, which the column must fit). The
+    // widest second line, measured in `every_rank_line_fits_the_rank_column`,
+    // is "+100% this game" (change alone, 81.7 px); the widest with both
+    // numbers is "-100% +100%" (61.7 px). The last has none.
     let matches = vec![
-        pm(
-            "sess-t1",
-            "Junker Queen",
-            "King's Row",
-            "Tank",
-            "victory",
-            28,
-            7,
-            9,
-            12400,
-            0,
-            18600,
-            dt(2026, 9, 2, 21, 14),
-        ),
+        {
+            let mut m = pm(
+                "sess-t1",
+                "Junker Queen",
+                "King's Row",
+                "Tank",
+                "victory",
+                28,
+                7,
+                9,
+                12400,
+                0,
+                18600,
+                dt(2026, 9, 2, 21, 14),
+            );
+            m.rank_update = Some(rank("Tank", "DIAMOND", Some(2), Some(45), Some(23)));
+            m
+        },
         {
             let mut m = pm(
                 "sess-t2",
@@ -182,6 +223,7 @@ fn sample_snapshot() -> Snapshot {
             );
             m.corrected_elims = Some(21);
             m.edited_fields = vec!["elims".into()];
+            m.rank_update = Some(rank("Damage", "CHAMPION", Some(3), Some(80), Some(-15)));
             m
         },
         {
@@ -219,22 +261,27 @@ fn sample_snapshot() -> Snapshot {
                     resolution: None,
                 },
             ];
+            m.rank_update = Some(rank("Support", "GOLD", None, None, None));
             m
         },
-        pm(
-            "sess-s16-1",
-            "Reinhardt",
-            "Numbani",
-            "Tank",
-            "victory",
-            22,
-            8,
-            11,
-            8100,
-            0,
-            24100,
-            dt(2026, 8, 18, 19, 40),
-        ),
+        {
+            let mut m = pm(
+                "sess-s16-1",
+                "Reinhardt",
+                "Numbani",
+                "Tank",
+                "victory",
+                22,
+                8,
+                11,
+                8100,
+                0,
+                24100,
+                dt(2026, 8, 18, 19, 40),
+            );
+            m.rank_update = Some(rank("Tank", "GRANDMASTER", Some(5), Some(-100), Some(-100)));
+            m
+        },
         pm(
             "sess-s16-2",
             "Soldier: 76",

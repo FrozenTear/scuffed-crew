@@ -7,9 +7,10 @@
 //! layout keeps its own Overview ([`crate::overview`]).
 //!
 //! Rank, queue, length and crew are spec example data and are not drawn
-//! here. Rank and crew are not stored yet. Queue (`queue_title`, only
-//! with the queue title reader on) and length (`match_times`) are stored
-//! now and shown on the Games tab, not on this page yet.
+//! here. Crew is not stored yet. Rank (`rank_update`, only with the rank
+//! reader on), queue (`queue_title`, only with the queue title reader on)
+//! and length (`match_times`) are stored now and shown on the Games tab,
+//! not on this page yet.
 
 use iced::widget::{Column, Row, button, column, row, text};
 use iced::{Alignment, Background, Border, Padding, Theme};

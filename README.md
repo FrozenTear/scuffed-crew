@@ -2,7 +2,7 @@
 
 Community site and tooling for the Scuffed Crew gaming org. One Rust monorepo:
 the public site and admin panel, the backend that serves them, and the desktop
-tooling we use day to day — including an OCR stat tracker for Overwatch 2
+tooling we use day to day, including an OCR stat tracker for Overwatch
 scoreboards.
 
 Built with [Dioxus](https://dioxuslabs.com) (WASM frontend), [Axum](https://github.com/tokio-rs/axum)
@@ -20,7 +20,7 @@ Built with [Dioxus](https://dioxuslabs.com) (WASM frontend), [Axum](https://gith
 | `crates/db` | SurrealDB client, migrations, queries |
 | `crates/auth` | OAuth, sessions, crypto |
 | `crates/chat` | Nostr chat backend (relay client, NIP-44/59) |
-| `crates/stat-tracker` | Overwatch 2 stat tracker — OCR capture daemon |
+| `crates/stat-tracker` | Overwatch stat tracker: OCR capture daemon |
 | `crates/stat-tracker-ui` | Iced 0.14 desktop GUI (`stat-tracker-gui`) |
 | `crates/stat-tracker-core` | Tracker base layer shared by the daemon and GUI: config, parsing, shared model types |
 | `crates/map-pipeline`, `crates/map-renderer` | Map asset tooling for the strategy editor |
@@ -80,7 +80,7 @@ encryption key (`PRODUCTION=1` gate).
 
 ## Stat tracker
 
-A desktop daemon that watches Overwatch 2, OCRs the scoreboard when you hit
+A desktop daemon that watches Overwatch, OCRs the scoreboard when you hit
 Tab, and keeps per-game stats locally (optionally syncing to your org's site).
 Ships as a portable tarball per release — see the
 [releases page](https://github.com/FrozenTear/scuffed-crew/releases) and
