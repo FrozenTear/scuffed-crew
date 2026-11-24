@@ -2889,6 +2889,7 @@ mod tests {
             "hero_sr_change": { "value": -17, "confidence": 0.0 },
             "next_mode_hint": { "value": null, "confidence": 0.0 },
             "queue_title": { "value": "COMPETITIVE: ROLE QUEUE", "confidence": 0.8 },
+            "queue": { "value": null, "confidence": null },
             "rank_recognizer": "rank-v1"
         })
     }
@@ -3008,6 +3009,7 @@ mod tests {
             "hero_sr_change": "not an object",
             "next_mode_hint": { "value": ["x"], "confidence": null },
             "queue_title": { "value": 7, "confidence": 0.5 },
+            "queue": { "value": 2, "confidence": 0.5 },
             "rank_recognizer": "Rank V1"
         });
         let mut zero = match_object("sess-rank-zero", 3);
@@ -3057,6 +3059,7 @@ mod tests {
                 "hero_sr_change": null_field,
                 "next_mode_hint": null_field,
                 "queue_title": half(serde_json::Value::Null),
+                "queue": half(serde_json::Value::Null),
                 "rank_recognizer": null
             })
         );
@@ -3090,6 +3093,83 @@ mod tests {
         assert_eq!(edge_row["hero_sr"], half(serde_json::json!(u32::MAX)));
     }
 
+    /// `rank.queue` (#654): each known value is stored and read back, a value
+    /// this server does not know reads as `unknown`, and an upload without it
+    /// (a tracker before 0.7) stores a null queue, not a guess.
+    #[tokio::test]
+    async fn upload_rank_queue_known_unknown_and_missing() {
+        let (state, member_id, daemon_token, session_token) = member_reader().await;
+        let with_queue = |sid: &str, elims: u32, queue: &str| {
+            let mut game = match_object(sid, elims);
+            game["rank"] = serde_json::json!({
+                "role": { "value": "Tank", "confidence": 0.9 },
+                "queue_title": { "value": "6V6 ROLE QUEUE", "confidence": 0.7 },
+                "queue": { "value": queue, "confidence": 0.75 },
+                "rank_recognizer": "rank-v1"
+            });
+            game
+        };
+        let queues = ["role_5v5", "open_5v5", "role_6v6", "open_6v6", "unknown"];
+        let mut games: Vec<serde_json::Value> = queues
+            .iter()
+            .enumerate()
+            .map(|(i, q)| with_queue(&format!("sess-q-{q}"), i as u32 + 1, q))
+            .collect();
+        games.push(with_queue("sess-q-newer", 8, "role_7v7"));
+        let mut old = match_object("sess-q-old", 9);
+        old["rank"] = serde_json::json!({
+            "role": { "value": "Tank", "confidence": 0.9 },
+            "rank_recognizer": "rank-v1"
+        });
+        games.push(old);
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &daemon_token,
+            serde_json::json!({ "matches": games }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{parsed}");
+        assert_eq!(parsed["inserted"], 7, "{parsed}");
+
+        let page = get_my_matches(create_router(state.clone()), &session_token).await;
+        let sure = |v: &str| serde_json::json!({ "value": v, "confidence": 0.75 });
+        for q in queues {
+            let row = row_by_session(&page, &format!("sess-q-{q}"));
+            assert_eq!(row["rank"]["queue"], sure(q), "{q}");
+            assert_eq!(row["rank"]["queue_title"]["value"], "6V6 ROLE QUEUE");
+        }
+        let newer = row_by_session(&page, "sess-q-newer");
+        assert_eq!(newer["rank"]["queue"], sure("unknown"));
+        assert_eq!(newer["rank"]["role"]["value"], "Tank");
+        let old = row_by_session(&page, "sess-q-old");
+        assert_eq!(
+            old["rank"]["queue"],
+            serde_json::json!({ "value": null, "confidence": null }),
+            "no queue sent stores a null queue, not a guess"
+        );
+
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        let queue_of = |sid: &str| {
+            rows.iter()
+                .find(|r| r.session_id == sid)
+                .and_then(|r| r.rank.as_ref())
+                .map(|r| r.queue.value)
+        };
+        assert_eq!(
+            queue_of("sess-q-role_6v6"),
+            Some(Some(scuffed_types::RankQueue::Role6v6))
+        );
+        assert_eq!(
+            queue_of("sess-q-newer"),
+            Some(Some(scuffed_types::RankQueue::Unknown))
+        );
+        assert_eq!(queue_of("sess-q-old"), Some(None));
+    }
+
     #[tokio::test]
     async fn upload_empty_rank_object_reads_back_all_null_not_null() {
         let (state, _member_id, daemon_token, session_token) = member_reader().await;
@@ -3117,6 +3197,7 @@ mod tests {
             "hero_sr_change": null_field,
             "next_mode_hint": null_field,
             "queue_title": null_field,
+            "queue": null_field,
             "rank_recognizer": null
         });
         let page = get_my_matches(create_router(state.clone()), &session_token).await;
