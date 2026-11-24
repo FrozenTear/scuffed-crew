@@ -7,6 +7,7 @@
 //! `crate::config` in that crate name these modules. New code may import
 //! from `stat_tracker_core` directly; the re-exports are for existing paths.
 
+pub mod companion_stage;
 pub mod config;
 pub mod fs_mode;
 pub mod hero_auth;

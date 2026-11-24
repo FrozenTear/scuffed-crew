@@ -875,6 +875,8 @@ pub(crate) async fn run_loop(
                             accolade_map,
                         );
 
+                        // The companion reads each known phase as its pre-game stage.
+                        daemon::companion_stage::publish(data_dir, &phase);
                         // Boundaries live in `boundary::decide_poll`. A map vote
                         // or a hero ban after a board-followed hint splits and
                         // seals it. A hero select only arms. A confirmed word
