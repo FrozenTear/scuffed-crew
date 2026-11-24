@@ -92,7 +92,9 @@ fn tip_box(words: String) -> Element<'static, Message> {
         .into()
 }
 
-fn with_tip(
+/// `body` with `words` as its tooltip, above it. The Games list's Map cell
+/// uses it too.
+pub(crate) fn with_tip(
     body: impl Into<Element<'static, Message>>,
     words: String,
 ) -> Element<'static, Message> {

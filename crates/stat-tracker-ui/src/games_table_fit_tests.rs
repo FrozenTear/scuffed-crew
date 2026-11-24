@@ -31,7 +31,9 @@ fn natural_width(renderer: &iced::Renderer, element: Element<'_, Message>) -> f3
 }
 
 /// A game with the widest rank the cell draws: "Grandmaster 5" over
-/// "-100% +100%", the widest second line.
+/// "+100% this game", the widest second line (change alone, 81.7 px; the
+/// widest with both numbers is "-100% +100%" at 61.7 px), as measured in
+/// `games_rank`'s `every_rank_line_fits_the_rank_column`.
 fn widest_rank_game() -> Game {
     let mut g = crate::games_rows::tests::game(Outcome::Win, "2026-09-02T21:14:00Z", &[]);
     let word = |value: &str| {
@@ -50,7 +52,6 @@ fn widest_rank_game() -> Game {
         role: word("Damage"),
         role_rank: word("GRANDMASTER"),
         division: num(5),
-        progress_pct: num(-100),
         progress_change: num(100),
         ..RankUpdate::default()
     });
@@ -68,6 +69,8 @@ const WINDOWS: [f32; 10] = [
 fn the_row_fits_with_the_wider_rank_column() {
     let renderer = crate::games_bans_view::tests::headless();
     let mut g = widest_rank_game();
+    let lines = crate::games_rank::RankShown::from_game(&g).unwrap().lines();
+    assert_eq!(lines, ["Grandmaster 5", "+100% this game"]);
     let rank_need = natural_width(&renderer, crate::games_rank::cell(&g));
     // The widest hero cell: every hero name, with the unsure sign.
     let (hero_need, hero) = scuffed_types::HERO_NAMES

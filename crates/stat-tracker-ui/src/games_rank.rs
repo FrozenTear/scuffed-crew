@@ -28,6 +28,9 @@ use stat_tracker::model::{RankNumber, RankText};
 /// A missing or unsure role, as the site words it.
 pub const ROLE_UNKNOWN: &str = "Role unknown";
 
+/// The tooltip's second sentence when progress is below 0.
+pub const DEMOTION_PROTECTION: &str = "Negative progress means demotion protection.";
+
 /// The tooltip text size (the bans and picks tooltips use the same).
 const TIP_SIZE: f32 = 12.0;
 
@@ -115,7 +118,8 @@ impl RankShown {
         parts
     }
 
-    /// One sentence for the tooltip.
+    /// The tooltip: one sentence, and with negative progress a second one
+    /// that says what it means.
     pub fn sentence(&self) -> String {
         let mut parts = vec![self.context()];
         if let Some(rank) = self.rank_text() {
@@ -127,20 +131,25 @@ impl RankShown {
         if let Some(c) = self.change {
             parts.push(format!("{} this game", change_text(c)));
         }
-        format!("Rank: {}", parts.join(", "))
+        let rank = format!("Rank: {}", parts.join(", "));
+        if self.progress.is_some_and(|p| p < 0) {
+            format!("{rank}. {DEMOTION_PROTECTION}")
+        } else {
+            rank
+        }
     }
 
     /// The cell's lines: the rank text, then progress and change ("45%
-    /// +23%") smaller under it. Without a rank text, progress and change
-    /// are the one line.
+    /// +23%") smaller under it. One number alone says which it is, in the
+    /// tooltip's words ("45% progress", "-5% this game"). Without a rank
+    /// text, the numbers are the one line.
     pub fn lines(&self) -> Vec<String> {
-        let numbers: Vec<String> = self
-            .progress
-            .map(|p| format!("{p}%"))
-            .into_iter()
-            .chain(self.change.map(change_text))
-            .collect();
-        let numbers = (!numbers.is_empty()).then(|| numbers.join(" "));
+        let numbers = match (self.progress, self.change) {
+            (Some(p), Some(c)) => Some(format!("{p}% {}", change_text(c))),
+            (Some(p), None) => Some(format!("{p}% progress")),
+            (None, Some(c)) => Some(format!("{} this game", change_text(c))),
+            (None, None) => None,
+        };
         self.rank_text().into_iter().chain(numbers).collect()
     }
 }

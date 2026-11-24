@@ -114,12 +114,21 @@ fn sentence_with_and_without_queue_and_role() {
     g.rank_update.as_mut().unwrap().role = None;
     assert_eq!(
         shown(&g).sentence(),
-        "Rank: Role unknown, Gold 3, -15% progress, -15% this game"
+        "Rank: Role unknown, Gold 3, -15% progress, -15% this game. \
+         Negative progress means demotion protection."
     );
     g.queue_title = Some(queue("ROLE QUEUE"));
     assert_eq!(
         shown(&g).sentence(),
-        "Rank: Role unknown, Role Queue, Gold 3, -15% progress, -15% this game"
+        "Rank: Role unknown, Role Queue, Gold 3, -15% progress, -15% this game. \
+         Negative progress means demotion protection."
+    );
+    // Zero progress is not negative; a negative change alone says nothing
+    // about demotion protection.
+    let g = with_rank(rank("Support", "Gold", 3, 0, -15));
+    assert_eq!(
+        shown(&g).sentence(),
+        "Rank: Support, Gold 3, 0% progress, -15% this game"
     );
 }
 
@@ -156,7 +165,24 @@ fn cell_lines_for_each_case() {
         progress_pct: num(-15),
         ..RankUpdate::default()
     });
-    assert_eq!(cell_lines(&numbers), ["-15%"]);
+    assert_eq!(cell_lines(&numbers), ["-15% progress"]);
+    // One number alone says which it is, in the tooltip's words.
+    let mut progress_only = with_rank(rank("Support", "GOLD", 3, 45, 0));
+    progress_only.rank_update.as_mut().unwrap().progress_change = None;
+    assert_eq!(cell_lines(&progress_only), ["Gold 3", "45% progress"]);
+    assert_eq!(
+        shown(&progress_only).sentence(),
+        "Rank: Support, Gold 3, 45% progress"
+    );
+    let mut change_only = with_rank(rank("Support", "GOLD", 3, 0, -5));
+    change_only.rank_update.as_mut().unwrap().progress_pct = None;
+    assert_eq!(cell_lines(&change_only), ["Gold 3", "-5% this game"]);
+    assert_eq!(
+        shown(&change_only).sentence(),
+        "Rank: Support, Gold 3, -5% this game"
+    );
+    change_only.rank_update.as_mut().unwrap().progress_change = num(23);
+    assert_eq!(cell_lines(&change_only), ["Gold 3", "+23% this game"]);
 }
 
 #[test]
@@ -224,7 +250,11 @@ fn values_the_upload_drops_are_not_shown() {
         let mut r = rank("Support", "Diamond", 2, 45, 23);
         r.role_rank.as_mut().unwrap().confidence = bad;
         r.progress_pct.as_mut().unwrap().confidence = bad;
-        assert_eq!(cell_lines(&with_rank(r)), ["Division 2", "+23%"], "{bad}");
+        assert_eq!(
+            cell_lines(&with_rank(r)),
+            ["Division 2", "+23% this game"],
+            "{bad}"
+        );
     }
     let mut r = rank("Support", "Diamond", 2, 45, 23);
     r.role.as_mut().unwrap().confidence = f32::NAN;
@@ -425,7 +455,9 @@ fn rank_width(grid: Grid) -> f32 {
 /// sizes (`SIZE_META` top line, `SIZE_LABEL` second). The cell does not
 /// wrap and clips to the column, so a wider line loses the division: at
 /// the spec's 64 px "Champion 3" read "Champion", and at 64 and 72 px
-/// "Grandmaster 2" read "Grandmaster".
+/// "Grandmaster 2" read "Grandmaster". The widest cell and the widest
+/// second line are taken over every tier, division and number case here
+/// (two numbers, progress alone, change alone), not from one named line.
 #[test]
 fn every_rank_line_fits_the_rank_column() {
     let renderer = crate::games_bans_view::tests::headless();
@@ -443,39 +475,71 @@ fn every_rank_line_fits_the_rank_column() {
         "GRANDMASTER",
         "CHAMPION",
     ];
-    let numbers = [(-100, -100), (-100, 100), (100, 100), (-99, -100), (0, 0)];
+    let values = [-100, -99, -10, 0, 10, 99, 100];
+    let mut numbers: Vec<(Option<i64>, Option<i64>)> = Vec::new();
+    for p in values {
+        numbers.push((Some(p), None));
+        numbers.push((None, Some(p)));
+        for c in values {
+            numbers.push((Some(p), Some(c)));
+        }
+    }
     let mut widest = (0.0_f32, String::new());
+    let mut widest_second = (0.0_f32, String::new());
     for tier in tiers {
         for division in 1..=5 {
-            for (p, c) in numbers {
-                let g = with_rank(rank("Support", tier, division, p, c));
+            for &(p, c) in &numbers {
+                let mut r = rank("Support", tier, division, 0, 0);
+                r.progress_pct = p.and_then(num);
+                r.progress_change = c.and_then(num);
+                let g = with_rank(r);
+                let lines = cell_lines(&g);
+                assert_eq!(lines.len(), 2, "{lines:?}");
                 let w = natural_width(&renderer, cell(&g));
                 if w > widest.0 {
-                    widest = (w, cell_lines(&g).join(" / "));
+                    widest = (w, lines.join(" / "));
+                }
+                let second = line(&lines[1], SIZE_LABEL);
+                if second > widest_second.0 {
+                    widest_second = (second, lines[1].clone());
                 }
             }
         }
     }
     let gm5 = line("Grandmaster 5", SIZE_META);
-    let second = line("-100% +100%", SIZE_LABEL);
+    let named: Vec<String> = [
+        "-100% -100%",
+        "-100% +100%",
+        "100% +100%",
+        "-100% progress",
+        "100% progress",
+        "-100% this game",
+        "+100% this game",
+    ]
+    .iter()
+    .map(|s| format!("{s} {}", line(s, SIZE_LABEL)))
+    .collect();
     eprintln!(
-        "widest cell {widest:?}; Grandmaster 5 {gm5}, Grandmaster 1 {}, Champion 5 {}, \
-         Champion 1 {}, -100% +100% {second}, -100% -100% {}, 100% +100% {}",
+        "widest cell {widest:?}; widest second line {widest_second:?}; Grandmaster 5 {gm5}, \
+         Grandmaster 1 {}, Champion 5 {}, Champion 1 {}; second lines: {}",
         line("Grandmaster 1", SIZE_META),
         line("Champion 5", SIZE_META),
         line("Champion 1", SIZE_META),
-        line("-100% -100%", SIZE_LABEL),
-        line("100% +100%", SIZE_LABEL),
+        named.join(", "),
     );
     // The widest line is a Grandmaster one, past the old 72 px.
     assert!(widest.1.starts_with("Grandmaster"), "{widest:?}");
     assert!(gm5 > 72.0, "{gm5}");
-    assert!(widest.0 >= gm5 && widest.0 >= second, "{widest:?}");
+    assert!(widest.0 >= gm5 && widest.0 >= widest_second.0, "{widest:?}");
     for grid in [Grid::Wide, Grid::Mid, Grid::Narrow] {
         let rank_w = rank_width(grid);
         assert!(
             widest.0 <= rank_w,
             "{grid:?}: {widest:?} is wider than the {rank_w} px Rank column"
+        );
+        assert!(
+            widest_second.0 <= rank_w,
+            "{grid:?}: {widest_second:?} is wider than the {rank_w} px Rank column"
         );
     }
 }

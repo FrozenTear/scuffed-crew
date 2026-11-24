@@ -43,6 +43,7 @@ mod games_bans_view;
 mod games_delete;
 mod games_detail;
 mod games_length;
+mod games_map_fit;
 mod games_panel;
 mod games_picker;
 mod games_rank;
