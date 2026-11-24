@@ -8,7 +8,7 @@
 
 use super::*;
 use crate::games_detail::{MAP_CELL_GAP, map_cell_parts, map_chips};
-use crate::games_map_fit::{CHIP_PAD_X, ELLIPSIS};
+use crate::games_map_fit::{CHIP_PAD_X, ELLIPSIS, MIN_KEPT, stub};
 use iced::advanced::graphics::text::Paragraph;
 use iced::advanced::layout::{Limits, Node};
 use iced::advanced::widget::Tree;
@@ -164,6 +164,8 @@ struct Counts {
     tooltips: usize,
     cut: Vec<String>,
     mode_only_cut: Vec<String>,
+    bare: Vec<String>,
+    short_names: Vec<String>,
 }
 
 /// A game with map `m`, the map read unsure (`doubt`) or not, and a
@@ -212,8 +214,17 @@ fn check_case(
     if !drawn.too_tall.is_empty() {
         problems.push(format!("{at}: taller than its box {:?}", drawn.too_tall));
     }
-    // The name, then one text a chip.
-    assert_eq!(drawn.texts[0].0, m, "{at}");
+    // The name (in full, or shortened with "…" when even the mode chip's
+    // stub would not fit beside it wrapped), then one text a chip.
+    let name = &drawn.texts[0].0;
+    if name != m {
+        let kept = name.strip_suffix(ELLIPSIS).unwrap_or_default();
+        assert!(
+            !kept.is_empty() && m.starts_with(kept),
+            "{at}: name {name:?}"
+        );
+        n.short_names.push(format!("{at}: {name:?}"));
+    }
     let chips = &drawn.texts[1..];
     let mut changed = Vec::new();
     for (i, (s, _, _, left, _)) in chips.iter().enumerate() {
@@ -227,13 +238,19 @@ fn check_case(
             problems.push(format!("{at}: {s:?} is neither {want:?} nor shortened"));
             continue;
         };
+        // Never a bare "…": a shortened chip keeps its first letters.
+        if kept.trim().chars().count() < MIN_KEPT.min(want.chars().count() - 1) {
+            n.bare.push(format!("{at}: {s:?} for {want:?}"));
+        }
         if !want.starts_with(kept) {
             problems.push(format!("{at}: {s:?} is not a start of {want:?}"));
         }
-        // The full chip would not have fit with an ellipsis chip for each
-        // chip after it (or it is the last one shown before one left out).
-        let after =
-            (chips.len() - 1 - i) as f32 * (MAP_CELL_GAP + full_chip_width(renderer, ELLIPSIS));
+        // The full chip would not have fit with a stub chip for each chip
+        // after it (or it is the last one shown before one left out).
+        let after: f32 = full[i + 1..chips.len()]
+            .iter()
+            .map(|c| MAP_CELL_GAP + full_chip_width(renderer, &stub(c)))
+            .sum();
         let full_right = left - CHIP_PAD_X / 2.0 + full_chip_width(renderer, want) + after;
         let before_left_out = chips.len() < full.len() && i + 1 == chips.len();
         if full_right <= cell_w - 0.01 && !before_left_out {
@@ -242,8 +259,8 @@ fn check_case(
             ));
         }
     }
-    // A chip with no room even for "…" is left out only after a chip that
-    // ends in "…", so the row still shows that more is there.
+    // A chip with no room even for its stub is left out whole, only after
+    // a chip that ends in "…", so the row still shows that more is there.
     let left_out = &full[chips.len()..];
     if !left_out.is_empty() {
         n.left_out.push(format!("{at}: {left_out:?}"));
@@ -293,7 +310,12 @@ fn cases(m: &str) -> Vec<(&str, bool, Option<&str>)> {
 fn map_chips_never_clip_silently() {
     let renderer = crate::games_bans_view::tests::headless();
     let maps = stat_tracker::parse::known_map_names();
-    // 54 maps the Games list shows, plus practice and deathmatch.
+    // Every catalogue map, a wider set than the Games list draws: only the
+    // maps `stat_tracker::parse::stats_row_is_tracked` keeps (33 today)
+    // reach the list. Wuxing University - Water College (Stadium) and
+    // Workshop Green Screen (Workshop), the longest names, are not among
+    // them. At the windows below, Wuxing (with the sign, at 1100) is the
+    // only map whose name is shortened.
     assert!(maps.len() >= 54, "{}", maps.len());
     let mut problems: Vec<String> = Vec::new();
     let mut report = Vec::new();
@@ -307,7 +329,7 @@ fn map_chips_never_clip_silently() {
         report.push(format!(
             "window {window}: {} cases, {} chips shortened with an ellipsis, {} left out, \
              {} cells with a tooltip, {} silent cuts ({} tracked maps cut with the mode chip \
-             alone: {:?})\n  left out: {:?}",
+             alone: {:?})\n  left out: {:?}\n  names shortened: {:?}",
             n.cases,
             n.shortened,
             n.left_out.len(),
@@ -316,10 +338,30 @@ fn map_chips_never_clip_silently() {
             n.mode_only_cut.len(),
             n.mode_only_cut,
             n.left_out,
+            n.short_names,
         ));
         problems.extend(n.cut);
+        problems.extend(n.bare);
     }
-    eprintln!("{} catalogue maps\n{}", maps.len(), report.join("\n"));
+    let listed: Vec<&str> = maps
+        .iter()
+        .copied()
+        .filter(|m| {
+            stat_tracker::parse::stats_row_is_tracked(
+                m,
+                stat_tracker::parse::map_mode(m).unwrap_or(""),
+            )
+        })
+        .collect();
+    for m in ["Wuxing University - Water College", "Workshop Green Screen"] {
+        assert!(!listed.contains(&m), "{m} reaches the Games list");
+    }
+    eprintln!(
+        "{} catalogue maps, {} reach the Games list\n{}",
+        maps.len(),
+        listed.len(),
+        report.join("\n")
+    );
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 
@@ -364,6 +406,7 @@ fn map_chips_never_clip_silently_at_any_window() {
         n.cut.len()
     );
     problems.extend(n.cut);
+    problems.extend(n.bare);
     assert!(problems.is_empty(), "{}", problems.join("\n"));
 }
 

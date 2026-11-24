@@ -30,6 +30,9 @@ pub struct MapFit {
     pub parts: Vec<MapPart>,
     pub name_max: Option<f32>,
     pub tip: Option<String>,
+    /// The name shortened with "…" when even a wrapped name would leave the
+    /// mode chip less than its [`stub`]; None draws the name in full.
+    pub name: Option<String>,
 }
 
 /// Size of `s` laid out as the text widget lays it out in a `bounds` box.
@@ -56,16 +59,33 @@ pub fn chip_width(label: &str) -> f32 {
     measure(label, SIZE_LABEL, FONT_SEMIBOLD, bounds, Wrapping::None).width + CHIP_PAD_X
 }
 
-/// The longest start of `full` that fits `room` with "…" after it, or "…"
-/// alone. Spaces before the "…" are dropped.
+/// The fewest letters a shortened chip keeps before its "…", so a chip
+/// never shows a bare "…".
+pub const MIN_KEPT: usize = 2;
+
+/// `full` cut to its first `n` letters and "…". Spaces before the "…" are
+/// dropped.
+fn kept(full: &str, n: usize) -> String {
+    let start: String = full.chars().take(n).collect();
+    format!("{}{ELLIPSIS}", start.trim_end())
+}
+
+/// The shortest a chip may get: its first [`MIN_KEPT`] letters and "…".
+pub fn stub(full: &str) -> String {
+    kept(
+        full,
+        MIN_KEPT.min(full.chars().count().saturating_sub(1)).max(1),
+    )
+}
+
+/// The longest start of `full` that fits `room` with "…" after it, and
+/// never fewer than [`MIN_KEPT`] letters ([`stub`]).
 fn shorten(full: &str, room: f32) -> String {
-    let chars: Vec<char> = full.chars().collect();
-    let with = |n: usize| {
-        let start: String = chars[..n].iter().collect();
-        format!("{}{ELLIPSIS}", start.trim_end())
-    };
+    let len = full.chars().count();
+    let with = |n: usize| kept(full, n);
     // Widths grow with the letters kept, so search for the most that fit.
-    let (mut lo, mut hi) = (0, chars.len().saturating_sub(1));
+    let floor = MIN_KEPT.min(len.saturating_sub(1)).max(1);
+    let (mut lo, mut hi) = (floor, len.saturating_sub(1).max(floor));
     while lo < hi {
         let mid = (lo + hi).div_ceil(2);
         if chip_width(&with(mid)) <= room {
@@ -77,17 +97,45 @@ fn shorten(full: &str, room: f32) -> String {
     with(lo)
 }
 
+/// The longest start of `name` that, with "…" after it, wraps within `cap`
+/// and fits `height`; at least one letter.
+fn shorten_name(name: &str, font: Font, cap: f32, height: f32) -> String {
+    let fits = |n: usize| {
+        let m = measure(
+            &kept(name, n),
+            SIZE_META,
+            font,
+            Size::new(cap, 1_000.0),
+            WRAP,
+        );
+        m.height <= height && m.width <= cap
+    };
+    let (mut lo, mut hi) = (1, name.chars().count().saturating_sub(1).max(1));
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if fits(mid) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    kept(name, lo)
+}
+
 /// The Map cell `cell` wide and `height` tall holding `parts`, the name in
 /// `font`. `mode` is the map's mode chip, which the tooltip always names.
 ///
 /// Iced lays a row out by taking every gap off first, then giving each
 /// child in order the width the earlier ones left, so the name (capped
 /// with the sign, [`map_name_max_width`]) and the sign come first and the
-/// chips share what is left. A name that would leave less than an
-/// ellipsis chip for each chip wraps a little sooner instead, as long as it
-/// still fits the row's height. Each chip leaves room for an ellipsis chip
-/// for every chip after it. When not even that fits, the last chips are
-/// left out (the tooltip names them) and the last chip shown ends in "…".
+/// chips share what is left. A name that would leave less than a
+/// [`stub`] chip (two letters and "…") for each chip wraps a little sooner
+/// instead, as long as it still fits the row's height. Each chip leaves
+/// room for a stub of every chip after it. When not even that fits, the
+/// last chips are left out whole (the tooltip names them) and the last
+/// chip shown ends in "…". When even the mode chip's stub does not fit
+/// beside the wrapped name, the name is shortened with "…" instead. No
+/// chip is ever a bare "…".
 pub fn fit(
     cell: f32,
     height: f32,
@@ -109,7 +157,7 @@ pub fn fit(
         .cloned()
         .collect();
     let warn = fixed.contains(&MapPart::Warn);
-    let min_chip = chip_width(ELLIPSIS);
+    let stubs: Vec<f32> = chips.iter().map(|c| chip_width(&stub(c))).collect();
     for shown in (0..=chips.len()).rev() {
         let mut with: Vec<MapPart> = fixed.clone();
         with.extend(chips[..shown].iter().map(|c| MapPart::Chip(c.to_string())));
@@ -117,10 +165,11 @@ pub fn fit(
         let sign = if warn { MAP_WARN_W } else { 0.0 };
         // The widest the row lets the name be, with the sign's cap.
         let name_room = map_name_max_width(cell, &with).unwrap_or((cell - gaps).max(0.0));
-        let reserve = min_chip * shown as f32;
+        let reserve: f32 = stubs[..shown].iter().sum();
         let lay = |room: f32| measure(name, SIZE_META, font, Size::new(room, height), WRAP);
         let tall = |room: f32| measure(name, SIZE_META, font, Size::new(room, 1_000.0), WRAP);
         let mut name_max = map_name_max_width(cell, &with);
+        let mut short_name = None;
         let mut name_w = lay(name_room).width;
         if shown > 0 && cell - gaps - name_w - sign < reserve {
             // Cap the name to leave the chips their ellipsis, if it still
@@ -128,17 +177,23 @@ pub fn fit(
             // A word wider than the cap would run past it.
             let cap = (cell - gaps - sign - reserve).max(0.0);
             let need = tall(cap);
-            if need.height > height || need.width > cap {
-                continue;
-            }
             name_max = Some(cap);
-            name_w = lay(cap).width;
+            if need.height > height || need.width > cap {
+                if shown > 1 {
+                    continue;
+                }
+                let short = shorten_name(name, font, cap, height);
+                name_w = measure(&short, SIZE_META, font, Size::new(cap, height), WRAP).width;
+                short_name = Some(short);
+            } else {
+                name_w = lay(cap).width;
+            }
         }
         let mut left = cell - gaps - name_w - sign;
         let mut out = fixed.clone();
         let mut cut = Vec::new();
         for (i, full) in chips[..shown].iter().enumerate() {
-            let room = left - min_chip * (shown - 1 - i) as f32;
+            let room = left - stubs[i + 1..shown].iter().sum::<f32>();
             let last_before_dropped = i + 1 == shown && shown < chips.len();
             let label = if chip_width(full) <= room && !last_before_dropped {
                 full.to_string()
@@ -150,7 +205,7 @@ pub fn fit(
             out.push(MapPart::Chip(label));
         }
         cut.extend(&chips[shown..]);
-        let tip = (!cut.is_empty()).then(|| {
+        let tip = (!cut.is_empty() || short_name.is_some()).then(|| {
             let mut words = vec![name.to_string()];
             words.extend(mode.map(str::to_string));
             words.extend(
@@ -164,6 +219,7 @@ pub fn fit(
             parts: out,
             name_max,
             tip,
+            name: short_name,
         };
     }
     unreachable!("no chips always fits")

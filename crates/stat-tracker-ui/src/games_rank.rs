@@ -98,7 +98,7 @@ impl RankShown {
         }
     }
 
-    /// "Support, Role Queue", or the role alone. See [`context_label`].
+    /// "Support, ROLE QUEUE", or the role alone. See [`context_label`].
     pub fn context(&self) -> String {
         context_label(self.role, self.queue.as_deref())
     }
@@ -162,28 +162,34 @@ fn role_name(value: &str, open_queue: bool) -> Option<&'static str> {
         "Tank" if !open_queue => Some("Tank"),
         "Damage" if !open_queue => Some("Damage"),
         "Support" if !open_queue => Some("Support"),
-        "Open" if open_queue => Some("Open queue"),
+        "Open" if open_queue => Some(OPEN_ROLE),
         _ => None,
     }
 }
 
-/// Role and queue for display: "Support, Role Queue". A missing queue is
-/// left out, and a queue that only repeats the role ("Open queue" with the
-/// title "OPEN QUEUE") shows once.
+/// Role and queue for display: "Support, ROLE QUEUE". The queue is
+/// spelled as its chip and the Map tooltip spell it, in the game's own
+/// capitals ("COMPETITIVE: 6V6 OPEN QUEUE"). A missing queue is left out,
+/// and the Open role with an open queue title shows the title alone, so
+/// open queue is never said twice.
 pub fn context_label(role: Option<&str>, queue: Option<&str>) -> String {
     let role = role.unwrap_or(ROLE_UNKNOWN);
-    match queue.map(title_case_upper) {
+    match queue {
+        Some(q) if role == OPEN_ROLE && q.to_uppercase().contains("OPEN QUEUE") => q.to_string(),
         Some(q) if !q.eq_ignore_ascii_case(role) => format!("{role}, {q}"),
         _ => role.to_string(),
     }
 }
 
-/// "+23%", "-15%", "0%".
+/// The Open role as the cell names it.
+const OPEN_ROLE: &str = "Open queue";
+
+/// "+23%", "-15%", and "±0%" for no change, so every change shows a sign.
 pub fn change_text(change: i32) -> String {
-    if change > 0 {
-        format!("+{change}%")
-    } else {
-        format!("{change}%")
+    match change {
+        0 => "±0%".to_string(),
+        c if c > 0 => format!("+{c}%"),
+        c => format!("{c}%"),
     }
 }
 
@@ -209,7 +215,7 @@ fn clean_text(text: &str) -> Option<String> {
     (!joined.is_empty()).then_some(joined)
 }
 
-/// "ROLE QUEUE" to "Role Queue". The screen draws these in capitals.
+/// "DIAMOND" to "Diamond" (lowered first by the caller, as the site does).
 fn title_case(text: &str) -> String {
     text.split(' ')
         .map(|word| {
@@ -224,11 +230,6 @@ fn title_case(text: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-/// Title case for a key that is stored in capitals.
-fn title_case_upper(key: &str) -> String {
-    title_case(&key.to_lowercase())
 }
 
 /// The Rank cell: the rank text with progress and change under it, and the

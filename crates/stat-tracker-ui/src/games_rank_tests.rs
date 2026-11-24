@@ -75,7 +75,7 @@ fn rank_text_variants() {
 fn change_text_signs() {
     assert_eq!(change_text(23), "+23%");
     assert_eq!(change_text(-15), "-15%");
-    assert_eq!(change_text(0), "0%");
+    assert_eq!(change_text(0), "±0%");
 }
 
 /// The pack may spell the tier in capitals; the site shows it title cased.
@@ -97,7 +97,7 @@ fn sentence_with_and_without_queue_and_role() {
     g.queue_title = Some(queue("ROLE QUEUE"));
     assert_eq!(
         shown(&g).sentence(),
-        "Rank: Support, Role Queue, Diamond 2, 45% progress, +23% this game"
+        "Rank: Support, ROLE QUEUE, Diamond 2, 45% progress, +23% this game"
     );
     // A weak queue read is not shown, as the map chip and upload skip it.
     g.queue_title = Some(QueueTitle {
@@ -120,7 +120,7 @@ fn sentence_with_and_without_queue_and_role() {
     g.queue_title = Some(queue("ROLE QUEUE"));
     assert_eq!(
         shown(&g).sentence(),
-        "Rank: Role unknown, Role Queue, Gold 3, -15% progress, -15% this game. \
+        "Rank: Role unknown, ROLE QUEUE, Gold 3, -15% progress, -15% this game. \
          Negative progress means demotion protection."
     );
     // Zero progress is not negative; a negative change alone says nothing
@@ -139,11 +139,42 @@ fn open_queue_role_follows_the_upload() {
     let mut g = with_rank(rank("Open", "Silver", 1, 10, 0));
     assert_eq!(shown(&g).context(), ROLE_UNKNOWN);
     g.queue_title = Some(queue("OPEN QUEUE"));
-    assert_eq!(shown(&g).context(), "Open queue");
+    assert_eq!(shown(&g).context(), "OPEN QUEUE");
+    // The game's own spelling, 6V6 included, and open queue said once.
+    g.queue_title = Some(queue("COMPETITIVE: 6V6 OPEN QUEUE"));
+    assert_eq!(shown(&g).context(), "COMPETITIVE: 6V6 OPEN QUEUE");
+    assert_eq!(
+        shown(&g).sentence(),
+        "Rank: COMPETITIVE: 6V6 OPEN QUEUE, Silver 1, 10% progress, ±0% this game"
+    );
     let mut g = with_rank(rank("Tank", "Silver", 1, 10, 0));
     g.queue_title = Some(queue("OPEN QUEUE"));
-    assert_eq!(shown(&g).context(), "Role unknown, Open Queue");
+    assert_eq!(shown(&g).context(), "Role unknown, OPEN QUEUE");
     assert_eq!(context_label(Some("Tank"), None), "Tank");
+}
+
+/// The rank tooltip spells the queue as the queue chip and the Map
+/// tooltip do (`games_detail::map_chips`, `games_map_fit::fit`).
+#[test]
+fn both_tooltips_spell_the_queue_the_same_way() {
+    for title in ["ROLE QUEUE", "COMPETITIVE: 6V6 OPEN QUEUE"] {
+        let mut g = with_rank(rank("Support", "Gold", 3, 10, 5));
+        g.queue_title = Some(queue(title));
+        let chip = crate::games_detail::map_chips(&g)
+            .into_iter()
+            .find(|c| c.contains("QUEUE"))
+            .unwrap();
+        assert_eq!(chip, title);
+        assert!(
+            shown(&g).sentence().contains(&format!(", {chip}, ")),
+            "{title}"
+        );
+        let parts = crate::games_detail::map_cell_parts(&g, false);
+        let mode = crate::games_rows::mode_chip(&g.map_name);
+        let fit =
+            crate::games_map_fit::fit(1.0, 40.0, &g.map_name, iced::Font::DEFAULT, &parts, mode);
+        assert!(fit.tip.unwrap().contains(&chip), "{title}");
+    }
 }
 
 #[test]

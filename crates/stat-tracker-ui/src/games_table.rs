@@ -700,7 +700,8 @@ fn game_row(
                             &parts,
                             mode,
                         );
-                        let m = map_cell(&name, color, font, &fit.parts, fit.name_max);
+                        let shown = fit.name.as_deref().unwrap_or(&name);
+                        let m = map_cell(shown, color, font, &fit.parts, fit.name_max);
                         let m = container(m).center_y(Fill);
                         match fit.tip {
                             Some(tip) => crate::games_bans_view::with_tip(m, tip),
