@@ -1875,7 +1875,8 @@ fn field_input<'a>(
     if let Some(copy) = hint_copy {
         col = col.push(hint(copy));
     }
-    // No max width on the column (a row ignores it; see `field_fill_portion`); the input is capped above and the hint by `HELP_MEASURE`.
+    // No max width on the column (a row ignores it; see `field_fill_portion`).
+    // The input is capped above and the hint by `HELP_MEASURE`.
     col.width(Length::FillPortion(field_fill_portion(field)))
         .into()
 }
@@ -2095,7 +2096,6 @@ mod tests {
     }
 
     // ---- Headless layout -------------------------------------------------
-    //
     // Iced's own layout pass on the real view pieces, with the software
     // renderer and the app fonts. No window is opened. None of these build a
     // `TrackerApp`, so no tray icon is made and no companion is started.
