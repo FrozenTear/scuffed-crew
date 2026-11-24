@@ -96,6 +96,30 @@ impl Ui {
         })
     }
 
+    /// A left click at `point` on the production window.
+    fn click_at(&mut self, app: &TrackerApp, point: Point) -> Sent {
+        self.with(app, |element, tree, layout, renderer| {
+            let mut messages = Vec::new();
+            let mut shell = Shell::new(&mut messages);
+            element.as_widget_mut().update(
+                tree,
+                &Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                layout,
+                mouse::Cursor::Available(point),
+                renderer,
+                &mut clipboard::Null,
+                &mut shell,
+                &Rectangle::new(Point::ORIGIN, SIZE),
+            );
+            let captured = shell.is_event_captured();
+            Sent {
+                messages,
+                captured,
+                typing: false,
+            }
+        })
+    }
+
     /// The first event after a view change, as iced sends one each frame.
     fn redraw(&mut self, app: &TrackerApp) -> Sent {
         let now = std::time::Instant::now();
@@ -778,6 +802,39 @@ fn esc_returns_focus_to_the_field_blurred_by_the_opening_click() {
         assert!(
             types_into_settings(&ui.send(&app, type_x())),
             "{nav:?}: typing should reach the field again"
+        );
+    }
+}
+
+/// A click on the live page that leaves nothing focused clears `last_id`,
+/// so a dialog opened later does not restore the field the user left.
+/// A click that opens a dialog still restores, in the test above.
+#[test]
+fn a_click_on_the_live_page_clears_last_id_unless_it_opens_a_dialog() {
+    for nav in LAYOUTS {
+        let (_dir, mut app, mut ui, field) = settings_field_in(nav);
+        let page_field = ui.focuses(&app).all[field];
+        ui.click_at(&app, Point::new(SIZE.width - 8.0, SIZE.height - 8.0));
+        ui.redraw(&app);
+        assert!(
+            ui.focuses(&app).focused().is_empty(),
+            "{nav:?}: a click on the page should leave nothing focused"
+        );
+        let open = crate::settings_open::OpenMsg::WhatLeaves(true);
+        let _ = app.update(Message::SettingsPage(crate::settings_update::Msg::Open(
+            open,
+        )));
+        ui.redraw(&app);
+        let esc = ui.send(&app, named(Named::Escape));
+        assert!(!esc.messages.is_empty(), "{nav:?}: Esc does nothing");
+        for message in esc.messages {
+            let _ = app.update(message);
+        }
+        ui.redraw(&app);
+        let focused = ui.focuses(&app).focused();
+        assert!(
+            !focused.contains(&page_field),
+            "{nav:?}: Esc restored the field left by a click on the page: {focused:?}"
         );
     }
 }

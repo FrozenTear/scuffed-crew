@@ -115,8 +115,13 @@ struct State {
     shown: usize,
     /// The last focused widget id while this layer was live. Kept when a
     /// click blurs the field before the dialog opens, so Esc can restore
-    /// that field rather than the button that was clicked.
+    /// that field rather than the button that was clicked. Cleared when
+    /// a click on the live page leaves nothing focused, unless that
+    /// click opens a dialog (cleared on the next live event).
     last_id: Option<Id>,
+    /// A click on the live page left nothing focused. Cleared, or
+    /// applied to `last_id`, on the next event.
+    pending_blur: bool,
 }
 
 /// Counts the focusable widgets and finds the focused one.
@@ -388,6 +393,30 @@ impl Layer<'_> {
         }
         tree.state.downcast_mut::<State>().itself = itself;
     }
+
+    /// After the page handles a click: keep `last_id` if this click
+    /// opened a dialog (the next view is covered), otherwise clear it
+    /// on the following live event so Esc does not restore a field the
+    /// user already left.
+    fn after_live_click(
+        &mut self,
+        tree: &mut Tree,
+        layout: Layout<'_>,
+        renderer: &iced::Renderer,
+        event: &Event,
+    ) {
+        let click = matches!(event, Event::Mouse(mouse::Event::ButtonPressed(_)));
+        let focused = self.census(tree, layout, renderer).focused_id.is_some();
+        let state = tree.state.downcast_mut::<State>();
+        if focused {
+            state.pending_blur = false;
+        } else if click {
+            state.pending_blur = true;
+        } else if state.pending_blur {
+            state.last_id = None;
+            state.pending_blur = false;
+        }
+    }
 }
 
 impl Widget<Message, iced::Theme, iced::Renderer> for Layer<'_> {
@@ -536,6 +565,9 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Layer<'_> {
                 shell,
                 viewport,
             );
+        }
+        if self.role == Role::Live {
+            self.after_live_click(tree, layout, renderer, event);
         }
     }
 
