@@ -6,11 +6,12 @@
 //! (GitHub releases), the season list, the token check, and Report a
 //! problem.
 
+use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::{Column, button, column, container, opaque, row, scrollable, space, text};
 use iced::{Element, Fill, Padding};
 
 use crate::app::{Message, TrackerApp};
-use crate::layout::SETTINGS_SCROLL_GUTTER;
+use crate::layout::{SCROLLBAR_WIDTH, SETTINGS_SCROLL_GUTTER};
 use crate::settings_open::OpenMsg;
 use crate::settings_update::Msg;
 use crate::theme::{
@@ -114,7 +115,13 @@ fn dialog<'a>() -> Element<'a, Message> {
                 .size(SIZE_BODY + 4.0)
                 .font(FONT_BOLD)
                 .color(TEXT),
-            scrollable(body).height(iced::Length::Shrink),
+            scrollable(body)
+                .direction(Direction::Vertical(
+                    Scrollbar::new()
+                        .width(SCROLLBAR_WIDTH)
+                        .scroller_width(SCROLLBAR_WIDTH),
+                ))
+                .height(iced::Length::Shrink),
             row![space().width(Fill), done],
         ]
         .spacing(16),

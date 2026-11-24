@@ -39,6 +39,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use iced::widget::image::Handle;
+use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::{button, column, container, opaque, row, scrollable, space, text, text_input};
 use iced::{Alignment, Element, Fill, Length, Padding};
 
@@ -48,6 +49,7 @@ use scuffed_types::{
 use stat_tracker::config::{Config, SetupDiskPatch, SyncConfig};
 
 use crate::app::Message;
+use crate::layout::{SCROLLBAR_WIDTH, SETTINGS_SCROLL_GUTTER};
 use crate::theme::{
     self, FONT_BOLD, FONT_MEDIUM, FONT_SEMIBOLD, SIZE_BODY, SIZE_FEATURED, SIZE_META, SIZE_TITLE,
     TEXT, TEXT_2, TEXT_3,
@@ -1577,9 +1579,27 @@ pub fn view(guide: &GuideUi) -> Element<'_, Message> {
     footer = footer.push(guide_button(forward, true, forward_msg));
 
     let card = container(
-        column![header, scrollable(body).height(Fill).width(Fill), footer,]
-            .spacing(16)
-            .height(Fill),
+        column![
+            header,
+            scrollable(
+                container(body)
+                    .padding(Padding {
+                        right: SETTINGS_SCROLL_GUTTER,
+                        ..Padding::ZERO
+                    })
+                    .width(Fill),
+            )
+            .direction(Direction::Vertical(
+                Scrollbar::new()
+                    .width(SCROLLBAR_WIDTH)
+                    .scroller_width(SCROLLBAR_WIDTH),
+            ))
+            .height(Fill)
+            .width(Fill),
+            footer,
+        ]
+        .spacing(16)
+        .height(Fill),
     )
     .padding(24)
     .width(Length::Fixed(720.0))

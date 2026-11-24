@@ -1,9 +1,12 @@
-//! Dialog scrollbars (#879). iced 0.14 draws a vertical scrollbar
+//! Dialog scrollbars. iced 0.14 draws a vertical scrollbar
 //! [`SCROLLBAR_WIDTH`] px wide over the right edge of a scrollable's
 //! content, so a dialog body that fills its scrollable runs its text under
-//! the bar. Each dialog is laid out at 1280x860 and 1000x768 with the
-//! headless renderer, and every text block inside a scrollable must end
-//! left of where the bar is drawn.
+//! the bar. Each dialog is laid out at 1280x860, 1000x768 and 720x480 with
+//! the headless renderer. The walk only sees widgets that call
+//! `operation.text` (plain text and checkbox labels). iced 0.14's
+//! `rich_text` has no `operate`, so What's new Details markdown is not
+//! checked, and text input values are not checked either. Every covered
+//! text block inside a scrollable must end left of where the bar is drawn.
 
 use std::collections::HashSet;
 
@@ -18,31 +21,13 @@ use crate::layout::SCROLLBAR_WIDTH;
 use crate::settings_open::OpenMsg;
 use crate::settings_update::Msg;
 use crate::setup_guide::SetupMessage;
-use crate::theme;
+use crate::theme::GRID_GAP;
 
-/// The two window sizes the dialogs are checked at.
-const WINDOWS: [(f32, f32); 2] = [(1280.0, 860.0), (1000.0, 768.0)];
+/// The window sizes the dialogs are checked at, including the app minimum.
+const WINDOWS: [(f32, f32); 3] = [(1280.0, 860.0), (1000.0, 768.0), (720.0, 480.0)];
 
 fn headless() -> iced::Renderer {
-    use iced::advanced::renderer::Headless;
-    let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
-        theme::FONT_MEDIUM,
-        iced::Pixels(theme::SIZE_BODY),
-        Some("tiny-skia"),
-    ))
-    .expect("the tiny-skia renderer needs no display");
-    for bytes in [
-        theme::FONT_BYTES_MEDIUM,
-        theme::FONT_BYTES_SEMIBOLD,
-        theme::FONT_BYTES_BOLD,
-        theme::FONT_BYTES_EXTRABOLD,
-    ] {
-        iced::advanced::graphics::text::font_system()
-            .write()
-            .expect("font system lock")
-            .load_font(std::borrow::Cow::Borrowed(bytes));
-    }
-    renderer
+    crate::games_bans_view::tests::headless()
 }
 
 /// One text block inside a scrollable, and that scrollable.
@@ -124,8 +109,9 @@ fn placed(mut element: Element<'_, Message>, window: (f32, f32)) -> Vec<Placed> 
     collect.placed
 }
 
-/// Every text block of `name` ends left of the bar, at both window sizes.
-fn assert_clear<'a>(name: &str, build: impl Fn() -> Element<'a, Message>) {
+/// Every covered text block of `name` ends left of the bar, at each window
+/// size, and (when `min_gap` is set) leaves at least that much space.
+fn assert_clear<'a>(name: &str, min_gap: f32, build: impl Fn() -> Element<'a, Message>) {
     for window in WINDOWS {
         let placed = placed(build(), window);
         assert!(
@@ -151,6 +137,12 @@ fn assert_clear<'a>(name: &str, build: impl Fn() -> Element<'a, Message>) {
                 p.bar_left(),
                 p.text
             );
+            assert!(
+                p.bar_left() - p.text_right >= min_gap - 0.5,
+                "{name} {window:?}: gap is {:.1}, need at least {min_gap}: {:?}",
+                p.bar_left() - p.text_right,
+                p.text
+            );
         }
     }
 }
@@ -159,7 +151,7 @@ fn assert_clear<'a>(name: &str, build: impl Fn() -> Element<'a, Message>) {
 fn what_leaves_your_pc_keeps_its_text_clear_of_the_bar() {
     let (_dir, mut app) = crate::fixtures::test_app();
     let _ = app.update(Message::SettingsPage(Msg::Open(OpenMsg::WhatLeaves(true))));
-    assert_clear("what leaves", || {
+    assert_clear("what leaves", GRID_GAP, || {
         crate::what_leaves::layer(&app).expect("open")
     });
 }
@@ -170,7 +162,7 @@ fn whats_new_keeps_its_text_clear_of_the_bar() {
     let closed = HashSet::new();
     let open: HashSet<String> = sections.iter().map(|s| s.version.clone()).collect();
     for (show_older, open_details) in [(false, &closed), (true, &open)] {
-        assert_clear("what's new", || {
+        assert_clear("what's new", 0.0, || {
             crate::notes::dialog(
                 "Release notes",
                 &sections,
@@ -194,7 +186,7 @@ fn report_a_problem_keeps_its_text_clear_of_the_bar() {
         ReportDialog::for_game(None, true),
     ] {
         let ui = ReportUi::Dialog(Box::new(dialog));
-        assert_clear("report", || crate::report::view(&ui));
+        assert_clear("report", 0.0, || crate::report::view(&ui));
     }
 }
 
@@ -210,7 +202,7 @@ fn uninstall_keeps_its_text_clear_of_the_bar() {
         delete_data: true,
         fallback: true,
     };
-    assert_clear("uninstall", || crate::uninstall::view(&dialog, false));
+    assert_clear("uninstall", 0.0, || crate::uninstall::view(&dialog, false));
 }
 
 /// Each step the guide reaches with Skip this step, from the first.
@@ -219,7 +211,7 @@ fn the_setup_guide_keeps_its_text_clear_of_the_bar() {
     let (_dir, mut app) = crate::fixtures::test_app();
     let _ = app.update(Message::Setup(SetupMessage::Open));
     for step in 0..4 {
-        assert_clear(&format!("setup guide step {step}"), || {
+        assert_clear(&format!("setup guide step {step}"), GRID_GAP, || {
             crate::setup_guide::view(&app.setup)
         });
         let _ = app.update(Message::Setup(SetupMessage::SkipStep));
