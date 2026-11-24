@@ -148,6 +148,8 @@ pub struct PageState {
     /// "Show Companion during games", stored in ui_state.json. Off keeps
     /// the Companion closed ([`TrackerApp::overlay_showing`]).
     pub companion_during_games: bool,
+    /// Typed companion page binds that have not been committed with Enter.
+    pub(crate) page_bind_drafts: crate::companion_keys::PageBindDrafts,
     /// When Check now last answered (local "HH:MM"), and whether it runs.
     pub update_checked_at: Option<String>,
     /// The last Check now could not ask GitHub: when (local "HH:MM").
@@ -192,6 +194,7 @@ impl PageState {
             reader_pending: None,
             reader_seq: 0,
             companion_during_games,
+            page_bind_drafts: crate::companion_keys::PageBindDrafts::default(),
             update_checked_at: None,
             update_check_failed_at: None,
             update_checking: false,
@@ -497,15 +500,27 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> Task<Message> {
                 }
             }
         }
-        Msg::PageBindDraft(kind, value) => kind.set(&mut app.page_keys, value),
+        Msg::PageBindDraft(kind, value) => {
+            kind.set_draft(&mut app.page_state.page_bind_drafts, value);
+        }
         Msg::PageBindCommit(kind) => {
-            let _ = kind;
-            match app.page_keys.validate_for_save() {
+            let raw = kind
+                .shown(&app.page_keys, &app.page_state.page_bind_drafts)
+                .to_string();
+            match crate::companion_keys::commit_page_bind(
+                &app.page_keys,
+                kind,
+                &raw,
+                &app.overlay_hotkey.bind,
+            ) {
                 Ok(keys) => match crate::companion_keys::save_page_keys(&app.data_dir, &keys) {
-                    Ok(()) => app.page_keys = keys,
+                    Ok(()) => {
+                        app.page_keys = keys;
+                        kind.clear_draft(&mut app.page_state.page_bind_drafts);
+                    }
                     Err(e) => app.replace_toast(format!("Could not save the page shortcut: {e}")),
                 },
-                Err(e) => app.replace_toast(format!("Could not save the page shortcut: {e}")),
+                Err(e) => app.replace_toast(e),
             }
         }
         Msg::CheckUpdates => {
@@ -1248,12 +1263,62 @@ mod tests {
         assert_eq!(app.changes_waiting(), 0);
         let _ = app.update(page(Msg::PageBindDraft(PageBind::Prev, "N".into())));
         let _ = app.update(page(Msg::PageBindCommit(PageBind::Prev)));
-        assert_eq!(app.page_keys.prev_bind, "N");
+        assert_eq!(
+            app.page_keys.prev_bind,
+            crate::companion_keys::DEFAULT_PREV_BIND
+        );
         assert_eq!(
             crate::companion_keys::load_page_keys(dir.path()).prev_bind,
             crate::companion_keys::DEFAULT_PREV_BIND
         );
         assert!(app.toast.is_some());
+        assert_eq!(app.changes_waiting(), 0);
+    }
+
+    #[test]
+    fn page_bind_drafts_are_not_live_and_blank_or_clash_is_refused() {
+        use crate::companion_keys::{DEFAULT_NEXT_BIND, DEFAULT_PREV_BIND, PageBind};
+        let (dir, mut app) = live_app();
+        let committed = app.page_keys.clone();
+        let _ = app.update(page(Msg::PageBindDraft(PageBind::Next, "".into())));
+        assert_eq!(app.page_keys, committed);
+        let _ = app.update(page(Msg::PageBindCommit(PageBind::Next)));
+        assert_eq!(app.page_keys.next_bind, DEFAULT_NEXT_BIND);
+        assert_eq!(
+            crate::companion_keys::load_page_keys(dir.path()).next_bind,
+            DEFAULT_NEXT_BIND
+        );
+        assert!(
+            app.toast.as_ref().is_some_and(|t| t.contains("blank")),
+            "{:?}",
+            app.toast
+        );
+        app.toast = None;
+        let _ = app.update(page(Msg::PageBindDraft(
+            PageBind::Next,
+            "Super+Shift+C".into(),
+        )));
+        let _ = app.update(page(Msg::PageBindCommit(PageBind::Next)));
+        assert_eq!(app.page_keys.next_bind, DEFAULT_NEXT_BIND);
+        assert!(
+            app.toast.as_ref().is_some_and(|t| t.contains("hide bind")),
+            "{:?}",
+            app.toast
+        );
+        app.toast = None;
+        let _ = app.update(page(Msg::PageBindDraft(
+            PageBind::Prev,
+            "Super+Shift+T".into(),
+        )));
+        let _ = app.update(page(Msg::PageBindCommit(PageBind::Prev)));
+        assert_eq!(app.page_keys.prev_bind, DEFAULT_PREV_BIND);
+        assert!(
+            app.toast
+                .as_ref()
+                .is_some_and(|t| t.contains("another page key")),
+            "{:?}",
+            app.toast
+        );
         assert_eq!(app.changes_waiting(), 0);
     }
 }

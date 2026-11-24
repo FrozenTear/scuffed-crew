@@ -29,6 +29,8 @@ pub mod commands;
 pub mod companion_gate;
 pub mod companion_keys;
 #[cfg(test)]
+mod companion_wiring;
+#[cfg(test)]
 mod copy_rules;
 pub mod daemon;
 mod filter_chips;

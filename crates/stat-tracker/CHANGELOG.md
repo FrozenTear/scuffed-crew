@@ -17,7 +17,7 @@ summary, then the highlights, and tucks the remaining text under Details.
 
 ## Unreleased
 
-Each square in the companion's Tonight strip now shows W, L or D, so a result no longer reads from its colour alone. After 13 games in a day the strip shows the newest 13 and a +N for the rest. A row of four dots and the page name now sits at the top of the companion. Settings can hold the companion on the stream page, and next, previous and safe-page keys (Super+Shift+N, Super+Shift+P and Super+Shift+T by default) change the page.
+Each square in the companion's Tonight strip now shows W, L or D, so a result no longer reads from its colour alone. After 13 games in a day the strip shows the newest 13 and a +N for the rest. A row of four dots and the page name now sits at the top of the companion. Settings can hold the companion on the stream page, and next, previous and safe-page keys (Super+Shift+N, Super+Shift+B and Super+Shift+T by default) change the page.
 
 ## 0.6.0
 

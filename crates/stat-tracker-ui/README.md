@@ -174,6 +174,10 @@ Layer-shell surface (`iced_layershell` 0.19, pinned with Iced 0.14): `Layer::Ove
 
 Bind format: `Super+Shift+C` (modifiers joined with `+`, then one key). Super aliases: `Meta`, `Win`. Also `Ctrl`, `Alt`, `Shift`. Key: `A` to `Z`, `0` to `9`, `F1` to `F12`, `Tab`, `Space`, `Esc`, `Enter`. At least one modifier is required. Empty field saves as Super+Shift+C.
 
+**Page keys:** Settings → **Companion**. Defaults **Super+Shift+N** (next), **Super+Shift+B** (previous) and **Super+Shift+T** (safe page: Tonight and hold). **Hold the stream page** keeps Tonight up and turns auto-advance off. Binds and the hold flag are stored in `<data_dir>/ui_state.json` (`companion_next_bind`, `companion_prev_bind`, `companion_safe_bind`, `hold_stream_page`) with the hide bind, so they do not count as changes waiting. The overlay cannot receive keys, so the main GUI process reads the same evdev path as the hide bind. Press Enter to apply a page bind. Do not reuse the hide bind, and do not give two page keys the same bind. Super+Shift+P is not the previous-page default: it is stock niri's power-off-monitors.
+
+**Optional file triggers** (same idea as `companion_toggle`): `companion_next`, `companion_prev` and `companion_safe` in `<data_dir>`. The GUI notices a later mtime on its 1 s tick and runs the same command as the key. A file that is already there at start does not fire. These files are not `StoreCommand`s (do not put them under `commands/`). Do not bind both an evdev key and a compositor bind for the same action, or one press will step the page twice.
+
 **Why not the GlobalShortcuts portal?** niri (FrozenTear’s CachyOS / AerynOS) has no xdg-desktop-portal GlobalShortcuts backend. A portal bind would not fire there. This path does not prompt for a portal permission.
 
 **Optional niri bind** (only if the in-app shortcut does not fire; do not use both or one press will hide then show):

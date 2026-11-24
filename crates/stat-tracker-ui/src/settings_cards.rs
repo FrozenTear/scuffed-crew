@@ -54,6 +54,7 @@ const SHORTCUT_LABEL: &str = "Keyboard shortcut to hide or show the overlay";
 const SHORTCUT_HELP: &str = "Works in fullscreen. Overlay is click-through.";
 const SHORTCUT_FIELD_HELP: &str = "Super = Windows key. Join with +. Press Enter to apply.";
 const HOLD_STREAM_LABEL: &str = "Hold the stream page";
+const HOLD_STREAM_HELP: &str = "Pages stay on Tonight unless you change them with a key.";
 const NEXT_PAGE_LABEL: &str = "Next page";
 const PREV_PAGE_LABEL: &str = "Previous page";
 const SAFE_PAGE_LABEL: &str = "Safe page";
@@ -142,7 +143,7 @@ pub(crate) fn companion_page_rows(app: &TrackerApp, demo: bool) -> Vec<Element<'
     use crate::settings_update::Msg;
     let hold = setting_row(
         row_title(HOLD_STREAM_LABEL),
-        vec![],
+        vec![hint(HOLD_STREAM_HELP)],
         switch(
             app.page_keys.hold_stream_page,
             toggle(!demo, |v| Message::SettingsPage(Msg::HoldStreamPage(v))),
@@ -167,7 +168,8 @@ pub(crate) fn companion_page_rows(app: &TrackerApp, demo: bool) -> Vec<Element<'
     ];
     let mut rows = vec![hold];
     for (kind, label, placeholder) in binds {
-        let mut input = text_input(placeholder, kind.get(&app.page_keys))
+        let shown = kind.shown(&app.page_keys, &app.page_state.page_bind_drafts);
+        let mut input = text_input(placeholder, shown)
             .padding(Padding::from([8, 10]))
             .size(SIZE_BODY)
             .style(theme::text_input_style)
@@ -181,12 +183,12 @@ pub(crate) fn companion_page_rows(app: &TrackerApp, demo: bool) -> Vec<Element<'
             column![
                 field_caption(label),
                 container(input).width(Fill).max_width(FIELD_SHORT),
-                hint(SHORTCUT_FIELD_HELP),
             ]
             .spacing(4)
             .into(),
         );
     }
+    rows.push(hint(SHORTCUT_FIELD_HELP));
     rows
 }
 

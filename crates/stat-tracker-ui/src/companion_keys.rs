@@ -19,10 +19,11 @@ use crate::overlay_pages::{self, PageState, Stage, vote_maps_read};
 use crate::seasons;
 
 /// Q6 choice: the spec names Super+Shift+T for safe-page, but not next or
-/// previous. These two parse with the existing bind parser and do not reuse
-/// C (hide) or T (safe-page).
+/// previous. N and B parse with the existing bind parser, do not reuse C
+/// (hide) or T (safe-page), and are not stock niri default binds. Super+Shift+P
+/// is niri's power-off-monitors.
 pub const DEFAULT_NEXT_BIND: &str = "Super+Shift+N";
-pub const DEFAULT_PREV_BIND: &str = "Super+Shift+P";
+pub const DEFAULT_PREV_BIND: &str = "Super+Shift+B";
 /// The safe-page bind the spec names.
 pub const DEFAULT_SAFE_BIND: &str = overlay_pages::DEFAULT_SAFE_BIND;
 
@@ -149,6 +150,19 @@ pub fn load_page_keys(data_dir: &Path) -> PageKeys {
     seasons::load_page_keys(data_dir)
 }
 
+/// A new companion starts on Tonight, keeping the hold, the last stage
+/// and `in_match`. Launch is when a stream is most likely up.
+pub fn start_companion_pages(data_dir: &Path) -> PageState {
+    let state = PageState {
+        page: overlay_pages::Page::Tonight,
+        ..load_page_state(data_dir)
+    };
+    if let Err(e) = save_page_state(data_dir, state) {
+        tracing::warn!(error = %e, "failed to write companion_page.json");
+    }
+    state
+}
+
 pub fn save_page_keys(data_dir: &Path, keys: &PageKeys) -> std::io::Result<()> {
     seasons::save_page_keys(data_dir, keys)
 }
@@ -223,9 +237,11 @@ pub fn consume_page_triggers(data_dir: &Path, last: &mut TriggerMtimes) -> Optio
 /// Map the status file's `companion_stage` (C3) to a page-model stage.
 ///
 /// Missing file, missing field, or `unknown` -> `None`, so the last page
-/// stays. Hero select and hero ban are `MapLocked { map_read: true }`:
-/// C3 does not publish the locked map name, and the stage itself means
-/// the map has locked.
+/// stays. Hero select and hero ban are `MapLocked { map_read: false }`
+/// until detect produces InGame or another match-on signal, so the page
+/// does not auto-advance to Bans and picks (Tonight comes back, or stays,
+/// through a lock and a later unread vote). Flip `map_read` in the PR
+/// that adds InGame.
 pub fn stage_from_status(data_dir: &Path) -> Option<Stage> {
     let bytes = std::fs::read(stat_tracker::ocr_status::status_path(data_dir)).ok()?;
     let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
@@ -238,7 +254,11 @@ pub fn stage_from_status(data_dir: &Path) -> Option<Stage> {
         "map_vote" => Some(Stage::MapVote {
             maps_read: vote_maps_read(&dto.maps),
         }),
-        "hero_select" | "hero_ban" => Some(Stage::MapLocked { map_read: true }),
+        // map_read stays false until detect produces InGame (or another
+        // match-on signal). Auto-advance to Bans and picks would leave
+        // that page up through the match, because InGame is not produced
+        // today and C3 leaves the last lock in the status file.
+        "hero_select" | "hero_ban" => Some(Stage::MapLocked { map_read: false }),
         "in_game" => Some(Stage::MatchStart),
         _ => None,
     }
@@ -307,6 +327,74 @@ impl PageBind {
             PageBind::Safe => keys.safe_bind = value,
         }
     }
+
+    fn draft(self, drafts: &PageBindDrafts) -> Option<&str> {
+        match self {
+            PageBind::Next => drafts.next.as_deref(),
+            PageBind::Prev => drafts.prev.as_deref(),
+            PageBind::Safe => drafts.safe.as_deref(),
+        }
+    }
+
+    pub fn set_draft(self, drafts: &mut PageBindDrafts, value: String) {
+        match self {
+            PageBind::Next => drafts.next = Some(value),
+            PageBind::Prev => drafts.prev = Some(value),
+            PageBind::Safe => drafts.safe = Some(value),
+        }
+    }
+
+    pub fn clear_draft(self, drafts: &mut PageBindDrafts) {
+        match self {
+            PageBind::Next => drafts.next = None,
+            PageBind::Prev => drafts.prev = None,
+            PageBind::Safe => drafts.safe = None,
+        }
+    }
+
+    /// The field text: a draft while typing, otherwise the committed bind.
+    pub fn shown<'a>(self, keys: &'a PageKeys, drafts: &'a PageBindDrafts) -> &'a str {
+        self.draft(drafts).unwrap_or_else(|| self.get(keys))
+    }
+}
+
+/// Typed page-bind fields that are not yet committed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PageBindDrafts {
+    pub next: Option<String>,
+    pub prev: Option<String>,
+    pub safe: Option<String>,
+}
+
+fn bind_key(raw: &str) -> Option<String> {
+    hotkey::parse_bind(raw).ok().map(|b| b.to_string())
+}
+
+/// Commit one page bind. A blank draft is refused, and a bind that matches
+/// the hide bind or another page bind is refused.
+pub fn commit_page_bind(
+    keys: &PageKeys,
+    kind: PageBind,
+    raw: &str,
+    hide_bind: &str,
+) -> Result<PageKeys, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("The shortcut cannot be blank.".into());
+    }
+    let parsed = hotkey::parse_bind(trimmed).map_err(|e| e)?;
+    let parsed = parsed.to_string();
+    if bind_key(hide_bind).as_deref() == Some(parsed.as_str()) {
+        return Err("That shortcut is already the hide bind.".into());
+    }
+    for other in [PageBind::Next, PageBind::Prev, PageBind::Safe] {
+        if other != kind && bind_key(other.get(keys)).as_deref() == Some(parsed.as_str()) {
+            return Err("That shortcut is already used by another page key.".into());
+        }
+    }
+    let mut next = keys.clone();
+    kind.set(&mut next, parsed);
+    Ok(next)
 }
 
 #[cfg(test)]
@@ -321,7 +409,7 @@ mod tests {
     #[test]
     fn default_binds_parse_and_normalize() {
         assert_eq!(parse_ok(DEFAULT_NEXT_BIND), "Super+Shift+N");
-        assert_eq!(parse_ok(DEFAULT_PREV_BIND), "Super+Shift+P");
+        assert_eq!(parse_ok(DEFAULT_PREV_BIND), "Super+Shift+B");
         assert_eq!(parse_ok(DEFAULT_SAFE_BIND), "Super+Shift+T");
         let keys = PageKeys::normalized(" super+shift+n ", "", "nope", true);
         assert_eq!(keys.next_bind, "Super+Shift+N");
@@ -335,6 +423,23 @@ mod tests {
             ..PageKeys::default()
         };
         assert!(bad.validate_for_save().is_err());
+        let keys = PageKeys::default();
+        assert_eq!(
+            commit_page_bind(&keys, PageBind::Next, "  ", "Super+Shift+C").unwrap_err(),
+            "The shortcut cannot be blank."
+        );
+        assert_eq!(
+            commit_page_bind(&keys, PageBind::Next, "Super+Shift+C", "Super+Shift+C").unwrap_err(),
+            "That shortcut is already the hide bind."
+        );
+        assert_eq!(
+            commit_page_bind(&keys, PageBind::Prev, "Super+Shift+T", "Super+Shift+C").unwrap_err(),
+            "That shortcut is already used by another page key."
+        );
+        let saved =
+            commit_page_bind(&keys, PageBind::Next, "Super+Shift+J", "Super+Shift+C").unwrap();
+        assert_eq!(saved.next_bind, "Super+Shift+J");
+        assert_eq!(saved.prev_bind, DEFAULT_PREV_BIND);
     }
 
     #[test]
@@ -413,8 +518,8 @@ mod tests {
         .unwrap();
         let start = PageState::default();
         let locked = apply_status(start, dir.path(), false);
-        assert_eq!(locked.page, Page::PicksAndBans);
-        assert_eq!(locked.stage, Stage::MapLocked { map_read: true });
+        assert_eq!(locked.page, Page::Tonight);
+        assert_eq!(locked.stage, Stage::MapLocked { map_read: false });
 
         std::fs::write(
             &status,
@@ -424,6 +529,28 @@ mod tests {
         let back = apply_status(locked, dir.path(), true);
         assert_eq!(back.page, Page::Tonight);
         assert_eq!(back.stage, Stage::MatchStart);
+    }
+
+    #[test]
+    fn hero_select_then_unread_vote_leaves_tonight() {
+        let dir = tempfile::tempdir().unwrap();
+        let status = stat_tracker::ocr_status::status_path(dir.path());
+        std::fs::write(
+            &status,
+            r#"{"companion_stage":{"kind":"hero_select","maps":[],"since":2}}"#,
+        )
+        .unwrap();
+        let s = apply_status(PageState::default(), dir.path(), false);
+        assert_eq!(s.page, Page::Tonight);
+        std::fs::write(
+            &status,
+            r#"{"companion_stage":{"kind":"map_vote","maps":[],"since":3}}"#,
+        )
+        .unwrap();
+        let s = apply_status(s, dir.path(), false);
+        assert_eq!(s.page, Page::Tonight);
+        assert_ne!(s.page, Page::PicksAndBans);
+        assert!(!s.in_match);
     }
 
     #[test]

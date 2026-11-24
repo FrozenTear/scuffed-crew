@@ -71,7 +71,7 @@ struct UiStateFile {
     /// Companion next-page bind. Missing -> Super+Shift+N.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     companion_next_bind: Option<String>,
-    /// Companion previous-page bind. Missing -> Super+Shift+P.
+    /// Companion previous-page bind. Missing -> Super+Shift+B.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     companion_prev_bind: Option<String>,
     /// Companion safe-page bind. Missing -> Super+Shift+T.

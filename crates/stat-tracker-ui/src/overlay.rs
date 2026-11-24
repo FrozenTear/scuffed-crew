@@ -1008,7 +1008,7 @@ impl OverlayApp {
         model.hotkey_hint = seasons::load_overlay_hotkey(&cli.data_dir).footer_hint();
         let keys = crate::companion_keys::load_page_keys(&cli.data_dir);
         model.safe_bind = keys.safe_bind;
-        model.pages = crate::companion_keys::load_page_state(&cli.data_dir);
+        model.pages = crate::companion_keys::start_companion_pages(&cli.data_dir);
         let surface_height = content_height(&model);
         Self {
             data_dir: cli.data_dir.clone(),
@@ -1033,29 +1033,26 @@ impl OverlayApp {
     pub(crate) fn refresh(&mut self) {
         let hint = seasons::load_overlay_hotkey(&self.data_dir).footer_hint();
         let keys = crate::companion_keys::load_page_keys(&self.data_dir);
-        if self.fixture.is_some() {
-            self.model.hotkey_hint = hint;
-            self.model.safe_bind = keys.safe_bind;
-            return;
-        }
-        let mtime = snapshot::snapshot_mtime(&self.data_dir);
-        if mtime != self.snapshot_mtime {
-            self.snapshot_mtime = mtime;
-            let snap = snapshot::load_snapshot(&self.data_dir);
-            let games = games_from_snapshot(&snap);
-            let seasons = seasons::load_cache(&self.data_dir);
-            let persisted = seasons::load_ui_state(&self.data_dir);
-            let season = seasons::resolve_selection(persisted, &seasons.seasons);
-            self.clock = Utc::now();
-            let config = stat_tracker::config::Config::load().unwrap_or_default();
-            self.model = build_model(
-                &games,
-                &seasons.seasons,
-                &season,
-                self.clock,
-                config.sync.is_some(),
-                detect_game_running(&self.data_dir, &config.game_process_names, false),
-            );
+        if self.fixture.is_none() {
+            let mtime = snapshot::snapshot_mtime(&self.data_dir);
+            if mtime != self.snapshot_mtime {
+                self.snapshot_mtime = mtime;
+                let snap = snapshot::load_snapshot(&self.data_dir);
+                let games = games_from_snapshot(&snap);
+                let seasons = seasons::load_cache(&self.data_dir);
+                let persisted = seasons::load_ui_state(&self.data_dir);
+                let season = seasons::resolve_selection(persisted, &seasons.seasons);
+                self.clock = Utc::now();
+                let config = stat_tracker::config::Config::load().unwrap_or_default();
+                self.model = build_model(
+                    &games,
+                    &seasons.seasons,
+                    &season,
+                    self.clock,
+                    config.sync.is_some(),
+                    detect_game_running(&self.data_dir, &config.game_process_names, false),
+                );
+            }
         }
         self.model.pages = crate::companion_keys::load_page_state(&self.data_dir);
         self.model.safe_bind = keys.safe_bind;
