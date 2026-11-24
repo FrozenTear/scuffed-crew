@@ -6,9 +6,10 @@
 //! `companion_safe` file triggers, writes `<data_dir>/companion_page.json`,
 //! and applies auto-advance from the status file's `companion_stage` (the C3
 //! shape), through `read_companion_stage` and the C3 freshness bound. A
-//! missing pid, a pid that does not match, or a stale `seen` is ignored,
-//! so the last page stays. The companion process reads the page file on
-//! its tick.
+//! missing pid, a pid that does not match, a stale `seen`, or a `seen`
+//! more than [`stat_tracker::companion_stage::SEEN_FUTURE_SLACK_SECS`]
+//! ahead is ignored, so the last page stays. The companion process
+//! reads the page file on its tick.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -239,10 +240,13 @@ pub fn consume_page_triggers(data_dir: &Path, last: &mut TriggerMtimes) -> Optio
 /// Map the status file's `companion_stage` (C3) to a page-model stage.
 ///
 /// Reads through [`stat_tracker::companion_stage::read_companion_stage`]
-/// and ignores a stage whose `seen` is older than
-/// [`stat_tracker::companion_stage::stage_is_current`]. Missing file,
-/// missing field, no live pid, a pid that does not match, a stale
-/// `seen`, or `unknown` -> `None`, so the last page stays. Hero select
+/// and ignores a stage that is not
+/// [`stat_tracker::companion_stage::stage_is_current`] (a stale `seen`,
+/// or a `seen` more than
+/// [`stat_tracker::companion_stage::SEEN_FUTURE_SLACK_SECS`] ahead).
+/// Missing file, missing field, no live pid, a pid that does not
+/// match, a rejected `seen`, or `unknown` -> `None`, so the last page
+/// stays. Hero select
 /// and hero ban are `MapLocked { map_read: false }` until detect produces
 /// InGame or another match-on signal, so the page does not auto-advance
 /// to Bans and picks (Tonight comes back, or stays, through a lock and a
@@ -627,5 +631,30 @@ mod tests {
         assert_eq!(none, start);
         let current = apply_now(start, dir.path(), false);
         assert_eq!(current.page, Page::MapVote);
+    }
+
+    #[test]
+    fn a_seen_further_ahead_than_the_slack_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let start = PageState::default();
+        let slack = stat_tracker::companion_stage::SEEN_FUTURE_SLACK_SECS;
+        write_stage(
+            dir.path(),
+            LIVE_PID,
+            "map_vote",
+            r#"["Busan","Ilios","Lijiang Tower"]"#,
+            NOW + slack + 1,
+        );
+        assert_eq!(apply_now(start, dir.path(), false), start);
+
+        write_stage(
+            dir.path(),
+            LIVE_PID,
+            "map_vote",
+            r#"["Busan","Ilios","Lijiang Tower"]"#,
+            NOW + 1,
+        );
+        let within = apply_now(start, dir.path(), false);
+        assert_eq!(within.page, Page::MapVote);
     }
 }
