@@ -847,50 +847,64 @@ fn shares_page_clicks(bare: &[String], over: &[String]) -> bool {
 /// restart bar stacked with the bottom gap, including a long wrapped
 /// toast, so the slot cannot cover the last control when both show.
 ///
-/// The slot is laid out at a page width narrow enough that an uncapped
-/// wrap of this toast would overflow both [`crate::widgets::TOAST_MAX`]
-/// and the inset. At 640 px, and even at the classic 720 pane width
-/// (488 px), an uncapped wrap still fitted; 400 px is the width that
-/// pins the cap. The toast bar itself is also checked to stay within
-/// [`crate::widgets::TOAST_MAX`].
+/// A one-line toast, and a long message that would overflow
+/// [`crate::widgets::TOAST_MAX`] if the cap were dropped, both at the
+/// classic 720 pane (488 px) and at 640 px. 400 px is below the 720x480
+/// window minimum and is not used here. The long toast is asserted at
+/// the cap, and the slot (toast + restart bar + gap) still fits
+/// [`super::PROMPTS_INSET`].
 #[test]
 fn the_prompts_inset_covers_a_toast_and_the_restart_bar() {
     use iced::advanced::layout::Limits;
     let renderer = headless();
-    // Narrower than FLOAT_MAX and the classic 720 page (488). At those
-    // widths an uncapped wrap of WRAPPED_TOAST still fitted in the inset.
-    let page = 400.0;
-    for (name, toast) in [("one line", "Report sent"), ("wrapped", WRAPPED_TOAST)] {
-        let mut slot = super::prompts_slot(toast, page);
-        let mut tree = Tree::new(&slot);
-        let node = slot.as_widget_mut().layout(
-            &mut tree,
-            &renderer,
-            &Limits::new(Size::ZERO, Size::new(page, 400.0)),
-        );
-        let height = node.size().height;
-        assert!(
-            height <= super::PROMPTS_INSET,
-            "{name}: inset {} is short of the slot {height} at page {page}",
-            super::PROMPTS_INSET
-        );
-        assert!(
-            height > super::PROMPTS_INSET / 2.0,
-            "{name}: slot {height} looks too small; the inset may be guessing"
-        );
-        let mut bar = crate::widgets::toast_bar(toast, None);
-        let mut tree = Tree::new(&bar);
-        let node = bar.as_widget_mut().layout(
-            &mut tree,
-            &renderer,
-            &Limits::new(Size::ZERO, Size::new(page, 400.0)),
-        );
-        let toast_h = node.size().height;
-        assert!(
-            toast_h <= crate::widgets::TOAST_MAX + 0.5,
-            "{name}: toast bar {toast_h} taller than TOAST_MAX {} at page {page}",
-            crate::widgets::TOAST_MAX
-        );
+    // WRAPPED_TOAST still fitted uncapped at these widths, so the cap
+    // pin uses a longer message: many repeats, joined with spaces.
+    let long = [WRAPPED_TOAST; 24].join(" ");
+    for page in [488.0, 640.0] {
+        for (name, toast) in [
+            ("one line", "Report sent".to_string()),
+            ("capped", long.clone()),
+        ] {
+            let mut slot = super::prompts_slot(&toast, page);
+            let mut tree = Tree::new(&slot);
+            let node = slot.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &Limits::new(Size::ZERO, Size::new(page, 2000.0)),
+            );
+            let height = node.size().height;
+            assert!(
+                height <= super::PROMPTS_INSET,
+                "{name}: inset {} is short of the slot {height} at page {page}",
+                super::PROMPTS_INSET
+            );
+            assert!(
+                height > super::PROMPTS_INSET / 2.0,
+                "{name}: slot {height} looks too small; the inset may be guessing"
+            );
+            let mut bar = crate::widgets::toast_bar(&toast, None);
+            let mut tree = Tree::new(&bar);
+            let node = bar.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &Limits::new(Size::ZERO, Size::new(page, 2000.0)),
+            );
+            let toast_h = node.size().height;
+            assert!(
+                toast_h <= crate::widgets::TOAST_MAX + 0.5,
+                "{name}: toast bar {toast_h} taller than TOAST_MAX {} at page {page}",
+                crate::widgets::TOAST_MAX
+            );
+            if name == "capped" {
+                // Iced's layout height leaves out the 1px border on each
+                // side, so a toast at the cap lays out at TOAST_MAX - 2.
+                let layout_max = crate::widgets::TOAST_MAX - 2.0;
+                assert!(
+                    (toast_h - layout_max).abs() <= 0.5,
+                    "{name}: toast bar {toast_h} should sit at the cap {layout_max} at page {page}"
+                );
+            }
+        }
     }
 }
 
@@ -987,9 +1001,11 @@ fn the_overflowing_toast_keeps_its_text_clear_of_the_scrollbar() {
     let bar_left = scroll.x + scroll.width - SCROLLBAR_WIDTH;
     for (bounds, text) in &texts {
         let right = bounds.x + bounds.width;
+        let detail =
+            format!("scroll={scroll:?} content={content:?} text={text:?} bounds={bounds:?}");
         assert!(
             right <= bar_left + 0.5,
-            "toast text ends at {right}, under the bar which starts at {bar_left};              scroll={scroll:?} content={content:?} text={text:?} bounds={bounds:?}"
+            "toast text ends at {right}, under the bar which starts at {bar_left}; {detail}"
         );
     }
 }
