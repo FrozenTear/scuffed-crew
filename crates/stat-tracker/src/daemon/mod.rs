@@ -6,6 +6,7 @@
 //! `main.rs` and `main_tests` name them as before.
 
 pub(crate) mod bans_picks;
+mod companion_stage;
 mod debug_dumps;
 mod event_loop;
 pub(crate) mod focus;
@@ -26,6 +27,8 @@ mod shutdown;
 pub(crate) mod snapshot_policy;
 mod sync_sched;
 mod tab;
+#[cfg(test)]
+mod tests_companion_stage;
 #[cfg(test)]
 mod tests_debug_dumps;
 #[cfg(test)]
