@@ -6,7 +6,7 @@
 //! spec puts its one toast (p4 "Report sent"), so nothing sits between the
 //! bar and the page heading.
 
-use iced::widget::{Column, column, container, responsive, row, stack};
+use iced::widget::{Column, Stack, column, container, responsive, row, space, stack};
 use iced::{Element, Fill, Length, Padding};
 
 use crate::app::{Message, TrackerApp};
@@ -17,6 +17,8 @@ use crate::{restart_prompt, widgets};
 
 /// The whole window: the chrome for the layout picked at start on the page
 /// background, with each open dialog in `layers` stacked over it in order.
+/// A closed dialog keeps its place as an empty layer ([`empty_layer`]), so
+/// the page keeps its scroll when a dialog opens or closes (#806).
 pub(crate) fn with_layers<'a, const N: usize>(
     app: &'a TrackerApp,
     layers: [Option<Element<'a, Message>>; N],
@@ -29,13 +31,14 @@ pub(crate) fn with_layers<'a, const N: usize>(
         .width(Fill)
         .height(Fill)
         .style(theme::page_background);
-    layers
+    let layers = layers
         .into_iter()
         .chain([crate::what_leaves::layer(app)])
-        .flatten()
-        .fold(page.into(), |below, layer| {
-            stack![below, layer].width(Fill).height(Fill).into()
-        })
+        .map(|layer| layer.unwrap_or_else(empty_layer));
+    Stack::with_children(std::iter::once(page.into()).chain(layers))
+        .width(Fill)
+        .height(Fill)
+        .into()
 }
 
 /// 0.5 layout: sidebar on the left, header and old Settings cards.
@@ -78,51 +81,74 @@ fn sidebar(app: &TrackerApp) -> Element<'_, Message> {
 /// draw the spec's filter chips yet; the redesigned pages draw the chips
 /// themselves (Season, queues, roles, Crew, Hero, Map; "Filters (n)"
 /// below a 1440 px window).
+///
+/// The prompts layer is always there, empty when there is no toast and no
+/// restart bar ([`empty_layer`]), so the widget tree keeps its shape when a
+/// toast comes and goes. iced matches widget state by position in the
+/// tree: with the layer only there while a toast shows, the page scroll
+/// got a fresh state and jumped to the top (#806).
 fn top_tabs(app: &TrackerApp) -> Element<'_, Message> {
     responsive(move |size| {
-        let mut content = column![crate::nav::page_heading(app.screen)];
-        // No Tracker health panel here: without a keyboard Tab is never
-        // seen, so the reason and its fix sit under the title on every tab.
-        if let Some(notice) = top_tabs_input_notice(app) {
-            content = content.push(widgets::warn_line(notice));
-        }
-        content = with_vision_notice(app, content);
-        // Settings has none; Overview, Games, Heroes, Maps and Seasons draw
-        // the spec's filter chips themselves.
-        if !matches!(
-            app.screen,
-            Screen::Settings
-                | Screen::Overview
-                | Screen::Games
-                | Screen::Heroes
-                | Screen::Maps
-                | Screen::Seasons
-        ) {
-            content = content.push(widgets::header_controls(app));
-        }
-        let gutter = theme::page_gutter(size.width);
-        let window = column![
-            crate::nav::top_bar(app, size.width),
-            page_body(
-                app,
-                content,
-                crate::settings_page::view,
-                gutter,
-                false,
-                Prompts::Floating
-            ),
-        ]
-        .spacing(0)
-        .width(Fill)
-        .height(Fill);
-        match floating_prompts(app, size.width - 2.0 * gutter) {
-            Some(prompts) => stack![window, prompts].width(Fill).height(Fill).into(),
-            None => window.into(),
-        }
+        let (window, prompts) = top_tabs_parts(app, size.width);
+        stack![window, prompts.unwrap_or_else(empty_layer)]
+            .width(Fill)
+            .height(Fill)
+            .into()
     })
     .width(Fill)
     .height(Fill)
     .into()
+}
+
+/// The layer in place of no prompts or a closed dialog: a zero-size
+/// [`space`] that draws nothing and takes no events, so clicks reach the
+/// page under it, as they do in the space around a real toast.
+fn empty_layer<'a>() -> Element<'a, Message> {
+    space().into()
+}
+
+/// The top tabs window for a `width` px window, and the floating toast and
+/// restart bar over it, if any.
+fn top_tabs_parts(
+    app: &TrackerApp,
+    width: f32,
+) -> (Column<'_, Message>, Option<Element<'_, Message>>) {
+    let mut content = column![crate::nav::page_heading(app.screen)];
+    // No Tracker health panel here: without a keyboard Tab is never
+    // seen, so the reason and its fix sit under the title on every tab.
+    if let Some(notice) = top_tabs_input_notice(app) {
+        content = content.push(widgets::warn_line(notice));
+    }
+    content = with_vision_notice(app, content);
+    // Settings has none; Overview, Games, Heroes, Maps and Seasons draw
+    // the spec's filter chips themselves.
+    if !matches!(
+        app.screen,
+        Screen::Settings
+            | Screen::Overview
+            | Screen::Games
+            | Screen::Heroes
+            | Screen::Maps
+            | Screen::Seasons
+    ) {
+        content = content.push(widgets::header_controls(app));
+    }
+    let gutter = theme::page_gutter(width);
+    let window = column![
+        crate::nav::top_bar(app, width),
+        page_body(
+            app,
+            content,
+            crate::settings_page::view,
+            gutter,
+            false,
+            Prompts::Floating
+        ),
+    ]
+    .spacing(0)
+    .width(Fill)
+    .height(Fill);
+    (window, floating_prompts(app, width - 2.0 * gutter))
 }
 
 /// The keyboard notice the top tabs layout draws under the page title.
@@ -278,3 +304,7 @@ mod tests {
         assert_eq!(top_tabs_input_notice(&app), None);
     }
 }
+
+#[cfg(test)]
+#[path = "chrome_tree_tests.rs"]
+mod tree_tests;
