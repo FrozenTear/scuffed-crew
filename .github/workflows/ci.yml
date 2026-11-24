@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, "wip/0.6", "wip/0.7"]
+    branches: [main, "wip/0.6", "wip/0.7", "wip/0.7.1"]
 
 # A new push to a PR cancels that PR's older run. Pushes to main group by
 # commit SHA and never cancel: publish-image.yml publishes only main commits

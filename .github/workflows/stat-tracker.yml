@@ -2,7 +2,7 @@ name: Stat Tracker CI
 
 on:
   push:
-    branches: [main, "wip/0.6", "wip/0.7"]
+    branches: [main, "wip/0.6", "wip/0.7", "wip/0.7.1"]
     paths:
       # The tracker lib, the crates split out of it (stat-tracker-core, …)
       # and the GUI.
@@ -14,7 +14,7 @@ on:
       - ".github/workflows/stat-tracker-release.yml"
       - ".github/actions/apt-install/**"
   pull_request:
-    branches: [main, "wip/0.6", "wip/0.7"]
+    branches: [main, "wip/0.6", "wip/0.7", "wip/0.7.1"]
     paths:
       # The tracker lib, the crates split out of it (stat-tracker-core, …)
       # and the GUI.
