@@ -110,6 +110,37 @@ fn a_hero_banned_by_both_sides_counts_once_in_games_and_once_per_side() {
     assert_eq!(t.rows.len(), 1);
 }
 
+/// The Banned by parts sum to Games plus one per game where both sides
+/// banned the hero: such a game counts once in Games, once per side.
+fn parts_sum(r: &BanRow) -> usize {
+    r.own + r.enemy + r.side_not_read + r.lobby
+}
+
+#[test]
+fn the_banned_by_parts_sum_to_games_plus_both_sides_games() {
+    let mut games = vec![
+        game(&bans(&[(Some("orisa"), Some("own"))]), Outcome::Win, 1),
+        game(&bans(&[(Some("orisa"), Some("enemy"))]), Outcome::Loss, 2),
+        game(&bans(&[(Some("orisa"), None)]), Outcome::Win, 3),
+        game(&bans_lobby(&[(None, None)], Some("orisa")), Outcome::Win, 4),
+    ];
+    let t = table(&games);
+    let o = row(&t, "Orisa");
+    assert_eq!((o.own, o.enemy, o.side_not_read, o.lobby), (1, 1, 1, 1));
+    assert_eq!(parts_sum(o), o.record.games, "no both-sides game: exact");
+
+    games.push(game(
+        &bans(&[(Some("orisa"), Some("own")), (Some("orisa"), Some("enemy"))]),
+        Outcome::Win,
+        5,
+    ));
+    let t = table(&games);
+    let o = row(&t, "Orisa");
+    assert_eq!(o.record.games, 5, "the both-sides game adds 1 to Games");
+    assert_eq!((o.own, o.enemy), (2, 2), "and 1 to each side");
+    assert_eq!(parts_sum(o), o.record.games + 1);
+}
+
 #[test]
 fn a_ban_with_no_team_counts_in_games_but_not_in_the_split() {
     let games = [

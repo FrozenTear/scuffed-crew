@@ -7,8 +7,9 @@
 //! chrome: Hero (portrait, role, name), Games, Decided (the count, muted,
 //! then the record), Win rate (the shared bar and a whole percent from 10
 //! decided games, else "Too few games (n of 10)") and Banned by ("Your
-//! ban N", tinted as a tag only above 0, "Enemy N", then "Side not read
-//! N" and "Lobby N" when there is one). Headers sort like Maps: the
+//! ban N", tinted as a tag only above 0, and "Enemy N" on every row, then
+//! "Side not read N" and "Lobby N" when there is one, in the muted style;
+//! its tooltip, the spoken label too, names every part in order). Headers sort like Maps: the
 //! active one in the accent with a chevron. No Best or Worst rail, so
 //! nothing ranks as a pick. With no rows, one empty card says why, with
 //! no Sort and no stats line. Below an 860 px window the columns narrow
@@ -304,17 +305,15 @@ pub struct SplitPart {
     pub tag: bool,
 }
 
-/// "Your ban N" and "Enemy N" when either side banned the hero (Your ban
-/// tinted only above 0), then "Side not read N" and "Lobby N" when there
-/// is one. A hero named only by unread sides or lobby bans shows just
-/// those, not "Your ban 0" and "Enemy 0". Wraps inside the cell.
+/// "Your ban N" and "Enemy N" on every row, 0 included (Your ban tinted
+/// only above 0), then "Side not read N" and "Lobby N" only above 0, both
+/// muted, never the tag. Wraps inside the cell.
 pub fn split_parts(r: &BanRow) -> Vec<SplitPart> {
     let part = |words: String, tag| SplitPart { words, tag };
-    let mut parts = Vec::new();
-    if r.own > 0 || r.enemy > 0 {
-        parts.push(part(format!("{YOUR_BAN} {}", r.own), r.own > 0));
-        parts.push(part(format!("{ENEMY} {}", r.enemy), false));
-    }
+    let mut parts = vec![
+        part(format!("{YOUR_BAN} {}", r.own), r.own > 0),
+        part(format!("{ENEMY} {}", r.enemy), false),
+    ];
     if r.side_not_read > 0 {
         parts.push(part(format!("{SIDE_NOT_READ} {}", r.side_not_read), false));
     }
@@ -324,6 +323,15 @@ pub fn split_parts(r: &BanRow) -> Vec<SplitPart> {
     parts
 }
 
+/// The Banned by cell's tooltip, its spoken label too: every part of
+/// [`split_parts`], in order, as in "Your ban 0, Enemy 0, Lobby 3."
+pub fn split_name(r: &BanRow) -> String {
+    let words: Vec<String> = split_parts(r).into_iter().map(|p| p.words).collect();
+    format!("{}.", words.join(", "))
+}
+
+/// The Banned by cell, with [`split_name`] as its tooltip like a Games
+/// bans chip.
 fn split(r: &BanRow) -> Element<'static, Message> {
     let mut cell = Row::new().spacing(8).align_y(Alignment::Center);
     for part in split_parts(r) {
@@ -348,7 +356,7 @@ fn split(r: &BanRow) -> Element<'static, Message> {
             Element::from(t)
         });
     }
-    cell.wrap().vertical_spacing(4).into()
+    crate::games_bans_view::with_tip(cell.wrap().vertical_spacing(4), split_name(r))
 }
 
 /// The Maps-style empty card: a title and a line.

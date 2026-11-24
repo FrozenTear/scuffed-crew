@@ -289,26 +289,158 @@ fn lobby_only(hero: &str, i: usize) -> Game {
 }
 
 #[test]
-fn a_lobby_only_row_shows_only_the_lobby_count() {
+fn a_lobby_only_row_still_shows_your_ban_and_enemy_at_zero() {
     let row = only_row(&[lobby_only("sigma", 0), lobby_only("sigma", 1)]);
     assert_eq!((row.own, row.enemy, row.lobby), (0, 0, 2));
-    assert_eq!(split_parts(&row), [part("Lobby 2", false)]);
+    assert_eq!(
+        split_parts(&row),
+        [
+            part("Your ban 0", false),
+            part("Enemy 0", false),
+            part("Lobby 2", false),
+        ]
+    );
 
     let mut unread = row.clone();
     unread.lobby = 0;
     unread.side_not_read = 1;
-    assert_eq!(split_words(&unread), ["Side not read 1"]);
+    assert_eq!(
+        split_parts(&unread),
+        [
+            part("Your ban 0", false),
+            part("Enemy 0", false),
+            part("Side not read 1", false),
+        ]
+    );
 
     let (_dir, mut app) = app_with(vec![lobby_only("sigma", 0)]);
     when_banned(&mut app);
     let words = page(&app);
-    assert!(has(&words, "Sigma") && has(&words, "Lobby 1"), "{words:?}");
-    assert!(
-        !words
-            .iter()
-            .any(|w| w.starts_with(YOUR_BAN) || w.starts_with(ENEMY)),
-        "{words:?}"
+    let at = words
+        .iter()
+        .position(|w| w == "Sigma")
+        .expect("Sigma drawn");
+    let cell: Vec<&str> = words[at..]
+        .iter()
+        .map(String::as_str)
+        .filter(|w| {
+            [YOUR_BAN, ENEMY, SIDE_NOT_READ, LOBBY]
+                .iter()
+                .any(|p| w.starts_with(p))
+        })
+        .collect();
+    assert_eq!(cell, ["Your ban 0", "Enemy 0", "Lobby 1"], "{words:?}");
+}
+
+#[test]
+fn parts_at_zero_stay_hidden_except_your_ban_and_enemy() {
+    let mut row = only_row(&banned("ana", 1, 1, 1));
+    for (own, enemy) in [(0, 0), (1, 0), (0, 1), (2, 3)] {
+        (row.own, row.enemy, row.side_not_read, row.lobby) = (own, enemy, 0, 0);
+        assert_eq!(
+            split_words(&row),
+            [format!("Your ban {own}"), format!("Enemy {enemy}")],
+            "Side not read 0 and Lobby 0 never show"
+        );
+    }
+}
+
+#[test]
+fn lobby_side_not_read_and_your_ban_at_zero_are_never_the_tag() {
+    let mut row = only_row(&[lobby_only("sigma", 0)]);
+    (row.side_not_read, row.lobby) = (2, 3);
+    let parts = split_parts(&row);
+    assert_eq!(parts.len(), 4, "{parts:?}");
+    assert!(parts.iter().all(|p| !p.tag), "{parts:?}");
+    row.own = 1;
+    let tagged: Vec<String> = split_parts(&row)
+        .into_iter()
+        .filter(|p| p.tag)
+        .map(|p| p.words)
+        .collect();
+    assert_eq!(tagged, ["Your ban 1"], "only a real own ban");
+}
+
+#[test]
+fn lobby_and_side_not_read_are_drawn_muted_with_no_tag_box() {
+    // Sigma: one game with an unread slot, one named only by the lobby
+    // ban, so its cell is Your ban 0, Enemy 0, Side not read 1, Lobby 1.
+    let mut unread = sample().remove(0);
+    unread.session_id = "unread-sigma".into();
+    unread.bans_picks =
+        Some(r#"{"bans":[{"value":"sigma","team":null}],"bans_picks_recognizer":"cv-v1"}"#.into());
+    let (_dir, mut app) = app_with(vec![unread, lobby_only("sigma", 0)]);
+    when_banned(&mut app);
+    let all = texts_at(crate::heroes_page::view(&app, 10_000.0), 10_000.0);
+    let cell = ["Your ban 0", "Enemy 0", "Side not read 1", "Lobby 1"];
+    let at: Vec<Rectangle> = cell
+        .iter()
+        .map(|w| {
+            all.iter()
+                .find(|(t, _)| t == w)
+                .unwrap_or_else(|| panic!("{w} not drawn: {all:?}"))
+                .1
+        })
+        .collect();
+    // Untagged parts sit 8 px apart on a line, or start the cell on a new
+    // one; the tag box would add its 8 px padding before the words.
+    for i in 1..at.len() {
+        let want = if (at[i].y - at[i - 1].y).abs() < 0.5 {
+            at[i - 1].x + at[i - 1].width + 8.0
+        } else {
+            at[0].x
+        };
+        assert!(
+            (at[i].x - want).abs() < 0.5,
+            "{} drawn in a box: {:?}, want x {want}: {all:?}",
+            cell[i],
+            at[i]
+        );
+    }
+}
+
+#[test]
+fn the_split_name_lists_every_shown_part_in_order() {
+    let own = only_row(&banned("ana", 3, 1, 1));
+    assert_eq!(split_name(&own), "Your ban 1, Enemy 2.");
+    let lobby = only_row(&[
+        lobby_only("sigma", 0),
+        lobby_only("sigma", 1),
+        lobby_only("sigma", 2),
+    ]);
+    assert_eq!(split_name(&lobby), "Your ban 0, Enemy 0, Lobby 3.");
+    let mut unread = lobby.clone();
+    (unread.lobby, unread.side_not_read) = (0, 2);
+    assert_eq!(split_name(&unread), "Your ban 0, Enemy 0, Side not read 2.");
+    let mut mixed = own.clone();
+    (mixed.side_not_read, mixed.lobby) = (1, 4);
+    assert_eq!(
+        split_name(&mixed),
+        "Your ban 1, Enemy 2, Side not read 1, Lobby 4."
     );
+}
+
+#[test]
+fn the_split_name_has_one_entry_per_drawn_part() {
+    let base = only_row(&banned("ana", 1, 1, 1));
+    for (own, enemy, unread, lobby) in [
+        (0, 0, 0, 0),
+        (0, 0, 0, 5),
+        (0, 0, 7, 0),
+        (3, 0, 0, 0),
+        (0, 4, 1, 0),
+        (2, 6, 3, 9),
+    ] {
+        let mut r = base.clone();
+        (r.own, r.enemy, r.side_not_read, r.lobby) = (own, enemy, unread, lobby);
+        let name = split_name(&r);
+        let entries: Vec<&str> = name
+            .strip_suffix('.')
+            .expect("ends with a full stop")
+            .split(", ")
+            .collect();
+        assert_eq!(entries, split_words(&r), "{name}");
+    }
 }
 
 #[test]
@@ -537,4 +669,46 @@ fn sort_messages_reach_the_page_state() {
         app.heroes_page.banned.sort = key;
         let _ = page(&app);
     }
+}
+
+#[test]
+fn hovering_the_banned_by_cell_opens_its_tooltip() {
+    // The tooltip's words are [`split_name`] (tested above); iced's
+    // tooltip overlay does not take operations, so this checks it opens.
+    use iced::advanced::{Shell, clipboard, mouse};
+    let row = only_row(&[lobby_only("sigma", 0)]);
+    let mut cell = split(&row);
+    let renderer = headless();
+    let mut tree = Tree::new(&cell);
+    let node = cell.as_widget_mut().layout(
+        &mut tree,
+        &renderer,
+        &Limits::new(iced::Size::ZERO, iced::Size::new(240.0, 400.0)),
+    );
+    let viewport = Rectangle::with_size(iced::Size::new(240.0, 400.0));
+    let tip_open = |cell: &mut Element<'_, Message>, tree: &mut Tree| {
+        cell.as_widget_mut()
+            .overlay(
+                tree,
+                Layout::new(&node),
+                &renderer,
+                &viewport,
+                iced::Vector::ZERO,
+            )
+            .is_some()
+    };
+    assert!(!tip_open(&mut cell, &mut tree), "closed until hovered");
+    let at = iced::Point::new(4.0, node.bounds().height / 2.0);
+    let mut messages = Vec::new();
+    cell.as_widget_mut().update(
+        &mut tree,
+        &iced::Event::Mouse(mouse::Event::CursorMoved { position: at }),
+        Layout::new(&node),
+        mouse::Cursor::Available(at),
+        &renderer,
+        &mut clipboard::Null,
+        &mut Shell::new(&mut messages),
+        &viewport,
+    );
+    assert!(tip_open(&mut cell, &mut tree), "the tooltip opens on hover");
 }
