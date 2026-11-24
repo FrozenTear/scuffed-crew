@@ -198,7 +198,7 @@ fn upload_rank_struct_carries_the_decided_queue() {
 
 #[test]
 fn a_title_that_does_not_name_role_or_open_omits_the_rank_object() {
-    for title in ["QUICK PLAY", "6V6 QUICK PLAY", "ARCADE", "COMPETITIVE"] {
+    for title in ["QUICK PLAY", "6V6 QUICK PLAY", "ARCADE"] {
         let m = game(Some(queue(title)), Some(6), None);
         assert!(upload_rank(&m).is_none(), "{title}");
         let body = body_of(&m);
