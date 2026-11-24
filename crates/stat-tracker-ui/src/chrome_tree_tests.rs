@@ -37,7 +37,7 @@ const SCROLL_Y: f32 = 120.0;
 
 type View = for<'a> fn(&'a TrackerApp) -> Element<'a, Message>;
 
-pub(super) fn headless() -> iced::Renderer {
+pub(crate) fn headless() -> iced::Renderer {
     use iced::advanced::renderer::Headless;
     let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
         theme::FONT_MEDIUM,
@@ -362,6 +362,68 @@ fn scroll_path(
 /// The path of widget tags from the root to the page pane.
 fn pane_path(app: &TrackerApp, view: View) -> Vec<(usize, tree::Tag)> {
     scroll_path(app, view, Target::Pane, WINDOW)
+}
+
+/// The path of widget tags from the root to the first widget whose text
+/// is `needle`. Children are searched first, so a shrink-wrapped parent
+/// with the same bounds does not hide the text node.
+fn text_path(app: &TrackerApp, view: View, needle: &str) -> Vec<(usize, tree::Tag)> {
+    let renderer = headless();
+    let mut element = view(app);
+    let mut tree = Tree::new(&element);
+    let node = lay_out(&mut element, &mut tree, &renderer, WINDOW);
+    struct FindText<'a> {
+        needle: &'a str,
+        bounds: Option<Rectangle>,
+    }
+    impl Operation<()> for FindText<'_> {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<()>)) {
+            operate(self);
+        }
+
+        fn text(&mut self, _id: Option<&Id>, bounds: Rectangle, text: &str) {
+            if self.bounds.is_none() && text == self.needle {
+                self.bounds = Some(bounds);
+            }
+        }
+    }
+    let mut find = FindText {
+        needle,
+        bounds: None,
+    };
+    run(&mut element, &mut tree, &node, &renderer, &mut find);
+    let bounds = find
+        .bounds
+        .unwrap_or_else(|| panic!("{needle} is in the tree"));
+    let mut path = vec![(0, tree.tag)];
+    assert!(
+        path_to_bounds(&tree, Layout::new(&node), bounds, &mut path),
+        "{needle} is in the tree"
+    );
+    path
+}
+
+fn path_to_bounds(
+    tree: &Tree,
+    layout: Layout<'_>,
+    target: Rectangle,
+    path: &mut Vec<(usize, tree::Tag)>,
+) -> bool {
+    for (i, child) in layout.children().enumerate() {
+        let Some(child_tree) = tree.children.get(i) else {
+            continue;
+        };
+        path.push((i, child_tree.tag));
+        if path_to_bounds(child_tree, child, target, path) {
+            return true;
+        }
+        path.pop();
+    }
+    let b = layout.bounds();
+    (b.x - target.x).abs() < 0.5
+        && (b.y - target.y).abs() < 0.5
+        && (b.width - target.width).abs() < 0.5
+        && (b.height - target.height).abs() < 0.5
 }
 
 /// A readable name for a tag, for the failure messages.
@@ -1122,4 +1184,91 @@ fn lowest_inside_scrollable(layout: Layout<'_>, _target: Target, found: &Seen) -
         layout.children().find_map(|child| walk(child, found))
     }
     walk(layout, found).expect("the scrollable is in the layout")
+}
+
+/// The status pill's menu and confirm are layers that are always
+/// there, so opening or closing either keeps the pane and its scroll.
+#[test]
+fn the_pill_menu_and_confirm_keep_the_pane_and_its_scroll() {
+    use crate::daemon::DaemonVerb;
+    use crate::status_pill::Confirm;
+    let (_dir, mut app) = app();
+    // A live app with the tracker up, so the pill has a menu.
+    app.fixture = None;
+    app.daemon.pid = Some(4242);
+    let closed = pane_path(&app, no_dialog);
+    app.pill.menu = Some(0);
+    assert!(crate::status_pill::menu_layer(&app).is_some());
+    let menu = pane_path(&app, no_dialog);
+    app.pill.menu = None;
+    app.pill.confirm = Some(Confirm {
+        verb: DaemonVerb::Stop,
+        on_action: false,
+    });
+    assert!(crate::status_pill::confirm_layer(&app).is_some());
+    let confirm = pane_path(&app, no_dialog);
+    app.pill.confirm = None;
+    eprintln!("pill closed: {:?}", readable(&closed));
+    assert_eq!(
+        closed,
+        menu,
+        "{:?} vs {:?}",
+        readable(&closed),
+        readable(&menu)
+    );
+    assert_eq!(
+        closed,
+        confirm,
+        "{:?} vs {:?}",
+        readable(&closed),
+        readable(&confirm)
+    );
+    // The pane is already the first stack child, so a pane-only path
+    // still matches if the empty closed pill layers are dropped. The
+    // dialog sits after those slots; its path stays put only when the
+    // empty layers keep their place.
+    app.pill.menu = None;
+    app.pill.confirm = None;
+    let dialog_closed = text_path(&app, a_dialog, "A dialog");
+    app.pill.menu = Some(0);
+    let dialog_menu = text_path(&app, a_dialog, "A dialog");
+    app.pill.menu = None;
+    app.pill.confirm = Some(Confirm {
+        verb: DaemonVerb::Stop,
+        on_action: false,
+    });
+    let dialog_confirm = text_path(&app, a_dialog, "A dialog");
+    app.pill.confirm = None;
+    eprintln!("dialog closed: {:?}", readable(&dialog_closed));
+    assert_eq!(
+        dialog_closed,
+        dialog_menu,
+        "{:?} vs {:?}",
+        readable(&dialog_closed),
+        readable(&dialog_menu)
+    );
+    assert_eq!(
+        dialog_closed,
+        dialog_confirm,
+        "{:?} vs {:?}",
+        readable(&dialog_closed),
+        readable(&dialog_confirm)
+    );
+    let kept = offset_after(&mut app, no_dialog, no_dialog, |app| {
+        app.pill.menu = Some(0)
+    });
+    assert!(kept > 0.0, "opening the menu reset the scroll");
+    let kept = offset_after(&mut app, no_dialog, no_dialog, |app| app.pill.menu = None);
+    assert!(kept > 0.0, "closing the menu reset the scroll");
+    let kept = offset_after(&mut app, no_dialog, no_dialog, |app| {
+        app.pill.confirm = Some(Confirm {
+            verb: DaemonVerb::Restart,
+            on_action: false,
+        })
+    });
+    assert!(kept > 0.0, "opening the confirm reset the scroll");
+    let kept = offset_after(&mut app, no_dialog, no_dialog, |app| {
+        app.pill.confirm = None
+    });
+    assert!(kept > 0.0, "closing the confirm reset the scroll");
 }

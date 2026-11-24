@@ -144,6 +144,8 @@ pub enum Message {
     SaveSettings,
     Daemon(DaemonVerb),
     DaemonDone(Result<String, String>),
+    /// The top bar's status pill, its menu and confirm ([`crate::status_pill`]).
+    Pill(crate::status_pill::Msg),
     ToggleAutostart,
     AutostartReady(bool),
     BackendReady(CaptureBackend),
@@ -364,6 +366,8 @@ pub struct TrackerApp {
     pub(crate) config_unreadable: bool,
     pub daemon: DaemonView,
     pub daemon_busy: bool,
+    /// The status pill's verb in flight, error, menu and confirm.
+    pub(crate) pill: crate::status_pill::PillState,
     pub outputs: Vec<String>,
     pub backend: Option<CaptureBackend>,
     /// `XDG_CURRENT_DESKTOP`, read once.
@@ -614,6 +618,7 @@ impl TrackerApp {
             config_unreadable,
             daemon,
             daemon_busy: false,
+            pill: Default::default(),
             outputs: Vec::new(),
             backend: None,
             desktop: std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default(),
@@ -773,12 +778,18 @@ impl TrackerApp {
         let page = top.is_none();
         if top == Some(crate::chrome::TopDialog::Guide) {
             subs.push(iced::event::listen_with(setup_guide_keys));
-        } else if page && self.page_state.chip_draft().is_some() {
-            subs.push(iced::event::listen_with(
-                crate::settings_update::chip_escape,
-            ));
-        } else if page && self.screen == Screen::Games && crate::games_panel::listens(self) {
-            subs.push(iced::event::listen_with(crate::games_panel::close_keys));
+        } else if page {
+            let pill_owns = crate::status_pill::listen(self, &mut subs);
+            if !pill_owns && self.page_state.chip_draft().is_some() {
+                subs.push(iced::event::listen_with(
+                    crate::settings_update::chip_escape,
+                ));
+            } else if !pill_owns
+                && self.screen == Screen::Games
+                && crate::games_panel::listens(self)
+            {
+                subs.push(iced::event::listen_with(crate::games_panel::close_keys));
+            }
         }
         crate::nav::with_clear_on_pointer(self, subs)
     }
@@ -1129,35 +1140,12 @@ impl TrackerApp {
             Message::SaveSettings => {
                 self.save_settings(crate::settings_save::SaveFrom::Classic, None)
             }
-            Message::Daemon(verb) => {
-                if self.fixture.is_some() || self.daemon_busy {
-                    return Task::none();
-                }
-                self.daemon_busy = true;
-                if verb.applies_saved_config() {
-                    self.page_state.restart_started(&self.saved_config);
-                }
-                let data_dir = self.data_dir.clone();
-                let installed = self.daemon.service_installed;
-                Task::perform(
-                    daemon::run_verb(data_dir, verb, installed),
-                    Message::DaemonDone,
-                )
-            }
-            Message::DaemonDone(result) => {
-                self.daemon_busy = false;
-                self.page_state.daemon_done(result.is_ok());
-                self.replace_toast(match result {
-                    Ok(m) => m,
-                    Err(e) => e,
-                });
-                self.daemon = daemon::refresh_view(&self.data_dir, &self.daemon);
-                self.page_state
-                    .observe_tracker(self.daemon.pid, &self.saved_config);
-                Task::perform(daemon::systemd_enabled(), Message::AutostartReady)
-            }
+            Message::Daemon(verb) => crate::status_pill::request(self, verb),
+            Message::DaemonDone(result) => crate::status_pill::done(self, result),
+            Message::Pill(msg) => crate::status_pill::update(self, msg),
             Message::ToggleAutostart => {
-                if self.fixture.is_some() || !self.daemon.service_installed {
+                // Its own busy mark: the pill names no verb, none starts.
+                if self.fixture.is_some() || self.daemon_busy || !self.daemon.service_installed {
                     return Task::none();
                 }
                 self.daemon_busy = true;

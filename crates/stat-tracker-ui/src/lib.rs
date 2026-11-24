@@ -99,6 +99,7 @@ pub mod setup_guide;
 mod small_sample;
 pub mod snapshot;
 mod stat_tiles;
+mod status_pill;
 pub mod tab_bits;
 pub mod theme;
 pub mod tracker_status;
