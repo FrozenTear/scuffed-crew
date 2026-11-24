@@ -383,3 +383,39 @@ fn a_chip_that_fits_is_unchanged() {
         assert_eq!(drawn.tooltips, 0, "{m}");
     }
 }
+
+/// The unsure-sign row's contract (`the_unsure_map_sign_keeps_its_width_when_laid_out`):
+/// the name, the sign and the mode chip always show, the mode chip whole
+/// or ending in "…". The queue chip shows, or is left out and the tooltip
+/// names the queue title.
+pub(super) fn shows_mode_and_names_queue(
+    parts: &[MapPart],
+    fit: &crate::games_map_fit::MapFit,
+    at: &str,
+) {
+    let shown = &fit.parts;
+    let [MapPart::Chip(full_mode), MapPart::Chip(queue)] = &parts[2..] else {
+        panic!("{at}: mode and queue chips after the name and sign: {parts:?}");
+    };
+    assert!(
+        matches!(&shown[..2], [MapPart::Name, MapPart::Warn]),
+        "{at}: {shown:?}"
+    );
+    let Some(MapPart::Chip(shown_mode)) = shown.get(2) else {
+        panic!("{at}: no mode chip in {shown:?}");
+    };
+    let kept = shown_mode.strip_suffix(ELLIPSIS);
+    assert!(
+        shown_mode == full_mode || kept.is_some_and(|k| full_mode.starts_with(k.trim_end())),
+        "{at}: mode chip {shown_mode:?} for {full_mode:?}"
+    );
+    let tip_names_queue = fit
+        .tip
+        .as_deref()
+        .is_some_and(|t| t.contains(queue.as_str()));
+    let queue_ok = match shown.len() {
+        4 => matches!(&shown[3], MapPart::Chip(_)),
+        n => n == 3 && tip_names_queue,
+    };
+    assert!(queue_ok, "{at}: {shown:?}, tip {:?}", fit.tip);
+}

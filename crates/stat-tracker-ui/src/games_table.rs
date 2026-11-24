@@ -1445,14 +1445,19 @@ mod tests {
                 let cell = &cells[map_at];
                 let cell_w = cell.bounds().width;
                 let inner = row_node(cell);
-                // A chip with no room even for "…" is left out (the
-                // tooltip names it); the name, the sign and a chip stay.
+                // The name, the sign and the mode chip always show (the
+                // mode chip may end in "…"). A queue chip with no room
+                // even for "…" is left out, and then the tooltip names it.
                 let mode = games_rows::mode_chip(&g.map_name);
                 let h = cell.bounds().height;
                 let fit =
                     crate::games_map_fit::fit(cell_w, h, &g.map_name, FONT_BOLD, &parts, mode);
-                let shown = fit.parts;
-                assert!(shown.len() >= 3, "{grid:?} at {width}: {shown:?}");
+                let shown = &fit.parts;
+                super::map_fit_tests::shows_mode_and_names_queue(
+                    &parts,
+                    &fit,
+                    &format!("{grid:?} at {width}"),
+                );
                 assert_eq!(inner.children().len(), shown.len(), "{grid:?} at {width}");
                 let [name, sign, ..] = inner.children() else {
                     panic!("name and sign first");
@@ -1462,7 +1467,7 @@ mod tests {
                     "{} {grid:?} window {window} row {width}: cell {cell_w}, name {name:?}, sign {sign:?}",
                     g.map_name
                 );
-                let cap = map_name_max_width(cell_w, &shown).unwrap();
+                let cap = map_name_max_width(cell_w, shown).unwrap();
                 assert!(name.width > 0.0 && name.width <= cap + 0.5, "{at}");
                 assert_eq!(sign.width, MAP_WARN_W, "{at}");
                 assert!(sign.x + 0.5 >= name.x + name.width + MAP_CELL_GAP, "{at}");
