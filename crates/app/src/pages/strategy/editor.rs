@@ -49,6 +49,7 @@ use crate::state::maps::{
     maps_for_mode,
 };
 use crate::state::undo::{UndoManager, UndoableAction};
+use crate::state::unsaved::use_unsaved_guard;
 
 // =============================================================================
 // API request/response types
@@ -627,6 +628,13 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
         state.take_team_hand_off();
         state
     });
+    // Ask before a link, a reload or closing the tab drops an unsaved
+    // drawing. Up here, ahead of any way out of the component, so it runs
+    // on every render; a save that clears the flag takes the guard off.
+    // The same `has_unsaved` feeds the toolbar and the "Unsaved changes"
+    // line below, so the prompt and the line cannot disagree.
+    let has_unsaved = strategy_state.read().has_unsaved_changes;
+    use_unsaved_guard(has_unsaved);
     let mut undo_manager = use_signal(UndoManager::default);
 
     // Sidebar collapse state
@@ -944,7 +952,6 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
             None => format!("0/{}", total),
         }
     };
-    let has_unsaved = ss.has_unsaved_changes;
     // The update API takes no map, so the map is fixed once the strategy is
     // saved (and while a save is in flight).
     let saved = ss.strategy_id.is_some();
@@ -2016,6 +2023,50 @@ fn apply_redo(strategy_state: &mut Signal<StrategyState>, action: UndoableAction
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review 819: leaving the editor with an unsaved drawing asks first.
+    ///
+    /// The guard is a no-op off wasm, so this test cannot run it: the
+    /// wiring rests on these source pins alone. How `mark_saved` clears the
+    /// flag is covered in `state/editor.rs`; the prompt itself needs a
+    /// browser pass (see the PR's QA steps). The pins: one guard call, in
+    /// `EditorLayout`, ahead of anything that could leave the component; it
+    /// reads the same `has_unsaved` as the toolbar and the "Unsaved
+    /// changes" line; the save path still calls `mark_saved` and only
+    /// replaces the route when that save left the editor clean.
+    #[test]
+    fn the_leave_guard_follows_the_unsaved_drawing() {
+        let src = include_str!("editor.rs");
+        let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let flag = "let has_unsaved = strategy_state.read().has_unsaved_changes;";
+        let guard = "use_unsaved_guard(has_unsaved);";
+        assert_eq!(prod.matches(guard).count(), 1, "one guard, on the page");
+        let layout = prod
+            .split("fn EditorLayout(")
+            .nth(1)
+            .expect("EditorLayout is in this file");
+        let before_guard = layout.split(guard).next().unwrap();
+        assert!(
+            before_guard.len() < layout.len(),
+            "EditorLayout owns the guard"
+        );
+        assert!(
+            !before_guard.contains("return") && !before_guard.contains('?'),
+            "no way out of the component ahead of the guard"
+        );
+        // One binding, read just before the guard, reused below.
+        assert_eq!(prod.matches("let has_unsaved =").count(), 1);
+        assert!(
+            before_guard.trim_end().ends_with(flag),
+            "the guard reads the flag bound right above it"
+        );
+        assert!(prod.contains("has_unsaved_changes: has_unsaved,"));
+        assert!(prod.contains("} else if has_unsaved {"));
+        assert!(prod.contains("s.mark_saved(&snapshot, saved.id, saved.owner_id)"));
+        // A first save only moves to the new route when nothing was edited
+        // during it; a replace skips the guard and would drop that edit.
+        assert!(prod.contains("if opened_as_new && clean {"));
+    }
 
     /// Vision blocking 2: Esc closes the picker, Tab stays inside it, and
     /// no other key (Space, Delete, a tool letter) reaches the editor.
