@@ -209,16 +209,31 @@ pub(crate) fn rank_update_changes_upload(
 impl UploadRank {
     /// A field read on the rank screen itself, not the pre-game title.
     fn has_rank_screen_field(&self) -> bool {
-        self.role.is_some()
-            || self.role_rank.is_some()
-            || self.division.is_some()
-            || self.progress_pct.is_some()
-            || self.progress_change.is_some()
-            || self.change_tags.is_some()
-            || self.higher_than_pct.is_some()
-            || self.hero_sr.is_some()
-            || self.hero_sr_change.is_some()
-            || self.next_mode_hint.is_some()
+        let Self {
+            role,
+            role_rank,
+            division,
+            progress_pct,
+            progress_change,
+            change_tags,
+            higher_than_pct,
+            hero_sr,
+            hero_sr_change,
+            next_mode_hint,
+            queue_title: _,
+            queue: _,
+            rank_recognizer: _,
+        } = self;
+        role.is_some()
+            || role_rank.is_some()
+            || division.is_some()
+            || progress_pct.is_some()
+            || progress_change.is_some()
+            || change_tags.is_some()
+            || higher_than_pct.is_some()
+            || hero_sr.is_some()
+            || hero_sr_change.is_some()
+            || next_mode_hint.is_some()
     }
 
     /// No field read: what [`upload_rank`] never sends. Kept for tests

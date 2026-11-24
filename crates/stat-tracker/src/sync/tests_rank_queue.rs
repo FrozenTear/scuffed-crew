@@ -7,7 +7,7 @@
 use super::tests_wire::row;
 use super::wire::{UploadQueueField, upload_rank};
 use super::*;
-use crate::model::{QueueTitle, RankNumber, RankText, RankUpdate};
+use crate::model::{QueueTitle, RankNumber, RankTags, RankText, RankUpdate};
 use scuffed_types::api::{RankQueue, StatsUploadBody, resolve_rank};
 use serde_json::{Value, json};
 
@@ -239,4 +239,95 @@ fn an_unsure_role_line_does_not_decide_the_queue() {
     assert_eq!(rank["queue"]["confidence"], Value::Null);
     assert!(rank.get("role").is_none(), "{rank}");
     assert_eq!(rank["hero_sr"]["value"], json!(3412));
+}
+
+/// Each rank-screen field alone is enough Competitive evidence to send
+/// a `rank` object (and so `rank.queue`). The pre-game title is not one
+/// of those fields.
+#[test]
+fn each_rank_screen_field_alone_sends_a_rank_object() {
+    let cases: [(&str, RankUpdate); 10] = [
+        (
+            "role",
+            RankUpdate {
+                role: t("Tank", 0.9),
+                ..RankUpdate::default()
+            },
+        ),
+        (
+            "role_rank",
+            RankUpdate {
+                role_rank: t("Diamond", 0.9),
+                ..RankUpdate::default()
+            },
+        ),
+        (
+            "division",
+            RankUpdate {
+                division: n(2, 0.9),
+                ..RankUpdate::default()
+            },
+        ),
+        (
+            "progress_pct",
+            RankUpdate {
+                progress_pct: n(45, 0.9),
+                ..RankUpdate::default()
+            },
+        ),
+        (
+            "progress_change",
+            RankUpdate {
+                progress_change: n(23, 0.9),
+                ..RankUpdate::default()
+            },
+        ),
+        (
+            "change_tags",
+            RankUpdate {
+                change_tags: Some(RankTags {
+                    value: vec!["Win".into()],
+                    confidence: 0.9,
+                }),
+                ..RankUpdate::default()
+            },
+        ),
+        (
+            "higher_than_pct",
+            RankUpdate {
+                higher_than_pct: n(80, 0.9),
+                ..RankUpdate::default()
+            },
+        ),
+        (
+            "hero_sr",
+            RankUpdate {
+                hero_sr: n(3412, 0.9),
+                ..RankUpdate::default()
+            },
+        ),
+        (
+            "hero_sr_change",
+            RankUpdate {
+                hero_sr_change: n(10, 0.9),
+                ..RankUpdate::default()
+            },
+        ),
+        (
+            "next_mode_hint",
+            RankUpdate {
+                next_mode_hint: t("6V6", 0.9),
+                ..RankUpdate::default()
+            },
+        ),
+    ];
+    for (name, update) in cases {
+        let rank = upload_rank(&game(None, Some(6), Some(update)))
+            .unwrap_or_else(|| panic!("{name}: a rank-screen field alone must send a rank object"));
+        assert!(rank.queue.is_some(), "{name}");
+    }
+    assert!(
+        upload_rank(&game(None, Some(6), Some(RankUpdate::default()))).is_none(),
+        "an empty rank update is not a rank-screen field"
+    );
 }
