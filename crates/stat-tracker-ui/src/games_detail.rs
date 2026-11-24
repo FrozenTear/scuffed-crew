@@ -373,9 +373,9 @@ pub enum MapPart {
 
 /// The Games list row's Map cell in draw order: the name, the warning sign
 /// when the map read is unsure (`doubt`), then [`map_chips`]. The sign
-/// comes before the chips, so in a narrow Map column the chips are clipped
-/// first. The name is capped ([`map_name_max_width`]) so it cannot squeeze
-/// the sign either.
+/// comes before the chips, so in a narrow Map column the chips give way
+/// first, shortened with "…" (`games_map_fit::fit`). The name is capped
+/// ([`map_name_max_width`]) so it cannot squeeze the sign either.
 pub fn map_cell_parts(g: &Game, doubt: bool) -> Vec<MapPart> {
     let mut parts = vec![MapPart::Name];
     if doubt {
@@ -398,7 +398,7 @@ pub const MAP_WARN_W: f32 = 12.0;
 /// the cell would leave the sign less than its 12 px. So with the sign in
 /// `parts`, the name gets the cell less every gap and the sign, and wraps
 /// inside that width instead. The sign always keeps [`MAP_WARN_W`]; the chips get
-/// what is left and are clipped first.
+/// what is left and are shortened with "…" first (`games_map_fit::fit`).
 pub fn map_name_max_width(cell: f32, parts: &[MapPart]) -> Option<f32> {
     if !parts.contains(&MapPart::Warn) {
         return None;
@@ -779,6 +779,7 @@ pub(crate) mod tests {
             bans_picks: None,
             bans_picks_status: None,
             queue_title: None,
+            rank_update: None,
             match_times: None,
         }
     }
@@ -1374,7 +1375,8 @@ pub(crate) mod tests {
     }
 
     /// The unsure map's warning sign is drawn right after the name, before
-    /// any chip, so a narrow Map column clips the chips first. The name's
+    /// any chip, so a narrow Map column shortens the chips with "…" first
+    /// (`games_map_fit`). The name's
     /// cap keeps it from squeezing the sign (the next test).
     #[test]
     fn the_map_warning_comes_before_the_chips() {
@@ -1414,10 +1416,12 @@ pub(crate) mod tests {
     }
 
     /// With the sign in the Map cell, the name is capped so that, after
-    /// every gap, the sign keeps its full 12 px at every cell width the
-    /// grids use (Mid at 1100 and 1280, Wide at 1440, Narrow at 780), and a
-    /// name at the cap leaves no room the sign has to give up. With no sign
-    /// the name is not capped.
+    /// every gap, the sign keeps its full 12 px, and a name at the cap
+    /// leaves no room the sign has to give up. The widths below are the Map
+    /// cell at Mid 1100 and 1280, Wide 1440 and Narrow 780 under the spec's
+    /// Rank widths; with the 96 px Rank column (`games_rows::RANK_W`) they
+    /// are about 160, 247, 293 and 290 px. The property holds at any width.
+    /// With no sign the name is not capped.
     #[test]
     fn the_unsure_map_name_leaves_the_sign_its_full_width() {
         let chip = |s: &str| MapPart::Chip(s.into());

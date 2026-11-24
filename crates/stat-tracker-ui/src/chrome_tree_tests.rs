@@ -931,9 +931,10 @@ fn the_overflowing_toast_keeps_its_text_clear_of_the_scrollbar() {
         })
         .expect("the overflowing toast scrolls");
     let overflows = content.height > scroll.height + 0.5;
+    let overflow_detail = format!("scroll={scroll:?}, content={content:?}");
     assert!(
         overflows,
-        "the wrapped toast should overflow at {page} px so the bar shows (scroll {scroll:?}, content {content:?})"
+        "the wrapped toast should overflow at {page} px so the bar shows ({overflow_detail})"
     );
     assert!(!texts.is_empty(), "the toast text is in the tree");
     let bar_left = scroll.x + scroll.width - SCROLLBAR_WIDTH;
