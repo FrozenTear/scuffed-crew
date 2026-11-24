@@ -17,6 +17,16 @@ fn role_queue() -> QueueTitle {
     }
 }
 
+/// A stored row the upload will actually send (snap() has a blank map).
+fn uploadable(session_id: &str, elims: u32) -> PersonalMatch {
+    let mut m = snap(session_id, elims);
+    m.hero = "Ana".into();
+    m.map_name = "Busan".into();
+    m.game_mode = "Control".into();
+    m.role = "Support".into();
+    m
+}
+
 fn sent_queue(m: &PersonalMatch) -> Value {
     let body = serde_json::to_value(upload_request(std::slice::from_ref(m), &[])).unwrap();
     body["matches"][0]["rank"]["queue"].clone()
@@ -48,13 +58,13 @@ async fn a_later_snapshot_without_a_size_takes_the_stored_one() {
 async fn a_later_tab_requeues_the_game_with_the_decided_queue() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = LocalStore::open(dir.path()).await.expect("open store");
-    let mut first = snap("g1", 1);
+    let mut first = uploadable("g1", 1);
     first.queue_title = Some(role_queue());
     store.insert_match(first).await.unwrap();
     mark_current(&store).await;
     assert!(store.get_unsynced().await.unwrap().is_empty());
 
-    let mut later = snap("g1", 2);
+    let mut later = uploadable("g1", 2);
     later.team_size = Some(5);
     store.insert_match(later).await.unwrap();
     let queued = store.get_unsynced().await.unwrap();
