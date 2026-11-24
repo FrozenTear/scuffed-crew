@@ -5,7 +5,7 @@
 use crate::app::Message;
 use crate::cli::{Cli, FixtureKind};
 use crate::companion_keys::{
-    self, NEXT_TRIGGER, PageCmd, load_page_state, save_page_state, trigger_path,
+    NEXT_TRIGGER, PageCmd, load_page_state, save_page_state, trigger_path,
 };
 use crate::fixtures::test_app;
 use crate::overlay::OverlayApp;

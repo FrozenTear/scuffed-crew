@@ -382,7 +382,7 @@ pub fn commit_page_bind(
     if trimmed.is_empty() {
         return Err("The shortcut cannot be blank.".into());
     }
-    let parsed = hotkey::parse_bind(trimmed).map_err(|e| e)?;
+    let parsed = hotkey::parse_bind(trimmed)?;
     let parsed = parsed.to_string();
     if bind_key(hide_bind).as_deref() == Some(parsed.as_str()) {
         return Err("That shortcut is already the hide bind.".into());
