@@ -398,10 +398,14 @@ fn the_compact_columns_fill_the_same_row_as_before() {
     assert_eq!(c.games + c.decided + c.rate + c.split, 416.0, "{c:?}");
 }
 
+/// The gap between "Too few games" and "(n of 10)" on one line: about one
+/// space at the 12 px size.
+const TOO_FEW_GAP_PX: f32 = 3.0;
+
 /// Junker Queen and Sigma have too few decided games: in each row
 /// "Too few games" and "(n of 10)" are drawn whole, one line each, the
-/// count right after the words. Returns, per row, whether the count sat
-/// on the same line.
+/// count right after the words, [`TOO_FEW_GAP_PX`] after them when they
+/// share a line. Returns, per row, whether the count sat on the same line.
 fn too_few_stays_whole(all: &[(String, Rectangle)], fit: &[Fit], width: f32) -> Vec<bool> {
     let mut same_line = Vec::new();
     for count in ["(4 of 10)", "(2 of 10)"] {
@@ -413,7 +417,18 @@ fn too_few_stays_whole(all: &[(String, Rectangle)], fit: &[Fit], width: f32) -> 
         assert_eq!(words.0, crate::small_sample::TOO_FEW, "at {width}: {all:?}");
         let f = fit_of(fit, count);
         assert!(f.one_line() && !f.overflows(), "{count} at {width}: {f:?}");
-        same_line.push((words.1.y - at.y).abs() < 0.5);
+        let same = (words.1.y - at.y).abs() < 0.5;
+        if same {
+            // On one line the count starts about one space (3 px at this
+            // size) after the words end, never touching them. A literal,
+            // not the view's constant, so a changed gap fails here.
+            let gap = at.x - (words.1.x + words.1.width);
+            assert!(
+                (gap - TOO_FEW_GAP_PX).abs() <= 0.5,
+                "{count} at {width}: gap {gap}, want {TOO_FEW_GAP_PX}"
+            );
+        }
+        same_line.push(same);
     }
     let words: Vec<&Fit> = fit
         .iter()

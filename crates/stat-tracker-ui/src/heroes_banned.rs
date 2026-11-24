@@ -204,8 +204,9 @@ impl BanRow {
             .map(|(words, count)| format!("{words} {count}"))
     }
 
-    /// [`Self::too_few`] in its two unbreakable parts, "Too few games" and
-    /// "(8 of 10)": a narrow column breaks only between them.
+    /// The "Too few games (8 of 10)" phrase in its two unbreakable parts,
+    /// "Too few games" and "(8 of 10)", or `None` when the hero has a
+    /// rate: a narrow column breaks only between them.
     pub fn too_few_parts(&self) -> Option<(String, String)> {
         self.rate().is_none().then(|| {
             (
