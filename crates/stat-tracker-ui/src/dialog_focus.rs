@@ -117,11 +117,18 @@ struct State {
     /// click blurs the field before the dialog opens, so Esc can restore
     /// that field rather than the button that was clicked. Cleared when
     /// a click on the live page leaves nothing focused, unless that
-    /// click opens a dialog (cleared on the next live event).
+    /// click opens a dialog (cleared on the live event after that
+    /// click's ButtonReleased).
     last_id: Option<Id>,
-    /// A click on the live page left nothing focused. Cleared, or
-    /// applied to `last_id`, on the next event.
+    /// A click on the live page left nothing focused. Set on the press,
+    /// armed on the matching release, and applied to `last_id` on a
+    /// later live event. The release itself must not clear `last_id`:
+    /// iced buttons publish `on_press` on release, and the dialog only
+    /// appears in the next view.
     pending_blur: bool,
+    /// The blurring click's ButtonReleased has been seen, so the next
+    /// live event that still has nothing focused may clear `last_id`.
+    blur_released: bool,
 }
 
 /// Counts the focusable widgets and finds the focused one.
@@ -394,10 +401,12 @@ impl Layer<'_> {
         tree.state.downcast_mut::<State>().itself = itself;
     }
 
-    /// After the page handles a click: keep `last_id` if this click
-    /// opened a dialog (the next view is covered), otherwise clear it
-    /// on the following live event so Esc does not restore a field the
-    /// user already left.
+    /// After the page handles a click: keep `last_id` through the
+    /// ButtonReleased of the click that blurred the field, then clear
+    /// it on a later live event if nothing is focused, so Esc does not
+    /// restore a field the user already left. Events between press and
+    /// release are ignored, so a shaky opening click does not drop the
+    /// id before the dialog opens.
     fn after_live_click(
         &mut self,
         tree: &mut Tree,
@@ -405,16 +414,24 @@ impl Layer<'_> {
         renderer: &iced::Renderer,
         event: &Event,
     ) {
-        let click = matches!(event, Event::Mouse(mouse::Event::ButtonPressed(_)));
+        let press = matches!(event, Event::Mouse(mouse::Event::ButtonPressed(_)));
+        let release = matches!(event, Event::Mouse(mouse::Event::ButtonReleased(_)));
         let focused = self.census(tree, layout, renderer).focused_id.is_some();
         let state = tree.state.downcast_mut::<State>();
         if focused {
             state.pending_blur = false;
-        } else if click {
+            state.blur_released = false;
+        } else if press {
             state.pending_blur = true;
+            state.blur_released = false;
         } else if state.pending_blur {
-            state.last_id = None;
-            state.pending_blur = false;
+            if release {
+                state.blur_released = true;
+            } else if state.blur_released {
+                state.last_id = None;
+                state.pending_blur = false;
+                state.blur_released = false;
+            }
         }
     }
 }
