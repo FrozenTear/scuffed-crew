@@ -67,6 +67,14 @@ textarea.field-input {
 }
 .field-input:focus { border-color: var(--accent-solid); }
 .field-input[aria-invalid="true"] { border-color: var(--loss); }
+/* Disabled (a picker still loading): the sunken fill, a quiet edge and the
+   muted ink. Colour tokens, not opacity, so the text keeps AA contrast. */
+.field-input:disabled {
+  background: var(--surface-sunken);
+  border-color: var(--border);
+  color: var(--text-subtle);
+  cursor: not-allowed;
+}
 .field-hint {
   margin: 0;
   color: var(--text-3);
@@ -329,6 +337,26 @@ mod tests {
         assert_ink_clears_aa("--on-loss", "--loss", 4.5);
         assert_ink_clears_aa("--text", "--surface", 4.5);
         assert_ink_clears_aa("--text-3", "--surface", 4.5);
+    }
+
+    /// A disabled field looks disabled (the loading team picker in chat):
+    /// sunken fill, quiet edge, muted ink and a not-allowed cursor. No
+    /// opacity, which would drop the light ink below AA; the muted ink still
+    /// clears 4.5:1 on the sunken fill in every scope.
+    #[test]
+    fn disabled_field_is_muted_and_keeps_aa_text() {
+        use crate::components::ui::test_support::{assert_ink_clears_aa, css_rule, has_decl};
+        let disabled = css_rule(FORM_FIELD_CSS, ".field-input:disabled {");
+        for decl in [
+            "background: var(--surface-sunken)",
+            "border-color: var(--border)",
+            "color: var(--text-subtle)",
+            "cursor: not-allowed",
+        ] {
+            assert!(has_decl(&disabled, decl), "missing {decl}: {disabled}");
+        }
+        assert!(!disabled.contains("opacity"), "{disabled}");
+        assert_ink_clears_aa("--text-subtle", "--surface-sunken", 4.5);
     }
 
     #[test]
