@@ -6,8 +6,9 @@
 //! do not create entries. Idle entries are pruned every 60 seconds. Burst
 //! and replenish come from [`scuffed_types`].
 //!
-//! The batch cap is off unless `STATS_UPLOAD_BATCH_CAP` classifies the same
-//! way as `PRODUCTION` ([`scuffed_auth::production_value_enabled`]).
+//! The batch cap is on when `STATS_UPLOAD_BATCH_CAP` is unset. A set value
+//! classifies the same way as `PRODUCTION`
+//! ([`scuffed_auth::production_value_enabled`]), so `0` turns it off.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -60,17 +61,17 @@ impl Drop for BatchCapForce {
 
 /// Classify one `STATS_UPLOAD_BATCH_CAP` value.
 ///
-/// `None` (unset) is off. Empty, `0`, `false`, `no`, and `off` (any ASCII
+/// `None` (unset) is on. Empty, `0`, `false`, `no`, and `off` (any ASCII
 /// case, surrounding whitespace ignored) are off. Any other non-empty value
 /// is on. Same arms as [`scuffed_auth::production_value_enabled`].
 pub fn batch_cap_from_env_value(value: Option<&str>) -> bool {
     match value {
-        None => false,
+        None => true,
         Some(value) => scuffed_auth::production_value_enabled(value),
     }
 }
 
-/// Live read of `STATS_UPLOAD_BATCH_CAP`. Unset is off.
+/// Live read of `STATS_UPLOAD_BATCH_CAP`. Unset is on.
 pub fn stats_upload_batch_cap_enabled() -> bool {
     #[cfg(test)]
     match CAP_OVERRIDE.load(Ordering::SeqCst) {
@@ -80,7 +81,7 @@ pub fn stats_upload_batch_cap_enabled() -> bool {
     }
     match std::env::var("STATS_UPLOAD_BATCH_CAP") {
         Ok(value) => batch_cap_from_env_value(Some(&value)),
-        Err(_) => false,
+        Err(_) => batch_cap_from_env_value(None),
     }
 }
 
@@ -236,7 +237,7 @@ mod tests {
 
     #[test]
     fn batch_cap_flag_matches_production_parsing() {
-        assert!(!batch_cap_from_env_value(None));
+        assert!(batch_cap_from_env_value(None));
         for value in ["", " ", "0", "false", "FALSE", "False", "no", "off", "OFF"] {
             assert!(
                 !batch_cap_from_env_value(Some(value)),

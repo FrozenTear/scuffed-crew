@@ -9,4 +9,4 @@ mod swiss;
 pub use bracket_view::BracketView;
 pub use single_elim::{BracketMatch, BracketRound};
 pub use styles::BRACKET_STYLES;
-pub use swiss::SwissStanding;
+pub use swiss::{StandingsLoad, SwissStanding};

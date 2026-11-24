@@ -13,8 +13,9 @@ use scuffed_db::{AuditAction, AuditTargetType};
 
 use crate::extractors::{OfficerUser, OrgMember};
 use crate::routes::audit_log::audit;
+use crate::routes::hero_icons::{PNG_SIGNATURE, decode_limits};
 use crate::state::AppState;
-use crate::uploads::{UploadError, save_upload};
+use crate::uploads::{UploadError, save_upload, sniff_image_ext};
 
 const AVATAR_MAX_BYTES: usize = 2 * 1024 * 1024; // 2 MB
 const IMAGE_MAX_BYTES: usize = 5 * 1024 * 1024; // 5 MB
@@ -71,17 +72,32 @@ pub(crate) fn member_dir_key(member_id: &str) -> String {
 /// canvas size (no pixel data), then rejects oversized / decompression-bomb
 /// images before anything is persisted. The magic-byte sniff in `save_upload`
 /// still runs afterwards.
+///
+/// A PNG first goes through [`check_png_chunks`] (colour profile bound,
+/// critical chunks, cut-short files). The header read then runs under
+/// [`decode_limits`]; for a PNG header read that cap bounds only how far png
+/// inflates an `iCCP` profile, and the chunk check has already refused any
+/// profile over [`PNG_ICCP_MAX_BYTES`].
+///
+/// AVIF is read with `imagesize` (container header only). The `image` crate
+/// is built without AVIF, so it cannot size one.
 fn check_image_dimensions(data: &[u8]) -> Result<(), Reject> {
-    let reader = image::ImageReader::new(Cursor::new(data))
-        .with_guessed_format()
-        .map_err(|_| reject(StatusCode::BAD_REQUEST, "Could not read image"))?;
+    let (w, h) = if sniff_image_ext(data) == Some("avif") {
+        avif_dimensions(data)?
+    } else {
+        check_png_chunks(data)?;
+        let mut reader = image::ImageReader::new(Cursor::new(data))
+            .with_guessed_format()
+            .map_err(|_| reject(StatusCode::BAD_REQUEST, "Could not read image"))?;
+        // Same 32 MiB allocation cap as training crops (#691), as a
+        // backstop: without it png may inflate a colour profile up to the
+        // image crate's 512 MiB default during the header read.
+        reader.limits(decode_limits());
 
-    let (w, h) = reader.into_dimensions().map_err(|_| {
-        reject(
-            StatusCode::BAD_REQUEST,
-            "Invalid or unreadable image dimensions",
-        )
-    })?;
+        reader
+            .into_dimensions()
+            .map_err(|_| unreadable_dimensions())?
+    };
 
     if w > MAX_IMAGE_EDGE || h > MAX_IMAGE_EDGE || (w as u64) * (h as u64) > MAX_IMAGE_PIXELS {
         return Err(reject(
@@ -91,6 +107,146 @@ fn check_image_dimensions(data: &[u8]) -> Result<(), Reject> {
     }
 
     Ok(())
+}
+
+fn unreadable_dimensions() -> Reject {
+    reject(
+        StatusCode::BAD_REQUEST,
+        "Invalid or unreadable image dimensions",
+    )
+}
+
+/// Most that the `iCCP` colour profile of a PNG may inflate to: 4 MiB.
+/// Real profiles are a few KiB.
+const PNG_ICCP_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Chunk checks for a PNG that is stored as uploaded (avatars and article
+/// images are not re-encoded, so what is checked here is what `/uploads`
+/// serves; #691). Walks the chunk headers like
+/// [`crate::routes::hero_icons`]'s `png_pixel_chunks`, keeping nothing, and
+/// refuses with 400:
+///
+/// - an `iCCP` profile that inflates past [`PNG_ICCP_MAX_BYTES`] ("colour
+///   profile too large"). It is inflated into a fixed-size buffer, so the
+///   memory cost does not grow with the profile;
+/// - an `iCCP` profile whose zlib stream is corrupt or cut short: the
+///   2-byte zlib header must be valid and the deflate data must reach its
+///   end. The Adler-32 trailer is not required, since some exporters omit
+///   it (Figma Display P3, lovell/sharp#4128) and libpng still reads such a
+///   profile; bytes after the deflate end are ignored;
+/// - a second `iCCP` (PNG allows one, and each costs a decoder). It is
+///   refused before it is inflated;
+/// - a critical chunk (uppercase first letter) whose CRC is wrong, or whose
+///   type is not `IHDR`, `PLTE`, `IDAT` or `IEND`. Bad ancillary CRCs are
+///   left to the browser, which ignores such a chunk;
+/// - a file cut short: a chunk that runs past the end, or no `IEND`.
+///
+/// Bytes after the first `IEND` are ignored. Not a PNG: nothing to check
+/// here, the image read decides.
+fn check_png_chunks(data: &[u8]) -> Result<(), Reject> {
+    use flate2::{Decompress, FlushDecompress, Status};
+    if !data.starts_with(&PNG_SIGNATURE) {
+        return Ok(());
+    }
+    let unreadable = || reject(StatusCode::BAD_REQUEST, "Could not read image");
+    let mut seen_iccp = false;
+    let mut at = PNG_SIGNATURE.len();
+    loop {
+        let header = data.get(at..at + 8).ok_or_else(unreadable)?;
+        let len = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize;
+        let chunk = at
+            .checked_add(12)
+            .and_then(|end| end.checked_add(len))
+            .and_then(|end| data.get(at..end))
+            .ok_or_else(unreadable)?;
+        let kind = &header[4..8];
+        let body = &chunk[8..8 + len];
+        if kind[0] & 0x20 == 0 {
+            if !matches!(kind, b"IHDR" | b"PLTE" | b"IDAT" | b"IEND") {
+                return Err(unreadable());
+            }
+            let mut crc = flate2::Crc::new();
+            crc.update(&chunk[4..8 + len]);
+            if crc.sum().to_be_bytes() != chunk[8 + len..] {
+                return Err(unreadable());
+            }
+        }
+        if kind == b"iCCP" {
+            if std::mem::replace(&mut seen_iccp, true) {
+                return Err(unreadable());
+            }
+            // Profile name (1-79 bytes), NUL, compression method 0, zlib.
+            let zlib = body
+                .iter()
+                .take(80)
+                .position(|&b| b == 0)
+                .filter(|&nul| nul > 0 && body.get(nul + 1) == Some(&0))
+                .map(|nul| &body[nul + 2..])
+                .ok_or_else(unreadable)?;
+            // zlib header (RFC 1950): deflate with a window of at most
+            // 32 KiB, a valid check value, no preset dictionary. The raw
+            // deflate data follows; the Adler-32 after it is not required.
+            let stream = match zlib {
+                [cmf, flg, rest @ ..]
+                    if cmf & 0x0f == 8
+                        && cmf >> 4 <= 7
+                        && flg & 0x20 == 0
+                        && (u16::from(*cmf) << 8 | u16::from(*flg)) % 31 == 0 =>
+                {
+                    rest
+                }
+                _ => return Err(unreadable()),
+            };
+            let mut z = Decompress::new(false);
+            let mut sink = [0u8; 8 * 1024];
+            loop {
+                let (fed, made) = (z.total_in(), z.total_out());
+                let status = z
+                    .decompress(&stream[fed as usize..], &mut sink, FlushDecompress::None)
+                    .map_err(|_| unreadable())?;
+                if z.total_out() > PNG_ICCP_MAX_BYTES {
+                    return Err(reject(
+                        StatusCode::BAD_REQUEST,
+                        format!(
+                            "Image colour profile too large (max {} MB)",
+                            PNG_ICCP_MAX_BYTES / (1024 * 1024)
+                        ),
+                    ));
+                }
+                match status {
+                    Status::StreamEnd => break,
+                    // No progress: the input ran out before the deflate end.
+                    _ if z.total_in() == fed && z.total_out() == made => {
+                        return Err(unreadable());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        at += chunk.len();
+        if kind == b"IEND" {
+            return Ok(());
+        }
+    }
+}
+
+/// Declared AVIF canvas from the HEIF property boxes (`meta` / `iprp` /
+/// `ipco` / `ispe`). No AV1 data is decoded. When there are several `ispe`
+/// boxes, `imagesize` reports the largest by area, which is the one the
+/// pixel cap needs. A header it cannot parse, or one that declares a zero
+/// side, is refused with the same error as any other unreadable image.
+fn avif_dimensions(data: &[u8]) -> Result<(u32, u32), Reject> {
+    let size = imagesize::ImageType::Heif(imagesize::Compression::Av1)
+        .reader_size(&mut Cursor::new(data))
+        .map_err(|_| unreadable_dimensions())?;
+    if size.width == 0 || size.height == 0 {
+        return Err(unreadable_dimensions());
+    }
+    // `ispe` fields are u32, so these only saturate on a platform where usize
+    // is narrower, and a saturated side is still over the edge cap.
+    let w = u32::try_from(size.width).unwrap_or(u32::MAX);
+    let h = u32::try_from(size.height).unwrap_or(u32::MAX);
+    Ok((w, h))
 }
 
 /// Count files and total bytes already stored in a member's category dir.
@@ -171,16 +327,17 @@ pub(crate) fn normalize_avatar_url(
     }
     let prefix = member_avatar_prefix(member_id);
     if let Some(rel) = trimmed.strip_prefix(&prefix)
-        && avatar_rel_is_safe(rel)
+        && upload_rel_is_safe(rel)
     {
         return Ok(Some(trimmed.to_string()));
     }
     Err("avatar_url must be empty, an https URL, or a file under your own avatars folder")
 }
 
-/// Relative path under `avatars/<key>/`. Rejects empty segments, `.`, `..`,
-/// and characters that would let a later join escape the folder.
-fn avatar_rel_is_safe(rel: &str) -> bool {
+/// Relative path under an uploads folder (`avatars/<key>/`, `images/`).
+/// Rejects empty segments, `.`, `..`, and characters that would let a later
+/// join escape the folder.
+pub(crate) fn upload_rel_is_safe(rel: &str) -> bool {
     if rel.is_empty()
         || rel.contains('\\')
         || rel.contains('\0')
@@ -241,7 +398,7 @@ async fn owned_avatar_file(
 ) -> Option<std::path::PathBuf> {
     let prefix = member_avatar_prefix(member_id);
     let rel = url.strip_prefix(&prefix)?;
-    if !avatar_rel_is_safe(rel) {
+    if !upload_rel_is_safe(rel) {
         return None;
     }
     let base = upload_dir.join("avatars").join(member_dir_key(member_id));
@@ -421,7 +578,8 @@ async fn avatar_folder_for_upload(
 /// - Absent, blank, or equal to the caller: save into `avatars/<caller key>/`
 ///   and delete-on-replace the caller's current avatar file.
 /// - Another member: same permission as `PUT /api/members/{mid}` for that
-///   profile (self, or officer+). Otherwise 403 `{ "error": "..." }`. Unknown
+///   profile (self, an admin, or an officer editing a member or recruit).
+///   Otherwise 403 `{ "error": "..." }`. Unknown
 ///   member 404. The file is saved into `avatars/<target key>/` and
 ///   delete-on-replace runs against the target's current `avatar_url`, only
 ///   inside the target's folder.
@@ -580,8 +738,368 @@ mod tests {
     }
 
     #[test]
+    fn avif_dimension_guard_reads_header_and_applies_caps() {
+        use crate::uploads::test_avif::{TINY_AVIF, avif_with_dims};
+
+        // The real 2x1 fixture passes.
+        assert!(check_image_dimensions(TINY_AVIF).is_ok());
+        assert!(check_image_dimensions(&avif_with_dims(MAX_IMAGE_EDGE, 1)).is_ok());
+
+        // A header declaring a gigapixel canvas is rejected.
+        let bomb = check_image_dimensions(&avif_with_dims(50_000, 50_000)).unwrap_err();
+        assert_eq!(bomb.0, StatusCode::BAD_REQUEST);
+        assert!(bomb.1.error.contains("too large"), "{}", bomb.1.error);
+        // One side over the edge cap.
+        let wide = check_image_dimensions(&avif_with_dims(MAX_IMAGE_EDGE + 1, 1)).unwrap_err();
+        assert_eq!(wide.0, StatusCode::BAD_REQUEST);
+        assert!(wide.1.error.contains("too large"), "{}", wide.1.error);
+        // Both sides under the edge cap but over the pixel cap.
+        let flood =
+            check_image_dimensions(&avif_with_dims(MAX_IMAGE_EDGE, MAX_IMAGE_EDGE)).unwrap_err();
+        assert_eq!(flood.0, StatusCode::BAD_REQUEST);
+        assert!(flood.1.error.contains("too large"), "{}", flood.1.error);
+    }
+
+    #[test]
+    fn avif_with_unparseable_header_is_refused_like_other_bad_images() {
+        use crate::uploads::test_avif::{TINY_AVIF, avif_with_dims, ftyp};
+
+        let bad_png = check_image_dimensions(&png_with_dims(0, 0)).unwrap_err();
+        assert_eq!(bad_png.0, StatusCode::BAD_REQUEST);
+
+        // Sniffs as AVIF but has no `meta` box at all.
+        let bare = ftyp(b"avif", &[b"mif1", b"miaf"]);
+        // Sniffs as AVIF, then garbage where the boxes should be.
+        let mut garbage = ftyp(b"avif", &[b"mif1"]);
+        garbage.extend_from_slice(&[0xff; 64]);
+        // The real fixture cut off inside its `meta` box.
+        let truncated = TINY_AVIF[..80].to_vec();
+        // A declared zero side.
+        let zero = avif_with_dims(0, 1);
+
+        for (name, data) in [
+            ("bare", bare),
+            ("garbage", garbage),
+            ("truncated", truncated),
+            ("zero", zero),
+        ] {
+            assert_eq!(sniff_image_ext(&data), Some("avif"), "{name}");
+            let err = check_image_dimensions(&data).unwrap_err();
+            assert_eq!(err.0, bad_png.0, "{name}");
+            assert_eq!(err.1.error, bad_png.1.error, "{name}");
+        }
+    }
+
+    #[test]
     fn dimension_guard_rejects_non_image() {
         assert!(check_image_dimensions(b"not an image at all").is_err());
+    }
+
+    /// A 64x64 PNG whose `iCCP` inflates to 64 MiB, in about 64 KB.
+    fn iccp_bomb() -> Vec<u8> {
+        let bomb = crate::routes::hero_icons::tests::iccp_png(64, 64, 64 * 1024 * 1024);
+        assert!(bomb.len() < 128 * 1024, "{}", bomb.len());
+        bomb
+    }
+
+    #[test]
+    fn a_colour_profile_bomb_is_refused_before_the_image_read() {
+        use crate::routes::hero_icons::tests::heap::peak_during;
+        const MIB: usize = 1024 * 1024;
+        let bomb = iccp_bomb();
+        // The image crate's default limits (512 MiB) inflate the whole
+        // 64 MiB profile during the header read: the #691 bug.
+        let (unbounded, unbounded_peak) = peak_during(|| {
+            image::ImageReader::new(Cursor::new(&bomb[..]))
+                .with_guessed_format()
+                .unwrap()
+                .into_dimensions()
+        });
+        assert_eq!(unbounded.unwrap(), (64, 64));
+        assert!(
+            unbounded_peak >= 64 * MIB,
+            "default limits peak {unbounded_peak} B"
+        );
+        // The backstop alone: under `decode_limits` png stops inflating at
+        // 32 MiB and skips the profile (png 0.18 does not fail on it).
+        let (capped, capped_peak) = peak_during(|| {
+            let mut reader = image::ImageReader::new(Cursor::new(&bomb[..]))
+                .with_guessed_format()
+                .unwrap();
+            reader.limits(decode_limits());
+            reader.into_dimensions()
+        });
+        assert_eq!(capped.unwrap(), (64, 64));
+        assert!(capped_peak <= 36 * MIB, "capped peak {capped_peak} B");
+        // The chunk check refuses the bomb before the image read, inflating
+        // into a sink: the cost does not grow with the profile.
+        let (guarded, guarded_peak) = peak_during(|| check_image_dimensions(&bomb));
+        let (code, body) = guarded.unwrap_err();
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert!(
+            body.error.contains("colour profile too large"),
+            "{}",
+            body.error
+        );
+        assert!(
+            guarded_peak <= MIB,
+            "guarded peak {guarded_peak} B is over 1 MiB"
+        );
+    }
+
+    #[test]
+    fn a_normal_colour_profile_is_accepted() {
+        use crate::routes::hero_icons::tests::iccp_png;
+        // A 4 KiB profile, the size of a real sRGB one.
+        assert!(check_image_dimensions(&iccp_png(64, 64, 4096)).is_ok());
+    }
+
+    /// Byte offset of chunk number `index` (0 = IHDR) in `png`.
+    fn chunk_at(png: &[u8], index: usize) -> usize {
+        let mut at = 8;
+        for _ in 0..index {
+            at += 12 + u32::from_be_bytes(png[at..at + 4].try_into().unwrap()) as usize;
+        }
+        at
+    }
+
+    /// A chunk with a valid CRC.
+    fn chunk(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut out = u32::try_from(body.len()).unwrap().to_be_bytes().to_vec();
+        out.extend_from_slice(kind);
+        out.extend_from_slice(body);
+        let mut crc = flate2::Crc::new();
+        crc.update(&out[4..]);
+        out.extend_from_slice(&crc.sum().to_be_bytes());
+        out
+    }
+
+    /// `png` with `chunk` inserted before its chunk number `index`.
+    fn with_chunk(png: &[u8], index: usize, chunk: &[u8]) -> Vec<u8> {
+        let at = chunk_at(png, index);
+        let mut out = png[..at].to_vec();
+        out.extend_from_slice(chunk);
+        out.extend_from_slice(&png[at..]);
+        out
+    }
+
+    /// `png` with the body of its chunk number `index` passed through `edit`
+    /// (length and CRC fixed up).
+    fn with_body(png: &[u8], index: usize, edit: impl FnOnce(&[u8]) -> Vec<u8>) -> Vec<u8> {
+        let at = chunk_at(png, index);
+        let len = u32::from_be_bytes(png[at..at + 4].try_into().unwrap()) as usize;
+        let kind: [u8; 4] = png[at + 4..at + 8].try_into().unwrap();
+        let mut out = png[..at].to_vec();
+        out.extend(chunk(&kind, &edit(&png[at + 8..at + 8 + len])));
+        out.extend_from_slice(&png[at + 12 + len..]);
+        out
+    }
+
+    fn assert_refused(png: &[u8], message: &str, case: &str) {
+        let (code, body) = check_image_dimensions(png).unwrap_err();
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{case}");
+        assert!(body.error.contains(message), "{case}: {}", body.error);
+    }
+
+    #[test]
+    fn the_colour_profile_bound_is_4_mib() {
+        use crate::routes::hero_icons::tests::iccp_png;
+        let at = PNG_ICCP_MAX_BYTES as usize;
+        // The bound is inclusive.
+        assert!(check_image_dimensions(&iccp_png(64, 64, at)).is_ok());
+        assert_refused(
+            &iccp_png(64, 64, at + 1),
+            "colour profile too large",
+            "4 MiB + 1",
+        );
+    }
+
+    #[test]
+    fn a_second_colour_profile_is_refused() {
+        let png = crate::routes::hero_icons::tests::iccp_png(64, 64, 4096);
+        let profile = png[chunk_at(&png, 1)..chunk_at(&png, 2)].to_vec();
+        // Chunks: IHDR, iCCP, IDAT, IEND. A second copy right after the
+        // first, and one after the IDAT (which the header read never sees).
+        for index in [2, 3] {
+            let two = with_chunk(&png, index, &profile);
+            assert_refused(&two, "Could not read image", &format!("at {index}"));
+        }
+    }
+
+    #[test]
+    fn a_second_colour_profile_is_refused_before_it_is_inflated() {
+        use crate::routes::hero_icons::tests::heap::peak_during;
+        let png = crate::routes::hero_icons::tests::iccp_png(64, 64, 4096);
+        let bomb = iccp_bomb();
+        let second = &bomb[chunk_at(&bomb, 1)..chunk_at(&bomb, 2)];
+        assert_eq!(&second[4..8], b"iCCP");
+        let two = with_chunk(&png, 2, second);
+        // Inflating the 64 MiB profile would answer "colour profile too
+        // large"; the second-profile rule answers first, in bounded memory.
+        let (out, peak) = peak_during(|| check_image_dimensions(&two));
+        let (code, body) = out.unwrap_err();
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert!(
+            body.error.contains("Could not read image"),
+            "{}",
+            body.error
+        );
+        assert!(peak <= 1024 * 1024, "peak {peak} B is over 1 MiB");
+    }
+
+    #[test]
+    fn a_cut_short_profile_stream_is_refused() {
+        let png = crate::routes::hero_icons::tests::iccp_png(64, 64, 4096);
+        // "bomb\0\0", then the zlib stream: header, deflate, Adler-32.
+        let whole = with_body(&png, 1, |body| body.to_vec());
+        assert_eq!(whole, png);
+        assert!(check_image_dimensions(&whole).is_ok());
+        // No Adler-32: the deflate data is whole, so it is accepted.
+        let no_adler = with_body(&png, 1, |body| body[..body.len() - 4].to_vec());
+        assert!(check_image_dimensions(&no_adler).is_ok(), "no Adler-32");
+        let half = with_body(&png, 1, |body| body[..6 + (body.len() - 6) / 2].to_vec());
+        assert_refused(&half, "Could not read image", "half the stream");
+        // A stream that stops right after the zlib header.
+        let bare = with_body(&png, 1, |body| body[..8].to_vec());
+        assert_refused(&bare, "Could not read image", "header only");
+        // A stream that stops inside the zlib header.
+        let one = with_body(&png, 1, |body| body[..7].to_vec());
+        assert_refused(&one, "Could not read image", "half a header");
+    }
+
+    #[test]
+    fn a_profile_stream_without_adler32_is_accepted() {
+        use std::io::Write;
+        // The Figma Display P3 shape (lovell/sharp#4128): a valid zlib
+        // header, a complete deflate stream, no Adler-32 trailer.
+        let mut deflate =
+            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+        deflate.write_all(&[7u8; 3144]).unwrap();
+        let mut body = b"Display P3\0\0\x78\x9c".to_vec();
+        body.extend(deflate.finish().unwrap());
+        let png = crate::routes::hero_icons::tests::iccp_png(64, 64, 4096);
+        let figma = with_body(&png, 1, |_| body.clone());
+        assert!(check_image_dimensions(&figma).is_ok());
+        // The same stream under a bad zlib header (check value off by one,
+        // or a preset dictionary) is refused.
+        // Each header below fails one condition only: 0x7709 is CM 7 and
+        // 0x881c is CINFO 8, both with a valid check value and no FDICT.
+        for (case, header) in [
+            ("check value", [0x78, 0x9d]),
+            ("dictionary", [0x78, 0xbb]),
+            ("method 7", [0x77, 0x09]),
+            ("window 64 KiB", [0x88, 0x1c]),
+        ] {
+            assert_eq!(u16::from_be_bytes(header) % 31 == 0, case != "check value");
+            let mut bad = body.clone();
+            bad[12..14].copy_from_slice(&header);
+            let bad = with_body(&png, 1, |_| bad);
+            assert_refused(&bad, "Could not read image", case);
+        }
+    }
+
+    #[test]
+    fn bytes_after_the_profile_deflate_end_are_ignored() {
+        let png = crate::routes::hero_icons::tests::iccp_png(64, 64, 4096);
+        // "bomb\0\0", then the zlib stream: header, deflate, Adler-32.
+        // A wrong Adler-32 is not checked.
+        let bad_adler = with_body(&png, 1, |body| {
+            let mut body = body.to_vec();
+            let at = body.len() - 4;
+            body[at] ^= 0xff;
+            body
+        });
+        assert_ne!(bad_adler, png);
+        assert!(check_image_dimensions(&bad_adler).is_ok(), "wrong Adler-32");
+        // Junk after the Adler-32, and junk in place of it.
+        let junk = b"not deflate data at all";
+        let after = with_body(&png, 1, |body| [body, &junk[..]].concat());
+        assert!(
+            check_image_dimensions(&after).is_ok(),
+            "junk after Adler-32"
+        );
+        let instead = with_body(&png, 1, |body| {
+            [&body[..body.len() - 4], &junk[..]].concat()
+        });
+        assert!(
+            check_image_dimensions(&instead).is_ok(),
+            "junk for Adler-32"
+        );
+    }
+
+    #[test]
+    fn a_cut_short_file_is_refused() {
+        let png = crate::routes::hero_icons::tests::iccp_png(64, 64, 4096);
+        let idat = chunk_at(&png, 2);
+        let iend = chunk_at(&png, 3);
+        assert_eq!(&png[idat + 4..idat + 8], b"IDAT");
+        assert_eq!(png.len(), iend + 12);
+        for (case, cut) in [
+            ("inside the IDAT body", idat + 8 + (iend - idat - 12) / 2),
+            ("inside the IDAT CRC", iend - 2),
+            ("no IEND", iend),
+            ("inside the IEND header", iend + 5),
+            ("inside the IEND CRC", iend + 10),
+        ] {
+            assert_refused(&png[..cut], "Could not read image", case);
+        }
+        // Bytes after the IEND are still ignored.
+        let mut trailing = png.clone();
+        trailing.extend_from_slice(b"trailing bytes");
+        assert!(check_image_dimensions(&trailing).is_ok());
+    }
+
+    #[test]
+    fn an_unknown_critical_chunk_is_refused_and_an_unknown_ancillary_one_is_not() {
+        let png = crate::routes::hero_icons::tests::iccp_png(64, 64, 4096);
+        // Chunks: IHDR, iCCP, IDAT, IEND. Index 3 is after the first IDAT,
+        // where the header read never looks.
+        for index in [2, 3] {
+            let bad = with_chunk(&png, index, &chunk(b"IDOT", b"x"));
+            assert_refused(&bad, "Could not read image", &format!("IDOT at {index}"));
+            let ok = with_chunk(&png, index, &chunk(b"teSt", b"x"));
+            assert!(check_image_dimensions(&ok).is_ok(), "teSt at {index}");
+        }
+    }
+
+    /// `png` with the CRC of its chunk number `index` (0 = IHDR) flipped.
+    fn with_bad_crc(mut png: Vec<u8>, index: usize) -> (Vec<u8>, [u8; 4]) {
+        let at = chunk_at(&png, index);
+        let kind: [u8; 4] = png[at + 4..at + 8].try_into().unwrap();
+        let crc_at = at + 8 + u32::from_be_bytes(png[at..at + 4].try_into().unwrap()) as usize;
+        png[crc_at] ^= 0xff;
+        (png, kind)
+    }
+
+    #[test]
+    fn a_bad_critical_chunk_crc_is_refused_and_a_bad_profile_crc_is_not() {
+        let png = crate::routes::hero_icons::tests::iccp_png(64, 64, 4096);
+        assert!(check_image_dimensions(&png).is_ok());
+        // Chunks: IHDR, iCCP, IDAT, IEND (the encoder writes one IDAT).
+        for index in [0, 2, 3] {
+            let (bad, kind) = with_bad_crc(png.clone(), index);
+            assert!(kind[0].is_ascii_uppercase(), "{kind:?}");
+            let (code, _) = check_image_dimensions(&bad).unwrap_err();
+            assert_eq!(code, StatusCode::BAD_REQUEST, "{kind:?}");
+        }
+        let (bad, kind) = with_bad_crc(png.clone(), 1);
+        assert_eq!(&kind, b"iCCP");
+        assert!(check_image_dimensions(&bad).is_ok());
+    }
+
+    #[test]
+    fn a_profile_that_does_not_inflate_is_refused() {
+        let png = crate::routes::hero_icons::tests::iccp_png(64, 64, 4096);
+        // Corrupt the zlib header of the profile and fix the chunk CRC, so
+        // only the inflate can catch it. "bomb\0\0" comes first.
+        let len = u32::from_be_bytes(png[33..37].try_into().unwrap()) as usize;
+        let mut bad = png.clone();
+        bad[41 + 6] ^= 0xff;
+        let mut crc = flate2::Crc::new();
+        crc.update(&bad[37..41 + len]);
+        bad[41 + len..45 + len].copy_from_slice(&crc.sum().to_be_bytes());
+        let (code, _) = check_image_dimensions(&bad).unwrap_err();
+        assert_eq!(code, StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -801,8 +1319,7 @@ mod tests {
         tokio::fs::remove_dir_all(&root).await.ok();
     }
 
-    fn png_multipart() -> (Vec<u8>, &'static str) {
-        let png = png_with_dims(1, 1);
+    fn multipart_of(png: &[u8]) -> (Vec<u8>, &'static str) {
         let boundary = "----scuffedboundary";
         let mut body = Vec::new();
         body.extend_from_slice(
@@ -811,7 +1328,7 @@ mod tests {
             )
             .as_bytes(),
         );
-        body.extend_from_slice(&png);
+        body.extend_from_slice(png);
         body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
         (body, boundary)
     }
@@ -884,7 +1401,16 @@ mod tests {
         token: &str,
         member_id: Option<&str>,
     ) -> axum::response::Response {
-        let (body, boundary) = png_multipart();
+        post_avatar_png(app, token, member_id, &png_with_dims(1, 1)).await
+    }
+
+    async fn post_avatar_png(
+        app: &axum::Router,
+        token: &str,
+        member_id: Option<&str>,
+        png: &[u8],
+    ) -> axum::response::Response {
+        let (body, boundary) = multipart_of(png);
         let uri = match member_id {
             None => "/api/upload/avatar".to_string(),
             Some(id) => format!("/api/upload/avatar?member_id={}", urlencoding::encode(id)),
@@ -1011,6 +1537,42 @@ mod tests {
         tokio::fs::remove_dir_all(&root).await.ok();
     }
 
+    /// An officer may not upload an avatar for an admin. The stored URL and
+    /// the file on disk stay as they were.
+    #[tokio::test]
+    async fn officer_upload_for_admin_is_forbidden_and_leaves_avatar() {
+        let mut state = crate::test_support::test_state().await;
+        let root = unique_tmp("officer-admin-avatar");
+        state.upload_dir = root.clone();
+        let (officer, officer_token) =
+            session_member(&state, "officeradminava", scuffed_db::OrgRole::Officer).await;
+        let (admin, _) = session_member(&state, "adminava", scuffed_db::OrgRole::Admin).await;
+        let (admin_file, admin_url) = plant_avatar(&root, &admin.id, "admin.png").await;
+        set_avatar_url(&state, &admin.id, &admin_url).await;
+        let admin_dir = root.join("avatars").join(member_dir_key(&admin.id));
+        let officer_dir = root.join("avatars").join(member_dir_key(&officer.id));
+        let admin_before = files_in(&admin_dir);
+
+        let app = crate::create_router(state.clone());
+        let res = post_avatar(&app, &officer_token, Some(&admin.id)).await;
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        let body = response_json(res).await;
+        assert_eq!(
+            body["error"],
+            "Officers cannot edit the profile of admins or other officers"
+        );
+        let stored = state.db.get_member_safe(&admin.id).await.unwrap().unwrap();
+        assert_eq!(stored.avatar_url.as_deref(), Some(admin_url.as_str()));
+        assert!(admin_file.exists());
+        assert_eq!(files_in(&admin_dir), admin_before);
+        assert!(
+            !officer_dir.exists() || files_in(&officer_dir).is_empty(),
+            "a refused upload must not write the officer folder"
+        );
+
+        tokio::fs::remove_dir_all(&root).await.ok();
+    }
+
     #[tokio::test]
     async fn unknown_avatar_member_id_is_not_found() {
         let mut state = crate::test_support::test_state().await;
@@ -1088,5 +1650,60 @@ mod tests {
         assert_eq!(member_dir_key("member:abc123"), "member_abc123");
         assert_eq!(member_dir_key("a/../b"), "a____b");
         assert_eq!(member_dir_key(""), "unknown");
+    }
+
+    #[tokio::test]
+    async fn avatar_upload_refuses_image_bombs_and_stores_a_normal_png() {
+        let mut state = crate::test_support::test_state().await;
+        let root = unique_tmp("avatar-bomb");
+        state.upload_dir = root.clone();
+        let (_member, token) = session_member(&state, "bomber", scuffed_db::OrgRole::Member).await;
+        let app = crate::create_router(state.clone());
+
+        // Declared gigapixel canvas: refused before anything is stored.
+        let res = post_avatar_png(&app, &token, None, &png_with_dims(100_000, 100_000)).await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(res).await;
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("Image dimensions too large"),
+            "{body}"
+        );
+
+        // A 64 MiB colour profile: refused before anything is stored, since
+        // the file would be served as uploaded, profile included.
+        let res = post_avatar_png(&app, &token, None, &iccp_bomb()).await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(res).await;
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("Image colour profile too large"),
+            "{body}"
+        );
+        assert!(!root.join("avatars").exists(), "nothing stored");
+
+        // A normal avatar cut short inside its IDAT: the header read alone
+        // would size it, but it is refused and nothing is stored.
+        let normal = crate::routes::hero_icons::tests::iccp_png(64, 64, 4096);
+        let res = post_avatar_png(&app, &token, None, &normal[..normal.len() - 20]).await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(res).await;
+        assert_eq!(body["error"], "Could not read image", "{body}");
+        assert!(!root.join("avatars").exists(), "nothing stored");
+
+        // A normal avatar with a real-size profile is stored byte for byte.
+        let res = post_avatar_png(&app, &token, None, &normal).await;
+        assert_eq!(res.status(), StatusCode::OK, "a normal avatar is stored");
+        let body = response_json(res).await;
+        let url = body["url"].as_str().unwrap();
+        let stored = tokio::fs::read(root.join(url.strip_prefix("/uploads/").unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(stored, normal);
+        tokio::fs::remove_dir_all(&root).await.ok();
     }
 }

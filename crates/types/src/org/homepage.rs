@@ -357,7 +357,7 @@ impl HomepagePreset {
                 ethos_title: "Not a LFG dump.".into(),
                 ethos_body: "Life first, games second. When you commit a night, you show up. Communicate or lose the slot.".into(),
                 ethos_rules: vec![
-                    "Squads of ~5–10. The team is the unit, the org is the scaffold.".into(),
+                    "Squads of 5 to 10. The team is the unit, the org is the scaffold.".into(),
                     "Multi-game is fine; one culture across titles.".into(),
                     "Voice for play nights; async chat for everything else.".into(),
                     "No drama. Show up. Don’t ghost.".into(),
@@ -569,7 +569,7 @@ impl HomepagePreset {
                 ethos_title: "Not a server. A clan.".into(),
                 ethos_body: "Life comes first. The games come second, but we still show up. Communicate or lose your slot.".into(),
                 ethos_rules: vec![
-                    "Squads of ~5–10. Your team is your crew, the org is the scaffold.".into(),
+                    "Squads of 5 to 10. Your team is your crew, the org is the scaffold.".into(),
                     "Multi-game under one roof. Play what you play, still one culture.".into(),
                     "TeamSpeak for play nights, Matrix for everything else.".into(),
                     "No politics, no drama. Show up. Don’t ghost.".into(),
@@ -692,5 +692,22 @@ mod tests {
             HomepagePreset::casual().suggested_shell,
             HomeShell::RecruitLanding
         );
+    }
+
+    #[test]
+    fn default_presets_have_no_long_dashes() {
+        for p in homepage_presets() {
+            let json = p.content.to_json();
+            assert!(!json.contains('\u{2014}'), "em dash in preset {}", p.id);
+            assert!(!json.contains('\u{2013}'), "en dash in preset {}", p.id);
+        }
+    }
+
+    #[test]
+    fn ethos_range_reads_as_words() {
+        let competitive = HomepagePreset::competitive();
+        let scuffed = HomepagePreset::scuffed();
+        assert!(competitive.content.ethos_rules[0].starts_with("Squads of 5 to 10."));
+        assert!(scuffed.content.ethos_rules[0].starts_with("Squads of 5 to 10."));
     }
 }

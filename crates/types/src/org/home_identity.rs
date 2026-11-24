@@ -307,10 +307,7 @@ fn looks_like_scuffed_content(content: &HomepageContent) -> bool {
         return true;
     }
     let footer = content.footer_note.to_ascii_lowercase();
-    if footer.contains("scuffed crew") {
-        return true;
-    }
-    false
+    footer.contains("scuffed crew")
 }
 
 fn is_competitive_brand(dark: &str, light: &str) -> bool {

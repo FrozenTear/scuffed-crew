@@ -441,13 +441,13 @@ where
 pub trait TabKeySource {
     fn next_key(
         &mut self,
-    ) -> impl Future<Output = Result<crate::detect::TabKey, Box<dyn std::error::Error>>>;
+    ) -> impl Future<Output = Result<crate::input::TabKey, Box<dyn std::error::Error>>>;
 }
 
-impl TabKeySource for crate::detect::MultiKeyboardStream {
+impl TabKeySource for crate::input::MultiKeyboardStream {
     fn next_key(
         &mut self,
-    ) -> impl Future<Output = Result<crate::detect::TabKey, Box<dyn std::error::Error>>> {
+    ) -> impl Future<Output = Result<crate::input::TabKey, Box<dyn std::error::Error>>> {
         self.wait_tab()
     }
 }
@@ -458,7 +458,7 @@ impl TabKeySource for crate::detect::MultiKeyboardStream {
 pub async fn next_press<S: TabKeySource>(
     source: &mut S,
     tabs: &mut TabKeys,
-) -> Result<crate::detect::TabKey, Box<dyn std::error::Error>> {
+) -> Result<crate::input::TabKey, Box<dyn std::error::Error>> {
     loop {
         let key = source.next_key().await?;
         if key.down {
@@ -570,13 +570,13 @@ mod tests {
             _ => TabResult::Accepted,
         }
     }
-    use crate::detect::hero_portrait::{ScoreboardPreflight, preflight_scoreboard};
+    use crate::frame::layout::{ScoreboardPreflight, preflight_scoreboard};
     use crate::ocr::preprocess::{crop_scoreboard, crop_scoreboard_rect};
-    use crate::report::blank::synth::{self, Layout};
+    use crate::report::blank::tests_synth::{self as synth, Layout};
     use image::{DynamicImage, Rgb, RgbImage};
     use std::cell::RefCell;
 
-    /// The synthetic 6v6 frame (`report::blank::synth`, no member pixels).
+    /// The synthetic 6v6 frame (`report::blank::tests_synth`, no member pixels).
     fn full_6v6() -> RgbImage {
         synth::frame(Layout::L1, &synth::VALUES).to_rgb8()
     }
@@ -1176,12 +1176,12 @@ mod tests {
     }
 
     /// Key events from a list; then nothing more ever arrives.
-    pub(crate) struct FakeKeys(pub std::collections::VecDeque<crate::detect::TabKey>);
+    pub(crate) struct FakeKeys(pub std::collections::VecDeque<crate::input::TabKey>);
 
     impl TabKeySource for FakeKeys {
         fn next_key(
             &mut self,
-        ) -> impl Future<Output = Result<crate::detect::TabKey, Box<dyn std::error::Error>>>
+        ) -> impl Future<Output = Result<crate::input::TabKey, Box<dyn std::error::Error>>>
         {
             let key = self.0.pop_front();
             async move {
@@ -1193,8 +1193,8 @@ mod tests {
         }
     }
 
-    fn key(down: bool, at: Instant) -> crate::detect::TabKey {
-        crate::detect::TabKey { down, at }
+    fn key(down: bool, at: Instant) -> crate::input::TabKey {
+        crate::input::TabKey { down, at }
     }
 
     /// The loop's Tab wiring: a second press during a capture is queued
@@ -1312,6 +1312,11 @@ mod tests {
                 .finish();
             let _ = tracing::subscriber::set_global_default(sub);
         });
+        // Other tests install scoped subscribers on their own threads at
+        // the same time; a callsite first hit under one of them can keep a
+        // cached interest that leaves this global one out. Rebuild it so
+        // every line here reaches the thread log.
+        tracing::callsite::rebuild_interest_cache();
         THREAD_LOG.with(|log| log.borrow_mut().clear());
         f();
         THREAD_LOG.with(|log| String::from_utf8(std::mem::take(&mut *log.borrow_mut())).unwrap())

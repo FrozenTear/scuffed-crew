@@ -1,8 +1,7 @@
 //! Section 9 fixtures for log-only bundles: the log fixture, the manifest
 //! checked against section 2, and the zip rules.
 
-use std::io::Read;
-use std::path::PathBuf;
+use std::{io::Read, path::PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -42,8 +41,7 @@ fn ctx() -> ScrubContext {
         account_name: Some(ACCOUNT.into()),
         hostname: Some(HOSTNAME.into()),
         player_name: Some(SELF_NAME.into()),
-        // FIELD_NAME is deliberately not on the list: only the field drop
-        // can keep it out of log.txt.
+        // FIELD_NAME is not on the list on purpose: only the field drop keeps it out of log.txt.
         names: vec![OTHER_1.into(), OTHER_2.into(), MISREAD.into(), SHORT.into()],
     }
 }
@@ -527,7 +525,7 @@ fn system_collects_the_ocr_switch_from_the_daemon_status() {
         leptess_created: 0,
         share_open: false,
         share_notice: String::new(),
-        capture_notice: String::new(),
+        ..Status::default()
     };
     // The daemon refused off (a pack was missing): what ran was on.
     ocr_switch::write_status(dir.path(), &status(1, OcrSetting::On, &[])).unwrap();
@@ -558,14 +556,15 @@ fn system_collects_the_ocr_switch_from_the_daemon_status() {
 
     // With a daemon running, only the file that daemon wrote counts.
     let written = ocr_switch::read_status(dir.path());
-    let used = |running, pid| bundle::switch_for_report(written.clone(), running, pid).is_some();
+    let used =
+        |running, pid| super::input::switch_for_report(written.clone(), running, pid).is_some();
     assert!(used(false, None), "no daemon: the last run's file");
     assert!(used(true, Some(1)), "this daemon's file");
     assert!(!used(true, Some(2)), "another run's file");
     assert!(!used(true, None), "a daemon without a pid file");
-    assert!(bundle::switch_for_report(None, false, None).is_none());
+    assert!(super::input::switch_for_report(None, false, None).is_none());
 
-    assert!(bundle::blocked_sites(&status(1, OcrSetting::On, &sites)).is_empty());
+    assert!(super::input::blocked_sites(&status(1, OcrSetting::On, &sites)).is_empty());
 }
 
 /// Whatever the status file holds, the call sites a report sends pass the
@@ -598,14 +597,14 @@ fn the_call_sites_a_report_sends_always_pass_the_site_validator() {
         leptess_created: 0,
         share_open: false,
         share_notice: String::new(),
-        capture_notice: String::new(),
+        ..Status::default()
     };
     // The manifest a report with these sites carries, through the validator.
     let sent = |sites: &[(String, u64)]| -> Value {
         let mut inp = input(dir.path(), LogWindow::log_only(t("2026-10-09T12:06:00Z")));
         inp.system = SystemInfo {
             ocr: OcrSetting::Off,
-            ocr_blocked_calls: bundle::blocked_sites(&status(sites)),
+            ocr_blocked_calls: super::input::blocked_sites(&status(sites)),
             ..system()
         };
         let json = bundle::build_log_report(&inp).unwrap().manifest_json;
@@ -656,7 +655,7 @@ fn the_call_sites_a_report_sends_always_pass_the_site_validator() {
     many.push(site("main.rs:7 recognize_cell", u64::from(u32::MAX) + 9));
     many.push(site("detect/match_end.rs:1133 recognize_prepared", 4000));
     many.push(site("detect/match_end.rs:1133 recognize_prepared", 500));
-    let capped = bundle::blocked_sites(&status(&many));
+    let capped = super::input::blocked_sites(&status(&many));
     assert_eq!(capped.len(), bundle::OCR_BLOCKED_SITES_MAX);
     assert_eq!(
         capped[0],
@@ -938,10 +937,9 @@ fn server_validator_accepts_log_only_manifest() {
 
 const HOST_LINE: &str = "host desktop=KDE session=wayland drm=card0:amdgpu[eDP-1:disconnected];card1:nvidia[DP-1:connected] drm_output_cards=card1 nvidia_drm_modeset=Y";
 
-/// The host line (desktop, GPU topology) is the first line of `log.txt` in
-/// every log-only report, and the manifest's `system` keys do not change,
-/// so the site's validator (unknown `system` keys are invalid) still takes
-/// it.
+/// The host line (desktop, GPU topology) leads `log.txt` in every log-only
+/// report, and the manifest's `system` keys do not change, so the site's
+/// validator (unknown `system` keys are invalid) still takes it.
 #[test]
 fn the_host_line_leads_log_txt_and_leaves_the_manifest_alone() {
     let dir = tempfile::tempdir().unwrap();
@@ -1024,15 +1022,15 @@ fn real_ocr_text_fields_are_dropped_without_a_name_list() {
 
 // --- Game reports ---
 
-mod game {
+pub(super) mod game {
     use super::*;
-    use crate::report::blank::synth::{self, Layout};
+    use crate::report::blank::tests_synth::{self as synth, Layout};
     use crate::report::bundle::{GameCategory, GameReportInput, build_game_report};
     use crate::report::kit::{self, KitRead, KitReads};
     use image::{DynamicImage, Rgb, RgbImage};
     use std::collections::BTreeMap;
 
-    fn reads(team_size: Option<u32>) -> KitReads {
+    pub(in crate::report) fn reads(team_size: Option<u32>) -> KitReads {
         let mut r = BTreeMap::new();
         for key in ["mode", "result", "hero", "e", "a", "d", "dmg", "h", "mit"] {
             r.insert(
@@ -1066,11 +1064,14 @@ mod game {
 
     /// A 2560x1440 frame with a synthetic 6v6 scoreboard whose name cells
     /// hold bright strokes, so a blank miss shows as a non-fill pixel.
-    fn frame() -> DynamicImage {
+    pub(in crate::report) fn frame() -> DynamicImage {
         synth::frame(Layout::L1, &synth::VALUES)
     }
 
-    fn input(dir: &std::path::Path, category: GameCategory) -> GameReportInput {
+    pub(in crate::report) fn input(
+        dir: &std::path::Path,
+        category: GameCategory,
+    ) -> GameReportInput {
         GameReportInput {
             session_id: "sess-1".into(),
             category,
@@ -1082,6 +1083,7 @@ mod game {
             ui_scale: None,
             system: system(),
             training: true,
+            rank_included: false,
             scrub: ctx(),
             window: LogWindow::session(t("2026-10-09T12:00:00Z"), t("2026-10-09T12:10:00Z")),
             log_dir: dir.to_path_buf(),
@@ -1091,7 +1093,7 @@ mod game {
         }
     }
 
-    fn unzip(bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
+    pub(in crate::report) fn unzip(bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
         let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
         let mut out = BTreeMap::new();
         for i in 0..z.len() {
@@ -1103,9 +1105,8 @@ mod game {
         out
     }
 
-    /// QA note on #290: the per-game board names in the kit folder stay on
-    /// this machine. No game report category ever puts `names.json` (or
-    /// any of its names) in the zip.
+    /// QA note: the per-game board names in the kit folder stay on this machine:
+    /// no game report category ever puts `names.json` (or any of its names) in the zip.
     #[test]
     fn names_json_is_never_in_a_built_report_zip() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1405,7 +1406,6 @@ mod game {
             "the kit still holds the Tab read"
         );
 
-        let played = surrealdb_types::Datetime::from(t("2026-10-09T12:05:00Z"));
         let snapshot = crate::storage::Snapshot {
             matches: vec![crate::storage::PersonalMatch {
                 id: None,
@@ -1420,7 +1420,7 @@ mod game {
                 damage: 1000,
                 healing: 2000,
                 mitigation: 0,
-                played_at: played,
+                played_at: surrealdb_types::Datetime::from(t("2026-10-09T12:05:00Z")),
                 synced: false,
                 sync_rev: 0,
                 upload_reject: None,
@@ -1442,8 +1442,13 @@ mod game {
                 recognizer: "cv-v7".into(),
                 suspect_fields: Vec::new(),
                 name_recognizer: None,
+                bans_picks: None,
+                bans_picks_status: None,
+                queue_title: None,
+                rank_update: None,
+                match_times: None,
             }],
-            sessions: Vec::new(),
+            ..crate::storage::Snapshot::default()
         };
         std::fs::write(
             tmp.path().join("live_snapshot.json"),
@@ -1527,22 +1532,9 @@ mod own_name_seeds {
 
     fn game_input(dir: &std::path::Path) -> GameReportInput {
         GameReportInput {
-            session_id: "sess-1".into(),
-            category: GameCategory::MissedGame,
             text: "the game was missed".into(),
-            resolution: Resolution {
-                width: 1920,
-                height: 1080,
-            },
-            ui_scale: None,
-            system: system(),
-            training: true,
-            scrub: ctx(),
-            window: LogWindow::session(t("2026-10-09T12:00:00Z"), t("2026-10-09T12:10:00Z")),
-            log_dir: dir.to_path_buf(),
-            kit: kit::load(dir, "sess-1"),
             corrections: BTreeMap::new(),
-            built_at: t("2026-10-09T13:00:00Z"),
+            ..super::game::input(dir, GameCategory::MissedGame)
         }
     }
 

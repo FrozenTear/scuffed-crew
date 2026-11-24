@@ -11,12 +11,20 @@ const TEAM_PANEL_CSS: &str = r#"
     .team-panel .panel-title {
         font-family: var(--font-head);
         font-size: 0.75rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-transform: uppercase;
         letter-spacing: 0.08em;
         padding: 0.75rem 0.75rem 0.5rem;
         margin: 0;
         border-bottom: 1px solid var(--border);
+    }
+    .team-unsaved-note {
+        margin: 0;
+        padding: 0.5rem 0.75rem;
+        border-bottom: 1px solid var(--border);
+        font-size: 0.75rem;
+        line-height: 1.4;
+        color: var(--text-3);
     }
 
     /* ---- Format toggle ---- */
@@ -32,19 +40,19 @@ const TEAM_PANEL_CSS: &str = r#"
         border: 1px solid var(--border);
         border-radius: 4px;
         background: none;
-        color: var(--text-2);
+        color: var(--text-3);
         font-size: 0.8rem;
         font-weight: 600;
         cursor: pointer;
         transition: background 0.12s, color 0.12s, border-color 0.12s;
     }
     .format-btn:hover {
-        background: var(--surface-2);
+        background: var(--surface-sunken);
     }
     .format-btn.active {
         background: var(--accent-soft);
-        color: var(--accent);
-        border-color: var(--accent);
+        color: var(--accent-text);
+        border-color: var(--accent-solid);
     }
 
     /* ---- Team slots ---- */
@@ -62,7 +70,7 @@ const TEAM_PANEL_CSS: &str = r#"
     }
     .slot-label {
         font-size: 0.7rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-transform: uppercase;
         letter-spacing: 0.04em;
         min-width: 55px;
@@ -74,7 +82,7 @@ const TEAM_PANEL_CSS: &str = r#"
     }
     .slot-empty {
         font-size: 0.75rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-style: italic;
     }
     .slot-assign-btn {
@@ -83,7 +91,7 @@ const TEAM_PANEL_CSS: &str = r#"
         background: none;
         border: 1px dashed var(--border);
         border-radius: 4px;
-        color: var(--accent);
+        color: var(--accent-text);
         font-size: 0.75rem;
         font-weight: 600;
         padding: 0.2rem 0.45rem;
@@ -92,7 +100,7 @@ const TEAM_PANEL_CSS: &str = r#"
     }
     .slot-assign-btn:hover {
         background: var(--accent-soft);
-        border-color: var(--accent);
+        border-color: var(--accent-solid);
     }
 
     /* ---- Assigned hero display ---- */
@@ -107,7 +115,7 @@ const TEAM_PANEL_CSS: &str = r#"
         height: 24px;
         border-radius: 50%;
         object-fit: cover;
-        background: var(--surface-2);
+        background: var(--surface-sunken);
     }
     .slot-hero-name {
         flex: 1;
@@ -116,14 +124,14 @@ const TEAM_PANEL_CSS: &str = r#"
     .slot-remove-btn {
         background: none;
         border: none;
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-size: 0.85rem;
         cursor: pointer;
         padding: 0 0.2rem;
         transition: color 0.12s;
     }
     .slot-remove-btn:hover {
-        color: var(--danger);
+        color: var(--loss);
     }
 
     /* ---- Actions ---- */
@@ -136,16 +144,22 @@ const TEAM_PANEL_CSS: &str = r#"
         border: 1px solid var(--border);
         border-radius: 4px;
         background: none;
-        color: var(--text-2);
+        color: var(--text-3);
         font-size: 0.75rem;
         cursor: pointer;
         transition: background 0.12s, color 0.12s;
     }
     .team-clear-btn:hover {
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         color: var(--text);
     }
 "#;
+
+/// The strategy API stores no team format or composition (issue 817), so
+/// the panel says so instead of letting Save imply it kept them. The first
+/// save of a new strategy hands the team to the strategy's own editor
+/// (`StrategyState::hand_off_team`), so only a reload or leaving clears it.
+const TEAM_NOT_SAVED_NOTE: &str = "Not saved with the strategy. The team here is a planning aid and is cleared when you reload or leave the editor.";
 
 /// Name and role for a filled slot. The role is the catalog's `role`, which
 /// the roster sets from `role_for_hero_name`. Unknown ids stay "Unknown" and
@@ -193,6 +207,7 @@ pub fn TeamPanel(
         crate::styles::StyleOnce { id: "scuffed-css-components-strategy-team_panel-team-panel-css", css: TEAM_PANEL_CSS }
         div { class: "team-panel",
             h3 { class: "panel-title", "Team Composition" }
+            p { class: "team-unsaved-note", "{TEAM_NOT_SAVED_NOTE}" }
 
             // ---- Format toggle ----
             div { class: "format-toggle",
@@ -226,7 +241,7 @@ pub fn TeamPanel(
                     };
 
                     let border_color = if is_6v6 {
-                        "var(--accent)".to_string()
+                        "var(--accent-text)".to_string()
                     } else {
                         slot.required_role().color_hex().to_string()
                     };
@@ -366,5 +381,24 @@ mod tests {
             ("Jetpack Cat", HeroRole::Support)
         );
         assert_eq!(assigned_hero("not-a-hero"), ("Unknown", HeroRole::Damage));
+    }
+
+    /// Issue 817: the API stores no team format or composition, so the
+    /// panel always says the team is not saved, right under its heading.
+    #[test]
+    fn the_panel_says_the_team_is_not_saved() {
+        assert!(TEAM_NOT_SAVED_NOTE.starts_with("Not saved with the strategy."));
+        let src = include_str!("team_panel.rs");
+        let src = src.split("#[cfg(test)]").next().unwrap_or(src);
+        let heading = src
+            .find("h3 { class: \"panel-title\", \"Team Composition\" }")
+            .expect("panel heading");
+        let note = src
+            .find("p { class: \"team-unsaved-note\", \"{TEAM_NOT_SAVED_NOTE}\" }")
+            .expect("not saved note");
+        let toggle = src
+            .find("div { class: \"format-toggle\",")
+            .expect("format toggle");
+        assert!(heading < note && note < toggle);
     }
 }

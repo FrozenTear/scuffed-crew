@@ -54,6 +54,7 @@ use crate::shadow::confirm::{CellTrust, cell_trust};
 use crate::shadow::digits::RECOGNIZER_ID;
 use crate::shadow::{BoardRead, BoardStatus, FieldRead, Value};
 use crate::storage::PersonalMatch;
+pub use crate::suspect::{clear_edited_suspects, upload_suspect_fields};
 
 /// The six stat fields of a board row, in capture gate column order.
 pub const STAT_SUFFIXES: [&str; 6] = ["e", "a", "d", "dmg", "h", "mit"];
@@ -282,7 +283,7 @@ pub fn merge_saved_with_authority(
     let map = policy.map.clone();
     let mode = policy.mode.clone();
     if let Some(board_map) = text_on(board, "map")
-        && board_map.trim() != policy.map.trim()
+        && !same_stored_map(&board_map, &policy.map)
     {
         push_suspect(&mut suspect, "map");
     }
@@ -391,32 +392,6 @@ pub fn own_row_guesses(board: &BoardRead, own: OwnRow) -> [Option<u32>; 6] {
     })
 }
 
-/// Flat suspect names safe to upload.
-///
-/// Row names such as `r3.dmg` become `dmg`. Unknown names, duplicates, and
-/// anything that is not in the server's allowlist are dropped. Order follows
-/// [`SUSPECT_FIELD_NAMES`].
-pub fn upload_suspect_fields(stored: &[String]) -> Vec<String> {
-    let mut seen = [false; SUSPECT_FIELD_NAMES.len()];
-    for name in stored {
-        let Some(flat) = flat_suspect_name(name) else {
-            continue;
-        };
-        if let Some(idx) = SUSPECT_FIELD_NAMES
-            .iter()
-            .position(|allowed| *allowed == flat)
-        {
-            seen[idx] = true;
-        }
-    }
-    SUSPECT_FIELD_NAMES
-        .iter()
-        .enumerate()
-        .filter(|(idx, _)| seen[*idx])
-        .map(|(_, name)| (*name).to_string())
-        .collect()
-}
-
 /// The fields read off the member's own row: the hero and the six stats.
 /// The map, the mode and the result are the same on every row.
 pub const OWN_ROW_FIELDS: [&str; 7] = ["hero", "e", "a", "d", "dmg", "h", "mit"];
@@ -434,23 +409,6 @@ pub fn mark_own_row_suspect(fields: &mut Vec<String>) {
         push_suspect(fields, name);
     }
     *fields = upload_suspect_fields(fields);
-}
-
-/// Drop suspect names cleared by a manual edit.
-///
-/// `storage_field` is the tracker's edit name (`elims`, `map_name`, ...).
-/// Both the flat API name and a leftover `rN.` form of that name are removed.
-pub fn clear_edited_suspects(fields: &mut Vec<String>, storage_field: &str) {
-    let drop_names = suspect_names_for_edit(storage_field);
-    if drop_names.is_empty() {
-        return;
-    }
-    fields.retain(|name| {
-        let Some(flat) = flat_suspect_name(name) else {
-            return true;
-        };
-        !drop_names.contains(&flat)
-    });
 }
 
 /// Why a provided board cannot replace any field.
@@ -512,31 +470,22 @@ fn canonical_board_hero(raw: &str) -> String {
     crate::parse::canonical_hero(raw)
 }
 
-fn suspect_names_for_edit(storage_field: &str) -> &'static [&'static str] {
-    match storage_field {
-        "hero" => &["hero"],
-        "map_name" => &["map", "mode"],
-        "outcome" => &["result"],
-        "elims" => &["e"],
-        "assists" => &["a"],
-        "deaths" => &["d"],
-        "damage" => &["dmg"],
-        "healing" => &["h"],
-        "mitigation" => &["mit"],
-        _ => &[],
+/// True when both names are the same stored map, including OCR forms that
+/// canonicalize to one display name. "Kings Row" and "KING'S ROW" are
+/// King's Row, so a later Tab must not keep the map warning up.
+fn same_stored_map(a: &str, b: &str) -> bool {
+    let a = a.trim();
+    let b = b.trim();
+    if a == b {
+        return true;
     }
-}
-
-fn flat_suspect_name(name: &str) -> Option<&str> {
-    if SUSPECT_FIELD_NAMES.contains(&name) {
-        return Some(name);
+    match (
+        crate::parse::canonical_map(a),
+        crate::parse::canonical_map(b),
+    ) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
     }
-    let (row, field) = name.split_once('.')?;
-    let digits = row.strip_prefix('r')?;
-    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    SUSPECT_FIELD_NAMES.contains(&field).then_some(field)
 }
 
 /// Non-empty text on a field, including a suspect read. Missing and blank
@@ -618,6 +567,26 @@ fn stat_row_attempted(board: &BoardRead, index: usize) -> bool {
     })
 }
 
+/// One field as the active reader read it: its confidence and its own
+/// value (before the capture gate), for `report::kit::KitReads::with_confidences`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReaderRead {
+    pub confidence: f64,
+    pub value: Option<String>,
+}
+
+impl ReaderRead {
+    pub fn from_field(f: &crate::shadow::FieldRead) -> Self {
+        Self {
+            confidence: f64::from(f.confidence),
+            value: f.value.as_ref().map(|v| match v {
+                crate::shadow::Value::Int(n) => n.to_string(),
+                crate::shadow::Value::Text(t) => t.trim().to_string(),
+            }),
+        }
+    }
+}
+
 /// The new reader's confidence for each report kit read key (`mode`,
 /// `hero`, `e`, `a`, `d`, `dmg`, `h`, `mit`) of the own row. A field the
 /// reader did not attempt has no entry. `result` is not on the board until
@@ -627,14 +596,11 @@ fn stat_row_attempted(board: &BoardRead, index: usize) -> bool {
 pub fn kit_confidences(
     board: &BoardRead,
     own: OwnRow,
-) -> std::collections::BTreeMap<String, crate::report::kit::ReaderRead> {
+) -> std::collections::BTreeMap<String, ReaderRead> {
     let mut out = std::collections::BTreeMap::new();
     let mut put = |key: &str, name: &str| {
         if let Some(f) = board.get(name).filter(|f| field_attempted(f)) {
-            out.insert(
-                key.to_string(),
-                crate::report::kit::ReaderRead::from_field(f),
-            );
+            out.insert(key.to_string(), ReaderRead::from_field(f));
         }
     };
     put("mode", "mode");
@@ -649,7 +615,7 @@ pub fn kit_confidences(
 
 /// A field the new reader wrote, as opposed to the unread placeholder
 /// (`value` none, confidence 0, suspect).
-fn field_attempted(field: &FieldRead) -> bool {
+pub fn field_attempted(field: &FieldRead) -> bool {
     field.value.is_some() || field.confidence > 0.0 || !field.suspect
 }
 
@@ -662,6 +628,12 @@ fn push_suspect(suspect: &mut Vec<String>, flat: &str) {
 fn order_suspects(names: Vec<String>) -> Vec<String> {
     upload_suspect_fields(&names)
 }
+
+#[cfg(test)]
+mod tests_board_merge;
+
+#[cfg(test)]
+mod tests_map_suspect;
 
 #[cfg(test)]
 mod tests {
@@ -725,7 +697,7 @@ mod tests {
         assert!(board_refusal(&six, 5).is_some());
     }
 
-    fn ocr() -> PolicyRow {
+    pub(super) fn ocr() -> PolicyRow {
         PolicyRow {
             map: "Busan".into(),
             mode: "Control".into(),
@@ -740,7 +712,7 @@ mod tests {
         }
     }
 
-    fn text_field(name: &str, value: &str, suspect: bool) -> FieldRead {
+    pub(super) fn text_field(name: &str, value: &str, suspect: bool) -> FieldRead {
         FieldRead {
             name: name.into(),
             value: Some(Value::Text(value.into())),
@@ -749,7 +721,7 @@ mod tests {
         }
     }
 
-    fn int_field(name: &str, value: u32, suspect: bool) -> FieldRead {
+    pub(super) fn int_field(name: &str, value: u32, suspect: bool) -> FieldRead {
         FieldRead {
             name: name.into(),
             value: Some(Value::Int(value)),
@@ -794,7 +766,7 @@ mod tests {
     }
 
     /// A Read board whose row `index` is fully confident, plus match fields.
-    fn confident_board(team_size: usize, index: usize) -> BoardRead {
+    pub(super) fn confident_board(team_size: usize, index: usize) -> BoardRead {
         let mut fields = vec![
             text_field("map", "Ilios", false),
             text_field("mode", "Control", false),
@@ -821,7 +793,7 @@ mod tests {
         }
     }
 
-    fn identified(index: usize, team_size: usize) -> OwnRow {
+    pub(super) fn identified(index: usize, team_size: usize) -> OwnRow {
         OwnRow::Identified { index, team_size }
     }
 
@@ -1347,43 +1319,6 @@ mod tests {
         assert_eq!(saved.elims, 21);
         assert_eq!(saved.suspect_fields, vec!["hero".to_string()]);
         assert_eq!(saved.recognizer, RECOGNIZER_ID);
-    }
-
-    #[test]
-    fn agreeing_map_is_not_suspect_and_mode_stays_on_policy() {
-        let mut board = confident_board(5, 0);
-        let map = board
-            .fields
-            .iter_mut()
-            .find(|field| field.name == "map")
-            .unwrap();
-        map.value = Some(Value::Text("Busan".into()));
-        let mode = board
-            .fields
-            .iter_mut()
-            .find(|field| field.name == "mode")
-            .unwrap();
-        mode.value = Some(Value::Text("Escort".into()));
-        let saved = merge_saved(&ocr(), identified(0, 5), Some(&board));
-        assert_eq!(saved.map, "Busan");
-        assert_eq!(saved.mode, "Control");
-        assert!(!saved.suspect_fields.iter().any(|name| name == "map"));
-        assert!(!saved.suspect_fields.iter().any(|name| name == "mode"));
-        assert_eq!(saved.recognizer, RECOGNIZER_ID);
-    }
-
-    #[test]
-    fn deathmatch_policy_stays_when_the_new_reader_names_another_map() {
-        let mut policy = ocr();
-        policy.map = "Château Guillard".into();
-        policy.mode = "Deathmatch".into();
-        let saved = merge_saved(&policy, identified(0, 5), Some(&confident_board(5, 0)));
-        assert_eq!(saved.map, "Château Guillard");
-        assert_eq!(saved.mode, "Deathmatch");
-        assert!(saved.suspect_fields.iter().any(|name| name == "map"));
-        assert!(!saved.suspect_fields.iter().any(|name| name == "mode"));
-        assert!(!crate::parse::stats_row_is_tracked(&saved.map, &saved.mode));
-        assert!(crate::parse::map_is_untracked(&saved.map));
     }
 
     #[test]

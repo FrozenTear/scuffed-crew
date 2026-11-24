@@ -13,7 +13,9 @@ use scuffed_types::{MeResponse, OrgRole, UserInfo};
 
 const CSS: &str = r#"
 .login-page {
-    min-height: 100vh;
+    /* The sticky site top bar takes its own height above the page. */
+    min-height: calc(100vh - var(--nav-height-used));
+    box-sizing: border-box;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -35,7 +37,7 @@ const CSS: &str = r#"
     margin: 0 0 0.5rem;
 }
 .login-card p.lead {
-    color: var(--text-2);
+    color: var(--text-3);
     font-size: 0.9rem;
     margin: 0 0 1.5rem;
 }
@@ -46,10 +48,9 @@ const CSS: &str = r#"
     margin-bottom: 1rem;
 }
 .login-field label {
-    font-size: 0.75rem;
+    font-size: 0.85rem;
+    font-weight: 600;
     color: var(--text-3);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
 }
 .login-field input {
     background: var(--bg);
@@ -60,9 +61,21 @@ const CSS: &str = r#"
     font-size: 1rem;
 }
 .login-error {
-    color: var(--danger);
+    color: var(--loss);
     font-size: 0.85rem;
     margin-bottom: 1rem;
+}
+/* No text: out of the layout, still in the tree so the next message is
+   announced. */
+.login-error:empty {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
 }
 .login-nostr-btn {
     width: 100%;
@@ -70,20 +83,20 @@ const CSS: &str = r#"
     border-radius: 6px;
     border: 1px solid var(--accent-soft);
     background: var(--surface);
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 0.9rem;
     font-weight: 600;
     cursor: pointer;
     transition: all 0.15s;
 }
 .login-nostr-btn:hover:not(:disabled) {
-    border-color: var(--accent);
+    border-color: var(--accent-solid);
     background: var(--accent-soft);
 }
 .login-nostr-btn:disabled { opacity: 0.6; cursor: default; }
 .login-nostr-hint {
-    font-size: 0.72rem;
-    color: var(--text-3);
+    font-size: 0.75rem;
+    color: var(--text-subtle);
     margin: 0.4rem 0 0;
     text-align: center;
 }
@@ -93,7 +106,7 @@ const CSS: &str = r#"
     gap: 0.5rem;
     margin-bottom: 1rem;
     font-size: 0.85rem;
-    color: var(--text-2);
+    color: var(--text-3);
 }
 .login-switch {
     margin-top: 1rem;
@@ -102,7 +115,7 @@ const CSS: &str = r#"
 .login-linkish {
     background: none;
     border: none;
-    color: var(--accent);
+    color: var(--accent-text);
     font-size: 0.85rem;
     font-weight: 600;
     cursor: pointer;
@@ -122,12 +135,12 @@ const CSS: &str = r#"
     padding: 0.55rem;
     border: 1px solid var(--border);
     border-radius: 6px;
-    color: var(--text-2);
+    color: var(--text-3);
     font-size: 0.9rem;
 }
 .login-oauth a:hover {
     color: var(--text);
-    border-color: var(--accent);
+    border-color: var(--accent-solid);
 }
 .login-card button[type="submit"] {
     width: 100%;
@@ -154,11 +167,20 @@ fn me_to_user_info(me: &MeResponse) -> UserInfo {
     }
 }
 
-/// Pull the server's `{"error": "..."}` message out of an HTTP error body.
+/// Pull the server's `{"error": "..."}` message out of an HTTP error body,
+/// with long dashes made plain like every other server reason
+/// ([`crate::client_error::plain_punctuation`]): the register 400 "username
+/// must be 1\u{2013}32 characters" reads "1-32", as on setup (Vision nit 1 at
+/// e453160d on 748). A blank reason is the fallback.
 fn body_error_or(body: &str, fallback: &str) -> String {
     serde_json::from_str::<serde_json::Value>(body)
         .ok()
-        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
+        .and_then(|v| {
+            v.get("error")?
+                .as_str()
+                .map(crate::client_error::plain_punctuation)
+        })
+        .filter(|reason| !reason.is_empty())
         .unwrap_or_else(|| fallback.to_string())
 }
 
@@ -189,24 +211,32 @@ fn sign_in_wait_message(seconds: u64) -> String {
     }
 }
 
-/// Password login. A 429 with a usable JSON `retry_after` or `Retry-After`
+/// Password login. A 401 is the server's answer for a wrong username or
+/// password (`routes/auth.rs`, the only credential rejection), so only it
+/// reads as one. A 429 with a usable JSON `retry_after` or `Retry-After`
 /// header names that wait. 120 seconds or more is whole minutes, rounded up.
-/// Any other 429 says to try again later, without guessing the wait. Anything
-/// else stays the generic credential message.
+/// Any other 429 says to try again later, without guessing the wait.
+/// Anything else (no answer, an unreadable answer, a 500) goes through the
+/// one mapping with a lead, and the raw error goes to the console: an
+/// unreachable server is not a wrong password (QA on 748).
 fn login_failure_message(err: &scuffed_api_client::ClientError) -> String {
-    let scuffed_api_client::ClientError::Http {
-        status: 429,
-        body,
-        retry_after,
-    } = err
-    else {
-        return "Invalid username or password".into();
-    };
-    match scuffed_types::json_retry_after(body).or(*retry_after) {
-        Some(seconds) => sign_in_wait_message(seconds),
-        None => SIGN_IN_RATE_LIMIT.to_string(),
+    match err {
+        scuffed_api_client::ClientError::Http { status: 401, .. } => {
+            INVALID_CREDENTIALS.to_string()
+        }
+        scuffed_api_client::ClientError::Http {
+            status: 429,
+            body,
+            retry_after,
+        } => match scuffed_types::json_retry_after(body).or(*retry_after) {
+            Some(seconds) => sign_in_wait_message(seconds),
+            None => SIGN_IN_RATE_LIMIT.to_string(),
+        },
+        other => crate::client_error::with_lead("Could not sign in.", other),
     }
 }
+
+const INVALID_CREDENTIALS: &str = "Invalid username or password";
 
 /// Local register. 409, 400, and 403 keep their own copy. A 429 names the wait.
 fn register_failure_message(err: &scuffed_api_client::ClientError) -> String {
@@ -223,7 +253,7 @@ fn register_failure_message(err: &scuffed_api_client::ClientError) -> String {
             "Registration is currently closed".into()
         }
         other => client_rate_limit_message(other)
-            .unwrap_or_else(|| "Registration failed. Try again.".into()),
+            .unwrap_or_else(|| crate::client_error::with_lead("Registration failed.", other)),
     }
 }
 
@@ -234,7 +264,7 @@ fn nostr_verify_failure_message(err: &scuffed_api_client::ClientError) -> String
             "Registration is currently closed".to_string()
         }
         other => client_rate_limit_message(other)
-            .unwrap_or_else(|| format!("Verification failed: {other}")),
+            .unwrap_or_else(|| crate::client_error::with_lead("Verification failed", other)),
     }
 }
 
@@ -772,9 +802,9 @@ pub fn Login() -> Element {
                         "Sign in to continue."
                     }
                 }
-                if let Some(err) = error() {
-                    p { class: "login-error", "{err}" }
-                }
+                // Always rendered so a new message is announced; only its text
+                // changes, and the empty paragraph is out of the layout.
+                p { class: "login-error", role: "alert", "{error().unwrap_or_default()}" }
                 if registering() && show_register {
                     form { onsubmit: on_register,
                         div { class: "login-field",
@@ -899,7 +929,7 @@ pub fn Login() -> Element {
                     if cfg!(debug_assertions) {
                         a {
                             href: "/api/dev/login",
-                            style: "color: var(--accent);",
+                            style: "color: var(--accent-text);",
                             "Dev login (in-memory only)"
                         }
                     }
@@ -940,7 +970,7 @@ async fn nostr_login_flow() -> Result<(), String> {
         .await
         .map_err(|e| {
             client_rate_limit_message(&e)
-                .unwrap_or_else(|| format!("Challenge request failed: {e}"))
+                .unwrap_or_else(|| crate::client_error::with_lead("Challenge request failed", &e))
         })?;
 
     let window = web_sys::window().ok_or("No window")?;
@@ -1008,11 +1038,169 @@ mod tests {
     use super::*;
     use std::str::FromStr;
 
+    /// QA on 748: an unreachable server is not a wrong password. Only the
+    /// server's 401 (its one credential rejection) reads as one; no answer,
+    /// an unreadable answer and a 5xx go through the mapping, and log.
+    #[test]
+    fn only_a_401_reads_as_a_wrong_password() {
+        use crate::client_error::{
+            NETWORK_ERROR_MESSAGE, SERVER_TROUBLE_MESSAGE, UNREADABLE_ANSWER_MESSAGE,
+        };
+        use scuffed_api_client::ClientError;
+        let _ = crate::util::take_logged();
+        assert_eq!(
+            login_failure_message(&ClientError::http(
+                401,
+                r#"{"error":"invalid username or password"}"#,
+                None
+            )),
+            "Invalid username or password"
+        );
+        let offline = login_failure_message(&ClientError::Network(
+            "JsValue(TypeError: Failed to fetch)".into(),
+        ));
+        assert_eq!(
+            offline,
+            format!("Could not sign in. {NETWORK_ERROR_MESSAGE}")
+        );
+        assert!(!offline.contains("password"), "{offline}");
+        assert_eq!(
+            login_failure_message(&ClientError::Deserialize("expected value".into())),
+            format!("Could not sign in. {UNREADABLE_ANSWER_MESSAGE}")
+        );
+        assert_eq!(
+            login_failure_message(&ClientError::http(502, "", None)),
+            format!("Could not sign in. {SERVER_TROUBLE_MESSAGE}")
+        );
+        assert_eq!(
+            login_failure_message(&ClientError::http(
+                500,
+                r#"{"error":"database error"}"#,
+                None
+            )),
+            "Could not sign in. HTTP error 500: database error"
+        );
+        for status in [400, 403, 404, 500, 502, 503] {
+            let text = login_failure_message(&ClientError::http(status, "", None));
+            assert!(!text.contains("password"), "{status}: {text}");
+        }
+        let logged = crate::util::take_logged();
+        assert!(
+            logged.iter().any(|line| line.contains("Failed to fetch")),
+            "{logged:?}"
+        );
+        assert!(
+            logged.iter().any(|line| line.contains("expected value")),
+            "{logged:?}"
+        );
+
+        // Vision nit 13 on 748: the error paragraph is a live region that is
+        // always rendered (only its text changes), here and on /setup, and
+        // an empty one is out of the layout.
+        for (src, class) in [
+            (include_str!("login.rs"), "login-error"),
+            (include_str!("setup.rs"), "setup-error"),
+        ] {
+            let prod = src
+                .split("#[cfg(test)]\nmod tests")
+                .next()
+                .expect("prod part");
+            assert!(
+                prod.contains(&format!(
+                    "p {{ class: \"{class}\", role: \"alert\", \"{{error().unwrap_or_default()}}\" }}"
+                )),
+                "{class}"
+            );
+            assert!(
+                !prod.contains("if let Some(message) = error() {"),
+                "{class}"
+            );
+            assert!(
+                prod.contains(&format!(".{class}:empty {{\n    position: absolute;")),
+                "{class}"
+            );
+        }
+
+        // Registration has no catch-all "try again" either.
+        assert_eq!(
+            register_failure_message(&ClientError::Network("offline".into())),
+            format!("Registration failed. {NETWORK_ERROR_MESSAGE}")
+        );
+    }
+
+    fn css_rule_body<'a>(marker: &str) -> &'a str {
+        let rest = CSS.split(marker).nth(1).expect("rule in login CSS");
+        rest.split('}').next().expect("rule body")
+    }
+
+    #[test]
+    fn login_page_fits_under_the_fixed_nav() {
+        let page = css_rule_body(".login-page {");
+        assert!(
+            page.contains("min-height: calc(100vh - var(--nav-height-used))"),
+            "{page}"
+        );
+        assert!(page.contains("box-sizing: border-box"), "{page}");
+        assert!(
+            !page.contains("min-height: 100vh"),
+            "100vh here stacks on the main's own 100vh and makes the page scroll: {page}"
+        );
+    }
+
+    #[test]
+    fn field_labels_are_plain_sentence_case() {
+        let label = css_rule_body(".login-field label {");
+        assert!(!label.contains("uppercase"), "{label}");
+        assert!(!label.contains("0.75rem"), "{label}");
+    }
+
+    #[test]
+    fn nostr_hint_meets_the_twelve_px_floor() {
+        let hint = css_rule_body(".login-nostr-hint {");
+        assert!(hint.contains("font-size: 0.75rem;"), "{hint}");
+    }
+
     fn http(status: u16, body: &str) -> scuffed_api_client::ClientError {
         scuffed_api_client::ClientError::Http {
             status,
             body: body.to_string(),
             retry_after: None,
+        }
+    }
+
+    /// Vision nit 3, round 6 on 748: the register 400 dash checks have their
+    /// own test, out of the 429 one.
+    #[test]
+    fn register_400_reason_reads_without_long_dashes() {
+        // Vision nit 1 at e453160d on 748: the register 400 reason goes
+        // through plain_punctuation like setup's, so the server's en dash
+        // range reads "1-32" and a spaced dash breaks the sentence.
+        let range = register_failure_message(&http(
+            400,
+            r#"{"error":"username must be 1\u201332 characters"}"#,
+        ));
+        assert_eq!(range, "username must be 1-32 characters");
+        assert!(
+            !range.contains('\u{2013}') && !range.contains('\u{2014}'),
+            "{range}"
+        );
+        assert_eq!(
+            register_failure_message(&http(
+                400,
+                r#"{"error":"username may only contain letters, digits, _ and -"}"#,
+            )),
+            "username may only contain letters, digits, _ and -"
+        );
+        assert_eq!(
+            register_failure_message(&http(400, r#"{"error":"taken \u2014 pick another"}"#)),
+            "taken. Pick another"
+        );
+        for body in [r#"{"error":"  "}"#, r#"{"error":""}"#, "<html>", ""] {
+            assert_eq!(
+                register_failure_message(&http(400, body)),
+                "Check your input",
+                "{body}"
+            );
         }
     }
 

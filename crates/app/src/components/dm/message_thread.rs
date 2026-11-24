@@ -5,123 +5,115 @@ use scuffed_api_client::{ApiClient, ClientError};
 use super::failure::DmFailureNotice;
 use super::reply_input::ReplyInput;
 use super::types::{
-    DmLoadFailure, DmMessage, MarkReadBody, classify_dm_client_error, relative_time,
-    truncate_pubkey,
+    DmLoadFailure, DmMessage, MarkReadBody, avatar_initials, classify_dm_client_error,
+    relative_time,
 };
+use crate::components::ui::{EmptyCard, SkeletonBars};
+use crate::routes::Route;
 use crate::util::encode_query;
 
+/// The scrolling message list. One thread per page, so a fixed id.
+pub const MESSAGE_LIST_ID: &str = "dm-message-list";
+/// The thread's always-rendered status line (loading, older messages).
+pub const THREAD_STATUS_ID: &str = "dm-thread-status";
+
+/// The thread column of the `d1-dm` frame: a head with the peer, the
+/// messages on `--bg` (newest at the bottom, mine on the right on the soft
+/// accent), then the composer.
 const MESSAGE_THREAD_CSS: &str = r#"
 .dm-thread {
+    flex: 1 1 auto;
+    min-height: 0;
     display: flex;
     flex-direction: column;
-    height: 100%;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 10px;
+}
+/* Back is for phone only (the inbox is beside the thread on desktop). Two
+   classes, so it beats `.btn { display: inline-flex }`. */
+.dm-thread-head .dm-thread-back { display: none; }
+.dm-thread-peer {
+    min-width: 0;
     overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
-.dm-thread-header {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    padding: 1rem;
-    border-bottom: 1px solid var(--border);
-}
-.dm-thread-avatar {
-    width: 36px;
-    height: 36px;
-    border-radius: 50%;
-    background: var(--accent-soft);
-    color: var(--accent);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-weight: 700;
-    font-size: 0.85rem;
-    flex-shrink: 0;
-}
-.dm-thread-name {
-    font-family: var(--font-head);
-    font-weight: 700;
-    font-size: 1.05rem;
-    color: var(--text);
-}
-.dm-thread-pubkey {
-    font-family: var(--font-mono);
-    font-size: 0.7rem;
-    color: var(--text-3);
-}
-.dm-thread-scroll {
-    flex: 1;
+.dm-msg-list {
+    flex: 1 1 auto;
+    min-height: 0;
     overflow-y: auto;
-    padding: 1rem;
+    margin: 0;
+    padding: var(--space-4);
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
-}
-.dm-thread-load-older {
-    align-self: center;
-    background: transparent;
-    color: var(--text-2);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 0.35rem 0.75rem;
-    font-size: 0.75rem;
-    cursor: pointer;
-    margin-bottom: 0.5rem;
-}
-.dm-thread-load-older:hover { color: var(--text); border-color: var(--accent-soft); }
-.dm-thread-load-older:disabled { opacity: 0.5; cursor: not-allowed; }
-.dm-msg {
-    display: flex;
-    flex-direction: column;
-    max-width: 75%;
-    padding: 0.55rem 0.75rem;
-    border-radius: 10px;
+    gap: var(--space-3);
     background: var(--bg);
+    list-style: none;
+}
+.dm-msg-list:focus-visible {
+    outline: var(--focus-ring-width) solid var(--focus-ring);
+    outline-offset: calc(var(--focus-ring-width) * -1);
+}
+/* Newest at the bottom. An auto margin, not justify-content: flex-end, so
+   the oldest messages can still be scrolled to. */
+.dm-msg-list > :first-child { margin-top: auto; }
+.dm-msg {
+    box-sizing: border-box;
+    width: fit-content;
+    max-width: min(60ch, 100%);
+    margin: 0;
+    padding: var(--space-3);
+    align-self: flex-start;
+    background: var(--surface);
+    color: var(--text);
     border: 1px solid var(--border);
-    word-wrap: break-word;
+    border-radius: var(--radius-card);
     overflow-wrap: anywhere;
 }
-.dm-msg.outgoing {
+.dm-msg.is-me {
     align-self: flex-end;
-    background: color-mix(in srgb, var(--accent) 15%, transparent);
-    border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+    background: var(--accent-soft);
+    border-color: var(--accent-soft);
 }
 .dm-msg-meta {
-    font-size: 0.65rem;
-    color: var(--text-3);
-    margin-top: 0.25rem;
     display: flex;
-    justify-content: flex-end;
-    gap: 0.4rem;
-}
-.dm-msg-content { font-size: 0.9rem; color: var(--text); white-space: pre-wrap; }
-.dm-thread-empty {
-    display: flex;
-    flex: 1;
-    align-items: center;
-    justify-content: center;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    margin: 0 0 var(--space-1);
     color: var(--text-3);
-    font-size: 0.9rem;
-    padding: 2rem;
-    text-align: center;
+    font-size: var(--text-sm);
 }
-.dm-thread-loading {
-    display: flex;
-    flex: 1;
-    align-items: center;
-    justify-content: center;
-    color: var(--text-3);
-    font-size: 0.9rem;
+.dm-msg.is-me .dm-msg-meta { color: var(--text); }
+.dm-msg-body {
+    margin: 0;
+    font-size: var(--text-md);
+    line-height: var(--leading-body);
+    white-space: pre-wrap;
 }
+.dm-msg-list .dm-older { align-self: center; }
+.dm-msg-list .empty-card {
+    align-self: stretch;
+    padding: var(--space-card-pad);
+}
+.dm-msg-list .empty-card h2 { font-size: var(--text-xl); }
+.dm-msg-list .ui-skel-list { align-self: stretch; }
+.dm-msg-list .dm-failure { margin: 0; align-self: stretch; }
 "#;
 
 #[component]
 pub fn MessageThread(
     peer_pubkey: String,
-    peer_display_name: Option<String>,
+    /// The peer's name (from the server, the member list, or a short npub).
+    peer_label: String,
+    /// My own display name, for the meta line of my messages.
+    #[props(default)]
+    self_label: Option<String>,
     self_pubkey: Option<String>,
+    /// True on `/dm/:peer`: the peer's name is the page's H1.
+    #[props(default)]
+    heading_is_h1: bool,
+    /// Fired with the peer key once the thread is loaded and marked read, so
+    /// the inbox can clear that row's unread count.
+    #[props(default)]
+    on_read: Option<EventHandler<String>>,
 ) -> Element {
     let peer = peer_pubkey.clone();
     let peer_for_resource = peer.clone();
@@ -135,7 +127,7 @@ pub fn MessageThread(
     let mut last_marked_until = use_signal(|| None::<String>);
 
     // Load initial page when peer changes.
-    let _load_initial = use_resource(move || {
+    let mut load_initial = use_resource(move || {
         let peer = peer_for_resource.clone();
         async move {
             loading_initial.set(true);
@@ -159,6 +151,9 @@ pub fn MessageThread(
                         mark_read(&peer, &ts).await;
                         last_marked_until.set(Some(ts));
                     }
+                    if let Some(on_read) = on_read {
+                        on_read.call(peer.clone());
+                    }
                 }
                 Err(err) => {
                     load_error.set(Some(classify_dm_client_error(&err)));
@@ -167,6 +162,16 @@ pub fn MessageThread(
             }
         }
     });
+
+    // Keep the newest message in view: after the first load and after a send
+    // (the newest message changes). "Load older messages" only prepends, so
+    // the newest stays the same and the reader stays where they were.
+    let newest = newest_message_key(&messages.read());
+    use_effect(use_reactive((&newest,), move |(newest,)| {
+        if newest.is_some() {
+            scroll_to_end(MESSAGE_LIST_ID);
+        }
+    }));
 
     let peer_for_older = peer.clone();
     let load_older = move |_| {
@@ -197,22 +202,18 @@ pub fn MessageThread(
         });
     };
 
-    let display_name = peer_display_name
+    let initials = avatar_initials(&peer_label);
+    let me_label = self_label
         .clone()
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| truncate_pubkey(&peer));
-    let initials = display_name
-        .chars()
-        .next()
-        .unwrap_or('?')
-        .to_uppercase()
-        .to_string();
+        .unwrap_or_else(|| "You".to_string());
 
     let msgs = messages();
     let is_loading_initial = loading_initial();
     let failure = load_error();
     let show_empty = thread_shows_empty(is_loading_initial, failure.is_some(), msgs.len());
     let reply_to = msgs.last().map(|m| m.gift_wrap_id.clone());
+    let status = thread_status_text(is_loading_initial, loading_older());
 
     let on_optimistic = move |msg: DmMessage| {
         // Append to the local thread cache so the UI updates without waiting
@@ -225,39 +226,56 @@ pub fn MessageThread(
 
     rsx! {
         crate::styles::StyleOnce { id: "scuffed-css-components-dm-message_thread-message-thread-css", css: MESSAGE_THREAD_CSS }
-        div { class: "dm-thread",
-            div { class: "dm-thread-header",
-                div { class: "dm-thread-avatar", "{initials}" }
-                div {
-                    div { class: "dm-thread-name", "{display_name}" }
-                    div { class: "dm-thread-pubkey", "{truncate_pubkey(&peer)}" }
+        section { class: "dm-thread", aria_label: "Conversation with {peer_label}",
+            div { class: "dm-pane-head dm-thread-head",
+                Link {
+                    to: Route::DmInbox {},
+                    class: "btn is-ghost dm-thread-back",
+                    aria_label: "Back to conversations",
+                    "Back"
+                }
+                span { class: "dm-avatar", aria_hidden: "true", "{initials}" }
+                if heading_is_h1 {
+                    h1 { class: "dm-pane-title dm-thread-peer", "{peer_label}" }
+                } else {
+                    h2 { class: "dm-pane-title dm-thread-peer", "{peer_label}" }
                 }
             }
-            div { class: "dm-thread-scroll",
+            p { id: THREAD_STATUS_ID, class: "visually-hidden", role: "status", "{status}" }
+            // A focusable region, so the keyboard can scroll the history.
+            div { id: MESSAGE_LIST_ID, class: "dm-msg-list", tabindex: "0", role: "region",
+                aria_label: "Messages with {peer_label}",
                 if has_more() && !is_loading_initial && !msgs.is_empty() {
                     button {
-                        class: "dm-thread-load-older",
-                        disabled: loading_older(),
+                        class: "btn is-ghost dm-older",
+                        r#type: "button",
+                        aria_disabled: if loading_older() { "true" },
                         onclick: load_older,
-                        if loading_older() { "Loading…" } else { "Load older messages" }
+                        if loading_older() { "Loading..." } else { "Load older messages" }
                     }
                 }
                 if is_loading_initial {
-                    div { class: "dm-thread-loading", "Loading messages…" }
+                    SkeletonBars { rows: 3 }
                 } else if let Some(failure) = failure {
-                    DmFailureNotice { failure }
+                    DmFailureNotice {
+                        failure,
+                        title: "Could not load this conversation",
+                        on_retry: move |_| load_initial.restart(),
+                    }
                 } else if show_empty {
-                    div { class: "dm-thread-empty",
-                        "No messages with this peer yet."
+                    EmptyCard {
+                        title: "No messages yet",
+                        message: "Write the first message to {peer_label} in the box below.",
                     }
                 } else {
                     for m in msgs.iter() {
-                        {render_message(m, self_pk.as_deref())}
+                        Fragment { key: "{m.id}", {render_message(m, self_pk.as_deref(), &me_label, &peer_label)} }
                     }
                 }
             }
             ReplyInput {
                 peer_pubkey: peer.clone(),
+                peer_label: peer_label.clone(),
                 self_pubkey: self_pk.clone(),
                 reply_to_event_id: reply_to,
                 on_optimistic: on_optimistic,
@@ -266,22 +284,56 @@ pub fn MessageThread(
     }
 }
 
-fn render_message(m: &DmMessage, self_pubkey: Option<&str>) -> Element {
+fn render_message(m: &DmMessage, self_pubkey: Option<&str>, me: &str, peer: &str) -> Element {
     let outgoing = self_pubkey
         .map(|pk| pk.eq_ignore_ascii_case(&m.sender_pubkey))
         .unwrap_or(false);
-    let cls = if outgoing {
-        "dm-msg outgoing"
-    } else {
-        "dm-msg"
-    };
+    let cls = if outgoing { "dm-msg is-me" } else { "dm-msg" };
+    let who = if outgoing { me } else { peer };
     let time = relative_time(&m.created_at);
     rsx! {
-        div { key: "{m.id}", class: "{cls}",
-            div { class: "dm-msg-content", "{m.content}" }
-            div { class: "dm-msg-meta", "{time}" }
+        article { key: "{m.id}", class: "{cls}",
+            p { class: "dm-msg-meta",
+                span { "{who}" }
+                time { datetime: "{m.created_at}", "{time}" }
+            }
+            p { class: "dm-msg-body", "{m.content}" }
         }
     }
+}
+
+/// Text of the thread's status line. Always rendered, only the text changes.
+fn thread_status_text(loading_initial: bool, loading_older: bool) -> &'static str {
+    if loading_initial {
+        "Loading messages..."
+    } else if loading_older {
+        "Loading older messages..."
+    } else {
+        ""
+    }
+}
+
+/// Scroll the list to its end, so the newest message is in view.
+fn scroll_to_end(id: &str) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        if let Some(el) = web_sys::window()
+            .and_then(|w| w.document())
+            .and_then(|d| d.get_element_by_id(id))
+        {
+            el.set_scroll_top(el.scroll_height());
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = id;
+    }
+}
+
+/// What the scroll-to-end effect follows: the newest message. It changes on
+/// the first load and on a send, never when older messages are prepended.
+fn newest_message_key(messages: &[DmMessage]) -> Option<String> {
+    messages.last().map(|m| m.gift_wrap_id.clone())
 }
 
 async fn fetch_thread(
@@ -317,6 +369,9 @@ async fn mark_read(peer: &str, until_ts: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::components::ui::test_support::{
+        assert_ink_clears_aa, assert_sizes_from_tokens, render_routed,
+    };
 
     #[test]
     fn empty_thread_copy_only_after_a_successful_load() {
@@ -324,5 +379,130 @@ mod tests {
         assert!(!thread_shows_empty(false, true, 0));
         assert!(thread_shows_empty(false, false, 0));
         assert!(!thread_shows_empty(false, false, 1));
+    }
+
+    #[test]
+    fn back_is_hidden_on_desktop_over_the_btn_rule() {
+        // `.btn { display: inline-flex }` is one class; the hide rule needs
+        // two, and the phone rule in pages/dm.rs three, to win in any order.
+        assert!(MESSAGE_THREAD_CSS.contains(".dm-thread-head .dm-thread-back { display: none; }"));
+        assert!(!MESSAGE_THREAD_CSS.contains("\n.dm-thread-back {"));
+    }
+
+    #[test]
+    fn status_line_says_what_is_loading() {
+        assert_eq!(thread_status_text(true, false), "Loading messages...");
+        assert_eq!(thread_status_text(false, true), "Loading older messages...");
+        assert_eq!(thread_status_text(false, false), "");
+    }
+
+    #[test]
+    fn first_render_is_a_labelled_wait_with_the_peer_as_h1() {
+        let html = render_routed(|| {
+            rsx! {
+                crate::components::ToastProvider {
+                    MessageThread {
+                        peer_pubkey: "ab".repeat(32),
+                        peer_label: "Player02",
+                        self_pubkey: None,
+                        heading_is_h1: true,
+                    }
+                }
+            }
+        });
+        assert_eq!(html.matches("<h1").count(), 1, "{html}");
+        assert!(html.contains(">Player02</h1>"), "{html}");
+        assert!(
+            html.contains(&format!(
+                "<p id=\"{THREAD_STATUS_ID}\" class=\"visually-hidden\" role=\"status\">Loading messages...</p>"
+            )),
+            "{html}"
+        );
+        assert!(
+            html.contains("aria-label=\"Back to conversations\""),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn inside_the_inbox_the_peer_is_an_h2() {
+        let html = render_routed(|| {
+            rsx! {
+                crate::components::ToastProvider {
+                    MessageThread {
+                        peer_pubkey: "ab".repeat(32),
+                        peer_label: "Player02",
+                        self_pubkey: None,
+                    }
+                }
+            }
+        });
+        assert!(!html.contains("<h1"), "{html}");
+        assert!(html.contains(">Player02</h2>"), "{html}");
+    }
+
+    #[test]
+    fn messages_name_the_sender_so_mine_is_not_colour_alone() {
+        let html = crate::components::ui::test_support::render(|| {
+            let m = DmMessage {
+                id: "m1".into(),
+                gift_wrap_id: "g1".into(),
+                sender_pubkey: "AB".repeat(32),
+                recipient_pubkey: "cd".repeat(32),
+                content: "Hey, want to duo later?".into(),
+                created_at: "2026-11-10T19:00:00Z".into(),
+                reply_to_event_id: None,
+            };
+            render_message(&m, Some(&"ab".repeat(32)), "Player01", "Player02")
+        });
+        assert!(html.contains("class=\"dm-msg is-me\""), "{html}");
+        assert!(html.contains("<span>Player01</span>"), "{html}");
+        assert!(html.contains("datetime=\"2026-11-10T19:00:00Z\""), "{html}");
+    }
+
+    #[test]
+    fn thread_css_is_on_tokens_and_readable() {
+        assert_sizes_from_tokens(MESSAGE_THREAD_CSS);
+        assert_ink_clears_aa("--text", "--accent-soft", 4.5);
+        assert_ink_clears_aa("--text-3", "--bg", 4.5);
+        assert_ink_clears_aa("--text-3", "--surface", 4.5);
+    }
+
+    #[test]
+    fn loading_older_messages_does_not_jump_to_the_newest() {
+        // Vision blocking 5 on PR 706: the scroll-to-end effect followed the
+        // message count, so a prepended older page jumped to the end.
+        let msg = |id: &str, at: &str| DmMessage {
+            id: id.into(),
+            gift_wrap_id: format!("g-{id}"),
+            sender_pubkey: "ab".repeat(32),
+            recipient_pubkey: "cd".repeat(32),
+            content: "hi".into(),
+            created_at: at.into(),
+            reply_to_event_id: None,
+        };
+        let first = vec![
+            msg("3", "2026-11-10T19:03:00Z"),
+            msg("4", "2026-11-10T19:04:00Z"),
+        ];
+        let key = newest_message_key(&first);
+        assert_eq!(key.as_deref(), Some("g-4"));
+        // Older page prepended: the key the effect follows is unchanged.
+        let mut older = vec![
+            msg("1", "2026-11-10T19:01:00Z"),
+            msg("2", "2026-11-10T19:02:00Z"),
+        ];
+        older.extend(first.clone());
+        assert_eq!(newest_message_key(&older), key);
+        // A send appends: the key changes and the list scrolls.
+        let mut sent = first;
+        sent.push(msg("5", "2026-11-10T19:05:00Z"));
+        assert_ne!(newest_message_key(&sent), key);
+        assert_eq!(newest_message_key(&[]), None);
+        // The effect follows that key, not the count.
+        let src = include_str!("message_thread.rs");
+        let prod = src.split("mod tests").next().expect("production half");
+        assert!(prod.contains("use_reactive((&newest,),"));
+        assert!(!prod.contains("use_reactive((&message_count,)"));
     }
 }

@@ -22,139 +22,17 @@ use scuffed_types::strategy::{
     Color, ElementType, HealthPack, HealthPackSize, MapMetadata, Position, StrategyElement, Tool,
 };
 
+use super::hero_chip::{HeroChip, hero_chip, portrait_ready};
 use crate::canvas::tile_manager::{SharedTileManager, create_tile_manager};
+use crate::keybindings::{self, CanvasKey, Keybinding};
 use crate::theme::tokens::{
-    CANVAS_BADGE_BG, CANVAS_BG, CANVAS_GRID_LOADING, CANVAS_MARKER_BORDER, CANVAS_SELECTION_COLOR,
-    CANVAS_TEXT_LOADING, CANVAS_TILE_PLACEHOLDER, CANVAS_WHITE, HP_GLOW, HP_LARGE_FILL,
-    HP_LARGE_STROKE, HP_SMALL_FILL, HP_SMALL_STROKE, STRATEGY_ACCENT,
+    CANVAS_BADGE_BG, CANVAS_BG, CANVAS_GRID_LOADING, CANVAS_MARKER_BORDER,
+    CANVAS_SELECTION_FALLBACK, CANVAS_SELECTION_TOKEN, CANVAS_TEXT_LOADING,
+    CANVAS_TILE_PLACEHOLDER, CANVAS_WHITE, HP_GLOW, HP_LARGE_FILL, HP_LARGE_STROKE, HP_SMALL_FILL,
+    HP_SMALL_STROKE, STRATEGY_ACCENT,
 };
 
-// =============================================================================
-// CSS
-// =============================================================================
-
-pub const MAP_CANVAS_CSS: &str = r#"
-    .map-canvas-wrapper {
-        position: relative;
-        width: 100%;
-        height: 100%;
-        overflow: hidden;
-        background: var(--bg);
-    }
-    .map-canvas {
-        position: absolute;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-    }
-    .map-canvas-background {
-        pointer-events: none;
-        z-index: 1;
-    }
-    .map-canvas-elements {
-        pointer-events: none;
-        z-index: 2;
-    }
-    .map-canvas-overlay {
-        z-index: 3;
-    }
-    .map-selector-overlay {
-        position: absolute;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        background: var(--overlay);
-        z-index: 10;
-    }
-    .map-selector-content {
-        background: var(--surface);
-        border: 1px solid var(--border);
-        border-radius: 12px;
-        padding: 2rem;
-        max-width: 600px;
-        width: 90%;
-        max-height: 70vh;
-        overflow-y: auto;
-    }
-    .map-selector-content h2 {
-        font-family: var(--font-head);
-        font-size: 1.5rem;
-        color: var(--text);
-        margin-bottom: 0.5rem;
-    }
-    .map-selector-content p {
-        color: var(--text-2);
-        margin-bottom: 1.5rem;
-    }
-    .map-selector-modes {
-        display: flex;
-        flex-direction: column;
-        gap: 0.5rem;
-    }
-    .map-selector-mode-group {
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        overflow: hidden;
-    }
-    .map-selector-mode-title {
-        padding: 0.6rem 1rem;
-        background: var(--surface-2);
-        color: var(--text);
-        font-weight: 600;
-        cursor: pointer;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-    }
-    .map-count {
-        font-size: 0.8rem;
-        color: var(--text-3);
-        background: var(--surface);
-        padding: 0.1rem 0.5rem;
-        border-radius: 10px;
-    }
-    .map-selector-grid {
-        display: flex;
-        flex-direction: column;
-    }
-    .map-selector-btn,
-    .map-selector-btn-submap {
-        display: block;
-        width: 100%;
-        padding: 0.5rem 1rem;
-        text-align: left;
-        background: transparent;
-        border: none;
-        color: var(--text-2);
-        cursor: pointer;
-        transition: background 0.15s, color 0.15s;
-    }
-    .map-selector-btn:hover,
-    .map-selector-btn-submap:hover {
-        background: var(--surface-2);
-        color: var(--text);
-    }
-    .map-selector-btn-submap {
-        padding-left: 2rem;
-        font-size: 0.9rem;
-    }
-    .map-selector-submap-group {
-        border: none;
-    }
-    .map-selector-expand-hint {
-        margin-left: 0.5rem;
-        font-size: 0.8rem;
-        color: var(--text-3);
-    }
-    .map-selector-submaps {
-        padding-left: 0.5rem;
-    }
-"#;
+// The canvas CSS lives in `map_canvas_css.rs`, shared with the desktop canvas.
 
 // =============================================================================
 // Hero image cache
@@ -388,16 +266,21 @@ pub fn MapCanvas(
     on_text_create: EventHandler<(Position, String)>,
     on_erase_at: EventHandler<Position>,
     on_element_drag_end: EventHandler<(Uuid, Position, Position)>,
+    // Tab, Esc or Shift+Tab while the canvas holds focus
+    on_canvas_key: EventHandler<CanvasKey>,
+    // A key was pressed while the canvas held focus (the editor shows its
+    // key hint then, not on a mouse focus)
+    on_canvas_keydown: EventHandler<()>,
 ) -> Element {
     // =========================================================================
-    // Canvas element refs — stored as signals so effects can read them
+    // Canvas element refs: stored as signals so effects can read them
     // =========================================================================
     let mut bg_canvas: Signal<Option<Rc<MountedData>>> = use_signal(|| None);
     let mut el_canvas: Signal<Option<Rc<MountedData>>> = use_signal(|| None);
     let mut ov_canvas: Signal<Option<Rc<MountedData>>> = use_signal(|| None);
 
     // =========================================================================
-    // Local interaction state — kept local for smooth 60fps panning
+    // Local interaction state: kept local for smooth 60fps panning
     // =========================================================================
     let mut is_panning = use_signal(|| false);
     let mut is_dragging = use_signal(|| false);
@@ -407,11 +290,11 @@ pub fn MapCanvas(
     let mut arrow_start = use_signal(|| Option::<Position>::None);
     let mut arrow_end = use_signal(|| Option::<Position>::None);
 
-    // Local pan offset for smooth dragging — only syncs to parent on mouseup.
+    // Local pan offset for smooth dragging; only syncs to parent on mouseup.
     // This prevents 60+ signal propagation cycles per second during panning.
     let mut local_pan = use_signal(|| Position::new(0.0, 0.0));
 
-    // Image version counter — incremented when map image or tiles load.
+    // Image version counter: incremented when map image or tiles load.
     // Subscribing to this in effects triggers redraws.
     let image_version = use_signal(|| 0u32);
 
@@ -457,7 +340,7 @@ pub fn MapCanvas(
     let current_map_id_rsx = current_map_id;
 
     // =========================================================================
-    // Map loading effect — runs when current_map_id changes
+    // Map loading effect: runs when current_map_id changes
     // =========================================================================
     {
         let tile_manager = tile_manager.clone();
@@ -493,7 +376,7 @@ pub fn MapCanvas(
 
                 start_map_image_load(&map_load, &map_image, image_version, &id, token);
             } else {
-                // No map selected — clear
+                // No map selected: clear
                 tile_manager.borrow_mut().clear();
             }
         });
@@ -742,8 +625,18 @@ pub fn MapCanvas(
                 .filter(|e| e.phase_id.is_none() || e.phase_id == sel_phase)
                 .collect();
 
+            // `--canvas-selection` follows the brand's solid accent for this
+            // theme, so it is read from the canvas's computed style. If it
+            // resolves empty, the outline still draws in the strategy scope's
+            // dark ring colour (CANVAS_SELECTION_FALLBACK).
+            let selection = web_sys::window()
+                .and_then(|w| w.get_computed_style(&canvas).ok().flatten())
+                .and_then(|style| style.get_property_value(CANVAS_SELECTION_TOKEN).ok())
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| CANVAS_SELECTION_FALLBACK.to_string());
             if let Some(element) = visible.iter().find(|e| e.id == sel) {
-                ctx.set_stroke_style_str(CANVAS_SELECTION_COLOR);
+                ctx.set_stroke_style_str(&selection);
                 ctx.set_line_width(2.0);
                 let dash = Array::of2(&4.0.into(), &4.0.into());
                 let _ = ctx.set_line_dash(&dash);
@@ -828,7 +721,7 @@ pub fn MapCanvas(
     rsx! {
         div { class: "map-canvas-wrapper",
 
-            // Layer 1 (bottom): Background — map tiles, health packs
+            // Layer 1 (bottom): Background (map tiles, health packs)
             canvas {
                 width: "1920",
                 height: "1080",
@@ -838,7 +731,7 @@ pub fn MapCanvas(
                 },
             }
 
-            // Layer 2 (middle): Elements — routes, markers, areas
+            // Layer 2 (middle): Elements (routes, markers, areas)
             canvas {
                 width: "1920",
                 height: "1080",
@@ -848,14 +741,19 @@ pub fn MapCanvas(
                 },
             }
 
-            // Layer 3 (top): Overlay — cursors, selection, drawing preview
+            // Layer 3 (top): Overlay (cursors, selection, drawing preview)
             // This canvas captures all mouse/keyboard events
             canvas {
                 width: "1920",
                 height: "1080",
                 class: "map-canvas map-canvas-overlay",
                 style: "cursor: {cursor_style()};",
-                tabindex: 0,
+                // Focus by click only. As a Tab stop the canvas would hold
+                // keyboard focus: Tab toggles the left panel in here, so the
+                // controls after the map (and the phone tab bar) could not
+                // be reached going forward.
+                tabindex: "-1",
+                aria_label: "Strategy map. Tab toggles the team panel. Esc cancels a drawing or selection. Esc or Shift+Tab leaves the map.",
                 onmounted: move |evt| {
                     ov_canvas.set(Some(evt.data()));
                 },
@@ -1021,7 +919,7 @@ pub fn MapCanvas(
                     let zoom = *zoom_sig.read();
                     let pan_offset = *pan_sig.read();
 
-                    // Zoom towards mouse position — extract delta_y from WheelDelta enum
+                    // Zoom towards mouse position: extract delta_y from WheelDelta enum
                     let delta_y = match evt.data().delta() {
                         dioxus::html::geometry::WheelDelta::Pixels(v) => v.y,
                         dioxus::html::geometry::WheelDelta::Lines(v) => v.y * 20.0,
@@ -1057,19 +955,31 @@ pub fn MapCanvas(
 
                 // ---- Canvas keyboard shortcuts ----
                 onkeydown: move |evt: Event<KeyboardData>| {
-                    let key = evt.data().key();
-                    match key {
-                        Key::Delete | Key::Backspace
-                            if selected_sig.read().is_some() => {
-                                // Parent handles deletion through element select -> delete flow
-                                on_element_select.call(None);
-                            }
-                        Key::Escape => {
+                    // Keys that belong to the canvas while it holds focus.
+                    // This is the only place in the editor that takes Tab.
+                    on_canvas_keydown.call(());
+                    let binding = Keybinding::from_key(&evt.key(), evt.modifiers());
+                    // A half-drawn shape or a selection: Esc drops it first.
+                    let in_progress = arrow_start.read().is_some()
+                        || *drawing_sig.read()
+                        || selected_sig.read().is_some();
+                    if let Some(canvas_key) = keybindings::canvas_key(&binding, in_progress) {
+                        if canvas_key.prevents_default() {
+                            evt.prevent_default();
+                        }
+                        if canvas_key == CanvasKey::CancelInProgress {
                             on_element_select.call(None);
                             arrow_start.set(None);
                             arrow_end.set(None);
                         }
-                        _ => {}
+                        on_canvas_key.call(canvas_key);
+                    }
+                    // The editor's document listener deleted the selected
+                    // element; drop the stale selection here.
+                    if matches!(evt.data().key(), Key::Delete | Key::Backspace)
+                        && selected_sig.read().is_some()
+                    {
+                        on_element_select.call(None);
                     }
                 },
             }
@@ -1083,7 +993,7 @@ pub fn MapCanvas(
                         div { class: "map-selector-modes",
                             // Map selection handled by parent component's map picker
                             p {
-                                style: "color: var(--text-3); text-align: center; padding: 2rem;",
+                                style: "color: var(--text-subtle); text-align: center; padding: 2rem;",
                                 "Use the status bar or toolbar to select a map."
                             }
                         }
@@ -1316,28 +1226,35 @@ fn draw_element(
             let y = element.position.y;
 
             let mut drew_portrait = false;
+            let mut chip: Option<HeroChip> = None;
             if let Some(ref hero_id) = element.hero_id {
                 let cache = hero_cache.borrow();
                 if let Some(img) = cache.get(hero_id) {
-                    // Circular clipping path for hero portrait
-                    ctx.save();
-                    ctx.begin_path();
-                    let _ = ctx.arc(x, y, radius, 0.0, std::f64::consts::PI * 2.0);
-                    ctx.clip();
+                    if portrait_ready(img.complete(), img.natural_width()) {
+                        // Circular clipping path for hero portrait
+                        ctx.save();
+                        ctx.begin_path();
+                        let _ = ctx.arc(x, y, radius, 0.0, std::f64::consts::PI * 2.0);
+                        ctx.clip();
 
-                    let img_size = radius * 2.0;
-                    let _ = ctx.draw_image_with_html_image_element_and_dw_and_dh(
-                        img,
-                        x - radius,
-                        y - radius,
-                        img_size,
-                        img_size,
-                    );
+                        let img_size = radius * 2.0;
+                        let _ = ctx.draw_image_with_html_image_element_and_dw_and_dh(
+                            img,
+                            x - radius,
+                            y - radius,
+                            img_size,
+                            img_size,
+                        );
 
-                    ctx.restore();
-                    drew_portrait = true;
+                        ctx.restore();
+                        drew_portrait = true;
+                    } else {
+                        // Loading or failed. A failed image stays cached, so
+                        // it is not requested again.
+                        chip = Some(hero_chip(hero_id, &element.color));
+                    }
                 } else {
-                    // Image not in cache — start loading
+                    // Image not in cache: start loading once
                     drop(cache);
                     let img = HtmlImageElement::new().expect("failed to create image");
                     let hero_id_clone = hero_id.clone();
@@ -1353,19 +1270,25 @@ fn draw_element(
                     onload.forget();
 
                     img.set_src(&format!("/assets/heroes/{}.png", hero_id_clone));
+                    chip = Some(hero_chip(hero_id, &element.color));
                 }
             }
 
-            // Colored circle fallback or border
+            // Role chip, or the plain coloured circle
             if !drew_portrait {
-                ctx.set_fill_style_str(&color);
+                let fill = chip.as_ref().map_or(color.as_str(), |c| c.fill);
+                ctx.set_fill_style_str(fill);
                 ctx.begin_path();
                 let _ = ctx.arc(x, y, radius, 0.0, std::f64::consts::PI * 2.0);
                 ctx.fill();
             }
 
-            // Border
-            if drew_portrait {
+            // Border: team colour around a portrait. A chip ring swaps to a
+            // contrasting colour when the team colour matches its fill.
+            if let Some(ref chip) = chip {
+                ctx.set_stroke_style_str(&chip.ring);
+                ctx.set_line_width(3.0);
+            } else if drew_portrait {
                 ctx.set_stroke_style_str(&color);
                 ctx.set_line_width(3.0);
             } else {
@@ -1376,8 +1299,13 @@ fn draw_element(
             let _ = ctx.arc(x, y, radius, 0.0, std::f64::consts::PI * 2.0);
             ctx.stroke();
 
-            // Label (only for plain markers)
-            if !drew_portrait && let Some(ref label) = element.label {
+            if let Some(ref chip) = chip {
+                ctx.set_fill_style_str(chip.label_color);
+                ctx.set_font("bold 13px sans-serif");
+                ctx.set_text_align("center");
+                let _ = ctx.fill_text(&chip.label, x, y + 5.0);
+            } else if !drew_portrait && let Some(ref label) = element.label {
+                // Label (only for plain markers)
                 ctx.set_fill_style_str(CANVAS_WHITE);
                 ctx.set_font("14px sans-serif");
                 ctx.set_text_align("center");

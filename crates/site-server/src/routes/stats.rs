@@ -1,28 +1,31 @@
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::{StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
 
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{
-    AuditAction, AuditTargetType, DaemonToken, HeroStats, MapStats, PersonalMatch, PersonalStats,
-    RoleStats,
+    AuditAction, AuditTargetType, DaemonToken, HeroStats, MapStats, OrgRole, PersonalMatch,
+    PersonalStats, RoleStats,
 };
 use scuffed_types::api::{
     CreateDaemonTokenRequest, CreateDaemonTokenResponse, CursorResponse, DaemonConfigResponse,
     MemberSettingsResponse, NAME_RECOGNIZER_ID_ERROR, PaginationParams, RECOGNIZER_ID_ERROR,
-    SUSPECT_FIELDS_ERROR, SeasonQuery, StatsUploadBody, StatsUploadResponse, TokenCheckResponse,
-    UpdateMemberSettingsRequest, resolve_name_recognizer, resolve_recognizer,
-    resolve_suspect_fields,
+    SUSPECT_FIELDS_ERROR, SeasonQuery, StatsHiddenError, StatsUploadBody, StatsUploadResponse,
+    StatsVisibility, TokenCheckResponse, UPLOAD_HERO_UNKNOWN, is_upload_hero_unknown,
+    resolve_bans_picks, resolve_name_recognizer, resolve_rank, resolve_recognizer,
+    resolve_suspect_fields, validate_deleted_session, validate_upload_entry,
 };
 use scuffed_types::{
     STATS_UPLOAD_MAX_DELETED_SESSIONS, STATS_UPLOAD_MAX_MATCHES, hero_key_to_name,
     role_for_hero_name,
 };
 
-use crate::extractors::{DaemonUser, LimitedUploadDaemon, OpaqueDaemonUser, OrgMember};
+use crate::extractors::{
+    DaemonUser, LimitedUploadDaemon, OfficerUser, OpaqueDaemonUser, OrgMember,
+};
 use crate::routes::audit_log::audit;
 use crate::routes::leaderboards::resolve_season_window;
 use crate::state::AppState;
@@ -33,9 +36,12 @@ use crate::state::AppState;
 /// 0.5.0-alpha.1 and alpha.2 trackers on the new reader send the pack key
 /// (`wrecking-ball`, `ana`) as the hero and guess the role from it, which
 /// gives Damage for hyphenated tanks and supports. Leaderboards and hero
-/// stats group on the exact string, so `ana` and `Ana` split. A name that is
-/// not a known hero (including `Unknown`) is stored as sent.
+/// stats group on the exact string, so `ana` and `Ana` split. `Unknown` in
+/// any case is stored as `Unknown`, matching the rows already in live data.
 fn normalize_hero(hero: String, role: String) -> (String, String) {
+    if is_upload_hero_unknown(&hero) {
+        return (UPLOAD_HERO_UNKNOWN.to_string(), role);
+    }
     let Some(display) = hero_key_to_name(&hero) else {
         return (hero, role);
     };
@@ -59,6 +65,20 @@ impl IntoResponse for UploadReject {
     }
 }
 
+fn bad_request(error: String) -> UploadReject {
+    (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })).into()
+}
+
+/// 422 for a `bans_picks` value that cannot be stored. Same `{error}` body as
+/// the other upload checks.
+fn unprocessable(error: String) -> UploadReject {
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(ErrorResponse { error }),
+    )
+        .into()
+}
+
 fn batch_over_cap(body: &StatsUploadBody) -> bool {
     body.matches.len() > STATS_UPLOAD_MAX_MATCHES
         || body.deleted_sessions.len() > STATS_UPLOAD_MAX_DELETED_SESSIONS
@@ -78,10 +98,41 @@ fn batch_too_large() -> UploadReject {
     ))
 }
 
+/// First tracker release whose legacy (no session id) uploads may reuse the
+/// stored row at the same `played_at` (alpha.3 item 22, PR 649 blocker 1).
+const LEGACY_REUSE_MIN_TRACKER: &str = "0.6.0-alpha.3";
+
+/// Tracker version from a `scuffed-stat-tracker/<semver>` User-Agent. `None`
+/// for a missing, foreign or unparseable User-Agent.
+pub(crate) fn tracker_version(headers: &HeaderMap) -> Option<semver::Version> {
+    headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|ua| ua.strip_prefix("scuffed-stat-tracker/"))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|v| semver::Version::parse(v).ok())
+}
+
+/// Legacy id rule for this upload, from its `User-Agent`.
+///
+/// Only `scuffed-stat-tracker/<version>` at `0.6.0-alpha.3` or newer (semver
+/// order, so `0.6.0-alpha.2.3` is older and `0.6.0` is newer) reuses the
+/// stored row. A missing, foreign or unparseable User-Agent keeps the
+/// pre-alpha.3 behaviour: an edited game is a new row and the original is
+/// never overwritten.
+fn legacy_id_reuse(headers: &HeaderMap) -> scuffed_db::LegacyIdReuse {
+    let min = semver::Version::parse(LEGACY_REUSE_MIN_TRACKER).expect("valid min tracker version");
+    match tracker_version(headers) {
+        Some(v) if v >= min => scuffed_db::LegacyIdReuse::ByPlayedAt,
+        _ => scuffed_db::LegacyIdReuse::Off,
+    }
+}
+
 /// POST /api/stats/upload — bulk upload personal matches (daemon token auth)
 pub(crate) async fn upload_stats(
     State(state): State<AppState>,
     daemon: LimitedUploadDaemon,
+    headers: HeaderMap,
     Json(body): Json<StatsUploadBody>,
 ) -> Result<Json<StatsUploadResponse>, UploadReject> {
     if crate::stats_upload_limits::stats_upload_batch_cap_enabled() && batch_over_cap(&body) {
@@ -101,9 +152,32 @@ pub(crate) async fn upload_stats(
     // and a later entry must not leave the earlier ones committed.
     // deleted_sessions is not applied either.
     // `recognizer` is checked first. A match that fails both reports that error.
+    //
+    // After those, each match must pass `validate_upload_entry` (API-3,
+    // DB19): 64-character strings, a known hero or `Unknown`, a played_at
+    // window, and
+    // numeric ceilings. The message keeps the `matches[n]: ` prefix so the
+    // tracker can isolate the one bad row. A long deleted_sessions entry is
+    // a 400 for the whole request.
+    //
+    // `bans_picks` is checked after `suspect_fields` and before
+    // `validate_upload_entry`. An unknown hero key is stored as null. A
+    // wrong shape, more than 4 bans, more than 6 picks, a bad team, or a
+    // bad recognizer is a 422 for the whole batch, with the same
+    // `matches[n]: ` prefix.
+    //
+    // `rank` is never checked here: `resolve_rank` turns bad or unknown parts
+    // into null when the row is built, so rank data cannot reject a game.
+    for (i, session_id) in body.deleted_sessions.iter().enumerate() {
+        if let Err(message) = validate_deleted_session(session_id) {
+            return Err(bad_request(format!("deleted_sessions[{i}]: {message}")));
+        }
+    }
+    let now = chrono::Utc::now();
     let mut recognizers = Vec::with_capacity(body.matches.len());
     let mut name_recognizers = Vec::with_capacity(body.matches.len());
     let mut suspect_lists = Vec::with_capacity(body.matches.len());
+    let mut bans_picks_list = Vec::with_capacity(body.matches.len());
     for (i, entry) in body.matches.iter().enumerate() {
         match resolve_recognizer(&entry.recognizer) {
             Ok(id) => recognizers.push(id),
@@ -141,6 +215,13 @@ pub(crate) async fn upload_stats(
                     .into());
             }
         }
+        match resolve_bans_picks(entry.bans_picks.as_ref()) {
+            Ok(bans_picks) => bans_picks_list.push(bans_picks),
+            Err(message) => return Err(unprocessable(format!("matches[{i}]: {message}"))),
+        }
+        if let Err(message) = validate_upload_entry(&entry.entry, now) {
+            return Err(bad_request(format!("matches[{i}]: {message}")));
+        }
     }
 
     let total = body.matches.len() as u32;
@@ -155,36 +236,51 @@ pub(crate) async fn upload_stats(
         .zip(recognizers)
         .zip(name_recognizers)
         .zip(suspect_lists)
-        .map(|(((entry, recognizer), name_recognizer), suspect_fields)| {
-            (entry, recognizer, name_recognizer, suspect_fields)
-        })
-        .filter(|(e, _, _, _)| matches!(e.entry.outcome.as_str(), "victory" | "defeat" | "draw"))
-        .map(|(e, recognizer, name_recognizer, suspect_fields)| {
-            let e = e.entry;
-            let (hero, role) = normalize_hero(e.hero, e.role);
-            PersonalMatch {
-                id: String::new(),
-                member_id: daemon.member.id.clone(),
-                session_id: e.session_id,
-                hero,
-                map_name: e.map_name,
-                game_mode: e.game_mode,
-                role,
-                outcome: e.outcome,
-                elims: e.elims,
-                deaths: e.deaths,
-                assists: e.assists,
-                damage: e.damage,
-                healing: e.healing,
-                mitigation: e.mitigation,
-                played_at: e.played_at,
-                uploaded_at: chrono::Utc::now(),
-                edited: e.edited,
-                recognizer,
-                name_recognizer,
-                suspect_fields,
-            }
-        })
+        .zip(bans_picks_list)
+        .map(
+            |((((entry, recognizer), name_recognizer), suspect_fields), bans_picks)| {
+                (
+                    entry,
+                    recognizer,
+                    name_recognizer,
+                    suspect_fields,
+                    bans_picks,
+                )
+            },
+        )
+        .filter(|(e, _, _, _, _)| matches!(e.entry.outcome.as_str(), "victory" | "defeat" | "draw"))
+        .map(
+            |(e, recognizer, name_recognizer, suspect_fields, bans_picks)| {
+                // Rank data is best effort: bad parts become null, never a reject.
+                let rank = resolve_rank(e.rank.as_ref());
+                let e = e.entry;
+                let (hero, role) = normalize_hero(e.hero, e.role);
+                PersonalMatch {
+                    id: String::new(),
+                    member_id: daemon.member.id.clone(),
+                    session_id: e.session_id,
+                    hero,
+                    map_name: e.map_name,
+                    game_mode: e.game_mode,
+                    role,
+                    outcome: e.outcome,
+                    elims: e.elims,
+                    deaths: e.deaths,
+                    assists: e.assists,
+                    damage: e.damage,
+                    healing: e.healing,
+                    mitigation: e.mitigation,
+                    played_at: e.played_at,
+                    uploaded_at: chrono::Utc::now(),
+                    edited: e.edited,
+                    recognizer,
+                    name_recognizer,
+                    suspect_fields,
+                    bans_picks,
+                    rank,
+                }
+            },
+        )
         .collect();
     let dropped = total - stub_matches.len() as u32;
     if dropped > 0 {
@@ -200,7 +296,11 @@ pub(crate) async fn upload_stats(
     } else {
         state
             .db
-            .upsert_personal_matches(&daemon.member.id, &stub_matches)
+            .upsert_personal_matches_with(
+                &daemon.member.id,
+                &stub_matches,
+                legacy_id_reuse(&headers),
+            )
             .await
             .map_err(|_e| {
                 (
@@ -267,6 +367,11 @@ pub async fn my_stats(
 }
 
 /// GET /api/stats/me/matches — personal match history (session auth, paginated)
+///
+/// Each item's `role` is filled at read time with
+/// [`scuffed_types::filled_role_label`]: a recognized stored role is kept, an
+/// empty or unrecognized one takes the hero's current role, and a hero not on
+/// the list keeps `""`. The stored row is not changed.
 pub async fn my_matches(
     State(state): State<AppState>,
     member: OrgMember,
@@ -275,7 +380,7 @@ pub async fn my_matches(
 ) -> Result<Json<CursorResponse<PersonalMatch>>, (StatusCode, Json<ErrorResponse>)> {
     let (limit, offset) = pagination.resolve();
     let season = resolve_season_window(&state, sq.season.as_deref()).await?;
-    let items = state
+    let mut items = state
         .db
         .list_personal_matches_in(&member.member.id, limit, offset, season)
         .await
@@ -287,7 +392,49 @@ pub async fn my_matches(
                 }),
             )
         })?;
+    // Read-time role fill only: the stored row keeps its role.
+    for m in &mut items {
+        m.role = scuffed_types::filled_role_label(&m.role, &m.hero);
+    }
     Ok(Json(CursorResponse::from_oversized(items, limit, offset)))
+}
+
+/// GET /api/stats/me/matches/{id}: one of the caller's own games (session auth).
+///
+/// `id` is the `id` of a row on [`my_matches`]. The body is that same row
+/// (same fields, including `edited`, `recognizer` and `suspect_fields`), with
+/// `role` filled at read time the same way. A key that does not exist, a
+/// malformed key and another member's game are all the same 404, so the
+/// route does not reveal whether someone else's game exists. Auth matches
+/// [`my_matches`]: 401 without a session, 403 for inactive members.
+pub async fn my_match(
+    State(state): State<AppState>,
+    member: OrgMember,
+    Path(id): Path<String>,
+) -> Result<Json<PersonalMatch>, (StatusCode, Json<ErrorResponse>)> {
+    let found = state
+        .db
+        .get_personal_match_for_member(&member.member.id, &id)
+        .await
+        .map_err(|_e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal error".into(),
+                }),
+            )
+        })?;
+    let mut m = found.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Match not found".into(),
+            }),
+        )
+    })?;
+    // Read-time role fill only, as on the list: the stored row keeps its role.
+    m.role = scuffed_types::filled_role_label(&m.role, &m.hero);
+    Ok(Json(m))
 }
 
 /// GET /api/stats/me/heroes — per-hero stats (session auth)
@@ -312,15 +459,17 @@ pub async fn my_hero_stats(
         })
 }
 
-/// GET /api/stats/me/roles — per-role stats from the stored match role (session auth).
+/// GET /api/stats/me/roles: per-role stats from the stored match role, filled at read time (session auth).
 ///
 /// Query: `?season=<id>`, the same window as [`my_hero_stats`] (omitted or blank
 /// is all time; an unknown id is 404). No other filters.
 ///
 /// Response: a JSON array of [`RoleStats`] (`role`, `matches`, `wins`, `losses`,
 /// `draws`, `avg_elims`, `avg_deaths`, `avg_damage`, `avg_healing`). Grouped by
-/// the `personal_match.role` column only — never derived from the hero name.
-/// An empty stored role is its own row (`"role": ""`). Ordered by `matches`
+/// the `personal_match.role` column, filled at read time: a recognized stored
+/// role is kept, an empty or unrecognized one takes the hero's current role
+/// (`scuffed_types::filled_role_label`). Only games with a hero not on the list
+/// stay in the `""` row. Stored roles are never rewritten. Ordered by `matches`
 /// descending, then `role` ascending.
 ///
 /// Auth matches [`my_hero_stats`]: a session is required (401 when anonymous or
@@ -333,7 +482,7 @@ pub async fn my_role_stats(
     let season = resolve_season_window(&state, sq.season.as_deref()).await?;
     state
         .db
-        .get_role_stats_in(&member.member.id, season)
+        .get_filled_role_stats_in(&member.member.id, season)
         .await
         .map(Json)
         .map_err(|_e| {
@@ -368,13 +517,55 @@ pub async fn my_map_stats(
         })
 }
 
-/// GET /api/stats/member/:id — view another member's stats (session auth)
+fn stats_forbidden(error: &str) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::FORBIDDEN,
+        Json(ErrorResponse {
+            error: error.to_string(),
+        }),
+    )
+}
+
+fn internal_error() -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse {
+            error: "Internal error".into(),
+        }),
+    )
+}
+
+async fn ensure_member_stats_visible(
+    state: &AppState,
+    viewer: &OrgMember,
+    target_id: &str,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let visibility = state
+        .db
+        .get_stats_visibility(target_id)
+        .await
+        .map_err(|_e| internal_error())?;
+    if let Some(error) = visibility.denial(
+        true,
+        viewer.member.id == target_id,
+        viewer.member.org_role.is_at_least(OrgRole::Officer),
+    ) {
+        return Err(stats_forbidden(error));
+    }
+    Ok(())
+}
+
+/// GET /api/stats/member/:id — view another member's stats (session auth).
+///
+/// `public` and `members` are visible to any active member. `private` is the
+/// owner or an officer. Anyone else gets 403 `stats_private`.
 pub async fn member_stats(
     State(state): State<AppState>,
-    _member: OrgMember,
+    member: OrgMember,
     Path(member_id): Path<String>,
     Query(sq): Query<SeasonQuery>,
 ) -> Result<Json<PersonalStats>, (StatusCode, Json<ErrorResponse>)> {
+    ensure_member_stats_visible(&state, &member, &member_id).await?;
     let season = resolve_season_window(&state, sq.season.as_deref()).await?;
     state
         .db
@@ -394,10 +585,11 @@ pub async fn member_stats(
 /// GET /api/stats/member/:id/heroes — view another member's hero stats
 pub async fn member_hero_stats(
     State(state): State<AppState>,
-    _member: OrgMember,
+    member: OrgMember,
     Path(member_id): Path<String>,
     Query(sq): Query<SeasonQuery>,
 ) -> Result<Json<Vec<HeroStats>>, (StatusCode, Json<ErrorResponse>)> {
+    ensure_member_stats_visible(&state, &member, &member_id).await?;
     let season = resolve_season_window(&state, sq.season.as_deref()).await?;
     state
         .db
@@ -417,19 +609,21 @@ pub async fn member_hero_stats(
 /// GET /api/stats/member/:id/roles — another member's per-role stats (session auth).
 ///
 /// Same query, [`RoleStats`] shape, and ordering as [`my_role_stats`].
-/// Visibility matches [`member_hero_stats`]: any active org member may read any
-/// member id. There is no per-member privacy flag. A missing id returns `[]`.
-/// Anonymous requests are 401; inactive or suspended callers are 403.
+/// Visibility matches [`member_stats`]: `public` and `members` for any active
+/// member, `private` for the owner or an officer. A missing id with public
+/// visibility returns `[]`. Anonymous requests are 401; inactive or suspended
+/// callers are 403 `Membership inactive` before this check.
 pub async fn member_role_stats(
     State(state): State<AppState>,
-    _member: OrgMember,
+    member: OrgMember,
     Path(member_id): Path<String>,
     Query(sq): Query<SeasonQuery>,
 ) -> Result<Json<Vec<RoleStats>>, (StatusCode, Json<ErrorResponse>)> {
+    ensure_member_stats_visible(&state, &member, &member_id).await?;
     let season = resolve_season_window(&state, sq.season.as_deref()).await?;
     state
         .db
-        .get_role_stats_in(&member_id, season)
+        .get_filled_role_stats_in(&member_id, season)
         .await
         .map(Json)
         .map_err(|_e| {
@@ -445,10 +639,11 @@ pub async fn member_role_stats(
 /// GET /api/stats/member/:id/maps — view another member's map stats
 pub async fn member_map_stats(
     State(state): State<AppState>,
-    _member: OrgMember,
+    member: OrgMember,
     Path(member_id): Path<String>,
     Query(sq): Query<SeasonQuery>,
 ) -> Result<Json<Vec<MapStats>>, (StatusCode, Json<ErrorResponse>)> {
+    ensure_member_stats_visible(&state, &member, &member_id).await?;
     let season = resolve_season_window(&state, sq.season.as_deref()).await?;
     state
         .db
@@ -463,6 +658,191 @@ pub async fn member_map_stats(
                 }),
             )
         })
+}
+
+/// Rejection from the officer match routes. Most are the usual `{error}`
+/// body. A member whose setting hides their matches gets [`StatsHiddenError`].
+pub(crate) struct OfficerMatchReject(Box<Response>);
+
+impl From<(StatusCode, Json<ErrorResponse>)> for OfficerMatchReject {
+    fn from(err: (StatusCode, Json<ErrorResponse>)) -> Self {
+        Self(Box::new(err.into_response()))
+    }
+}
+
+impl OfficerMatchReject {
+    /// 403 [`StatsHiddenError`]: exactly `{"error":"hidden_by_member","message":"..."}`.
+    fn hidden_by_member() -> Self {
+        let body = Json(StatsHiddenError::hidden_by_member());
+        Self(Box::new((StatusCode::FORBIDDEN, body).into_response()))
+    }
+}
+
+impl IntoResponse for OfficerMatchReject {
+    fn into_response(self) -> Response {
+        *self.0
+    }
+}
+
+/// Gate for the officer match routes. Runs before any match query, so a
+/// blocked read touches no match data and reveals no counts or dates.
+///
+/// The officer's own id is always allowed. Another member must exist (404
+/// `Member not found`), and their `stats_visibility` must allow officers per
+/// [`StatsVisibility::officer_match_denial`]. Otherwise 403 with
+/// [`StatsHiddenError`].
+async fn ensure_officer_match_access(
+    state: &AppState,
+    officer: &OfficerUser,
+    target_id: &str,
+) -> Result<(), OfficerMatchReject> {
+    let owner = officer.member.id == target_id;
+    if !owner {
+        let target = state.db.get_member_safe(target_id).await.map_err(|e| {
+            tracing::error!(
+                error = %e,
+                member_id = ?target_id,
+                "officer match view: member lookup failed"
+            );
+            internal_error()
+        })?;
+        if target.is_none() {
+            let body = Json(ErrorResponse {
+                error: "Member not found".into(),
+            });
+            return Err((StatusCode::NOT_FOUND, body).into());
+        }
+    }
+    let visibility = state
+        .db
+        .get_stats_visibility(target_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                error = %e,
+                member_id = ?target_id,
+                "officer match view: stats visibility lookup failed"
+            );
+            internal_error()
+        })?;
+    if visibility.officer_match_denial(owner).is_some() {
+        return Err(OfficerMatchReject::hidden_by_member());
+    }
+    Ok(())
+}
+
+/// GET /api/stats/member/{id}/matches: a member's match history, for officers
+/// (session auth, paginated).
+///
+/// Same query, pagination and row shape as [`my_matches`], including
+/// `suspect_fields` and the read-time role fill. 401 without a session, 403
+/// `Officer access required` for non-officers, 403 `Membership inactive` for
+/// inactive callers, 404 `Member not found` for an unknown member, and 403
+/// [`StatsHiddenError`] when the member's `stats_visibility` hides their
+/// matches from officers. Members read their own games on [`my_matches`].
+///
+/// A 200 read of another member's games writes one `viewed_member_matches`
+/// audit row (target `member`, the member id, details = the page and season
+/// as `offset=<n> limit=<n> season=<id or all>`) per page. Reads of the
+/// officer's own games and refused reads write none.
+pub(crate) async fn member_matches(
+    State(state): State<AppState>,
+    officer: OfficerUser,
+    Path(member_id): Path<String>,
+    Query(pagination): Query<PaginationParams>,
+    Query(sq): Query<SeasonQuery>,
+) -> Result<Json<CursorResponse<PersonalMatch>>, OfficerMatchReject> {
+    ensure_officer_match_access(&state, &officer, &member_id).await?;
+    let (limit, offset) = pagination.resolve();
+    let season = resolve_season_window(&state, sq.season.as_deref()).await?;
+    let mut items = state
+        .db
+        .list_personal_matches_in(&member_id, limit, offset, season)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                error = %e,
+                member_id = ?member_id,
+                "officer match view: match list query failed"
+            );
+            internal_error()
+        })?;
+    // Read-time role fill only: the stored row keeps its role.
+    for m in &mut items {
+        m.role = scuffed_types::filled_role_label(&m.role, &m.hero);
+    }
+    if officer.member.id != member_id {
+        // Built only from parsed values: the season id is one that resolved.
+        let season_label = if season.is_some() {
+            sq.season.as_deref().map(str::trim).unwrap_or("all")
+        } else {
+            "all"
+        };
+        let details = format!("offset={offset} limit={limit} season={season_label}");
+        audit(
+            &state.db,
+            &officer.member.id,
+            AuditAction::ViewedMemberMatches,
+            AuditTargetType::Member,
+            &member_id,
+            Some(details.as_str()),
+        )
+        .await;
+    }
+    Ok(Json(CursorResponse::from_oversized(items, limit, offset)))
+}
+
+/// GET /api/stats/member/{id}/matches/{match_id}: one of a member's games,
+/// for officers (session auth).
+///
+/// Same body as [`my_match`], including `suspect_fields`. Auth and the
+/// visibility gate match [`member_matches`], and the gate runs first. A key
+/// that does not exist, a malformed key and another member's game are all
+/// 404 `Match not found`.
+///
+/// A 200 read of another member's game writes one `viewed_member_match` audit
+/// row (target `member`, the member id, details = the match id). Reads of the
+/// officer's own games and refused reads write none.
+pub(crate) async fn member_match(
+    State(state): State<AppState>,
+    officer: OfficerUser,
+    Path((member_id, match_id)): Path<(String, String)>,
+) -> Result<Json<PersonalMatch>, OfficerMatchReject> {
+    ensure_officer_match_access(&state, &officer, &member_id).await?;
+    let found = state
+        .db
+        .get_personal_match_for_member(&member_id, &match_id)
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                error = %e,
+                member_id = ?member_id,
+                "officer match view: match lookup failed"
+            );
+            internal_error()
+        })?;
+    let mut m = found.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Match not found".into(),
+            }),
+        )
+    })?;
+    // Read-time role fill only, as on the list: the stored row keeps its role.
+    m.role = scuffed_types::filled_role_label(&m.role, &m.hero);
+    if officer.member.id != member_id {
+        audit(
+            &state.db,
+            &officer.member.id,
+            AuditAction::ViewedMemberMatch,
+            AuditTargetType::Member,
+            &member_id,
+            Some(match_id.as_str()),
+        )
+        .await;
+    }
+    Ok(Json(m))
 }
 
 /// POST /api/stats/tokens — create a daemon token (session auth, for self)
@@ -575,38 +955,96 @@ pub async fn get_member_settings(
                 }),
             )
         })?;
+    let (player_name, stats_visibility) = match settings {
+        Some(s) => (s.player_name, s.stats_visibility),
+        None => (None, StatsVisibility::Public),
+    };
     Ok(Json(MemberSettingsResponse {
-        player_name: settings.and_then(|s| s.player_name),
+        player_name,
+        stats_visibility,
     }))
 }
 
-/// PUT /api/stats/settings — save player's daemon settings (session auth)
+enum SettingsPutReject {
+    Malformed,
+    BadVisibility,
+}
+
+/// Same JSON shape as [`scuffed_types::UpdateMemberSettingsRequest`].
+///
+/// Parsed by hand so an unknown `stats_visibility` is 400. A missing
+/// `player_name` is still `None`, which clears the stored name.
+fn parse_settings_put(
+    value: serde_json::Value,
+) -> Result<(Option<String>, Option<StatsVisibility>), SettingsPutReject> {
+    let Some(obj) = value.as_object() else {
+        return Err(SettingsPutReject::Malformed);
+    };
+    let player_name = match obj.get("player_name") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(s)) => Some(s.clone()),
+        Some(_) => return Err(SettingsPutReject::Malformed),
+    };
+    let stats_visibility = match obj.get("stats_visibility") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(s)) => match s.as_str() {
+            "public" => Some(StatsVisibility::Public),
+            "members" => Some(StatsVisibility::Members),
+            "private" => Some(StatsVisibility::Private),
+            _ => return Err(SettingsPutReject::BadVisibility),
+        },
+        Some(_) => return Err(SettingsPutReject::BadVisibility),
+    };
+    Ok((player_name, stats_visibility))
+}
+
+/// PUT /api/stats/settings. Save the caller's daemon settings (session auth).
+///
+/// Omitting `player_name` still clears the stored name. Omitting
+/// `stats_visibility` keeps the stored value. A visibility change drops the
+/// leaderboard cache so the next board is scanned under the new rule.
 pub async fn update_member_settings(
     State(state): State<AppState>,
     member: OrgMember,
-    Json(body): Json<UpdateMemberSettingsRequest>,
+    Json(body): Json<serde_json::Value>,
 ) -> Result<Json<MemberSettingsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let (player_name_raw, stats_visibility) =
+        parse_settings_put(body).map_err(|reject| match reject {
+            SettingsPutReject::Malformed => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ErrorResponse {
+                    error: "invalid_settings".into(),
+                }),
+            ),
+            SettingsPutReject::BadVisibility => (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "invalid_stats_visibility".into(),
+                }),
+            ),
+        })?;
     // Trim and treat empty string as None
-    let player_name = body
-        .player_name
+    let player_name = player_name_raw
         .as_deref()
         .map(|s| s.trim())
         .filter(|s| !s.is_empty());
 
+    let before = state
+        .db
+        .get_stats_visibility(&member.member.id)
+        .await
+        .map_err(|_e| internal_error())?;
     let settings = state
         .db
-        .upsert_member_settings(&member.member.id, player_name)
+        .upsert_member_settings(&member.member.id, player_name, stats_visibility)
         .await
-        .map_err(|_e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Internal error".into(),
-                }),
-            )
-        })?;
+        .map_err(|_e| internal_error())?;
+    if settings.stats_visibility != before {
+        state.leaderboard_cache.invalidate();
+    }
     Ok(Json(MemberSettingsResponse {
         player_name: settings.player_name,
+        stats_visibility: settings.stats_visibility,
     }))
 }
 
@@ -633,7 +1071,12 @@ pub async fn token_check(
     )
 }
 
-/// GET /api/stats/daemon-config — fetch config for daemon (token auth)
+/// GET /api/stats/daemon-config. Daemon-token auth, read only.
+///
+/// `stats_visibility` comes from the same `member_settings` row as
+/// `player_name`. No row uses public, which is what GET /api/stats/settings
+/// reports for a member with no row. This route does not write settings, and
+/// the daemon token is not accepted on /api/stats/settings.
 pub async fn daemon_config(
     State(state): State<AppState>,
     daemon: DaemonUser,
@@ -650,8 +1093,14 @@ pub async fn daemon_config(
                 }),
             )
         })?;
+    // Same default as `get_member_settings`: a missing row is public.
+    let (player_name, stats_visibility) = match settings {
+        Some(s) => (s.player_name, s.stats_visibility),
+        None => (None, StatsVisibility::Public),
+    };
     Ok(Json(DaemonConfigResponse {
-        player_name: settings.and_then(|s| s.player_name),
+        player_name,
+        stats_visibility: Some(stats_visibility),
     }))
 }
 
@@ -824,11 +1273,27 @@ mod tests {
         token: &str,
         body: serde_json::Value,
     ) -> (StatusCode, serde_json::Value) {
-        let req = upload_request(
+        post_raw_ua(app, token, body, None).await
+    }
+
+    /// The first tracker that reuses legacy rows (PR 649 blocker 1 gate).
+    const GATED_UA: &str = "scuffed-stat-tracker/0.6.0-alpha.3";
+
+    async fn post_raw_ua(
+        app: axum::Router,
+        token: &str,
+        body: serde_json::Value,
+        user_agent: Option<&str>,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut req = upload_request(
             token,
             serde_json::to_vec(&body).unwrap(),
             Ipv4Addr::LOCALHOST,
         );
+        if let Some(ua) = user_agent {
+            req.headers_mut()
+                .insert(header::USER_AGENT, ua.parse().unwrap());
+        }
         let resp = app.oneshot(req).await.unwrap();
         let status = resp.status();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
@@ -902,6 +1367,184 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].hero, "Wrecking Ball");
         assert_eq!(rows[0].role, "Tank");
+    }
+
+    /// alpha.3 item 22: an old game (no session id) posted again with a
+    /// corrected hero updates the stored match instead of adding one.
+    #[tokio::test]
+    async fn legacy_game_reposted_with_new_hero_stays_one_match() {
+        let (state, member_id, token) = daemon().await;
+        let app = create_router(state.clone());
+        let first = match_object("", 5);
+        let (status, _) = post_raw(
+            app.clone(),
+            &token,
+            serde_json::json!({ "matches": [first] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let before = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(before.len(), 1);
+
+        let mut edited = match_object("", 5);
+        edited["hero"] = "Kiriko".into();
+        edited["edited"] = true.into();
+        let (status, body) = post_raw_ua(
+            app,
+            &token,
+            serde_json::json!({ "matches": [edited] }),
+            Some(GATED_UA),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["inserted"], 1, "{body}");
+        assert_eq!(body["skipped"], 0, "{body}");
+
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "same old game must stay one match");
+        assert_eq!(rows[0].hero, "Kiriko");
+        assert!(rows[0].edited);
+        assert_eq!(rows[0].session_id, before[0].session_id, "id is unchanged");
+        assert!(rows[0].session_id.starts_with("legacy-"));
+    }
+
+    /// PR 649 blocker 1: trackers older than 0.6.0-alpha.3, or with no
+    /// readable version, keep the pre-alpha.3 behaviour. The edit is a new
+    /// row and the original row is not overwritten.
+    #[tokio::test]
+    async fn legacy_edit_from_old_or_unknown_tracker_keeps_original() {
+        for ua in [
+            None,
+            Some("scuffed-stat-tracker/0.6.0-alpha.2.3"),
+            Some("scuffed-stat-tracker/0.5.9"),
+            Some("scuffed-stat-tracker/not-a-version"),
+            Some("curl/8.0"),
+        ] {
+            let (state, member_id, token) = daemon().await;
+            let app = create_router(state.clone());
+            let (status, _) = post_raw_ua(
+                app.clone(),
+                &token,
+                serde_json::json!({ "matches": [match_object("", 5)] }),
+                ua,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{ua:?}");
+            let before = state
+                .db
+                .list_personal_matches(&member_id, 10, 0)
+                .await
+                .unwrap();
+
+            let mut edited = match_object("", 5);
+            edited["hero"] = "Kiriko".into();
+            edited["edited"] = true.into();
+            let (status, body) =
+                post_raw_ua(app, &token, serde_json::json!({ "matches": [edited] }), ua).await;
+            assert_eq!(status, StatusCode::OK, "{ua:?}");
+            assert_eq!(body["inserted"], 1, "{ua:?} {body}");
+
+            let rows = state
+                .db
+                .list_personal_matches(&member_id, 10, 0)
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 2, "{ua:?}: old tracker edit adds a row");
+            let original = rows
+                .iter()
+                .find(|r| r.id == before[0].id)
+                .expect("original row kept");
+            assert_eq!(original.hero, "Ana", "{ua:?}: original not overwritten");
+            assert!(!original.edited, "{ua:?}");
+        }
+    }
+
+    #[test]
+    fn legacy_id_reuse_gate_follows_semver_order() {
+        use scuffed_db::LegacyIdReuse::{ByPlayedAt, Off};
+        let gate = |ua: Option<&str>| {
+            let mut h = axum::http::HeaderMap::new();
+            if let Some(ua) = ua {
+                h.insert(header::USER_AGENT, ua.parse().unwrap());
+            }
+            super::legacy_id_reuse(&h)
+        };
+        assert_eq!(gate(None), Off);
+        assert_eq!(gate(Some("scuffed-stat-tracker/0.6.0-alpha.2")), Off);
+        assert_eq!(gate(Some("scuffed-stat-tracker/0.6.0-alpha.2.3")), Off);
+        assert_eq!(gate(Some("scuffed-stat-tracker/0.6.0-alpha.2.10")), Off);
+        assert_eq!(gate(Some("scuffed-stat-tracker/0.5.12")), Off);
+        assert_eq!(gate(Some("scuffed-stat-tracker/garbage")), Off);
+        assert_eq!(gate(Some("other-client/0.7.0")), Off);
+        assert_eq!(gate(Some("scuffed-stat-tracker/0.6.0-alpha.3")), ByPlayedAt);
+        assert_eq!(
+            gate(Some("scuffed-stat-tracker/0.6.0-alpha.3.1")),
+            ByPlayedAt
+        );
+        assert_eq!(gate(Some("scuffed-stat-tracker/0.6.0-alpha.4")), ByPlayedAt);
+        assert_eq!(gate(Some("scuffed-stat-tracker/0.6.0-beta.1")), ByPlayedAt);
+        assert_eq!(gate(Some("scuffed-stat-tracker/0.6.0")), ByPlayedAt);
+        assert_eq!(gate(Some("scuffed-stat-tracker/0.7.2 (linux)")), ByPlayedAt);
+    }
+
+    /// The tracker uploads played_at at nanosecond precision. An edit at the
+    /// same instant is one game; 1 µs later is another game.
+    #[tokio::test]
+    async fn legacy_game_matches_played_at_to_the_nanosecond() {
+        let (state, member_id, token) = daemon().await;
+        let app = create_router(state.clone());
+        let mut game = match_object("", 5);
+        game["played_at"] = "2026-07-01T20:00:00.123456789Z".into();
+        let mut edit = game.clone();
+        edit["hero"] = "Kiriko".into();
+        edit["edited"] = true.into();
+        for g in [game, edit] {
+            let (status, body) = post_raw_ua(
+                app.clone(),
+                &token,
+                serde_json::json!({ "matches": [g] }),
+                Some(GATED_UA),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "an edit at the same nanosecond instant is one game"
+        );
+        assert_eq!(rows[0].hero, "Kiriko");
+
+        let mut later = match_object("", 5);
+        later["played_at"] = "2026-07-01T20:00:00.123457789Z".into();
+        let (status, _) = post_raw_ua(
+            app,
+            &token,
+            serde_json::json!({ "matches": [later] }),
+            Some(GATED_UA),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2, "1 µs later is a separate game");
     }
 
     #[tokio::test]
@@ -1052,6 +1695,208 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(rows.len(), 1);
+    }
+
+    /// Post `bad` after a valid sibling and assert a 400 naming `matches[1]`
+    /// with `message`, and that neither row was stored.
+    async fn assert_entry_rejected(bad: serde_json::Value, message: &str) {
+        let (state, member_id, token) = daemon().await;
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({ "matches": [match_object("sess-ok", 3), bad] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{parsed}");
+        assert_eq!(parsed["error"], format!("matches[1]: {message}"));
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert!(rows.is_empty(), "rejected batch must store nothing");
+    }
+
+    const PLAYED_AT_ERROR: &str = "played_at must be on or after 2022-10-04T00:00:00Z and no more than 24 hours after server time";
+
+    #[tokio::test]
+    async fn upload_future_played_at_is_400_and_stores_nothing() {
+        let mut bad = match_object("sess-future", 1);
+        bad["played_at"] = serde_json::json!("2099-01-01T00:00:00Z");
+        assert_entry_rejected(bad, PLAYED_AT_ERROR).await;
+
+        let mut tomorrow_plus = match_object("sess-future2", 1);
+        tomorrow_plus["played_at"] =
+            serde_json::json!((Utc::now() + chrono::Duration::hours(25)).to_rfc3339());
+        assert_entry_rejected(tomorrow_plus, PLAYED_AT_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn upload_played_at_before_overwatch_2_is_400() {
+        let mut bad = match_object("sess-old", 1);
+        bad["played_at"] = serde_json::json!("2022-10-03T23:59:59Z");
+        assert_entry_rejected(bad, PLAYED_AT_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn upload_non_hero_is_400() {
+        for hero in ["Totally Real Hero", "Unknown Hero", ""] {
+            let mut bad = match_object("sess-hero", 1);
+            bad["hero"] = serde_json::json!(hero);
+            assert_entry_rejected(bad, "hero must be a known hero or Unknown").await;
+        }
+    }
+
+    /// Regression: 0.4.x and 0.5.0 trackers send `Unknown` when no hero was
+    /// read. Those rows are stored (as `Unknown`, whatever the case), not
+    /// rejected.
+    #[tokio::test]
+    async fn upload_with_hero_unknown_is_stored() {
+        let (state, member_id, token) = daemon().await;
+        let mut upper = match_object("sess-unknown", 2);
+        upper["hero"] = serde_json::json!("Unknown");
+        let mut lower = match_object("sess-unknown-lower", 2);
+        lower["hero"] = serde_json::json!("unknown");
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({ "matches": [upper, lower] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{parsed}");
+        assert_eq!(parsed["inserted"], 2, "{parsed}");
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.hero == "Unknown"), "{rows:?}");
+    }
+
+    #[tokio::test]
+    async fn upload_with_hero_doctrine_is_stored() {
+        let (state, member_id, token) = daemon().await;
+        let mut row = match_object("sess-doctrine", 2);
+        row["hero"] = serde_json::json!("doctrine");
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({ "matches": [row] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{parsed}");
+        assert_eq!(parsed["inserted"], 1, "{parsed}");
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].hero, "Doctrine");
+    }
+
+    #[tokio::test]
+    async fn upload_huge_damage_and_healing_are_400() {
+        for (field, max) in [
+            ("damage", 200_000u32),
+            ("healing", 200_000),
+            ("mitigation", 200_000),
+            ("elims", 999),
+            ("assists", 999),
+            ("deaths", 50),
+        ] {
+            let mut bad = match_object("sess-num", 1);
+            bad[field] = serde_json::json!(u32::MAX);
+            assert_entry_rejected(bad, &format!("{field} must be at most {max}")).await;
+            let mut over = match_object("sess-num", 1);
+            over[field] = serde_json::json!(max + 1);
+            assert_entry_rejected(over, &format!("{field} must be at most {max}")).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn upload_strings_over_64_characters_are_400() {
+        let long = "x".repeat(65);
+        for field in ["session_id", "map_name", "game_mode", "role", "outcome"] {
+            let mut bad = match_object("sess-long", 1);
+            bad[field] = serde_json::json!(long);
+            assert_entry_rejected(bad, &format!("{field} must be at most 64 characters")).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn upload_long_deleted_session_is_400_and_keeps_rows() {
+        let (state, member_id, token) = daemon().await;
+        let (status, _) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({ "matches": [match_object("sess-keep", 4)] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({
+                "matches": [match_object("sess-new", 1)],
+                "deleted_sessions": ["sess-keep", "y".repeat(65)],
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            parsed["error"],
+            "deleted_sessions[1]: session id must be at most 64 characters"
+        );
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "nothing deleted or inserted");
+        assert_eq!(rows[0].session_id, "sess-keep");
+    }
+
+    #[tokio::test]
+    async fn upload_values_at_the_limits_are_stored() {
+        let (state, member_id, token) = daemon().await;
+        let mut edge = match_object(&"s".repeat(64), 999);
+        edge["map_name"] = serde_json::json!("\u{e9}".repeat(64));
+        edge["hero"] = serde_json::json!("wrecking-ball");
+        edge["assists"] = serde_json::json!(999);
+        edge["deaths"] = serde_json::json!(50);
+        edge["damage"] = serde_json::json!(200_000);
+        edge["healing"] = serde_json::json!(200_000);
+        edge["mitigation"] = serde_json::json!(200_000);
+        edge["played_at"] =
+            serde_json::json!((Utc::now() + chrono::Duration::hours(1)).to_rfc3339());
+        let mut floor = match_object("sess-floor", 1);
+        floor["played_at"] = serde_json::json!("2022-10-04T00:00:00Z");
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({
+                "matches": [edge, floor],
+                "deleted_sessions": ["d".repeat(64)],
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{parsed}");
+        assert_eq!(parsed["inserted"], 2);
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        let edge_row = rows
+            .iter()
+            .find(|r| r.session_id == "s".repeat(64))
+            .unwrap();
+        assert_eq!(edge_row.damage, 200_000);
+        assert_eq!(edge_row.hero, "Wrecking Ball");
     }
 
     #[tokio::test]
@@ -1246,6 +2091,142 @@ mod tests {
         (state, member.id, daemon_token, session_token)
     }
 
+    async fn json_call(
+        app: axum::Router,
+        method: &str,
+        uri: &str,
+        bearer: Option<&str>,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut builder = Request::builder().method(method).uri(uri);
+        if let Some(token) = bearer {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        let req = if let Some(body) = body {
+            builder
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap()
+        } else {
+            builder.body(Body::empty()).unwrap()
+        };
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let parsed = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, parsed)
+    }
+
+    /// Daemon-config returns the same visibility GET /api/stats/settings does.
+    /// A missing settings row is public. The daemon token cannot write settings.
+    #[tokio::test]
+    async fn daemon_config_returns_stats_visibility() {
+        let (state, _member_id, daemon_token, session_token) = member_reader().await;
+        let app = create_router(state);
+
+        let (status, cfg) = json_call(
+            app.clone(),
+            "GET",
+            "/api/stats/daemon-config",
+            Some(&daemon_token),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{cfg}");
+        assert!(cfg["player_name"].is_null(), "{cfg}");
+        assert_eq!(cfg["stats_visibility"], "public");
+
+        let (status, settings) = json_call(
+            app.clone(),
+            "GET",
+            "/api/stats/settings",
+            Some(&session_token),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{settings}");
+        assert_eq!(settings["stats_visibility"], cfg["stats_visibility"]);
+
+        for vis in ["public", "members", "private"] {
+            let (status, put) = json_call(
+                app.clone(),
+                "PUT",
+                "/api/stats/settings",
+                Some(&session_token),
+                Some(serde_json::json!({
+                    "player_name": "Ana",
+                    "stats_visibility": vis
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{put}");
+            assert_eq!(put["stats_visibility"], vis);
+            assert_eq!(put["player_name"], "Ana");
+
+            let (status, cfg) = json_call(
+                app.clone(),
+                "GET",
+                "/api/stats/daemon-config",
+                Some(&daemon_token),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{cfg}");
+            assert_eq!(cfg["stats_visibility"], vis, "{cfg}");
+            assert_eq!(cfg["player_name"], "Ana");
+
+            let (status, settings) = json_call(
+                app.clone(),
+                "GET",
+                "/api/stats/settings",
+                Some(&session_token),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{settings}");
+            assert_eq!(settings["stats_visibility"], cfg["stats_visibility"]);
+        }
+
+        let (missing_status, missing_body) =
+            json_call(app.clone(), "GET", "/api/stats/daemon-config", None, None).await;
+        assert_eq!(missing_status, StatusCode::UNAUTHORIZED, "{missing_body}");
+        assert_eq!(missing_body["error"], "Missing Bearer token");
+
+        let (bad_status, bad_body) = json_call(
+            app.clone(),
+            "GET",
+            "/api/stats/daemon-config",
+            Some("not-a-daemon-token"),
+            None,
+        )
+        .await;
+        assert_eq!(bad_status, StatusCode::UNAUTHORIZED, "{bad_body}");
+        assert_eq!(bad_body["error"], "Invalid or revoked daemon token");
+
+        // The daemon token stays off the session settings routes.
+        let (status, body) = json_call(
+            app.clone(),
+            "GET",
+            "/api/stats/settings",
+            Some(&daemon_token),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        let (status, body) = json_call(
+            app.clone(),
+            "PUT",
+            "/api/stats/settings",
+            Some(&daemon_token),
+            Some(serde_json::json!({
+                "player_name": "Ana",
+                "stats_visibility": "public"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+    }
+
     async fn get_my_matches(app: axum::Router, token: &str) -> serde_json::Value {
         let req = Request::builder()
             .method("GET")
@@ -1313,6 +2294,261 @@ mod tests {
 
         let stats = state.db.get_personal_stats(&member_id).await.unwrap();
         assert_eq!(stats.wins, 3);
+    }
+
+    /// `/me/matches` fills an empty or unrecognized role from the hero at read
+    /// time, keeps a recognized one, and never changes the stored row.
+    #[tokio::test]
+    async fn me_matches_fill_role_at_read_time_only() {
+        let (state, member_id, _daemon_token, session_token) = member_reader().await;
+        let game = |sid: &str, hero: &str, role: &str| scuffed_db::PersonalMatch {
+            id: String::new(),
+            member_id: member_id.clone(),
+            session_id: sid.into(),
+            hero: hero.into(),
+            map_name: "Oasis".into(),
+            game_mode: "control".into(),
+            role: role.into(),
+            outcome: "victory".into(),
+            elims: 1,
+            deaths: 1,
+            assists: 0,
+            damage: 0,
+            healing: 0,
+            mitigation: 0,
+            played_at: Utc.with_ymd_and_hms(2026, 7, 1, 20, 0, 0).unwrap(),
+            uploaded_at: Utc::now(),
+            edited: false,
+            recognizer: scuffed_types::RECOGNIZER_OCR_V1.into(),
+            name_recognizer: None,
+            suspect_fields: Vec::new(),
+            bans_picks: None,
+            rank: None,
+        };
+        let seeded = [
+            ("kept", "Ana", "Damage", "Damage"),
+            ("empty", "Reaper", "", "Damage"),
+            ("garbage", "Reinhardt", "dps", "Tank"),
+            ("unknown", "Unknown", "", ""),
+            ("sombra", "Sombra", "Support", "Support"),
+        ];
+        let rows: Vec<_> = seeded
+            .iter()
+            .map(|(sid, hero, role, _)| game(sid, hero, role))
+            .collect();
+        state
+            .db
+            .upsert_personal_matches(&member_id, &rows)
+            .await
+            .unwrap();
+
+        let page = get_my_matches(create_router(state.clone()), &session_token).await;
+        for (sid, _, _, filled) in seeded {
+            assert_eq!(row_by_session(&page, sid)["role"], filled, "{sid}");
+        }
+        let stored = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        for (sid, _, role, _) in seeded {
+            let row = stored.iter().find(|m| m.session_id == sid).unwrap();
+            assert_eq!(row.role, role, "stored role for {sid} must not change");
+        }
+    }
+
+    async fn get_my_match(
+        app: axum::Router,
+        token: Option<&str>,
+        id: &str,
+    ) -> (StatusCode, String) {
+        let mut req = Request::builder()
+            .method("GET")
+            .uri(format!("/api/stats/me/matches/{id}"));
+        if let Some(token) = token {
+            req = req.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        let resp = app.oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    fn single_game(member_id: &str, sid: &str) -> scuffed_db::PersonalMatch {
+        scuffed_db::PersonalMatch {
+            id: String::new(),
+            member_id: member_id.into(),
+            session_id: sid.into(),
+            hero: "Reaper".into(),
+            map_name: "Oasis".into(),
+            game_mode: "control".into(),
+            role: String::new(),
+            outcome: "victory".into(),
+            elims: 12,
+            deaths: 3,
+            assists: 4,
+            damage: 9000,
+            healing: 500,
+            mitigation: 0,
+            played_at: Utc.with_ymd_and_hms(2026, 7, 2, 20, 0, 0).unwrap(),
+            uploaded_at: Utc::now(),
+            edited: true,
+            recognizer: "cv-v1".into(),
+            name_recognizer: Some("names-v1".into()),
+            suspect_fields: vec!["dmg".into(), "map".into()],
+            bans_picks: None,
+            rank: None,
+        }
+    }
+
+    /// Two members, each with one game. Returns the state, the first
+    /// member's session, and both games' ids as listed on `/me/matches`.
+    async fn two_members_one_game_each() -> (crate::state::AppState, String, String, String) {
+        let (state, member_id, _daemon_token, session_token) = member_reader().await;
+        crate::test_support::seed_user(&state, "otherplayer", "otherplayer").await;
+        let other = state
+            .db
+            .create_member("otherplayer", "otherplayer", OrgRole::Member)
+            .await
+            .unwrap();
+        state
+            .db
+            .upsert_personal_matches(&member_id, &[single_game(&member_id, "mine-1")])
+            .await
+            .unwrap();
+        state
+            .db
+            .upsert_personal_matches(&other.id, &[single_game(&other.id, "theirs-1")])
+            .await
+            .unwrap();
+        let mine = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        let theirs = state
+            .db
+            .list_personal_matches(&other.id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(mine.len(), 1);
+        assert_eq!(theirs.len(), 1);
+        (
+            state,
+            session_token,
+            mine[0].id.clone(),
+            theirs[0].id.clone(),
+        )
+    }
+
+    #[tokio::test]
+    async fn me_match_returns_own_game_same_shape_as_list_row() {
+        let (state, session_token, mine, _theirs) = two_members_one_game_each().await;
+        let page = get_my_matches(create_router(state.clone()), &session_token).await;
+        let listed = row_by_session(&page, "mine-1").clone();
+        assert_eq!(listed["id"], mine.as_str());
+
+        let (status, text) = get_my_match(create_router(state), Some(&session_token), &mine).await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        let single: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(single, listed, "single game must match its list row");
+        assert_eq!(single["edited"], true);
+        assert_eq!(single["recognizer"], "cv-v1");
+        assert_eq!(single["suspect_fields"], serde_json::json!(["dmg", "map"]));
+        assert_eq!(single["role"], "Damage", "role is filled at read time");
+    }
+
+    #[tokio::test]
+    async fn me_match_other_members_game_is_the_same_404_as_missing() {
+        let (state, session_token, _mine, theirs) = two_members_one_game_each().await;
+        let (other_status, other_text) =
+            get_my_match(create_router(state.clone()), Some(&session_token), &theirs).await;
+        assert_eq!(other_status, StatusCode::NOT_FOUND, "{other_text}");
+
+        let (missing_status, missing_text) = get_my_match(
+            create_router(state),
+            Some(&session_token),
+            "pm00000000deadbeef",
+        )
+        .await;
+        assert_eq!(missing_status, StatusCode::NOT_FOUND, "{missing_text}");
+        assert_eq!(
+            other_text, missing_text,
+            "another member's game must not be told apart from a missing one"
+        );
+    }
+
+    #[tokio::test]
+    async fn me_match_missing_and_malformed_ids_are_404() {
+        let (state, session_token, _mine, _theirs) = two_members_one_game_each().await;
+        let (missing_status, missing_text) = get_my_match(
+            create_router(state.clone()),
+            Some(&session_token),
+            "pm00000000deadbeef",
+        )
+        .await;
+        assert_eq!(missing_status, StatusCode::NOT_FOUND, "{missing_text}");
+        for id in ["not-a-key", "12345", "a%3Ab"] {
+            let (status, text) =
+                get_my_match(create_router(state.clone()), Some(&session_token), id).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{id}: {text}");
+            assert_eq!(
+                text, missing_text,
+                "{id}: a malformed id must get the same 404 body as a missing one"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn me_match_without_a_session_is_401() {
+        let (state, _session_token, mine, _theirs) = two_members_one_game_each().await;
+        let (status, text) = get_my_match(create_router(state.clone()), None, &mine).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{text}");
+        let (status, text) = get_my_match(create_router(state), Some("not-a-session"), &mine).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{text}");
+    }
+
+    #[tokio::test]
+    async fn me_match_inactive_member_is_403() {
+        let (state, member_id, _daemon_token, session_token) = member_reader().await;
+        state
+            .db
+            .upsert_personal_matches(&member_id, &[single_game(&member_id, "mine-1")])
+            .await
+            .unwrap();
+        let mine = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(mine.len(), 1);
+        let id = mine[0].id.clone();
+        let (status, text) =
+            get_my_match(create_router(state.clone()), Some(&session_token), &id).await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+
+        state
+            .db
+            .update_member(
+                &member_id,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(false),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("deactivate member");
+        let (status, text) = get_my_match(create_router(state), Some(&session_token), &id).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{text}");
+        let body: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(body["error"], "Membership inactive");
     }
 
     #[tokio::test]
@@ -1396,6 +2632,507 @@ mod tests {
             "omitting suspect_fields clears the stored list, got {:?}",
             rows[0].suspect_fields
         );
+    }
+
+    fn full_bans_picks() -> serde_json::Value {
+        serde_json::json!({
+            "bans": [
+                { "hero": "mauga", "team": "own" },
+                { "hero": "wrecking-ball", "team": "enemy" },
+                { "hero": null, "team": null }
+            ],
+            "lobby_ban": "ana",
+            "picks": ["wrecking-ball", "no_preference", null, "dva"],
+            "ban_vote": ["no_preference", "ana", null, "wrecking-ball", "no_preference", null],
+            "recognizer": "cv-v1"
+        })
+    }
+
+    #[tokio::test]
+    async fn upload_bans_picks_round_trips_on_me_matches_and_absent_is_null() {
+        let (state, _member_id, daemon_token, session_token) = member_reader().await;
+        let mut full = match_object("sess-bp-full", 4);
+        full["bans_picks"] = full_bans_picks();
+        let omitted = match_object("sess-bp-omitted", 5);
+        let mut null_field = match_object("sess-bp-null", 6);
+        null_field["bans_picks"] = serde_json::Value::Null;
+
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &daemon_token,
+            serde_json::json!({ "matches": [full, omitted, null_field] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{parsed}");
+        assert_eq!(parsed["inserted"], 3);
+
+        let page = get_my_matches(create_router(state.clone()), &session_token).await;
+        assert_eq!(
+            row_by_session(&page, "sess-bp-full")["bans_picks"],
+            full_bans_picks()
+        );
+        for sid in ["sess-bp-omitted", "sess-bp-null"] {
+            let row = row_by_session(&page, sid);
+            assert!(
+                row.get("bans_picks")
+                    .is_some_and(serde_json::Value::is_null),
+                "{sid}: {row}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn upload_bans_picks_unknown_hero_key_is_stored_as_null() {
+        let (state, member_id, token) = daemon().await;
+        let mut game = match_object("sess-bp-unknown", 3);
+        game["bans_picks"] = serde_json::json!({
+            "bans": [{ "hero": "not-a-hero", "team": "enemy" }],
+            "lobby_ban": "zzz",
+            "picks": ["Wrecking Ball", "nobody", "no_preference"],
+            "ban_vote": ["nobody", "no_preference", "ana", "Not_A_Hero"]
+        });
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({ "matches": [game] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{parsed}");
+        assert_eq!(
+            parsed["inserted"], 1,
+            "an unknown hero does not reject the game"
+        );
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        let stored = rows[0].bans_picks.clone().expect("bans_picks stored");
+        assert_eq!(stored.bans[0].hero, None);
+        assert_eq!(stored.bans[0].team, Some(scuffed_types::BanTeam::Enemy));
+        assert_eq!(stored.lobby_ban, None);
+        assert_eq!(
+            stored.picks,
+            vec![
+                Some("wrecking-ball".to_string()),
+                None,
+                Some("no_preference".to_string())
+            ]
+        );
+        assert_eq!(
+            stored.ban_vote,
+            vec![
+                None,
+                Some("no_preference".to_string()),
+                Some("ana".to_string()),
+                None
+            ]
+        );
+        assert_eq!(stored.recognizer, None);
+    }
+
+    #[tokio::test]
+    async fn upload_bad_bans_picks_is_422_and_stores_nothing() {
+        let (state, member_id, token) = daemon().await;
+        let cases = [
+            (
+                serde_json::json!({ "bans": [
+                    { "hero": "ana" }, { "hero": "ana" }, { "hero": "ana" },
+                    { "hero": "ana" }, { "hero": "ana" }
+                ]}),
+                "bans_picks.bans must have at most 4 entries, got 5".to_string(),
+            ),
+            (
+                serde_json::json!({ "picks": ["ana", "ana", "ana", "ana", "ana", "ana", "ana"] }),
+                "bans_picks.picks must have at most 6 entries, got 7".to_string(),
+            ),
+            (
+                serde_json::json!({ "ban_vote": ["ana", "ana", "ana", "ana", "ana", "ana", "ana"] }),
+                "bans_picks.ban_vote must have at most 6 entries, got 7".to_string(),
+            ),
+            (
+                serde_json::json!({ "ban_vote": ["no_preference", 3] }),
+                "bans_picks.ban_vote[1] must be a hero key string or null".to_string(),
+            ),
+            (
+                serde_json::json!({ "recognizer": "CV V1" }),
+                scuffed_types::BANS_PICKS_RECOGNIZER_ERROR.to_string(),
+            ),
+        ];
+        for (bans_picks, message) in cases {
+            let mut bad = match_object("sess-bp-bad", 2);
+            bad["bans_picks"] = bans_picks.clone();
+            let sibling = match_object("sess-bp-sibling", 1);
+            let (status, parsed) = post_raw(
+                create_router(state.clone()),
+                &token,
+                serde_json::json!({ "matches": [sibling, bad], "deleted_sessions": [] }),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{bans_picks}: {parsed}"
+            );
+            assert_eq!(
+                parsed["error"],
+                format!("matches[1]: {message}"),
+                "{parsed}"
+            );
+        }
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert!(rows.is_empty(), "a rejected batch writes nothing: {rows:?}");
+    }
+
+    async fn stored_bans_picks(
+        state: &crate::state::AppState,
+        member_id: &str,
+    ) -> Option<scuffed_types::BansPicks> {
+        let rows = state
+            .db
+            .list_personal_matches(member_id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "re-upload updates the same session");
+        rows[0].bans_picks.clone()
+    }
+
+    #[tokio::test]
+    async fn reupload_replaces_bans_picks_and_omitting_it_clears_like_suspect_fields() {
+        let (state, member_id, token) = daemon().await;
+
+        let mut first = match_object("sess-bp-reup", 4);
+        first["bans_picks"] = full_bans_picks();
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({ "matches": [first] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{parsed}");
+        assert_eq!(
+            stored_bans_picks(&state, &member_id)
+                .await
+                .unwrap()
+                .lobby_ban
+                .as_deref(),
+            Some("ana")
+        );
+
+        let mut second = match_object("sess-bp-reup", 5);
+        second["bans_picks"] = serde_json::json!({ "lobby_ban": "mercy" });
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({ "matches": [second] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{parsed}");
+        let replaced = stored_bans_picks(&state, &member_id).await.unwrap();
+        assert_eq!(replaced.lobby_ban.as_deref(), Some("mercy"));
+        assert!(
+            replaced.bans.is_empty(),
+            "the whole object is replaced: {replaced:?}"
+        );
+        assert!(replaced.picks.is_empty());
+
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({ "matches": [match_object("sess-bp-reup", 6)] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{parsed}");
+        assert_eq!(
+            stored_bans_picks(&state, &member_id).await,
+            None,
+            "omitting bans_picks clears the stored object"
+        );
+    }
+
+    /// A tracker rank-v1 read as sent: every field has a bbox, and there are
+    /// keys the server does not know.
+    fn full_rank_upload() -> serde_json::Value {
+        let bbox = serde_json::json!([10, 20, 110, 40]);
+        serde_json::json!({
+            "role": { "value": "Support", "confidence": 0.9, "bbox": bbox },
+            "role_rank": { "value": "Diamond", "confidence": 0.95, "bbox": bbox },
+            "division": { "value": 2, "confidence": 0.875, "bbox": bbox },
+            "progress_pct": { "value": -15, "confidence": 0.5, "bbox": null },
+            "progress_change": { "value": 23, "confidence": 0.75, "bbox": bbox },
+            "change_tags": { "value": ["WIN", "UPHILL BATTLE"], "confidence": 0.6, "bbox": bbox },
+            "higher_than_pct": { "value": 47, "confidence": 1.0, "bbox": bbox },
+            "hero_sr": { "value": 3125, "confidence": 0.25, "bbox": bbox },
+            "hero_sr_change": { "value": -17, "confidence": 0.0, "bbox": bbox },
+            "next_mode_hint": { "value": null, "confidence": 0.0, "bbox": null },
+            "queue_title": { "value": "COMPETITIVE: ROLE QUEUE", "confidence": 0.8 },
+            "rank_recognizer": "rank-v1",
+            "future_field": { "value": 1, "confidence": 0.5 }
+        })
+    }
+
+    /// What the server stores and returns for [`full_rank_upload`].
+    fn full_rank_read() -> serde_json::Value {
+        serde_json::json!({
+            "role": { "value": "Support", "confidence": 0.9 },
+            "role_rank": { "value": "Diamond", "confidence": 0.95 },
+            "division": { "value": 2, "confidence": 0.875 },
+            "progress_pct": { "value": -15, "confidence": 0.5 },
+            "progress_change": { "value": 23, "confidence": 0.75 },
+            "change_tags": { "value": ["WIN", "UPHILL BATTLE"], "confidence": 0.6 },
+            "higher_than_pct": { "value": 47, "confidence": 1.0 },
+            "hero_sr": { "value": 3125, "confidence": 0.25 },
+            "hero_sr_change": { "value": -17, "confidence": 0.0 },
+            "next_mode_hint": { "value": null, "confidence": 0.0 },
+            "queue_title": { "value": "COMPETITIVE: ROLE QUEUE", "confidence": 0.8 },
+            "rank_recognizer": "rank-v1"
+        })
+    }
+
+    /// The raw `rank` objects on the member's stored rows.
+    async fn stored_rank_objects(state: &crate::state::AppState) -> Vec<serde_json::Value> {
+        let mut res = state
+            .db
+            .client
+            .query("SELECT VALUE rank FROM personal_match WHERE rank != NONE")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        res.take(0).unwrap()
+    }
+
+    #[tokio::test]
+    async fn upload_full_rank_round_trips_on_me_reads_and_drops_bbox() {
+        let (state, _member_id, daemon_token, session_token) = member_reader().await;
+        let mut game = match_object("sess-rank-full", 4);
+        game["rank"] = full_rank_upload();
+        game["some_new_top_level_key"] = serde_json::json!({ "x": 1 });
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &daemon_token,
+            serde_json::json!({ "matches": [game] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{parsed}");
+        assert_eq!(parsed["inserted"], 1);
+
+        let page = get_my_matches(create_router(state.clone()), &session_token).await;
+        let row = row_by_session(&page, "sess-rank-full");
+        assert_eq!(row["rank"], full_rank_read());
+        let id = row["id"].as_str().unwrap().to_string();
+        let (status, body) =
+            get_my_match(create_router(state.clone()), Some(&session_token), &id).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let one: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(one["rank"], full_rank_read());
+
+        let stored = stored_rank_objects(&state).await;
+        assert_eq!(stored.len(), 1);
+        assert!(
+            !stored[0].to_string().contains("bbox"),
+            "bbox is not stored: {}",
+            stored[0]
+        );
+        assert!(
+            stored[0].get("future_field").is_none(),
+            "unknown rank keys are not stored: {}",
+            stored[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_without_rank_is_unchanged_and_reads_null() {
+        let (state, member_id, daemon_token, session_token) = member_reader().await;
+        let omitted = match_object("sess-rank-omitted", 5);
+        let mut null_rank = match_object("sess-rank-null", 6);
+        null_rank["rank"] = serde_json::Value::Null;
+        let mut not_object = match_object("sess-rank-string", 7);
+        not_object["rank"] = serde_json::json!("Diamond 2");
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &daemon_token,
+            serde_json::json!({ "matches": [omitted, null_rank, not_object] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{parsed}");
+        assert_eq!(parsed["inserted"], 3);
+        assert_eq!(parsed["skipped"], 0);
+
+        let page = get_my_matches(create_router(state.clone()), &session_token).await;
+        for (sid, elims) in [
+            ("sess-rank-omitted", 5),
+            ("sess-rank-null", 6),
+            ("sess-rank-string", 7),
+        ] {
+            let row = row_by_session(&page, sid);
+            assert!(
+                row.get("rank").is_some_and(serde_json::Value::is_null),
+                "{sid}: {row}"
+            );
+            assert_eq!(row["elims"], elims, "{sid}");
+            assert_eq!(row["hero"], "Ana", "{sid}");
+            assert_eq!(row["recognizer"], "ocr-v1", "{sid}");
+            assert!(row["bans_picks"].is_null(), "{sid}");
+        }
+        assert!(stored_rank_objects(&state).await.is_empty());
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert!(rows.iter().all(|r| r.rank.is_none()), "{rows:?}");
+    }
+
+    #[tokio::test]
+    async fn upload_out_of_range_rank_parts_are_null_and_the_game_is_stored() {
+        let (state, _member_id, daemon_token, session_token) = member_reader().await;
+        let long = "a".repeat(scuffed_types::RANK_STRING_MAX_CHARS + 1);
+        let tags: Vec<String> = (0..=scuffed_types::RANK_MAX_CHANGE_TAGS)
+            .map(|i| format!("T{i}"))
+            .collect();
+        let mut bad = match_object("sess-rank-bad", 3);
+        bad["rank"] = serde_json::json!({
+            "role": { "value": "Healer", "confidence": 1.5 },
+            "role_rank": { "value": long, "confidence": -0.1 },
+            "division": { "value": 6, "confidence": 0.5 },
+            "progress_pct": { "value": 4_294_967_296_i64, "confidence": "high" },
+            "progress_change": { "value": 1.5, "confidence": 0.5 },
+            "change_tags": { "value": tags, "confidence": 0.5 },
+            "higher_than_pct": { "value": 101, "confidence": 0.5 },
+            "hero_sr": { "value": -1, "confidence": 0.5 },
+            "hero_sr_change": "not an object",
+            "next_mode_hint": { "value": ["x"], "confidence": null },
+            "queue_title": { "value": 7, "confidence": 0.5 },
+            "rank_recognizer": "Rank V1"
+        });
+        let mut zero = match_object("sess-rank-zero", 3);
+        zero["rank"] = serde_json::json!({
+            "division": { "value": 0, "confidence": 0.5 },
+            "change_tags": { "value": ["ok", 3], "confidence": 0.5 },
+            "rank_recognizer": 5
+        });
+        let edge_tags: Vec<String> = (0..scuffed_types::RANK_MAX_CHANGE_TAGS)
+            .map(|i| format!("T{i}"))
+            .collect();
+        let edge_string = "b".repeat(scuffed_types::RANK_STRING_MAX_CHARS);
+        let mut edges = match_object("sess-rank-edges", 3);
+        edges["rank"] = serde_json::json!({
+            "role": { "value": "Open", "confidence": 0.0 },
+            "role_rank": { "value": edge_string, "confidence": 1.0 },
+            "division": { "value": 5, "confidence": 0.5 },
+            "change_tags": { "value": edge_tags, "confidence": 0.5 },
+            "higher_than_pct": { "value": 100, "confidence": 0.5 },
+            "hero_sr": { "value": 4_294_967_295_u64, "confidence": 0.5 }
+        });
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &daemon_token,
+            serde_json::json!({ "matches": [bad, zero, edges] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{parsed}");
+        assert_eq!(parsed["inserted"], 3, "rank never rejects the game");
+
+        let page = get_my_matches(create_router(state.clone()), &session_token).await;
+        let null_field = serde_json::json!({ "value": null, "confidence": null });
+        let half = |v: serde_json::Value| serde_json::json!({ "value": v, "confidence": 0.5 });
+        let bad_row = row_by_session(&page, "sess-rank-bad");
+        assert_eq!(bad_row["elims"], 3);
+        assert_eq!(
+            bad_row["rank"],
+            serde_json::json!({
+                "role": null_field,
+                "role_rank": null_field,
+                "division": half(serde_json::Value::Null),
+                "progress_pct": null_field,
+                "progress_change": half(serde_json::Value::Null),
+                "change_tags": half(serde_json::Value::Null),
+                "higher_than_pct": half(serde_json::Value::Null),
+                "hero_sr": half(serde_json::Value::Null),
+                "hero_sr_change": null_field,
+                "next_mode_hint": null_field,
+                "queue_title": half(serde_json::Value::Null),
+                "rank_recognizer": null
+            })
+        );
+        let zero_row = &row_by_session(&page, "sess-rank-zero")["rank"];
+        assert_eq!(zero_row["division"], half(serde_json::Value::Null));
+        assert_eq!(zero_row["change_tags"], half(serde_json::Value::Null));
+        assert_eq!(zero_row["rank_recognizer"], serde_json::Value::Null);
+        assert_eq!(
+            zero_row["role"], null_field,
+            "an omitted field reads as null"
+        );
+
+        let edge_row = &row_by_session(&page, "sess-rank-edges")["rank"];
+        assert_eq!(
+            edge_row["role"],
+            serde_json::json!({ "value": "Open", "confidence": 0.0 })
+        );
+        assert_eq!(edge_row["role_rank"]["confidence"], 1.0);
+        assert_eq!(
+            edge_row["role_rank"]["value"]
+                .as_str()
+                .map(|s| s.chars().count()),
+            Some(scuffed_types::RANK_STRING_MAX_CHARS)
+        );
+        assert_eq!(edge_row["division"], half(serde_json::json!(5)));
+        assert_eq!(
+            edge_row["change_tags"]["value"].as_array().map(Vec::len),
+            Some(scuffed_types::RANK_MAX_CHANGE_TAGS)
+        );
+        assert_eq!(edge_row["higher_than_pct"], half(serde_json::json!(100)));
+        assert_eq!(edge_row["hero_sr"], half(serde_json::json!(u32::MAX)));
+    }
+
+    #[tokio::test]
+    async fn upload_empty_rank_object_reads_back_all_null_not_null() {
+        let (state, _member_id, daemon_token, session_token) = member_reader().await;
+        let mut empty = match_object("sess-rank-empty", 2);
+        empty["rank"] = serde_json::json!({});
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &daemon_token,
+            serde_json::json!({ "matches": [empty] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{parsed}");
+        assert_eq!(parsed["inserted"], 1);
+
+        let null_field = serde_json::json!({ "value": null, "confidence": null });
+        let all_null = serde_json::json!({
+            "role": null_field,
+            "role_rank": null_field,
+            "division": null_field,
+            "progress_pct": null_field,
+            "progress_change": null_field,
+            "change_tags": null_field,
+            "higher_than_pct": null_field,
+            "hero_sr": null_field,
+            "hero_sr_change": null_field,
+            "next_mode_hint": null_field,
+            "queue_title": null_field,
+            "rank_recognizer": null
+        });
+        let page = get_my_matches(create_router(state.clone()), &session_token).await;
+        let row = row_by_session(&page, "sess-rank-empty");
+        assert_eq!(row["elims"], 2);
+        assert_eq!(
+            row["rank"], all_null,
+            "rank: {{}} is an all-null object, not null"
+        );
+        let id = row["id"].as_str().unwrap().to_string();
+        let (status, body) =
+            get_my_match(create_router(state.clone()), Some(&session_token), &id).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let one: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(one["rank"], all_null);
+        assert_eq!(stored_rank_objects(&state).await.len(), 1);
     }
 
     async fn assert_suspect_fields_rejected(

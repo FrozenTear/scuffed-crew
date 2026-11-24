@@ -1,0 +1,17 @@
+{
+  "name": "scuffed-app-browser-checks",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Playwright checks for the Dioxus app against a local stack with fake data. Not wired into CI.",
+  "type": "module",
+  "scripts": {
+    "seed": "node seed-all.mjs",
+    "keys": "node keys.mjs",
+    "fix2": "node fix2.mjs",
+    "overflow": "node overflow.mjs",
+    "focus": "node focus.mjs"
+  },
+  "dependencies": {
+    "playwright": "1.65.1"
+  }
+}

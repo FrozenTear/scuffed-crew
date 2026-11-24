@@ -3,6 +3,10 @@
 # App favicon rasters. The blanket png ignore is for screenshots and captures.
 !crates/app/assets/favicon-32.png
 !crates/app/assets/apple-touch-icon.png
+# Official Overwatch rank emblems, unmodified (see rank-icons/LICENCE-NOTE.md); asset!() needs them.
+!crates/app/assets/rank-icons/*.png
+# Icons compiled into the tracker GUI (include_bytes!); a clean checkout must have them.
+!crates/stat-tracker-ui/assets/**/*.png
 # Design-review After screenshots (PR #97 Patch Notes)
 !docs/design-review/**/*.png
 # Synthetic (non-capture) end-reel layout for the nameplate POTG wake test.
@@ -16,6 +20,10 @@ data/uploads/
 data/reports/
 # Recognizer asset packs (PACKS_DIR). Game art must not be committed.
 data/packs/
+# Member-contributed hero icons (HERO_ICONS_DIR default). Never committed.
+data/hero-icons/
+# update.sh --backup exports (database contents). Never committed.
+backups-manual/
 dist/
 # Exception: prebuilt-release installer sources (not app SPA output)
 !crates/stat-tracker/dist/

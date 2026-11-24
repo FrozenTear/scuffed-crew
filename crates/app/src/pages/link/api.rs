@@ -33,6 +33,9 @@ pub struct LinkCallError {
     pub status: Option<u16>,
     pub body: String,
     pub retry_after: Option<String>,
+    /// The server answered but the answer could not be read: not a
+    /// connection problem (QA on 748).
+    pub unreadable: bool,
 }
 
 impl LinkCallError {
@@ -46,12 +49,23 @@ impl LinkCallError {
                 status: Some(status),
                 body,
                 retry_after,
+                unreadable: false,
             },
-            ObservedError::Network(message) | ObservedError::Deserialize(message) => Self {
+            ObservedError::Network(message) => Self {
                 status: None,
                 body: message,
                 retry_after: None,
+                unreadable: false,
             },
+            ObservedError::Deserialize(message) => {
+                crate::util::log_client_error("device link answer", &message);
+                Self {
+                    status: None,
+                    body: message,
+                    retry_after: None,
+                    unreadable: true,
+                }
+            }
         }
     }
 }
@@ -87,6 +101,7 @@ pub async fn approve_pending_code(raw_code: &str) -> Result<(), LinkCallError> {
             status: Some(200),
             body: String::new(),
             retry_after: None,
+            unreadable: false,
         })
     }
 }
@@ -100,6 +115,7 @@ pub async fn deny_pending_code(raw_code: &str) -> Result<(), LinkCallError> {
             status: Some(200),
             body: String::new(),
             retry_after: None,
+            unreadable: false,
         })
     }
 }
@@ -107,6 +123,27 @@ pub async fn deny_pending_code(raw_code: &str) -> Result<(), LinkCallError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// QA on 748: an unreadable answer is not "Couldn't reach the site".
+    #[test]
+    fn an_unreadable_answer_is_kept_apart_from_no_answer() {
+        let unreadable =
+            LinkCallError::from_observed(ObservedError::Deserialize("expected value".into()));
+        assert!(unreadable.unreadable);
+        assert_eq!(unreadable.status, None);
+        let offline = LinkCallError::from_observed(ObservedError::Network("offline".into()));
+        assert!(!offline.unreadable);
+        assert_eq!(
+            super::super::notice_from_call(&unreadable),
+            super::super::UserNotice::Text(
+                crate::client_error::UNREADABLE_ANSWER_MESSAGE.to_string()
+            )
+        );
+        assert_eq!(
+            super::super::notice_from_call(&offline),
+            super::super::UserNotice::Text(super::super::COULD_NOT_REACH.to_string())
+        );
+    }
 
     #[test]
     fn session_post_adds_no_csrf_header() {

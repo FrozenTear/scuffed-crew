@@ -1,7 +1,8 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
-use crate::components::{ConfirmDialog, Toast, use_toast};
+use crate::components::ui::InlineConfirm;
+use crate::components::{Toast, use_toast};
 use crate::hooks::use_api;
 use crate::routes::Route;
 use crate::state::auth::use_auth;
@@ -22,7 +23,7 @@ struct StrategySummary {
     updated_at: String,
 }
 
-/// `{ "data": [...] }` envelope — same unwrap as Browse (`StrategyListResponse`).
+/// `{ "data": [...] }` envelope: same unwrap as Browse (`StrategyListResponse`).
 /// `data` is required so a bare `[]` / `{}` cannot look like a successful empty list.
 #[derive(Debug, Clone, Deserialize)]
 struct ListResponse {
@@ -81,8 +82,8 @@ const PAGE_CSS: &str = r#"
         gap: 0.4rem;
         padding: 0.55rem 1.3rem;
         border-radius: 6px;
-        background: var(--accent);
-        color: white;
+        background: var(--accent-solid);
+        color: var(--on-accent);
         border: none;
         font-size: 0.85rem;
         font-weight: 600;
@@ -127,7 +128,7 @@ const PAGE_CSS: &str = r#"
         gap: 0.75rem;
         flex-wrap: wrap;
         font-size: 0.75rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
     }
     .my-strategy-card-mode {
         display: inline-block;
@@ -138,7 +139,7 @@ const PAGE_CSS: &str = r#"
         text-transform: uppercase;
         letter-spacing: 0.04em;
         background: var(--accent-soft);
-        color: var(--accent);
+        color: var(--accent-text);
         width: fit-content;
     }
 
@@ -153,16 +154,16 @@ const PAGE_CSS: &str = r#"
         letter-spacing: 0.04em;
     }
     .visibility-badge.public {
-        background: color-mix(in srgb, var(--ok) 20%, transparent);
-        color: var(--ok);
+        background: color-mix(in srgb, var(--win) 20%, transparent);
+        color: var(--win);
     }
     .visibility-badge.unlisted {
         background: color-mix(in srgb, var(--warn) 20%, transparent);
         color: var(--warn);
     }
     .visibility-badge.private {
-        background: color-mix(in srgb, var(--text-3) 20%, transparent);
-        color: var(--text-3);
+        background: color-mix(in srgb, var(--text-subtle) 20%, transparent);
+        color: var(--text-subtle);
     }
 
     .my-strategy-card-footer {
@@ -173,7 +174,7 @@ const PAGE_CSS: &str = r#"
         padding-top: 0.5rem;
         border-top: 1px solid var(--border);
         font-size: 0.7rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
     }
 
     /* Card actions */
@@ -187,7 +188,7 @@ const PAGE_CSS: &str = r#"
         border-radius: 5px;
         border: 1px solid var(--border);
         background: var(--surface);
-        color: var(--text-2);
+        color: var(--text-3);
         font-size: 0.75rem;
         font-weight: 600;
         cursor: pointer;
@@ -201,19 +202,19 @@ const PAGE_CSS: &str = r#"
         color: var(--text);
     }
     .card-btn.danger:hover {
-        border-color: var(--danger);
-        color: var(--danger);
+        border-color: var(--loss);
+        color: var(--loss);
     }
 
     /* States */
     .my-strategies-loading, .my-strategies-empty {
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-align: center;
         padding: 4rem 1rem;
         font-size: 0.95rem;
     }
     .my-strategies-error {
-        color: var(--danger);
+        color: var(--loss);
         text-align: center;
         padding: 4rem 1rem;
         font-size: 0.95rem;
@@ -229,7 +230,7 @@ const PAGE_CSS: &str = r#"
         margin-bottom: 0.75rem;
     }
     .my-strategies-login p {
-        color: var(--text-2);
+        color: var(--text-3);
         margin-bottom: 1.5rem;
         font-size: 0.9rem;
     }
@@ -237,8 +238,8 @@ const PAGE_CSS: &str = r#"
         display: inline-block;
         padding: 0.5rem 1.5rem;
         border-radius: 6px;
-        background: var(--accent);
-        color: white;
+        background: var(--accent-solid);
+        color: var(--on-accent);
         font-weight: 600;
         font-size: 0.85rem;
         text-decoration: none;
@@ -260,9 +261,10 @@ pub fn StrategyMy() -> Element {
     let mut toast = use_toast();
     let mut strategies = use_api::<ListResponse>("/api/strategy/strategies/mine");
 
-    // Delete confirmation state
-    let mut delete_open = use_signal(|| false);
+    // Which card is asking "Delete this strategy?" (inline strip, no modal)
     let mut delete_target: Signal<Option<StrategySummary>> = use_signal(|| None);
+    // A DELETE is in flight. Blocks a second click from sending another one.
+    let mut deleting = use_signal(|| false);
 
     // Auth guard
     let auth_state = auth();
@@ -290,14 +292,13 @@ pub fn StrategyMy() -> Element {
 
     // --- Delete handlers ---
 
-    let mut open_delete = move |strat: StrategySummary| {
-        delete_target.set(Some(strat));
-        delete_open.set(true);
-    };
-
     let on_delete_confirm = move |_| {
+        if deleting() {
+            return;
+        }
         if let Some(strat) = delete_target() {
             let id = strat.id.clone();
+            deleting.set(true);
             spawn(async move {
                 match ApiClient::web()
                     .delete(&format!("/api/strategy/strategies/{id}"))
@@ -305,18 +306,17 @@ pub fn StrategyMy() -> Element {
                 {
                     Ok(_) => {
                         toast.show(Toast::success("Strategy deleted."));
-                        delete_open.set(false);
                         delete_target.set(None);
                         strategies.refresh += 1;
                     }
-                    Err(e) => toast.show(Toast::error(format!("Delete failed: {e}"))),
+                    Err(e) => toast.show(Toast::error_from("Delete failed", &e)),
                 }
+                deleting.set(false);
             });
         }
     };
 
     let on_delete_cancel = move |_| {
-        delete_open.set(false);
         delete_target.set(None);
     };
 
@@ -394,16 +394,29 @@ pub fn StrategyMy() -> Element {
                                                 span { "{s.element_count} elements" }
                                                 span { "{updated_short}" }
                                             }
-                                            div { class: "my-strategy-card-actions",
-                                                Link {
-                                                    to: Route::StrategyEditor { id: s.id.clone() },
-                                                    class: "card-btn",
-                                                    "Edit"
+                                            if delete_target().is_some_and(|t| t.id == s.id) {
+                                                InlineConfirm {
+                                                    id: format!("delete-strategy-{}", s.id),
+                                                    title: format!("Delete \"{}\"?", s.name),
+                                                    body: "This cannot be undone.".to_string(),
+                                                    confirm_label: "Delete".to_string(),
+                                                    busy: deleting(),
+                                                    on_confirm: on_delete_confirm,
+                                                    on_cancel: on_delete_cancel,
                                                 }
-                                                button {
-                                                    class: "card-btn danger",
-                                                    onclick: move |_| open_delete(s_del.clone()),
-                                                    "Delete"
+                                            } else {
+                                                div { class: "my-strategy-card-actions",
+                                                    Link {
+                                                        to: Route::StrategyEditor { id: s.id.clone() },
+                                                        class: "card-btn",
+                                                        "Edit"
+                                                    }
+                                                    button {
+                                                        id: "delete-strategy-{s.id}-trigger",
+                                                        class: "card-btn danger",
+                                                        onclick: move |_| delete_target.set(Some(s_del.clone())),
+                                                        "Delete"
+                                                    }
                                                 }
                                             }
                                         }
@@ -415,19 +428,6 @@ pub fn StrategyMy() -> Element {
                         }
                     },
                 }
-            }
-
-            // Delete confirmation dialog
-            ConfirmDialog {
-                title: "Delete Strategy".to_string(),
-                message: format!(
-                    "Are you sure you want to delete \"{}\"? This cannot be undone.",
-                    delete_target().map(|s| s.name).unwrap_or_default()
-                ),
-                open: delete_open(),
-                danger: true,
-                on_confirm: on_delete_confirm,
-                on_cancel: on_delete_cancel,
             }
         }
     }
@@ -507,5 +507,14 @@ mod tests {
         assert_eq!(resp.data[0].name, "Attack");
         assert_eq!(resp.data[0].map_id, "circuit-royal");
         assert_eq!(resp.data[0].element_count, 3);
+    }
+
+    #[test]
+    fn delete_confirm_is_busy_while_the_request_is_in_flight() {
+        let src = include_str!("my_strategies.rs");
+        let busy = ["busy: ", "deleting()"].concat();
+        assert_eq!(src.matches(busy.as_str()).count(), 1);
+        let guard = ["if ", "deleting() {"].concat();
+        assert!(src.contains(guard.as_str()));
     }
 }

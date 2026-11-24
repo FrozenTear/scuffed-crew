@@ -1,24 +1,45 @@
 pub mod api;
+pub mod application_message;
 pub mod auth;
+pub mod brand;
+pub mod hero_icons;
 pub mod heroes;
 pub mod nostr;
 pub mod org;
+pub mod pack_limits;
 pub mod patch_notes;
+pub mod role_fill;
 pub mod stat_report;
 pub mod stats;
 pub mod stats_upload_limits;
 pub mod strategy;
+pub mod training_crops;
 
 pub use api::*;
+pub use application_message::{
+    APPLICATION_IP_BURST, APPLICATION_IP_REPLENISH_SECS, APPLICATION_RESUBMIT_COOLDOWN_SECS,
+    ApplicationPreferenceError, MAX_APPLICATION_MESSAGE_CHARS,
+    MAX_APPLICATION_PREFERENCE_ITEM_CHARS, MAX_APPLICATION_PREFERENCE_ITEMS,
+    MAX_WITHDRAWN_APPLICATIONS, MIN_APPLICATION_MESSAGE_CHARS, WITHDRAWN_APPLICATION_WINDOW_DAYS,
+    WITHDRAWN_APPLICATION_WINDOW_SECS, application_message_chars, application_message_long_enough,
+    application_message_within_max, check_application_preferences,
+};
 pub use auth::*;
+pub use hero_icons::{
+    HERO_ICON_MAX_BYTES, HERO_ICON_MAX_EDGE, HERO_ICON_MAX_FILES_PER_UPLOAD,
+    HERO_ICON_MAX_PER_MEMBER, HERO_ICON_MAX_REQUEST_BYTES, HERO_ICON_MIN_EDGE,
+    HERO_ICON_RATE_BURST, HERO_ICON_RATE_REFILL_SECS,
+};
 pub use heroes::{
     HERO_NAMES, HERO_PACK_FILES, HERO_PACK_PLACEHOLDERS, HEROES, HeroName, canonical_hero,
-    find_hero, hero_for_pack_file, hero_key_to_name, is_placeholder_hero, match_hero_in_text,
-    pack_file_stem, resolve_hero_query, role_for_hero_name,
+    find_hero, hero_for_pack_file, hero_key, hero_key_to_name, is_placeholder_hero,
+    match_hero_in_text, pack_file_stem, resolve_hero_query, role_for_hero_name,
 };
 pub use nostr::*;
 pub use org::*;
+pub use pack_limits::{PACK_IP_BURST, PACK_IP_REPLENISH_SECS};
 pub use patch_notes::*;
+pub use role_fill::{fill_game_role, filled_role_label, recognized_stored_role};
 pub use stat_report::*;
 pub use stats::*;
 pub use stats_upload_limits::{
@@ -27,3 +48,11 @@ pub use stats_upload_limits::{
     STATS_UPLOAD_TOKEN_REPLENISH_SECS,
 };
 pub use strategy::*;
+pub use training_crops::{
+    CropKind, MAP_NAME_MAX_BYTES, MAP_NAME_MAX_HEIGHT, MAP_NAME_MAX_PER_MEMBER, MAP_NAME_MAX_WIDTH,
+    RANK_MAX_BYTES, RANK_MAX_HEIGHT, RANK_MAX_PER_MEMBER, RANK_MAX_WIDTH, RANK_MIN_SCREEN_HEIGHT,
+    RANK_MIN_SCREEN_WIDTH, STAT_DIGITS_MAX_PER_MEMBER, TRAINING_CROP_GAME_TOKEN_LEN,
+    TRAINING_CROP_LABEL_MAX_LEN, TRAINING_CROP_META_MAX_BYTES, TRAINING_CROP_SCORE_ABS_MAX,
+    TRAINING_CROP_SCREEN_MAX_EDGE, TRAINING_CROP_SCREEN_MIN_EDGE, TRAINING_CROP_SLOT_INDEX_MAX,
+    TRAINING_CROP_UI_SCALE_MAX, TRAINING_CROP_VERSION_MAX_LEN,
+};

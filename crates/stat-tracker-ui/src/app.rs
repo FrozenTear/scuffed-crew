@@ -5,10 +5,9 @@ use std::time::{Duration, SystemTime};
 use chrono::{DateTime, Utc};
 use gtk::gdk::prelude::MonitorExt;
 use iced::widget::image::Handle;
-use iced::widget::{column, container, responsive, row, stack};
-use iced::{Element, Fill, Length, Padding, Subscription, Task, window};
+use iced::{Element, Subscription, Task, window};
 use stat_tracker::capture::CaptureBackend;
-use stat_tracker::config::{Config, ShadowRecognizerControl};
+use stat_tracker::config::Config;
 use stat_tracker::report::LogOnlyCategory;
 
 use crate::aggregate::GameFilter;
@@ -16,149 +15,25 @@ use crate::capture::{self, PreviewShot};
 use crate::cli::{Cli, FixtureKind};
 use crate::daemon::{self, DaemonVerb, DaemonView};
 use crate::hotkey::{self, OverlayHotkey};
-use crate::model::{
-    EditField, EditForm, Game, Outcome, Role, RoleFilter, Screen, SeasonSel, local_hm,
-};
+use crate::model::{EditField, EditForm, Game, Outcome, Role, RoleFilter, Screen, SeasonSel};
 use crate::notes::{self, ShownRelease};
 use crate::overlay::{self, CompanionChild, OverlayHold};
 use crate::restart_prompt::{self, BinStamp, RestartNeed, RestartWatch};
 use crate::seasons::{self, SeasonCache};
 use crate::settings::{self, SettingsField, SettingsForm, SettingsToggle};
 use crate::snapshot::{self, games_from_snapshot};
-use crate::theme::{self, PAGE_PAD_X, PAGE_PAD_Y, SIDEBAR_WIDTH};
 use crate::tray::{self, TrayAction, TrayHandle};
 use crate::update::{self, UpdateInfo, UpdatePlan, UpdateProgress};
-use crate::widgets;
-
-/// Shown when the tracker service is already running.
-const SETTINGS_SAVED_RESTART: &str =
-    "Settings saved. Restart the tracker for changes to take effect.";
 
 /// Save must not replace a config.toml that did not parse.
-const SETTINGS_SAVE_REFUSED: &str =
+pub(crate) const SETTINGS_SAVE_REFUSED: &str =
     "Could not read config.toml, so settings were not saved. Fix that file, then try again.";
-
-/// The file parsed, but it is not the snapshot this form was built from.
-const SETTINGS_RELOADED_FROM_DISK: &str = "\
-config.toml changed on disk. Settings reloaded from the file, please review and save again.";
 
 /// How long the unreadable-config toast stays up before it clears itself.
 const REFUSED_TOAST_TIMEOUT: Duration = Duration::from_secs(8);
 
 fn toast_if_config_unreadable(unreadable: bool) -> Option<&'static str> {
     unreadable.then_some(SETTINGS_SAVE_REFUSED)
-}
-
-/// Every Save re-reads the file. `Err` means it still does not parse.
-fn reread_config_for_save(path: &std::path::Path) -> Result<Config, &'static str> {
-    Config::read_at(path).map_err(|_| SETTINGS_SAVE_REFUSED)
-}
-
-/// Result of pressing Save against the config file.
-#[derive(Debug, PartialEq)]
-enum SettingsFileSave {
-    /// The file does not parse. Nothing was written.
-    Unreadable,
-    /// The form was built while the file was unreadable, or the parsed file
-    /// differs from that snapshot. Nothing was written.
-    Reloaded(Config),
-    /// The on-disk parse matched the snapshot, and the form was written.
-    Saved(Config),
-}
-
-#[derive(Debug)]
-enum SettingsSaveError {
-    /// Sync URL or shortcut check failed. The file was not written.
-    Blocked(String),
-    /// The in-place write failed.
-    Write(String),
-}
-
-/// Re-read `path`, then either refuse, reload, or write the form in place.
-///
-/// A write happens only when the file parses as `snapshot`. The form's sync
-/// URL and shortcut checks run in `before_write`, after that match, so a
-/// reload is not blocked by the empty defaults a broken startup file leaves
-/// in the form. The write is `form.to_config(snapshot)` then [`Config::save_at`],
-/// which edits `shadow_recognizer` in place when that is the only change.
-fn save_settings_form(
-    path: &std::path::Path,
-    form_built_unreadable: bool,
-    snapshot: &Config,
-    form: &SettingsForm,
-    before_write: impl FnOnce() -> Result<(), String>,
-) -> Result<SettingsFileSave, SettingsSaveError> {
-    let fresh = match reread_config_for_save(path) {
-        Err(_) => return Ok(SettingsFileSave::Unreadable),
-        Ok(fresh) => fresh,
-    };
-    if form_built_unreadable || fresh != *snapshot {
-        return Ok(SettingsFileSave::Reloaded(fresh));
-    }
-    before_write().map_err(SettingsSaveError::Blocked)?;
-    let next = form.to_config(snapshot);
-    next.save_at(path)
-        .map_err(|err| SettingsSaveError::Write(err.to_string()))?;
-    Ok(SettingsFileSave::Saved(next))
-}
-
-/// Form fields from `fresh`, keeping the shortcut the member was editing.
-fn form_after_disk_reload(
-    previous: &SettingsForm,
-    fresh: &Config,
-    shadow: ShadowRecognizerControl,
-) -> SettingsForm {
-    let mut next = SettingsForm::from_config_and_shadow(fresh, shadow);
-    next.overlay_hotkey = previous.overlay_hotkey.clone();
-    next.overlay_hotkey_enabled = previous.overlay_hotkey_enabled;
-    next
-}
-
-/// True when `after` differs from `before` only in `update_channel`.
-///
-/// Only this app reads that key, so the save does not need a tracker restart.
-fn only_update_channel_changed(before: &Config, after: &Config) -> bool {
-    if before.update_channel == after.update_channel {
-        return false;
-    }
-    let mut same = before.clone();
-    same.update_channel.clone_from(&after.update_channel);
-    same == *after
-}
-
-/// True when the save changed the channel the update check uses, so it must
-/// run again on the new channel. `installed` matters: on an alpha install an
-/// unset channel is already prerelease, so writing `stable` is a switch.
-fn update_channel_switched(before: &Config, after: &Config, installed: Option<&str>) -> bool {
-    update::prerelease_updates_effective(&before.update_channel, installed)
-        != update::prerelease_updates_effective(&after.update_channel, installed)
-}
-
-/// True when the save changed which screen the tracker captures. The
-/// tracker reads `capture_output` once at start, so the app restarts a
-/// running tracker after such a save instead of asking the player to.
-fn capture_output_changed(before: &Config, after: &Config) -> bool {
-    before.capture_output != after.capture_output
-}
-
-fn capture_route_changed(before: &Config, after: &Config) -> bool {
-    before.capture_route != after.capture_route
-}
-
-const SETTINGS_SAVED_RESTARTING: &str =
-    "Settings saved. Restarting the tracker to use the new screen.";
-
-const SETTINGS_SAVED_ROUTE: &str =
-    "Settings saved. Restarting the tracker to use the new capture method.";
-
-const SETTINGS_SAVED_ROUTE_ENV: &str = "Settings saved. STAT_TRACKER_CAPTURE in the environment overrides this choice, so the tracker keeps that route. Edit the file under .config/environment.d, then log out and back in.";
-
-fn toast_after_successful_save(daemon_up: bool) -> &'static str {
-    if daemon_up {
-        SETTINGS_SAVED_RESTART
-    } else {
-        "Settings saved"
-    }
 }
 
 /// Dismiss clears the toast, including the unreadable-config error.
@@ -258,7 +133,7 @@ pub enum Message {
     ResolveSegment {
         session_id: String,
         segment: u32,
-        confirm: bool,
+        step: crate::commands::SegmentStep,
     },
     RetryUpload(String),
     RetryRejectedUploads,
@@ -340,6 +215,18 @@ pub enum Message {
     ShowOlderReleases(notes::NotesSurface),
     Setup(crate::setup_guide::SetupMessage),
     Report(crate::report::ReportMessage),
+    /// A message from the 0.6 Settings page ([`crate::settings_update`]).
+    SettingsPage(crate::settings_update::Msg),
+    /// A message from the 0.6 top bar ([`crate::nav::update`]).
+    Nav(crate::nav::Msg),
+    /// Games tab controls (grouping, time sort, compact rows, filters).
+    Games(crate::games_table::Msg),
+    /// A message from the 0.6 Overview ([`crate::overview_page::update`]).
+    OverviewPage(crate::overview_page::Msg),
+    /// A message from the 0.6 Heroes page ([`crate::heroes_page::update`]).
+    HeroesPage(crate::heroes_page::Msg),
+    /// A message from the 0.6 Maps and Seasons tabs ([`crate::tab_bits::update`]).
+    Pages(crate::tab_bits::PageMsg),
 }
 
 struct NotesDialog {
@@ -434,6 +321,9 @@ fn live_game_session_now(
 pub struct TrackerApp {
     pub data_dir: PathBuf,
     pub fixture: Option<FixtureKind>,
+    /// Outside values in place of the host's CLI and environment, for the
+    /// Settings pages (tests). `None` reads this process's.
+    pub(crate) outside_env: Option<crate::settings_env::OutsideEnv>,
     pub games: Vec<Game>,
     pub seasons: SeasonCache,
     pub season: SeasonSel,
@@ -449,17 +339,29 @@ pub struct TrackerApp {
     pub filter_hero: Option<String>,
     pub filter_map: Option<String>,
     pub filter_outcome: Option<Outcome>,
+    /// Games shows only games that need a look (the top bar chip).
+    pub needs_look_filter: bool,
+    /// The 0.6 Overview's own state ([`crate::overview_page`]).
+    pub overview_page: crate::overview_page::OverviewPage,
+    /// The 0.6 Heroes page's sort, view and fold ([`crate::heroes_page`]).
+    pub heroes_page: crate::heroes_page::HeroesPage,
+    /// The 0.6 Maps tab's sort and Show row ([`crate::maps_tab`]).
+    pub maps_ui: crate::maps_tab::MapsUi,
     pub toast: Option<String>,
     /// Optional press on the toast. Cleared only when this toast is replaced.
-    toast_action: Option<Message>,
+    pub(crate) toast_action: Option<Message>,
     /// Sessions whose report kit was present the last time games were loaded.
     pub sessions_with_kit: HashSet<String>,
     /// When the unreadable-config toast was shown. Cleared with the toast.
-    toast_shown_at: Option<SystemTime>,
+    pub(crate) toast_shown_at: Option<SystemTime>,
     pub settings: SettingsForm,
+    /// config.toml with the CLI / env overlay on top: what Settings shows
+    /// and the app acts on.
     pub saved_config: Config,
+    /// config.toml as written: what saves compare against and build on.
+    pub(crate) saved_file: Config,
     /// The on-disk config.toml did not parse. Save must not overwrite it.
-    config_unreadable: bool,
+    pub(crate) config_unreadable: bool,
     pub daemon: DaemonView,
     pub daemon_busy: bool,
     pub outputs: Vec<String>,
@@ -498,7 +400,7 @@ pub struct TrackerApp {
     dialog_show_older: bool,
     notes_dialog: Option<NotesDialog>,
     notes_seen: NotesSeen,
-    uninstall_dialog: Option<crate::uninstall::UninstallDialog>,
+    pub(crate) uninstall_dialog: Option<crate::uninstall::UninstallDialog>,
     uninstall_busy: bool,
     /// Report a problem dialog, or the crash prompt shown at start.
     report: Option<crate::report::ReportUi>,
@@ -512,11 +414,11 @@ pub struct TrackerApp {
     /// the classic OCR switch.
     pub ocr_switch: settings::OcrSwitchView,
     pub vacuum_busy: bool,
-    snapshot_mtime: Option<SystemTime>,
+    pub(crate) snapshot_mtime: Option<SystemTime>,
     seasons_url: Option<String>,
     last_seasons_attempt: Option<DateTime<Utc>>,
     /// Last update check started (GUI-7). `None` in fixture mode.
-    last_update_check: Option<std::time::Instant>,
+    pub(crate) last_update_check: Option<std::time::Instant>,
     quit_gate: QuitGate,
     /// The running update's gate: `update::LIVE_GATE`, or a test's own.
     update_gate: &'static update::UpdateGate,
@@ -524,7 +426,7 @@ pub struct TrackerApp {
     tick_count: u64,
     tray: Option<TrayHandle>,
     pub overlay_hold: OverlayHold,
-    overlay_child: Option<CompanionChild>,
+    pub(crate) overlay_child: Option<CompanionChild>,
     overlay_spawn_blocked: bool,
     pub game_running: bool,
     /// Open session shown as the Games in-progress card. `None` once it closes.
@@ -539,6 +441,12 @@ pub struct TrackerApp {
     /// Puts text on the system clipboard ([`crate::clipboard::copy_text`]).
     /// Tests swap it so they never reach the real clipboard.
     copy_text: fn(&str) -> Result<crate::clipboard::ClipboardBackend, String>,
+    /// Top tabs (0.6 default) or the 0.5 sidebar, from `SCUFFED_TRACKER_LAYOUT`.
+    pub nav_style: crate::nav::NavStyle,
+    /// Games tab view state (0.6 top tabs).
+    pub games_tab: crate::games_rows::GamesTab,
+    /// The 0.6 Settings page's own state.
+    pub(crate) page_state: crate::settings_update::PageState,
 }
 
 impl TrackerApp {
@@ -554,14 +462,14 @@ impl TrackerApp {
         let games = games_from_snapshot(&snap);
         let mut seasons = seasons::load_cache(&cli.data_dir);
         if seasons.seasons.is_empty()
-            && cli.fixture == Some(FixtureKind::Sample)
-            && let Ok(list) = serde_json::from_str(crate::fixtures::sample_seasons_json())
+            && let Some(json) = cli.fixture.and_then(crate::fixtures::seasons_json)
+            && let Ok(list) = serde_json::from_str(json)
         {
             seasons.seasons = list;
         }
         let persisted = seasons::load_ui_state(&cli.data_dir);
         let season = seasons::resolve_selection(persisted, &seasons.seasons);
-        let clock = fixture_clock(cli.fixture, &games);
+        let clock = crate::fixtures::clock(cli.fixture, &games);
         let seasons_url = cli.seasons_url.clone();
         let now = Utc::now();
         let (fetch, last_seasons_attempt) =
@@ -578,20 +486,17 @@ impl TrackerApp {
             };
 
         let snapshot_mtime = snapshot::snapshot_mtime(&cli.data_dir);
-        let live_status = live_status_for(&games);
+        let live_status = crate::tracker_status::classic_live_status(&games);
         let config_existed = Config::config_path()
             .map(|path| path.exists())
             .unwrap_or(false);
-        let (saved_config, config_unreadable) = match Config::load() {
-            Ok(config) => (config, false),
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "config.toml did not parse; Settings will not overwrite it"
-                );
-                (Config::default(), true)
-            }
-        };
+        // Shown: the file with the env overlay. Saved against: the file as
+        // written (`settings_env`).
+        let crate::settings_env::Loaded {
+            file: saved_file,
+            shown: saved_config,
+            unreadable: config_unreadable,
+        } = crate::settings_env::load(Config::config_path().ok().as_deref(), cli.fixture.is_some());
         let health_status = health_status_for(
             &cli.data_dir,
             &games,
@@ -618,11 +523,7 @@ impl TrackerApp {
             .with_installed_version(&saved_config, installed_version.as_deref());
         settings.overlay_hotkey = overlay_hotkey.bind.clone();
         settings.overlay_hotkey_enabled = overlay_hotkey.enabled;
-        let daemon = DaemonView {
-            pid: daemon::daemon_running(&cli.data_dir),
-            service_installed: daemon::service_file_installed(),
-            autostart: false,
-        };
+        let daemon = daemon::initial_view(&cli.data_dir);
         let live = cli.fixture.is_none();
         let (window_id, open) = window::open(window_settings());
         let process_running =
@@ -674,7 +575,14 @@ impl TrackerApp {
             &saved_config,
             installed_version.as_deref(),
         );
+        let page_state = crate::settings_update::PageState::new(
+            saved_config.clone(),
+            daemon.pid,
+            seasons::load_companion_during_games(&cli.data_dir),
+        )
+        .with_unknown_baseline(config_unreadable);
         let mut app = Self {
+            outside_env: crate::settings_env::OutsideEnv::for_build(),
             live_status,
             health_status,
             data_dir: cli.data_dir,
@@ -692,12 +600,17 @@ impl TrackerApp {
             filter_hero: None,
             filter_map: None,
             filter_outcome: None,
+            needs_look_filter: false,
+            overview_page: Default::default(),
+            heroes_page: Default::default(),
+            maps_ui: Default::default(),
             toast: None,
             toast_action: None,
             sessions_with_kit: HashSet::new(),
             toast_shown_at: None,
             settings,
             saved_config,
+            saved_file,
             config_unreadable,
             daemon,
             daemon_busy: false,
@@ -733,7 +646,7 @@ impl TrackerApp {
             report: None,
             confirm_clear: false,
             tessdata_busy: false,
-            tessdata_installed: capture::tessdata_installed(),
+            tessdata_installed: cli.fixture.is_some() || capture::tessdata_installed(),
             ocr_switch: settings::OcrSwitchView::default(),
             vacuum_busy: false,
             snapshot_mtime,
@@ -758,12 +671,22 @@ impl TrackerApp {
             own_exe,
             restart_watch,
             copy_text: crate::clipboard::copy_text,
+            // Tests start on the 0.6 layout whatever the shell exports.
+            nav_style: if cfg!(test) {
+                crate::nav::NavStyle::TopTabs
+            } else {
+                crate::nav::NavStyle::from_env()
+            },
+            page_state,
+            games_tab: Default::default(),
         };
+        app.refresh_token_rejected();
         app.refresh_kit_sessions();
 
+        let want_overlay = app.overlay_showing();
         if let Some(err) = overlay::reconcile_companion(
             &mut app.overlay_child,
-            overlay::overlay_visible(&app.overlay_hold, app.game_running),
+            want_overlay,
             &app.data_dir,
             app.fixture,
             &mut app.overlay_spawn_blocked,
@@ -808,10 +731,9 @@ impl TrackerApp {
                 probe_own_package_owner(),
                 Message::PackageOwnerProbed,
             ));
-            tasks.push(Task::perform(
-                update::check_for_update(),
-                Message::UpdateChecked,
-            ));
+            tasks.push(Task::perform(crate::update_check::check(), |found| {
+                Message::SettingsPage(crate::settings_update::Msg::UpdatesChecked(found))
+            }));
             app.last_update_check = Some(std::time::Instant::now());
             tasks.push(Task::perform(
                 daemon::systemd_enabled(),
@@ -840,6 +762,7 @@ impl TrackerApp {
             window::close_events().map(Message::WindowClosed),
         ];
         if self.overlay_hotkey.enabled
+            && self.companion_enabled()
             && let Ok(bind) = hotkey::parse_bind(&self.overlay_hotkey.bind)
         {
             subs.push(hotkey::subscription(bind));
@@ -852,8 +775,14 @@ impl TrackerApp {
             subs.push(iced::event::listen_with(setup_guide_keys));
         } else if self.notes_dialog.is_some() {
             subs.push(iced::event::listen_with(notes_dialog_escape));
+        } else if self.page_state.chip_draft().is_some() {
+            subs.push(iced::event::listen_with(
+                crate::settings_update::chip_escape,
+            ));
+        } else if self.screen == Screen::Games && crate::games_panel::listens(self) {
+            subs.push(iced::event::listen_with(crate::games_panel::close_keys));
         }
-        Subscription::batch(subs)
+        crate::nav::with_clear_on_pointer(self, subs)
     }
 
     pub fn season_window(&self) -> Option<crate::aggregate::SeasonWindow> {
@@ -864,8 +793,9 @@ impl TrackerApp {
         GameFilter::from_header(self.season_window(), self.roles)
     }
 
+    /// The Companion shows now ([`crate::companion_gate`]).
     pub fn overlay_showing(&self) -> bool {
-        overlay::overlay_visible(&self.overlay_hold, self.game_running)
+        self.companion_enabled() && overlay::overlay_visible(&self.overlay_hold, self.game_running)
     }
 
     fn apply_overlay_policy(&mut self) {
@@ -909,30 +839,26 @@ impl TrackerApp {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        crate::games_table::before_message(self, &message);
         match message {
             Message::Tick => self.on_tick(),
             Message::Navigate(screen) => {
                 self.screen = screen;
                 if screen != Screen::Games {
-                    self.expanded = None;
-                    self.editing = false;
-                    self.confirm_delete = None;
+                    crate::games_table::leave(self);
                 }
                 if screen != Screen::Settings {
                     self.confirm_clear = false;
+                    self.page_state.left_page();
                 }
-                if screen == Screen::Settings
-                    && let Some(backend) = self.backend
-                {
-                    return Task::perform(capture::list_outputs(backend), Message::OutputsReady);
+                if screen == Screen::Settings {
+                    return crate::settings_open::on_open(self);
                 }
                 Task::none()
             }
             Message::SelectSeason(sel) => {
                 self.season = sel;
-                if let Err(e) = seasons::save_ui_state(&self.data_dir, &self.season) {
-                    tracing::warn!(error = %e, "failed to write ui_state.json");
-                }
+                seasons::persist_selection(&self.data_dir, &self.season);
                 Task::none()
             }
             Message::ToggleRole(role) => {
@@ -964,15 +890,13 @@ impl TrackerApp {
                             .is_some_and(|id| !self.seasons.seasons.iter().any(|s| s.id == id))
                         {
                             self.season = seasons::default_selection(&self.seasons.seasons);
-                            if let Err(e) = seasons::save_ui_state(&self.data_dir, &self.season) {
-                                tracing::warn!(error = %e, "failed to write ui_state.json");
-                            }
+                            seasons::persist_selection(&self.data_dir, &self.season);
                         }
-                        self.health_status = self.health_now();
+                        self.refresh_health();
                     }
                     Err(e) => {
                         tracing::info!(error = %e, "seasons fetch failed; using cache");
-                        self.health_status = self.health_now();
+                        self.refresh_health();
                     }
                 }
                 Task::none()
@@ -1044,12 +968,14 @@ impl TrackerApp {
                 Task::none()
             }
             Message::ToggleEdit => {
+                // Enter over the form must not open the delete strip.
+                crate::games_table::clear_focus(self);
                 if self.editing {
                     self.editing = false;
                 } else if let Some(sid) = &self.expanded
                     && let Some(g) = self.games.iter().find(|g| &g.session_id == sid)
                 {
-                    self.edit = EditForm::from_game(g);
+                    self.edit = crate::games_picker::edit_form(&mut self.games_tab, g);
                     self.editing = true;
                 }
                 Task::none()
@@ -1064,19 +990,19 @@ impl TrackerApp {
                     self.games
                         .iter()
                         .find(|g| &g.session_id == sid)
-                        .map(|g| crate::commands::save_edit(&self.data_dir, g, &self.edit))
+                        .map(|g| crate::commands::save_edit_for(self, g, &self.edit))
                 });
                 if let Some(sid) = sid {
-                    match saved {
-                        Some(Ok(())) => {
-                            self.replace_toast("Stats corrected");
-                            self.arm_training_toast(&sid, crate::report::GameCategory::WrongStats);
+                    match &saved {
+                        Some(Ok(saved)) => {
+                            crate::commands::show_saved(self, &sid, saved);
+                            self.refresh_game(&sid);
                         }
-                        Some(Err(e)) => self.replace_toast(e),
-                        None => {}
+                        Some(Err(e)) => self.replace_toast(e.clone()),
+                        None => self.replace_toast(crate::commands::GAME_GONE),
                     }
                 }
-                self.editing = false;
+                self.editing = matches!(saved, Some(Err(_)));
                 Task::none()
             }
             Message::PickMap { session_id, map } => {
@@ -1123,22 +1049,16 @@ impl TrackerApp {
             Message::ResolveSegment {
                 session_id,
                 segment,
-                confirm,
+                step,
             } => {
                 self.replace_toast(
                     match crate::commands::resolve_segment(
                         &self.data_dir,
                         &session_id,
                         segment,
-                        confirm,
+                        step,
                     ) {
-                        Ok(()) => {
-                            if confirm {
-                                "Hero swap confirmed".into()
-                            } else {
-                                "Hero swap dismissed".into()
-                            }
-                        }
+                        Ok(()) => step.toast().into(),
                         Err(e) => format!("Could not update hero swap: {e}"),
                     },
                 );
@@ -1151,6 +1071,12 @@ impl TrackerApp {
             Message::SettingsToggle(SettingsToggle::ClassicOcr, want_classic) => {
                 self.toggle_classic_ocr(want_classic)
             }
+            Message::SettingsPage(msg) => crate::settings_update::update(self, msg),
+            Message::Nav(msg) => crate::nav::update(self, msg),
+            Message::Games(msg) => crate::games_table::update(self, msg),
+            Message::OverviewPage(msg) => crate::overview_page::update(self, msg),
+            Message::HeroesPage(msg) => crate::heroes_page::update(self, msg),
+            Message::Pages(msg) => crate::tab_bits::update(self, msg),
             Message::SettingsToggle(toggle, value) => {
                 self.settings.set_toggle(toggle, value);
                 Task::none()
@@ -1203,161 +1129,16 @@ impl TrackerApp {
                 Task::none()
             }
             Message::SaveSettings => {
-                if self.fixture.is_some() {
-                    return Task::none();
-                }
-                let config_path = match Config::config_path() {
-                    Ok(path) => path,
-                    Err(_) => {
-                        self.config_unreadable = true;
-                        self.show_refused_toast();
-                        return Task::none();
-                    }
-                };
-                let sync_url = self.settings.sync_url.clone();
-                let saved_ocr = self.saved_config.ocr;
-                let form_classic_ocr = self.settings.classic_ocr;
-                let known_packs = self.ocr_switch.packs;
-                let hotkey_enabled = self.settings.overlay_hotkey_enabled;
-                let hotkey_bind = self.settings.overlay_hotkey.clone();
-                let mut stored_hotkey = None;
-                let outcome = save_settings_form(
-                    &config_path,
-                    self.config_unreadable,
-                    &self.saved_config,
-                    &self.settings,
-                    || {
-                        // Block the whole save. Writing the form would either store
-                        // the cleartext URL or drop the sync block; the file on disk
-                        // stays as it is until the URL is https, loopback http, or blank.
-                        // This runs only after the file matches the form's snapshot, so
-                        // a reload of a fixed file is not stopped by the default URL.
-                        if let Some(problem) = settings::sync_url_problem(&sync_url) {
-                            return Err(problem.to_string());
-                        }
-                        // Turning classic OCR off needs a tracker version
-                        // that can, and the reader packs. The click looked;
-                        // the save checks what that look found. The tracker
-                        // itself decides again when it starts.
-                        if let Some(reason) = settings::ocr_save_problem(
-                            saved_ocr,
-                            form_classic_ocr,
-                            known_packs.as_ref(),
-                            &stat_tracker::ocr_switch::Read::needing_ocr(),
-                        ) {
-                            return Err(reason);
-                        }
-                        let hotkey = OverlayHotkey::normalized(hotkey_enabled, &hotkey_bind);
-                        stored_hotkey = Some(hotkey.validate_for_save()?);
-                        Ok(())
-                    },
-                );
-                match outcome {
-                    Ok(SettingsFileSave::Unreadable) => {
-                        self.config_unreadable = true;
-                        self.show_refused_toast();
-                    }
-                    Ok(SettingsFileSave::Reloaded(fresh)) => {
-                        self.settings = form_after_disk_reload(
-                            &self.settings,
-                            &fresh,
-                            fresh.shadow_recognizer_control(),
-                        )
-                        .with_installed_version(&fresh, self.installed_version.as_deref());
-                        self.saved_config = fresh;
-                        self.config_unreadable = false;
-                        self.health_status = self.health_now();
-                        self.replace_toast(SETTINGS_RELOADED_FROM_DISK.to_string());
-                        self.toast_shown_at = None;
-                    }
-                    Ok(SettingsFileSave::Saved(config)) => {
-                        let Some(hotkey) = stored_hotkey else {
-                            self.replace_toast(
-                                "Could not save settings: shortcut was not checked".to_string(),
-                            );
-                            return Task::none();
-                        };
-                        if let Err(e) = seasons::save_overlay_hotkey(&self.data_dir, &hotkey) {
-                            self.replace_toast(format!("Could not save companion shortcut: {e}"));
-                            return Task::none();
-                        }
-                        let daemon_up = daemon::is_daemon_running(&self.data_dir);
-                        let gui_only = only_update_channel_changed(&self.saved_config, &config);
-                        let route_changed = capture_route_changed(&self.saved_config, &config);
-                        let restart_for_screen = daemon_up
-                            && !self.daemon_busy
-                            && capture_output_changed(&self.saved_config, &config);
-                        let restart_for_route = daemon_up && !self.daemon_busy && route_changed;
-                        let env_overrides_route = std::env::var(stat_tracker::config::CAPTURE_ENV)
-                            .ok()
-                            .is_some_and(|value| !value.trim().is_empty());
-                        let recheck = update_channel_switched(
-                            &self.saved_config,
-                            &config,
-                            self.installed_version.as_deref(),
-                        );
-                        self.saved_config = config;
-                        self.config_unreadable = false;
-                        self.health_status = self.health_now();
-                        self.overlay_hotkey = hotkey;
-                        self.settings = SettingsForm::from_config(&self.saved_config)
-                            .with_installed_version(
-                                &self.saved_config,
-                                self.installed_version.as_deref(),
-                            );
-                        self.settings.overlay_hotkey = self.overlay_hotkey.bind.clone();
-                        self.settings.overlay_hotkey_enabled = self.overlay_hotkey.enabled;
-                        self.replace_toast(if restart_for_route && env_overrides_route {
-                            SETTINGS_SAVED_ROUTE_ENV
-                        } else if restart_for_screen {
-                            SETTINGS_SAVED_RESTARTING
-                        } else if restart_for_route {
-                            SETTINGS_SAVED_ROUTE
-                        } else {
-                            toast_after_successful_save(daemon_up && !gui_only)
-                        });
-                        self.toast_shown_at = None;
-                        let mut tasks = Vec::new();
-                        if restart_for_screen || restart_for_route {
-                            // Same path as the Restart button, so the unit or
-                            // the spawned tracker is restarted the usual way.
-                            self.daemon_busy = true;
-                            tasks.push(Task::perform(
-                                daemon::run_verb(
-                                    self.data_dir.clone(),
-                                    DaemonVerb::Restart,
-                                    self.daemon.service_installed,
-                                ),
-                                Message::DaemonDone,
-                            ));
-                        }
-                        if recheck {
-                            // `check_for_update` reads the channel from config.toml,
-                            // which now holds the new value.
-                            tasks.push(Task::perform(
-                                update::check_for_update(),
-                                Message::UpdateChecked,
-                            ));
-                            self.last_update_check = Some(std::time::Instant::now());
-                        }
-                        if !tasks.is_empty() {
-                            return Task::batch(tasks);
-                        }
-                    }
-                    Err(SettingsSaveError::Blocked(message)) => {
-                        self.replace_toast(message);
-                    }
-                    Err(SettingsSaveError::Write(message)) => {
-                        self.replace_toast(format!("Could not save settings: {message}"));
-                    }
-                }
-                Task::none()
+                self.save_settings(crate::settings_save::SaveFrom::Classic, None)
             }
             Message::Daemon(verb) => {
                 if self.fixture.is_some() || self.daemon_busy {
                     return Task::none();
                 }
                 self.daemon_busy = true;
+                if verb.applies_saved_config() {
+                    self.page_state.restart_started(&self.saved_config);
+                }
                 let data_dir = self.data_dir.clone();
                 let installed = self.daemon.service_installed;
                 Task::perform(
@@ -1367,11 +1148,14 @@ impl TrackerApp {
             }
             Message::DaemonDone(result) => {
                 self.daemon_busy = false;
+                self.page_state.daemon_done(result.is_ok());
                 self.replace_toast(match result {
                     Ok(m) => m,
                     Err(e) => e,
                 });
                 self.daemon = daemon::refresh_view(&self.data_dir, &self.daemon);
+                self.page_state
+                    .observe_tracker(self.daemon.pid, &self.saved_config);
                 Task::perform(daemon::systemd_enabled(), Message::AutostartReady)
             }
             Message::ToggleAutostart => {
@@ -1466,7 +1250,7 @@ impl TrackerApp {
                     Ok(m) => m,
                     Err(e) => e,
                 });
-                Task::none()
+                crate::settings_open::resize(self)
             }
             Message::ConfirmClear => {
                 self.confirm_clear = !self.confirm_clear;
@@ -1490,9 +1274,9 @@ impl TrackerApp {
                 });
                 if ok {
                     self.games.clear();
-                    self.health_status = self.health_now();
+                    self.refresh_health();
                 }
-                Task::none()
+                crate::settings_open::resize(self)
             }
             Message::UpdateChecked(info) => {
                 self.update_open_details.clear();
@@ -1602,6 +1386,10 @@ impl TrackerApp {
                 Task::none()
             }
             Message::OpenUninstall => {
+                if self.fixture.is_some() {
+                    self.replace_toast(crate::settings_update::DEMO_REFUSED);
+                    return Task::none();
+                }
                 let exe = std::env::current_exe().unwrap_or_default();
                 let Some(home) =
                     dirs::home_dir().filter(|home| crate::uninstall::home_is_usable(home))
@@ -1640,6 +1428,10 @@ impl TrackerApp {
                 Task::none()
             }
             Message::ConfirmUninstall => {
+                if self.fixture.is_some() {
+                    self.uninstall_dialog = None;
+                    return Task::none();
+                }
                 let Some(crate::uninstall::UninstallDialog::Confirm {
                     home,
                     prefix,
@@ -1794,6 +1586,8 @@ impl TrackerApp {
                     }
                 }
                 self.daemon = daemon::refresh_view(&self.data_dir, &self.daemon);
+                self.page_state
+                    .observe_tracker(self.daemon.pid, &self.saved_config);
                 if self.quit_gate.update_finished() {
                     tracing::info!("update finished: running the quit that waited for it");
                     return self.exit_now();
@@ -1906,7 +1700,7 @@ impl TrackerApp {
         }
     }
 
-    fn replace_toast(&mut self, text: impl Into<String>) {
+    pub(crate) fn replace_toast(&mut self, text: impl Into<String>) {
         show_plain_toast(&mut self.toast, &mut self.toast_action, text.into());
     }
 
@@ -1979,7 +1773,7 @@ impl TrackerApp {
         ))
     }
 
-    fn refresh_kit_sessions(&mut self) {
+    pub(crate) fn refresh_kit_sessions(&mut self) {
         self.sessions_with_kit = self
             .games
             .iter()
@@ -1988,52 +1782,13 @@ impl TrackerApp {
             .collect();
     }
 
-    fn game_choices(&self) -> Vec<crate::report::GameChoice> {
-        // Kit sessions stay listed. The newest games without a kit are capped
-        // so a long history is not a column of disabled chips.
-        const RECENT_WITHOUT_KIT: usize = 8;
-        let mut without_kit = 0;
-        let mut choices = Vec::new();
-        for game in &self.games {
-            // Every stored game can be reported: without a saved picture
-            // the report carries the stored values and the session id.
-            let has_picture = self.sessions_with_kit.contains(&game.session_id);
-            let has_kit = true;
-            if !has_picture {
-                if without_kit == RECENT_WITHOUT_KIT {
-                    continue;
-                }
-                without_kit += 1;
-            }
-            choices.push(crate::report::GameChoice {
-                session_id: game.session_id.clone(),
-                label: format!(
-                    "{} · {} · {} {}{}",
-                    game.display_hero(),
-                    game.display_map(),
-                    game.played_at
-                        .with_timezone(&chrono::Local)
-                        .format("%Y-%m-%d"),
-                    local_hm(game.played_at),
-                    if has_picture {
-                        ""
-                    } else {
-                        " · no picture saved"
-                    }
-                ),
-                has_kit,
-            });
-        }
-        choices
-    }
-
-    fn arm_training_toast(&mut self, session_id: &str, category: crate::report::GameCategory) {
-        if !self.games.iter().any(|g| g.session_id == session_id) {
+    pub(crate) fn arm_training_toast(&mut self, sid: &str, category: crate::report::GameCategory) {
+        if !self.games.iter().any(|g| g.session_id == sid) {
             self.toast_action = None;
             return;
         }
         self.toast_action = Some(Message::Report(crate::report::ReportMessage::OpenGame {
-            session_id: Some(session_id.to_string()),
+            session_id: Some(sid.to_string()),
             category: Some(category),
             training: true,
             choices: Vec::new(),
@@ -2082,14 +1837,7 @@ impl TrackerApp {
                 category,
             } => {
                 dialog.building = Some(generation);
-                let req = crate::report::GameBuildRequest {
-                    config,
-                    session_id,
-                    category,
-                    text: dialog.text.clone(),
-                    training: dialog.training,
-                    capture_backend,
-                };
+                let req = dialog.game_build_request(config, session_id, category, capture_backend);
                 Task::perform(crate::report::build_game(req), move |result| {
                     Message::Report(crate::report::ReportMessage::Built(generation, result))
                 })
@@ -2148,7 +1896,7 @@ impl TrackerApp {
                 dialog.game_session = session_id;
                 dialog.training = training;
                 dialog.game_choices = if choices.is_empty() {
-                    self.game_choices()
+                    self.game_choices(dialog.game_session.as_deref())
                 } else {
                     choices
                 };
@@ -2189,7 +1937,10 @@ impl TrackerApp {
                 self.rebuild_report()
             }
             ReportMessage::GameCategory(category) => {
-                let choices = self.game_choices();
+                let selected = self
+                    .report_dialog_mut()
+                    .and_then(|d| d.game_session.clone());
+                let choices = self.game_choices(selected.as_deref());
                 let Some(dialog) = self.report_dialog_mut() else {
                     return Task::none();
                 };
@@ -2214,11 +1965,14 @@ impl TrackerApp {
                 }
                 Task::none()
             }
-            ReportMessage::Training(on) => {
+            ReportMessage::Training(on) | ReportMessage::RankIncluded(on) => {
                 let Some(d) = self.report_dialog_mut() else {
                     return Task::none();
                 };
-                d.training = on;
+                match message {
+                    ReportMessage::Training(_) => d.training = on,
+                    _ => d.rank_included = on,
+                }
                 self.rebuild_report()
             }
             ReportMessage::Text(value) => {
@@ -2542,16 +2296,19 @@ impl TrackerApp {
         };
         match Config::apply_setup_patch(&path, &patch) {
             Ok(fresh) => {
+                let shown = self.shown_for(&fresh, &path);
                 if patch.setup_completed.is_some() {
+                    self.saved_file.setup_completed = fresh.setup_completed;
                     self.saved_config.setup_completed = fresh.setup_completed;
                 }
                 if patch.sync.is_some() {
-                    self.saved_config.sync = fresh.sync.clone();
-                    if let Some(sync) = &fresh.sync {
+                    self.saved_file.sync.clone_from(&fresh.sync);
+                    self.saved_config.sync = shown.sync;
+                    if let Some(sync) = &self.saved_config.sync {
                         self.settings.sync_url = sync.server_url.clone();
                         self.settings.sync_token = sync.token.clone();
                     }
-                    self.health_status = self.health_now();
+                    self.refresh_health();
                 }
             }
             Err(_) => {
@@ -2560,7 +2317,7 @@ impl TrackerApp {
         }
     }
 
-    fn show_refused_toast(&mut self) {
+    pub(crate) fn show_refused_toast(&mut self) {
         self.replace_toast(
             toast_if_config_unreadable(true)
                 .unwrap_or(SETTINGS_SAVE_REFUSED)
@@ -2596,6 +2353,22 @@ impl TrackerApp {
         Task::batch([report, self.tick_rest()])
     }
 
+    /// Show the Edit just queued on game `sid` now, as the next reload
+    /// will ([`snapshot::load_snapshot`] overlays the queued commands). The
+    /// card and the next Edit form then start from the corrected values,
+    /// so a second save before the tracker rewrites `live_snapshot.json`
+    /// (or with it stopped) re-sends no stale read.
+    fn refresh_game(&mut self, sid: &str) {
+        let snap = snapshot::load_snapshot(&self.data_dir);
+        if let Some(fresh) = games_from_snapshot(&snap)
+            .into_iter()
+            .find(|g| g.session_id == sid)
+            && let Some(g) = self.games.iter_mut().find(|g| g.session_id == sid)
+        {
+            *g = fresh;
+        }
+    }
+
     fn tick_rest(&mut self) -> Task<Message> {
         self.expire_refused_toast();
         if self.fixture.is_none() {
@@ -2603,13 +2376,16 @@ impl TrackerApp {
             if mtime != self.snapshot_mtime {
                 self.snapshot_mtime = mtime;
                 let snap = snapshot::load_snapshot(&self.data_dir);
-                self.games = games_from_snapshot(&snap);
+                self.games = self.games_tab.games_from(&snap);
                 self.refresh_kit_sessions();
-                self.live_status = live_status_for(&self.games);
-                self.health_status = self.health_now();
+                self.live_status = crate::tracker_status::classic_live_status(&self.games);
+                self.refresh_health();
                 self.clock = Utc::now();
             }
             self.daemon = daemon::refresh_view(&self.data_dir, &self.daemon);
+            self.page_state
+                .observe_tracker(self.daemon.pid, &self.saved_config);
+            self.refresh_token_rejected();
             let status = stat_tracker::ocr_switch::read_status(&self.data_dir);
             self.ocr_switch.daemon_off =
                 settings::daemon_runs_ocr_off(status.as_ref(), self.daemon.pid);
@@ -2617,10 +2393,10 @@ impl TrackerApp {
             let health = settings::daemon_health_notice(status.as_ref(), self.daemon.pid);
             if health != self.ocr_switch.health_notice {
                 self.ocr_switch.health_notice = health;
-                self.health_status = self.health_now();
+                self.refresh_health();
             }
-            self.ocr_switch.capture_notice =
-                settings::daemon_capture_notice(status.as_ref(), self.daemon.pid);
+            // The capture route and keyboard notices, and the debounced focus.
+            self.observe_capture_and_focus(status.as_ref(), std::time::Instant::now());
             let seen = (
                 self.daemon.pid,
                 settings::daemon_share_open(status.as_ref(), self.daemon.pid),
@@ -2632,7 +2408,7 @@ impl TrackerApp {
             let share = settings::daemon_share_notice(status.as_ref(), self.daemon.pid);
             if share != self.ocr_switch.share_notice {
                 self.ocr_switch.share_notice = share;
-                self.health_status = self.health_now();
+                self.refresh_health();
             }
         }
 
@@ -2771,6 +2547,10 @@ impl TrackerApp {
     }
 
     fn toggle_overlay(&mut self) -> Task<Message> {
+        if !self.companion_enabled() {
+            self.replace_toast(crate::companion_gate::OFF_TOAST);
+            return Task::none();
+        }
         self.apply_overlay_policy();
         let key = overlay::live_session_key(
             &self.data_dir,
@@ -2821,129 +2601,21 @@ impl TrackerApp {
     }
 
     pub fn view(&self, _window: window::Id) -> Element<'_, Message> {
-        let header = widgets::app_header(self);
-        let nav = widgets::sidebar(self.screen);
-        let settings_screen = self.screen == Screen::Settings;
-
-        // Sidebar is a fixed width. The remaining pane flexes with the window
-        // (rev 3). Header chips live in that pane. Column counts come from
-        // `responsive`. Settings keeps the header and scrolls the form in the
-        // leftover height. Other screens scroll the whole pane.
-        let mut content = column![header]
-            .spacing(16)
-            .width(Fill)
-            .height(if settings_screen {
-                Fill
-            } else {
-                Length::Shrink
-            });
-        if let Some(t) = &self.toast {
-            content = content.push(widgets::toast_bar(t, self.toast_action.clone()));
-        }
-        if self.restart_bar_visible() {
-            content = content.push(restart_prompt::bar());
-        }
-        content = content.push(
-            responsive(|size| match self.screen {
-                Screen::Overview => crate::overview::view(self, size.width),
-                Screen::Games => crate::games::view(self, size.width),
-                Screen::Heroes => crate::heroes::view(self, size.width),
-                Screen::Maps => crate::maps::view(self, size.width),
-                Screen::Seasons => crate::seasons::view(self, size.width),
-                Screen::Settings => crate::settings::view(self, size.width),
-            })
-            .width(Fill)
-            .height(if settings_screen {
-                Fill
-            } else {
-                Length::Shrink
-            }),
-        );
-
-        let main = container(content)
-            .width(Fill)
-            .height(if settings_screen {
-                Fill
-            } else {
-                Length::Shrink
-            })
-            .padding(Padding {
-                top: PAGE_PAD_Y,
-                bottom: PAGE_PAD_Y,
-                left: PAGE_PAD_X,
-                right: PAGE_PAD_X,
-            });
-
-        let page_body: Element<'_, Message> = if settings_screen {
-            container(main).width(Fill).height(Fill).into()
-        } else {
-            iced::widget::scrollable(main)
-                .width(Fill)
-                .height(Fill)
-                .into()
-        };
-
-        let chrome = row![
-            container(nav)
-                .width(SIDEBAR_WIDTH)
-                .height(Fill)
-                .padding(Padding {
-                    top: PAGE_PAD_Y,
-                    bottom: PAGE_PAD_Y,
-                    left: PAGE_PAD_X,
-                    right: 8.0,
-                }),
-            page_body,
-        ]
-        .spacing(0)
-        .width(Fill)
-        .height(Fill);
-
-        let page = container(chrome)
-            .width(Fill)
-            .height(Fill)
-            .style(theme::page_background);
-
-        let with_notes = if let Some(dialog) = &self.notes_dialog {
-            // `notes::dialog` includes the backdrop and is opaque, so a press
-            // on the scrim or the card does not reach Update now underneath.
-            stack![
-                page,
-                notes::dialog(&dialog.subtitle, &dialog.sections, self.dialog_notes_ui())
-            ]
-            .width(Fill)
-            .height(Fill)
-            .into()
-        } else {
-            page.into()
-        };
-        let with_guide = if self.setup.open {
-            stack![with_notes, crate::setup_guide::view(&self.setup)]
-                .width(Fill)
-                .height(Fill)
-                .into()
-        } else {
-            with_notes
-        };
-        let with_uninstall = if let Some(dialog) = &self.uninstall_dialog {
-            stack![
-                with_guide,
-                crate::uninstall::view(dialog, self.uninstall_busy)
-            ]
-            .width(Fill)
-            .height(Fill)
-            .into()
-        } else {
-            with_guide
-        };
-        if let Some(report) = &self.report {
-            stack![with_uninstall, crate::report::view(report)]
-                .width(Fill)
-                .height(Fill)
-                .into()
-        } else {
-            with_uninstall
-        }
+        // `notes::dialog` includes the backdrop and is opaque, so a press
+        // on the scrim or the card does not reach Update now underneath.
+        let notes = self.notes_dialog.as_ref().map(|dialog| {
+            notes::dialog(&dialog.subtitle, &dialog.sections, self.dialog_notes_ui())
+        });
+        let guide = self
+            .setup
+            .open
+            .then(|| crate::setup_guide::view(&self.setup));
+        let uninstall = self
+            .uninstall_dialog
+            .as_ref()
+            .map(|dialog| crate::uninstall::view(dialog, self.uninstall_busy));
+        let report = self.report.as_ref().map(crate::report::view);
+        crate::chrome::with_layers(self, [notes, guide, uninstall, report])
     }
 
     pub fn update_notes_ui(&self) -> notes::NotesUi<'_> {
@@ -2976,7 +2648,7 @@ impl TrackerApp {
         hero_pack_hint(self.sync_on(), self.ocr_switch.packs.as_ref())
     }
 
-    fn health_now(&self) -> String {
+    pub(crate) fn health_now(&self) -> String {
         let base = health_with_ocr_notice(
             health_status_for(
                 &self.data_dir,
@@ -2997,7 +2669,7 @@ impl TrackerApp {
     /// ([`Message::ReaderPacksChecked`]). With a pack missing, or a tracker
     /// version that cannot yet, the box stays ticked and the reason is shown
     /// next to it.
-    fn toggle_classic_ocr(&mut self, want_classic: bool) -> Task<Message> {
+    pub(crate) fn toggle_classic_ocr(&mut self, want_classic: bool) -> Task<Message> {
         if self.fixture.is_some() {
             // Demo mode saves nothing and has no packs to look at.
             self.settings.classic_ocr = want_classic;
@@ -3016,14 +2688,10 @@ impl TrackerApp {
 /// carries a waiting click on the classic OCR switch.
 fn check_reader_packs(data_dir: PathBuf, turn_off: bool) -> Task<Message> {
     Task::perform(
-        async move { stat_tracker::ocr_switch::PackReadiness::on_disk(&data_dir) },
+        async move { stat_tracker::ocr_switch::pack_readiness_on_disk(&data_dir) },
         move |packs| Message::ReaderPacksChecked { packs, turn_off },
     )
 }
-
-/// Shown under Tracker health when no hero pack is installed and site sync
-/// is off: the hero pack comes from the site, so heroes read as unknown.
-pub const HERO_PACK_SYNC_HINT: &str = "Hero names need site sync. Your stats still track normally.";
 
 /// Site sync is set up in `config`: a URL and a token, neither blank.
 pub fn sync_on_for(config: &Config) -> bool {
@@ -3033,48 +2701,20 @@ pub fn sync_on_for(config: &Config) -> bool {
         .is_some_and(|s| !s.server_url.trim().is_empty() && !s.token.trim().is_empty())
 }
 
-/// [`HERO_PACK_SYNC_HINT`] when site sync is off and the last pack check
-/// found no hero pack. `None` before the first check (and in demo mode,
-/// which never checks), and whenever sync is on: with sync on the tracker
-/// downloads the pack itself.
-pub fn hero_pack_hint(
-    sync_on: bool,
-    packs: Option<&stat_tracker::ocr_switch::PackReadiness>,
-) -> Option<&'static str> {
-    match packs {
-        Some(p) if !sync_on && !p.heroes => Some(HERO_PACK_SYNC_HINT),
-        _ => None,
-    }
-}
+pub use crate::hero_pack_hint::hero_pack_hint;
 
 const HEALTH_READY: &str = "Ready";
 const HEALTH_WAITING: &str = "Waiting for a capture";
 
-/// Tracker health with the tracker's classic OCR notice: it runs with OCR
-/// off and holds reads for a missing reader pack, or a read was stopped. A
-/// refused off is not in it (`settings::daemon_health_notice`). The notice
-/// takes the place of the two idle lines and follows a sync problem.
+/// Tracker health with a notice: the tracker's own (`settings::daemon_health_notice`)
+/// or a declined screen share. It takes the place of the two idle lines;
+/// after a sync problem or an earlier notice it starts a new line, as the
+/// keyboard notice ends with a shell command.
 fn health_with_ocr_notice(base: String, notice: Option<&str>) -> String {
     match notice {
         None => base,
         Some(notice) if base == HEALTH_READY || base == HEALTH_WAITING => notice.to_string(),
-        Some(notice) => format!("{base} {notice}"),
-    }
-}
-
-fn fixture_clock(fixture: Option<FixtureKind>, games: &[Game]) -> DateTime<Utc> {
-    if fixture == Some(FixtureKind::Sample) {
-        games.first().map(|g| g.played_at).unwrap_or_else(Utc::now)
-    } else {
-        Utc::now()
-    }
-}
-
-fn live_status_for(games: &[Game]) -> String {
-    if let Some(g) = games.first() {
-        format!("Last game {}", crate::model::local_hm(g.played_at))
-    } else {
-        "Waiting for a capture".into()
+        Some(notice) => format!("{base}\n{notice}"),
     }
 }
 
@@ -3267,881 +2907,5 @@ fn health_status_for(
 }
 
 #[cfg(test)]
-mod tests {
-    #[test]
-    fn a_new_capture_screen_restarts_the_tracker_and_other_saves_do_not() {
-        let before = super::Config::default();
-        let mut picked = before.clone();
-        picked.capture_output = Some("DP-1".into());
-        assert!(super::capture_output_changed(&before, &picked));
-        assert!(super::capture_output_changed(&picked, &before));
-        let mut other = picked.clone();
-        other.capture_output = Some("eDP-1".into());
-        assert!(super::capture_output_changed(&picked, &other));
-        let mut same = picked.clone();
-        same.update_channel = "prerelease".into();
-        assert!(!super::capture_output_changed(&picked, &same));
-        assert!(!super::capture_output_changed(&picked, &picked));
-    }
-
-    use super::{TrayWindowOp, tray_hide_op, tray_show_op};
-    use iced::window;
-    use stat_tracker::config::Config;
-    use tracing_subscriber::layer::SubscriberExt;
-
-    #[test]
-    fn a_stopped_or_foreign_pid_does_not_block_uninstall() {
-        use crate::daemon::StopError;
-
-        assert!(StopError::NotRunning.allows_restart());
-        assert!(
-            StopError::Refused("Saved process id is not the tracker, not stopping it")
-                .allows_restart()
-        );
-        assert!(StopError::Refused("Refusing to stop this window's process").allows_restart());
-        assert!(
-            !StopError::Failed("Tracker is still shutting down, not starting another copy".into())
-                .allows_restart()
-        );
-        assert!(
-            !StopError::Failed("Could not stop the tracker: Permission denied".into())
-                .allows_restart()
-        );
-    }
-
-    #[test]
-    fn setup_guide_keys_do_not_dismiss_notes_underneath() {
-        use iced::keyboard::Key;
-        use iced::keyboard::key::Named;
-
-        let escape = Key::Named(Named::Escape);
-        let enter = Key::Named(Named::Enter);
-        match super::foreground_key_message(true, true, &escape) {
-            Some(super::Message::Setup(crate::setup_guide::SetupMessage::Skip)) => {}
-            other => panic!("escape should skip the guide, got {other:?}"),
-        }
-        match super::guide_shortcut(iced::event::Status::Captured, true, true, &escape) {
-            None => {}
-            other => panic!("a focused text input keeps escape, got {other:?}"),
-        }
-        match super::guide_shortcut(iced::event::Status::Captured, true, true, &enter) {
-            None => {}
-            other => panic!("a focused text input keeps enter, got {other:?}"),
-        }
-        match super::guide_shortcut(iced::event::Status::Ignored, true, true, &enter) {
-            Some(super::Message::Setup(crate::setup_guide::SetupMessage::Next)) => {}
-            other => panic!("enter should continue the guide, got {other:?}"),
-        }
-        match super::foreground_key_message(true, true, &enter) {
-            Some(super::Message::Setup(crate::setup_guide::SetupMessage::Next)) => {}
-            other => panic!("enter should continue the guide, got {other:?}"),
-        }
-        match super::foreground_key_message(false, true, &escape) {
-            Some(super::Message::DismissNotes) => {}
-            other => panic!("escape should close notes when the guide is closed, got {other:?}"),
-        }
-        assert!(super::foreground_key_message(false, true, &enter).is_none());
-    }
-
-    #[test]
-    fn save_toasts_have_no_em_or_en_dash() {
-        for copy in [
-            super::SETTINGS_SAVED_RESTART,
-            super::SETTINGS_SAVE_REFUSED,
-            super::SETTINGS_RELOADED_FROM_DISK,
-            "Settings saved",
-        ] {
-            assert!(!copy.contains('—'), "{copy}");
-            assert!(!copy.contains('–'), "{copy}");
-        }
-        assert_eq!(
-            super::toast_if_config_unreadable(true),
-            Some(super::SETTINGS_SAVE_REFUSED)
-        );
-        assert!(super::SETTINGS_SAVE_REFUSED.contains("not saved"));
-        assert!(super::toast_if_config_unreadable(false).is_none());
-        assert!(super::SETTINGS_SAVED_RESTART.contains("Restart the tracker"));
-    }
-
-    #[test]
-    fn alpha_updates_save_rechecks_and_needs_no_tracker_restart() {
-        use crate::settings::{SettingsForm, SettingsToggle};
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("config.toml");
-        let raw = "\
-# keep this comment
-data_dir = \"/tmp/sst-alpha-save\"
-player_name = \"FrozenTear\"
-";
-        std::fs::write(&path, raw).expect("seed");
-        let snapshot = Config::parse_file_contents(raw).expect("parse");
-        let mut form = SettingsForm::from_config_and_shadow(
-            &snapshot,
-            Config::shadow_control(snapshot.shadow_recognizer, None),
-        );
-        form.set_toggle(SettingsToggle::PrereleaseUpdates, true);
-        let saved = super::save_settings_form(&path, false, &snapshot, &form, || Ok(()))
-            .expect("save writes");
-        let super::SettingsFileSave::Saved(written) = saved else {
-            panic!("expected a write, got {saved:?}");
-        };
-        let on_disk = std::fs::read_to_string(&path).expect("file");
-        assert!(on_disk.contains("# keep this comment"), "{on_disk}");
-        assert!(
-            on_disk.contains("update_channel = \"prerelease\""),
-            "{on_disk}"
-        );
-        assert!(
-            Config::parse_file_contents(&on_disk)
-                .expect("reparse")
-                .wants_prerelease_updates(),
-            "the next update check reads prerelease from disk"
-        );
-        assert!(super::update_channel_switched(&snapshot, &written, None));
-        assert!(super::only_update_channel_changed(&snapshot, &written));
-        assert_eq!(super::toast_after_successful_save(false), "Settings saved");
-
-        let mut other = written.clone();
-        other.debug_ocr = !other.debug_ocr;
-        assert!(!super::only_update_channel_changed(&written, &other));
-        assert!(!super::update_channel_switched(&written, &other, None));
-        assert!(!super::only_update_channel_changed(&written, &written));
-
-        let mut respelled = written.clone();
-        respelled.update_channel = "PRERELEASE".into();
-        assert!(!super::update_channel_switched(&written, &respelled, None));
-
-        // On an alpha install an unset channel is already prerelease, so
-        // writing `stable` switches and writing `prerelease` does not.
-        let alpha = Some("0.5.0-alpha.3");
-        let mut stable = snapshot.clone();
-        stable.update_channel = "stable".into();
-        assert!(super::update_channel_switched(&snapshot, &stable, alpha));
-        assert!(!super::update_channel_switched(&snapshot, &written, alpha));
-    }
-
-    #[test]
-    fn save_reloads_a_fixed_or_hand_edited_config_instead_of_overwriting_it() {
-        use crate::settings::{SettingsForm, SettingsToggle};
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("config.toml");
-        let broken = "\
-this is not toml
-token = \"secret-token-must-stay\"
-";
-        std::fs::write(&path, broken).expect("seed broken file");
-
-        // Startup: the file did not parse, so the form is defaults.
-        let mut snapshot = Config::default();
-        let mut form = SettingsForm::from_config_and_shadow(
-            &snapshot,
-            Config::shadow_control(snapshot.shadow_recognizer, None),
-        );
-        let mut form_built_unreadable = true;
-        assert!(form.player_name.is_empty());
-        assert!(form.sync_token.is_empty());
-
-        let mut checked_before_reload = false;
-        let refused =
-            super::save_settings_form(&path, form_built_unreadable, &snapshot, &form, || {
-                checked_before_reload = true;
-                Ok(())
-            })
-            .expect("refuse is not a write error");
-        assert!(!checked_before_reload);
-        assert_eq!(refused, super::SettingsFileSave::Unreadable);
-        assert_eq!(std::fs::read_to_string(&path).expect("unchanged"), broken);
-
-        let fixed = "\
-# scoreboard name
-data_dir = \"/tmp/sst-fixed-on-disk\"
-player_name = \"FrozenTear\"
-session_window_secs = 1800
-finished_game_close_secs = 180
-game_process_names = [\"Overwatch.exe\"]
-debug_ocr = false
-
-[auto_detect]
-enabled = true
-poll_interval_secs = 4
-cooldown_secs = 120
-
-[sync]
-server_url = \"https://crew.example\"
-token = \"secret-token-must-stay\"
-";
-        std::fs::write(&path, fixed).expect("fix the file");
-
-        // (a) First Save reloads the fixed file and does not write the defaults.
-        let mut checked_before_reload = false;
-        let reloaded =
-            super::save_settings_form(&path, form_built_unreadable, &snapshot, &form, || {
-                checked_before_reload = true;
-                Err("sync check must not run before a reload".into())
-            })
-            .expect("reload is not a write error");
-        assert!(!checked_before_reload);
-        let super::SettingsFileSave::Reloaded(fresh) = reloaded else {
-            panic!("first save after the fix must reload, got {reloaded:?}");
-        };
-        assert_eq!(std::fs::read_to_string(&path).expect("file"), fixed);
-        form = super::form_after_disk_reload(
-            &form,
-            &fresh,
-            Config::shadow_control(fresh.shadow_recognizer, None),
-        );
-        snapshot = fresh;
-        form_built_unreadable = false;
-        assert_eq!(form.player_name, "FrozenTear");
-        assert_eq!(form.sync_token, "secret-token-must-stay");
-        assert_eq!(form.sync_url, "https://crew.example");
-        assert!(!snapshot.shadow_recognizer);
-
-        // Second Save, after the member toggles the reader, writes only that key.
-        form.set_toggle(SettingsToggle::ShadowRecognizer, true);
-        let saved =
-            super::save_settings_form(&path, form_built_unreadable, &snapshot, &form, || Ok(()))
-                .expect("second save writes");
-        let super::SettingsFileSave::Saved(written) = saved else {
-            panic!("second save must write the toggle, got {saved:?}");
-        };
-        assert!(written.shadow_recognizer);
-        let text = std::fs::read_to_string(&path).expect("saved");
-        let loaded = Config::read_at(&path).expect("load after save");
-        assert!(loaded.shadow_recognizer);
-        assert_eq!(
-            loaded.player_name.as_deref(),
-            Some("FrozenTear"),
-            "the reloaded name must survive the toggle write"
-        );
-        assert_eq!(
-            loaded.sync.as_ref().map(|sync| sync.token.as_str()),
-            Some("secret-token-must-stay")
-        );
-        let header = text.find("[auto_detect]").expect("tables");
-        assert_eq!(
-            &text[header..],
-            &fixed[fixed.find("[auto_detect]").expect("tables")..]
-        );
-        assert_eq!(text[..header].matches("shadow_recognizer").count(), 1);
-        assert!(text[..header].contains("shadow_recognizer = true"));
-        assert!(text.contains("# scoreboard name"));
-        assert!(text.contains("player_name = \"FrozenTear\""));
-
-        // (b) A hand edit while the form is open is reloaded, not overwritten.
-        let hand_edited = fixed.replace(
-            "player_name = \"FrozenTear\"",
-            "player_name = \"the other account\"",
-        );
-        let hand_edited = hand_edited.replace(
-            "token = \"secret-token-must-stay\"",
-            "token = \"token-edited-on-disk\"",
-        );
-        std::fs::write(&path, &hand_edited).expect("hand edit");
-        form.set_toggle(SettingsToggle::ShadowRecognizer, false);
-        let outcome =
-            super::save_settings_form(&path, form_built_unreadable, &snapshot, &form, || {
-                Err("must not write over a hand edit".into())
-            })
-            .expect("hand edit reloads");
-        let super::SettingsFileSave::Reloaded(fresh) = outcome else {
-            panic!("a hand edit must reload, got {outcome:?}");
-        };
-        assert_eq!(
-            std::fs::read_to_string(&path).expect("hand edit kept"),
-            hand_edited
-        );
-        form = super::form_after_disk_reload(
-            &form,
-            &fresh,
-            Config::shadow_control(fresh.shadow_recognizer, None),
-        );
-        assert_eq!(form.player_name, "the other account");
-        assert_eq!(form.sync_token, "token-edited-on-disk");
-        assert!(!form.sync_token.is_empty());
-
-        // The startup flag reloads even when the parsed values already match.
-        let defaults_path = dir.path().join("defaults.toml");
-        let defaults = Config::default();
-        let defaults_text = toml::to_string_pretty(&defaults).expect("pretty");
-        std::fs::write(&defaults_path, &defaults_text).expect("write defaults");
-        let round_trip = Config::read_at(&defaults_path).expect("read defaults");
-        assert_eq!(round_trip, defaults);
-        let defaults_form = SettingsForm::from_config_and_shadow(
-            &defaults,
-            Config::shadow_control(defaults.shadow_recognizer, None),
-        );
-        let mut dirty = defaults_form;
-        dirty.set_toggle(SettingsToggle::ShadowRecognizer, true);
-        let flagged = super::save_settings_form(&defaults_path, true, &defaults, &dirty, || {
-            Err("must not write while the form was built unreadable".into())
-        })
-        .expect("flagged reload");
-        assert!(matches!(flagged, super::SettingsFileSave::Reloaded(_)));
-        assert_eq!(
-            std::fs::read_to_string(&defaults_path).expect("defaults"),
-            defaults_text
-        );
-    }
-
-    #[test]
-    fn refused_toast_clears_on_dismiss_or_timeout() {
-        let refused = super::SETTINGS_SAVE_REFUSED;
-        assert!(super::toast_after_dismiss().is_none());
-        let shown = std::time::SystemTime::UNIX_EPOCH;
-        let almost = shown + super::REFUSED_TOAST_TIMEOUT - std::time::Duration::from_secs(1);
-        let due = shown + super::REFUSED_TOAST_TIMEOUT;
-        assert!(!super::refused_toast_expired(
-            Some(refused),
-            Some(shown),
-            almost
-        ));
-        assert!(super::refused_toast_expired(
-            Some(refused),
-            Some(shown),
-            due
-        ));
-        assert_ne!(super::toast_after_successful_save(true), refused);
-    }
-
-    #[test]
-    fn a_later_toast_drops_the_training_action() {
-        let mut toast = Some("Outcome set to Victory".into());
-        let mut action = Some(super::Message::DismissToast);
-        super::show_plain_toast(&mut toast, &mut action, "The overlay did not start.".into());
-        assert_eq!(toast.as_deref(), Some("The overlay did not start."));
-        assert!(action.is_none());
-    }
-
-    #[test]
-    fn background_messages_keep_the_training_action() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cli = crate::cli::Cli {
-            data_dir: tmp.path().to_path_buf(),
-            fixture: Some(crate::cli::FixtureKind::Empty),
-            seasons_url: None,
-            companion: false,
-            help: false,
-            version: false,
-            replace: false,
-        };
-        let (mut app, _open) = super::TrackerApp::new(cli);
-        app.toast = Some("Outcome set to Victory".into());
-        app.toast_action = Some(super::Message::DismissToast);
-        let _ = app.update(super::Message::AutostartReady(true));
-        let _ = app.update(super::Message::SeasonsFetched(Ok(Vec::new())));
-        let _ = app.update(super::Message::Setup(
-            crate::setup_guide::SetupMessage::PollReady(Err("down".into())),
-        ));
-        assert_eq!(app.toast.as_deref(), Some("Outcome set to Victory"));
-        assert!(app.toast_action.is_some());
-        let _ = app.update(super::Message::DaemonDone(Ok("restarted".into())));
-        assert_eq!(app.toast.as_deref(), Some("restarted"));
-        assert!(app.toast_action.is_none());
-    }
-
-    fn aur_owner() -> crate::uninstall::PackageOwner {
-        crate::uninstall::PackageOwner {
-            manager: crate::uninstall::PackageManager::Pacman,
-            package: "scuffed-stat-tracker-bin".into(),
-        }
-    }
-
-    fn offered_update() -> super::UpdateInfo {
-        super::UpdateInfo {
-            latest: "0.5.0".into(),
-            current: "0.5.0-rc.7".into(),
-            url: "https://example.invalid/release".into(),
-            release_bodies: Vec::new(),
-        }
-    }
-
-    // Only Pending and package-owned plans here: a script-install plan
-    // probes PATH and writes a probe file under the install prefix.
-    #[test]
-    fn the_package_probe_re_plans_unless_an_update_runs() {
-        use super::{Message, UpdatePlan, UpdateProgress};
-        let tmp = tempfile::tempdir().unwrap();
-        let mut app = fixture_app(tmp.path());
-        app.package_probed = false;
-        let _ = app.update(Message::UpdateChecked(Some(offered_update())));
-        assert_eq!(
-            app.update_plan,
-            UpdatePlan::Blocked {
-                reason: crate::update::PACKAGE_PROBE_PENDING.into(),
-                hint: String::new(),
-            }
-        );
-        // Update now is a no-op until the probe answers.
-        let _ = app.update(Message::RunUpdate);
-        assert!(!matches!(app.update_progress, UpdateProgress::Running));
-
-        // An update in progress keeps its plan.
-        app.update_progress = UpdateProgress::Running;
-        let _ = app.update(Message::PackageOwnerProbed(Some(aur_owner())));
-        assert_eq!(app.package_owner, Some(aur_owner()));
-        assert!(app.package_probed);
-        assert!(matches!(
-            &app.update_plan,
-            UpdatePlan::Blocked { reason, .. } if reason == crate::update::PACKAGE_PROBE_PENDING
-        ));
-
-        app.update_progress = UpdateProgress::Idle;
-        let _ = app.update(Message::PackageOwnerProbed(Some(aur_owner())));
-        let UpdatePlan::Blocked { reason, hint } = &app.update_plan else {
-            panic!("a package install is never Ready");
-        };
-        assert!(reason.contains("scuffed-stat-tracker-bin"));
-        assert!(hint.contains("paru -Syu"));
-    }
-
-    #[test]
-    fn copy_update_command_does_nothing_on_a_package_install() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut app = fixture_app(tmp.path());
-        app.package_owner = Some(aur_owner());
-        app.update = Some(offered_update());
-        app.toast = None;
-        app.copy_text = |_| panic!("the test reached the clipboard");
-        let _ = app.update(super::Message::CopyUpdateCmd);
-        assert!(
-            app.toast.is_none(),
-            "no clipboard, no toast: {:?}",
-            app.toast
-        );
-    }
-
-    #[test]
-    fn copy_update_command_does_nothing_before_the_probe_answers() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut app = fixture_app(tmp.path());
-        app.package_probed = false;
-        app.package_owner = None;
-        app.update = Some(offered_update());
-        app.toast = None;
-        app.copy_text = |_| panic!("the test reached the clipboard");
-        let _ = app.update(super::Message::CopyUpdateCmd);
-        assert!(
-            app.toast.is_none(),
-            "no clipboard, no toast: {:?}",
-            app.toast
-        );
-        // Once the probe says "no package", the command is copied, through
-        // the swapped copy function only.
-        app.package_probed = true;
-        app.copy_text = |cmd| {
-            assert!(
-                cmd.contains("STAT_TRACKER_TAG=stat-tracker-v0.5.0"),
-                "{cmd}"
-            );
-            Ok(crate::clipboard::ClipboardBackend::WlCopy)
-        };
-        let _ = app.update(super::Message::CopyUpdateCmd);
-        assert!(
-            app.toast
-                .as_deref()
-                .is_some_and(|t| t.starts_with("Copied install command")),
-            "{:?}",
-            app.toast
-        );
-    }
-
-    #[test]
-    fn a_running_update_leaves_the_quit_request_unpolled() {
-        use crate::update::UpdateProgress;
-        let polled = std::cell::Cell::new(0);
-        let poll = || {
-            polled.set(polled.get() + 1);
-            true
-        };
-        assert!(!super::quit_request_due(&UpdateProgress::Running, poll));
-        assert_eq!(
-            polled.get(),
-            0,
-            "a running update must not consume the request"
-        );
-        for done in [
-            UpdateProgress::Idle,
-            UpdateProgress::Succeeded("ok".into()),
-            UpdateProgress::Failed("no".into()),
-        ] {
-            assert!(super::quit_request_due(&done, poll), "{done:?}");
-        }
-        assert_eq!(polled.get(), 3);
-        assert!(!super::quit_request_due(&UpdateProgress::Idle, || false));
-    }
-
-    #[test]
-    fn quit_gate_defers_a_quit_until_the_update_ends() {
-        use crate::update::UpdateProgress;
-        let update = crate::update::UpdateGate::new();
-        let mut gate = super::QuitGate::default();
-        assert!(
-            !gate.request(&UpdateProgress::Running, &update),
-            "no exit mid-update"
-        );
-        assert!(gate.update_finished(), "the waiting quit runs");
-        assert!(!gate.update_finished(), "only once");
-
-        for done in [
-            UpdateProgress::Idle,
-            UpdateProgress::Succeeded("ok".into()),
-            UpdateProgress::Failed("no".into()),
-        ] {
-            let mut gate = super::QuitGate::default();
-            assert!(gate.request(&done, &update), "{done:?} exits at once");
-            assert!(!gate.update_finished(), "{done:?} leaves nothing pending");
-        }
-
-        let mut gate = super::QuitGate::default();
-        assert!(!gate.request(&UpdateProgress::Running, &update));
-        gate.cancel();
-        assert!(!gate.update_finished(), "Show cancelled the quit");
-    }
-
-    /// F3 on #425: a relaunch that shows the window again must drop a
-    /// quit that waits for the update, as tray Show does.
-    #[test]
-    fn showing_the_window_again_drops_a_waiting_quit() {
-        use crate::update::UpdateProgress;
-        let tmp = tempfile::tempdir().unwrap();
-        let mut app = fixture_app(tmp.path());
-        app.update_gate = Box::leak(Box::new(crate::update::UpdateGate::new()));
-        app.update_progress = UpdateProgress::Running;
-        let _ = app.update(super::Message::Tray(crate::tray::TrayAction::Quit));
-        assert!(app.quit_gate.deferred);
-        let _ = app.on_show_request();
-        assert!(!app.quit_gate.deferred, "the relaunch cancelled the quit");
-        let _ = app.update(super::Message::UpdateFinished(Ok("Installed.".into())));
-        assert!(!app.quit_gate.deferred);
-    }
-
-    /// F4 on #425: Quit while the update waits for the game exits at once
-    /// and cancels the update; nothing was stopped yet.
-    #[test]
-    fn quit_while_the_update_waits_for_the_game_exits_and_cancels_it() {
-        use crate::update::UpdateProgress;
-        let tmp = tempfile::tempdir().unwrap();
-        let mut app = fixture_app(tmp.path());
-        let gate: &'static crate::update::UpdateGate =
-            Box::leak(Box::new(crate::update::UpdateGate::new()));
-        app.update_gate = gate;
-        crate::update::test_set_waiting(gate);
-        app.update_progress = UpdateProgress::Running;
-        let _ = app.update(super::Message::Tray(crate::tray::TrayAction::Quit));
-        assert!(!app.quit_gate.deferred, "the quit did not wait");
-        assert!(!gate.waiting(), "the waiting update was cancelled");
-        assert!(!gate.cancel_waiting(), "it is cancelled, not waiting");
-    }
-
-    fn fixture_app(tmp: &std::path::Path) -> super::TrackerApp {
-        let cli = crate::cli::Cli {
-            data_dir: tmp.to_path_buf(),
-            fixture: Some(crate::cli::FixtureKind::Empty),
-            seasons_url: None,
-            companion: false,
-            help: false,
-            version: false,
-            replace: false,
-        };
-        super::TrackerApp::new(cli).0
-    }
-
-    /// GUI-2: tray Quit used to call `iced::exit()` mid-update and drop the
-    /// installer with the tracker stopped.
-    #[test]
-    fn tray_quit_during_an_update_waits_for_it() {
-        use crate::update::UpdateProgress;
-        let tmp = tempfile::tempdir().unwrap();
-        let mut app = fixture_app(tmp.path());
-        app.update_gate = Box::leak(Box::new(crate::update::UpdateGate::new()));
-        app.update_progress = UpdateProgress::Running;
-        let _ = app.update(super::Message::Tray(crate::tray::TrayAction::Quit));
-        assert!(app.quit_gate.deferred, "the quit waits for the update");
-        assert!(app.window_id.is_none(), "the window is hidden meanwhile");
-        let _ = app.update(super::Message::UpdateFinished(Ok("Installed.".into())));
-        assert!(
-            !app.quit_gate.deferred,
-            "the quit ran when the update ended"
-        );
-
-        app.update_progress = UpdateProgress::Idle;
-        let _ = app.update(super::Message::Tray(crate::tray::TrayAction::Quit));
-        assert!(!app.quit_gate.deferred, "no update: quit at once");
-    }
-
-    #[test]
-    fn closing_the_last_window_without_a_tray_during_an_update_waits() {
-        use crate::update::UpdateProgress;
-        let tmp = tempfile::tempdir().unwrap();
-        let mut app = fixture_app(tmp.path());
-        app.tray = None;
-        app.update_gate = Box::leak(Box::new(crate::update::UpdateGate::new()));
-        let id = app.window_id.expect("window open");
-        app.update_progress = UpdateProgress::Running;
-        let _ = app.update(super::Message::WindowClosed(id));
-        assert!(app.quit_gate.deferred);
-        let _ = app.update(super::Message::UpdateFinished(Err("failed".into())));
-        assert!(!app.quit_gate.deferred);
-    }
-
-    /// GUI-7: a re-check that fails keeps the banner; a new version
-    /// replaces it and clears an old error.
-    #[test]
-    fn a_periodic_recheck_only_replaces_the_offer_with_a_new_version() {
-        use crate::update::{UpdateInfo, UpdateProgress};
-        let tmp = tempfile::tempdir().unwrap();
-        let mut app = fixture_app(tmp.path());
-        let info = |v: &str| UpdateInfo {
-            latest: v.into(),
-            current: "0.5.0-rc.5".into(),
-            url: String::new(),
-            release_bodies: Vec::new(),
-        };
-        app.update = Some(info("0.5.0-rc.6"));
-        let _ = app.update(super::Message::UpdateRechecked(None));
-        assert_eq!(
-            app.update.as_ref().map(|i| i.latest.as_str()),
-            Some("0.5.0-rc.6")
-        );
-
-        app.update_progress = UpdateProgress::Failed("old error".into());
-        let _ = app.update(super::Message::UpdateRechecked(Some(info("0.5.0-rc.7"))));
-        assert_eq!(
-            app.update.as_ref().map(|i| i.latest.as_str()),
-            Some("0.5.0-rc.7")
-        );
-        assert_eq!(app.update_progress, UpdateProgress::Idle);
-    }
-
-    #[test]
-    fn hide_closes_the_open_window_and_is_noop_when_already_hidden() {
-        let id = window::Id::unique();
-        assert_eq!(tray_hide_op(Some(id)), Some(TrayWindowOp::Close(id)));
-        assert_eq!(tray_hide_op(None), None);
-    }
-
-    struct WarnCount(std::sync::Arc<std::sync::atomic::AtomicUsize>);
-
-    impl<S> tracing_subscriber::Layer<S> for WarnCount
-    where
-        S: tracing::Subscriber,
-    {
-        fn on_event(
-            &self,
-            event: &tracing::Event<'_>,
-            _ctx: tracing_subscriber::layer::Context<'_, S>,
-        ) {
-            if *event.metadata().level() == tracing::Level::WARN {
-                self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-        }
-    }
-
-    fn shown_launch(
-        dir: &std::path::Path,
-        installed: Option<&str>,
-        seen_memory: Option<&str>,
-    ) -> Option<super::NotesDialog> {
-        match super::notes_dialog_for(dir, installed, seen_memory) {
-            super::LaunchNotes::Show(dialog) => Some(dialog),
-            super::LaunchNotes::Quiet { .. } => None,
-        }
-    }
-
-    #[test]
-    fn launch_notes_follow_the_stored_version() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let first = shown_launch(dir.path(), Some("0.4.23"), None).expect("first run");
-        assert_eq!(first.remember.as_deref(), Some("0.4.23"));
-        assert_eq!(first.sections[0].version, "0.4.23");
-        assert!(first.sections[0].summary.contains("private log"));
-
-        super::seasons::save_last_seen_version(dir.path(), "0.4.23").expect("save");
-        assert!(shown_launch(dir.path(), Some("0.4.23"), None).is_none());
-
-        super::seasons::save_last_seen_version(dir.path(), "0.4.19").expect("older");
-        let upgraded = shown_launch(dir.path(), Some("0.4.23"), None).expect("upgrade");
-        let versions: Vec<_> = upgraded
-            .sections
-            .iter()
-            .map(|section| section.version.as_str())
-            .collect();
-        assert_eq!(versions, ["0.4.23", "0.4.22", "0.4.21", "0.4.20"]);
-
-        super::seasons::save_last_seen_version(dir.path(), "0.4.23").expect("newer");
-        let downgraded = shown_launch(dir.path(), Some("0.4.20"), None).expect("downgrade");
-        assert_eq!(downgraded.sections.len(), 1);
-        assert_eq!(downgraded.sections[0].version, "0.4.20");
-    }
-
-    #[test]
-    fn failed_ui_state_write_keeps_the_version_seen_for_the_session() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let blocker = dir.path().join("not-a-directory");
-        std::fs::write(&blocker, b"x").expect("blocker file");
-
-        let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let subscriber = tracing_subscriber::registry().with(WarnCount(count.clone()));
-        tracing::subscriber::with_default(subscriber, || {
-            let mut seen = super::NotesSeen::default();
-            super::remember_installed(&mut seen, &blocker, "0.4.23");
-            assert_eq!(seen.version.as_deref(), Some("0.4.23"));
-            assert!(seen.write_error_logged);
-            assert!(shown_launch(&blocker, Some("0.4.23"), seen.version.as_deref()).is_none());
-            super::remember_installed(&mut seen, &blocker, "0.4.23");
-            assert!(seen.write_error_logged);
-        });
-        assert_eq!(
-            count.load(std::sync::atomic::Ordering::Relaxed),
-            1,
-            "a failed ui_state write is logged once per session"
-        );
-
-        let fresh = tempfile::tempdir().expect("tempdir");
-        assert!(shown_launch(fresh.path(), Some("0.4.23"), Some("0.4.23")).is_none());
-    }
-
-    #[test]
-    fn show_opens_when_hidden_and_focuses_when_visible() {
-        let id = window::Id::unique();
-        assert_eq!(tray_show_op(None), TrayWindowOp::Open);
-        assert_eq!(tray_show_op(Some(id)), TrayWindowOp::Focus(id));
-    }
-
-    #[test]
-    fn hero_pack_hint_shows_only_without_sync_and_without_a_hero_pack() {
-        use stat_tracker::ocr_switch::PackReadiness;
-        let none = PackReadiness::default();
-        let heroes = PackReadiness {
-            heroes: true,
-            ..PackReadiness::default()
-        };
-        assert_eq!(
-            super::hero_pack_hint(false, Some(&none)),
-            Some(super::HERO_PACK_SYNC_HINT)
-        );
-        assert_eq!(super::hero_pack_hint(true, Some(&none)), None, "sync on");
-        assert_eq!(
-            super::hero_pack_hint(false, Some(&heroes)),
-            None,
-            "pack there"
-        );
-        assert_eq!(super::hero_pack_hint(true, Some(&heroes)), None);
-        assert_eq!(super::hero_pack_hint(false, None), None, "not checked yet");
-        assert_eq!(
-            super::HERO_PACK_SYNC_HINT,
-            "Hero names need site sync. Your stats still track normally."
-        );
-        assert!(!super::HERO_PACK_SYNC_HINT.contains('\u{2014}'));
-    }
-
-    #[test]
-    fn sync_counts_as_on_only_with_a_url_and_a_token() {
-        use stat_tracker::config::SyncConfig;
-        let with = |url: &str, token: &str| Config {
-            sync: Some(SyncConfig {
-                server_url: url.into(),
-                token: token.into(),
-            }),
-            ..Config::default()
-        };
-        assert!(!super::sync_on_for(&Config::default()));
-        assert!(!super::sync_on_for(&with("", "tok")));
-        assert!(!super::sync_on_for(&with("https://crew.example", "  ")));
-        assert!(super::sync_on_for(&with("https://crew.example", "tok")));
-    }
-
-    #[test]
-    fn the_classic_ocr_notice_replaces_an_idle_health_line_and_follows_a_sync_problem() {
-        let notice = "Reading on hold: the maps-v1 reader pack is not installed.";
-        for idle in [super::HEALTH_READY, super::HEALTH_WAITING] {
-            assert_eq!(super::health_with_ocr_notice(idle.into(), None), idle);
-            assert_eq!(
-                super::health_with_ocr_notice(idle.into(), Some(notice)),
-                notice
-            );
-        }
-        let paused = "Sync paused: Website URL must use https.";
-        assert_eq!(super::health_with_ocr_notice(paused.into(), None), paused);
-        assert_eq!(
-            super::health_with_ocr_notice(paused.into(), Some(notice)),
-            format!("{paused} {notice}")
-        );
-        let declined = "Screen share was declined: no captures until Overwatch is restarted";
-        let idle = super::health_with_ocr_notice(super::HEALTH_READY.into(), None);
-        assert_eq!(
-            super::health_with_ocr_notice(idle, Some(declined)),
-            declined
-        );
-        assert!(!declined.contains('\u{2014}'));
-    }
-
-    #[test]
-    fn health_names_an_insecure_saved_sync_url() {
-        let dir = std::env::temp_dir().join(format!("sst-health-m20-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("live_snapshot.json"), b"{}").unwrap();
-        let paused = super::health_status_for(&dir, &[], Some(("http://example.com", "tok")));
-        assert!(
-            paused.starts_with("Sync paused:"),
-            "existing cleartext config must be visible in tracker health, got {paused}"
-        );
-        assert!(!paused.contains('—'), "{paused}");
-        assert!(!paused.contains('–'), "{paused}");
-        assert!(paused.contains("https"), "{paused}");
-        assert_eq!(
-            super::health_status_for(&dir, &[], Some(("https://crew.example", "tok"))),
-            "Ready"
-        );
-        assert_eq!(
-            super::health_status_for(&dir, &[], Some(("http://127.0.0.1:3030", "tok"))),
-            "Ready"
-        );
-        assert_eq!(
-            super::health_status_for(&dir, &[], Some(("http://localhost", "tok"))),
-            "Ready"
-        );
-        assert_eq!(
-            super::health_status_for(&dir, &[], Some(("http://[::1]", "tok"))),
-            "Ready"
-        );
-        stat_tracker::sync::write_auth_pause(&dir, "https://crew.example", "old-token").unwrap();
-        let rejected =
-            super::health_status_for(&dir, &[], Some(("https://crew.example", "old-token")));
-        assert_eq!(rejected, stat_tracker::sync::SYNC_TOKEN_REJECTED_STATUS);
-        assert!(rejected.contains("Sync token rejected"), "{rejected}");
-        assert!(rejected.contains("Settings"), "{rejected}");
-        assert_eq!(
-            super::health_status_for(&dir, &[], Some(("https://crew.example", "new-token"))),
-            "Ready",
-            "a changed token clears the rejected state"
-        );
-        assert_eq!(
-            super::health_status_for(&dir, &[], Some(("https://other.example", "old-token"))),
-            "Ready",
-            "a changed URL clears the rejected state"
-        );
-        stat_tracker::sync::write_auth_pause_reason(
-            &dir,
-            "https://crew.example",
-            "expired-token",
-            stat_tracker::sync::AuthPauseReason::Expired,
-        )
-        .unwrap();
-        let expired =
-            super::health_status_for(&dir, &[], Some(("https://crew.example", "expired-token")));
-        assert_eq!(expired, stat_tracker::sync::SYNC_TOKEN_EXPIRED_STATUS);
-        assert_eq!(expired, "Sync token expired, relink in Settings");
-        assert!(expired.contains("relink"), "{expired}");
-        assert!(expired.contains("Settings"), "{expired}");
-        assert_eq!(
-            super::health_status_for(&dir, &[], Some(("https://crew.example", "other-token"))),
-            "Ready",
-            "a changed token clears the expired state"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-}
+#[path = "app_tests.rs"]
+mod tests;

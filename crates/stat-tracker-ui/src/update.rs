@@ -22,7 +22,7 @@ use crate::theme::{
     TEXT_2, TEXT_3,
 };
 
-const REPO: &str = "FrozenTear/scuffed-crew";
+pub(crate) const REPO: &str = "FrozenTear/scuffed-crew";
 const BOOTSTRAP_REPO_PATH: &str = "crates/stat-tracker/dist/bootstrap.sh";
 
 /// Fresh-install one-liner. `bootstrap.sh` on `main` resolves the release and
@@ -664,32 +664,13 @@ pub fn evaluate_plan_with(latest: &str, probes: UpdateProbes<'_>) -> UpdatePlan 
     }
 }
 
-/// Query GitHub Releases; `None` on failure or when already current.
-///
-/// `per_page=100` so a player who skipped several releases still gets those
-/// bodies for the in-app notes. The bundled changelog covers anything the
-/// response leaves out.
+/// Query GitHub Releases; `None` on failure or when already current
+/// ([`crate::update_check`] tells the two apart).
 pub async fn check_for_update() -> Option<UpdateInfo> {
-    let current = current_version()?;
-    let url = format!("https://api.github.com/repos/{REPO}/releases?per_page=100");
-    let client = reqwest::Client::builder()
-        .user_agent("scuffed-stat-tracker-gui")
-        .timeout(Duration::from_secs(8))
-        .build()
-        .ok()?;
-    let releases: Vec<serde_json::Value> = client
-        .get(&url)
-        .header("Accept", "application/vnd.github+json")
-        .send()
-        .await
-        .ok()?
-        .json()
-        .await
-        .ok()?;
-    select_newer_release_on(installed_update_channel(&current), &current, &releases)
+    crate::update_check::check().await.ok().flatten()
 }
 
-fn installed_update_channel(current: &str) -> UpdateChannel {
+pub(crate) fn installed_update_channel(current: &str) -> UpdateChannel {
     let stored = stat_tracker::config::Config::read_stored()
         .map(|config| config.update_channel)
         .unwrap_or_default();

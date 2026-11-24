@@ -37,7 +37,7 @@ const CSS: &str = r#"
     font-size: 1rem;
 }
 .setup-hint {
-    color: var(--text-3);
+    color: var(--text-subtle);
     font-size: 0.8rem;
     margin: 0.25rem 0 0;
 }
@@ -48,7 +48,7 @@ const CSS: &str = r#"
     margin: 0 0 0.5rem;
 }
 .setup-card p.lead {
-    color: var(--text-2);
+    color: var(--text-3);
     font-size: 0.9rem;
     margin: 0 0 1.5rem;
 }
@@ -60,7 +60,7 @@ const CSS: &str = r#"
 }
 .setup-field label {
     font-size: 0.75rem;
-    color: var(--text-3);
+    color: var(--text-subtle);
     text-transform: uppercase;
     letter-spacing: 0.04em;
 }
@@ -73,9 +73,21 @@ const CSS: &str = r#"
     font-size: 1rem;
 }
 .setup-error {
-    color: var(--danger);
+    color: var(--loss);
     font-size: 0.85rem;
     margin-bottom: 1rem;
+}
+/* No text: out of the layout, still in the tree so the next message is
+   announced. */
+.setup-error:empty {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
 }
 .setup-card button[type="submit"] {
     width: 100%;
@@ -84,7 +96,7 @@ const CSS: &str = r#"
 .setup-pack-meta {
     font-family: var(--font-mono);
     font-size: 0.72rem;
-    color: var(--text-2);
+    color: var(--text-3);
     margin: 0.35rem 0 0;
     letter-spacing: 0.02em;
 }
@@ -183,6 +195,9 @@ pub fn Setup() -> Element {
                     nav.replace(Route::AdminDashboard {});
                 }
                 Err(e) => {
+                    // Logged once here, whichever line shows it (Vision nit 3,
+                    // round 4 on 748); the mapping below is pure.
+                    crate::util::log_client_error("Create admin account", &e);
                     let settled = settle_name_field(
                         &typed_at_submit,
                         &username(),
@@ -193,7 +208,7 @@ pub fn Setup() -> Element {
                     if let Some(message) = settled.error {
                         name_error.set(Some(message.to_string()));
                     } else if settled.keep_existing_failure {
-                        error.set(Some(e.to_string()));
+                        error.set(Some(crate::client_error::user_message(&e)));
                     }
                     submitting.set(false);
                 }
@@ -209,9 +224,9 @@ pub fn Setup() -> Element {
                 p { class: "lead",
                     "First-time setup for your clan platform. Create the admin account, name the org, and pick a homepage starter."
                 }
-                if let Some(err) = error() {
-                    p { class: "setup-error", "{err}" }
-                }
+                // Always rendered so a new message is announced; only its text
+                // changes, and the empty paragraph is out of the layout.
+                p { class: "setup-error", role: "alert", "{error().unwrap_or_default()}" }
                 form { onsubmit: on_submit,
                     div { class: "setup-field",
                         label { r#for: "setup-org", "Clan / org name" }
@@ -301,5 +316,25 @@ pub fn Setup() -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Vision nit 3, round 4 on 748: a failed first-admin setup logs its raw
+    /// error once, at the top of the failure arm, whichever line (the name
+    /// field or the form error) then shows it, and the mapping stays pure.
+    #[test]
+    fn a_failed_setup_logs_once() {
+        let src = include_str!("setup.rs");
+        let prod = src.split("mod tests").next().expect("production source");
+        assert_eq!(prod.matches("log_client_error(").count(), 1);
+        assert!(!prod.contains("logged_message("), "a second log");
+        assert!(!prod.contains("with_lead("), "a second log");
+        let arm = prod.find("Err(e) => {").expect("failure arm");
+        let log = prod.find("log_client_error(").expect("log");
+        let settle = prod.find("settle_name_field(\n").expect("settle");
+        let shown = prod.find("user_message(&e)").expect("form error");
+        assert!(arm < log && log < settle && settle < shown);
     }
 }

@@ -1,7 +1,7 @@
 //! Startup / maintenance helpers around the local SurrealKV store and logs.
 //!
 //! SurrealKV keeps historical versions; weeks of captures leave the store
-//! dominated by dead data (see [`super::LocalStore::vacuum`]). Manual
+//! dominated by dead data (see [`LocalStore::vacuum`] below). Manual
 //! `--vacuum` already compact, but nothing ran unless the user remembered.
 //! These helpers run at daemon start (pid-guard held, store not yet open):
 //! rotate `daemon.log`, prune old pre-vacuum backups, and auto-vacuum when
@@ -24,12 +24,27 @@ pub const PRE_VACUUM_BACKUP_PREFIX: &str = "stats.surrealkv.pre-vacuum-";
 /// above a compact store and well below the painful zone.
 pub const AUTO_VACUUM_THRESHOLD_BYTES: u64 = 32 * 1024 * 1024;
 
+/// File under `data_dir` holding the live store's size in bytes right after
+/// the last vacuum (auto or `--vacuum`).
+pub const LAST_VACUUM_SIZE_FILE: &str = "vacuum.last-size";
+
+/// The next auto-vacuum also waits until the store has grown this much past
+/// the size the last vacuum left. A store whose live rows sit near
+/// [`AUTO_VACUUM_THRESHOLD_BYTES`] otherwise crossed it again after a few
+/// writes and was vacuumed at every start (34.1 MB down to 33.2 MB, about
+/// 2.5 minutes, each restart).
+pub const AUTO_VACUUM_REGROW_BYTES: u64 = 8 * 1024 * 1024;
+
 /// Rotate `daemon.log` when it exceeds this size (GUI-spawned daemons append
 /// here; systemd units use the journal instead).
 pub const DAEMON_LOG_MAX_BYTES: u64 = 32 * 1024 * 1024;
 
 /// Keep this many newest `pre-vacuum-*` backups; delete the rest.
 pub const PRE_VACUUM_BACKUPS_KEEP: usize = 1;
+
+/// Longest wait for each store's close in `vacuum`. A close takes well
+/// under a second; the old fixed sleep was 2 s.
+const VACUUM_CLOSE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Best-effort recursive size of a file or directory tree.
 pub fn dir_size(path: &Path) -> u64 {
@@ -121,6 +136,55 @@ pub fn rotate_daemon_log(data_dir: &Path, max_bytes: u64) -> std::io::Result<boo
     Ok(true)
 }
 
+/// Whether a live store of `size` bytes is auto-vacuumed at start, given the
+/// size the last vacuum left (`None` when not recorded): over the threshold,
+/// and grown more than [`AUTO_VACUUM_REGROW_BYTES`] past that size. So a
+/// vacuum that left the store near or over the threshold is not repeated at
+/// the next start, only once dead versions have built up again. A recorded
+/// size more than twice `size` is not trusted (a hand-edited value, or one
+/// left by another store) and counts as `None`, so the threshold alone
+/// decides. The headroom matters: a real store can sit a few KB under the
+/// size its last vacuum recorded, and treating that as untrusted would
+/// vacuum it again at every start.
+pub fn auto_vacuum_due(size: u64, last_after: Option<u64>) -> bool {
+    size > AUTO_VACUUM_THRESHOLD_BYTES
+        && last_after
+            .filter(|&after| after <= size.saturating_mul(2))
+            .is_none_or(|after| size > after.saturating_add(AUTO_VACUUM_REGROW_BYTES))
+}
+
+/// The size the last vacuum left, from [`LAST_VACUUM_SIZE_FILE`]; `None`
+/// when the file is missing or does not hold a number.
+pub fn last_vacuum_size(data_dir: &Path) -> Option<u64> {
+    std::fs::read_to_string(data_dir.join(LAST_VACUUM_SIZE_FILE))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Record the size a vacuum left. A failed write is a warn line: the next
+/// start reads whatever file is there, an older size from an earlier vacuum
+/// or none (then the threshold alone decides).
+fn record_vacuum_size(data_dir: &Path, after: u64) {
+    if let Err(e) = std::fs::write(data_dir.join(LAST_VACUUM_SIZE_FILE), after.to_string()) {
+        tracing::warn!(error = %e, "could not record the store size after vacuum");
+    }
+}
+
+/// Drop the recorded post-vacuum size. Called by every clear path: the size
+/// belongs to the cleared store, and left behind it held the next
+/// auto-vacuum back until the new store grew past it plus
+/// [`AUTO_VACUUM_REGROW_BYTES`]. A missing file is fine; a failed remove is
+/// a warn line.
+pub fn forget_last_vacuum_size(data_dir: &Path) {
+    match std::fs::remove_file(data_dir.join(LAST_VACUUM_SIZE_FILE)) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!(error = %e, "could not remove the recorded vacuum size"),
+    }
+}
+
 /// Run non-blocking-ish maintenance under the pid guard, before the daemon
 /// opens the store: log rotation, backup prune, optional auto-vacuum.
 pub async fn startup_maintenance(
@@ -157,6 +221,23 @@ pub async fn startup_maintenance(
         );
         return Ok(());
     }
+    let last_after = last_vacuum_size(data_dir);
+    if !auto_vacuum_due(size, last_after) {
+        let last_mb = last_after.unwrap_or_default() as f64 / 1e6;
+        tracing::info!(
+            size_mb = format!("{:.1}", size as f64 / 1e6),
+            last_vacuum_mb = format!("{last_mb:.1}"),
+            next_over_mb = format!(
+                "{:.1}",
+                last_after
+                    .unwrap_or_default()
+                    .saturating_add(AUTO_VACUUM_REGROW_BYTES) as f64
+                    / 1e6
+            ),
+            "auto-vacuum skipped: the store is over the threshold but has not grown much since the last vacuum"
+        );
+        return Ok(());
+    }
 
     tracing::info!(
         size_mb = format!("{:.1}", size as f64 / 1e6),
@@ -181,6 +262,117 @@ pub async fn startup_maintenance(
         "auto-vacuum complete"
     );
     Ok(())
+}
+
+impl LocalStore {
+    /// Rewrite all live rows into a brand-new store and swap it in, leaving
+    /// the old directory as `stats.surrealkv.pre-vacuum-<stamp>`.
+    ///
+    /// SurrealKV keeps every historical version of every record; the tracker
+    /// only ever needs latest state, so weeks of captures leave the store
+    /// ~99% dead versions (observed 87 MB for ~1 MB of live rows). SurrealDB's
+    /// periodic embedded housekeeping range-scans then spend entire cores
+    /// skipping those versions — two threads at 100% around the clock on an
+    /// idle daemon (2026-07-15). The daemon must NOT be running (single-
+    /// writer: `open` flocks the store directory; the caller also checks the
+    /// pid file).
+    ///
+    /// Returns (matches, sessions, tombstones) copied.
+    pub async fn vacuum(
+        data_dir: &Path,
+    ) -> Result<(usize, usize, usize), Box<dyn std::error::Error + Send + Sync>> {
+        let live_path = data_dir.join("stats.surrealkv");
+        let fresh_dir = data_dir.join("vacuum.tmp");
+        if fresh_dir.exists() {
+            std::fs::remove_dir_all(&fresh_dir)?;
+        }
+
+        // Rows as stored (with any per-row timeline copies they carry), plus
+        // the one-per-game timeline records and the migration marker: an
+        // older vacuum that copied only the rows lost them.
+        let (matches, sessions, tombstones, timelines, migrated) = {
+            let old = LocalStore::open(data_dir).await?;
+            (
+                old.get_all_matches_raw().await?,
+                old.get_all_sessions().await?,
+                old.get_pending_tombstones().await?,
+                old.all_timelines().await?,
+                old.timeline_migrated(),
+            )
+        };
+
+        let fresh = LocalStore::open(&fresh_dir).await?;
+        for mut m in matches.iter().cloned() {
+            // Record ids belong to the old store; fresh inserts mint new ones.
+            m.id = None;
+            fresh.insert_match(m).await?;
+        }
+        for s in &sessions {
+            fresh.create_session(s).await?;
+        }
+        for t in &tombstones {
+            fresh.insert_tombstone(t).await?;
+        }
+        for t in &timelines {
+            fresh.put_timeline(t).await?;
+        }
+        if migrated {
+            fresh.write_timeline_marker().await?;
+        }
+        drop(fresh);
+        // Dropping a handle only starts SurrealKV's close: the memtable flush
+        // runs on the SDK's router task. Renaming a directory mid-flush makes
+        // the flush ENOENT. Every commit is WAL-synced, so nothing is lost
+        // either way, but waiting for both closes swaps the store in fully
+        // flushed and error-free. `old` was dropped at the end of its block.
+        // A LOCK that cannot be checked counts as not closed here.
+        for dir in [fresh_dir.as_path(), data_dir] {
+            match super::lock_released_within(dir, VACUUM_CLOSE_WAIT).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(format!(
+                        "store in {} did not finish closing; nothing was swapped",
+                        dir.display()
+                    )
+                    .into());
+                }
+                Err(err) => {
+                    return Err(format!(
+                        "cannot check that the store in {} closed ({err}); nothing was swapped",
+                        dir.display()
+                    )
+                    .into());
+                }
+            }
+        }
+
+        let stamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+        let backup = data_dir.join(format!("stats.surrealkv.pre-vacuum-{stamp}"));
+        std::fs::rename(&live_path, &backup)?;
+        std::fs::rename(fresh_dir.join("stats.surrealkv"), &live_path)?;
+        let _ = std::fs::remove_dir_all(&fresh_dir);
+        // What the next start's auto-vacuum compares against.
+        record_vacuum_size(data_dir, store_size_bytes(data_dir));
+        // Keep only the newest pre-vacuum backup (this one) so data_dir does
+        // not accumulate multi-hundred-MB copies across repeated vacua.
+        if let Ok(n) = prune_pre_vacuum_backups(data_dir, PRE_VACUUM_BACKUPS_KEEP)
+            && n > 0
+        {
+            tracing::info!(
+                pruned = n,
+                keep = PRE_VACUUM_BACKUPS_KEEP,
+                "pruned older pre-vacuum backups after vacuum"
+            );
+        }
+        tracing::info!(
+            matches = matches.len(),
+            sessions = sessions.len(),
+            tombstones = tombstones.len(),
+            backup = %backup.display(),
+            "store vacuumed"
+        );
+        Ok((matches.len(), sessions.len(), tombstones.len()))
+    }
 }
 
 #[cfg(test)]
@@ -262,6 +454,85 @@ mod tests {
         std::fs::write(root.join("daemon.log"), b"hi").unwrap();
         assert!(!rotate_daemon_log(root, 100).unwrap());
         assert!(root.join("daemon.log").exists());
+    }
+
+    #[test]
+    fn auto_vacuum_does_not_repeat_until_the_store_really_grows() {
+        let mb = |x: f64| (x * 1e6) as u64;
+        // Under the threshold: never.
+        assert!(!auto_vacuum_due(mb(30.0), None));
+        // Over it with nothing recorded, or well past a compact vacuum.
+        assert!(auto_vacuum_due(mb(34.1), None));
+        assert!(auto_vacuum_due(mb(34.1), Some(mb(8.0))));
+        // The field case: 34.1 MB vacuumed to 33.2 MB, then a few writes put
+        // it back over the threshold. The next start is not another 2.5
+        // minute vacuum.
+        assert!(mb(34.1) > AUTO_VACUUM_THRESHOLD_BYTES);
+        assert!(!auto_vacuum_due(mb(34.1), Some(mb(33.2))));
+        // Nor is a vacuum that left the store over the threshold repeated.
+        assert!(!auto_vacuum_due(mb(36.0), Some(mb(35.0))));
+        let regrown = mb(33.2) + AUTO_VACUUM_REGROW_BYTES;
+        assert!(!auto_vacuum_due(regrown, Some(mb(33.2))));
+        // Real growth past the size it left: vacuumed again.
+        assert!(auto_vacuum_due(regrown + 1, Some(mb(33.2))));
+    }
+
+    #[test]
+    fn a_recorded_size_over_the_live_size_is_not_trusted() {
+        let mb = |x: f64| (x * 1e6) as u64;
+        // A hand-edited u64::MAX would otherwise turn auto-vacuum off for
+        // good: the threshold rule applies, as with nothing recorded.
+        assert!(auto_vacuum_due(mb(34.1), Some(u64::MAX)));
+        assert!(auto_vacuum_due(mb(34.1), Some(mb(34.1) * 2 + 1)));
+        assert!(!auto_vacuum_due(mb(30.0), Some(u64::MAX)));
+        // Equal to the live size is a store that did not grow: trusted.
+        assert!(!auto_vacuum_due(mb(34.1), Some(mb(34.1))));
+    }
+
+    #[test]
+    fn a_store_a_few_kb_under_its_recorded_size_is_not_vacuumed_again() {
+        // A real store can sit a few KB under the size its last vacuum
+        // recorded. That size is still trusted, so no vacuum runs.
+        let after = AUTO_VACUUM_THRESHOLD_BYTES + 2_000_000;
+        assert!(!auto_vacuum_due(after - 4_096, Some(after)));
+        assert!(!auto_vacuum_due(after - 1, Some(after)));
+        // Twice the live size is the edge of the trusted range.
+        let size = AUTO_VACUUM_THRESHOLD_BYTES + 1;
+        assert!(!auto_vacuum_due(size, Some(size * 2)));
+        assert!(auto_vacuum_due(size, Some(size * 2 + 1)));
+    }
+
+    #[test]
+    fn the_last_vacuum_size_reads_back_and_junk_is_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        assert_eq!(last_vacuum_size(root), None);
+        record_vacuum_size(root, 33_200_000);
+        assert_eq!(last_vacuum_size(root), Some(33_200_000));
+        std::fs::write(root.join(LAST_VACUUM_SIZE_FILE), "not a size").unwrap();
+        assert_eq!(last_vacuum_size(root), None);
+        std::fs::write(root.join(LAST_VACUUM_SIZE_FILE), " 42\n").unwrap();
+        assert_eq!(last_vacuum_size(root), Some(42));
+    }
+
+    #[tokio::test]
+    async fn startup_skips_the_vacuum_a_store_over_the_threshold_already_had() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        // A live store of 34.1 MB (a sparse file: only its length counts).
+        // It is no real store, so a vacuum would fail to open it.
+        let live = store_live_path(root);
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::File::create(live.join("data"))
+            .unwrap()
+            .set_len(34_100_000)
+            .unwrap();
+        record_vacuum_size(root, 33_200_000);
+        startup_maintenance(root)
+            .await
+            .expect("no vacuum runs, so nothing fails");
+        assert_eq!(store_size_bytes(root), 34_100_000);
+        assert!(list_pre_vacuum_backups(root).is_empty(), "no vacuum ran");
     }
 
     #[test]

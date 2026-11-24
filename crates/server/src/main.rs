@@ -52,7 +52,12 @@ async fn main() {
         }
         Database::bootstrap_from_env()
             .await
-            .expect("SURREALDB_MIGRATE_ONLY: bootstrap failed");
+            .unwrap_or_else(|e| match e {
+                scuffed_db::DbError::Migration { .. } => {
+                    panic!("SURREALDB_MIGRATE_ONLY: SurrealDB startup migration failed: {e}")
+                }
+                e => panic!("SURREALDB_MIGRATE_ONLY: Failed to connect to SurrealDB: {e}"),
+            });
         tracing::info!("SURREALDB_MIGRATE_ONLY complete — exiting");
         return;
     }
@@ -77,9 +82,16 @@ async fn main() {
         tracing::info!("Dev data seeded — visit /api/dev/login to set session cookie");
         db
     } else {
+        // A failed startup migration names its step (DbError::Migration), so
+        // the panic does not claim a connect failure for, say, DB7.
         Database::connect_from_env()
             .await
-            .expect("Failed to connect to SurrealDB")
+            .unwrap_or_else(|e| match e {
+                scuffed_db::DbError::Migration { .. } => {
+                    panic!("SurrealDB startup migration failed: {e}")
+                }
+                e => panic!("Failed to connect to SurrealDB: {e}"),
+            })
     };
 
     // Emergency local admin password reset (production only).
@@ -106,6 +118,13 @@ async fn main() {
         &upload_dir,
         &reports_dir,
     );
+    let hero_icons = scuffed_site_server::hero_icons::open_hero_icons_dir(
+        &scuffed_site_server::hero_icons::hero_icons_dir_from_env(),
+        &upload_dir,
+        &reports_dir,
+        packs_dir.as_deref(),
+    )
+    .await;
 
     let notifier = Notifier::from_env();
     if notifier.is_none() {
@@ -164,6 +183,7 @@ async fn main() {
         reports_dir: reports_dir.clone(),
         reports_enabled,
         packs_dir,
+        hero_icons,
         notifier,
         nostr_challenge_key,
         consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(),
@@ -215,6 +235,10 @@ async fn main() {
     if reports_enabled {
         scuffed_site_server::stat_reports::spawn_sweeper(db.clone(), reports_dir);
     }
+
+    // Icon files with no row (a crash between file write and row insert) are
+    // removed once at startup. Only runs when HERO_ICONS_DIR is usable.
+    scuffed_site_server::hero_icons::spawn_orphan_sweep(db.clone(), state.hero_icons.clone());
 
     // Build the unified router: existing org routes + strategy routes + chat + WebSocket,
     // then apply production middleware to the combined router.
@@ -333,6 +357,7 @@ mod compression_shell {
             reports_dir: root.join("reports"),
             reports_enabled: true,
             packs_dir: None,
+            hero_icons: scuffed_site_server::hero_icons::HeroIconStore::in_temp_dir(),
             notifier: None,
             nostr_challenge_key: [0u8; 32],
             consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(
@@ -462,6 +487,7 @@ mod compression_shell {
             reports_dir: root.join("reports"),
             reports_enabled: true,
             packs_dir: Some(packs),
+            hero_icons: scuffed_site_server::hero_icons::HeroIconStore::in_temp_dir(),
             notifier: None,
             nostr_challenge_key: [0u8; 32],
             consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(

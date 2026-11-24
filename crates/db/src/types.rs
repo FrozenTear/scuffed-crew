@@ -563,6 +563,21 @@ pub struct PersonalMatch {
     /// existed, read as an empty list. Additive on match-list JSON.
     #[serde(default)]
     pub suspect_fields: Vec<String>,
+    /// Bans and picks the tracker read for this game, or `None` (JSON null).
+    ///
+    /// `None` when the upload omitted the field or sent null, and on rows
+    /// written before the column existed. A later upload of the same session
+    /// replaces it, so a re-upload without the field clears it (same as
+    /// `name_recognizer` and `suspect_fields`). Additive on match-list JSON.
+    #[serde(default)]
+    pub bans_picks: Option<scuffed_types::BansPicks>,
+    /// Rank update screen read for this game, or `None` (JSON null).
+    ///
+    /// Same lifecycle as `bans_picks`: `None` when the upload omitted it or
+    /// sent something other than an object, and on older rows. A re-upload of
+    /// the session replaces it. See [`scuffed_types::MatchRank`] for the shape.
+    #[serde(default)]
+    pub rank: Option<scuffed_types::MatchRank>,
 }
 
 /// Aggregated personal stats for a member.
@@ -610,6 +625,12 @@ pub struct MemberLeaderboardRow {
     pub member_id: String,
     pub display_name: String,
     pub games: u32,
+    /// Victories counted in `games`. `wins + losses + draws == games`.
+    pub wins: u32,
+    /// Defeats counted in `games`.
+    pub losses: u32,
+    /// Draws counted in `games`.
+    pub draws: u32,
     pub winrate: f32,
     pub kd: f64,
 }
@@ -624,6 +645,10 @@ pub struct LeaderboardHeroAgg {
     pub display_name: String,
     pub games: u32,
     pub wins: u32,
+    /// Defeats in `games`. `wins + losses + draws == games`.
+    pub losses: u32,
+    /// Draws in `games`.
+    pub draws: u32,
     pub elims: u32,
     pub deaths: u32,
     /// Games whose elims and deaths both passed the plausibility check, i.e.
@@ -699,6 +724,9 @@ impl LeaderboardSnapshot {
                 member_id: agg.member_id.clone(),
                 display_name: agg.display_name.clone(),
                 games: agg.games,
+                wins: agg.wins,
+                losses: agg.losses,
+                draws: agg.draws,
                 winrate: agg.wins as f32 / agg.games as f32,
                 kd: agg.elims as f64 / (agg.deaths.max(1) as f64),
             });
@@ -746,6 +774,8 @@ mod snapshot_project_tests {
             display_name: id.into(),
             games,
             wins,
+            losses: games - wins,
+            draws: 0,
             elims: wins,
             deaths: 1,
             kd_games: games,
@@ -784,12 +814,51 @@ mod snapshot_project_tests {
         assert_eq!(both.len(), 2);
     }
 
+    #[test]
+    fn record_counts_roll_up_and_sum_to_games() {
+        let wld = |id: &str, wins: u32, losses: u32, draws: u32| LeaderboardHeroAgg {
+            member_id: id.into(),
+            display_name: id.into(),
+            games: wins + losses + draws,
+            wins,
+            losses,
+            draws,
+            elims: wins,
+            deaths: 1,
+            kd_games: wins + losses + draws,
+        };
+        let snap = LeaderboardSnapshot::from_rows(vec![
+            ("Ana".into(), wld("a", 3, 1, 1)),
+            ("Genji".into(), wld("a", 1, 2, 1)),
+            ("Genji".into(), wld("b", 0, 1, 0)),
+        ]);
+
+        let all = snap.project("games", "", 10);
+        let a = all.iter().find(|r| r.member_id == "a").unwrap();
+        assert_eq!((a.games, a.wins, a.losses, a.draws), (9, 4, 3, 2));
+        let b = all.iter().find(|r| r.member_id == "b").unwrap();
+        assert_eq!((b.games, b.wins, b.losses, b.draws), (1, 0, 1, 0));
+
+        let ana = snap.project("winrate", "Ana", 10);
+        assert_eq!(ana.len(), 1);
+        assert_eq!(
+            (ana[0].games, ana[0].wins, ana[0].losses, ana[0].draws),
+            (5, 3, 1, 1)
+        );
+
+        for row in all.iter().chain(ana.iter()) {
+            assert_eq!(row.wins + row.losses + row.draws, row.games, "{row:?}");
+        }
+    }
+
     fn tied(id: &str) -> LeaderboardHeroAgg {
         LeaderboardHeroAgg {
             member_id: id.into(),
             display_name: id.into(),
             games: 8,
             wins: 4,
+            losses: 3,
+            draws: 1,
             elims: 10,
             deaths: 2,
             kd_games: 8,
@@ -839,6 +908,8 @@ fn merge_agg_one(
         .and_modify(|existing| {
             existing.games = existing.games.saturating_add(agg.games);
             existing.wins = existing.wins.saturating_add(agg.wins);
+            existing.losses = existing.losses.saturating_add(agg.losses);
+            existing.draws = existing.draws.saturating_add(agg.draws);
             existing.elims = existing.elims.saturating_add(agg.elims);
             existing.deaths = existing.deaths.saturating_add(agg.deaths);
             existing.kd_games = existing.kd_games.saturating_add(agg.kd_games);
@@ -852,6 +923,12 @@ fn merge_agg_one(
 pub struct MemberHeroScopedAgg {
     pub member_id: String,
     pub games: u32,
+    /// Victories in `games`. `wins + losses + draws == games`.
+    pub wins: u32,
+    /// Defeats in `games`.
+    pub losses: u32,
+    /// Draws in `games`.
+    pub draws: u32,
     pub winrate: f32,
 }
 
@@ -870,6 +947,10 @@ pub struct MapStats {
 pub struct MemberSettings {
     pub member_id: String,
     pub player_name: Option<String>,
+    /// Missing on a legacy row. Callers treat that as [`scuffed_types::StatsVisibility::Public`].
+    pub stats_visibility: scuffed_types::StatsVisibility,
+    /// Opted in to contributing hero icons. False when the row predates the field.
+    pub hero_icon_opt_in: bool,
 }
 
 /// A daemon authentication token.
@@ -977,6 +1058,18 @@ pub enum AuditAction {
     WithdrawnStatReportTraining,
     DownloadedStatReport,
     ReadStatReportManifest,
+    /// An officer read another member's match list (one row per page).
+    ViewedMemberMatches,
+    /// An officer read one of another member's matches. Details: the match id.
+    ViewedMemberMatch,
+    DeletedHeroIcon,
+    DeletedAllHeroIcons,
+    ViewedHeroIcons,
+    /// An admin deleted another member's training crop of a kind other than
+    /// `hero_icon` (those keep `deleted_hero_icon`). Details: id and kind.
+    DeletedTrainingCrop,
+    /// An admin read the training crop list. Details: count and kind filter.
+    ViewedTrainingCrops,
 }
 
 impl std::fmt::Display for AuditAction {
@@ -1192,6 +1285,9 @@ pub struct SiteSettings {
     pub brand_accent_dark: String,
     #[serde(default)]
     pub brand_accent_light: String,
+    /// Display font key ("" | "urbanist" | "ibm-plex-sans"). Empty = Urbanist.
+    #[serde(default)]
+    pub brand_font_display: String,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -1565,6 +1661,85 @@ pub struct NewStatReport {
     pub size_bytes: u64,
     pub zip_sha256: String,
     pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// Metadata for one contributed hero icon.
+///
+/// The PNG bytes live on disk under `HERO_ICONS_DIR` as `file_name`. This row
+/// does not store them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeroIcon {
+    /// 32 lowercase hex characters, made by the server.
+    pub id: String,
+    pub member_id: String,
+    /// Hero display name from `scuffed_types::hero_key_to_name`.
+    pub hero: String,
+    /// `<id>.png`. Never taken from user input.
+    pub file_name: String,
+    pub size_bytes: u64,
+    pub width: u32,
+    pub height: u32,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Fields written when an icon is accepted.
+#[derive(Debug, Clone)]
+pub struct NewHeroIcon {
+    pub id: String,
+    pub member_id: String,
+    pub hero: String,
+    pub file_name: String,
+    pub size_bytes: u64,
+    pub width: u32,
+    pub height: u32,
+    pub created_at: DateTime<Utc>,
+}
+
+/// One stored training crop: a row of the `hero_icon` table of any kind.
+///
+/// Hero icons are the `hero_icon` kind; [`HeroIcon`] is that view. The PNG
+/// bytes live on disk under `HERO_ICONS_DIR` as `file_name`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrainingCrop {
+    /// 32 lowercase hex characters, made by the server.
+    pub id: String,
+    pub member_id: String,
+    pub kind: scuffed_types::CropKind,
+    /// Hero key (`soldier-76`, see `scuffed_types::hero_key`). Always set
+    /// for `hero_icon`. Older rows that stored the display name read as the
+    /// key too.
+    pub hero: Option<String>,
+    /// `<id>.png`. Never taken from user input.
+    pub file_name: String,
+    pub size_bytes: u64,
+    pub width: u32,
+    pub height: u32,
+    pub created_at: DateTime<Utc>,
+    /// Version from a `scuffed-stat-tracker/<semver>` User-Agent.
+    pub tracker_version: Option<String>,
+    pub meta: scuffed_types::TrainingCropMeta,
+}
+
+/// Fields written when a crop is accepted. Same shape as [`TrainingCrop`].
+pub type NewTrainingCrop = TrainingCrop;
+
+/// Stored crop count of one member, kind and game resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrainingCropCountRow {
+    pub member_id: String,
+    pub kind: scuffed_types::CropKind,
+    pub screen_width: Option<u32>,
+    pub screen_height: Option<u32>,
+    pub count: u64,
+}
+
+/// Who owns a stored crop, read without parsing the rest of the row, so a
+/// row that fails to parse can still be found and deleted. `kind` is `None`
+/// when the stored kind is unknown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrainingCropOwner {
+    pub member_id: String,
+    pub kind: Option<scuffed_types::CropKind>,
 }
 
 /// Build the deterministic conversation key from a pubkey pair.

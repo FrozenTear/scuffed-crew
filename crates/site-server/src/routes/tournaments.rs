@@ -68,16 +68,79 @@ fn manages_tournaments(member: &Option<Member>) -> bool {
         .is_some_and(|m| m.org_role.is_at_least(OrgRole::Officer))
 }
 
-/// 404 when this id is a draft the caller is not allowed to see.
-/// A missing row is left to the handler (list endpoints return an empty set).
-async fn reject_hidden_draft(state: &AppState, id: &str, member: &Option<Member>) -> ApiResult<()> {
-    let Some(tournament) = state.db.get_tournament(id).await.map_err(internal_err)? else {
-        return Ok(());
-    };
+/// Load a tournament by id. 404 "Tournament not found" when no tournament
+/// has this id; a real DB error stays a 500. Officer writes that take a
+/// tournament id call this (directly or through `require_participant`)
+/// before writing, except `report_match`, which loads the match and checks
+/// that its `tournament_id` matches the path instead. Public reads go
+/// through `load_visible_tournament`, which builds on this.
+async fn require_tournament(state: &AppState, id: &str) -> ApiResult<Tournament> {
+    state
+        .db
+        .get_tournament(id)
+        .await
+        .map_err(internal_err)?
+        .ok_or_else(|| not_found("Tournament not found"))
+}
+
+/// Load a tournament the caller is allowed to see.
+///
+/// 404 when no tournament has this id, or when it is a draft and the caller
+/// does not manage tournaments (same body, so a hidden draft and a missing id
+/// look the same). A real DB error stays a 500.
+async fn load_visible_tournament(
+    state: &AppState,
+    id: &str,
+    member: &Option<Member>,
+) -> ApiResult<Tournament> {
+    let tournament = require_tournament(state, id).await?;
     if tournament.status == TournamentStatus::Draft && !manages_tournaments(member) {
         return Err(not_found("Tournament not found"));
     }
-    Ok(())
+    Ok(tournament)
+}
+
+/// Load a participant that belongs to tournament `id`. 404 when the
+/// tournament is missing, the participant is missing, or the participant
+/// belongs to a different tournament.
+async fn require_participant(
+    state: &AppState,
+    id: &str,
+    pid: &str,
+) -> ApiResult<TournamentParticipant> {
+    require_tournament(state, id).await?;
+    state
+        .db
+        .list_tournament_participants(id)
+        .await
+        .map_err(internal_err)?
+        .into_iter()
+        .find(|p| p.id == pid)
+        .ok_or_else(|| not_found("Participant not found"))
+}
+
+/// Bracket and round generators: `Invalid` (for example fewer than 2
+/// participants) is a 400. Everything else, including a `NotFound` raised on
+/// rows the generator itself just wrote, is a logged 500. A missing
+/// tournament never reaches here: callers check it first with
+/// `require_tournament`.
+fn invalid_or_internal(e: scuffed_db::DbError) -> (StatusCode, Json<ErrorResponse>) {
+    match e {
+        scuffed_db::DbError::Invalid(msg) => bad_request(&msg),
+        other => internal_err(other),
+    }
+}
+
+/// An update after the existence check: a `NotFound` means the row was
+/// deleted in between, so answer the same fixed 404 body as the check.
+/// Never echo the DB message. Everything else is a logged 500.
+fn gone_or_internal(
+    body: &'static str,
+) -> impl FnOnce(scuffed_db::DbError) -> (StatusCode, Json<ErrorResponse>) {
+    move |e| match e {
+        scuffed_db::DbError::NotFound(_) => not_found(body),
+        other => internal_err(other),
+    }
 }
 
 #[derive(Deserialize)]
@@ -134,16 +197,9 @@ pub async fn get_tournament(
     OptionalOrgMember(member): OptionalOrgMember,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Tournament>> {
-    let tournament = state
-        .db
-        .get_tournament(&id)
+    load_visible_tournament(&state, &id, &member)
         .await
-        .map_err(internal_err)?
-        .ok_or_else(|| not_found("Tournament not found"))?;
-    if tournament.status == TournamentStatus::Draft && !manages_tournaments(&member) {
-        return Err(not_found("Tournament not found"));
-    }
-    Ok(Json(tournament))
+        .map(Json)
 }
 
 // ─── CRUD (Officer+) ───
@@ -236,6 +292,7 @@ pub async fn update_tournament(
     Path(id): Path<String>,
     Json(body): Json<UpdateTournamentRequest>,
 ) -> ApiResult<Json<Tournament>> {
+    require_tournament(&state, &id).await?;
     let tournament = state
         .db
         .update_tournament(
@@ -255,7 +312,7 @@ pub async fn update_tournament(
             body.ends_at,
         )
         .await
-        .map_err(internal_err)?;
+        .map_err(gone_or_internal("Tournament not found"))?;
 
     audit(
         &state.db,
@@ -284,12 +341,7 @@ pub async fn transition_status(
     Path(id): Path<String>,
     Json(body): Json<StatusTransitionRequest>,
 ) -> ApiResult<Json<Tournament>> {
-    let tournament = state
-        .db
-        .get_tournament(&id)
-        .await
-        .map_err(internal_err)?
-        .ok_or_else(|| not_found("Tournament not found"))?;
+    let tournament = require_tournament(&state, &id).await?;
 
     let new_status = match body.status.as_str() {
         "registration" => TournamentStatus::Registration,
@@ -367,13 +419,14 @@ pub async fn get_bracket(
     OptionalOrgMember(member): OptionalOrgMember,
     Path(id): Path<String>,
 ) -> ApiResult<Json<TournamentBracket>> {
-    reject_hidden_draft(&state, &id, &member).await?;
+    load_visible_tournament(&state, &id, &member).await?;
     state
         .db
         .get_tournament_bracket(&id)
         .await
+        .map_err(internal_err)?
         .map(Json)
-        .map_err(internal_err)
+        .ok_or_else(|| not_found("Tournament not found"))
 }
 
 /// POST /api/tournaments/:id/generate-bracket
@@ -382,12 +435,7 @@ pub async fn generate_bracket(
     officer: OfficerUser,
     Path(id): Path<String>,
 ) -> ApiResult<Json<TournamentBracket>> {
-    let tournament = state
-        .db
-        .get_tournament(&id)
-        .await
-        .map_err(internal_err)?
-        .ok_or_else(|| not_found("Tournament not found"))?;
+    let tournament = require_tournament(&state, &id).await?;
 
     match tournament.format {
         TournamentFormat::SingleElim => {
@@ -395,21 +443,21 @@ pub async fn generate_bracket(
                 .db
                 .generate_single_elim_bracket(&id)
                 .await
-                .map_err(internal_err)?;
+                .map_err(invalid_or_internal)?;
         }
         TournamentFormat::DoubleElim => {
             state
                 .db
                 .generate_double_elim_bracket(&id)
                 .await
-                .map_err(internal_err)?;
+                .map_err(invalid_or_internal)?;
         }
         TournamentFormat::RoundRobin => {
             state
                 .db
                 .generate_round_robin_pairings(&id)
                 .await
-                .map_err(internal_err)?;
+                .map_err(invalid_or_internal)?;
         }
         TournamentFormat::Swiss => {
             // Swiss generates one round at a time; for initial bracket, generate round 1
@@ -417,7 +465,7 @@ pub async fn generate_bracket(
                 .db
                 .generate_swiss_round(&id)
                 .await
-                .map_err(internal_err)?;
+                .map_err(invalid_or_internal)?;
         }
     }
 
@@ -435,8 +483,9 @@ pub async fn generate_bracket(
         .db
         .get_tournament_bracket(&id)
         .await
+        .map_err(internal_err)?
         .map(Json)
-        .map_err(internal_err)
+        .ok_or_else(|| not_found("Tournament not found"))
 }
 
 // ─── Participants ───
@@ -447,7 +496,7 @@ pub async fn list_participants(
     OptionalOrgMember(member): OptionalOrgMember,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Vec<TournamentParticipant>>> {
-    reject_hidden_draft(&state, &id, &member).await?;
+    load_visible_tournament(&state, &id, &member).await?;
     state
         .db
         .list_tournament_participants(&id)
@@ -456,11 +505,44 @@ pub async fn list_participants(
         .map_err(internal_err)
 }
 
+/// A given seed must be 1 or higher; absent or null means unseeded.
+const SEED_TOO_LOW: &str = "Seed must be 1 or higher";
+/// A seed that is not a whole number, or is above `u32::MAX`.
+const SEED_NOT_WHOLE: &str = "Seed must be a whole number from 1 to 4294967295";
+
+/// Check a seed read as a raw JSON number. Reading it as `u32` directly let
+/// -1, 4294967296 and 1.5 fail in the JSON extractor with a 422 that is not
+/// the `{error}` shape; these are now 400 with a message that names the seed.
+fn parse_seed(n: &serde_json::Number) -> ApiResult<u32> {
+    if let Some(v) = n.as_u64() {
+        if v == 0 {
+            return Err(bad_request(SEED_TOO_LOW));
+        }
+        return u32::try_from(v).map_err(|_| bad_request(SEED_NOT_WHOLE));
+    }
+    if n.as_i64().is_some() {
+        // A negative whole number is below 1.
+        return Err(bad_request(SEED_TOO_LOW));
+    }
+    // A float token with a whole value (1.0, 1e0, -1.0) counts as that whole
+    // number. Every u32 is exact in f64, so the cast below is lossless.
+    if let Some(f) = n.as_f64().filter(|f| f.is_finite() && f.fract() == 0.0) {
+        if f < 1.0 {
+            return Err(bad_request(SEED_TOO_LOW));
+        }
+        if f <= f64::from(u32::MAX) {
+            return Ok(f as u32);
+        }
+    }
+    Err(bad_request(SEED_NOT_WHOLE))
+}
+
 #[derive(Deserialize)]
 pub struct AddParticipantRequest {
     pub team_id: Option<String>,
     pub external_name: Option<String>,
-    pub seed: Option<u32>,
+    /// Checked by [`parse_seed`] in the handler.
+    pub seed: Option<serde_json::Number>,
 }
 
 /// POST /api/tournaments/:id/participants
@@ -468,19 +550,30 @@ pub async fn add_participant(
     State(state): State<AppState>,
     officer: OfficerUser,
     Path(id): Path<String>,
-    Json(body): Json<AddParticipantRequest>,
+    Json(mut body): Json<AddParticipantRequest>,
 ) -> ApiResult<(StatusCode, Json<TournamentParticipant>)> {
+    // A blank or whitespace-only value counts as missing. team_id is trimmed
+    // so " team-alpha " hits the unique index as "team-alpha".
+    body.team_id = body
+        .team_id
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    body.external_name = body.external_name.filter(|s| !s.trim().is_empty());
     if body.team_id.is_none() && body.external_name.is_none() {
         return Err(bad_request("Provide team_id or external_name"));
     }
+    let seed = body.seed.as_ref().map(parse_seed).transpose()?;
 
     // Check max_teams
-    let tournament = state
-        .db
-        .get_tournament(&id)
-        .await
-        .map_err(internal_err)?
-        .ok_or_else(|| not_found("Tournament not found"))?;
+    let tournament = require_tournament(&state, &id).await?;
+
+    // The team must exist and be active (same 404 as GET /api/teams/:id).
+    if let Some(team_id) = body.team_id.as_deref() {
+        let team = state.db.get_team(team_id).await.map_err(internal_err)?;
+        if !team.is_some_and(|t| t.is_active) {
+            return Err(not_found("Team not found"));
+        }
+    }
 
     if let Some(max) = tournament.max_teams {
         let count = state
@@ -499,10 +592,13 @@ pub async fn add_participant(
             &id,
             body.team_id.as_deref(),
             body.external_name.as_deref(),
-            body.seed,
+            seed,
         )
         .await
-        .map_err(internal_err)?;
+        .map_err(|e| match e {
+            scuffed_db::DbError::Conflict(msg) => conflict(&msg),
+            other => internal_err(other),
+        })?;
 
     audit(
         &state.db,
@@ -525,7 +621,10 @@ pub async fn add_participant(
 
 #[derive(Deserialize)]
 pub struct UpdateParticipantRequest {
-    pub seed: Option<Option<u32>>,
+    /// Absent = leave unchanged, null = clear to unseeded, n = set seed.
+    /// The value is checked by [`parse_seed`] in the handler.
+    #[serde(default, deserialize_with = "crate::routes::members::double_option")]
+    pub seed: Option<Option<serde_json::Number>>,
     pub status: Option<String>,
     pub group_label: Option<Option<String>>,
 }
@@ -537,6 +636,13 @@ pub async fn update_participant(
     Path((id, pid)): Path<(String, String)>,
     Json(body): Json<UpdateParticipantRequest>,
 ) -> ApiResult<Json<TournamentParticipant>> {
+    // Absent leaves the seed alone and null clears it; a given seed must be a
+    // whole number from 1 to u32::MAX.
+    let seed = match &body.seed {
+        None => None,
+        Some(None) => Some(None),
+        Some(Some(n)) => Some(Some(parse_seed(n)?)),
+    };
     let status = body.status.as_deref().map(|s| match s {
         "checked_in" => ParticipantStatus::CheckedIn,
         "active" => ParticipantStatus::Active,
@@ -546,16 +652,17 @@ pub async fn update_participant(
         _ => ParticipantStatus::Registered,
     });
 
+    require_participant(&state, &id, &pid).await?;
     let result = state
         .db
         .update_tournament_participant(
             &pid,
-            body.seed,
+            seed,
             status,
             body.group_label.as_ref().map(|g| g.as_deref()),
         )
         .await
-        .map_err(internal_err)?;
+        .map_err(gone_or_internal("Participant not found"))?;
 
     audit(
         &state.db,
@@ -576,6 +683,7 @@ pub async fn remove_participant(
     officer: OfficerUser,
     Path((id, pid)): Path<(String, String)>,
 ) -> ApiResult<StatusCode> {
+    require_participant(&state, &id, &pid).await?;
     state
         .db
         .remove_tournament_participant(&pid)
@@ -603,7 +711,7 @@ pub async fn list_matches(
     OptionalOrgMember(member): OptionalOrgMember,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Vec<TournamentMatch>>> {
-    reject_hidden_draft(&state, &id, &member).await?;
+    load_visible_tournament(&state, &id, &member).await?;
     state
         .db
         .list_tournament_matches(&id)
@@ -782,7 +890,7 @@ pub async fn get_standings(
     OptionalOrgMember(member): OptionalOrgMember,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Vec<SwissStanding>>> {
-    reject_hidden_draft(&state, &id, &member).await?;
+    load_visible_tournament(&state, &id, &member).await?;
     state
         .db
         .get_swiss_standings(&id)
@@ -797,11 +905,12 @@ pub async fn generate_next_round(
     officer: OfficerUser,
     Path(id): Path<String>,
 ) -> ApiResult<(StatusCode, Json<TournamentRound>)> {
+    require_tournament(&state, &id).await?;
     let round = state
         .db
         .generate_swiss_round(&id)
         .await
-        .map_err(internal_err)?;
+        .map_err(invalid_or_internal)?;
 
     audit(
         &state.db,

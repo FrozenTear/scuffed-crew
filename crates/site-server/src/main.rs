@@ -44,7 +44,12 @@ async fn main() {
         }
         Database::bootstrap_from_env()
             .await
-            .expect("SURREALDB_MIGRATE_ONLY: bootstrap failed");
+            .unwrap_or_else(|e| match e {
+                scuffed_db::DbError::Migration { .. } => {
+                    panic!("SURREALDB_MIGRATE_ONLY: SurrealDB startup migration failed: {e}")
+                }
+                e => panic!("SURREALDB_MIGRATE_ONLY: Failed to connect to SurrealDB: {e}"),
+            });
         tracing::info!("SURREALDB_MIGRATE_ONLY complete — exiting");
         return;
     }
@@ -65,9 +70,16 @@ async fn main() {
             .expect("Failed to run database migrations");
         db
     } else {
+        // A failed startup migration names its step (DbError::Migration), so
+        // the panic does not claim a connect failure for, say, DB7.
         Database::connect_from_env()
             .await
-            .expect("Failed to connect to SurrealDB")
+            .unwrap_or_else(|e| match e {
+                scuffed_db::DbError::Migration { .. } => {
+                    panic!("SurrealDB startup migration failed: {e}")
+                }
+                e => panic!("Failed to connect to SurrealDB: {e}"),
+            })
     };
     if is_dev {
         use scuffed_auth::crypto::hash_session_token;
@@ -359,38 +371,15 @@ async fn main() {
             .await
             .expect("Failed to start RR tournament");
 
-        // Report some RR matches with replay codes
-        let rr_matches = db
-            .list_tournament_matches("rr_demo")
-            .await
-            .expect("Failed to list RR matches");
-
-        let rr_pending: Vec<_> = rr_matches
-            .iter()
-            .filter(|m| {
-                m.participant_a_id.is_some()
-                    && m.participant_b_id.is_some()
-                    && m.status == scuffed_db::types::TournamentMatchStatus::Pending
-            })
-            .collect();
-
-        // Report first 3 matches of the round robin
-        for (i, m) in rr_pending.iter().take(3).enumerate() {
-            let winner = if i % 2 == 0 {
-                m.participant_a_id.as_ref().unwrap()
-            } else {
-                m.participant_b_id.as_ref().unwrap()
-            };
-            let codes = vec![
-                format!("RR{}{}", (b'A' + i as u8) as char, "001"),
-                format!("RR{}{}", (b'A' + i as u8) as char, "002"),
-            ];
-            db.report_tournament_match(&m.id, 2, 1, winner, None, codes)
+        // Report up to 3 round-robin matches (shared with the tests).
+        // The error says which step failed: "listing RR matches failed: ..."
+        // or "reporting RR match {i} failed: ...".
+        let rr_reported =
+            scuffed_site_server::seed::report_round_robin_demo_matches(&db, "rr_demo", 3)
                 .await
-                .unwrap_or_else(|_| panic!("Failed to report RR match {i}"));
-        }
+                .unwrap_or_else(|e| panic!("Failed to seed RR results: {e}"));
 
-        tracing::info!("Round robin seeded: 4 teams, 3 matches reported");
+        tracing::info!("Round robin seeded: 4 teams, {rr_reported} matches reported");
 
         // ── Swiss tournament seed ──
         db.client
@@ -463,7 +452,7 @@ async fn main() {
             ];
             db.report_tournament_match(&m.id, 2, 0, winner, None, codes)
                 .await
-                .unwrap_or_else(|_| panic!("Failed to report Swiss match {i}"));
+                .unwrap_or_else(|e| panic!("Failed to report Swiss match {i}: {e}"));
         }
 
         // Generate round 2 (pairs by standings now)
@@ -492,6 +481,13 @@ async fn main() {
         &upload_dir,
         &reports_dir,
     );
+    let hero_icons = scuffed_site_server::hero_icons::open_hero_icons_dir(
+        &scuffed_site_server::hero_icons::hero_icons_dir_from_env(),
+        &upload_dir,
+        &reports_dir,
+        packs_dir.as_deref(),
+    )
+    .await;
 
     let notifier = Notifier::from_env();
     if notifier.is_none() {
@@ -551,6 +547,7 @@ async fn main() {
         reports_dir: reports_dir.clone(),
         reports_enabled,
         packs_dir,
+        hero_icons,
         notifier,
         nostr_challenge_key,
         consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(),
@@ -587,6 +584,10 @@ async fn main() {
     if reports_enabled {
         scuffed_site_server::stat_reports::spawn_sweeper(db.clone(), reports_dir);
     }
+
+    // Icon files with no row (a crash between file write and row insert) are
+    // removed once at startup. Only runs when HERO_ICONS_DIR is usable.
+    scuffed_site_server::hero_icons::spawn_orphan_sweep(db.clone(), state.hero_icons.clone());
 
     let app = create_router(state);
 

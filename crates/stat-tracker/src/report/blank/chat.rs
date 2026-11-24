@@ -45,7 +45,7 @@ pub enum Chat {
 
 impl Chat {
     /// Whether a crop row ending at `bot` may be under chat.
-    pub(crate) fn covers(self, bot: u32, crop_h: u32) -> bool {
+    pub fn covers(self, bot: u32, crop_h: u32) -> bool {
         match self {
             Chat::None => false,
             Chat::Unknown => f64::from(bot) > REACH * f64::from(crop_h),
@@ -114,4 +114,37 @@ pub fn chat_over_board(frame: &RgbImage) -> Chat {
     // one line of margin above the highest line found
     let reach = py(top - LINE);
     Chat::ReachesY(reach.saturating_sub(crop_y))
+}
+
+/// Whether chat shows in the chat strip on a line band that overlaps
+/// playfield rows `top` to `bottom` (in 2560x1440 px): text strokes in the
+/// bottom band or in any line band of the stack above it, counted only when
+/// that band shares a row with `top..bottom`. Every band is checked, not
+/// only the stack up to its first empty line, so one empty line never hides
+/// a line above it. For a crop that reaches left toward the chat box (the
+/// rank training crops' progress bar): chat lines start in this strip, and
+/// a long one runs on to the right along its own rows, so chat only on rows
+/// outside the crop (the bottom line under the bar) does not touch it.
+pub fn chat_in_rows(frame: &RgbImage, top: f64, bottom: f64) -> bool {
+    let (w, h) = frame.dimensions();
+    let (gx, gy, gw, gh) = game_rect_16_9(w, h);
+    let (sx, sy) = (f64::from(gw) / 2560.0, f64::from(gh) / 1440.0);
+    let px = |v: f64| gx + (v * sx).round() as u32;
+    let py = |v: f64| gy + (v.max(0.0) * sy).round() as u32;
+    let min_px = TEXT_PX * sx * sy;
+    let (x0, x1) = (px(X.0), px(X.1));
+    let overlaps = |a: f64, b: f64| a < bottom && b > top;
+    let text = |a: f64, b: f64| (strokes(frame, x0, x1, py(a), py(b)) as f64) > min_px;
+    if overlaps(BOTTOM.0, BOTTOM.1) && text(BOTTOM.0, BOTTOM.1) {
+        return true;
+    }
+    let mut band_bottom = BOTTOM.0;
+    while band_bottom > top {
+        let band_top = band_bottom - LINE;
+        if overlaps(band_top, band_bottom) && text(band_top, band_bottom) {
+            return true;
+        }
+        band_bottom = band_top;
+    }
+    false
 }

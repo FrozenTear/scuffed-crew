@@ -1,4 +1,4 @@
-//! Admin › Patch Notes — officer CRUD for the Strategy catalog.
+//! Admin › Patch Notes: officer CRUD for the Strategy catalog.
 //!
 //! Frozen write contract: Contabo `6cf6260` / #92. Do not invent routes or
 //! fields. Public `GET /api/strategy/patch-notes` (`{ "data": [PatchNote] }`)
@@ -13,8 +13,14 @@
 
 use dioxus::prelude::*;
 
+use crate::components::admin_shared::{after_delete_focus_ids, focus_after_delete_soon};
+
+use crate::components::ui::{
+    EmptyCard, PageHeader, PageShell, PageWidth, Pager, page_slice, show_list_top,
+};
 use crate::components::{
-    AccessDenied, ConfirmDialog, DataTable, FormModal, Toast, admin_pending, use_toast,
+    ADMIN_PAGE_SIZE, AccessDenied, AdminDate, ConfirmDialog, DataTable, FormModal, RowActions,
+    Toast, admin_list_pending, delete_button_id, row_menu_toggle_id, use_toast,
 };
 use crate::hooks::{ModalController, use_api};
 use crate::state::use_auth;
@@ -26,34 +32,55 @@ use scuffed_types::{
 
 const CHANGE_TYPES: &[&str] = &["buff", "nerf", "adjustment", "bugfix"];
 
+/// Page CSS: the hero and section blocks of the editor, and the version cell.
 const PAGE_CSS: &str = r#"
-    .nested-stack { display: flex; flex-direction: column; gap: 0.75rem; }
+    .patch-group {
+        display: flex;
+        flex-direction: column;
+        gap: var(--space-3);
+        min-width: 0;
+    }
+    .patch-group-title {
+        margin: 0;
+        color: var(--text);
+        font-family: var(--font-head);
+        font-size: var(--text-md);
+        font-weight: var(--font-label-weight);
+        line-height: var(--leading-ui);
+    }
+    .nested-stack { display: flex; flex-direction: column; gap: var(--space-3); }
     .nested-block {
         border: 1px solid var(--border);
-        border-radius: 8px;
-        padding: 0.85rem;
+        border-radius: var(--radius-card);
+        padding: var(--space-card-pad);
         background: var(--surface);
         display: flex;
         flex-direction: column;
-        gap: 0.75rem;
+        gap: var(--space-3);
     }
     .nested-block-head {
         display: flex;
         justify-content: space-between;
         align-items: center;
-        gap: 0.5rem;
+        gap: var(--space-2);
     }
     .nested-block-title {
-        font-family: var(--font-head);
-        font-size: 0.75rem;
-        letter-spacing: 0.04em;
-        text-transform: uppercase;
-        color: var(--text-3);
         margin: 0;
+        color: var(--text-3);
+        font-family: var(--font-head);
+        font-size: var(--text-xs);
+        font-weight: var(--font-label-weight);
+        letter-spacing: var(--tracking-caps);
+        text-transform: uppercase;
     }
-    .form-textarea.mono {
+    textarea.field-input.patch-json {
         font-family: var(--font-mono);
-        min-height: 6rem;
+        font-size: var(--text-sm);
+    }
+    .patch-version {
+        font-family: var(--font-mono);
+        font-size: var(--text-sm);
+        overflow-wrap: anywhere;
     }
 "#;
 
@@ -121,7 +148,7 @@ fn format_write_error(verb: &str, e: &ClientError) -> String {
         Some(403) => "Officer access required (403). Members cannot write patch notes.".into(),
         Some(409) => "That version already exists (409). Use a different version number.".into(),
         Some(404) => "Patch note not found (404). It may have already been deleted.".into(),
-        _ => format!("Failed to {verb}: {e}"),
+        _ => crate::client_error::with_lead(&format!("Failed to {verb}"), e),
     }
 }
 
@@ -292,15 +319,69 @@ fn display_title(note: &PatchNote) -> String {
         .as_deref()
         .map(str::trim)
         .filter(|t| !t.is_empty())
-        .unwrap_or("-")
+        .unwrap_or("No title")
         .to_string()
 }
+
+/// A version or record key as a DOM id part: characters outside
+/// `[A-Za-z0-9_-]` (the dots in `2.18.1`) become `-`.
+fn id_part(raw: &str) -> String {
+    raw.trim()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+/// DOM id of one editor field: the version being edited (`new` for an unsaved
+/// note) plus the field name.
+fn patch_field_id(version: Option<&str>, field: &str) -> String {
+    let key = version.filter(|v| !v.trim().is_empty()).unwrap_or("new");
+    format!("patch-{}-{}", id_part(key), id_part(field))
+}
+
+fn edit_button_id(version: &str) -> String {
+    patch_field_id(Some(version), "edit")
+}
+
+fn actions_id(version: &str) -> String {
+    patch_field_id(Some(version), "actions")
+}
+
+/// "2 heroes, 1 section": what a note holds, for the list.
+fn contents_summary(note: &PatchNote) -> String {
+    let count = |n: usize, one: &str, many: &str| {
+        if n == 1 {
+            format!("1 {one}")
+        } else {
+            format!("{n} {many}")
+        }
+    };
+    format!(
+        "{}, {}",
+        count(note.hero_updates.len(), "hero", "heroes"),
+        count(note.sections.len(), "section", "sections")
+    )
+}
+
+/// The list region: the pager's focus target after a page change.
+const LIST_ID: &str = "admin-patch-notes-list";
+/// The header's "New patch note" button.
+const NEW_ID: &str = "patch-notes-new";
+/// The empty card's "New patch note" button.
+const NEW_EMPTY_ID: &str = "patch-notes-new-empty";
 
 #[component]
 pub fn AdminPatchNotes() -> Element {
     let auth = use_auth();
     let mut notes = use_api::<ApiSuccess<Vec<PatchNote>>>("/api/strategy/patch-notes");
     let mut toast = use_toast();
+    let mut page = use_signal(|| 1usize);
 
     let mut modal = ModalController::<String>::new();
     let mut delete_modal = ModalController::<PatchNote>::new();
@@ -311,6 +392,11 @@ pub fn AdminPatchNotes() -> Element {
     let mut form_url = use_signal(String::new);
     let mut form_heroes = use_signal(Vec::<HeroDraft>::new);
     let mut form_sections = use_signal(Vec::<SectionDraft>::new);
+    // The dialog's live line: a check that failed, or a failed save with the
+    // server's reason.
+    let mut form_error = use_signal(|| None::<String>);
+    // Id of the button that opened the editor, for focus on Cancel.
+    let mut opener = use_signal(|| None::<String>);
 
     let mut reset_form = move || {
         form_version.set(String::new());
@@ -319,10 +405,12 @@ pub fn AdminPatchNotes() -> Element {
         form_url.set(String::new());
         form_heroes.set(Vec::new());
         form_sections.set(Vec::new());
+        form_error.set(None);
     };
 
-    let open_create = move |_| {
+    let mut open_create = move |from: &'static str| {
         reset_form();
+        opener.set(Some(from.to_string()));
         modal.show_empty();
     };
 
@@ -333,6 +421,8 @@ pub fn AdminPatchNotes() -> Element {
         form_url.set(note.url.clone());
         form_heroes.set(note.hero_updates.iter().map(hero_from_note).collect());
         form_sections.set(note.sections.iter().map(section_from_note).collect());
+        form_error.set(None);
+        opener.set(Some(edit_button_id(&note.version)));
         modal.show(note.version);
     };
 
@@ -355,10 +445,12 @@ pub fn AdminPatchNotes() -> Element {
         ) {
             Ok(note) => note,
             Err(msg) => {
+                form_error.set(Some(msg.clone()));
                 toast.show(Toast::error(msg));
                 return;
             }
         };
+        form_error.set(None);
         let edit_version = modal.get_target();
 
         modal.start_submit();
@@ -389,7 +481,9 @@ pub fn AdminPatchNotes() -> Element {
                     notes.refresh += 1;
                 }
                 Err(e) => {
-                    toast.show(Toast::error(format_write_error("save", &e)));
+                    let message = format_write_error("save", &e);
+                    form_error.set(Some(message.clone()));
+                    toast.show(Toast::error(message));
                 }
             }
         });
@@ -400,6 +494,17 @@ pub fn AdminPatchNotes() -> Element {
             return;
         };
         let version = target.version.clone();
+        // B9: once the row is gone, focus the next row's Edit, else the
+        // previous row's, else New patch note.
+        let keys: Vec<String> = notes
+            .data
+            .peek()
+            .as_ref()
+            .and_then(|d| d.as_ref())
+            .map(|envelope| envelope.data.iter().map(|n| n.version.clone()).collect())
+            .unwrap_or_default();
+        let focus_next =
+            after_delete_focus_ids(&keys, &version, |k| vec![edit_button_id(k)], &[NEW_ID]);
         delete_modal.close();
         spawn(async move {
             match ApiClient::web()
@@ -409,6 +514,7 @@ pub fn AdminPatchNotes() -> Element {
                 Ok(_) => {
                     toast.show(Toast::success("Patch note deleted."));
                     notes.refresh += 1;
+                    focus_after_delete_soon(edit_button_id(&version), focus_next);
                 }
                 Err(e) => {
                     toast.show(Toast::error(format_write_error("delete", &e)));
@@ -427,336 +533,487 @@ pub fn AdminPatchNotes() -> Element {
         };
     }
 
-    let editing = modal.get_target().is_some();
+    let list = {
+        let data = notes.data.read();
+        match data.as_ref().and_then(|d| d.as_ref()) {
+            None => admin_list_pending(&notes, "patch notes"),
+            Some(envelope) => {
+                let all = &envelope.data;
+                let total = all.len();
+                let rows = page_slice(all, page(), ADMIN_PAGE_SIZE).to_vec();
+                rsx! {
+                    if all.is_empty() {
+                        EmptyCard {
+                            title: "No patch notes yet",
+                            message: "Notes you add show on the public Patch Notes page. Add the latest Overwatch patch to start the list.",
+                            actions: rsx! {
+                                button {
+                                    r#type: "button",
+                                    id: NEW_EMPTY_ID,
+                                    class: "btn is-primary",
+                                    onclick: move |_| open_create(NEW_EMPTY_ID),
+                                    "New patch note"
+                                }
+                            },
+                        }
+                    } else {
+                        PatchNotesTable {
+                            rows,
+                            on_edit: move |n: PatchNote| open_edit(n),
+                            on_delete: move |n: PatchNote| open_delete(n),
+                        }
+                    }
+                    Pager {
+                        id: "patch-notes-pager",
+                        page: page(),
+                        total,
+                        page_size: ADMIN_PAGE_SIZE,
+                        noun: "patch notes",
+                        noun_singular: "patch note",
+                        show_page_count: true,
+                        on_change: move |next| {
+                            page.set(next);
+                            show_list_top(LIST_ID);
+                        },
+                    }
+                }
+            }
+        }
+    };
+
+    let record = modal.get_target();
+    let editing = record.is_some();
+    let delete_target = delete_modal.get_target();
 
     rsx! {
         crate::styles::StyleOnce { id: "scuffed-css-pages-admin-patch_notes-page-css", css: PAGE_CSS }
 
-        div { class: "admin-toolbar",
-            h1 { "Patch Notes" }
-            button { class: "btn-add", onclick: open_create, "+ New Patch Note" }
-        }
-        p { class: "empty-state", style: "text-align:left;padding:0 0 1rem;margin:0;",
-            "Published notes appear on the public Strategy Patch Notes page. "
-            "Version cannot be changed after create. Duplicate versions return 409."
-        }
-
-        {
-            let data = notes.data.read();
-            let data = data.as_ref().and_then(|d| d.as_ref());
-            match data {
-                None => admin_pending(&notes, "patch notes"),
-                Some(envelope) if envelope.data.is_empty() => rsx! {
-                    p { class: "empty-state", "No patch notes yet." }
-                },
-                Some(envelope) => rsx! {
-                    DataTable { headers: vec!["Version", "Date", "Title", "Actions"],
-                        for note in envelope.data.iter() {
-                            {
-                                let edit_note = note.clone();
-                                let delete_note = note.clone();
-                                let title = display_title(note);
-                                rsx! {
-                                    tr { key: "{note.version}",
-                                        td { code { "{note.version}" } }
-                                        td { "{note.date}" }
-                                        td { "{title}" }
-                                        td {
-                                            div { class: "row-actions",
-                                                button {
-                                                    class: "row-btn",
-                                                    onclick: move |_| open_edit(edit_note.clone()),
-                                                    "Edit"
-                                                }
-                                                button {
-                                                    class: "row-btn danger",
-                                                    onclick: move |_| open_delete(delete_note.clone()),
-                                                    "Delete"
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
+        PageShell { width: PageWidth::Wide, class: "admin-patch-notes-page",
+            PageHeader {
+                title: "Patch notes",
+                lead: "Notes here appear on the public Patch Notes page. The version is the note's address, so it cannot change after you create it.",
+                actions: rsx! {
+                    button {
+                        r#type: "button",
+                        id: NEW_ID,
+                        class: "btn is-primary",
+                        onclick: move |_| open_create(NEW_ID),
+                        "New patch note"
                     }
                 },
+            }
+            section {
+                id: LIST_ID,
+                class: "admin-list pager-target",
+                tabindex: "-1",
+                aria_label: "Patch notes",
+                {list}
             }
         }
 
         FormModal {
-            title: if editing { "Edit Patch Note".to_string() } else { "New Patch Note".to_string() },
+            title: if editing { "Edit patch note".to_string() } else { "New patch note".to_string() },
             open: modal.is_open(),
             submitting: modal.is_submitting(),
+            submit_label: if editing { None } else { Some("Create".to_string()) },
+            error: form_error(),
+            restore_focus_id: opener(),
             on_close: on_close,
             on_submit: on_submit,
             wide: true,
-
-            div { class: "form-grid",
-                div { class: "form-field",
-                    label { class: "form-label", "Version" }
-                    input {
-                        class: "form-input",
-                        r#type: "text",
-                        value: "{form_version}",
-                        placeholder: "2.18.1",
-                        disabled: editing,
-                        oninput: move |e| form_version.set(e.value()),
-                    }
-                    p { class: "form-hint",
-                        if editing {
-                            "Version is the URL key and cannot be changed."
-                        } else {
-                            "Must be unique. Duplicate versions return 409."
-                        }
-                    }
-                }
-                div { class: "form-field",
-                    label { class: "form-label", "Date" }
-                    input {
-                        class: "form-input",
-                        r#type: "date",
-                        value: "{form_date}",
-                        oninput: move |e| form_date.set(e.value()),
-                    }
-                    p { class: "form-hint", "YYYY-MM-DD, shown as-is on the public page." }
-                }
-                div { class: "form-field span-full",
-                    label { class: "form-label", "Title (optional)" }
-                    input {
-                        class: "form-input",
-                        r#type: "text",
-                        value: "{form_title}",
-                        placeholder: "Mid-season balance",
-                        oninput: move |e| form_title.set(e.value()),
-                    }
-                }
-                div { class: "form-field span-full",
-                    label { class: "form-label", "Official URL" }
-                    input {
-                        class: "form-input",
-                        r#type: "url",
-                        value: "{form_url}",
-                        placeholder: "https://overwatch.blizzard.com/en-us/news/patch-notes/",
-                        oninput: move |e| form_url.set(e.value()),
-                    }
-                }
+            PatchNoteFields {
+                record,
+                version: form_version,
+                date: form_date,
+                title: form_title,
+                url: form_url,
+                heroes: form_heroes,
+                sections: form_sections,
             }
+        }
 
-            div { class: "form-field",
-                div { class: "nested-block-head",
-                    label { class: "form-label", "Hero updates" }
-                    button {
-                        class: "row-btn",
-                        r#type: "button",
-                        onclick: move |_| form_heroes.write().push(empty_hero_draft()),
-                        "+ Add hero"
-                    }
-                }
-                p { class: "form-hint",
-                    "changes is a JSON array of {{ability?, description, change_type}}."
-                }
-                if form_heroes().is_empty() {
-                    p { class: "form-hint", "None yet. Public cards still render without hero blocks." }
-                } else {
-                    div { class: "nested-stack",
-                        for (i, hero) in form_heroes().into_iter().enumerate() {
-                            {
-                                let hero_id = hero.hero_id.clone();
-                                let hero_name = hero.hero_name.clone();
-                                let change_type = hero.change_type.clone();
-                                let changes_json = hero.changes_json.clone();
-                                let dev_comment = hero.dev_comment.clone();
-                                rsx! {
-                                    div { class: "nested-block", key: "hero-{i}",
-                                        div { class: "nested-block-head",
-                                            p { class: "nested-block-title", "Hero {i + 1}" }
-                                            button {
-                                                class: "row-btn danger",
-                                                r#type: "button",
-                                                onclick: move |_| {
-                                                    let mut list = form_heroes();
-                                                    if i < list.len() {
-                                                        list.remove(i);
-                                                        form_heroes.set(list);
-                                                    }
-                                                },
-                                                "Remove"
-                                            }
+        ConfirmDialog {
+            title: "Delete patch note".to_string(),
+            message: format!(
+                "Delete version \"{}\"? This removes it from the public Patch Notes page.",
+                delete_target.as_ref().map(|n| n.version.clone()).unwrap_or_default()
+            ),
+            open: delete_modal.is_open(),
+            danger: true,
+            confirm_label: "Delete".to_string(),
+            // Delete sits in the row on desktop and behind "Actions" on phone:
+            // focus goes back to whichever is shown.
+            restore_focus_id: delete_target.as_ref().map(|n| delete_button_id(&actions_id(&n.version))),
+            restore_focus_fallback: delete_target.as_ref().map(|n| row_menu_toggle_id(&actions_id(&n.version))),
+            on_confirm: on_confirm_delete,
+            on_cancel: on_cancel_delete,
+        }
+    }
+}
+
+/// The rows: version, date, title and contents, then Edit in the row and
+/// Delete behind "Actions" on phone.
+#[component]
+fn PatchNotesTable(
+    rows: Vec<PatchNote>,
+    on_edit: EventHandler<PatchNote>,
+    on_delete: EventHandler<PatchNote>,
+) -> Element {
+    rsx! {
+        DataTable {
+            headers: vec!["Version", "Title", "Contents", "Date", "Actions"],
+            num_cols: vec![3],
+            cards: true,
+            label: "Patch notes".to_string(),
+            for note in rows {
+                Fragment { key: "{note.version}", {
+                    let edit = note.clone();
+                    let delete = note.clone();
+                    let title = display_title(&note);
+                    let contents = contents_summary(&note);
+                    let version = note.version.clone();
+                    rsx! {
+                        tr { key: "{note.version}",
+                            td { class: "cell-who", code { class: "patch-version", "{note.version}" } }
+                            // On phone the title is the line under the version,
+                            // not a labelled line after the meta.
+                            td { class: "cell-badge patch-title", "{title}" }
+                            td { class: "cell-meta", "{contents}" }
+                            td { class: "cell-meta num", AdminDate { iso: note.date.clone() } }
+                            td { class: "cell-actions",
+                                RowActions {
+                                    id: actions_id(&note.version),
+                                    label: "Actions for version {version}",
+                                    inline_on_desktop: true,
+                                    more: rsx! {
+                                        button {
+                                            r#type: "button",
+                                            id: delete_button_id(&actions_id(&note.version)),
+                                            class: "btn is-danger",
+                                            aria_label: "Delete version {version}",
+                                            onclick: move |_| on_delete.call(delete.clone()),
+                                            "Delete"
                                         }
-                                        div { class: "form-grid",
-                                            div { class: "form-field",
-                                                label { class: "form-label", "Hero name" }
-                                                input {
-                                                    class: "form-input",
-                                                    r#type: "text",
-                                                    value: "{hero_name}",
-                                                    placeholder: "Ana",
-                                                    oninput: move |e| {
-                                                        form_heroes.with_mut(|list| {
-                                                            if let Some(h) = list.get_mut(i) {
-                                                                h.hero_name = e.value();
-                                                            }
-                                                        });
-                                                    },
-                                                }
-                                            }
-                                            div { class: "form-field",
-                                                label { class: "form-label", "Hero id" }
-                                                input {
-                                                    class: "form-input",
-                                                    r#type: "text",
-                                                    value: "{hero_id}",
-                                                    placeholder: "ana",
-                                                    oninput: move |e| {
-                                                        form_heroes.with_mut(|list| {
-                                                            if let Some(h) = list.get_mut(i) {
-                                                                h.hero_id = e.value();
-                                                            }
-                                                        });
-                                                    },
-                                                }
-                                            }
-                                            div { class: "form-field",
-                                                label { class: "form-label", "Change type" }
-                                                select {
-                                                    class: "form-select",
-                                                    value: "{change_type}",
-                                                    onchange: move |e| {
-                                                        form_heroes.with_mut(|list| {
-                                                            if let Some(h) = list.get_mut(i) {
-                                                                h.change_type = e.value();
-                                                            }
-                                                        });
-                                                    },
-                                                    for t in CHANGE_TYPES {
-                                                        option { value: "{t}", "{t}" }
-                                                    }
-                                                }
-                                            }
-                                            div { class: "form-field",
-                                                label { class: "form-label", "Dev comment (optional)" }
-                                                input {
-                                                    class: "form-input",
-                                                    r#type: "text",
-                                                    value: "{dev_comment}",
-                                                    oninput: move |e| {
-                                                        form_heroes.with_mut(|list| {
-                                                            if let Some(h) = list.get_mut(i) {
-                                                                h.dev_comment = e.value();
-                                                            }
-                                                        });
-                                                    },
-                                                }
-                                            }
-                                            div { class: "form-field span-full",
-                                                label { class: "form-label", "Changes (JSON)" }
-                                                textarea {
-                                                    class: "form-textarea mono",
-                                                    value: "{changes_json}",
-                                                    oninput: move |e| {
-                                                        form_heroes.with_mut(|list| {
-                                                            if let Some(h) = list.get_mut(i) {
-                                                                h.changes_json = e.value();
-                                                            }
-                                                        });
-                                                    },
-                                                }
-                                            }
-                                        }
+                                    },
+                                    button {
+                                        r#type: "button",
+                                        id: edit_button_id(&note.version),
+                                        class: "btn is-ghost",
+                                        aria_label: "Edit version {version}",
+                                        onclick: move |_| on_edit.call(edit.clone()),
+                                        "Edit"
                                     }
                                 }
                             }
                         }
                     }
-                }
+                } }
             }
+        }
+    }
+}
 
+/// The editor fields. Ids come from the version being edited plus the field
+/// name (and the block number for hero and section blocks).
+#[component]
+fn PatchNoteFields(
+    record: Option<String>,
+    version: Signal<String>,
+    date: Signal<String>,
+    title: Signal<String>,
+    url: Signal<String>,
+    heroes: Signal<Vec<HeroDraft>>,
+    sections: Signal<Vec<SectionDraft>>,
+) -> Element {
+    let editing = record.is_some();
+    let key = record.as_deref();
+    let id = |field: &str| patch_field_id(key, field);
+    let (version_id, version_hint_id) = (id("version"), id("version-hint"));
+    let (date_id, date_hint_id) = (id("date"), id("date-hint"));
+    let title_id = id("title");
+    let url_id = id("url");
+    let (heroes_head_id, heroes_hint_id) = (id("heroes-head"), id("heroes-hint"));
+    let (sections_head_id, sections_hint_id) = (id("sections-head"), id("sections-hint"));
+    let key_owned = key.map(str::to_string);
+    rsx! {
+        div { class: "form-grid",
             div { class: "form-field",
-                div { class: "nested-block-head",
-                    label { class: "form-label", "Sections" }
-                    button {
-                        class: "row-btn",
-                        r#type: "button",
-                        onclick: move |_| form_sections.write().push(empty_section_draft()),
-                        "+ Add section"
+                label { class: "field-label", r#for: "{version_id}", "Version" }
+                input {
+                    id: "{version_id}",
+                    class: "field-input",
+                    r#type: "text",
+                    value: "{version}",
+                    placeholder: "2.18.1",
+                    readonly: editing,
+                    aria_describedby: "{version_hint_id}",
+                    oninput: move |e| version.set(e.value()),
+                }
+                p { id: "{version_hint_id}", class: "field-hint",
+                    if editing {
+                        "Version is the URL key and cannot be changed."
+                    } else {
+                        "Must be unique. Duplicate versions return 409."
                     }
                 }
-                p { class: "form-hint", "Category + one item per line (Bug Fixes, Maps, Competitive, …)." }
-                if form_sections().is_empty() {
-                    p { class: "form-hint", "None yet." }
-                } else {
-                    div { class: "nested-stack",
-                        for (i, section) in form_sections().into_iter().enumerate() {
-                            {
-                                let category = section.category.clone();
-                                let items_text = section.items_text.clone();
-                                rsx! {
-                                    div { class: "nested-block", key: "section-{i}",
-                                        div { class: "nested-block-head",
-                                            p { class: "nested-block-title", "Section {i + 1}" }
-                                            button {
-                                                class: "row-btn danger",
-                                                r#type: "button",
-                                                onclick: move |_| {
-                                                    let mut list = form_sections();
-                                                    if i < list.len() {
-                                                        list.remove(i);
-                                                        form_sections.set(list);
-                                                    }
-                                                },
-                                                "Remove"
-                                            }
-                                        }
-                                        div { class: "form-field",
-                                            label { class: "form-label", "Category" }
-                                            input {
-                                                class: "form-input",
-                                                r#type: "text",
-                                                value: "{category}",
-                                                placeholder: "Bug Fixes",
-                                                oninput: move |e| {
-                                                    form_sections.with_mut(|list| {
-                                                        if let Some(s) = list.get_mut(i) {
-                                                            s.category = e.value();
-                                                        }
-                                                    });
-                                                },
-                                            }
-                                        }
-                                        div { class: "form-field",
-                                            label { class: "form-label", "Items (one per line)" }
-                                            textarea {
-                                                class: "form-textarea",
-                                                value: "{items_text}",
-                                                oninput: move |e| {
-                                                    form_sections.with_mut(|list| {
-                                                        if let Some(s) = list.get_mut(i) {
-                                                            s.items_text = e.value();
-                                                        }
-                                                    });
-                                                },
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+            }
+            div { class: "form-field",
+                label { class: "field-label", r#for: "{date_id}", "Date" }
+                input {
+                    id: "{date_id}",
+                    class: "field-input",
+                    r#type: "date",
+                    value: "{date}",
+                    aria_describedby: "{date_hint_id}",
+                    oninput: move |e| date.set(e.value()),
+                }
+                p { id: "{date_hint_id}", class: "field-hint", "YYYY-MM-DD, shown as-is on the public page." }
+            }
+            div { class: "form-field span-full",
+                label { class: "field-label", r#for: "{title_id}", "Title (optional)" }
+                input {
+                    id: "{title_id}",
+                    class: "field-input",
+                    r#type: "text",
+                    value: "{title}",
+                    placeholder: "Mid-season balance",
+                    oninput: move |e| title.set(e.value()),
+                }
+            }
+            div { class: "form-field span-full",
+                label { class: "field-label", r#for: "{url_id}", "Official URL" }
+                input {
+                    id: "{url_id}",
+                    class: "field-input",
+                    r#type: "url",
+                    value: "{url}",
+                    placeholder: "https://overwatch.blizzard.com/en-us/news/patch-notes/",
+                    oninput: move |e| url.set(e.value()),
+                }
+            }
+        }
+
+        section { class: "patch-group", aria_labelledby: "{heroes_head_id}",
+            div { class: "nested-block-head",
+                h3 { id: "{heroes_head_id}", class: "patch-group-title", "Hero updates" }
+                button {
+                    class: "btn is-ghost",
+                    r#type: "button",
+                    onclick: move |_| heroes.write().push(empty_hero_draft()),
+                    "Add hero"
+                }
+            }
+            p { id: "{heroes_hint_id}", class: "field-hint",
+                if heroes.read().is_empty() {
+                    "None yet. Public cards still render without hero blocks. "
+                }
+                "Changes is a JSON array of {{ability?, description, change_type}}."
+            }
+            if !heroes.read().is_empty() {
+                div { class: "nested-stack",
+                    for (i, hero) in heroes().into_iter().enumerate() {
+                        HeroBlock {
+                            key: "hero-{i}",
+                            record: key_owned.clone(),
+                            index: i,
+                            hero,
+                            heroes,
+                            hint_id: heroes_hint_id.clone(),
                         }
                     }
                 }
             }
         }
 
-        ConfirmDialog {
-            title: "Delete Patch Note".to_string(),
-            message: format!(
-                "Delete version \"{}\"? This removes it from the public Strategy Patch Notes page.",
-                delete_modal.get_target().map(|n| n.version).unwrap_or_default()
-            ),
-            open: delete_modal.is_open(),
-            danger: true,
-            on_confirm: on_confirm_delete,
-            on_cancel: on_cancel_delete,
+        section { class: "patch-group", aria_labelledby: "{sections_head_id}",
+            div { class: "nested-block-head",
+                h3 { id: "{sections_head_id}", class: "patch-group-title", "Sections" }
+                button {
+                    class: "btn is-ghost",
+                    r#type: "button",
+                    onclick: move |_| sections.write().push(empty_section_draft()),
+                    "Add section"
+                }
+            }
+            p { id: "{sections_hint_id}", class: "field-hint",
+                if sections.read().is_empty() {
+                    "None yet. "
+                }
+                "A category plus one item per line (Bug Fixes, Maps, Competitive)."
+            }
+            if !sections.read().is_empty() {
+                div { class: "nested-stack",
+                    for (i, section) in sections().into_iter().enumerate() {
+                        SectionBlock {
+                            key: "section-{i}",
+                            record: key_owned.clone(),
+                            index: i,
+                            section,
+                            sections,
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One hero update block, named by its "Hero 1" title.
+#[component]
+fn HeroBlock(
+    record: Option<String>,
+    index: usize,
+    hero: HeroDraft,
+    heroes: Signal<Vec<HeroDraft>>,
+    hint_id: String,
+) -> Element {
+    let i = index;
+    let n = i + 1;
+    let id = |field: &str| patch_field_id(record.as_deref(), &format!("hero-{n}-{field}"));
+    let (head_id, name_id, hero_id_id) = (id("title"), id("name"), id("id"));
+    let (type_id, comment_id, changes_id) = (id("type"), id("comment"), id("changes"));
+    let mut edit = move |apply: &dyn Fn(&mut HeroDraft)| {
+        heroes.with_mut(|list| {
+            if let Some(h) = list.get_mut(i) {
+                apply(h);
+            }
+        });
+    };
+    rsx! {
+        div { class: "nested-block", role: "group", aria_labelledby: "{head_id}",
+            div { class: "nested-block-head",
+                p { id: "{head_id}", class: "nested-block-title", "Hero {n}" }
+                button {
+                    class: "btn is-danger",
+                    r#type: "button",
+                    aria_label: "Remove hero {n}",
+                    onclick: move |_| {
+                        let mut list = heroes();
+                        if i < list.len() {
+                            list.remove(i);
+                            heroes.set(list);
+                        }
+                    },
+                    "Remove"
+                }
+            }
+            div { class: "form-grid",
+                div { class: "form-field",
+                    label { class: "field-label", r#for: "{name_id}", "Hero name" }
+                    input {
+                        id: "{name_id}",
+                        class: "field-input",
+                        r#type: "text",
+                        value: "{hero.hero_name}",
+                        placeholder: "Ana",
+                        oninput: move |e| edit(&|h| h.hero_name = e.value()),
+                    }
+                }
+                div { class: "form-field",
+                    label { class: "field-label", r#for: "{hero_id_id}", "Hero id" }
+                    input {
+                        id: "{hero_id_id}",
+                        class: "field-input",
+                        r#type: "text",
+                        value: "{hero.hero_id}",
+                        placeholder: "ana",
+                        oninput: move |e| edit(&|h| h.hero_id = e.value()),
+                    }
+                }
+                div { class: "form-field",
+                    label { class: "field-label", r#for: "{type_id}", "Change type" }
+                    select {
+                        id: "{type_id}",
+                        class: "field-input",
+                        value: "{hero.change_type}",
+                        onchange: move |e| edit(&|h| h.change_type = e.value()),
+                        for t in CHANGE_TYPES {
+                            option { value: "{t}", selected: hero.change_type == *t, "{t}" }
+                        }
+                    }
+                }
+                div { class: "form-field",
+                    label { class: "field-label", r#for: "{comment_id}", "Dev comment (optional)" }
+                    input {
+                        id: "{comment_id}",
+                        class: "field-input",
+                        r#type: "text",
+                        value: "{hero.dev_comment}",
+                        oninput: move |e| edit(&|h| h.dev_comment = e.value()),
+                    }
+                }
+                div { class: "form-field span-full",
+                    label { class: "field-label", r#for: "{changes_id}", "Changes (JSON)" }
+                    textarea {
+                        id: "{changes_id}",
+                        class: "field-input patch-json",
+                        value: "{hero.changes_json}",
+                        aria_describedby: "{hint_id}",
+                        oninput: move |e| edit(&|h| h.changes_json = e.value()),
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One section block, named by its "Section 1" title.
+#[component]
+fn SectionBlock(
+    record: Option<String>,
+    index: usize,
+    section: SectionDraft,
+    sections: Signal<Vec<SectionDraft>>,
+) -> Element {
+    let i = index;
+    let n = i + 1;
+    let id = |field: &str| patch_field_id(record.as_deref(), &format!("section-{n}-{field}"));
+    let (head_id, category_id, items_id) = (id("title"), id("category"), id("items"));
+    let mut edit = move |apply: &dyn Fn(&mut SectionDraft)| {
+        sections.with_mut(|list| {
+            if let Some(s) = list.get_mut(i) {
+                apply(s);
+            }
+        });
+    };
+    rsx! {
+        div { class: "nested-block", role: "group", aria_labelledby: "{head_id}",
+            div { class: "nested-block-head",
+                p { id: "{head_id}", class: "nested-block-title", "Section {n}" }
+                button {
+                    class: "btn is-danger",
+                    r#type: "button",
+                    aria_label: "Remove section {n}",
+                    onclick: move |_| {
+                        let mut list = sections();
+                        if i < list.len() {
+                            list.remove(i);
+                            sections.set(list);
+                        }
+                    },
+                    "Remove"
+                }
+            }
+            div { class: "form-field",
+                label { class: "field-label", r#for: "{category_id}", "Category" }
+                input {
+                    id: "{category_id}",
+                    class: "field-input",
+                    r#type: "text",
+                    value: "{section.category}",
+                    placeholder: "Bug Fixes",
+                    oninput: move |e| edit(&|s| s.category = e.value()),
+                }
+            }
+            div { class: "form-field",
+                label { class: "field-label", r#for: "{items_id}", "Items (one per line)" }
+                textarea {
+                    id: "{items_id}",
+                    class: "field-input",
+                    value: "{section.items_text}",
+                    oninput: move |e| edit(&|s| s.items_text = e.value()),
+                }
+            }
         }
     }
 }
@@ -942,8 +1199,144 @@ mod tests {
             hero_updates: vec![],
             sections: vec![],
         };
-        assert_eq!(display_title(&note), "-");
+        assert_eq!(display_title(&note), "No title");
         note.title = Some("  Mid-season  ".into());
         assert_eq!(display_title(&note), "Mid-season");
+    }
+
+    fn render(view: fn() -> Element) -> String {
+        let mut dom = VirtualDom::new(view);
+        dom.rebuild_in_place();
+        dioxus_ssr::render(&dom)
+    }
+
+    /// Every `<label for="x">` has a control with `id="x"`, and ids are unique.
+    fn assert_labels_tied(html: &str) -> usize {
+        let mut seen = 0;
+        for part in html.split("<label").skip(1) {
+            let head = part.split('>').next().unwrap_or_default();
+            let target = head
+                .split("for=\"")
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+                .unwrap_or_else(|| panic!("label without for: {head}"));
+            assert_eq!(
+                html.matches(&format!("id=\"{target}\"")).count(),
+                1,
+                "control for {target}: {html}"
+            );
+            seen += 1;
+        }
+        seen
+    }
+
+    fn sample_note() -> PatchNote {
+        PatchNote {
+            version: "2.18.1".into(),
+            date: "2026-11-10".into(),
+            title: None,
+            url: "https://x.test".into(),
+            hero_updates: vec![],
+            sections: vec![PatchSection {
+                category: "Bug Fixes".into(),
+                items: vec!["Fixed a tooltip.".into()],
+            }],
+        }
+    }
+
+    #[test]
+    fn page_has_one_h1_and_a_labelled_wait_in_the_wide_shell() {
+        use crate::components::admin_shared::test_page::render_admin_route;
+        let html = render_admin_route("/admin/patch-notes", Some(scuffed_types::OrgRole::Officer));
+        assert!(
+            html.contains("class=\"ui-shell ui-shell--wide admin-patch-notes-page\""),
+            "{html}"
+        );
+        assert_eq!(html.matches("<h1").count(), 1, "{html}");
+        assert!(html.contains("<h1>Patch notes</h1>"), "{html}");
+        assert_eq!(html.matches("<main").count(), 1, "{html}");
+        assert!(
+            html.contains("role=\"status\">Loading patch notes...</p>"),
+            "{html}"
+        );
+        // Nothing in the page itself is styled inline (the shared toast
+        // host outside the page is not this page's markup).
+        let page = &html[html.find("admin-patch-notes-page").expect("page")..];
+        let page = &page[..page.find("</main>").expect("main end")];
+        assert!(!page.contains("style="), "{page}");
+        assert!(!html.contains('\u{2014}'), "{html}");
+    }
+
+    #[test]
+    fn rows_are_cards_with_contents_and_a_folded_delete() {
+        fn view() -> Element {
+            rsx! {
+                PatchNotesTable { rows: vec![sample_note()], on_edit: |_| {}, on_delete: |_| {} }
+            }
+        }
+        let html = render(view);
+        assert!(html.contains("data-table-scroll is-cards"), "{html}");
+        assert!(
+            html.contains("<th scope=\"col\" class=\"num\">Date</th>"),
+            "{html}"
+        );
+        assert!(html.contains(">0 heroes, 1 section</td>"), "{html}");
+        assert!(
+            html.contains("class=\"cell-badge patch-title\">No title</td>"),
+            "{html}"
+        );
+        assert!(html.contains("id=\"patch-2-18-1-edit\""), "{html}");
+        let group = &html[html.find("class=\"row-menu-group\"").expect("group")..];
+        assert!(
+            group.contains("aria-label=\"Delete version 2.18.1\""),
+            "{group}"
+        );
+        // The delete dialog gives focus back to this id (Vision 9, PR 706).
+        let delete_id = delete_button_id(&actions_id("2.18.1"));
+        assert!(group.contains(&format!("id=\"{delete_id}\"")), "{group}");
+    }
+
+    #[test]
+    fn editor_fields_are_labelled_per_block() {
+        fn view() -> Element {
+            let version = use_signal(|| "2.18.1".to_string());
+            let date = use_signal(String::new);
+            let title = use_signal(String::new);
+            let url = use_signal(String::new);
+            let heroes = use_signal(|| vec![empty_hero_draft(), empty_hero_draft()]);
+            let sections = use_signal(|| vec![empty_section_draft()]);
+            rsx! {
+                PatchNoteFields {
+                    record: Some("2.18.1".to_string()),
+                    version,
+                    date,
+                    title,
+                    url,
+                    heroes,
+                    sections,
+                }
+            }
+        }
+        let html = render(view);
+        // 4 note fields, 5 per hero, 2 per section.
+        assert_eq!(assert_labels_tied(&html), 4 + 5 * 2 + 2, "{html}");
+        assert!(html.contains("id=\"patch-2-18-1-hero-2-name\""), "{html}");
+        assert!(html.contains("aria-label=\"Remove hero 2\""), "{html}");
+        assert!(html.contains("readonly"), "{html}");
+        assert!(!html.contains("disabled"), "{html}");
+    }
+
+    #[test]
+    fn page_css_sizes_come_from_tokens() {
+        crate::components::ui::test_support::assert_sizes_from_tokens(PAGE_CSS);
+    }
+
+    #[test]
+    fn contents_count_words() {
+        let mut note = sample_note();
+        assert_eq!(contents_summary(&note), "0 heroes, 1 section");
+        note.sections.clear();
+        assert_eq!(contents_summary(&note), "0 heroes, 0 sections");
+        assert_eq!(patch_field_id(None, "url"), "patch-new-url");
     }
 }

@@ -1,8 +1,8 @@
 //! Eval probe: what ocr-v1 (Tesseract) reads for map name and outcome on each frame.
 //! Usage: cargo run --example ocrv1_meta -- <img>...   prints TSV: path, map, outcome, outcome_text
 
-use stat_tracker::detect::hero_portrait::preflight_scoreboard;
 use stat_tracker::detect::match_end::{detect_outcome, detect_outcome_text};
+use stat_tracker::frame::layout::preflight_scoreboard;
 use stat_tracker::{ocr, parse};
 
 fn main() {

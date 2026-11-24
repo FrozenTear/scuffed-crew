@@ -11,6 +11,14 @@
 //! paint the real accent, mark, and copy. `/api/settings` still revalidates.
 //! A missing or invalid block is not the template: callers stay pending until
 //! the fetch resolves, and a failed fetch with no prior value is an error.
+//!
+//! Two admin pages send `PUT /api/settings`: Admin Settings (everything but
+//! the brand, except that it writes both accents when an applied identity
+//! pack's pair is pending) and brand settings (the accent and the display
+//! font). Each hands a successful response to
+//! [`SiteSettingsState::apply_saved`]. The saved value paints at once and a
+//! refetch revalidates it, so nav, accent, org name and the strategies gate
+//! follow the save without a reload.
 
 use dioxus::prelude::*;
 use scuffed_api_client::ApiClient;
@@ -27,6 +35,20 @@ pub struct SiteSettingsState {
     /// One cached classification. Consumers borrow it with `.read()` so a
     /// render does not clone `SiteSettings` once per call.
     pub resolved: Memo<Option<Result<SiteSettings, String>>>,
+    /// Settings the admin just saved. Painted ahead of an older fetch until
+    /// the next successful fetch replaces it.
+    saved: Signal<Option<SiteSettings>>,
+}
+
+impl SiteSettingsState {
+    /// Paint the settings a successful save returned and revalidate.
+    ///
+    /// The refresh bump restarts `GET /api/settings`, which also drops any
+    /// fetch still in flight from before the save.
+    pub fn apply_saved(mut self, settings: SiteSettings) {
+        self.saved.set(Some(settings));
+        self.refresh += 1;
+    }
 }
 
 /// Call once from the root `App` component.
@@ -34,16 +56,22 @@ pub fn provide_site_settings() -> SiteSettingsState {
     let refresh = use_signal(|| 0u32);
     // Synchronous: the script is already in the document when WASM starts.
     let last_good = use_signal(read_embedded_settings);
+    let saved = use_signal(|| None::<SiteSettings>);
     // Do not read `last_good` in this future. `use_resource` polls inside a
     // reactive context, so a read subscribes the resource to that signal and
     // the success write restarts `GET /api/settings` on every tab.
     let resource = use_resource(move || {
         let _tick = refresh();
         let mut last_good = last_good;
+        let mut saved = saved;
         async move {
             match load_public_settings().await {
                 Ok(settings) => {
                     last_good.set(Some(settings.clone()));
+                    // `peek` so this future does not subscribe to `saved`.
+                    if saved.peek().is_some() {
+                        saved.set(None);
+                    }
                     Ok(settings)
                 }
                 Err(err) => Err(err),
@@ -53,9 +81,14 @@ pub fn provide_site_settings() -> SiteSettingsState {
     let resolved = use_memo(move || {
         let fetched = resource.read();
         let embedded = last_good.read();
-        resolve_settings(fetched.as_ref(), embedded.as_ref())
+        let just_saved = saved.read();
+        resolve_with_saved(just_saved.as_ref(), fetched.as_ref(), embedded.as_ref())
     });
-    let state = SiteSettingsState { refresh, resolved };
+    let state = SiteSettingsState {
+        refresh,
+        resolved,
+        saved,
+    };
     use_context_provider(|| state);
     state
 }
@@ -98,6 +131,19 @@ pub fn resolve_settings(
     }
 }
 
+/// A just-saved value wins over the fetch it outdates. Without it, fall back
+/// to [`resolve_settings`].
+pub fn resolve_with_saved(
+    saved: Option<&SiteSettings>,
+    fetched: Option<&Result<SiteSettings, String>>,
+    embedded: Option<&SiteSettings>,
+) -> Option<Result<SiteSettings, String>> {
+    match saved {
+        Some(settings) => Some(Ok(settings.clone())),
+        None => resolve_settings(fetched, embedded),
+    }
+}
+
 fn read_embedded_settings() -> Option<SiteSettings> {
     parse_embedded_settings(embedded_settings_text().as_deref())
 }
@@ -121,7 +167,7 @@ async fn load_public_settings() -> Result<SiteSettings, String> {
     ApiClient::web()
         .fetch::<SiteSettings>("/api/settings")
         .await
-        .map_err(|err| err.to_string())
+        .map_err(|err| crate::client_error::logged_message("site settings load", &err))
 }
 
 #[cfg(test)]
@@ -139,6 +185,7 @@ thread_local! {
     static TEST_SETTINGS_FETCH: std::cell::RefCell<Option<SettingsFetchMock>> =
         const { std::cell::RefCell::new(None) };
     static TEST_REFRESH: std::cell::Cell<Option<Signal<u32>>> = const { std::cell::Cell::new(None) };
+    static TEST_STATE: std::cell::Cell<Option<SiteSettingsState>> = const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]
@@ -149,6 +196,16 @@ pub fn set_test_embedded_json(json: Option<String>) {
 #[cfg(test)]
 fn set_test_settings_fetch(mock: Option<SettingsFetchMock>) {
     TEST_SETTINGS_FETCH.with(|slot| *slot.borrow_mut() = mock);
+}
+
+/// For tests in other modules: answer the first `GET /api/settings` with
+/// `body` and park any refetch. `None` removes the mock.
+#[cfg(test)]
+pub(crate) fn mock_settings_fetch(body: Option<String>) {
+    set_test_settings_fetch(body.map(|json| SettingsFetchMock {
+        hits: std::rc::Rc::new(std::cell::Cell::new(0)),
+        body: std::rc::Rc::new(std::cell::RefCell::new(Some(json))),
+    }));
 }
 
 /// Text of `#sc-settings`, when the shell embedded anonymous settings.
@@ -308,6 +365,7 @@ mod tests {
             set_test_embedded_json(None);
             set_test_settings_fetch(None);
             TEST_REFRESH.with(|slot| slot.set(None));
+            TEST_STATE.with(|slot| slot.set(None));
         }
     }
 
@@ -342,7 +400,11 @@ mod tests {
         let html = mount_seeded_home();
         assert!(html.contains("Play"), "{html}");
         assert!(html.contains("data-home-shell=\"manifesto\""), "{html}");
-        assert!(html.contains(">SO</div>"), "{html}");
+        // The seeded initials show in the top bar mark.
+        assert!(
+            html.contains("class=\"d1-mark\" aria-hidden=\"true\">SO</span>"),
+            "{html}"
+        );
         assert!(html.contains("Seeded Org"), "{html}");
         assert!(html.contains("© Seeded Org · desc"), "{html}");
         assert!(
@@ -367,15 +429,16 @@ mod tests {
     }
 
     fn abort_on_timeout(limit: std::time::Duration) -> AbortOnTimeout {
+        abort_named_on_timeout("settings_fetch_runs_once_and_replaces_the_seed", limit)
+    }
+
+    fn abort_named_on_timeout(name: &'static str, limit: std::time::Duration) -> AbortOnTimeout {
         let (done, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             if rx.recv_timeout(limit).is_err() {
                 // libtest captures eprintln, then process::exit drops that buffer.
                 use std::io::Write;
-                let _ = writeln!(
-                    std::io::stderr(),
-                    "settings_fetch_runs_once_and_replaces_the_seed exceeded {limit:?}"
-                );
+                let _ = writeln!(std::io::stderr(), "{name} exceeded {limit:?}");
                 std::process::exit(101);
             }
         });
@@ -432,6 +495,80 @@ mod tests {
         assert_eq!(hits.get(), 1);
         assert!(after.contains("Fetched Org"), "{after}");
         assert!(!after.contains("Seeded Org"), "{after}");
+    }
+
+    #[test]
+    fn a_saved_value_outranks_an_older_fetch() {
+        let fetched = parse_embedded_settings(Some(&fixture("Fetched Org", "Night"))).unwrap();
+        let saved = parse_embedded_settings(Some(&fixture("Saved Org", "Day"))).unwrap();
+
+        let shown = resolve_with_saved(Some(&saved), Some(&Ok(fetched.clone())), None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(shown.org_name, "Saved Org");
+
+        let shown = resolve_with_saved(Some(&saved), Some(&Err("offline".into())), None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(shown.org_name, "Saved Org");
+
+        let shown = resolve_with_saved(None, Some(&Ok(fetched)), Some(&saved))
+            .unwrap()
+            .unwrap();
+        assert_eq!(shown.org_name, "Fetched Org");
+    }
+
+    /// APP3: a save must reach every context reader without a reload, and
+    /// the refetch it triggers must not undo it.
+    #[test]
+    fn apply_saved_paints_at_once_and_refetches() {
+        let _timeout = abort_named_on_timeout(
+            "apply_saved_paints_at_once_and_refetches",
+            std::time::Duration::from_secs(8),
+        );
+        let _clear = ClearSettingsHooks;
+        let hits = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let body = std::rc::Rc::new(std::cell::RefCell::new(Some(fixture(
+            "Fetched Org",
+            "Night",
+        ))));
+        set_test_settings_fetch(Some(SettingsFetchMock {
+            hits: hits.clone(),
+            body: body.clone(),
+        }));
+
+        fn view() -> Element {
+            let state = provide_site_settings();
+            TEST_STATE.with(|slot| slot.set(Some(state)));
+            let resolved = state.resolved.read();
+            let name = loaded_site_settings(resolved.as_ref())
+                .map(|settings| settings.org_name.clone())
+                .unwrap_or_default();
+            rsx! { p { "{name}" } }
+        }
+
+        let mut dom = VirtualDom::new(view);
+        dom.rebuild_in_place();
+        for _ in 0..12 {
+            dom.render_immediate(&mut dioxus::dioxus_core::NoOpMutations);
+        }
+        let html = dioxus_ssr::render(&dom);
+        assert_eq!(hits.get(), 1);
+        assert!(html.contains("Fetched Org"), "{html}");
+
+        // The refetch fails, so only the saved value can explain the new name.
+        *body.borrow_mut() = None;
+        hits.set(0);
+        let saved = parse_embedded_settings(Some(&fixture("Saved Org", "Day"))).unwrap();
+        let state = TEST_STATE.with(|slot| slot.get().expect("settings state"));
+        state.apply_saved(saved);
+        for _ in 0..12 {
+            dom.render_immediate(&mut dioxus::dioxus_core::NoOpMutations);
+        }
+        let after = dioxus_ssr::render(&dom);
+        assert_eq!(hits.get(), 1, "a save must revalidate once");
+        assert!(after.contains("Saved Org"), "{after}");
+        assert!(!after.contains("Fetched Org"), "{after}");
     }
 
     #[test]

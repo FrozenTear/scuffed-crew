@@ -191,6 +191,7 @@ pub async fn seed_dev_data(
             Some(scuffed.suggested_skin.as_str()),
             None,
             None,
+            None,
         )
         .await?;
         tracing::info!("Dev site settings: Scuffed Crew homepage + brand + shell/skin applied");
@@ -214,6 +215,77 @@ type SeedMatchRow = (
     u32,
     u32,
 );
+
+/// Why `report_round_robin_demo_matches` failed.
+#[derive(Debug)]
+pub struct RoundRobinSeedError {
+    /// Index of the match whose report failed, or `None` when listing the
+    /// tournament's matches failed (before any report).
+    pub match_index: Option<usize>,
+    pub source: Box<scuffed_db::DbError>,
+}
+
+impl std::fmt::Display for RoundRobinSeedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.match_index {
+            Some(i) => write!(f, "reporting RR match {i} failed: {}", self.source),
+            None => write!(f, "listing RR matches failed: {}", self.source),
+        }
+    }
+}
+
+impl std::error::Error for RoundRobinSeedError {}
+
+/// Report the first `count` pending round-robin matches of `tournament_id`
+/// with demo scores and replay codes, alternating the winner (A, B, A, ...).
+///
+/// The winner's score must exceed the loser's (DB-009), so a B win is
+/// reported 1-2, not 2-1. Used by the standalone site-server dev seed and by
+/// its regression test. Returns the number of matches reported.
+///
+/// On failure the error says whether listing the matches or reporting a
+/// given match failed (see [`RoundRobinSeedError`]).
+pub async fn report_round_robin_demo_matches(
+    db: &Database,
+    tournament_id: &str,
+    count: usize,
+) -> Result<usize, RoundRobinSeedError> {
+    let matches = db
+        .list_tournament_matches(tournament_id)
+        .await
+        .map_err(|e| RoundRobinSeedError {
+            match_index: None,
+            source: Box::new(e),
+        })?;
+    let pending: Vec<_> = matches
+        .iter()
+        .filter(|m| {
+            m.participant_a_id.is_some()
+                && m.participant_b_id.is_some()
+                && m.status == scuffed_db::types::TournamentMatchStatus::Pending
+        })
+        .take(count)
+        .collect();
+
+    for (i, m) in pending.iter().enumerate() {
+        let (winner, score_a, score_b) = if i % 2 == 0 {
+            (m.participant_a_id.as_deref().unwrap_or_default(), 2, 1)
+        } else {
+            (m.participant_b_id.as_deref().unwrap_or_default(), 1, 2)
+        };
+        let codes = vec![
+            format!("RR{}{}", (b'A' + i as u8) as char, "001"),
+            format!("RR{}{}", (b'A' + i as u8) as char, "002"),
+        ];
+        db.report_tournament_match(&m.id, score_a, score_b, winner, None, codes)
+            .await
+            .map_err(|e| RoundRobinSeedError {
+                match_index: Some(i),
+                source: Box::new(e),
+            })?;
+    }
+    Ok(pending.len())
+}
 
 /// Seed a varied set of personal_match records for the dev member so the
 /// strategy editor's hero-winrate badges and the personal stats dashboard
@@ -500,6 +572,8 @@ async fn seed_personal_matches(
                 recognizer: scuffed_types::RECOGNIZER_OCR_V1.into(),
                 name_recognizer: None,
                 suspect_fields: Vec::new(),
+                bans_picks: None,
+                rank: None,
             }
         })
         .collect();

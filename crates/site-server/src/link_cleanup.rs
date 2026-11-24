@@ -37,11 +37,13 @@ fn cleanup_error_kind(error: &scuffed_db::DbError) -> &'static str {
         scuffed_db::DbError::Surreal(_) => "surreal",
         scuffed_db::DbError::NotFound(_) => "not_found",
         scuffed_db::DbError::Conflict(_) => "conflict",
+        scuffed_db::DbError::Invalid(_) => "invalid",
         scuffed_db::DbError::Config(_) => "config",
         scuffed_db::DbError::Timeout => "timeout",
         scuffed_db::DbError::Crypto(_) => "crypto",
         scuffed_db::DbError::DisplayNameInvalid => "display_name_invalid",
         scuffed_db::DbError::DisplayNameTaken => "display_name_taken",
+        scuffed_db::DbError::Migration { .. } => "migration",
     }
 }
 

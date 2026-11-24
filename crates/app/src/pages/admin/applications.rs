@@ -1,15 +1,21 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
+use crate::components::admin_shared::{after_delete_focus_ids, focus_after_delete_soon};
+use crate::components::ui::{
+    ChipButton, ChipRow, EmptyCard, PageHeader, PageShell, PageWidth, Pager, page_slice,
+    show_list_top,
+};
 use crate::components::{
-    ConfirmDialog, DataTable, StatusPill, Toast, admin_pending, list_cap_notice, use_toast,
+    ADMIN_PAGE_SIZE, AdminDate, ConfirmDialog, DataTable, RowActions, StatusPill, Toast,
+    admin_date_time, admin_list_pending, list_cap_notice, use_toast,
 };
 use crate::hooks::{ModalController, use_api_list};
 use crate::pages::display_name::{
     ApplicantNameCell, DisplayNameAudience, applicant_name_error_id, described_by_when_error,
     display_name_error_message,
 };
-use crate::util::format_datetime;
+use crate::routes::Route;
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::PatchApplicationRequest;
 
@@ -42,6 +48,17 @@ impl Application {
             .unwrap_or_else(|| self.user_id.clone())
     }
 
+    /// Preferred roles as words ("Tank, Damage"), whatever case the form
+    /// stored them in.
+    fn roles_label(&self) -> String {
+        self.preferred_roles
+            .iter()
+            .map(|r| role_label(r))
+            .filter(|r| !r.is_empty())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
     fn games_label(&self) -> String {
         match &self.preferred_game_names {
             Some(names) if !names.is_empty() => names.join(", "),
@@ -60,6 +77,25 @@ fn detail_text(value: &str) -> String {
     }
 }
 
+/// One preferred role as a word: the known ids by name (`dps` is Damage),
+/// anything else with a capital first letter.
+fn role_label(raw: &str) -> String {
+    let raw = raw.trim();
+    match raw.to_ascii_lowercase().as_str() {
+        "tank" => "Tank".to_string(),
+        "dps" | "damage" => "Damage".to_string(),
+        "support" | "healer" => "Support".to_string(),
+        "flex" => "Flex".to_string(),
+        _ => {
+            let mut chars = raw.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().chain(chars).collect(),
+                None => String::new(),
+            }
+        }
+    }
+}
+
 fn list_or_none(items: &[String]) -> String {
     let joined = items
         .iter()
@@ -68,6 +104,68 @@ fn list_or_none(items: &[String]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     detail_text(&joined)
+}
+
+/// The decline question, naming the applicant when the row is known.
+fn decline_message(applicant: Option<&str>) -> String {
+    match applicant.map(str::trim).filter(|n| !n.is_empty()) {
+        Some(name) => format!("Decline the application from {name}?"),
+        None => "Decline this application?".to_string(),
+    }
+}
+
+/// The list region: the pager's focus target after a page change.
+const LIST_ID: &str = "admin-applications-list";
+const REJECT_NOTES_ID: &str = "application-decline-notes";
+
+/// Status chips: the stored status (empty for all) and the chip's word. A
+/// stored `rejected` reads "Declined", as on its pill.
+const STATUS_FILTERS: [(&str, &str); 6] = [
+    ("", "All"),
+    ("pending", "Pending"),
+    ("trial", "Trial"),
+    ("accepted", "Accepted"),
+    ("rejected", "Declined"),
+    ("withdrawn", "Withdrawn"),
+];
+
+/// Id of a status chip, from its status.
+fn status_filter_id(status: &str) -> String {
+    let name = if status.is_empty() { "all" } else { status };
+    format!("application-filter-{name}")
+}
+
+/// Id of a row's Accept button. It leaves the page once the application is
+/// reviewed, which is how the focus move knows the list has refreshed.
+fn application_accept_id(app_id: &str) -> String {
+    format!("application-accept-{app_id}")
+}
+
+/// Where focus goes once an accepted or declined application's list has
+/// refreshed: its own View if the row stays (no status filter), else the next
+/// row's View, else the previous row's, else the active status chip (`status`),
+/// which stays on the page when the filtered list empties. `keys` is the
+/// filtered list in order.
+fn after_review_focus_ids(keys: &[String], reviewed: &str, status: &str) -> Vec<String> {
+    let view = |k: &str| vec![application_view_trigger_id(k)];
+    let chip = status_filter_id(status);
+    let mut ids = view(reviewed);
+    ids.extend(after_delete_focus_ids(keys, reviewed, view, &[&chip]));
+    ids
+}
+
+/// The applications a status chip keeps. The empty filter keeps all.
+fn filter_applications(list: &[Application], status: &str) -> Vec<Application> {
+    list.iter()
+        .filter(|app| status.is_empty() || app.status == status)
+        .cloned()
+        .collect()
+}
+
+/// Officers can act on the open pipeline: pending and trial (the server
+/// validates transitions either way).
+fn can_review(status: &str) -> bool {
+    status == "pending" || status == "trial"
 }
 
 const APPLICATION_DETAIL_DIALOG_ID: &str = "application-detail-dialog";
@@ -214,12 +312,12 @@ fn ApplicationDetailDialog(
 ) -> Element {
     let title = format!("Application: {}", app.applicant_label());
     let games = detail_text(&app.games_label());
-    let roles = list_or_none(&app.preferred_roles);
+    let roles = detail_text(&app.roles_label());
     let message = detail_text(app.message.as_deref().unwrap_or(""));
     let notes = detail_text(app.review_notes.as_deref().unwrap_or(""));
-    let submitted = format_datetime(&app.created_at);
+    let submitted = admin_date_time(&app.created_at);
     let updated = match app.updated_at.as_deref() {
-        Some(iso) => detail_text(&format_datetime(iso)),
+        Some(iso) => detail_text(&admin_date_time(iso)),
         None => "None".to_string(),
     };
     rsx! {
@@ -252,7 +350,7 @@ fn ApplicationDetailDialog(
                         evt.stop_propagation();
                     }
                 },
-                div {
+                h2 {
                     class: "form-modal-header",
                     id: APPLICATION_DETAIL_TITLE_ID,
                     tabindex: "-1",
@@ -268,11 +366,7 @@ fn ApplicationDetailDialog(
                             dt { "Roles" }
                             dd { "{roles}" }
                             dt { "Message" }
-                            dd {
-                                class: "application-detail-message",
-                                style: "white-space: pre-wrap; overflow-wrap: anywhere;",
-                                "{message}"
-                            }
+                            dd { class: "application-detail-message", "{message}" }
                             dt { "Review notes" }
                             dd { "{notes}" }
                             dt { "Submitted" }
@@ -284,12 +378,104 @@ fn ApplicationDetailDialog(
                 }
                 div { class: "form-modal-footer",
                     button {
-                        class: "btn-cancel",
+                        class: "btn is-ghost",
+                        r#type: "button",
                         id: APPLICATION_DETAIL_CLOSE_ID,
                         onclick: move |_| on_close.call(()),
                         "Close"
                     }
                 }
+            }
+        }
+    }
+}
+
+/// The table of one page of applications. On phone every row is a card:
+/// name and View on the top line, the status pill under the name, then role,
+/// games and date on one line. Accept and Decline are in the row on desktop
+/// and behind "Actions" on phone.
+#[component]
+fn ApplicationsTable(
+    rows: Vec<Application>,
+    /// The application whose accept failed on its display name, and why.
+    name_error: Option<(String, String)>,
+    on_accept: EventHandler<String>,
+    on_reject: EventHandler<String>,
+    on_view: EventHandler<Application>,
+) -> Element {
+    rsx! {
+        DataTable {
+            headers: vec!["Applicant", "Status", "Role", "Games", "Date", "Actions"],
+            num_cols: vec![4],
+            cards: true,
+            label: "Applications",
+            for app in rows.iter() {
+                Fragment { key: "{app.id}", {
+                    let id = app.id.clone();
+                    let accept_id = app.id.clone();
+                    let reject_id = app.id.clone();
+                    let applicant = app.applicant_label();
+                    let games = app.games_label();
+                    let roles = app.roles_label();
+                    let view_trigger = application_view_trigger_id(&app.id);
+                    let view_app = app.clone();
+                    let row_error = name_error
+                        .as_ref()
+                        .filter(|(row_id, _)| row_id == &id)
+                        .map(|(_, message)| message.clone());
+                    let name_error_id = applicant_name_error_id(&id);
+                    let accept_described_by =
+                        described_by_when_error(row_error.as_deref(), &name_error_id);
+                    let review = can_review(&app.status).then(|| rsx! {
+                        button {
+                            r#type: "button",
+                            class: "btn is-primary",
+                            id: application_accept_id(&id),
+                            aria_label: "Accept {applicant}",
+                            aria_describedby: accept_described_by.clone(),
+                            onclick: move |_| on_accept.call(accept_id.clone()),
+                            "Accept"
+                        }
+                        button {
+                            r#type: "button",
+                            class: "btn is-danger",
+                            aria_label: "Decline {applicant}",
+                            onclick: move |_| on_reject.call(reject_id.clone()),
+                            "Decline"
+                        }
+                    });
+                    rsx! {
+                        tr { key: "{id}",
+                            td { class: "cell-who",
+                                ApplicantNameCell {
+                                    name: applicant.clone(),
+                                    error: row_error,
+                                    error_id: name_error_id,
+                                }
+                            }
+                            td { class: "cell-badge", StatusPill { status: app.status.clone() } }
+                            td { class: "cell-meta", "{roles}" }
+                            td { class: "cell-meta", "{games}" }
+                            td { class: "cell-meta num", AdminDate { iso: app.created_at.clone() } }
+                            td { class: "cell-actions",
+                                RowActions {
+                                    id: "application-actions-{id}",
+                                    label: "Actions for {applicant}",
+                                    inline_on_desktop: true,
+                                    more: review,
+                                    button {
+                                        r#type: "button",
+                                        class: "btn is-ghost",
+                                        id: "{view_trigger}",
+                                        aria_label: "View {applicant}",
+                                        onclick: move |_| on_view.call(view_app.clone()),
+                                        "View"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } }
             }
         }
     }
@@ -302,6 +488,10 @@ pub fn AdminApplications() -> Element {
     let mut toast = use_toast();
     let mut accept_name_error = use_signal(|| None::<(String, String)>);
 
+    // Status chip and page of the list. Both live in memory.
+    let mut status_filter = use_signal(|| "");
+    let mut page = use_signal(|| 1usize);
+
     // Reject dialog state
     let mut reject_modal = ModalController::<String>::new();
     let mut reject_notes = use_signal(String::new);
@@ -310,7 +500,24 @@ pub fn AdminApplications() -> Element {
     let mut view_open = use_signal(|| false);
     let mut view_target = use_signal(|| None::<Application>);
 
+    // The shown list's ids, for where focus goes after a review.
+    let review_keys = move || -> Vec<String> {
+        applications
+            .data
+            .peek()
+            .as_ref()
+            .and_then(|d| d.as_ref())
+            .map(|all| {
+                filter_applications(all, *status_filter.peek())
+                    .into_iter()
+                    .map(|a| a.id)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
     let accept = move |id: String| {
+        let focus_next = after_review_focus_ids(&review_keys(), &id, *status_filter.peek());
         spawn(async move {
             accept_name_error.set(None);
             let body = PatchApplicationRequest {
@@ -326,6 +533,7 @@ pub fn AdminApplications() -> Element {
                     accept_name_error.set(None);
                     toast.show(Toast::success("Application accepted"));
                     applications.refresh += 1;
+                    focus_after_delete_soon(application_accept_id(&id), focus_next);
                 }
                 Err(e) => {
                     if let Some(message) =
@@ -333,7 +541,7 @@ pub fn AdminApplications() -> Element {
                     {
                         accept_name_error.set(Some((id, message.to_string())));
                     } else {
-                        toast.show(Toast::error(format!("Failed to accept: {e}")));
+                        toast.show(Toast::error_from("Failed to accept", &e));
                     }
                 }
             }
@@ -342,6 +550,7 @@ pub fn AdminApplications() -> Element {
 
     let confirm_reject = move |_| {
         let id = reject_modal.get_target().unwrap_or_default();
+        let focus_next = after_review_focus_ids(&review_keys(), &id, *status_filter.peek());
         let notes = reject_notes().clone();
         reject_modal.close();
         reject_notes.set(String::new());
@@ -356,96 +565,141 @@ pub fn AdminApplications() -> Element {
                 .await
             {
                 Ok(_) => {
-                    toast.show(Toast::success("Application rejected"));
+                    toast.show(Toast::success("Application declined"));
                     applications.refresh += 1;
+                    focus_after_delete_soon(application_accept_id(&id), focus_next);
                 }
-                Err(e) => toast.show(Toast::error(format!("Failed to reject: {e}"))),
+                Err(e) => toast.show(Toast::error_from("Failed to decline", &e)),
             }
         });
     };
 
-    rsx! {
+    // Cancel in the decline dialog returns to the row's View button, which
+    // is on screen at every width.
+    let reject_focus = reject_modal
+        .get_target()
+        .map(|id| application_view_trigger_id(&id));
 
-        h1 { "Applications" }
+    // The decline dialog names the applicant it is about.
+    let reject_message = {
+        let target = reject_modal.get_target();
+        let data = applications.data.read();
+        let name = target.and_then(|id| {
+            data.as_ref()
+                .and_then(|d| d.as_ref())
+                .and_then(|all| all.iter().find(|a| a.id == id))
+                .map(|a| a.applicant_label())
+        });
+        decline_message(name.as_deref())
+    };
+    let list_failed = applications.error.read().is_some()
+        && applications
+            .data
+            .read()
+            .as_ref()
+            .and_then(|d| d.as_ref())
+            .is_none();
 
-        {
-            let data = applications.data.read();
-            let data = data.as_ref().and_then(|d| d.as_ref());
-            match data {
-                None => admin_pending(&applications, "applications"),
-                Some(list) if list.is_empty() => rsx! {
-                    p { class: "empty-state", "No applications." }
-                },
-                Some(list) => rsx! {
-                    DataTable { headers: vec!["Applicant", "Games", "Message", "Status", "Date", "Actions"],
-                        for app in list.iter() {
-                            {
-                                let id = app.id.clone();
-                                let id2 = app.id.clone();
-                                let applicant = app.applicant_label();
-                                let games = app.games_label();
-                                let msg = app.message.clone().unwrap_or_default();
-                                let date: String = app.created_at.chars().take(10).collect();
-                                // Officers can act on the open pipeline: pending and trial
-                                // (server validates transitions either way).
-                                let can_action = app.status == "pending" || app.status == "trial";
-                                let view_trigger = application_view_trigger_id(&app.id);
-                                let view_app = app.clone();
-                                let row_error = accept_name_error()
-                                    .filter(|(row_id, _)| row_id == &id)
-                                    .map(|(_, message)| message);
-                                let name_error_id = applicant_name_error_id(&id);
-                                let accept_described_by =
-                                    described_by_when_error(row_error.as_deref(), &name_error_id);
-                                rsx! {
-                                    tr { key: "{id}",
-                                        td {
-                                            ApplicantNameCell {
-                                                name: applicant,
-                                                error: row_error,
-                                                error_id: name_error_id,
-                                            }
-                                        }
-                                        td { "{games}" }
-                                        td { "{msg}" }
-                                        td { StatusPill { status: app.status.clone() } }
-                                        td { "{date}" }
-                                        td {
-                                            div { class: "row-actions",
-                                                if can_action {
-                                                    button {
-                                                        class: "row-btn primary",
-                                                        aria_describedby: accept_described_by.clone(),
-                                                        onclick: move |_| accept(id.clone()),
-                                                        "Accept"
-                                                    }
-                                                    button {
-                                                        class: "row-btn danger",
-                                                        onclick: move |_| reject_modal.show(id2.clone()),
-                                                        "Reject"
-                                                    }
-                                                }
-                                                button {
-                                                    class: "row-btn",
-                                                    id: "{view_trigger}",
-                                                    onclick: move |_| {
-                                                        view_target.set(Some(view_app.clone()));
-                                                        view_open.set(true);
-                                                    },
-                                                    "View"
-                                                }
-                                            }
-                                        }
-                                    }
+    let list = {
+        let data = applications.data.read();
+        match data.as_ref().and_then(|d| d.as_ref()) {
+            None => admin_list_pending(&applications, "applications"),
+            Some(all) => {
+                let shown = filter_applications(all, status_filter());
+                let total = shown.len();
+                let rows = page_slice(&shown, page(), ADMIN_PAGE_SIZE).to_vec();
+                rsx! {
+                    if all.is_empty() {
+                        EmptyCard {
+                            title: "No applications yet",
+                            message: "New applications from the Apply page show up here for review.",
+                            actions: rsx! {
+                                Link { to: Route::Apply {}, class: "btn is-ghost", "Open the Apply page" }
+                            },
+                        }
+                    } else if rows.is_empty() {
+                        EmptyCard {
+                            title: "No applications match these filters",
+                            message: "Clear the filters to see the full list, or wait for a new application to arrive.",
+                            actions: rsx! {
+                                button {
+                                    r#type: "button",
+                                    class: "btn is-ghost",
+                                    onclick: move |_| {
+                                        status_filter.set("");
+                                        page.set(1);
+                                    },
+                                    "Clear filters"
                                 }
-                            }
+                            },
+                        }
+                    } else {
+                        ApplicationsTable {
+                            rows,
+                            name_error: accept_name_error(),
+                            on_accept: accept,
+                            on_reject: move |id: String| reject_modal.show(id),
+                            on_view: move |app: Application| {
+                                view_target.set(Some(app));
+                                view_open.set(true);
+                            },
                         }
                     }
-                },
+                    // Always rendered: its count line is the list's live line.
+                    Pager {
+                        id: "applications-pager",
+                        page: page(),
+                        total,
+                        page_size: ADMIN_PAGE_SIZE,
+                        noun: "applications",
+                        noun_singular: "application",
+                        show_page_count: true,
+                        on_change: move |next| {
+                            page.set(next);
+                            show_list_top(LIST_ID);
+                        },
+                    }
+                }
             }
         }
+    };
 
-        {list_cap_notice(&applications, "applications")}
+    rsx! {
+        PageShell { width: PageWidth::Wide, class: "admin-applications-page",
+            PageHeader {
+                title: "Applications",
+                lead: "Filter by status. View an application to read it, then accept or decline it.",
+            }
+
+            // Nothing to filter while the list failed to load.
+            if !list_failed {
+            ChipRow { label: "Status filters", scroll: true,
+                for (status, word) in STATUS_FILTERS {
+                    ChipButton {
+                        key: "{word}",
+                        class: "chip",
+                        id: status_filter_id(status),
+                        label: word,
+                        pressed: status_filter() == status,
+                        onclick: move |_| {
+                            status_filter.set(status);
+                            page.set(1);
+                        },
+                    }
+                }
+            }
+            }
+
+            section {
+                id: LIST_ID,
+                class: "admin-list pager-target",
+                tabindex: "-1",
+                aria_label: "Applications",
+                {list}
+            }
+
+            {list_cap_notice(&applications, "applications")}
+        }
 
         {
             let dialog = if view_open() { view_target() } else { None };
@@ -467,20 +721,23 @@ pub fn AdminApplications() -> Element {
         }
 
         ConfirmDialog {
-            title: "Reject Application".to_string(),
-            message: "Are you sure you want to reject this application?".to_string(),
+            title: "Decline application".to_string(),
+            message: reject_message,
             open: reject_modal.is_open(),
             danger: true,
+            confirm_label: "Decline".to_string(),
+            restore_focus_id: reject_focus,
             on_confirm: confirm_reject,
             on_cancel: move |_| {
                 reject_modal.close();
                 reject_notes.set(String::new());
             },
             extra: rsx! {
-                div { class: "form-field", style: "margin-top: 0.75rem;",
-                    label { class: "form-label", "Rejection Notes (optional)" }
+                div { class: "form-field",
+                    label { class: "field-label", r#for: REJECT_NOTES_ID, "Decline notes (optional)" }
                     textarea {
-                        class: "form-textarea",
+                        class: "field-input",
+                        id: REJECT_NOTES_ID,
                         value: "{reject_notes}",
                         oninput: move |e| reject_notes.set(e.value()),
                     }
@@ -493,6 +750,76 @@ pub fn AdminApplications() -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_review_hands_focus_on_once_the_list_refreshed() {
+        // Vision nit 2 on PR 706: Accept and Decline switch the row's
+        // actions, so focus fell to the body.
+        let keys: Vec<String> = ["a", "b", "c"].iter().map(|k| k.to_string()).collect();
+        let v = application_view_trigger_id;
+        let all = status_filter_id("");
+        // Own View first (the row stays without a filter), then next,
+        // previous, then the active chip.
+        assert_eq!(
+            after_review_focus_ids(&keys, "b", ""),
+            [v("b"), v("c"), v("a"), all.clone()]
+        );
+        assert_eq!(
+            after_review_focus_ids(&keys, "c", ""),
+            [v("c"), v("b"), all]
+        );
+        assert_eq!(
+            prod_src()
+                .matches("after_review_focus_ids(&review_keys(), &id, *status_filter.peek());")
+                .count(),
+            2,
+            "Accept and Decline pass the active chip"
+        );
+        let src = include_str!("applications.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert_eq!(
+            prod.matches("focus_after_delete_soon(application_accept_id(&id), focus_next);")
+                .count(),
+            2,
+            "Accept and Decline"
+        );
+        assert!(prod.contains("id: application_accept_id(&id),"));
+        assert!(prod.contains("Fragment { key: \"{app.id}\","));
+    }
+
+    fn prod_src() -> &'static str {
+        include_str!("applications.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap()
+    }
+
+    #[test]
+    fn reviewing_the_last_filtered_row_focuses_the_active_chip() {
+        // Vision blocker 1 on PR 706 round 4: under the Pending chip, the
+        // last Accept or Decline swapped the table for the empty card, which
+        // has no id, so focus fell to the body. The chips stay on the page.
+        let keys = vec!["only".to_string()];
+        assert_eq!(
+            after_review_focus_ids(&keys, "only", "pending"),
+            [
+                application_view_trigger_id("only"),
+                "application-filter-pending".to_string()
+            ]
+        );
+        // The chip is the last resort, after the neighbours' View buttons.
+        let keys: Vec<String> = ["a", "b"].iter().map(|k| k.to_string()).collect();
+        assert_eq!(
+            after_review_focus_ids(&keys, "b", "trial").last().unwrap(),
+            "application-filter-trial"
+        );
+        // The chips render whenever the list loaded, empty or not.
+        let chips = prod_src()
+            .split("if !list_failed {")
+            .nth(1)
+            .expect("chip row guard");
+        assert!(chips.contains("id: status_filter_id(status),"));
+    }
 
     fn sample_application() -> Application {
         Application {
@@ -516,14 +843,190 @@ mod tests {
         dioxus_ssr::render(&dom)
     }
 
+    fn row(id: &str, name: &str, status: &str) -> Application {
+        Application {
+            id: id.into(),
+            user_id: format!("user-{id}"),
+            applicant_name: Some(name.into()),
+            preferred_games: vec!["overwatch".into()],
+            preferred_game_names: Some(vec!["Overwatch".into()]),
+            preferred_roles: vec!["Tank".into()],
+            message: Some("Hello".into()),
+            status: status.into(),
+            review_notes: None,
+            created_at: "2026-11-10T12:00:00Z".into(),
+            updated_at: None,
+        }
+    }
+
+    #[test]
+    fn page_has_one_h1_chips_and_a_labelled_wait_in_the_wide_shell() {
+        use crate::components::admin_shared::test_page::render_admin_route;
+        let html = render_admin_route("/admin/applications", Some(scuffed_types::OrgRole::Officer));
+        assert!(
+            html.contains("class=\"ui-shell ui-shell--wide admin-applications-page\""),
+            "{html}"
+        );
+        assert_eq!(html.matches("<h1").count(), 1, "{html}");
+        assert!(html.contains("<h1>Applications</h1>"), "{html}");
+        assert_eq!(html.matches("<main").count(), 1, "{html}");
+        // The status chips are a named group; All is on.
+        assert!(
+            html.contains(
+                "<div class=\"chip-row is-scroll\" role=\"group\" aria-label=\"Status filters\">"
+            ),
+            "{html}"
+        );
+        assert_eq!(
+            html.matches("id=\"application-filter-").count(),
+            6,
+            "{html}"
+        );
+        assert!(
+            html.contains("id=\"application-filter-all\" aria-pressed=\"true\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("id=\"application-filter-rejected\" aria-pressed=\"false\""),
+            "{html}"
+        );
+        assert!(html.contains(">Declined</button>"), "{html}");
+        // Nothing has loaded yet: a labelled wait inside the list region.
+        assert!(
+            html.contains(
+                "<section id=\"admin-applications-list\" class=\"admin-list pager-target\" tabindex=\"-1\" aria-label=\"Applications\">"
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains("role=\"status\">Loading applications...</p>"),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn status_chips_filter_the_list() {
+        let list = vec![
+            row("a1", "Player04", "pending"),
+            row("a2", "Player09", "trial"),
+            row("a3", "Player12", "rejected"),
+        ];
+        assert_eq!(filter_applications(&list, "").len(), 3);
+        let declined = filter_applications(&list, "rejected");
+        assert_eq!(declined.len(), 1);
+        assert_eq!(declined[0].id, "a3");
+        assert!(filter_applications(&list, "accepted").is_empty());
+        assert_eq!(status_filter_id(""), "application-filter-all");
+        assert_eq!(status_filter_id("trial"), "application-filter-trial");
+        // Every status the server stores has a chip, and "rejected" reads
+        // "Declined" as on its pill.
+        let words: Vec<&str> = STATUS_FILTERS.iter().map(|(_, word)| *word).collect();
+        assert_eq!(
+            words,
+            [
+                "All",
+                "Pending",
+                "Trial",
+                "Accepted",
+                "Declined",
+                "Withdrawn"
+            ]
+        );
+        assert!(can_review("pending") && can_review("trial"));
+        assert!(!can_review("accepted") && !can_review("rejected") && !can_review("withdrawn"));
+    }
+
+    #[test]
+    fn rows_carry_the_card_cells_and_fold_review_actions() {
+        fn view() -> Element {
+            rsx! {
+                ApplicationsTable {
+                    rows: vec![row("a1", "Player04", "pending"), row("a2", "Player10", "accepted")],
+                    name_error: Some(("a1".to_string(), "That name is taken.".to_string())),
+                    on_accept: |_| {},
+                    on_reject: |_| {},
+                    on_view: |_| {},
+                }
+            }
+        }
+        let html = render(view);
+        assert!(html.contains("data-table-scroll is-cards"), "{html}");
+        assert!(
+            html.contains("<th scope=\"col\" class=\"num\">Date</th>"),
+            "{html}"
+        );
+        let (first, second) = html
+            .split_once("</tr><tr>")
+            .map(|(a, b)| (a.rsplit("<tr>").next().unwrap().to_string(), b.to_string()))
+            .expect("two body rows");
+        // Name, then the status pill, then role, games and date.
+        let who = first.find("class=\"cell-who\"").expect("who");
+        let badge = first.find("class=\"cell-badge\"").expect("badge");
+        let meta = first.find("class=\"cell-meta\"").expect("meta");
+        assert!(who < badge && badge < meta, "{first}");
+        assert!(
+            first.contains("<span class=\"ui-pill ui-pill--warn\">Pending</span>"),
+            "{first}"
+        );
+        assert!(
+            first.contains("<time class=\"date\" datetime=\"2026-11-10\">10 Nov 2026</time>"),
+            "{first}"
+        );
+        assert!(
+            !first.contains("Hello"),
+            "the message stays in the dialog: {first}"
+        );
+        // An open application: View in the row, Accept and Decline in the
+        // named group that phone folds behind "Actions".
+        assert!(
+            first.contains("class=\"row-actions is-inline-desktop\""),
+            "{first}"
+        );
+        assert!(
+            first.contains("id=\"application-view-a1\" aria-label=\"View Player04\""),
+            "{first}"
+        );
+        assert!(
+            first.contains(
+                "aria-controls=\"application-actions-a1-more\" aria-label=\"Actions for Player04\""
+            ),
+            "{first}"
+        );
+        let group = &first[first.find("class=\"row-menu-group\"").expect("group")..];
+        assert!(group.contains(">Accept</button>"), "{group}");
+        assert!(group.contains(">Decline</button>"), "{group}");
+        // The failed accept is announced in the row and tied to Accept.
+        assert!(
+            first.contains("role=\"alert\">That name is taken.</p>"),
+            "{first}"
+        );
+        assert!(
+            group.contains("aria-describedby=\"application-name-error-a1\""),
+            "{group}"
+        );
+        // A closed application has View only.
+        assert!(second.contains(">View</button>"), "{second}");
+        assert!(!second.contains("row-menu-group"), "{second}");
+        assert!(!second.contains(">Accept</button>"), "{second}");
+        assert_eq!(html.matches("id=\"application-view-").count(), 2, "{html}");
+    }
+
     #[test]
     fn application_detail_modal_pins_width_rule() {
         let css = crate::styles::admin::CSS;
-        let rule = ".form-modal.application-detail-modal {\n        width: min(640px, 92vw);\n        max-width: min(640px, 92vw);";
+        // The dialog is as wide as the overlay lets it be, up to the small
+        // container, and the overlay pads it on a 390px viewport.
+        let rule = ".form-modal.application-detail-modal {\n        width: 100%;\n        max-width: var(--container-sm);";
         assert!(
             css.contains(rule),
-            "application detail width must stay min(640px, 92vw) on the form-modal shell"
+            "application detail width must stay on the container token"
         );
+        let overlay = css
+            .split(".form-modal-overlay {")
+            .nth(1)
+            .and_then(|rest| rest.split('}').next())
+            .expect("overlay rule");
+        assert!(overlay.contains("padding: var(--space-4);"), "{overlay}");
         assert!(css.contains(".application-detail dl"));
         assert!(css.contains("grid-template-columns:"));
 
@@ -593,7 +1096,7 @@ mod tests {
         );
 
         let header_at = html.find("form-modal-header").expect("heading");
-        let header_end = html[header_at..].find("</div>").expect("heading end") + header_at;
+        let header_end = html[header_at..].find("</h2>").expect("heading end") + header_at;
         let header = &html[header_at..header_end];
         assert!(
             header.contains("id=\"application-detail-title\""),
@@ -617,16 +1120,9 @@ mod tests {
             message_tag.contains("application-detail-message"),
             "message field class: {message_tag}"
         );
-        assert!(
-            message_tag.contains("white-space:pre-wrap")
-                || message_tag.contains("white-space: pre-wrap"),
-            "message keeps line breaks: {message_tag}"
-        );
-        assert!(
-            message_tag.contains("overflow-wrap:anywhere")
-                || message_tag.contains("overflow-wrap: anywhere"),
-            "long message text wraps inside 390px: {message_tag}"
-        );
+        // The wrap and line breaks come from the class rule, never an
+        // inline style.
+        assert!(!message_tag.contains("style="), "{message_tag}");
         let css = crate::styles::admin::CSS;
         assert!(
             css.contains(".application-detail dd.application-detail-message"),
@@ -646,6 +1142,20 @@ mod tests {
         );
         assert!(!html.contains('\u{2014}'), "{html}");
         assert!(!html.contains("&mdash;"), "{html}");
+    }
+
+    #[test]
+    fn roles_read_as_words_and_decline_names_the_applicant() {
+        assert_eq!(role_label("dps"), "Damage");
+        assert_eq!(role_label(" tank "), "Tank");
+        assert_eq!(role_label("support"), "Support");
+        assert_eq!(role_label("flex"), "Flex");
+        assert_eq!(role_label("main tank"), "Main tank");
+        assert_eq!(
+            decline_message(Some("Applicant03")),
+            "Decline the application from Applicant03?"
+        );
+        assert_eq!(decline_message(None), "Decline this application?");
     }
 
     #[test]
@@ -833,7 +1343,7 @@ mod tests {
         assert!(html.contains("Tank"), "{html}");
         assert!(html.contains("Hello"), "{html}");
         assert!(html.contains("Ready"), "{html}");
-        assert!(html.contains("2026-03-02 08:15"), "{html}");
+        assert!(html.contains("2 Mar 2026, 08:15 UTC"), "{html}");
         assert!(!html.contains('\u{2014}'), "{html}");
     }
 }

@@ -399,28 +399,8 @@ pub struct OcrResult {
     pub confidence: i32,
 }
 
-#[derive(Debug)]
-pub struct CellOcrResult {
-    pub value: String,
-    pub confidence: i32,
-    /// Glyph ink touches a vertical crop edge (CG-3 clip/bleed). Suspect values
-    /// are still parsed — they may be right — but the capture gate strips their
-    /// corroboration/un-latch influence (see `capture_gate::apply_gate`).
-    pub suspect: bool,
-}
-
-#[derive(Debug)]
-pub struct RowOcrResult {
-    /// Read of name window 0 ([`preprocess::name_windows`]).
-    pub name: Option<CellOcrResult>,
-    /// Reads of the other name windows: `name_alternates[k]` is window
-    /// `k + 1`, `None` where that read failed, so the index always names the
-    /// window. Empty for 6v6, which has one window. The row matcher scores
-    /// `name` and these together and keeps the best.
-    pub name_alternates: Vec<Option<CellOcrResult>>,
-    pub stats: Vec<CellOcrResult>,
-    pub mean_confidence: i32,
-}
+pub(crate) use crate::model::is_clean_stat;
+pub use crate::model::{CellOcrResult, RowOcrResult};
 
 fn tessdata_path_for_lang(lang: &str) -> Option<PathBuf> {
     let custom = dirs::data_dir().map(|d| d.join("scuffed-stat-tracker").join("tessdata"));
@@ -1440,17 +1420,6 @@ pub(crate) fn is_valid_stat_for_column(text: &str, col_idx: usize) -> bool {
     }
 }
 
-/// Whether a cell's OCR text looks like a real stat value: at least one digit,
-/// nothing but digits and thousands-separator commas.
-pub(crate) fn is_clean_stat(text: &str) -> bool {
-    if text.is_empty() {
-        return false;
-    }
-    let has_digit = text.chars().any(|c| c.is_ascii_digit());
-    let all_valid = text.chars().all(|c| c.is_ascii_digit() || c == ',');
-    has_digit && all_valid
-}
-
 /// Full-image OCR (original approach with adaptive preprocessing).
 /// Used as fallback and for compatibility with the existing parse pipeline.
 #[track_caller]
@@ -1566,22 +1535,21 @@ fn run_ocr(
     })
 }
 
+/// The OCR-off source scan: nothing outside the gate starts Tesseract.
+#[cfg(test)]
+mod tests_gate_scan;
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// The functions of this file, by name: `(is it pub or pub(crate), body)`.
-    /// Top-level items only, up to the first test module.
+    /// Top-level items only, test items left out wherever they sit.
     fn production_functions() -> std::collections::BTreeMap<String, (bool, String)> {
-        let source = include_str!("mod.rs");
-        let end = ["\n#[cfg(test)]\nmod ", "\n#[cfg(test)]\npub(crate) mod "]
-            .iter()
-            .filter_map(|marker| source.find(marker))
-            .min()
-            .expect("the test modules");
+        let source = super::tests_gate_scan::production_text(include_str!("mod.rs"));
         let mut out = std::collections::BTreeMap::new();
         let mut current: Option<(String, bool, String)> = None;
-        for line in source[..end].lines() {
+        for line in source.lines() {
             let header = ["pub fn ", "pub(crate) fn ", "fn "]
                 .iter()
                 .find_map(|prefix| line.strip_prefix(prefix).map(|rest| (*prefix, rest)));
@@ -1693,7 +1661,7 @@ mod tests {
                 "recognize_scoreboard_names_pre_cropped",
                 "recognize_sparse_region",
             ],
-            "the entry points changed: update this list and tests/ocr_switch.rs"
+            "the entry points changed: update this list and tests/integration/ocr_switch.rs"
         );
         // A public function that reaches nothing is not gated and need not be.
         assert!(functions.contains_key("cell_edge_ink"));
@@ -1724,97 +1692,6 @@ mod tests {
         assert!(tessdata_lang_probed());
         assert!(ocr_pool().is_ok());
         assert!(pool_started());
-    }
-
-    /// Every `.rs` file below `src/`, with the part of it that is not test
-    /// code: the text before its first test module. Files that are test
-    /// code as a whole are left out.
-    fn production_sources() -> Vec<(String, String)> {
-        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-            for entry in std::fs::read_dir(dir).expect("read src") {
-                let path = entry.expect("dir entry").path();
-                if path.is_dir() {
-                    walk(&path, out);
-                } else if path.extension().is_some_and(|ext| ext == "rs") {
-                    out.push(path);
-                }
-            }
-        }
-        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut files = Vec::new();
-        walk(&src, &mut files);
-        files.sort();
-        files
-            .into_iter()
-            .filter(|path| {
-                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-                // `mod tests;` files and the OCR-off bench are test code.
-                !stem.starts_with("tests") && stem != "ocr_bench"
-            })
-            .map(|path| {
-                let text = std::fs::read_to_string(&path).expect("read a source file");
-                let end = ["\n#[cfg(test)]\nmod ", "\n#[cfg(test)]\npub(crate) mod "]
-                    .iter()
-                    .filter_map(|marker| text.find(marker))
-                    .min()
-                    .unwrap_or(text.len());
-                let name = path
-                    .strip_prefix(&src)
-                    .expect("below src")
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                (name, text[..end].to_string())
-            })
-            .collect()
-    }
-
-    /// Nothing outside this file can start Tesseract or open the gate:
-    /// - one `LepTess` construction in the whole tree, in `ocr_with`;
-    /// - `ocr_with` is called from this file only;
-    /// - the process-wide mode is set from `ocr_switch.rs` only, and no
-    ///   code outside tests sets a scoped mode.
-    #[test]
-    fn nothing_outside_the_gate_starts_tesseract_or_opens_the_gate() {
-        // Built at run time, so this test does not find itself.
-        let construct = format!("LepTess::{}(", "new");
-        let read = format!("ocr_{}(", "with");
-        let set_mode = format!("set_{}(", "mode");
-        let scoped = format!("scop{}(", "ed");
-        let sources = production_sources();
-        assert!(
-            sources.len() > 20,
-            "the walk found the tree: {}",
-            sources.len()
-        );
-        let holding = |needle: &str| -> Vec<(String, usize)> {
-            sources
-                .iter()
-                .map(|(name, text)| (name.clone(), text.matches(needle).count()))
-                .filter(|(_, count)| *count > 0)
-                .collect()
-        };
-        assert_eq!(
-            holding(&construct),
-            [("ocr/mod.rs".to_string(), 1)],
-            "one Tesseract instance is built, in ocr_with"
-        );
-        let callers = holding(&read);
-        assert_eq!(callers.len(), 1, "{callers:?}");
-        assert_eq!(
-            callers[0].0, "ocr/mod.rs",
-            "ocr_with is private to this file"
-        );
-        let setters: Vec<String> = holding(&set_mode)
-            .into_iter()
-            .map(|(name, _)| name)
-            .collect();
-        assert_eq!(
-            setters,
-            ["ocr/gate.rs", "ocr_switch.rs"],
-            "only the switch sets the process-wide mode"
-        );
-        let scopes: Vec<String> = holding(&scoped).into_iter().map(|(name, _)| name).collect();
-        assert_eq!(scopes, ["ocr/gate.rs"], "a scoped mode is for tests");
     }
 
     /// The line above `fn name` (after its doc comment) is `#[track_caller]`.
@@ -2724,139 +2601,10 @@ mod tests {
 
 /// Synthetic map-label pictures shared by the OCR tests and the stretch tests.
 #[cfg(test)]
-pub(crate) mod map_label_fixtures {
-    use ab_glyph::{Font, FontRef, PxScale, ScaleFont, point};
-    use image::{DynamicImage, Rgb, RgbImage};
-
-    use super::preprocess::{crop_scoreboard, game_rect_16_9};
-    use crate::detect::hero_portrait::{ScoreboardPreflight, preflight_scoreboard};
-
-    /// Subset of DejaVu Sans Bold. Licence: `fixtures/map-label/LICENSE`.
-    pub(crate) const SANS_BOLD: &[u8] =
-        include_bytes!("../../fixtures/map-label/DejaVuSans-Bold.subset.ttf");
-
-    pub(crate) const LIJIANG: &str = "Lijiang Tower";
-    pub(crate) const GRIMSVOTN: &str = "Watchpoint: Gr\u{00ed}msv\u{00f6}tn";
-    /// 102 / 255 is about 40% brightness.
-    pub(crate) const FADED: u8 = 102;
-    pub(crate) const LIT: u8 = 236;
-
-    /// Values 40 through 52. Peak-to-peak stays under the stretch floor.
-    pub(crate) fn low_noise(w: u32, h: u32) -> DynamicImage {
-        let mut img = RgbImage::new(w, h);
-        let mut state = 0x1234_5678u32;
-        for px in img.pixels_mut() {
-            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
-            let v = 40 + ((state >> 16) % 13) as u8;
-            *px = Rgb([v, v, v]);
-        }
-        DynamicImage::ImageRgb8(img)
-    }
-
-    pub(crate) fn brightness_range(img: &DynamicImage) -> u8 {
-        let rgb = img.to_rgb8();
-        let mut min_v = 255u8;
-        let mut max_v = 0u8;
-        for px in rgb.pixels() {
-            let v = ((u16::from(px.0[0]) + u16::from(px.0[1]) + u16::from(px.0[2])) / 3) as u8;
-            min_v = min_v.min(v);
-            max_v = max_v.max(v);
-        }
-        max_v.saturating_sub(min_v)
-    }
-
-    /// One line of synthetic top-bar text. Not a captured frame.
-    pub(crate) fn draw_label(text: &str, ink: u8) -> DynamicImage {
-        let font = FontRef::try_from_slice(SANS_BOLD).expect("bundled sans bold");
-        let scale = PxScale::from(48.0);
-        let scaled = font.as_scaled(scale);
-        let width = 1200u32;
-        let height = 88u32;
-        let bg = [18u8, 20, 28];
-        let mut img = RgbImage::from_pixel(width, height, Rgb(bg));
-        let mut cursor = 20.0f32;
-        let baseline = 14.0 + scaled.ascent();
-        for ch in text.chars() {
-            let id = font.glyph_id(ch);
-            let mut glyph = id.with_scale(scale);
-            glyph.position = point(cursor, baseline);
-            if let Some(outlined) = font.outline_glyph(glyph) {
-                let bounds = outlined.px_bounds();
-                outlined.draw(|dx, dy, cov| {
-                    if cov <= 0.0 {
-                        return;
-                    }
-                    let x = (bounds.min.x + dx as f32).round() as i32;
-                    let y = (bounds.min.y + dy as f32).round() as i32;
-                    if x < 0 || y < 0 || x >= width as i32 || y >= height as i32 {
-                        return;
-                    }
-                    let dest = img.get_pixel_mut(x as u32, y as u32);
-                    let cov = cov.clamp(0.0, 1.0);
-                    for channel in 0..3 {
-                        let from = f32::from(dest.0[channel]);
-                        let to = f32::from(ink);
-                        dest.0[channel] = (from + (to - from) * cov).round() as u8;
-                    }
-                });
-            }
-            cursor += scaled.h_advance(id);
-        }
-        assert!(
-            cursor < width as f32 - 8.0,
-            "{text} ran off the crop at {cursor}"
-        );
-        DynamicImage::ImageRgb8(img)
-    }
-
-    /// 1080p stand-in. `tab` paints a bright header with six dark labels inside
-    /// the scoreboard window, which is enough for the preflight to say Ready.
-    /// The map-name window holds a bright block so a stretch would be legal.
-    pub(crate) fn frame_1080(tab: bool) -> DynamicImage {
-        let (w, h) = (1920u32, 1080u32);
-        let mut img = RgbImage::from_pixel(w, h, Rgb([12, 14, 22]));
-        let (gx, gy, gw, gh) = game_rect_16_9(w, h);
-        let mx = gx + (gw as f64 * 0.68) as u32;
-        let my = gy + (gh as f64 * 0.022) as u32;
-        for py in my..my + 24 {
-            for px in mx..mx + 120 {
-                img.put_pixel(px, py, Rgb([102, 102, 102]));
-            }
-        }
-        if tab {
-            let bx = gx + (gw as f64 * 0.175) as u32;
-            let by = gy + (gh as f64 * 0.15) as u32;
-            let bw = (gw as f64 * 0.65) as u32;
-            let bh = (gh as f64 * 0.70) as u32;
-            // Cover the whole header scan (0.5% to 2.5% of the board). A dark
-            // row left in that band would count as ink across every column.
-            let y0 = by;
-            let y1 = by + (bh as f64 * 0.030) as u32;
-            for py in y0..y1 {
-                for px in bx..bx + bw {
-                    img.put_pixel(px, py, Rgb([230, 230, 230]));
-                }
-            }
-            // Six dark labels in the stat area, spaced past the letter merge.
-            let origin = bx + (bw as f64 * 0.40) as u32;
-            for i in 0..6u32 {
-                let x0 = origin + i * 36;
-                for py in y0..y1 {
-                    for px in x0..x0 + 4 {
-                        img.put_pixel(px, py, Rgb([20, 20, 20]));
-                    }
-                }
-            }
-        }
-        let frame = DynamicImage::ImageRgb8(img);
-        let ready = matches!(
-            preflight_scoreboard(&crop_scoreboard(&frame)).0,
-            ScoreboardPreflight::Ready(_)
-        );
-        assert_eq!(ready, tab, "synthetic frame tab={tab}");
-        frame
-    }
-}
+pub(crate) mod tests_map_label_fixtures;
+// The fixtures live in `ocr/tests_map_label_fixtures.rs`; old path kept.
+#[cfg(test)]
+pub(crate) use tests_map_label_fixtures as map_label_fixtures;
 
 #[cfg(test)]
 mod map_label_ocr_tests {

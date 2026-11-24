@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # The release tag must match the daemon Cargo.toml version. A mismatched
-# tag fails. The UI crate stays at 0.1.0 unless it is versioned as the release.
+# tag fails. stat-tracker-core must carry the same version. The UI crate
+# stays at 0.1.0 unless it is versioned as the release.
 set -euo pipefail
 
 DIST="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -67,11 +68,14 @@ serde = "1"
 EOF
 }
 
+# run_pair TAG DAEMON UI [CORE]: CORE defaults to DAEMON.
 run_pair() {
-    local tag="$1" daemon="$2" ui="$3"
+    local tag="$1" daemon="$2" ui="$3" core="${4:-$2}"
     write_toml "$TMP/daemon.toml" "$daemon"
+    write_toml "$TMP/core.toml" "$core"
     write_toml "$TMP/ui.toml" "$ui"
     STAT_TRACKER_CARGO_TOML="$TMP/daemon.toml" \
+        STAT_TRACKER_CORE_CARGO_TOML="$TMP/core.toml" \
         STAT_TRACKER_UI_CARGO_TOML="$TMP/ui.toml" \
         bash "$CHECK" "$tag"
 }
@@ -95,6 +99,16 @@ if run_pair "stat-tracker-v1.2.3" "9.9.9" "0.1.0" >/dev/null 2>&1; then
     fail "daemon version 9.9.9 was accepted for tag 1.2.3"
 fi
 pass "daemon Cargo.toml mismatch is rejected"
+
+if run_pair "stat-tracker-v1.2.3" "1.2.3" "0.1.0" "1.2.2" >/dev/null 2>&1; then
+    fail "stat-tracker-core 1.2.2 was accepted for release 1.2.3"
+fi
+pass "a stat-tracker-core version behind the release is rejected"
+
+if ! run_pair "stat-tracker-v1.2.3" "1.2.3" "0.1.0" "1.2.3" >/dev/null; then
+    fail "stat-tracker-core at the release version was rejected"
+fi
+pass "stat-tracker-core at the release version is accepted"
 
 if ! run_pair "stat-tracker-v0.5.0-alpha.10" "0.5.0-alpha.10" "0.1.0" >/dev/null; then
     fail "tag stat-tracker-v0.5.0-alpha.10 was rejected when Cargo.toml is 0.5.0-alpha.10"

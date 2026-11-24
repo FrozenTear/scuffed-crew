@@ -11,6 +11,30 @@ use crate::types::{
 };
 use crate::{with_timeout, Database, DbResult};
 
+/// Unique index on `(tournament_id, team_id)` for `tournament_participant`.
+const PARTICIPANT_TEAM_INDEX: &str = "tp_tournament_team_idx";
+
+/// True when `msg` is the unique-index rejection for [`PARTICIPANT_TEAM_INDEX`].
+/// SurrealDB v3 reports it as "Database index `tp_tournament_team_idx` already
+/// contains [...]". Same shape as `is_display_name_key_conflict`: lowercase,
+/// then the index name plus "already", "unique" or "indexexist", so wording
+/// changes still map but no other index's rejection becomes this 409.
+fn is_participant_team_conflict(msg: &str) -> bool {
+    let msg = msg.to_ascii_lowercase();
+    msg.contains(PARTICIPANT_TEAM_INDEX)
+        && (msg.contains("already") || msg.contains("unique") || msg.contains("indexexist"))
+}
+
+/// Map the unique-index rejection for [`PARTICIPANT_TEAM_INDEX`] (the same
+/// team added twice to one tournament) to `DbError::Conflict`.
+fn map_participant_team_conflict(e: surrealdb::Error) -> crate::DbError {
+    if is_participant_team_conflict(&e.to_string()) {
+        crate::DbError::Conflict("Team is already in this tournament".into())
+    } else {
+        crate::DbError::Surreal(e)
+    }
+}
+
 // ─── Internal DB Structs ───
 
 #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
@@ -502,7 +526,8 @@ impl Database {
                 .client
                 .create("tournament_participant")
                 .content(db)
-                .await?;
+                .await
+                .map_err(map_participant_team_conflict)?;
             Ok(db_to_participant(created.ok_or_else(|| {
                 crate::DbError::NotFound("Failed to add participant".into())
             })?))
@@ -830,21 +855,25 @@ impl Database {
 
     // ── Aggregates ──
 
-    pub async fn get_tournament_bracket(&self, id: &str) -> DbResult<TournamentBracket> {
-        let tournament = self
-            .get_tournament(id)
-            .await?
-            .ok_or_else(|| crate::DbError::NotFound(format!("Tournament {id} not found")))?;
+    /// Tournament plus its participants, rounds and matches.
+    ///
+    /// `Ok(None)` means no tournament has this id, and nothing else does:
+    /// callers map only that to "Tournament not found". Every error is a
+    /// real failure.
+    pub async fn get_tournament_bracket(&self, id: &str) -> DbResult<Option<TournamentBracket>> {
+        let Some(tournament) = self.get_tournament(id).await? else {
+            return Ok(None);
+        };
         let participants = self.list_tournament_participants(id).await?;
         let rounds = self.list_tournament_rounds(id).await?;
         let matches = self.list_tournament_matches(id).await?;
 
-        Ok(TournamentBracket {
+        Ok(Some(TournamentBracket {
             tournament,
             participants,
             rounds,
             matches,
-        })
+        }))
     }
 
     pub async fn get_swiss_standings(&self, tournament_id: &str) -> DbResult<Vec<SwissStanding>> {
@@ -977,7 +1006,7 @@ impl Database {
         let participants = self.list_tournament_participants(tournament_id).await?;
         let n = participants.len();
         if n < 2 {
-            return Err(crate::DbError::NotFound(
+            return Err(crate::DbError::Invalid(
                 "Need at least 2 participants".into(),
             ));
         }
@@ -1112,7 +1141,7 @@ impl Database {
         let participants = self.list_tournament_participants(tournament_id).await?;
         let n = participants.len();
         if n < 2 {
-            return Err(crate::DbError::NotFound(
+            return Err(crate::DbError::Invalid(
                 "Need at least 2 participants".into(),
             ));
         }
@@ -1342,7 +1371,7 @@ impl Database {
         let participants = self.list_tournament_participants(tournament_id).await?;
         let n = participants.len();
         if n < 2 {
-            return Err(crate::DbError::NotFound(
+            return Err(crate::DbError::Invalid(
                 "Need at least 2 participants".into(),
             ));
         }
@@ -1412,6 +1441,11 @@ impl Database {
     }
 
     pub async fn generate_swiss_round(&self, tournament_id: &str) -> DbResult<TournamentRound> {
+        if self.count_tournament_participants(tournament_id).await? < 2 {
+            return Err(crate::DbError::Invalid(
+                "Need at least 2 participants".into(),
+            ));
+        }
         let rounds = self.list_tournament_rounds(tournament_id).await?;
         let round_number = rounds.len() as u32 + 1;
 
@@ -1639,6 +1673,30 @@ fn standard_seed_order(size: usize) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn participant_team_conflict_matches_index_name_and_wording() {
+        let hit = [
+            "Database index `tp_tournament_team_idx` already contains ['t1', 'team-alpha'], with record `tournament_participant:x`",
+            "Database index `TP_TOURNAMENT_TEAM_IDX` ALREADY contains [...]",
+            "IndexExists { index: \"tp_tournament_team_idx\" }",
+            "unique constraint on tp_tournament_team_idx",
+        ];
+        for msg in hit {
+            assert!(is_participant_team_conflict(msg), "{msg}");
+        }
+        let miss = [
+            // Another unique index is not this 409.
+            "Database index `member_display_name_key_idx` already contains ['x']",
+            "Database index `patch_note_slug_idx` already contains ['x']",
+            // The index name alone, with no conflict wording.
+            "Failed to define index tp_tournament_team_idx",
+            "connection reset",
+        ];
+        for msg in miss {
+            assert!(!is_participant_team_conflict(msg), "{msg}");
+        }
+    }
 
     #[test]
     fn test_seed_order_4() {

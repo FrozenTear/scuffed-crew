@@ -18,10 +18,13 @@
 
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-pub const PACK_NAME: &str = "names-v1.tar";
-pub const PACK_SUBDIR: &str = "names-v1";
+// The pack name and folder live with the pack layout (0.6 lane D V4), so
+// pack sync does not reach into the reader. Re-exported at their old paths.
+pub use crate::packs::layout::{
+    NAMES_PACK_NAME as PACK_NAME, NAMES_PACK_SUBDIR as PACK_SUBDIR, names_dir_in as dir_in,
+};
 pub const FORMAT: u64 = 1;
 pub const CANVAS: (usize, usize) = (16, 28);
 pub const MARK_CANVAS: (usize, usize) = (16, 8);
@@ -42,11 +45,6 @@ const FILES: [&str; 6] = [
     "compose.txt",
     "whiten.f32",
 ];
-
-/// Where the pack is installed under the tracker's data dir.
-pub fn dir_in(data_dir: &Path) -> PathBuf {
-    data_dir.join("templates").join(PACK_SUBDIR)
-}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PackError {

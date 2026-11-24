@@ -16,7 +16,7 @@ impl std::fmt::Display for UploadError {
             UploadError::InvalidContentType => {
                 write!(
                     f,
-                    "Invalid content type. Only JPEG, PNG, WebP, and GIF are allowed"
+                    "Invalid content type. Only JPEG, PNG, WebP, GIF, and AVIF are allowed"
                 )
             }
             UploadError::FileTooLarge { max_bytes } => {
@@ -36,6 +36,7 @@ const ALLOWED_TYPES: &[(&str, &str)] = &[
     ("image/png", "png"),
     ("image/webp", "webp"),
     ("image/gif", "gif"),
+    ("image/avif", "avif"),
 ];
 
 fn extension_for(content_type: &str) -> Option<&'static str> {
@@ -46,7 +47,7 @@ fn extension_for(content_type: &str) -> Option<&'static str> {
 }
 
 /// Detect image type from magic bytes (not client Content-Type).
-fn sniff_image_ext(data: &[u8]) -> Option<&'static str> {
+pub(crate) fn sniff_image_ext(data: &[u8]) -> Option<&'static str> {
     if data.len() >= 3 && data[0] == 0xff && data[1] == 0xd8 && data[2] == 0xff {
         return Some("jpg");
     }
@@ -60,7 +61,32 @@ fn sniff_image_ext(data: &[u8]) -> Option<&'static str> {
     if data.len() >= 12 && data[..4] == *b"RIFF" && data[8..12] == *b"WEBP" {
         return Some("webp");
     }
+    if is_avif_ftyp(data) {
+        return Some("avif");
+    }
     None
+}
+
+/// AVIF: a leading ISO BMFF `ftyp` box whose major brand or one of its
+/// compatible brands is `avif` (still image) or `avis` (image sequence).
+///
+/// The box must be well formed: a 32-bit size of at least 16 bytes (size,
+/// type, major brand, minor version), a whole number of 4-byte brands, and
+/// no larger than the data. A 64-bit (`size == 1`) or to-end (`size == 0`)
+/// `ftyp` is refused; real AVIF encoders never write one.
+fn is_avif_ftyp(data: &[u8]) -> bool {
+    if data.len() < 16 || data[4..8] != *b"ftyp" {
+        return false;
+    }
+    let size = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
+    if size < 16 || size > data.len() || !size.is_multiple_of(4) {
+        return false;
+    }
+    let major = [data[8], data[9], data[10], data[11]];
+    let (compatible, _) = data[16..size].as_chunks::<4>();
+    std::iter::once(&major)
+        .chain(compatible)
+        .any(|brand| brand == b"avif" || brand == b"avis")
 }
 
 /// Save an uploaded file to disk. Returns the relative URL path.
@@ -133,7 +159,7 @@ where
 /// header on the site-server binary, which does not mount that layer, and
 /// makes the upload policy testable without the outer process.
 ///
-/// PNG, JPEG, WebP, and GIF are `Content-Disposition: inline` so avatars and
+/// PNG, JPEG, WebP, GIF, and AVIF are `Content-Disposition: inline` so avatars and
 /// article images still render in `<img>` / CSS. SVG is not in that set:
 /// `image/svg+xml` is a document and can carry script when opened directly.
 /// The upload API already rejects SVG by magic bytes; this is the response
@@ -180,7 +206,7 @@ pub async fn upload_response_headers(
 fn is_inline_raster(media_type: &str) -> bool {
     matches!(
         media_type,
-        "image/png" | "image/jpeg" | "image/webp" | "image/gif"
+        "image/png" | "image/jpeg" | "image/webp" | "image/gif" | "image/avif"
     )
 }
 
@@ -218,7 +244,7 @@ mod header_tests {
 
     #[tokio::test]
     async fn raster_images_are_inline_and_nosniff() {
-        for name in ["a.png", "a.jpg", "a.jpeg", "a.webp", "a.gif"] {
+        for name in ["a.png", "a.jpg", "a.jpeg", "a.webp", "a.gif", "a.avif"] {
             let response = served(name, b"not-a-real-image").await;
             assert_eq!(response.status(), StatusCode::OK, "{name}");
             assert_eq!(
@@ -237,6 +263,28 @@ mod header_tests {
                 "{name} should not be sandboxed"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn avif_is_inline_with_avif_content_type_and_nosniff() {
+        let response = served("a.avif", super::test_avif::TINY_AVIF).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            header_str(&response, &header::CONTENT_TYPE),
+            Some("image/avif")
+        );
+        assert_eq!(
+            header_str(&response, &header::X_CONTENT_TYPE_OPTIONS),
+            Some("nosniff")
+        );
+        assert_eq!(
+            header_str(&response, &header::CONTENT_DISPOSITION),
+            Some("inline")
+        );
+        assert!(
+            header_str(&response, &header::CONTENT_SECURITY_POLICY).is_none(),
+            "avif should not be sandboxed"
+        );
     }
 
     #[tokio::test]
@@ -260,5 +308,141 @@ mod header_tests {
                 "{name}"
             );
         }
+    }
+}
+
+/// Test-only AVIF fixture shared by the sniff, dimension, and serving tests.
+#[cfg(test)]
+pub(crate) mod test_avif {
+    /// Real 2x1 AVIF (Pillow encoder, solid fill). Brands: major `avif`,
+    /// compatible `avif mif1 miaf MA1B`. One `ispe` box.
+    pub(crate) const TINY_AVIF: &[u8] = include_bytes!("../tests/data/tiny-2x1.avif");
+
+    /// The fixture with its `ispe` box rewritten to declare `w` x `h`. The
+    /// rest of the file (and its real 2x1 payload) is unchanged, so this is a
+    /// header that lies about its size, which is what a pixel-flood upload is.
+    pub(crate) fn avif_with_dims(w: u32, h: u32) -> Vec<u8> {
+        let mut out = TINY_AVIF.to_vec();
+        let at = out
+            .windows(4)
+            .position(|win| win == b"ispe")
+            .expect("fixture has an ispe box");
+        // `ispe` tag, then version/flags (4 bytes), then width and height.
+        out[at + 8..at + 12].copy_from_slice(&w.to_be_bytes());
+        out[at + 12..at + 16].copy_from_slice(&h.to_be_bytes());
+        out
+    }
+
+    /// A bare `ftyp` box with the given major and compatible brands.
+    pub(crate) fn ftyp(major: &[u8; 4], compatible: &[&[u8; 4]]) -> Vec<u8> {
+        let size = 16 + 4 * compatible.len();
+        let mut out = Vec::with_capacity(size);
+        out.extend_from_slice(&(size as u32).to_be_bytes());
+        out.extend_from_slice(b"ftyp");
+        out.extend_from_slice(major);
+        out.extend_from_slice(&0u32.to_be_bytes());
+        for brand in compatible {
+            out.extend_from_slice(*brand);
+        }
+        out
+    }
+}
+
+#[cfg(test)]
+mod sniff_tests {
+    use super::test_avif::{TINY_AVIF, ftyp};
+    use super::*;
+
+    #[test]
+    fn real_avif_fixture_sniffs_as_avif() {
+        assert_eq!(sniff_image_ext(TINY_AVIF), Some("avif"));
+        assert_eq!(extension_for("image/avif"), Some("avif"));
+    }
+
+    #[test]
+    fn avif_and_avis_major_brands_are_accepted() {
+        assert_eq!(sniff_image_ext(&ftyp(b"avif", &[])), Some("avif"));
+        assert_eq!(sniff_image_ext(&ftyp(b"avis", &[])), Some("avif"));
+    }
+
+    #[test]
+    fn avif_and_avis_compatible_brands_are_accepted() {
+        assert_eq!(
+            sniff_image_ext(&ftyp(b"mif1", &[b"miaf", b"avif"])),
+            Some("avif")
+        );
+        assert_eq!(
+            sniff_image_ext(&ftyp(b"msf1", &[b"iso8", b"avis"])),
+            Some("avif")
+        );
+    }
+
+    #[test]
+    fn ftyp_with_other_brands_is_rejected() {
+        // HEIC, plain MP4, and a QuickTime movie all start with `ftyp`.
+        assert_eq!(sniff_image_ext(&ftyp(b"heic", &[b"mif1", b"heic"])), None);
+        assert_eq!(sniff_image_ext(&ftyp(b"isom", &[b"iso2", b"mp41"])), None);
+        assert_eq!(sniff_image_ext(&ftyp(b"qt  ", &[b"qt  "])), None);
+    }
+
+    #[test]
+    fn malformed_ftyp_box_is_rejected() {
+        // Brand outside the declared box size does not count.
+        let mut outside = ftyp(b"mif1", &[]);
+        outside.extend_from_slice(b"avif");
+        assert_eq!(sniff_image_ext(&outside), None);
+
+        // Box size larger than the data.
+        let mut too_big = ftyp(b"avif", &[]);
+        too_big[..4].copy_from_slice(&64u32.to_be_bytes());
+        assert_eq!(sniff_image_ext(&too_big), None);
+
+        // 64-bit and to-end sizes, and a size below the minimum header.
+        for size in [0u32, 1, 8, 12] {
+            let mut bad = ftyp(b"avif", &[b"avif"]);
+            bad[..4].copy_from_slice(&size.to_be_bytes());
+            assert_eq!(sniff_image_ext(&bad), None, "size {size}");
+        }
+
+        // Size not a whole number of brands.
+        let mut ragged = ftyp(b"avif", &[b"avif"]);
+        ragged.push(0);
+        ragged[..4].copy_from_slice(&21u32.to_be_bytes());
+        assert_eq!(sniff_image_ext(&ragged), None);
+
+        // Truncated before the major brand ends.
+        assert_eq!(sniff_image_ext(&TINY_AVIF[..12]), None);
+    }
+
+    #[tokio::test]
+    async fn save_upload_stores_avif_and_checks_declared_type() {
+        let dir = std::env::temp_dir().join(format!("scuffed-upload-avif-{}", Uuid::new_v4()));
+
+        let url = save_upload(&dir, "images", TINY_AVIF, "image/avif", 1024 * 1024)
+            .await
+            .expect("avif upload is stored");
+        assert!(url.starts_with("/uploads/images/"), "{url}");
+        assert!(url.ends_with(".avif"), "{url}");
+        let rel = url.strip_prefix("/uploads/").unwrap();
+        assert_eq!(std::fs::read(dir.join(rel)).unwrap(), TINY_AVIF);
+
+        // Declared PNG but the bytes are AVIF: mismatch is refused.
+        assert!(matches!(
+            save_upload(&dir, "images", TINY_AVIF, "image/png", 1024 * 1024).await,
+            Err(UploadError::InvalidContentType)
+        ));
+        // Declared AVIF but the bytes are PNG.
+        let png = [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
+        assert!(matches!(
+            save_upload(&dir, "images", &png, "image/avif", 1024 * 1024).await,
+            Err(UploadError::InvalidContentType)
+        ));
+        // Same byte cap as every other format.
+        assert!(matches!(
+            save_upload(&dir, "images", TINY_AVIF, "image/avif", TINY_AVIF.len() - 1).await,
+            Err(UploadError::FileTooLarge { .. })
+        ));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

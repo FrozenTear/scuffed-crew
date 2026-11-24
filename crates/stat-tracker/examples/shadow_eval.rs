@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use stat_tracker::shadow::digits::{FIELDS, read_board};
-use stat_tracker::{detect, ocr};
+use stat_tracker::{frame, ocr};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -62,7 +62,7 @@ fn main() {
         } else {
             img
         };
-        let detected = detect::hero_portrait::detect_team_size(&board);
+        let detected = frame::layout::detect_team_size(&board);
         let team = force_team.unwrap_or(detected);
         let t0 = Instant::now();
         let read = read_board(&board, team, Duration::from_secs(5));

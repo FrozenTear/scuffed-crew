@@ -8,8 +8,16 @@ use serde::de::DeserializeOwned;
 pub struct ApiResource<T: 'static> {
     pub data: Resource<Option<T>>,
     pub refresh: Signal<u64>,
-    /// Last fetch error (None when ok or still loading).
+    /// Last fetch error as page text (None when ok or still loading): always
+    /// [`crate::client_error::user_message`], the raw error is logged.
     pub error: Signal<Option<String>>,
+    /// True when the last finished fetch failed. Unlike `error` it is not
+    /// cleared when a refetch starts, only when a fetch succeeds or is
+    /// skipped (an empty URL, or `use_api_when` while disabled), so a retry
+    /// after a failure can be told from the first real fetch after a skip.
+    /// Only an empty-URL skip and a failure leave `data` holding `None`; the
+    /// disabled skip leaves `Some(T::default())`.
+    pub failed: Signal<bool>,
     /// True when a cursor page remains after the loaded page budget.
     pub truncated: Signal<bool>,
     /// Rows currently held (0 after an error).
@@ -31,14 +39,19 @@ impl<T: 'static> ApiResource<T> {
 pub fn use_api<T: DeserializeOwned + 'static>(url: &'static str) -> ApiResource<T> {
     let refresh = use_signal(|| 0u64);
     let mut error = use_signal(|| Option::<String>::None);
+    let mut failed = use_signal(|| false);
     let (truncated, shown, page_budget) = use_list_cap();
     let data = use_resource(move || async move {
         let _ = refresh();
         error.set(None);
         match ApiClient::web().fetch::<T>(url).await {
-            Ok(v) => Some(v),
+            Ok(v) => {
+                failed.set(false);
+                Some(v)
+            }
             Err(e) => {
-                error.set(Some(e.to_string()));
+                error.set(Some(crate::client_error::logged_message(url, &e)));
+                failed.set(true);
                 None
             }
         }
@@ -47,6 +60,53 @@ pub fn use_api<T: DeserializeOwned + 'static>(url: &'static str) -> ApiResource<
         data,
         refresh,
         error,
+        failed,
+        truncated,
+        shown,
+        page_budget,
+    }
+}
+
+/// [`use_api`] that only sends the request while `enabled()` is true. While
+/// it is false the resource holds `T::default()` with no error, and it
+/// fetches as soon as `enabled()` turns true. For endpoints that only answer
+/// a signed-in viewer: a guest page load no longer sends a request that can
+/// only come back 401.
+pub fn use_api_when<T: DeserializeOwned + Default + 'static>(
+    url: &'static str,
+    enabled: impl Fn() -> bool + Copy + 'static,
+) -> ApiResource<T> {
+    let refresh = use_signal(|| 0u64);
+    let mut error = use_signal(|| Option::<String>::None);
+    let mut failed = use_signal(|| false);
+    let (truncated, shown, page_budget) = use_list_cap();
+    // A memo, so the fetch reruns when the answer changes, not on every
+    // write to whatever `enabled` reads.
+    let enabled = use_memo(enabled);
+    let data = use_resource(move || async move {
+        let _ = refresh();
+        error.set(None);
+        if !enabled() {
+            failed.set(false);
+            return Some(T::default());
+        }
+        match ApiClient::web().fetch::<T>(url).await {
+            Ok(v) => {
+                failed.set(false);
+                Some(v)
+            }
+            Err(e) => {
+                error.set(Some(crate::client_error::logged_message(url, &e)));
+                failed.set(true);
+                None
+            }
+        }
+    });
+    ApiResource {
+        data,
+        refresh,
+        error,
+        failed,
         truncated,
         shown,
         page_budget,
@@ -114,20 +174,29 @@ struct PageBatch<T> {
     truncated: bool,
 }
 
-fn remember_batch<T>(batch: &PageBatch<T>, mut truncated: Signal<bool>, mut shown: Signal<usize>) {
+fn remember_batch<T>(
+    batch: &PageBatch<T>,
+    mut truncated: Signal<bool>,
+    mut shown: Signal<usize>,
+    mut failed: Signal<bool>,
+) {
     truncated.set(batch.truncated);
     shown.set(batch.items.len());
+    failed.set(false);
 }
 
 fn remember_list_failure(
     mut truncated: Signal<bool>,
     mut shown: Signal<usize>,
     mut error: Signal<Option<String>>,
-    message: String,
+    mut failed: Signal<bool>,
+    what: &str,
+    err: &ClientError,
 ) {
     truncated.set(false);
     shown.set(0);
-    error.set(Some(message));
+    error.set(Some(crate::client_error::logged_message(what, err)));
+    failed.set(true);
 }
 
 async fn fetch_pages<T: DeserializeOwned>(
@@ -192,6 +261,7 @@ async fn fetch_pages_or_forbidden_fallback<T: DeserializeOwned>(
 pub fn use_api_list<T: DeserializeOwned + 'static>(url: &'static str) -> ApiResource<Vec<T>> {
     let refresh = use_signal(|| 0u64);
     let mut error = use_signal(|| Option::<String>::None);
+    let failed = use_signal(|| false);
     let (mut truncated, shown, page_budget) = use_list_cap();
     let data = use_resource(move || {
         let budget = page_budget();
@@ -201,11 +271,11 @@ pub fn use_api_list<T: DeserializeOwned + 'static>(url: &'static str) -> ApiReso
             truncated.set(false);
             match fetch_pages::<T>(url, budget).await {
                 Ok(batch) => {
-                    remember_batch(&batch, truncated, shown);
+                    remember_batch(&batch, truncated, shown, failed);
                     Some(batch.items)
                 }
                 Err(e) => {
-                    remember_list_failure(truncated, shown, error, e.to_string());
+                    remember_list_failure(truncated, shown, error, failed, url, &e);
                     None
                 }
             }
@@ -215,6 +285,7 @@ pub fn use_api_list<T: DeserializeOwned + 'static>(url: &'static str) -> ApiReso
         data,
         refresh,
         error,
+        failed,
         truncated,
         shown,
         page_budget,
@@ -231,6 +302,7 @@ pub fn use_api_list_prefer<T: DeserializeOwned + 'static>(
 ) -> (ApiResource<Vec<T>>, Signal<bool>) {
     let refresh = use_signal(|| 0u64);
     let mut error = use_signal(|| Option::<String>::None);
+    let failed = use_signal(|| false);
     let mut used_fallback = use_signal(|| false);
     let (mut truncated, shown, page_budget) = use_list_cap();
     let data = use_resource(move || {
@@ -245,11 +317,11 @@ pub fn use_api_list_prefer<T: DeserializeOwned + 'static>(
             {
                 Ok((batch, fell_back)) => {
                     used_fallback.set(fell_back);
-                    remember_batch(&batch, truncated, shown);
+                    remember_batch(&batch, truncated, shown, failed);
                     Some(batch.items)
                 }
                 Err(e) => {
-                    remember_list_failure(truncated, shown, error, e.to_string());
+                    remember_list_failure(truncated, shown, error, failed, fallback, &e);
                     None
                 }
             }
@@ -260,6 +332,7 @@ pub fn use_api_list_prefer<T: DeserializeOwned + 'static>(
             data,
             refresh,
             error,
+            failed,
             truncated,
             shown,
             page_budget,
@@ -274,6 +347,7 @@ pub fn use_api_list_with<T: DeserializeOwned + 'static>(
 ) -> ApiResource<Vec<T>> {
     let refresh = use_signal(|| 0u64);
     let mut error = use_signal(|| Option::<String>::None);
+    let mut failed = use_signal(|| false);
     let (mut truncated, mut shown, page_budget) = use_list_cap();
     let data = use_resource(move || {
         let url = url();
@@ -284,15 +358,16 @@ pub fn use_api_list_with<T: DeserializeOwned + 'static>(
             truncated.set(false);
             if url.is_empty() {
                 shown.set(0);
+                failed.set(false);
                 return None;
             }
             match fetch_pages::<T>(&url, budget).await {
                 Ok(batch) => {
-                    remember_batch(&batch, truncated, shown);
+                    remember_batch(&batch, truncated, shown, failed);
                     Some(batch.items)
                 }
                 Err(e) => {
-                    remember_list_failure(truncated, shown, error, e.to_string());
+                    remember_list_failure(truncated, shown, error, failed, &url, &e);
                     None
                 }
             }
@@ -302,6 +377,7 @@ pub fn use_api_list_with<T: DeserializeOwned + 'static>(
         data,
         refresh,
         error,
+        failed,
         truncated,
         shown,
         page_budget,
@@ -314,6 +390,7 @@ pub fn use_api_with<T: DeserializeOwned + 'static>(
 ) -> ApiResource<T> {
     let refresh = use_signal(|| 0u64);
     let mut error = use_signal(|| Option::<String>::None);
+    let mut failed = use_signal(|| false);
     let (truncated, shown, page_budget) = use_list_cap();
     let data = use_resource(move || {
         let url = url();
@@ -321,12 +398,19 @@ pub fn use_api_with<T: DeserializeOwned + 'static>(
             let _ = refresh();
             error.set(None);
             if url.is_empty() {
+                // A skip is not a failure: the gate must not read the
+                // `None` it leaves as a failed load (issue 821).
+                failed.set(false);
                 return None;
             }
             match ApiClient::web().fetch::<T>(&url).await {
-                Ok(v) => Some(v),
+                Ok(v) => {
+                    failed.set(false);
+                    Some(v)
+                }
                 Err(e) => {
-                    error.set(Some(e.to_string()));
+                    error.set(Some(crate::client_error::logged_message(&url, &e)));
+                    failed.set(true);
                     None
                 }
             }
@@ -336,6 +420,7 @@ pub fn use_api_with<T: DeserializeOwned + 'static>(
         data,
         refresh,
         error,
+        failed,
         truncated,
         shown,
         page_budget,
@@ -408,5 +493,60 @@ mod tests {
         let mut budget = LIST_MAX_PAGES;
         budget += LIST_MAX_PAGES;
         assert_eq!(budget, LIST_MAX_PAGES * 2);
+    }
+
+    /// Issue 821: a skipped fetch and a failed fetch both leave `None` in the
+    /// slot, so the failure is a flag of its own. It is raised only where a
+    /// fetch error is recorded and lowered on every skip and every success;
+    /// a refetch starting must not lower it (the gate's retry rule reads it
+    /// while the refetch is pending).
+    #[test]
+    fn failed_flag_is_raised_only_by_an_error_and_lowered_by_a_skip_or_success() {
+        let src = include_str!("api.rs");
+        let src = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let squashed: String = src.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        // Every hook hands out the flag.
+        assert_eq!(
+            squashed.matches("failed = use_signal(|| false);").count(),
+            6
+        );
+        assert_eq!(squashed.matches("error, failed, truncated,").count(), 6);
+
+        // Raised right after every recorded error and nowhere else.
+        let raised = squashed.matches("failed.set(true);").count();
+        assert_eq!(raised, 4, "three plain hooks and remember_list_failure");
+        assert_eq!(
+            squashed.matches("))); failed.set(true);").count(),
+            raised,
+            "failed.set(true) only follows error.set(Some(..))"
+        );
+        assert_eq!(squashed.matches("error.set(Some(").count(), raised);
+
+        // Every skip lowers it before returning.
+        assert_eq!(squashed.matches("url.is_empty()").count(), 2);
+        assert_eq!(
+            squashed
+                .matches("failed.set(false); return None; }")
+                .count(),
+            2,
+            "both empty-URL skips clear the flag"
+        );
+        assert!(
+            squashed.contains("if !enabled() { failed.set(false); return Some(T::default()); }")
+        );
+
+        // Every success lowers it: three plain hooks and remember_batch.
+        assert_eq!(squashed.matches("failed.set(false); Some(v) }").count(), 3);
+        assert!(squashed.contains("shown.set(batch.items.len()); failed.set(false); }"));
+
+        // Starting a fetch clears the error but never the flag.
+        assert_eq!(squashed.matches("error.set(None);").count(), 6);
+        assert!(!squashed.contains("error.set(None); failed.set(false);"));
+
+        // And nothing else lowers it: the two empty-URL skips, the disabled
+        // return, the three plain successes and remember_batch are all of
+        // them, so a lowering added anywhere a fetch starts fails here.
+        assert_eq!(squashed.matches("failed.set(false);").count(), 7);
     }
 }

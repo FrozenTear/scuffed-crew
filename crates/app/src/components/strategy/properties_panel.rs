@@ -14,7 +14,7 @@ const PROPERTIES_CSS: &str = r#"
     .props-title {
         font-family: var(--font-head);
         font-size: 0.75rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-transform: uppercase;
         letter-spacing: 0.08em;
         padding: 0.75rem 0.75rem 0.5rem;
@@ -26,13 +26,13 @@ const PROPERTIES_CSS: &str = r#"
         text-align: center;
     }
     .props-empty p {
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-size: 0.8rem;
         margin: 0.25rem 0;
     }
     .props-empty .hint {
         font-size: 0.7rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         opacity: 0.7;
     }
     .props-content {
@@ -47,18 +47,18 @@ const PROPERTIES_CSS: &str = r#"
     .prop-label {
         display: block;
         font-size: 0.65rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-transform: uppercase;
         letter-spacing: 0.06em;
         margin-bottom: 0.3rem;
     }
     .prop-value {
         font-size: 0.8rem;
-        color: var(--text-2);
+        color: var(--text-3);
     }
     .prop-input {
         width: 100%;
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         border: 1px solid var(--border);
         border-radius: 4px;
         color: var(--text);
@@ -67,7 +67,7 @@ const PROPERTIES_CSS: &str = r#"
         transition: border-color 0.15s;
     }
     .prop-input:focus {
-        border-color: var(--accent);
+        border-color: var(--accent-solid);
     }
     select.prop-input {
         cursor: pointer;
@@ -90,7 +90,7 @@ const PROPERTIES_CSS: &str = r#"
         transform: scale(1.15);
     }
     .prop-color-btn.active {
-        border-color: var(--accent);
+        border-color: var(--accent-solid);
         box-shadow: 0 0 0 2px var(--accent-soft);
     }
 
@@ -103,15 +103,15 @@ const PROPERTIES_CSS: &str = r#"
         flex: 1;
         padding: 0.25rem 0.4rem;
         font-size: 0.7rem;
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         border: 1px solid var(--border);
         border-radius: 4px;
-        color: var(--text-2);
+        color: var(--text-3);
         cursor: pointer;
         transition: background 0.12s, color 0.12s;
     }
     .prop-layer-controls button:hover {
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         color: var(--text);
     }
 
@@ -122,16 +122,16 @@ const PROPERTIES_CSS: &str = r#"
     .prop-delete-btn {
         width: 100%;
         padding: 0.35rem;
-        border: 1px solid var(--danger);
+        border: 1px solid var(--loss);
         border-radius: 4px;
-        background: color-mix(in srgb, var(--danger) 10%, transparent);
-        color: var(--danger);
+        background: color-mix(in srgb, var(--loss) 10%, transparent);
+        color: var(--loss);
         font-size: 0.8rem;
         cursor: pointer;
         transition: background 0.12s;
     }
     .prop-delete-btn:hover {
-        background: color-mix(in srgb, var(--danger) 25%, transparent);
+        background: color-mix(in srgb, var(--loss) 25%, transparent);
     }
 "#;
 

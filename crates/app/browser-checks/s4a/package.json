@@ -1,0 +1,20 @@
+{
+  "name": "scuffed-app-browser-checks-s4a",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Playwright checks for the PR 696 public pages against a local stack with fake data. Not wired into CI.",
+  "type": "module",
+  "scripts": {
+    "seed": "node seed.mjs && node seed2.mjs",
+    "reapply": "node reapply.mjs",
+    "fix1": "node fix1.mjs",
+    "keys": "node keys.mjs",
+    "bars": "node bars.mjs",
+    "shots": "node shots.mjs",
+    "summary": "node summary.mjs",
+    "test": "node --test host-guard.test.mjs"
+  },
+  "dependencies": {
+    "playwright": "1.65.1"
+  }
+}

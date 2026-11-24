@@ -31,7 +31,7 @@ fn hero_options() -> Vec<(&'static str, &'static str)> {
 
 /// Shared hero picker. Emits `None` for "All heroes" (no filter) or
 /// `Some(canonical_name)` for a specific hero. Drop-in for any page that needs
-/// a hero filter (leaderboards, roster, profile — later waves).
+/// a hero filter (leaderboards, roster, profile; later waves).
 #[component]
 pub fn HeroSelect(
     /// Current selection. `None` = "All heroes" (no filter); `Some(name)` must

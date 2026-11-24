@@ -28,7 +28,7 @@ const TOOLBAR_CSS: &str = r#"
     }
     .tb-label {
         font-size: 0.65rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-transform: uppercase;
         letter-spacing: 0.06em;
         margin-right: 0.25rem;
@@ -48,19 +48,19 @@ const TOOLBAR_CSS: &str = r#"
         border: 1px solid transparent;
         border-radius: 5px;
         background: none;
-        color: var(--text-2);
+        color: var(--text-3);
         font-size: 0.85rem;
         cursor: pointer;
         transition: background 0.12s, color 0.12s, border-color 0.12s;
     }
     .tb-tool-btn:hover {
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         color: var(--text);
     }
     .tb-tool-btn.active {
         background: var(--accent-soft);
-        color: var(--accent);
-        border-color: var(--accent);
+        color: var(--accent-text);
+        border-color: var(--accent-solid);
     }
     .tb-tool-btn:disabled {
         opacity: 0.35;
@@ -80,7 +80,7 @@ const TOOLBAR_CSS: &str = r#"
         transform: scale(1.15);
     }
     .tb-color-btn.active {
-        border-color: var(--accent);
+        border-color: var(--accent-solid);
         box-shadow: 0 0 0 2px var(--accent-soft);
     }
 
@@ -92,11 +92,11 @@ const TOOLBAR_CSS: &str = r#"
     }
     .tb-opacity input[type="range"] {
         width: 60px;
-        accent-color: var(--accent);
+        accent-color: var(--accent-solid);
     }
     .tb-opacity-val {
         font-size: 0.7rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         min-width: 2.2em;
         text-align: right;
     }
@@ -104,7 +104,7 @@ const TOOLBAR_CSS: &str = r#"
     /* ---- Zoom display ---- */
     .tb-zoom-display {
         font-size: 0.75rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         min-width: 3em;
         text-align: center;
         user-select: none;
@@ -112,10 +112,10 @@ const TOOLBAR_CSS: &str = r#"
 
     /* ---- Floor selector ---- */
     .tb-floor-select {
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         border: 1px solid var(--border);
         border-radius: 4px;
-        color: var(--text-2);
+        color: var(--text-3);
         font-size: 0.75rem;
         padding: 0.2rem 0.35rem;
     }
@@ -130,22 +130,22 @@ const TOOLBAR_CSS: &str = r#"
         border: 1px solid transparent;
         border-radius: 5px;
         background: none;
-        color: var(--text-2);
+        color: var(--text-3);
         font-size: 0.9rem;
         cursor: pointer;
         transition: background 0.12s, color 0.12s;
     }
     .tb-hp-toggle.active {
-        background: color-mix(in srgb, var(--ok) 15%, transparent);
-        color: var(--ok);
+        background: color-mix(in srgb, var(--win) 15%, transparent);
+        color: var(--win);
     }
     .tb-hp-toggle:hover {
-        background: var(--surface-2);
+        background: var(--surface-sunken);
     }
 
     /* ---- Strategy name input ---- */
     .tb-name-input {
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         border: 1px solid var(--border);
         border-radius: 5px;
         color: var(--text);
@@ -155,7 +155,7 @@ const TOOLBAR_CSS: &str = r#"
         transition: border-color 0.15s;
     }
     .tb-name-input:focus {
-        border-color: var(--accent);
+        border-color: var(--accent-solid);
     }
 
     /* ---- Save button ---- */
@@ -166,8 +166,8 @@ const TOOLBAR_CSS: &str = r#"
         padding: 0.3rem 0.75rem;
         border: none;
         border-radius: 5px;
-        background: var(--accent);
-        color: var(--accent-fg);
+        background: var(--accent-solid);
+        color: var(--on-accent);
         font-size: 0.8rem;
         font-weight: 600;
         cursor: pointer;
@@ -190,10 +190,10 @@ const TOOLBAR_CSS: &str = r#"
 
     /* ---- Visibility dropdown ---- */
     .tb-visibility-select {
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         border: 1px solid var(--border);
         border-radius: 4px;
-        color: var(--text-2);
+        color: var(--text-3);
         font-size: 0.75rem;
         padding: 0.2rem 0.35rem;
     }

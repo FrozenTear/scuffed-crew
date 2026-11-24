@@ -1,7 +1,7 @@
 //! Dev probe: run the pre-OCR scoreboard preflight (row-dip scan) on frames.
 //! Usage: cargo run -p scuffed-stat-tracker --example preflight -- <img.png>...
 
-use stat_tracker::detect::hero_portrait::scan_rows;
+use stat_tracker::frame::layout::scan_rows;
 use stat_tracker::ocr::preprocess::{crop_scoreboard, header_label_groups};
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

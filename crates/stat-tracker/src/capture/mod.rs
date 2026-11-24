@@ -1,102 +1,40 @@
 mod flight;
-mod framebuf;
+mod geom;
 pub mod kwin;
-mod pod;
+mod outputs;
 pub mod portal;
-mod portal_backend;
-mod pw;
 mod route;
 pub use flight::is_busy as is_capture_busy;
 pub use route::{KWIN_DIRECT_DEFAULT_ON_KDE, KwinProbe, SessionKind, is_gnome, is_kde};
-mod screencast;
-mod stream_pause;
+mod select;
+mod state;
+mod stream;
+mod tab;
+mod types;
 pub mod wayshot;
 /// Native X11 capture (pure X11 sessions). Wired into selection by Lane C.
 pub mod x11;
 
-/// Why this grab is happening. Tab captures may save a debug pair. Poll
-/// captures, and the detectors that read them, stay on the same image type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CaptureKind {
-    Poll,
-    Tab,
-}
-
-/// Prefs the daemon and the app set before [`detect_backend`]. The env var
-/// still wins over `route` when it is non-empty.
-#[derive(Debug, Clone)]
-pub struct CapturePrefs {
-    pub data_dir: std::path::PathBuf,
-    pub route: crate::config::CaptureRoute,
-    pub debug_frames: bool,
-    /// Screen-stream cap in frames per second. Already clamped.
-    pub max_fps: u32,
-}
-
-fn prefs() -> CapturePrefs {
-    PREFS
-        .lock()
-        .unwrap_or_else(|err| err.into_inner())
-        .clone()
-        .unwrap_or_else(|| CapturePrefs {
-            data_dir: dirs::data_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join("scuffed-stat-tracker"),
-            route: crate::config::CaptureRoute::Auto,
-            debug_frames: false,
-            max_fps: crate::config::SCREENCAST_MAX_FPS_DEFAULT,
-        })
-}
-
-tokio::task_local! {
-    static TAB_PRESS: std::time::Instant;
-}
-
-tokio::task_local! {
-    static SUPPRESS_STREAM_MISS_LOG: ();
-}
-
-/// True while the first Tab is discarding a miss from a press that the
-/// share open already pushed past the frame budget. That miss is not logged.
-pub(crate) fn stream_miss_log_suppressed() -> bool {
-    SUPPRESS_STREAM_MISS_LOG.try_with(|_| ()).is_ok()
-}
-
-/// The Tab key instant for the current capture task, when this is a Tab grab.
-pub fn tab_press() -> Option<std::time::Instant> {
-    TAB_PRESS.try_with(|press| *press).ok()
-}
-
-tokio::task_local! {
-    static POLL_LOCK_WAIT: std::time::Duration;
-}
-
-/// How long the end-reel outcome-only poll waits for the screenshot lock
-/// while a Tab grab holds it. The VICTORY banner lasts about 3 s and, with
-/// the new reader, polls come every 1.5 s (4 s with classic OCR), so a poll
-/// turned away at once could lose the banner while the player held Tab
-/// over it. One second keeps the poll arm short.
-pub const OUTCOME_POLL_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
-
-/// The lock wait for a poll: [`OUTCOME_POLL_LOCK_WAIT`] for the end-reel
-/// outcome-only poll, nothing for an ordinary one.
-pub fn poll_lock_wait(outcome_only: bool) -> std::time::Duration {
-    if outcome_only {
-        OUTCOME_POLL_LOCK_WAIT
-    } else {
-        std::time::Duration::ZERO
-    }
-}
-
-/// Run a poll grab that may wait `wait` for the screenshot lock. Not an
-/// async fn: it returns the scope future itself, so the poll future does
-/// not carry a second copy of `fut`.
-pub fn with_poll_lock_wait<F: std::future::Future>(
-    wait: std::time::Duration,
-    fut: F,
-) -> impl std::future::Future<Output = F::Output> {
-    POLL_LOCK_WAIT.scope(wait, fut)
-}
+pub use geom::auto_output_index;
+pub use select::detect_backend;
+pub use state::{
+    PORTAL_PROMPT_NOTICE, PORTAL_STALL_NOTICE, capture_notice, daemon_share_is_open,
+    live_share_open, route_notice, set_notice_sink, set_prefs, shot_route, stream_route_active,
+    stream_was_forced,
+};
+use state::{note_grab_worked, portal_path, prefs};
+use tab::SUPPRESS_STREAM_MISS_LOG;
+pub use tab::{
+    FIRST_TAB_OPEN_WAIT, OUTCOME_POLL_LOCK_WAIT, OpeningTab, first_tab_while_opening,
+    poll_lock_wait, tab_attempt_press, tab_press, tab_press_after_late_open, with_poll_lock_wait,
+    with_tab_press,
+};
+use types::as_new_capture;
+pub use types::{
+    CaptureBackend, CaptureKind, CapturePrefs, CapturedFrame, PortalState, REUSED_FRAME_LOG_WINDOW,
+    SeenStream, ShotRoute, capture_backend_label, perf_backend_label, poll_uses_frame,
+    reused_frame_skip_is_debug, reused_frame_skips_the_read,
+};
 
 /// The daemon's poll grab: [`capture_screen_output_for`] with
 /// [`CaptureKind::Poll`], waiting for the screenshot lock as
@@ -112,80 +50,6 @@ pub fn poll_grab<'a>(
         poll_lock_wait(outcome_only),
         capture_screen_output_for(backend, output_name, CaptureKind::Poll),
     )
-}
-
-/// The lock wait for the grab running in this task: `tab_wait` in a Tab
-/// capture, the poll's wait ([`with_poll_lock_wait`]) otherwise, zero by
-/// default.
-pub(crate) fn grab_lock_wait(tab_wait: std::time::Duration) -> std::time::Duration {
-    flight::lock_wait(
-        tab_press().is_some(),
-        tab_wait,
-        POLL_LOCK_WAIT
-            .try_with(|wait| *wait)
-            .unwrap_or(std::time::Duration::ZERO),
-    )
-}
-
-/// Run `fut` as a Tab grab whose press time is `press`. Direct capture still
-/// sleeps before calling this. The stream path reads the press and does not.
-pub async fn with_tab_press<T>(
-    press: std::time::Instant,
-    fut: impl std::future::Future<Output = T>,
-) -> T {
-    TAB_PRESS.scope(press, fut).await
-}
-
-/// The first attempt uses the key instant. A retry starts its own
-/// press-relative deadline at `now`, so it is not already past the first
-/// attempt's hard stop.
-pub fn tab_attempt_press(
-    original: std::time::Instant,
-    attempt: usize,
-    now: std::time::Instant,
-) -> std::time::Instant {
-    if attempt == 0 { original } else { now }
-}
-
-/// How long the first Tab waits for a fresh frame from a share that is
-/// still opening. The frame budget stays 1200 ms.
-pub const FIRST_TAB_OPEN_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
-
-/// What the first Tab does while the share is still opening.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OpeningTab {
-    /// The wait for a fresh frame has not passed.
-    Wait,
-    /// [`FIRST_TAB_OPEN_WAIT`] has passed. The attempt returns
-    /// open-in-progress so a later retry can try again. It is not a
-    /// stream miss, and it does not log one.
-    Miss,
-}
-
-pub fn first_tab_while_opening(
-    elapsed: std::time::Duration,
-    bound: std::time::Duration,
-) -> OpeningTab {
-    if elapsed < bound {
-        OpeningTab::Wait
-    } else {
-        OpeningTab::Miss
-    }
-}
-
-/// After a late open, the original frame budget may already be gone. The
-/// grab then starts again from `now`, while this Tab is still held.
-pub fn tab_press_after_late_open(
-    original: std::time::Instant,
-    now: std::time::Instant,
-    frame_budget: std::time::Duration,
-    waited_for_open: bool,
-) -> std::time::Instant {
-    if waited_for_open && now >= original + frame_budget {
-        now
-    } else {
-        original
-    }
 }
 
 /// The first Tab's wait while a share is still opening.
@@ -226,7 +90,7 @@ where
                 waited_for_open = true;
                 match first_tab_while_opening(elapsed(), FIRST_TAB_OPEN_WAIT) {
                     OpeningTab::Wait => pause().await,
-                    OpeningTab::Miss => return Err(screencast::OPEN_IN_PROGRESS.into()),
+                    OpeningTab::Miss => return Err(stream::OPEN_IN_PROGRESS.into()),
                 }
             }
             Err(err) if suppress && is_stream_miss(&err.to_string()) => {
@@ -238,96 +102,6 @@ where
     }
 }
 
-/// `share_open` from a status file counts only when that file's pid is the
-/// live daemon. A stale pid file, or a status left by a daemon that has
-/// exited, is a closed share.
-pub fn live_share_open(share_open: bool, status_pid: u32, live_pid: Option<u32>) -> bool {
-    share_open && live_pid == Some(status_pid)
-}
-
-fn live_daemon_pid(data_dir: &std::path::Path) -> Option<u32> {
-    let text = std::fs::read_to_string(data_dir.join("daemon.pid")).ok()?;
-    let rec = crate::proc_id::parse_pid_record(&text)?;
-    crate::proc_id::pid_is_live_tracker_started(rec.pid, rec.start_ticks).then_some(rec.pid)
-}
-
-pub fn set_prefs(prefs: CapturePrefs) {
-    *PREFS.lock().unwrap_or_else(|err| err.into_inner()) = Some(prefs);
-}
-
-static PREFS: std::sync::Mutex<Option<CapturePrefs>> = std::sync::Mutex::new(None);
-
-/// Portal path chosen by the last [`detect_backend`] call.
-fn portal_path() -> route::PortalPath {
-    match PORTAL_PATH.load(std::sync::atomic::Ordering::Acquire) {
-        1 => route::PortalPath::Screenshot,
-        _ => route::PortalPath::Stream,
-    }
-}
-
-static PORTAL_PATH: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-
-static STREAM_ROUTE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static STREAM_FORCED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// This process is capturing through the long-lived screen stream.
-/// Wayshot, X11, KDE direct and the screenshot portal are not.
-pub fn stream_route_active() -> bool {
-    STREAM_ROUTE.load(std::sync::atomic::Ordering::Acquire)
-}
-
-static SHOT_ROUTE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-
-/// A route that takes one fresh screenshot per grab, as [`detect_backend`]
-/// chose it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ShotRoute {
-    /// The stream, wayshot or X11.
-    None,
-    /// The screenshot portal ("Older screenshot"): on KDE about 450 ms of
-    /// compositor and portal work per grab, plus a PNG.
-    Portal,
-    /// KDE direct: KWin renders the output into a pipe.
-    Kwin,
-}
-
-impl ShotRoute {
-    /// Out of a match this route polls less (each grab is a compositor
-    /// render, and for the portal a dialog and a PNG).
-    pub fn polls_less_out_of_a_match(self) -> bool {
-        self != ShotRoute::None
-    }
-
-    /// A rejected Tab is retried once here instead of twice: each portal
-    /// grab is a full KDE capture of about 450 ms.
-    pub fn one_tab_retry(self) -> bool {
-        self == ShotRoute::Portal
-    }
-}
-
-/// Which per-grab screenshot route this process uses, if any.
-pub fn shot_route() -> ShotRoute {
-    match SHOT_ROUTE.load(std::sync::atomic::Ordering::Acquire) {
-        1 => ShotRoute::Portal,
-        2 => ShotRoute::Kwin,
-        _ => ShotRoute::None,
-    }
-}
-
-static ROUTE_NOTICE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
-
-/// The warning from the last [`detect_backend`] the app should show: KDE
-/// direct was asked for and could not be used, a saved Wayland-only route
-/// was ignored off Wayland, or the X11 probe failed and nothing else can
-/// capture. `None` when there is none.
-pub fn route_notice() -> Option<String> {
-    let notice = ROUTE_NOTICE
-        .lock()
-        .unwrap_or_else(|err| err.into_inner())
-        .clone();
-    (!notice.is_empty()).then_some(notice)
-}
-
 /// A poll grab error that is a known state, not a capture failure: the
 /// capture lock was held, the share is still opening, was declined, or
 /// stays closed until the game runs, or the stream had no fresh frame for
@@ -336,104 +110,19 @@ pub fn route_notice() -> Option<String> {
 /// nor end a failure run (S5-CAP-7).
 pub fn is_expected_poll_miss(err: &str) -> bool {
     is_capture_busy(err)
-        || screencast::is_share_opening(err)
-        || screencast::is_declined_capture(err)
-        || screencast::is_share_closed_until_game(err)
-        || screencast::is_stream_miss(err)
-        || err.contains(pw::NO_STREAM_FRAME)
+        || stream::is_share_opening(err)
+        || stream::is_declined_capture(err)
+        || stream::is_share_closed_until_game(err)
+        || stream::is_stream_miss(err)
+        || err.contains(stream::pw::NO_STREAM_FRAME)
         || err.contains(portal::SHOT_BACKOFF)
 }
 
-/// What the screenshot portal's last request came to, for the app's
-/// notice (S5-CAP-1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum PortalState {
-    /// Nothing to say: it answered, or nothing asked it.
-    Answering = 0,
-    /// A request waits and permission is not granted: a permission prompt
-    /// may be up, perhaps behind the game.
-    MayBePrompt = 1,
-    /// Permission is granted and a request got no answer: it was given up.
-    Stalled = 2,
-}
-
-static PORTAL_STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-
-fn portal_state() -> PortalState {
-    match PORTAL_STATE.load(std::sync::atomic::Ordering::Acquire) {
-        1 => PortalState::MayBePrompt,
-        2 => PortalState::Stalled,
-        _ => PortalState::Answering,
-    }
-}
-
-/// Where this process publishes [`capture_notice`]. Only the daemon sets
-/// it (the status file); the app's own grabs leave the daemon's file alone.
-type NoticeSink = Box<dyn Fn(&str) + Send + Sync>;
-static NOTICE_SINK: std::sync::OnceLock<NoticeSink> = std::sync::OnceLock::new();
-
-/// The daemon's sink for [`capture_notice`]. Set once; later calls are
-/// ignored.
-pub fn set_notice_sink(sink: impl Fn(&str) + Send + Sync + 'static) {
-    let _ = NOTICE_SINK.set(Box::new(sink));
-}
-
-/// The sentence the app shows under the capture method: the route notice
-/// ([`route_notice`]) and what the screenshot portal is up to. Empty when
-/// there is nothing to say.
-pub fn capture_notice() -> String {
-    notice_text(&route_notice().unwrap_or_default(), portal_state())
-}
-
-/// The prompt notice: a request waits on a permission dialog, perhaps.
-pub const PORTAL_PROMPT_NOTICE: &str = "A screenshot permission prompt may be waiting, possibly behind the game. Screenshots wait for it.";
-
-/// The stall notice: permission is granted and the portal did not answer.
-pub const PORTAL_STALL_NOTICE: &str = "No answer from the screenshot portal. It may have stopped; restarting the tracker or the portal can help.";
-
-/// [`capture_notice`] from its parts.
-fn notice_text(route: &str, portal: PortalState) -> String {
-    let portal = match portal {
-        PortalState::Answering => None,
-        PortalState::MayBePrompt => Some(PORTAL_PROMPT_NOTICE.to_string()),
-        PortalState::Stalled => Some(PORTAL_STALL_NOTICE.to_string()),
-    };
-    match (route.trim(), portal) {
-        ("", None) => String::new(),
-        ("", Some(stall)) => stall,
-        (route, None) => route.to_string(),
-        (route, Some(stall)) => format!("{route}. {stall}"),
-    }
-}
-
-/// A grab worked, on any route: a stalled-portal notice no longer holds.
-/// A possible permission prompt stays until its request ends.
-fn note_grab_worked() {
-    if PORTAL_STATE
-        .compare_exchange(
-            PortalState::Stalled as u8,
-            PortalState::Answering as u8,
-            std::sync::atomic::Ordering::AcqRel,
-            std::sync::atomic::Ordering::Acquire,
-        )
-        .is_ok()
-        && let Some(sink) = NOTICE_SINK.get()
-    {
-        sink(&capture_notice());
-    }
-}
-
-/// What the screenshot portal's last request came to. A change is
-/// published through the daemon's sink. A successful grab on any route
-/// and a new route decision set [`PortalState::Answering`].
-pub(crate) fn note_portal_state(state: PortalState) {
-    let was = PORTAL_STATE.swap(state as u8, std::sync::atomic::Ordering::AcqRel);
-    if was != state as u8
-        && let Some(sink) = NOTICE_SINK.get()
-    {
-        sink(&capture_notice());
-    }
+/// An expected poll miss ([`is_expected_poll_miss`]) that can last the rest
+/// of the game: a declined share, or screenshot requests paused after the
+/// portal stopped answering.
+pub fn is_lasting_poll_miss(err: &str) -> bool {
+    stream::is_declined_capture(err) || err.contains(portal::SHOT_BACKOFF)
 }
 
 /// A grab error from a screenshot portal that is not answering: a request
@@ -444,476 +133,24 @@ pub fn is_portal_unanswered(err: &str) -> bool {
     err.contains(portal::SHOT_UNANSWERED)
 }
 
-/// The stream was asked for by the environment or by Settings, not chosen
-/// because the desktop is KDE or GNOME.
-pub fn stream_was_forced() -> bool {
-    STREAM_FORCED.load(std::sync::atomic::Ordering::Acquire)
-}
-
-pub use screencast::{
+pub use stream::{
     STREAM_MISS, close_if_open, is_declined_capture, is_share_opening, is_stream_miss,
     note_game_running, note_game_seen, session_is_open, share_close_due, should_close_share,
 };
 
-pub use framebuf::{TAB_GRAB_TIMEOUT_AFTER_PRESS_MS, first_grab_press, tab_retry_press};
-pub use stream_pause::{
+pub use stream::pause::{
     KeyHold, bridge_hold as stream_bridge_hold, decide_and_apply as decide_stream_pause,
     end_tab_stream_hold, key_hold as stream_key_hold, with_tab_stream_hold,
 };
+pub use tab::{TAB_GRAB_TIMEOUT_AFTER_PRESS_MS, first_grab_press, tab_retry_press};
 
-/// One captured image plus whether the stream had not already handed it out.
-/// Screenshots are always new and have no sequence.
-pub struct CapturedFrame {
-    pub image: image::DynamicImage,
-    pub seq: Option<u64>,
-    /// Which stream produced `seq`. A new stream starts its numbers again.
-    pub stream: Option<u64>,
-    pub is_new: bool,
-}
-
-/// The last stream frame a poll accepted. Sequence numbers restart at 0
-/// on every new stream, so the id has to travel with the sequence.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SeenStream {
-    pub id: u64,
-    pub seq: u64,
-}
-
-/// A still screen reuses one frame on every poll. The skip is debug once
-/// per this window, then trace.
-pub const REUSED_FRAME_LOG_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// True when the reused-frame skip should be logged at debug.
-pub fn reused_frame_skip_is_debug(
-    last: Option<std::time::Instant>,
-    now: std::time::Instant,
-    window: std::time::Duration,
-) -> bool {
-    match last {
-        None => true,
-        Some(at) => now.saturating_duration_since(at) >= window,
-    }
-}
-
-/// A poll may update streaks only for a frame it has not already used.
-/// A reused frame is no read. A new frame whose sequence was already seen
-/// on the same stream is no read. A different stream is a read. A
-/// screenshot (`seq` none, `is_new`) is a read.
-pub fn poll_uses_frame(
-    is_new: bool,
-    seq: Option<u64>,
-    stream: Option<u64>,
-    seen: Option<SeenStream>,
-) -> bool {
-    if !is_new {
-        return false;
-    }
-    match (seq, stream, seen) {
-        (Some(seq), Some(id), Some(seen)) if id == seen.id && seq <= seen.seq => false,
-        (Some(seq), None, Some(seen)) if seq <= seen.seq => false,
-        _ => true,
-    }
-}
-
-/// True when the poll loop must skip the read. The daemon `continue`s on
-/// this, so a reused frame never confirms Victory or Defeat.
-pub fn reused_frame_skips_the_read(
-    is_new: bool,
-    seq: Option<u64>,
-    stream: Option<u64>,
-    seen: Option<SeenStream>,
-) -> bool {
-    !poll_uses_frame(is_new, seq, stream, seen)
-}
-
-fn as_new_capture(image: image::DynamicImage) -> CapturedFrame {
-    CapturedFrame {
-        image,
-        seq: None,
-        stream: None,
-        is_new: true,
-    }
-}
+/// Forget the saved screen-share permission (the restore token and its temp
+/// file). Call only while the daemon is stopped.
+pub use stream::remove_restore_token;
 
 /// A saved restore token can reopen the share without a prompt.
 pub fn share_restorable(data_dir: &std::path::Path) -> bool {
-    screencast::restore_token_saved(data_dir)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CaptureBackend {
-    Wayshot,
-    X11,
-    Portal,
-    /// KDE direct: KWin's ScreenShot2 interface, no portal and no file.
-    Kwin,
-    None,
-}
-
-/// Normalized force target parsed from `STAT_TRACKER_CAPTURE` (pure; unit-tested).
-/// The accepted keyword set (and its case-folding) lives here and nowhere else,
-/// both `select_backend` and `detect_backend` route through `force_target`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ForceTarget {
-    Wayshot,
-    X11,
-    Portal,
-    Unknown,
-}
-
-fn force_target(raw: &str) -> ForceTarget {
-    match route::classify(raw) {
-        route::ForceWord::Wayshot => ForceTarget::Wayshot,
-        route::ForceWord::X11 => ForceTarget::X11,
-        // `portal` and `screencast` are the stream. `portal-screenshot` is
-        // the older portal. Both are the portal backend; `route` picks which.
-        route::ForceWord::Stream | route::ForceWord::Screenshot => ForceTarget::Portal,
-        // KDE direct is decided in `route::resolve` from its probe and
-        // never reaches `select_backend`.
-        route::ForceWord::Kwin | route::ForceWord::Unknown => ForceTarget::Unknown,
-    }
-}
-
-/// Pure backend-selection policy (R1-6). Every env read and live probe happens
-/// in `detect_backend`; this takes their already-normalized results so the exact
-/// production decision is unit-testable without touching process env or an X
-/// server. `detect_backend` routes through this, the tests below exercise the
-/// real logic, not a parallel copy.
-///
-/// `force` is the raw `STAT_TRACKER_CAPTURE` value (or `None`), normalized here
-/// via `force_target` so the keyword set exists once. A forced backend never
-/// silently falls back (R1-3): unavailable/unknown force → `None`.
-///
-/// `wayland_session` is true when the desktop itself is Wayland. There the
-/// X11 probe can pass through XWayland (KDE, GNOME) even though X11 cannot
-/// see the real screen, so the portal goes ahead of X11 and X11 is only a
-/// last resort.
-fn select_backend(
-    force: Option<&str>,
-    wayland_session: bool,
-    wayshot_ok: bool,
-    x11_ok: bool,
-    portal_ok: bool,
-) -> CaptureBackend {
-    match force {
-        Some(raw) => match force_target(raw) {
-            ForceTarget::Wayshot => {
-                if wayshot_ok {
-                    CaptureBackend::Wayshot
-                } else {
-                    CaptureBackend::None
-                }
-            }
-            ForceTarget::X11 => {
-                if x11_ok {
-                    CaptureBackend::X11
-                } else {
-                    CaptureBackend::None
-                }
-            }
-            ForceTarget::Portal => {
-                if portal_ok {
-                    CaptureBackend::Portal
-                } else {
-                    CaptureBackend::None
-                }
-            }
-            // Unknown forced value, fail closed, no fallback.
-            ForceTarget::Unknown => CaptureBackend::None,
-        },
-        // Automatic priority: usable Wayshot, then X11, then Portal. On a
-        // Wayland session: Wayshot, then Portal, then X11. On a known X11
-        // session `detect_backend` never reports the portal usable on
-        // automatic ([`auto_may_use_portal`], S5-CAP-5).
-        None => {
-            if wayshot_ok {
-                CaptureBackend::Wayshot
-            } else if wayland_session && portal_ok {
-                CaptureBackend::Portal
-            } else if x11_ok {
-                CaptureBackend::X11
-            } else if portal_ok {
-                CaptureBackend::Portal
-            } else {
-                CaptureBackend::None
-            }
-        }
-    }
-}
-
-pub async fn detect_backend() -> CaptureBackend {
-    // STAT_TRACKER_CAPTURE override (R1-3, fail-closed). A non-empty value
-    // wins over Settings. Otherwise `capture_route` wins when it is not
-    // auto. Probing is lazy per force so a forced backend never warms an
-    // unrelated connection. The route log is `route::resolve`, which the
-    // unit tests call with the same probe results.
-    let prefs = prefs();
-    let env = std::env::var("STAT_TRACKER_CAPTURE").ok();
-    let env_set = env.as_deref().map(str::trim).is_some_and(|s| !s.is_empty());
-    let settings = match prefs.route {
-        crate::config::CaptureRoute::Screencast => Some(route::ForceWord::Stream),
-        crate::config::CaptureRoute::Screenshot => Some(route::ForceWord::Screenshot),
-        crate::config::CaptureRoute::Kwin => Some(route::ForceWord::Kwin),
-        crate::config::CaptureRoute::Auto => None,
-    };
-    let session_type = std::env::var("XDG_SESSION_TYPE").ok();
-    let wayland_display = std::env::var_os("WAYLAND_DISPLAY").is_some();
-    let session = route::SessionKind::from_env(session_type.as_deref(), wayland_display);
-    let wayland = session == route::SessionKind::Wayland;
-    let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
-    // A saved Wayland-only route on a known X11 session is not probed:
-    // `resolve_on_session` uses automatic for it and says why.
-    let chosen = route::effective(env.as_deref(), route::saved_on_session(settings, session));
-
-    // KDE direct is probed when asked for, or on automatic on KDE once
-    // `KWIN_DIRECT_DEFAULT_ON_KDE` is flipped. No screen stream is open
-    // yet at this point, so the probe's 1x1 render cannot meet it.
-    let wants_kwin = match chosen {
-        route::Effective::Forced(route::ForceWord::Kwin) => true,
-        route::Effective::Auto => {
-            route::KWIN_DIRECT_DEFAULT_ON_KDE && wayland && route::is_kde(&desktop)
-        }
-        route::Effective::Forced(_) => false,
-    };
-    let kwin_probe = if wants_kwin {
-        // The app runs this too, perhaps beside a tracker whose stream is
-        // open (a different STAT_TRACKER_CAPTURE): no render there before
-        // Plasma 6.8.1. On KDE a probe that can pass (KWin not on the bus
-        // yet at login) is tried again for up to 15 s.
-        kwin::probe_at_startup(
-            || daemon_share_is_open(&prefs.data_dir),
-            route::is_kde(&desktop),
-        )
-        .await
-    } else {
-        route::KwinProbe::NotProbed
-    };
-    if chosen == route::Effective::Auto
-        && let route::KwinProbe::Unavailable(reason) | route::KwinProbe::NotChecked(reason) =
-            &kwin_probe
-    {
-        tracing::info!("automatic keeps the screen stream: KDE direct is not available ({reason})");
-    }
-    // A KDE direct that is there needs no other probe. One that is not
-    // falls back to what automatic would choose, so probe for that.
-    let probe_as = match chosen {
-        route::Effective::Forced(route::ForceWord::Kwin)
-            if kwin_probe == route::KwinProbe::Available =>
-        {
-            None
-        }
-        route::Effective::Forced(route::ForceWord::Kwin) => Some(route::Effective::Auto),
-        other => Some(other),
-    };
-
-    // Why the X11 probe failed, for the notice when nothing else works.
-    let mut x11_failure: Option<String> = None;
-    let (wayshot_ok, x11_ok, portal_ok) = match probe_as {
-        None => (false, false, false),
-        Some(chosen) => match chosen {
-            route::Effective::Forced(route::ForceWord::Wayshot) => {
-                (wayshot::probe().await.is_ok(), false, false)
-            }
-            route::Effective::Forced(route::ForceWord::X11) => {
-                (false, probe_x11_logged(&mut x11_failure).await, false)
-            }
-            route::Effective::Forced(route::ForceWord::Stream | route::ForceWord::Screenshot) => {
-                (false, false, portal::is_available().await)
-            }
-            // KDE direct never gets here: `probe_as` maps it to none or auto.
-            route::Effective::Forced(route::ForceWord::Unknown | route::ForceWord::Kwin) => {
-                (false, false, false)
-            }
-            route::Effective::Auto => {
-                let wayshot_ok = wayshot::probe().await.is_ok();
-                if wayshot_ok {
-                    (true, false, false)
-                } else if wayland {
-                    let portal_ok = portal::is_available().await;
-                    let x11_ok = !portal_ok && probe_x11_logged(&mut x11_failure).await;
-                    (false, x11_ok, portal_ok)
-                } else {
-                    let x11_ok = probe_x11_logged(&mut x11_failure).await;
-                    // S5-CAP-5: on a known X11 session there is no screen
-                    // stream to fall back to; a failed X11 probe means no
-                    // capture. An unknown session keeps rc.7's fallback.
-                    let portal_ok =
-                        !x11_ok && auto_may_use_portal(session) && portal::is_available().await;
-                    (false, x11_ok, portal_ok)
-                }
-            }
-        },
-    };
-
-    let decision = route::resolve_on_session(
-        env.as_deref(),
-        settings,
-        session,
-        wayshot_ok,
-        x11_ok,
-        portal_ok,
-        &desktop,
-        &kwin_probe,
-        route::KWIN_DIRECT_DEFAULT_ON_KDE,
-    );
-    PORTAL_PATH.store(
-        match decision.portal {
-            route::PortalPath::Screenshot => 1,
-            route::PortalPath::Stream => 0,
-        },
-        std::sync::atomic::Ordering::Release,
-    );
-    let flags = route_flags(decision.backend, decision.portal, decision.forced);
-    STREAM_ROUTE.store(flags.on_stream, std::sync::atomic::Ordering::Release);
-    STREAM_FORCED.store(flags.stream_forced, std::sync::atomic::Ordering::Release);
-    SHOT_ROUTE.store(
-        match flags.shot {
-            ShotRoute::None => 0,
-            ShotRoute::Portal => 1,
-            ShotRoute::Kwin => 2,
-        },
-        std::sync::atomic::Ordering::Release,
-    );
-    let notice = decision.fallback.clone().or_else(|| {
-        x11_failure
-            .filter(|_| {
-                session == route::SessionKind::X11 && decision.backend == CaptureBackend::None
-            })
-            .map(|err| x11_failure_notice(&err))
-    });
-    *ROUTE_NOTICE.lock().unwrap_or_else(|err| err.into_inner()) = notice.unwrap_or_default();
-    // A new route decision: an old portal notice no longer holds.
-    PORTAL_STATE.store(
-        PortalState::Answering as u8,
-        std::sync::atomic::Ordering::Release,
-    );
-    tracing::info!("{}", decision.info);
-    if let Some(line) = &decision.forced_line {
-        tracing::info!("{line}");
-    }
-    if let Some(line) = &decision.mismatch {
-        tracing::warn!("{line}");
-    }
-    if let Some(line) = &decision.fallback {
-        tracing::warn!("{line}");
-    }
-    if env_set
-        && matches!(
-            route::classify(env.as_deref().unwrap_or("")),
-            route::ForceWord::Unknown
-        )
-    {
-        tracing::warn!(
-            raw = env.as_deref().unwrap_or(""),
-            "unknown STAT_TRACKER_CAPTURE value"
-        );
-    }
-    tracing::info!(
-        backend = perf_backend_label(&decision.backend).unwrap_or("none"),
-        session_type = session_type.as_deref().unwrap_or("unset"),
-        wayland_display,
-        "capture method chosen"
-    );
-    if decision.backend == CaptureBackend::None {
-        tracing::warn!("no capture backend available");
-    } else if decision.backend == CaptureBackend::Portal
-        && decision.portal == route::PortalPath::Stream
-    {
-        portal_backend::log_configured(&desktop);
-    }
-    decision.backend
-}
-
-/// The X11 probe, its error logged at WARN and kept in `failure`.
-async fn probe_x11_logged(failure: &mut Option<String>) -> bool {
-    match x11::probe().await {
-        Ok(()) => true,
-        Err(err) => {
-            tracing::warn!(error = %err, "X11 capture probe failed");
-            *failure = Some(err.to_string());
-            false
-        }
-    }
-}
-
-/// Whether automatic may fall back to the portal's screen stream when no
-/// direct capture works: not on a known X11 session, where that stream
-/// does not exist (S5-CAP-5).
-fn auto_may_use_portal(session: route::SessionKind) -> bool {
-    session != route::SessionKind::X11
-}
-
-/// The app's notice when the X11 probe failed on a known X11 session and
-/// nothing else can capture.
-fn x11_failure_notice(err: &str) -> String {
-    format!("X11 capture is not available ({err}); no capture method works on this session")
-}
-
-/// The process-wide route flags for one decision.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct RouteFlags {
-    /// The screen stream is this process's route.
-    on_stream: bool,
-    /// ... and it was asked for, not chosen because of the desktop.
-    stream_forced: bool,
-    shot: ShotRoute,
-}
-
-fn route_flags(backend: CaptureBackend, portal: route::PortalPath, forced: bool) -> RouteFlags {
-    let on_stream = backend == CaptureBackend::Portal && portal == route::PortalPath::Stream;
-    RouteFlags {
-        on_stream,
-        stream_forced: on_stream && forced,
-        shot: match (backend, portal) {
-            (CaptureBackend::Portal, route::PortalPath::Screenshot) => ShotRoute::Portal,
-            (CaptureBackend::Kwin, _) => ShotRoute::Kwin,
-            _ => ShotRoute::None,
-        },
-    }
-}
-
-/// Built-in panels (laptop screens). On Auto these lose to an external
-/// monitor, since a player with a monitor plugged in plays on it.
-fn is_builtin_panel(name: &str) -> bool {
-    ["eDP", "LVDS", "DSI"]
-        .iter()
-        .any(|prefix| name.starts_with(prefix))
-}
-
-/// Which output Auto (no `capture_output`) captures, given each output's
-/// name and real pixel area, in compositor order. One output is always that
-/// output. With several, external monitors win over built-in panels (eDP,
-/// LVDS, DSI), then the largest area wins, and a tie keeps list order.
-/// `None` only for an empty list.
-pub fn auto_output_index<'a>(outputs: impl IntoIterator<Item = (&'a str, u64)>) -> Option<usize> {
-    let outputs: Vec<(&str, u64)> = outputs.into_iter().collect();
-    if outputs.len() <= 1 {
-        return if outputs.is_empty() { None } else { Some(0) };
-    }
-    let any_external = outputs.iter().any(|(name, _)| !is_builtin_panel(name));
-    let mut best: Option<(usize, u64)> = None;
-    for (i, (name, area)) in outputs.iter().enumerate() {
-        if any_external && is_builtin_panel(name) {
-            continue;
-        }
-        if best.is_none_or(|(_, best_area)| *area > best_area) {
-            best = Some((i, *area));
-        }
-    }
-    best.map(|(i, _)| i)
-}
-
-/// The name a backend's captures carry in the perf summary
-/// (`backend = ...`, with `capture_p50_ms`). Every backend that can capture
-/// has one, so X11, Wayland and the portal report the same timing line.
-pub fn perf_backend_label(backend: &CaptureBackend) -> Option<&'static str> {
-    match backend {
-        CaptureBackend::Wayshot => Some("wayshot"),
-        CaptureBackend::X11 => Some("x11"),
-        CaptureBackend::Portal => Some("portal"),
-        CaptureBackend::Kwin => Some("kwin"),
-        CaptureBackend::None => None,
-    }
+    stream::restore_token_saved(data_dir)
 }
 
 pub async fn capture_screen_output(
@@ -942,8 +179,8 @@ pub async fn capture_screen_oneshot(
                 tracing::warn!(
                     "Capture now skipped: the tracker is sharing the screen, and a screenshot beside it can crash KWin"
                 );
-                let token_saved = screencast::restore_token_saved(data_dir);
-                return Err(screencast::capture_now_blocked_message(token_saved).into());
+                let token_saved = stream::restore_token_saved(data_dir);
+                return Err(stream::capture_now_blocked_message(token_saved).into());
             }
             if *backend == CaptureBackend::Kwin {
                 kwin::capture(output_name).await
@@ -960,14 +197,7 @@ pub async fn capture_screen_oneshot(
 /// tracker's open share on KDE. Wayshot and X11 never do.
 pub fn oneshot_blocked(backend: CaptureBackend, desktop: &str, share_open: bool) -> bool {
     matches!(backend, CaptureBackend::Portal | CaptureBackend::Kwin)
-        && screencast::capture_now_blocked_by_daemon_share(desktop, share_open)
-}
-
-/// The running tracker's screen share is open, from its status file.
-pub fn daemon_share_is_open(data_dir: &std::path::Path) -> bool {
-    let live_pid = live_daemon_pid(data_dir);
-    crate::ocr_switch::read_status(data_dir)
-        .is_some_and(|status| live_share_open(status.share_open, status.pid, live_pid))
+        && stream::capture_now_blocked_by_daemon_share(desktop, share_open)
 }
 
 /// KDE direct for the app's Settings: `None` off KDE. With `render` (the
@@ -1015,7 +245,7 @@ pub async fn capture_screen_output_for(
                 .map(as_new_capture),
             route::PortalPath::Stream => {
                 let prefs = prefs();
-                screencast::capture(output_name, kind, &prefs.data_dir, prefs.debug_frames).await
+                stream::capture(output_name, kind, &prefs.data_dir, prefs.debug_frames).await
             }
         },
         // Never the stream: this route and the tracker's own screen share
@@ -1050,13 +280,17 @@ pub async fn list_outputs(
         // The portal shoots the whole desktop and is cropped to one output
         // afterwards, so the picker lists the Wayland outputs it can crop to.
         // KWin names its outputs as Wayland does, for KDE direct.
-        CaptureBackend::Portal | CaptureBackend::Kwin => Ok(portal::list_outputs().await),
+        CaptureBackend::Portal | CaptureBackend::Kwin => Ok(outputs::list_outputs().await),
         CaptureBackend::None => Ok(Vec::new()),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::route::{ForceTarget, force_target, select_backend};
+    use super::select::{auto_may_use_portal, x11_failure_notice};
+    use super::state::{RouteFlags, live_daemon_pid, notice_text, route_flags};
+    use super::tab::{grab_lock_wait, stream_miss_log_suppressed};
     use super::*;
 
     /// alpha.10 check: the capture p50 in the perf summary is recorded for
@@ -1118,12 +352,12 @@ mod tests {
         assert!(live_share_open(true, 41, Some(41)));
         assert!(!live_share_open(false, 41, Some(41)));
         let dir = tempfile::tempdir().unwrap();
-        let status = crate::ocr_switch::Status {
+        let status = crate::ocr_status::Status {
             pid: 999_999,
             share_open: true,
-            ..crate::ocr_switch::Status::default()
+            ..crate::ocr_status::Status::default()
         };
-        crate::ocr_switch::write_status(dir.path(), &status).unwrap();
+        crate::ocr_status::write_status(dir.path(), &status).unwrap();
         std::fs::write(dir.path().join("daemon.pid"), "999999\n").unwrap();
         assert_eq!(live_daemon_pid(dir.path()), None);
         assert!(!live_share_open(
@@ -1194,7 +428,7 @@ mod tests {
             || async {
                 let elapsed_ms = at.load(std::sync::atomic::Ordering::Relaxed);
                 if elapsed_ms < open_ms {
-                    return Err(super::screencast::OPEN_IN_PROGRESS.into());
+                    return Err(super::stream::OPEN_IN_PROGRESS.into());
                 }
                 let n = after_open.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if n == 0 {
@@ -1283,10 +517,7 @@ mod tests {
             ShotRoute::None
         );
         // Reports keep a word the site's validator accepts.
-        assert_eq!(
-            crate::report::bundle::capture_backend_label(CaptureBackend::Kwin),
-            "portal"
-        );
+        assert_eq!(capture_backend_label(CaptureBackend::Kwin), "portal");
     }
 
     /// Capture now on KDE: the portal and KDE direct are both blocked beside
@@ -1349,7 +580,10 @@ mod tests {
         assert!(poll.contains(
             "with_poll_lock_wait(poll_lock_wait(outcome_only),capture_screen_output_for(backend,output_name,CaptureKind::Poll)"
         ));
-        let wait = squashed_body(module, concat!("pub(crate) fn ", "grab_lock_wait("));
+        let wait = squashed_body(
+            include_str!("tab.rs"),
+            concat!("pub(crate) fn ", "grab_lock_wait("),
+        );
         assert!(wait.contains(
             "flight::lock_wait(tab_press().is_some(),tab_wait,POLL_LOCK_WAIT.try_with(|wait|*wait).unwrap_or(std::time::Duration::ZERO)"
         ));
@@ -1358,27 +592,27 @@ mod tests {
     #[test]
     fn the_portal_grab_reads_its_lock_wait_from_the_task() {
         let shot = squashed_body(
-            include_str!("portal.rs"),
+            include_str!("portal/mod.rs"),
             concat!("pub async fn ", "capture("),
         );
-        assert!(shot.contains("letwait=super::grab_lock_wait(SHOT_LOCK_WAIT_TAB);"));
+        assert!(shot.contains("letwait=super::tab::grab_lock_wait(SHOT_LOCK_WAIT_TAB);"));
         assert!(shot.contains("run_shot(&SHOT_FLIGHT,wait,"));
     }
 
     #[test]
     fn the_kwin_grab_reads_its_lock_wait_from_the_task() {
         let grab = squashed_body(
-            include_str!("kwin.rs"),
+            include_str!("kwin/mod.rs"),
             concat!("pub async fn ", "capture("),
         );
-        assert!(grab.contains("letwait=super::grab_lock_wait(LOCK_WAIT_TAB);"));
+        assert!(grab.contains("letwait=super::tab::grab_lock_wait(LOCK_WAIT_TAB);"));
         assert!(grab.contains("grab_in_flight(target,true,wait)"));
     }
 
     #[test]
     fn the_kwin_grab_respects_the_reread_limit() {
         let grab = squashed_body(
-            include_str!("kwin.rs"),
+            include_str!("kwin/mod.rs"),
             concat!("pub async fn ", "capture("),
         );
         assert!(grab.contains("letdue=native_reread_due("));
@@ -1388,7 +622,7 @@ mod tests {
     #[test]
     fn the_kwin_reread_counts_as_capture_cpu() {
         let grab = squashed_body(
-            include_str!("kwin.rs"),
+            include_str!("kwin/mod.rs"),
             concat!("pub async fn ", "capture("),
         );
         assert!(grab.contains("crate::perf::record_cpu(crate::perf::Stage::Capture,reread_cpu);"));
@@ -1397,7 +631,7 @@ mod tests {
     #[test]
     fn the_compare_half_runs_only_past_its_gate() {
         let compare = squashed_body(
-            include_str!("kwin.rs"),
+            include_str!("kwin/mod.rs"),
             concat!("pub(crate) async fn ", "save_compare_half("),
         );
         assert!(compare.contains("letprobe=probe_beside_share(true).await;"));
@@ -1410,7 +644,7 @@ mod tests {
     #[test]
     fn the_startup_probe_gets_a_share_check_for_every_attempt() {
         let detect = squashed_body(
-            include_str!("mod.rs"),
+            include_str!("select.rs"),
             concat!("pub async fn ", "detect_backend("),
         );
         assert!(detect.contains("kwin::probe_at_startup(||daemon_share_is_open(&prefs.data_dir),"));
@@ -1491,12 +725,12 @@ mod tests {
     fn known_poll_states_are_not_capture_failures() {
         for err in [
             format!("portal screenshot: {}", flight::BUSY),
-            screencast::OPEN_IN_PROGRESS.to_string(),
-            screencast::NO_CAPTURE_DECLINE_NOTICE.to_string(),
-            screencast::timeout_notice(false).to_string(),
-            screencast::SHARE_CLOSED_UNTIL_GAME.to_string(),
-            screencast::STREAM_MISS.to_string(),
-            pw::NO_STREAM_FRAME.to_string(),
+            stream::OPEN_IN_PROGRESS.to_string(),
+            stream::policy::NO_CAPTURE_DECLINE_NOTICE.to_string(),
+            stream::policy::timeout_notice(false).to_string(),
+            stream::policy::SHARE_CLOSED_UNTIL_GAME.to_string(),
+            stream::STREAM_MISS.to_string(),
+            stream::pw::NO_STREAM_FRAME.to_string(),
             format!("portal screenshot: {}", portal::SHOT_BACKOFF),
         ] {
             assert!(is_expected_poll_miss(&err), "{err}");
@@ -1507,6 +741,22 @@ mod tests {
             "KDE direct capture: KWin did not answer in 2 s",
         ] {
             assert!(!is_expected_poll_miss(err), "{err}");
+        }
+    }
+
+    #[test]
+    fn lasting_poll_misses_are_a_declined_share_and_paused_screenshots() {
+        let backoff = format!("portal screenshot: {}", portal::SHOT_BACKOFF);
+        for lasting in [
+            "Screen share was declined",
+            "Screen share permission timed out: no captures until Overwatch is restarted",
+            backoff.as_str(),
+        ] {
+            assert!(is_lasting_poll_miss(lasting), "{lasting}");
+            assert!(is_expected_poll_miss(lasting), "{lasting}");
+        }
+        for passing in [stream::STREAM_MISS, "capture failed: EIO"] {
+            assert!(!is_lasting_poll_miss(passing), "{passing}");
         }
     }
 

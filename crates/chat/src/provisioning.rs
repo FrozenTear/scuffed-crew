@@ -129,7 +129,7 @@ pub async fn provision_team_channels(
         if let Err(e) = group_manager
             .create_group(
                 &provisioned.public_group_id,
-                &format!("{team_name} — General"),
+                &format!("{team_name}: General"),
                 Some(&format!("Public channel for {team_name}")),
                 true,  // public
                 false, // not open (server-managed membership)
@@ -148,7 +148,7 @@ pub async fn provision_team_channels(
             if let Err(e) = group_manager
                 .create_group(
                     officer_group_id,
-                    &format!("{team_name} — Officers"),
+                    &format!("{team_name}: Officers"),
                     Some("Officer-only channel. Messages are NIP-44 encrypted."),
                     false, // private
                     false, // not open

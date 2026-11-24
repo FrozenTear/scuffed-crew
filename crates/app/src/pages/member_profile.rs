@@ -6,6 +6,8 @@ use crate::routes::Route;
 use scuffed_api_client::ApiClient;
 
 use super::public_fetch::{PublicFetch, fetch_public};
+use super::{NotFoundLink, NotFoundPanel};
+use crate::sample::{OTHER_HEROES, Tally, fold_small, other_label};
 
 #[derive(Debug, Clone, Deserialize)]
 struct MemberTeamInfo {
@@ -34,8 +36,9 @@ struct GameAccount {
 
 // Mirrors the backend `HeroAgg` returned by
 // `GET /api/public/members/{id}/heroes` (public, no auth). `winrate` is a
-// ready-made 0.0–1.0 ratio; `avg_elims`/`avg_deaths` are unused in this view
-// but kept so the shape matches the endpoint exactly.
+// ready-made 0.0 to 1.0 ratio used only for sorting; the card text follows the
+// small-sample rule in `crate::sample`. `avg_elims`/`avg_deaths` are unused in
+// this view but kept so the shape matches the endpoint exactly.
 #[derive(Debug, Clone, Deserialize)]
 struct HeroAgg {
     hero: String,
@@ -84,7 +87,7 @@ const PAGE_CSS: &str = r#"
         margin: 0 auto;
     }
     .profile-loading {
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-align: center;
         padding: 3rem 0;
     }
@@ -99,7 +102,7 @@ const PAGE_CSS: &str = r#"
         height: 120px;
         border-radius: 50%;
         overflow: hidden;
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         display: flex;
         align-items: center;
         justify-content: center;
@@ -113,7 +116,7 @@ const PAGE_CSS: &str = r#"
     .profile-avatar-large .member-initials {
         font-family: var(--font-head);
         font-size: 2.4rem;
-        color: var(--accent);
+        color: var(--accent-text);
         letter-spacing: 3px;
     }
     .profile-info {
@@ -130,7 +133,7 @@ const PAGE_CSS: &str = r#"
         line-height: 1;
     }
     .profile-joined {
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-size: 0.8rem;
         margin: 0;
     }
@@ -147,7 +150,7 @@ const PAGE_CSS: &str = r#"
         letter-spacing: 0.04em;
     }
     .profile-bio {
-        color: var(--text-2);
+        color: var(--text-3);
         font-size: 0.9rem;
         line-height: 1.7;
         margin: 0;
@@ -164,7 +167,7 @@ const PAGE_CSS: &str = r#"
         min-width: 0;
     }
     .profile-team-link:hover .profile-team-name {
-        color: var(--accent);
+        color: var(--accent-text);
     }
     .profile-team-name {
         font-family: var(--font-head);
@@ -173,7 +176,7 @@ const PAGE_CSS: &str = r#"
     }
     .profile-team-role {
         font-size: 0.7rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-transform: uppercase;
     }
     .profile-account-name {
@@ -184,7 +187,7 @@ const PAGE_CSS: &str = r#"
     .profile-account-id {
         font-family: var(--font-mono);
         font-size: 0.75rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
     }
     .profile-card-row {
         display: flex;
@@ -198,7 +201,7 @@ const PAGE_CSS: &str = r#"
         border-top: 1px solid var(--border);
     }
     .profile-back a {
-        color: var(--accent);
+        color: var(--accent-text);
         text-decoration: none;
         font-size: 0.85rem;
         font-weight: 600;
@@ -218,7 +221,7 @@ const PAGE_CSS: &str = r#"
         margin-top: 0.2rem;
     }
     .profile-socials a {
-        color: var(--accent);
+        color: var(--accent-text);
         text-decoration: none;
         font-size: 0.8rem;
         font-weight: 600;
@@ -231,7 +234,7 @@ const PAGE_CSS: &str = r#"
         gap: 0.5rem;
         margin-top: 0.4rem;
         font-size: 0.72rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-transform: uppercase;
         letter-spacing: 0.03em;
     }
@@ -248,7 +251,7 @@ const PAGE_CSS: &str = r#"
     }
     .profile-hero-meta {
         font-size: 0.75rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         margin-top: 0.25rem;
     }
     .profile-show-all {
@@ -257,7 +260,7 @@ const PAGE_CSS: &str = r#"
         border: none;
         padding: 0;
         cursor: pointer;
-        color: var(--accent);
+        color: var(--accent-text);
         font-size: 0.85rem;
         font-weight: 600;
         font-family: inherit;
@@ -311,14 +314,26 @@ pub fn MemberProfile(id: String) -> Element {
     rsx! {
         crate::styles::StyleOnce { id: "scuffed-css-pages-member_profile-page-css", css: PAGE_CSS }
 
-        main { class: "profile-page",
+        // The shell already renders the page's one `main`.
+        div { class: "profile-page",
             {
                 let data = profile.read();
                 match data.as_ref() {
                     None => rsx! { p { class: "profile-loading", "Loading..." } },
-                    Some(PublicFetch::NotFound) => rsx! { p { class: "profile-loading", "Member not found" } },
-                    Some(PublicFetch::Failed) => rsx! {
-                        p { class: "profile-loading", "Couldn't load this profile. Check your connection and try again." }
+                    Some(PublicFetch::NotFound) => rsx! {
+                        NotFoundPanel {
+                            title: "Member not found",
+                            message: "We could not find that member. The link may be wrong, or the profile may be private.",
+                            links: vec![
+                                NotFoundLink { label: "All members", to: Route::Members {} },
+                                NotFoundLink { label: "Back home", to: Route::Home {} },
+                            ],
+                        }
+                    },
+                    Some(PublicFetch::Failed(reason)) => rsx! {
+                        p { class: "profile-loading",
+                            {crate::client_error::join_lead("Couldn't load this profile.", reason)}
+                        }
                     },
                     Some(PublicFetch::Found(m)) => {
                         let initials: String = m.display_name
@@ -425,7 +440,10 @@ pub fn MemberProfile(id: String) -> Element {
                                                 .unwrap_or(std::cmp::Ordering::Equal)
                                         })
                                 });
-                                let total = hero_list.len();
+                                // Under 3 games a hero folds into one "Other heroes" card.
+                                let all: Vec<&HeroAgg> = hero_list.iter().collect();
+                                let (kept, folded) = fold_small(&all, hero_tally);
+                                let total = kept.len();
                                 let expanded = show_all_heroes();
                                 let visible = if !expanded && total > 6 { 6 } else { total };
                                 rsx! {
@@ -433,8 +451,11 @@ pub fn MemberProfile(id: String) -> Element {
                                         div { class: "profile-section",
                                             h2 { "Heroes" }
                                             div { class: "profile-heroes",
-                                                for h in hero_list.iter().take(visible) {
+                                                for h in kept.iter().take(visible) {
                                                     {render_hero_card(h)}
+                                                }
+                                                if !folded.is_empty() {
+                                                    {render_other_heroes_card(&folded)}
                                                 }
                                             }
                                             if total > 6 && !expanded {
@@ -491,18 +512,125 @@ fn render_account_card(a: &GameAccount) -> Element {
     }
 }
 
+fn hero_tally(h: &HeroAgg) -> Tally {
+    Tally::new(h.games, h.wins, h.losses, h.draws)
+}
+
+/// Card meta line: `12 games · 58.3% WR · 7W-5L` from 10 decided games,
+/// and `4 games · 3W-1L` below that (Too few games, no win rate yet).
+fn hero_meta(t: Tally) -> String {
+    let games = t.games;
+    let record = t.record();
+    match t.win_rate_pct() {
+        Some(pct) => format!("{games} games · {pct:.1}% WR · {record}"),
+        None => format!("{games} games · {record}"),
+    }
+}
+
 fn render_hero_card(h: &HeroAgg) -> Element {
-    let winrate = if h.games > 0 {
-        format!("{:.0}%", h.winrate * 100.0)
-    } else {
-        "-".to_string()
-    };
+    let meta = hero_meta(hero_tally(h));
     rsx! {
         Card {
             div { class: "profile-hero-name", "{h.hero}" }
-            div { class: "profile-hero-meta",
-                "{h.games} games · {winrate} WR · {h.wins}-{h.losses}-{h.draws}"
-            }
+            div { class: "profile-hero-meta", "{meta}" }
         }
+    }
+}
+
+/// Meta line for the pooled "Other heroes" card: `4 games · 3W-1L`. Always
+/// the record, never a win rate, because the pool mixes several heroes.
+fn other_meta(pool: Tally) -> String {
+    format!("{} games · {}", pool.games, other_label(pool))
+}
+
+/// One card for every hero under 3 games, with their combined games.
+fn render_other_heroes_card(folded: &[&HeroAgg]) -> Element {
+    let names = folded
+        .iter()
+        .map(|h| h.hero.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let count = folded.len();
+    let meta = other_meta(Tally::sum(folded.iter().copied().map(hero_tally)));
+    rsx! {
+        Card {
+            div { class: "profile-hero-name", "{OTHER_HEROES} ({count})" }
+            div { class: "profile-hero-meta", "{names}" }
+            div { class: "profile-hero-meta", "{meta}" }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hero(wins: u32, losses: u32, draws: u32) -> HeroAgg {
+        HeroAgg {
+            hero: "Ana".to_string(),
+            games: wins + losses + draws,
+            wins,
+            losses,
+            draws,
+            winrate: 0.0,
+            avg_elims: 0.0,
+            avg_deaths: 0.0,
+        }
+    }
+
+    #[test]
+    fn hero_cards_follow_the_small_sample_rule() {
+        let few = hero(2, 1, 0);
+        assert_eq!(hero_meta(hero_tally(&few)), "3 games · 2W-1L");
+        let many = hero(6, 4, 0);
+        assert_eq!(hero_meta(hero_tally(&many)), "10 games · 60.0% WR · 6W-4L");
+
+        let list = [hero(1, 1, 0), hero(6, 4, 0), hero(0, 0, 1)];
+        let refs: Vec<&HeroAgg> = list.iter().collect();
+        let (kept, folded) = fold_small(&refs, hero_tally);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(folded.len(), 2);
+    }
+
+    #[test]
+    fn other_card_pool_of_ten_plus_shows_the_record() {
+        let pool = Tally::sum(
+            [
+                hero(1, 1, 0),
+                hero(2, 0, 0),
+                hero(1, 1, 0),
+                hero(2, 0, 0),
+                hero(1, 1, 0),
+            ]
+            .iter()
+            .map(hero_tally),
+        );
+        assert_eq!(pool.games, 10);
+        let meta = other_meta(pool);
+        assert_eq!(meta, "10 games · 7W-3L");
+        assert!(!meta.contains('%'), "{meta}");
+    }
+
+    #[test]
+    fn hero_records_use_the_shared_record_label() {
+        let record = |h: HeroAgg| hero_tally(&h).record();
+        assert_eq!(record(hero(5, 2, 1)), "5W-2L-1D");
+        assert_eq!(record(hero(5, 2, 0)), "5W-2L");
+        assert_eq!(record(hero(0, 0, 0)), "0W-0L");
+        assert_eq!(record(hero(0, 0, 2)), "0W-0L-2D");
+    }
+
+    /// QA 706 nit 3: the site shell renders the page's `main`, so the
+    /// profile body must not add a second one.
+    #[test]
+    fn the_profile_body_adds_no_second_main() {
+        let src = include_str!("member_profile.rs");
+        let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        assert!(
+            !prod
+                .lines()
+                .any(|line| line.trim_start().starts_with("main {"))
+        );
+        assert!(prod.contains("div { class: \"profile-page\","));
     }
 }

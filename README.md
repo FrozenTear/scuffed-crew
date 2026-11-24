@@ -2,7 +2,7 @@
 
 Community site and tooling for the Scuffed Crew gaming org. One Rust monorepo:
 the public site and admin panel, the backend that serves them, and the desktop
-tooling we use day to day, including a stat tracker that reads Overwatch 2
+tooling we use day to day, including a stat tracker that reads Overwatch
 scoreboards.
 
 Built with [Dioxus](https://dioxuslabs.com) (WASM frontend), [Axum](https://github.com/tokio-rs/axum)
@@ -20,13 +20,34 @@ Built with [Dioxus](https://dioxuslabs.com) (WASM frontend), [Axum](https://gith
 | `crates/db` | SurrealDB client, migrations, queries |
 | `crates/auth` | OAuth, sessions, crypto |
 | `crates/chat` | Nostr chat backend (relay client, NIP-44/59) |
-| `crates/stat-tracker` | Overwatch 2 stat tracker: capture daemon and scoreboard reader |
+| `crates/stat-tracker` | Overwatch stat tracker: capture daemon and scoreboard reader |
 | `crates/stat-tracker-ui` | Iced 0.14 desktop GUI (`stat-tracker-gui`) |
+| `crates/stat-tracker-core` | Tracker base layer shared by the daemon and GUI: config, parsing, shared model types |
 | `crates/map-pipeline`, `crates/map-renderer` | Map asset tooling for the strategy editor |
 | `crates/relay-policy` | Nostr relay policy plugin (NIP-42/29, rate limits) |
 
 Production is `scuffed-server` serving the `dx build` output. See
 `scripts/build.sh` and the `Containerfile`.
+
+### Site stats pages
+
+The site shows the stats the tracker uploads. Win rates follow one small-sample
+rule everywhere: a win rate shows from 10 decided games, and below that the page
+shows the record (wins, losses, draws) under "Too few games".
+
+- `/stats` is My Stats for the signed-in member, and `/stats/match/:id` is one of
+  their own games: result, map, mode, hero, role, date and all six stat lines
+  (eliminations, assists, deaths, damage, healing, mitigation). Values the reader
+  was unsure about carry a mark, and a game corrected in the tracker shows an
+  "Edited" badge. A game that is missing or belongs to someone else shows "not in
+  your match history".
+- `/matches/:id` is the public page for a team fixture: score, map, mode, date,
+  and the VOD link and replay code when there are any.
+- `/leaderboards` has Win rate, K/D and Games boards, with hero and season
+  filters. The server only sends players with 5 or more games on the Win rate and
+  K/D boards. The Win rate board ranks players with 10 or more decided games and
+  lists the rest below it under "Too few games" with their record. The K/D and
+  Games boards are not split that way.
 
 ## Run it locally
 
@@ -59,7 +80,7 @@ encryption key (`PRODUCTION=1` gate).
 
 ## Stat tracker
 
-A desktop app and background service that watch Overwatch 2, read the
+A desktop app and background service that watch Overwatch, read the
 scoreboard when you press Tab and on the end screens, and keep per-game stats
 on your PC, optionally syncing them to your org's site. It reads boards with
 its own reader by default, with Tesseract OCR as a fallback. Linux-first:

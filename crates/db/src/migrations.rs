@@ -1,7 +1,80 @@
 use surrealdb::engine::any::Any;
 use surrealdb::Surreal;
 
-use crate::DbResult;
+use std::future::Future;
+use std::time::Duration;
+
+use crate::{DbError, DbResult};
+
+/// Tries per fatal startup step. Two servers booting against one database at
+/// once can hit "Transaction conflict: Resource busy ... can be retried" on
+/// the same rows; each step is idempotent, so it is safe to run it again.
+const MIGRATION_ATTEMPTS: u32 = 4;
+
+/// First backoff after a conflict; doubles each try (250, 500, 1000 ms plus
+/// up to 100 ms jitter so two servers do not retry in lockstep).
+const MIGRATION_BACKOFF_MS: u64 = if cfg!(test) { 1 } else { 250 };
+
+pub(crate) const STEP_SCHEMA: &str = "schema script";
+pub(crate) const STEP_DISPLAY_NAME: &str = "display_name key backfill/unique index";
+pub(crate) const STEP_PERSONAL_MATCH: &str = "personal_match session dedupe/unique index";
+pub(crate) const STEP_DB7: &str = "DB7 roster dedupe/unique index";
+pub(crate) const STEP_CROP_KIND: &str = "hero_icon kind backfill";
+
+/// True for SurrealDB's optimistic transaction conflict, which it reports as
+/// retryable. Unique-index rejections and other errors are not retried.
+fn text_is_transaction_conflict(text: &str) -> bool {
+    let msg = text.to_ascii_lowercase();
+    msg.contains("transaction conflict")
+        || msg.contains("resource busy")
+        || msg.contains("can be retried")
+}
+
+fn is_transaction_conflict(err: &DbError) -> bool {
+    match err {
+        DbError::Surreal(e) => text_is_transaction_conflict(&e.to_string()),
+        _ => false,
+    }
+}
+
+/// Run one fatal startup migration step. A transaction conflict is retried
+/// with a short backoff, up to [`MIGRATION_ATTEMPTS`] tries in total. Any
+/// final error is wrapped in [`DbError::Migration`] naming `step`.
+pub(crate) async fn run_migration_step<T, F, Fut>(step: &'static str, mut f: F) -> DbResult<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = DbResult<T>>,
+{
+    let mut attempt = 1;
+    loop {
+        match f().await {
+            Ok(value) => return Ok(value),
+            Err(e) if attempt < MIGRATION_ATTEMPTS && is_transaction_conflict(&e) => {
+                let jitter = if cfg!(test) {
+                    0
+                } else {
+                    rand::random::<u64>() % 100
+                };
+                let wait_ms = (MIGRATION_BACKOFF_MS << (attempt - 1)) + jitter;
+                tracing::warn!(
+                    step,
+                    attempt,
+                    wait_ms,
+                    "startup migration hit a transaction conflict; retrying: {e}"
+                );
+                tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+                attempt += 1;
+            }
+            Err(e) => {
+                return Err(DbError::Migration {
+                    step,
+                    attempts: attempt,
+                    source: Box::new(e),
+                })
+            }
+        }
+    }
+}
 
 /// Write `officers_can_edit_teams = false` on site_settings rows that omit it.
 ///
@@ -16,13 +89,25 @@ pub(crate) async fn backfill_officers_can_edit_teams(client: &Surreal<Any>) -> D
     Ok(())
 }
 
+/// Write `kind = 'hero_icon'` on hero_icon rows stored before the field
+/// existed. Rows that have a kind are not touched, so this is a no-op after
+/// the first boot.
+pub(crate) async fn backfill_training_crop_kind(client: &Surreal<Any>) -> DbResult<()> {
+    client
+        .query("UPDATE hero_icon SET kind = 'hero_icon' WHERE kind = NONE")
+        .await?
+        .check()?;
+    Ok(())
+}
+
 /// Run all schema migrations. Idempotent — safe to call on every startup.
 pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
     tracing::info!("Running database migrations...");
 
-    client
-        .query(
-            r#"
+    run_migration_step(STEP_SCHEMA, || async move {
+        client
+            .query(
+                r#"
         -- ================================================
         -- Users (OAuth accounts, shared with auth crate)
         -- ================================================
@@ -128,6 +213,9 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         -- lookup on a traffic-bearing public endpoint is an edge-table scan.
         DEFINE INDEX IF NOT EXISTS plays_on_in_idx ON plays_on COLUMNS in;
         DEFINE INDEX IF NOT EXISTS plays_on_out_idx ON plays_on COLUMNS out;
+        -- One edge per (member, team) is enforced by plays_on_member_team_idx
+        -- (UNIQUE in, out). It is defined by migrate_plays_on_pair_index after
+        -- older duplicate edges are collapsed, so it is not in this script.
 
         -- ================================================
         -- Events (schedule)
@@ -310,6 +398,14 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE page_bg_image_url ON site_settings TYPE string DEFAULT '';
         DEFINE FIELD OVERWRITE brand_accent_dark ON site_settings TYPE string DEFAULT '';
         DEFINE FIELD OVERWRITE brand_accent_light ON site_settings TYPE string DEFAULT '';
+        -- DEFAULT ALWAYS, not a plain DEFAULT: a plain DEFAULT is applied on create only,
+        -- while TYPE string is checked on every write. A row from before this field has
+        -- no value, so a partial UPDATE of it (the officers_can_edit_teams backfill at
+        -- boot) and a full write by a build that does not know the field (rollback) would
+        -- both be refused. ALWAYS fills '' when the written row has no value and never
+        -- replaces a value that the write carries. Values, upgrade and rollback (with the
+        -- optional cleanup query): docs/api/site-settings.md.
+        DEFINE FIELD OVERWRITE brand_font_display ON site_settings TYPE string DEFAULT ALWAYS '';
         DEFINE FIELD OVERWRITE updated_at ON site_settings TYPE datetime DEFAULT time::now();
 
         -- ================================================
@@ -628,7 +724,10 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE played_at ON personal_match TYPE datetime;
         DEFINE FIELD OVERWRITE uploaded_at ON personal_match TYPE datetime DEFAULT time::now();
         -- Client-generated game session id. Empty client ids are stored as a
-        -- content-derived `legacy-*` id (see `legacy_session_id`), not as ''.
+        -- `legacy-*` id, not as ''. Uploads from trackers at 0.6.0-alpha.3 or
+        -- newer reuse the member's legacy row at the same played_at; older or
+        -- unknown clients, and any upload with no such row, use the
+        -- content-derived id (see `legacy_session_id`).
         -- Pre-session rows that still have '' are rewritten to that id by
         -- `migrate_personal_match_session_index` so distinct historical games
         -- do not share one key under the unique index. The record id itself
@@ -659,6 +758,24 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         -- Rows already on disk are not rewritten; a missing value is read
         -- back as [].
         DEFINE FIELD OVERWRITE suspect_fields ON personal_match TYPE array<string> DEFAULT [];
+        -- Bans and picks the tracker read for this game: { bans: [{ hero,
+        -- team }], lobby_ban, picks: [hero | null], ban_vote: [hero | null],
+        -- recognizer }. Hero values are pack keys, and picks and ban_vote
+        -- entries may also be the literal "no_preference". Omitted or null is
+        -- stored as NONE. FLEXIBLE so the nested keys and null entries are
+        -- kept on this SCHEMAFULL table.
+        -- Additive: rows already on disk are not rewritten and read back as
+        -- none.
+        DEFINE FIELD OVERWRITE bans_picks ON personal_match TYPE option<object> FLEXIBLE;
+        -- Rank update screen read for this game: { role, role_rank, division,
+        -- progress_pct, progress_change, change_tags, higher_than_pct,
+        -- hero_sr, hero_sr_change, next_mode_hint, queue_title } each as
+        -- { value, confidence }, plus rank_recognizer. The tracker's bbox is
+        -- not stored. Omitted or null is stored as NONE. FLEXIBLE for the
+        -- nested keys, like bans_picks.
+        -- Additive: rows already on disk are not rewritten and read back as
+        -- none.
+        DEFINE FIELD OVERWRITE rank ON personal_match TYPE option<object> FLEXIBLE;
 
         DEFINE INDEX IF NOT EXISTS pm_member_idx ON personal_match COLUMNS member_id, played_at;
         -- Non-unique placeholder only. `DEFINE INDEX IF NOT EXISTS` will not
@@ -732,6 +849,19 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE TABLE IF NOT EXISTS member_settings SCHEMAFULL;
         DEFINE FIELD OVERWRITE member_id ON member_settings TYPE string;
         DEFINE FIELD OVERWRITE player_name ON member_settings TYPE option<string>;
+        -- Who can see this member's tracker stats.
+        -- public: everyone. members: active signed-in crew only.
+        -- private: owner and officers on per-member routes, and off every leaderboard.
+        -- Legacy rows that predate the field read back as public.
+        DEFINE FIELD OVERWRITE stats_visibility ON member_settings TYPE string
+            DEFAULT 'public'
+            ASSERT $value IN ['public', 'members', 'private'];
+        -- Opted in to contributing hero icons. Off by default; legacy rows read false.
+        -- DEFAULT ALWAYS: SurrealDB applies a plain DEFAULT only on create, so an
+        -- update of a row from before this field that does not set it would fail
+        -- TYPE bool. ALWAYS fills an absent value on every write and never
+        -- replaces a stored one. No row is rewritten by this definition.
+        DEFINE FIELD OVERWRITE hero_icon_opt_in ON member_settings TYPE bool DEFAULT ALWAYS false;
 
         DEFINE INDEX IF NOT EXISTS ms_member_idx ON member_settings COLUMNS member_id UNIQUE;
 
@@ -856,21 +986,127 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE expires_at ON stat_report TYPE option<datetime>;
         DEFINE INDEX IF NOT EXISTS stat_report_member_created_idx ON stat_report COLUMNS member_id, created_at;
         DEFINE INDEX IF NOT EXISTS stat_report_expires_idx ON stat_report COLUMNS expires_at;
+
+        -- One row per finished one-shot data pass (DB4 hero keys first), so
+        -- later boots can skip a full table scan.
+        DEFINE TABLE IF NOT EXISTS data_migration SCHEMAFULL;
+        DEFINE FIELD OVERWRITE completed_at ON data_migration TYPE datetime;
+        DEFINE FIELD OVERWRITE scanned ON data_migration TYPE int DEFAULT 0;
+        DEFINE FIELD OVERWRITE updated ON data_migration TYPE int DEFAULT 0;
+
+        -- ================================================
+        -- Contributed hero icons (metadata only)
+        -- PNG bytes live under HERO_ICONS_DIR as file_name, not in this table
+        -- and not in uploads. Only the owner and admins can read them.
+        -- ================================================
+        DEFINE TABLE IF NOT EXISTS hero_icon SCHEMAFULL;
+        DEFINE FIELD OVERWRITE member_id ON hero_icon TYPE string;
+        DEFINE FIELD OVERWRITE hero ON hero_icon TYPE string;
+        DEFINE FIELD OVERWRITE file_name ON hero_icon TYPE string;
+        DEFINE FIELD OVERWRITE size_bytes ON hero_icon TYPE int;
+        DEFINE FIELD OVERWRITE width ON hero_icon TYPE int;
+        DEFINE FIELD OVERWRITE height ON hero_icon TYPE int;
+        DEFINE FIELD OVERWRITE created_at ON hero_icon TYPE datetime;
+        DEFINE INDEX IF NOT EXISTS hero_icon_member_idx ON hero_icon COLUMNS member_id;
+
+        -- ================================================
+        -- Training crops (alpha.3 item 14). hero_icon is the crop store: a
+        -- row is one crop of one kind. Rows from before `kind` existed are
+        -- hero icons; backfill_training_crop_kind writes 'hero_icon' on them.
+        -- Everything else is optional per-crop metadata from the tracker.
+        -- full_screen is refused by the server and never stored. `hero`
+        -- keeps its type: hero_icon rows keep the display name, other kinds
+        -- hold the hero key (pack stem, e.g. 'soldier-76'); reads take
+        -- both.
+        -- Additive only. Rollback: see docs/api/training-crops.md.
+        -- ================================================
+        DEFINE FIELD OVERWRITE kind ON hero_icon TYPE string DEFAULT 'hero_icon'
+            ASSERT $value IN ['hero_icon', 'stat_digits', 'map_name', 'rank'];
+        DEFINE FIELD OVERWRITE screen ON hero_icon TYPE option<string>;
+        DEFINE FIELD OVERWRITE slot_type ON hero_icon TYPE option<string>;
+        DEFINE FIELD OVERWRITE slot_index ON hero_icon TYPE option<int>;
+        -- Random per-game token from the tracker (32 lowercase hex). Never
+        -- linked to a match.
+        DEFINE FIELD OVERWRITE game_token ON hero_icon TYPE option<string>;
+        DEFINE FIELD OVERWRITE score ON hero_icon TYPE option<float>;
+        DEFINE FIELD OVERWRITE runner_up ON hero_icon TYPE option<float>;
+        DEFINE FIELD OVERWRITE margin ON hero_icon TYPE option<float>;
+        DEFINE FIELD OVERWRITE icon_set_version ON hero_icon TYPE option<string>;
+        DEFINE FIELD OVERWRITE spot_version ON hero_icon TYPE option<string>;
+        DEFINE FIELD OVERWRITE vote_card_filled ON hero_icon TYPE option<bool>;
+        DEFINE FIELD OVERWRITE locked_in ON hero_icon TYPE option<bool>;
+        DEFINE FIELD OVERWRITE screen_width ON hero_icon TYPE option<int>;
+        DEFINE FIELD OVERWRITE screen_height ON hero_icon TYPE option<int>;
+        DEFINE FIELD OVERWRITE ui_scale ON hero_icon TYPE option<float>;
+        DEFINE FIELD OVERWRITE tracker_version ON hero_icon TYPE option<string>;
+        DEFINE FIELD OVERWRITE found_x ON hero_icon TYPE option<int>;
+        DEFINE FIELD OVERWRITE found_y ON hero_icon TYPE option<int>;
+        DEFINE FIELD OVERWRITE found_w ON hero_icon TYPE option<int>;
+        DEFINE FIELD OVERWRITE found_h ON hero_icon TYPE option<int>;
+        DEFINE FIELD OVERWRITE found_confidence ON hero_icon TYPE option<float>;
+        DEFINE INDEX IF NOT EXISTS hero_icon_member_kind_idx ON hero_icon COLUMNS member_id, kind;
+
+        -- Per-kind training crop consent. hero_icon consent is the existing
+        -- hero_icon_opt_in, so today's opt-ins carry over unchanged. The other
+        -- kinds are off by default; legacy rows read false. There is no
+        -- full_screen consent field: whole screens are not accepted, so their
+        -- consent is never stored.
+        -- DEFAULT ALWAYS for the same reason as hero_icon_opt_in: rows from
+        -- before these fields lack them, and every writer (stats settings,
+        -- hero icon opt-in) must still be able to update those rows.
+        DEFINE FIELD OVERWRITE stat_digits_opt_in ON member_settings TYPE bool DEFAULT ALWAYS false;
+        DEFINE FIELD OVERWRITE map_name_opt_in ON member_settings TYPE bool DEFAULT ALWAYS false;
+        -- rank crop consent (role, tier, rank bar, result, SR regions).
+        -- Additive: off by default, rows from before it read false, no row
+        -- rewrite.
+        DEFINE FIELD OVERWRITE rank_opt_in ON member_settings TYPE bool DEFAULT ALWAYS false;
     "#,
-        )
-        .await?
-        .check()?;
+            )
+            .await?
+            .check()?;
+        Ok::<(), DbError>(())
+    })
+    .await?;
+
+    // Training crops: hero_icon rows from before `kind` existed are hero
+    // icons. Fatal so the kind filters never miss a legacy row.
+    run_migration_step(STEP_CROP_KIND, || backfill_training_crop_kind(client)).await?;
 
     // Key every display name and install the UNIQUE index. A clash or an
     // unkeyable stored name fails startup and does not rewrite display_name.
-    crate::display_name::backfill_display_name_keys(client).await?;
+    run_migration_step(STEP_DISPLAY_NAME, || {
+        crate::display_name::backfill_display_name_keys(client)
+    })
+    .await?;
 
     // Dedupe (member_id, session_id), rewrite blank legacy ids, then replace
     // pm_session_idx with a UNIQUE index. Must run after the schema statement
     // above and must fail startup if uniqueness cannot be enforced.
     // When that UNIQUE index is already installed this is an INFO FOR TABLE
     // check only — it does not read personal_match.
-    crate::queries::personal_stats::migrate_personal_match_session_index(client).await?;
+    run_migration_step(STEP_PERSONAL_MATCH, || {
+        crate::queries::personal_stats::migrate_personal_match_session_index(client)
+    })
+    .await?;
+
+    // DB7: collapse duplicate plays_on edges, then UNIQUE (in, out). Fails
+    // startup if uniqueness cannot be enforced; a no-op once the index exists.
+    // These fatal steps retry a transaction conflict (two servers booting at
+    // once) and name themselves in the error; see run_migration_step.
+    run_migration_step(STEP_DB7, || {
+        crate::queries::roster::migrate_plays_on_pair_index(client)
+    })
+    .await?;
+
+    // DB4: move pack-key heroes (`ana`, `wrecking-ball`) from 0.5.0-alpha.1
+    // and alpha.2 uploads onto the canonical display name and table role.
+    // Canonical rows, unknown heroes and every Sombra row stay as stored.
+    // Paged and idempotent, so a failure here is retried on the next boot.
+    // A finished pass is recorded in data_migration and later boots skip it.
+    if let Err(e) = crate::queries::personal_stats::backfill_personal_match_hero_keys(client).await
+    {
+        tracing::warn!("personal_match hero key backfill: {e}");
+    }
 
     // Seed default category/board tree and migrate legacy thread.category strings.
     if let Err(e) = crate::queries::forum::ensure_forum_hierarchy(client).await {
@@ -897,4 +1133,111 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
 
     tracing::info!("Database migrations complete");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Database;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// A real SurrealDB error carrying `msg` (THROW from the embedded engine).
+    async fn surreal_error(db: &Database, msg: &str) -> DbError {
+        let err = db
+            .client
+            .query(format!("THROW '{msg}'"))
+            .await
+            .expect("query sent")
+            .check()
+            .expect_err("THROW fails");
+        DbError::Surreal(err)
+    }
+
+    const CONFLICT: &str = "Transaction conflict: Resource busy. This transaction can be retried";
+
+    #[test]
+    fn conflict_text_matches_surreal_messages() {
+        assert!(text_is_transaction_conflict(CONFLICT));
+        assert!(text_is_transaction_conflict(
+            "Transaction conflict: Write conflict. This transaction can be retried"
+        ));
+        assert!(!text_is_transaction_conflict(
+            "Database index `plays_on_member_team_idx` already contains [member:a, team:t]"
+        ));
+        assert!(!is_transaction_conflict(&DbError::Timeout));
+    }
+
+    #[tokio::test]
+    async fn step_retries_a_conflict_then_succeeds() {
+        let db = Database::connect_memory().await.expect("mem db");
+        let calls = AtomicU32::new(0);
+        let (db, calls) = (&db, &calls);
+        let out = run_migration_step(STEP_DB7, || async move {
+            let n = calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if n < 3 {
+                Err(surreal_error(db, CONFLICT).await)
+            } else {
+                Ok(n)
+            }
+        })
+        .await
+        .expect("third try succeeds");
+        assert_eq!(out, 3);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn step_gives_up_after_the_bound_and_names_the_step() {
+        let db = Database::connect_memory().await.expect("mem db");
+        let calls = AtomicU32::new(0);
+        let (db, calls) = (&db, &calls);
+        let err = run_migration_step(STEP_DB7, || async move {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err::<(), _>(surreal_error(db, CONFLICT).await)
+        })
+        .await
+        .expect_err("always conflicts");
+        assert_eq!(calls.load(Ordering::SeqCst), MIGRATION_ATTEMPTS);
+        assert!(matches!(
+            err,
+            DbError::Migration {
+                step: STEP_DB7,
+                attempts: MIGRATION_ATTEMPTS,
+                ..
+            }
+        ));
+        let text = err.to_string();
+        assert!(
+            text.starts_with("DB7 roster dedupe/unique index failed after 4 attempt(s): "),
+            "{text}"
+        );
+        assert!(text.contains("Resource busy"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn step_does_not_retry_other_errors() {
+        let db = Database::connect_memory().await.expect("mem db");
+        let calls = AtomicU32::new(0);
+        let (db, calls) = (&db, &calls);
+        let err = run_migration_step(STEP_DB7, || async move {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err::<(), _>(
+                surreal_error(
+                    db,
+                    "Database index `plays_on_member_team_idx` already contains x",
+                )
+                .await,
+            )
+        })
+        .await
+        .expect_err("fails");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "a unique rejection is not retried"
+        );
+        assert!(err
+            .to_string()
+            .starts_with("DB7 roster dedupe/unique index failed after 1 attempt(s): "));
+    }
 }

@@ -1,0 +1,52 @@
+# What's changed: Site
+#
+# This file is the Site tab of the public "What's changed" page
+# (/changelog/site). The build checks it and compiles it in, so a change
+# shows up with the next deploy. No server or database change is needed.
+#
+# How to add an entry
+# 1. Copy the [[entry]] block below and paste it ABOVE the newest entry.
+#    Keep the file newest first. The page also sorts by date, newest first.
+# 2. Set date to the deploy day, written as "YYYY-MM-DD" (Europe/Oslo).
+# 3. Write the changes for members in plain words, not commit titles.
+#    Use one list:
+#        changes = ["...", "..."]
+#    or split them into groups. Only the groups you write are shown:
+#        added   = ["..."]
+#        changed = ["..."]
+#        fixed   = ["..."]
+# 4. Optional: link = "https://..." for public release notes or a public
+#    pull request. Leave it out when the page is private. Only https links
+#    are allowed.
+# 5. No em or en dashes, and no personal names. Don't name the org; the
+#    page does that from Settings. If the owner must be named, write
+#    FrozenTear.
+# 6. The build checks this file: a broken file fails `cargo build`,
+#    `dx build` and `cargo test -p scuffed-app changelog`, with the reason.
+#
+# Example (as a comment, do not ship it):
+# [[entry]]
+# date = "2026-11-15"
+# added = ["A What's changed page, linked from the footer."]
+# fixed = ["The phone menu closes after you pick a page."]
+# link = "https://github.com/example/example/pull/1"
+
+[[entry]]
+date = "2026-11-17"
+added = [
+    "A new site menu. Pages are grouped under Community, Compete and Strategy, and your own links sit together in one account menu.",
+    "On phones, a tab bar along the bottom: Home, Community, Compete, Strategy and Menu.",
+    "An Appearance page in the account menu, where you pick the theme and how dense pages look. The choice is saved in this browser. For now the density setting changes only a few pages.",
+    "For admins: a Brand page to pick the site accent colour, with dark and light previews and a contrast check. Save stays off while a colour would make text hard to read.",
+]
+changed = [
+    "New fonts and colours across the site. The fonts now load from the site itself.",
+    "Admin pages use the same top menu as the rest of the site, with the admin pages in a row under it.",
+    "Chat moved under Community.",
+    "The accent colour fields moved from Admin Settings to the new Brand page.",
+]
+fixed = [
+    "The phone menu is no longer see-through.",
+    "The tracker card on My Stats names the current tracker release, not an old one.",
+    "The Maps and Competitive tags on patch notes are easier to read.",
+]

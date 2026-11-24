@@ -131,6 +131,9 @@ pub fn user_facing_copy() -> &'static [&'static str] {
     &[
         CAPTURE_FAILED,
         REACH_SITE,
+        stat_tracker::sync::REDIRECT_OFF_SITE_ABOVE,
+        // The report upload's form, checked here with the guide's.
+        stat_tracker::sync::REDIRECT_OFF_SITE,
         TOKEN_REJECTED,
         TOKEN_UNCHECKED,
         CAPTURE_CONTINUE_WARN,
@@ -830,11 +833,24 @@ pub fn site_link_url(server_url: &str) -> Result<String, String> {
     Ok(format!("{base}/link"))
 }
 
+/// Sign-in link and token check. These carry the device code or the sync
+/// token, so a redirect is followed only on the site's own scheme, host
+/// and port, the same rule as the tracker's uploads.
 fn http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
+        .redirect(stat_tracker::sync::token_safe_redirects())
         .build()
         .map_err(|_| REACH_SITE.to_string())
+}
+
+/// Text for a request that got no response: the site's redirect advice,
+/// naming where it redirected to, when [`http_client`] refused an off-site
+/// hop, else [`REACH_SITE`].
+fn send_error_message(e: &reqwest::Error) -> String {
+    // The Website URL field is on the guide's own page, above this message.
+    stat_tracker::sync::off_site_redirect_message(e, stat_tracker::sync::WebsiteUrlField::Above)
+        .unwrap_or_else(|| REACH_SITE.to_string())
 }
 
 fn retry_after_secs(headers: &reqwest::header::HeaderMap) -> Option<u64> {
@@ -880,7 +896,7 @@ pub async fn start_link(
         })
         .send()
         .await
-        .map_err(|_| REACH_SITE.to_string())?;
+        .map_err(|e| send_error_message(&e))?;
     let status = response.status();
     let retry = retry_after_secs(response.headers());
     if status.as_u16() == 429 {
@@ -924,7 +940,7 @@ pub async fn poll_link(base: String, device_code: String) -> Result<PollUpdate, 
         })
         .send()
         .await
-        .map_err(|_| REACH_SITE.to_string())?;
+        .map_err(|e| send_error_message(&e))?;
     let status = response.status();
     let retry = retry_after_secs(response.headers());
     if status.as_u16() == 429 {
@@ -951,7 +967,7 @@ pub async fn check_token(base: String, token: String) -> Result<TokenCheckResult
         .bearer_auth(&token)
         .send()
         .await
-        .map_err(|_| REACH_SITE.to_string())?;
+        .map_err(|e| send_error_message(&e))?;
     let status = response.status().as_u16();
     let retry = retry_after_secs(response.headers());
     if status == 429 {
@@ -2600,6 +2616,53 @@ mod tests {
             PollUpdate::Outcome(outcome) => outcome,
             PollUpdate::RateLimited { seconds } => panic!("rate limited for {seconds}s"),
         }
+    }
+
+    /// The token check follows a redirect only on the site's own origin:
+    /// a hop to another port never reaches it, so the token stays home.
+    #[tokio::test]
+    async fn token_check_does_not_follow_a_redirect_off_the_site() {
+        let elsewhere_hits = Arc::new(Mutex::new(Vec::<String>::new()));
+        let elsewhere_log = elsewhere_hits.clone();
+        let elsewhere = spawn_mock(move |head, _body| {
+            elsewhere_log.lock().expect("hits").push(head.to_string());
+            (200, vec![], r#"{"display_name":"someone"}"#.into())
+        });
+        let target = format!("{elsewhere}/api/stats/token-check");
+        let site = spawn_mock(move |_head, _body| {
+            (302, vec![("Location", target.clone())], String::new())
+        });
+
+        // The message names the target's scheme, host and port, never its path.
+        let named = format!(
+            "The site redirected to {elsewhere}. If that is your site's new address, set the Website URL above to it."
+        );
+        assert_plain(&named);
+        assert!(!named.contains("token-check"));
+        // The Website URL field is on the guide page, not in Settings.
+        assert!(!named.contains("in Settings"));
+
+        // The sign-in link's start and poll name the redirect the same way.
+        let started = start_link(site.clone(), "desk".into(), "0.6".into()).await;
+        assert!(
+            matches!(&started, Err(message) if *message == named),
+            "link start: {started:?}"
+        );
+        let polled = poll_link(site.clone(), "a".repeat(64)).await;
+        assert!(
+            matches!(&polled, Err(message) if *message == named),
+            "link poll: {polled:?}"
+        );
+
+        let result = check_token(site, "tok-must-stay-home".into()).await;
+        assert!(
+            matches!(&result, Err(message) if *message == named),
+            "a refused redirect names the redirect, not an unreachable site: {result:?}"
+        );
+        assert!(
+            elsewhere_hits.lock().expect("hits").is_empty(),
+            "nothing may reach the redirect target"
+        );
     }
 
     #[tokio::test]

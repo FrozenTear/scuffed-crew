@@ -1,0 +1,590 @@
+//! Cell trust on a Tab board: the gate's held cells and suspects, and the
+//! new reader's stats, holds and unsure reads.
+
+use crate::*;
+
+/// Put the game's last accepted value in each held stat column of `parsed`
+/// (0 when the game has none yet).
+///
+/// A belt, not a rule: nothing that runs before the gate reads a held
+/// column. The boundary plan leaves it out of every comparison
+/// (`boundary::plan_capture_held`; `the_plan_does_not_read_a_held_cell`
+/// pins that), the split vote skips a suspect column, both gates ignore
+/// the number, and the report kit's field is overwritten after the gate.
+/// It stays so that a later reader of these counters finds the game's own
+/// value and not a 0 that looks like a read.
+pub(crate) fn fill_held_cells(
+    parsed: &mut storage::PersonalMatch,
+    held: [bool; capture_gate::GATE_COLS],
+    prior: Option<capture_gate::Counters>,
+) {
+    let prior = prior.unwrap_or_default();
+    let prior = [
+        prior.elims,
+        prior.assists,
+        prior.deaths,
+        prior.damage,
+        prior.healing,
+        prior.mitigation,
+    ];
+    let cells = [
+        &mut parsed.elims,
+        &mut parsed.assists,
+        &mut parsed.deaths,
+        &mut parsed.damage,
+        &mut parsed.healing,
+        &mut parsed.mitigation,
+    ];
+    for (col, cell) in cells.into_iter().enumerate() {
+        if held[col] {
+            *cell = prior[col];
+        }
+    }
+}
+
+/// Run the capture gate on the new reader's stats.
+///
+/// `apply_new_reader` puts the sure digit reads back on the row. A drop is
+/// clamped back and flagged. A single-field jump past the capture gate's
+/// limit waits until the next read matches. A `held` column (the digit
+/// reader did not vouch for the cell) keeps the game's last accepted value
+/// and is flagged; whatever number sits in it on `parsed` is ignored.
+/// `suspect` and `trusted` are this capture's marks. `carried` is the board
+/// written onto the same session just before this row ([`carried_board`]);
+/// it seeds the held columns of a capture that opens the game. The returned
+/// gate is what the next capture compares against.
+///
+/// Every cell whose stored value is not this capture's read is flagged,
+/// whatever kept it out (`capture_gate::held_fields`): under this reader a
+/// rate-cap or trailing-digit hold after a run of held captures keeps a
+/// number that can be minutes old (F266-3). So is every stat that is lower
+/// than on the row before it (`capture_gate::revised_fields`,
+/// `capture_gate::lowered_fields`).
+///
+/// The capture path calls [`hold_new_reader_stats_with_guesses`]; this is
+/// that call with no digit guesses, kept for the gate tests.
+#[cfg(test)]
+pub(crate) fn hold_new_reader_stats(
+    parsed: &mut storage::PersonalMatch,
+    prior: Option<(capture_gate::GateState, std::time::Duration)>,
+    suspect: [bool; capture_gate::GATE_COLS],
+    held_cells: [bool; capture_gate::GATE_COLS],
+    split: bool,
+    trusted: bool,
+    carried: Option<(Counters, std::time::Duration)>,
+) -> capture_gate::GateOutcome {
+    hold_new_reader_stats_with_guesses(
+        parsed,
+        prior,
+        suspect,
+        held_cells,
+        split,
+        trusted,
+        carried,
+        [None; capture_gate::GATE_COLS],
+    )
+}
+
+/// The six gate columns of `c`, in gate order.
+pub(crate) fn gate_cols(c: Counters) -> [u32; capture_gate::GATE_COLS] {
+    [
+        c.elims,
+        c.assists,
+        c.deaths,
+        c.damage,
+        c.healing,
+        c.mitigation,
+    ]
+}
+
+/// [`Counters`] from six values in gate order.
+pub(crate) fn counters_from_cols(a: [u32; capture_gate::GATE_COLS]) -> Counters {
+    Counters {
+        elims: a[0],
+        assists: a[1],
+        deaths: a[2],
+        damage: a[3],
+        healing: a[4],
+        mitigation: a[5],
+    }
+}
+
+/// The digit the gate refused for `col` on this capture: the reader's own
+/// unsure read of a held cell, or the raw sure read the gate held. A row
+/// that is not trusted (a suspect own row, maybe another player's) gives
+/// no held sure read, so none of its digits can land in the stored row.
+fn refused_read(
+    holds: &[capture_gate::Hold],
+    held_cells: [bool; capture_gate::GATE_COLS],
+    guesses: [Option<u32>; capture_gate::GATE_COLS],
+    trusted: bool,
+    col: usize,
+) -> Option<u32> {
+    if held_cells[col] {
+        return guesses[col];
+    }
+    if !trusted {
+        return None;
+    }
+    holds
+        .iter()
+        .find(|hold| hold.col == col)
+        .map(|hold| hold.raw)
+}
+
+/// [`hold_new_reader_stats`] with the digit reader's own read of every cell,
+/// sure or not (`reader_apply::own_row_guesses`).
+///
+/// A held cell used to store the game's last accepted value. When no later
+/// Tab read the cell for sure, that old number was the game's final value:
+/// a healing of 3143 saved under a board that showed 5298 (report a6f3).
+/// Now a held cell whose unsure read the gate would have taken, had the
+/// reader vouched for it ([`fresh_unsure_reads`]), stores that read. It
+/// stays flagged in `suspect_fields`. The gate state is not touched: the
+/// accepted value, the previous raw read and every streak stay as the gate
+/// left them, so the next capture is judged exactly as before. Only the
+/// stored row changes, and the state remembers what that row shows
+/// ([`capture_gate::GateState::unsure_shown`]) so the next row cannot go
+/// below it unflagged. A later held Tab that gives no fresh unsure read
+/// for that cell (the same board read again: with every other column
+/// unchanged the dry run sees a quiet single-field jump and refuses it)
+/// keeps storing the unsure read the row before showed, flagged, as long
+/// as it is not below the accepted value; it never drops the stored row
+/// back to the older accepted value. An unread cell on that later Tab
+/// carries no new digit either, so it keeps the stored unsure read the
+/// same way. A later held Tab whose digit the dry run refuses, when the
+/// row before already showed an unsure read, stores that newer refused
+/// digit only when it also passes the same jump and rate-cap filter
+/// measured from the stored unsure value (still flagged, still not
+/// below the accepted value). A jump or injected digit past that filter
+/// keeps the stored unsure read instead. A sure read the gate holds (a
+/// lone jump from the accepted value, a rate cap) goes through the same
+/// filter, so it stores the same as an unvouched read of that digit; past
+/// the filter, a held read at or above the stored unsure read keeps that
+/// unsure read, flagged. A held sure read below the stored unsure read but
+/// at or above the accepted value stores that read, flagged, when the own
+/// row is trusted. A held sure read below the accepted value drops the row
+/// to the accepted value, flagged (an unvouched one keeps the stored
+/// unsure read, as above), and so does a held sure read of a suspect own
+/// row anywhere below the stored unsure read, even at or above the
+/// accepted value, since nothing of a suspect row is stored. Either way
+/// the unsure read stays the base later captures' refused digits are
+/// measured from ([`capture_gate::GateState::unsure_base`]), so a real
+/// read plausible from it is stored. The base is carried across every
+/// following misread of the cell (a held lower read, sure or not, a held
+/// cell with no read, a jump the filter refuses from the base too) and
+/// ends when a capture stores a value from it or a new unsure read, when
+/// the gate accepts a sure read of the cell, or on a new game. The filter
+/// measures from the base over the time since a stored row last showed
+/// it ([`capture_gate::GateState::unsure_base_secs`]). A held cell with
+/// no read, or
+/// with a read the gate would hold (lower than the accepted value, a
+/// jump, an injected digit, past the rate cap), and no stored unsure
+/// read to keep, keeps the accepted value, flagged, as before.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn hold_new_reader_stats_with_guesses(
+    parsed: &mut storage::PersonalMatch,
+    prior: Option<(capture_gate::GateState, std::time::Duration)>,
+    suspect: [bool; capture_gate::GATE_COLS],
+    held_cells: [bool; capture_gate::GATE_COLS],
+    split: bool,
+    trusted: bool,
+    carried: Option<(Counters, std::time::Duration)>,
+    guesses: [Option<u32>; capture_gate::GATE_COLS],
+) -> capture_gate::GateOutcome {
+    let seed = carried.filter(|_| held_cells.iter().any(|&cell| cell));
+    // The row stored just before this one in the same game: the game's last
+    // accepted counters once it has a row, or the carried board on the
+    // capture that opens the game with one. A column whose stored row
+    // showed an unsure read instead of the accepted value compares with
+    // that read.
+    let opens_game = split || prior.is_none();
+    let before = if opens_game {
+        carried.map(|(board, _)| board)
+    } else {
+        prior
+            .map(|(state, _)| state)
+            .filter(|state| state.unread_cols().is_empty())
+            .map(|state| {
+                let mut shown = gate_cols(state.accepted);
+                for (col, value) in shown.iter_mut().enumerate() {
+                    if state.has_unsure_shown[col] {
+                        *value = state.unsure_shown[col];
+                    }
+                }
+                counters_from_cols(shown)
+            })
+    };
+    let read = capture_gate::Counters {
+        elims: parsed.elims,
+        assists: parsed.assists,
+        deaths: parsed.deaths,
+        damage: parsed.damage,
+        healing: parsed.healing,
+        mitigation: parsed.mitigation,
+    };
+    // What the stored row before this one showed in each column in place of
+    // the accepted value, taken before the gate consumes `prior`. A game
+    // that opens on this capture has no such row.
+    let prior_shown: [Option<u32>; capture_gate::GATE_COLS] = match prior {
+        Some((state, _)) if !opens_game => std::array::from_fn(|col| {
+            state.has_unsure_shown[col].then_some(state.unsure_shown[col])
+        }),
+        _ => [None; capture_gate::GATE_COLS],
+    };
+    // The unsure read an earlier row showed, kept only as the base for this
+    // capture's plausibility check after a held read below the accepted
+    // value (or a suspect own row's held read below the shown value)
+    // dropped the row to the accepted value, with the seconds from
+    // the capture that last showed it to the prior one. Never stored or
+    // shown by itself. A capture that opens a game ignores it.
+    let prior_base: [Option<(u32, u32)>; capture_gate::GATE_COLS] = match prior {
+        Some((state, _)) if !opens_game => std::array::from_fn(|col| {
+            state.has_unsure_base[col]
+                .then_some((state.unsure_base[col], state.unsure_base_secs[col]))
+        }),
+        _ => [None; capture_gate::GATE_COLS],
+    };
+    let span = prior.map(|(_, span)| span).unwrap_or_default();
+    let span_secs = u32::try_from(span.as_secs()).unwrap_or(u32::MAX);
+    let mut held =
+        capture_gate::apply_gate_seeded(prior, read, suspect, held_cells, split, trusted, seed);
+    let fresh = fresh_unsure_reads(
+        prior,
+        read,
+        suspect,
+        held_cells,
+        guesses,
+        split,
+        seed,
+        held.accepted,
+    );
+    let mut stored = gate_cols(held.accepted);
+    for col in 0..capture_gate::GATE_COLS {
+        held.state.has_unsure_shown[col] = false;
+        held.state.unsure_shown[col] = 0;
+        held.state.has_unsure_base[col] = false;
+        held.state.unsure_base[col] = 0;
+        held.state.unsure_base_secs[col] = 0;
+        let refused = refused_read(&held.holds, held_cells, guesses, trusted, col);
+        // A column the game has never read stores no row at all (F266-1).
+        if let Some(value) = fresh[col].filter(|_| !held.state.unread[col]) {
+            if value != stored[col] {
+                tracing::info!(
+                    target: "scuffed_stat_tracker",
+                    col,
+                    read = value,
+                    kept = stored[col],
+                    "held stat cell stores the reader's unsure read, flagged, not the older accepted value"
+                );
+            }
+            stored[col] = value;
+            held.state.unsure_shown[col] = value;
+            held.state.has_unsure_shown[col] = true;
+        } else if let Some(value) = refused.filter(|&value| {
+            // A newer refused digit at or above the accepted value, and the
+            // row before already showed an unsure read: store this digit
+            // flagged in place of the older unsure shown value only when
+            // it also passes the jump and rate-cap filter from that shown
+            // value. A jump or inject past the filter keeps the shown one.
+            // A sure read the gate held is a refused digit too, so a
+            // vouched read stores the same as an unvouched one. After a
+            // held read below the accepted value (or a suspect own row's
+            // held read below the shown value) dropped a row to the
+            // accepted value, the unsure value it no longer showed is the
+            // base. The shown value is measured over the age of the
+            // accepted value, as before; the base over the time since a
+            // stored row last showed it, so a base carried over several
+            // captures allows no more growth than real time does.
+            let (from, elapsed) = match (prior_shown[col], prior_base[col]) {
+                (Some(shown), _) => {
+                    let age = prior.map_or(0, |(state, _)| state.held_secs[col]);
+                    (shown, span + std::time::Duration::from_secs(u64::from(age)))
+                }
+                (None, Some((base, age))) => {
+                    (base, span + std::time::Duration::from_secs(u64::from(age)))
+                }
+                (None, None) => return false,
+            };
+            if held.state.unread[col] || value < stored[col] {
+                return false;
+            }
+            capture_gate::plausible_from_shown(col, from, value, elapsed, true)
+        }) {
+            if value != stored[col] {
+                tracing::info!(
+                    target: "scuffed_stat_tracker",
+                    col,
+                    read = value,
+                    kept = stored[col],
+                    "held stat cell stores the newer refused read, flagged, not the older unsure or accepted value"
+                );
+            }
+            stored[col] = value;
+            held.state.unsure_shown[col] = value;
+            held.state.has_unsure_shown[col] = true;
+        } else if let Some(shown) = prior_shown[col].filter(|&shown| {
+            // Still held or unread, and no fresh unsure read this time: the
+            // same board read again, or a cell with no digit, carries no new
+            // information. Keep showing the unsure read the row before
+            // showed, flagged, rather than fall back to the older accepted
+            // value. The same goes for a sure read the gate held for any
+            // reason (a jump or a rate cap) that the branch above refused
+            // as implausible from the shown value: the gate kept the older
+            // accepted value, and the row keeps what it already showed
+            // instead, flagged by the hold. Only a held read at or above
+            // the shown value counts, so a lower held read never keeps a
+            // higher stale value (the branch below keeps it as the base).
+            // It never goes below the value the gate stores, so a hold can
+            // only keep a row level.
+            let gate_held = held
+                .holds
+                .iter()
+                .any(|hold| hold.col == col && hold.raw >= shown);
+            fresh[col].is_none() && (held_cells[col] || gate_held) && shown >= stored[col]
+        }) {
+            if shown != stored[col] {
+                tracing::info!(
+                    target: "scuffed_stat_tracker",
+                    col,
+                    read = shown,
+                    kept = stored[col],
+                    "held stat cell keeps the stored unsure read, flagged, not the older accepted value"
+                );
+            }
+            stored[col] = shown;
+            held.state.unsure_shown[col] = shown;
+            held.state.has_unsure_shown[col] = true;
+        } else if let Some(shown) = prior_shown[col].filter(|&shown| {
+            held.holds
+                .iter()
+                .any(|hold| hold.col == col && hold.raw < shown)
+        }) {
+            // The gate held a read below the shown value that the branches
+            // above did not store: a read below the accepted value, or a
+            // suspect own row's read between the accepted and the shown
+            // value (`refused_read` gives none for a suspect row; a trusted
+            // read there was stored by the refused branch above). The row
+            // drops to the accepted value the gate stores, flagged, and the
+            // shown value stays only as the base for later captures'
+            // checks, so a real read plausible from it is not held as a
+            // lone jump from the accepted value. It was last shown on the
+            // capture before this one.
+            held.state.unsure_base[col] = shown;
+            held.state.has_unsure_base[col] = true;
+            held.state.unsure_base_secs[col] = span_secs;
+        } else if let Some((base, age)) = prior_base[col].filter(|_| {
+            // Another misread of a cell that has a base: a held cell (no
+            // read, or an unsure read the branches above did not store) or
+            // a sure read the gate held (lower than the accepted value, or
+            // a jump the filter refuses from the base too). Nothing was
+            // stored from it, so the base is neither confirmed nor ruled
+            // out and carries on, getting older by this capture's gap. A
+            // sure read the gate accepts gets here with no hold and ends
+            // it, as does a new game (no prior base).
+            !held.state.unread[col]
+                && (held_cells[col] || held.holds.iter().any(|hold| hold.col == col))
+        }) {
+            held.state.unsure_base[col] = base;
+            held.state.has_unsure_base[col] = true;
+            held.state.unsure_base_secs[col] = age.saturating_add(span_secs);
+        }
+    }
+    let stored = counters_from_cols(stored);
+    parsed.elims = stored.elims;
+    parsed.assists = stored.assists;
+    parsed.deaths = stored.deaths;
+    parsed.damage = stored.damage;
+    parsed.healing = stored.healing;
+    parsed.mitigation = stored.mitigation;
+    // Flagged: every cell the gate kept at another value than the read,
+    // every cell an un-latch revised down, and any stat lower than on the
+    // row before, whatever let it down (R3-1: a stat never goes down
+    // unflagged in a stored row). A held cell is a gate hold, so a stored
+    // unsure read is flagged too.
+    let mut unsure = capture_gate::held_fields(&held.holds);
+    let lowered = before
+        .map(|before| capture_gate::lowered_fields(before, stored))
+        .unwrap_or_default();
+    for name in capture_gate::revised_fields(&held.unlatches)
+        .into_iter()
+        .chain(lowered)
+    {
+        if !unsure.contains(&name) {
+            unsure.push(name);
+        }
+    }
+    note_gate_suspects(parsed, stored, &unsure);
+    held
+}
+
+/// The unsure digit reads of held cells that may be stored in place of the
+/// game's older accepted value (see [`hold_new_reader_stats_with_guesses`]).
+///
+/// A held column gets `Some(read)` only when the reader gave a number for
+/// it, the number is not below `kept` (the accepted value the gate kept),
+/// and the gate, run once more on the same capture with that read as an
+/// untrusted, suspect read, keeps the read: no monotonic, rate-cap, jump or
+/// injected-digit hold, and no refused first read. Every other column is
+/// `None`. This is a dry run; its gate state is thrown away.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fresh_unsure_reads(
+    prior: Option<(capture_gate::GateState, std::time::Duration)>,
+    read: Counters,
+    suspect: [bool; capture_gate::GATE_COLS],
+    held_cells: [bool; capture_gate::GATE_COLS],
+    guesses: [Option<u32>; capture_gate::GATE_COLS],
+    split: bool,
+    seed: Option<(Counters, std::time::Duration)>,
+    kept: Counters,
+) -> [Option<u32>; capture_gate::GATE_COLS] {
+    let candidate: [bool; capture_gate::GATE_COLS] =
+        std::array::from_fn(|col| held_cells[col] && guesses[col].is_some());
+    if !candidate.iter().any(|&c| c) {
+        return [None; capture_gate::GATE_COLS];
+    }
+    let mut trial = gate_cols(read);
+    let mut trial_held = held_cells;
+    let mut trial_suspect = suspect;
+    for col in 0..capture_gate::GATE_COLS {
+        if let (true, Some(value)) = (candidate[col], guesses[col]) {
+            trial[col] = value;
+            trial_held[col] = false;
+            trial_suspect[col] = true;
+        }
+    }
+    let dry = capture_gate::apply_gate_seeded(
+        prior,
+        counters_from_cols(trial),
+        trial_suspect,
+        trial_held,
+        split,
+        false,
+        seed,
+    );
+    let kept = gate_cols(kept);
+    let accepted = gate_cols(dry.accepted);
+    std::array::from_fn(|col| {
+        let value = guesses[col]?;
+        let held_again = dry.holds.iter().any(|hold| hold.col == col);
+        (candidate[col]
+            && value >= kept[col]
+            && accepted[col] == value
+            && !held_again
+            && !dry.state.unread[col])
+            .then_some(value)
+    })
+}
+
+/// A gate hold keeps the old number and names the field.
+///
+/// `unsure` is the fields to name: ocr-v1 passes a drop and a single-field
+/// jump (`capture_gate::unsure_fields`), the new reader every hold
+/// (`capture_gate::held_fields`). The flag stays when the stored number is
+/// the one the gate kept.
+pub(crate) fn note_gate_suspects(
+    parsed: &mut storage::PersonalMatch,
+    held: capture_gate::Counters,
+    unsure: &[&'static str],
+) {
+    let stored = [
+        parsed.elims,
+        parsed.assists,
+        parsed.deaths,
+        parsed.damage,
+        parsed.healing,
+        parsed.mitigation,
+    ];
+    let kept = [
+        held.elims,
+        held.assists,
+        held.deaths,
+        held.damage,
+        held.healing,
+        held.mitigation,
+    ];
+    for &name in unsure {
+        let Some(col) = capture_gate::COL_FIELD
+            .iter()
+            .position(|field| *field == name)
+        else {
+            continue;
+        };
+        if stored[col] != kept[col] {
+            continue;
+        }
+        if !parsed.suspect_fields.iter().any(|field| field == name) {
+            parsed.suspect_fields.push(name.to_string());
+        }
+    }
+    parsed.suspect_fields = reader_apply::upload_suspect_fields(&parsed.suspect_fields);
+}
+
+/// Replace stored fields from the new reader's board.
+///
+/// `board` is the board the capture path already accepted
+/// (`reader_apply::board_refusal`, `reader_apply::read_own_row_stats`), and
+/// `parsed` is the policy row built from it: its stats are the capture
+/// gate's (a held cell carries the game's last accepted value), so a field
+/// the board does not supply never takes an OCR number. The map and mode
+/// already chosen by capture policy stay even when the board names another
+/// map; under this reader that policy map already took the banner read as
+/// its top-bar map ([`choose_top_bar_map`]). This does not touch the capture
+/// gate, the session map, or the report.
+///
+/// The row is the one [`find_own_row`] found from the own-name seeds and the
+/// highlight (alpha.7 O9); no name is matched here. `own_row_suspect` says
+/// only one of the two named it where both could have: the row is used, and
+/// every field read off it is marked suspect.
+pub(crate) fn apply_new_reader(
+    parsed: &mut storage::PersonalMatch,
+    evidence: &shadow::result::ResultEvidence,
+    own: reader_apply::OwnRow,
+    own_row_suspect: bool,
+    mut board: shadow::BoardRead,
+    authority: Option<&str>,
+) {
+    board.set_result(shadow::result_field(evidence));
+    let policy = reader_apply::PolicyRow {
+        map: parsed.map_name.clone(),
+        mode: parsed.game_mode.clone(),
+        result: parsed.outcome.clone(),
+        hero: parsed.hero.clone(),
+        elims: parsed.elims,
+        assists: parsed.assists,
+        deaths: parsed.deaths,
+        damage: parsed.damage,
+        healing: parsed.healing,
+        mitigation: parsed.mitigation,
+    };
+    // The own row's hero is stored only when the Tab's hero authority (own
+    // row and career panel portrait) names it too.
+    let saved =
+        reader_apply::merge_saved_with_authority(&policy, own, Some(&board), Some(authority));
+    parsed.map_name = saved.map;
+    parsed.game_mode = saved.mode;
+    parsed.outcome = saved.result;
+    parsed.hero = saved.hero;
+    parsed.role = parse::guess_role_public(&parsed.hero);
+    parsed.elims = saved.elims;
+    parsed.assists = saved.assists;
+    parsed.deaths = saved.deaths;
+    parsed.damage = saved.damage;
+    parsed.healing = saved.healing;
+    parsed.mitigation = saved.mitigation;
+    parsed.recognizer = if saved.recognizer == shadow::digits::RECOGNIZER_ID {
+        shadow::digits::live_recognizer_id().to_string()
+    } else {
+        saved.recognizer.to_string()
+    };
+    parsed.suspect_fields = saved.suspect_fields;
+    if own_row_suspect {
+        reader_apply::mark_own_row_suspect(&mut parsed.suspect_fields);
+    }
+    tracing::info!(
+        target: "scuffed_stat_tracker",
+        recognizer = parsed.recognizer,
+        suspects = ?parsed.suspect_fields,
+        "saved scoreboard reader"
+    );
+}

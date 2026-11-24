@@ -1,0 +1,522 @@
+//! Tests of the upload queue: the `sync_rev` CAS in `mark_synced`, upload
+//! quarantine and retry.
+
+use super::tests::{reopen_store, snap};
+use super::*;
+use chrono::Utc;
+
+#[tokio::test]
+async fn mark_synced_skips_row_revised_during_upload() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalStore::open(dir.path()).await.expect("open store");
+    store.insert_match(snap("s1", 10)).await.unwrap();
+
+    let before = store.get_unsynced().await.unwrap();
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0].sync_rev, 0);
+    let claims = SyncClaim::capture(&before);
+
+    // Outcome back-fill while the HTTP upload of `claims` is in flight.
+    store.set_session_outcome("s1", "defeat").await.unwrap();
+
+    store.mark_synced(&claims).await.unwrap();
+
+    let rows = store.get_all_matches().await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].outcome, "defeat");
+    assert!(
+        !rows[0].synced,
+        "a row revised during upload must stay queued"
+    );
+    assert!(rows[0].sync_rev > claims[0].sync_rev);
+
+    // The next sync, capturing the new revision, is allowed to commit.
+    let again = SyncClaim::capture(&store.get_unsynced().await.unwrap());
+    assert_eq!(again.len(), 1);
+    assert_eq!(again[0].sync_rev, rows[0].sync_rev);
+    store.mark_synced(&again).await.unwrap();
+    let committed = store.get_all_matches().await.unwrap();
+    assert!(committed[0].synced);
+    assert_eq!(committed[0].outcome, "defeat");
+    assert!(store.get_unsynced().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn quarantined_row_stays_out_of_the_queue_until_retry() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalStore::open(dir.path()).await.unwrap();
+    store.insert_match(snap("keep", 1)).await.unwrap();
+    store.insert_match(snap("bad", 2)).await.unwrap();
+    let rows = store.get_unsynced().await.unwrap();
+    let bad: Vec<_> = rows
+        .iter()
+        .filter(|row| row.session_id == "bad")
+        .cloned()
+        .collect();
+    store
+        .quarantine_upload(
+            &SyncClaim::capture(&bad),
+            None,
+            "matches[0]: hero is not allowed",
+        )
+        .await
+        .unwrap();
+    let pending = store.get_unsynced().await.unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].session_id, "keep");
+    let stored = store.get_all_matches().await.unwrap();
+    let bad_row = stored.iter().find(|row| row.session_id == "bad").unwrap();
+    assert!(!bad_row.synced);
+    assert_eq!(
+        bad_row.upload_rejection(),
+        Some("Upload rejected by server: hero is not allowed")
+    );
+    store
+        .apply_command(&StoreCommand::RetryUpload {
+            session_id: "bad".into(),
+        })
+        .await
+        .unwrap();
+    let again = store.get_unsynced().await.unwrap();
+    assert_eq!(again.len(), 2);
+    assert!(again.iter().all(|row| row.upload_rejection().is_none()));
+}
+
+#[tokio::test]
+async fn retry_rejected_uploads_clears_every_quarantine() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalStore::open(dir.path()).await.unwrap();
+    store.insert_match(snap("keep", 1)).await.unwrap();
+    store.insert_match(snap("bad-a", 2)).await.unwrap();
+    store.insert_match(snap("bad-b", 3)).await.unwrap();
+    // Same session: one snapshot already uploaded, one still quarantined.
+    // Clearing the flag must not mark the uploaded snapshot unsynced.
+    store.insert_match(snap("shared", 10)).await.unwrap();
+    store.insert_match(snap("shared", 11)).await.unwrap();
+    let shared = store.get_all_matches().await.unwrap();
+    let already = shared.iter().find(|row| row.elims == 10).unwrap().clone();
+    store
+        .mark_synced(&SyncClaim::capture(std::slice::from_ref(&already)))
+        .await
+        .unwrap();
+    let shared = store.get_all_matches().await.unwrap();
+    let held = shared.iter().find(|row| row.elims == 11).unwrap().clone();
+    assert!(!held.synced);
+    let rows = store.get_unsynced().await.unwrap();
+    for sid in ["bad-a", "bad-b"] {
+        let bad: Vec<_> = rows
+            .iter()
+            .filter(|row| row.session_id == sid)
+            .cloned()
+            .collect();
+        store
+            .quarantine_upload(
+                &SyncClaim::capture(&bad),
+                None,
+                "matches[0]: hero is not allowed",
+            )
+            .await
+            .unwrap();
+    }
+    store
+        .quarantine_upload(
+            &SyncClaim::capture(std::slice::from_ref(&held)),
+            None,
+            "matches[0]: hero is not allowed",
+        )
+        .await
+        .unwrap();
+    assert_eq!(store.get_unsynced().await.unwrap().len(), 1);
+    store
+        .apply_command(&StoreCommand::RetryRejectedUploads)
+        .await
+        .unwrap();
+    let again = store.get_unsynced().await.unwrap();
+    assert_eq!(again.len(), 4);
+    assert!(again.iter().all(|row| row.upload_rejection().is_none()));
+    assert!(again.iter().any(|row| row.elims == 11));
+    let stored = store.get_all_matches().await.unwrap();
+    let synced_sibling = stored.iter().find(|row| row.elims == 10).unwrap();
+    let cleared = stored.iter().find(|row| row.elims == 11).unwrap();
+    assert!(
+        synced_sibling.synced,
+        "clearing a quarantine leaves the synced snapshot synced"
+    );
+    assert!(synced_sibling.upload_rejection().is_none());
+    assert!(!cleared.synced);
+    assert!(cleared.upload_rejection().is_none());
+    assert!(
+        stored
+            .iter()
+            .filter(|row| row.session_id != "shared" || row.elims != 10)
+            .all(|row| !row.synced)
+    );
+}
+
+#[tokio::test]
+async fn editing_a_quarantined_row_queues_it_again() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalStore::open(dir.path()).await.unwrap();
+    store.insert_match(snap("bad", 2)).await.unwrap();
+    let rows = store.get_unsynced().await.unwrap();
+    store
+        .quarantine_upload(
+            &SyncClaim::capture(&rows),
+            None,
+            "matches[0]: hero is not allowed",
+        )
+        .await
+        .unwrap();
+    assert!(store.get_unsynced().await.unwrap().is_empty());
+    store
+        .edit_match(
+            "bad",
+            &MatchEdit {
+                elims: Some(9),
+                ..MatchEdit::default()
+            },
+        )
+        .await
+        .unwrap();
+    let pending = store.get_unsynced().await.unwrap();
+    assert_eq!(pending.len(), 1);
+    assert!(pending[0].upload_rejection().is_none());
+    assert_eq!(pending[0].corrected_elims, Some(9));
+}
+
+#[tokio::test]
+async fn reject_message_drops_the_batch_index() {
+    let cases = [
+        (
+            "a",
+            "matches[0]: hero is not allowed",
+            "Upload rejected by server: hero is not allowed",
+        ),
+        (
+            "b",
+            "matches[12]: map is unknown",
+            "Upload rejected by server: map is unknown",
+        ),
+        (
+            "c",
+            "hero is not allowed",
+            "Upload rejected by server: hero is not allowed",
+        ),
+        ("d", "matches[0]: ", "Upload rejected by server"),
+    ];
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalStore::open(dir.path()).await.unwrap();
+    for (index, (sid, raw, _)) in cases.iter().enumerate() {
+        store.insert_match(snap(sid, index as u32)).await.unwrap();
+        let rows = store.get_unsynced().await.unwrap();
+        let row = rows
+            .into_iter()
+            .find(|row| row.session_id == *sid)
+            .expect("row");
+        store
+            .quarantine_upload(&SyncClaim::capture(std::slice::from_ref(&row)), None, raw)
+            .await
+            .unwrap();
+    }
+    let stored = store.get_all_matches().await.unwrap();
+    for (sid, _, expect) in cases {
+        let row = stored.iter().find(|row| row.session_id == sid).unwrap();
+        assert_eq!(row.upload_rejection(), Some(expect), "{sid}");
+    }
+}
+
+#[tokio::test]
+async fn upload_reject_survives_store_reopen() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    {
+        let store = LocalStore::open(dir.path()).await.unwrap();
+        store.insert_match(snap("bad", 2)).await.unwrap();
+        let rows = store.get_unsynced().await.unwrap();
+        store
+            .quarantine_upload(
+                &SyncClaim::capture(&rows),
+                Some("invalid_hero"),
+                "matches[3]: hero is not allowed",
+            )
+            .await
+            .unwrap();
+    }
+    let store = reopen_store(dir.path()).await;
+    let rows = store.get_all_matches().await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(!rows[0].synced);
+    assert_eq!(
+        rows[0].upload_rejection(),
+        Some("Upload rejected by server: invalid_hero: hero is not allowed")
+    );
+    assert!(store.get_unsynced().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn mark_synced_commits_unchanged_revision() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalStore::open(dir.path()).await.expect("open store");
+    store.insert_match(snap("s1", 4)).await.unwrap();
+    let claims = SyncClaim::capture(&store.get_unsynced().await.unwrap());
+    store.mark_synced(&claims).await.unwrap();
+    let rows = store.get_all_matches().await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].synced);
+    assert!(store.get_unsynced().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn revised_sibling_keeps_whole_session_unsynced() {
+    // Two snapshots, one session. Map back-fill touches only the older
+    // row (the newer already has the map). Marking the unchanged newer
+    // row synced would let the next upload send the older snapshot alone
+    // and last-write its lower stats over the server row.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalStore::open(dir.path()).await.expect("open store");
+    let mut older = snap("s1", 3);
+    older.map_name = String::new();
+    older.played_at = SurrealDatetime::from(Utc::now() - chrono::Duration::seconds(30));
+    let mut newer = snap("s1", 20);
+    newer.map_name = "Ilios".into();
+    newer.played_at = SurrealDatetime::from(Utc::now());
+    // A second session that did not change must still commit.
+    let mut other = snap("s2", 7);
+    other.map_name = "Busan".into();
+    store.insert_match(older).await.unwrap();
+    store.insert_match(newer).await.unwrap();
+    store.insert_match(other).await.unwrap();
+
+    let claims = SyncClaim::capture(&store.get_unsynced().await.unwrap());
+    assert_eq!(claims.len(), 3);
+    store.set_session_map("s1", "Ilios").await.unwrap();
+    store.mark_synced(&claims).await.unwrap();
+
+    let rows = store.get_all_matches().await.unwrap();
+    let s1: Vec<_> = rows.iter().filter(|m| m.session_id == "s1").collect();
+    let s2: Vec<_> = rows.iter().filter(|m| m.session_id == "s2").collect();
+    assert_eq!(s1.len(), 2);
+    assert!(
+        s1.iter().all(|m| !m.synced && m.map_name == "Ilios"),
+        "changed session stays fully unsynced: {s1:?}"
+    );
+    assert_eq!(s2.len(), 1);
+    assert!(s2[0].synced, "untouched session still commits");
+}
+
+#[tokio::test]
+async fn legacy_row_without_sync_rev_marks_at_revision_zero() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalStore::open(dir.path()).await.expect("open store");
+    store
+        .db
+        .query(
+            "CREATE personal_match SET hero = 'Ana', map_name = 'Busan', game_mode = 'x', \
+             role = 'Support', outcome = 'victory', elims = 1, deaths = 0, assists = 0, \
+             damage = 1, healing = 0, mitigation = 0, played_at = time::now(), \
+             synced = false, session_id = 'legacy'",
+        )
+        .await
+        .unwrap();
+    let rows = store.get_unsynced().await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].sync_rev, 0, "missing sync_rev reads as 0");
+    assert_eq!(
+        rows[0].stored_recognizer(),
+        scuffed_types::RECOGNIZER_OCR_V1,
+        "a row written before recognizer existed still uploads as ocr-v1"
+    );
+    assert!(rows[0].suspect_fields.is_empty());
+    assert_eq!(
+        rows[0].name_recognizer, None,
+        "a row written before name_recognizer existed uploads with the field omitted"
+    );
+    store.mark_synced(&SyncClaim::capture(&rows)).await.unwrap();
+    let after = store.get_all_matches().await.unwrap();
+    assert!(after[0].synced);
+}
+
+async fn quarantine(store: &LocalStore, session_id: &str) {
+    let rows = store.get_unsynced().await.unwrap();
+    let bad: Vec<_> = rows
+        .iter()
+        .filter(|row| row.session_id == session_id)
+        .cloned()
+        .collect();
+    assert!(!bad.is_empty(), "{session_id} is queued");
+    store
+        .quarantine_upload(
+            &SyncClaim::capture(&bad),
+            None,
+            "matches[0]: hero must be a known hero or Unknown",
+        )
+        .await
+        .unwrap();
+}
+
+/// A new tracker version puts set-aside games back on the queue once, with
+/// the site's reason kept as proof. The same version does not do it again,
+/// also after a restart, so a game the site still refuses stays set aside
+/// until the next update or a Retry.
+#[tokio::test]
+async fn set_aside_games_go_back_on_the_queue_once_per_tracker_version() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalStore::open(dir.path()).await.unwrap();
+    store.insert_match(snap("bad", 1)).await.unwrap();
+    quarantine(&store, "bad").await;
+    assert!(store.get_unsynced().await.unwrap().is_empty());
+
+    assert!(
+        store
+            .retry_rejected_uploads_once_per_version("0.6.0-alpha.3")
+            .await
+            .unwrap()
+    );
+    let queued = store.get_unsynced().await.unwrap();
+    assert_eq!(queued.len(), 1);
+    assert!(queued[0].upload_retry_pending());
+    assert_eq!(
+        queued[0].upload_rejection(),
+        Some("Upload rejected by server: hero must be a known hero or Unknown"),
+        "the reason is kept"
+    );
+
+    quarantine(&store, "bad").await;
+    assert!(
+        !store
+            .retry_rejected_uploads_once_per_version("0.6.0-alpha.3")
+            .await
+            .unwrap(),
+        "the same version runs it once"
+    );
+    drop(store);
+    let store = reopen_store(dir.path()).await;
+    assert!(
+        !store
+            .retry_rejected_uploads_once_per_version("0.6.0-alpha.3")
+            .await
+            .unwrap(),
+        "a restart on the same version does not run it again"
+    );
+    assert!(store.get_unsynced().await.unwrap().is_empty());
+    let stored = store.get_all_matches().await.unwrap();
+    assert!(stored[0].upload_rejection().is_some(), "still set aside");
+
+    assert!(
+        store
+            .retry_rejected_uploads_once_per_version("0.6.0-alpha.4")
+            .await
+            .unwrap()
+    );
+    assert_eq!(store.get_unsynced().await.unwrap().len(), 1);
+}
+
+/// Two snapshots of one game: the older is set aside and the newer is already
+/// synced (already on the site). A version retry must not put the older
+/// snapshot back on the queue, or the next pass would last-write older
+/// stats over the site's row. A different set-aside game is still retried.
+#[tokio::test]
+async fn a_version_retry_does_not_send_an_older_snapshot_when_a_newer_one_is_synced() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalStore::open(dir.path()).await.unwrap();
+    let mut older = snap("g1", 5);
+    older.played_at = SurrealDatetime::from(Utc::now() - chrono::Duration::seconds(30));
+    store.insert_match(older).await.unwrap();
+    quarantine(&store, "g1").await;
+
+    let mut newer = snap("g1", 10);
+    newer.played_at = SurrealDatetime::from(Utc::now());
+    store.insert_match(newer).await.unwrap();
+    let newer_row = store
+        .get_all_matches()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|row| row.session_id == "g1" && row.elims == 10)
+        .expect("newer row");
+    store
+        .mark_synced(&SyncClaim::capture(std::slice::from_ref(&newer_row)))
+        .await
+        .unwrap();
+
+    store.insert_match(snap("g2", 1)).await.unwrap();
+    quarantine(&store, "g2").await;
+    assert!(
+        store.get_unsynced().await.unwrap().is_empty(),
+        "both games are set aside, so nothing is queued yet"
+    );
+
+    assert!(
+        store
+            .retry_rejected_uploads_once_per_version("0.6.0-alpha.3")
+            .await
+            .unwrap()
+    );
+    let queued = store.get_unsynced().await.unwrap();
+    assert_eq!(
+        queued
+            .iter()
+            .map(|row| row.session_id.as_str())
+            .collect::<Vec<_>>(),
+        ["g2"],
+        "the older g1 snapshot must not be sent; g2 is still retried"
+    );
+    let stored = store.get_all_matches().await.unwrap();
+    let older = stored
+        .iter()
+        .find(|row| row.session_id == "g1" && row.elims == 5)
+        .expect("older row");
+    assert!(
+        older.upload_rejection().is_some() && !older.upload_retry_pending(),
+        "the older snapshot stays set aside, not marked for retry"
+    );
+}
+
+/// Retry all must not put an older set-aside snapshot back on the queue
+/// when a newer snapshot of the same game is already synced.
+#[tokio::test]
+async fn retry_all_does_not_send_an_older_snapshot_when_a_newer_one_is_synced() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalStore::open(dir.path()).await.unwrap();
+    let mut older = snap("g1", 5);
+    older.played_at = SurrealDatetime::from(Utc::now() - chrono::Duration::seconds(30));
+    store.insert_match(older).await.unwrap();
+    quarantine(&store, "g1").await;
+
+    let mut newer = snap("g1", 10);
+    newer.played_at = SurrealDatetime::from(Utc::now());
+    store.insert_match(newer).await.unwrap();
+    let newer_row = store
+        .get_all_matches()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|row| row.session_id == "g1" && row.elims == 10)
+        .expect("newer row");
+    store
+        .mark_synced(&SyncClaim::capture(std::slice::from_ref(&newer_row)))
+        .await
+        .unwrap();
+
+    store.insert_match(snap("g2", 1)).await.unwrap();
+    quarantine(&store, "g2").await;
+
+    store.clear_rejected_uploads().await.unwrap();
+    let queued = store.get_unsynced().await.unwrap();
+    assert_eq!(
+        queued
+            .iter()
+            .map(|row| row.session_id.as_str())
+            .collect::<Vec<_>>(),
+        ["g2"],
+        "the older g1 snapshot must not be sent; g2 is still retried"
+    );
+    let stored = store.get_all_matches().await.unwrap();
+    let older = stored
+        .iter()
+        .find(|row| row.session_id == "g1" && row.elims == 5)
+        .expect("older row");
+    assert!(
+        older.upload_rejection().is_some(),
+        "the older snapshot stays set aside"
+    );
+}

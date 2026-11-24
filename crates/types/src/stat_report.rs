@@ -75,12 +75,31 @@ const SCREEN_CLASSES: &[&str] = &[
     "party",
     "lobby",
     "outcome",
+    "rank_update",
 ];
 
 /// The only crop path that carries the `outcome` screen class, and the only
 /// class that path may carry.
 const OUTCOME_CROP_PATH: &str = "crops/outcome.png";
 const OUTCOME_CLASS: &str = "outcome";
+
+/// The only crop paths that carry the `rank_update` screen class. That class
+/// is only valid on these paths, and these paths only carry that class.
+const RANK_CROP_PATHS: &[&str] = &["crops/rank.png", "crops/rank_banner.png"];
+const RANK_UPDATE_CLASS: &str = "rank_update";
+
+/// Largest declared size of one rank crop (`crops/rank.png` or
+/// `crops/rank_banner.png`), in bytes: 2 MiB.
+///
+/// This is a budget choice, not a measured size. Both rank crops at the cap
+/// use 4 MiB of the [`MAX_BUNDLE_BYTES`] cap (10 MiB). Nothing here checks
+/// that the rest of the report still fits beside them: the app leaves a rank
+/// crop out when it is over this cap or when it would push the bundle over
+/// [`MAX_BUNDLE_BYTES`] (spec section 3). The server checks the declared
+/// size here and ties it to the real bytes later (`file size does not match
+/// the manifest`). A rank crop over the cap is a 400, not a 413, because it
+/// is a manifest rule and not the body limit.
+pub const RANK_CROP_MAX_BYTES: u64 = 2 * 1024 * 1024;
 
 const OCR_ID: &str = "ocr-v1";
 
@@ -632,6 +651,13 @@ fn check_file(
             if (file.path == OUTCOME_CROP_PATH) != (class == OUTCOME_CLASS) {
                 return Err("crop screen_class does not match its path".into());
             }
+            let rank_path = RANK_CROP_PATHS.contains(&file.path.as_str());
+            if rank_path != (class == RANK_UPDATE_CLASS) {
+                return Err("crop screen_class does not match its path".into());
+            }
+            if rank_path && file.bytes > RANK_CROP_MAX_BYTES {
+                return Err("rank crop is over the size limit".into());
+            }
             reject_glyph_fields(file)?;
         }
         FileRole::OwnName => {
@@ -872,12 +898,13 @@ fn valid_rel_path(path: &str) -> bool {
     true
 }
 
-/// Crop paths the spec names. Suspect-cell files are not given names there,
-/// so they are not accepted.
+/// Crop paths the spec names besides the rank crops, which are in
+/// [`RANK_CROP_PATHS`]. Suspect-cell files are not given names there, so
+/// they are not accepted.
 const CROP_PATHS: &[&str] = &["crops/scoreboard.png", "crops/frame.png", OUTCOME_CROP_PATH];
 
 fn is_plain_crop_path(path: &str) -> bool {
-    CROP_PATHS.contains(&path)
+    CROP_PATHS.contains(&path) || RANK_CROP_PATHS.contains(&path)
 }
 
 fn is_glyph_id(id: &str) -> bool {
@@ -1549,6 +1576,76 @@ mod tests {
             let err = parse(&v).unwrap_err();
             assert!(err.contains("screen_class"), "{path}: {err}");
         }
+    }
+
+    fn with_rank_crop(mut v: serde_json::Value, path: &str, bytes: u64) -> serde_json::Value {
+        v["files"].as_array_mut().unwrap().push(serde_json::json!({
+            "path": path,
+            "sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+            "bytes": bytes,
+            "role": "crop",
+            "screen_class": "rank_update"
+        }));
+        v
+    }
+
+    #[test]
+    fn rank_crops_with_rank_update_class_are_accepted() {
+        for path in RANK_CROP_PATHS {
+            let checked = parse(&with_rank_crop(sample_v2(), path, 500)).unwrap();
+            assert_eq!(checked.files.len(), 3, "{path}");
+            assert_eq!(checked.files[2].role, FileRole::Crop, "{path}");
+            parse(&with_rank_crop(sample(), path, 500)).unwrap();
+        }
+        let both = with_rank_crop(
+            with_rank_crop(sample_v2(), "crops/rank.png", 500),
+            "crops/rank_banner.png",
+            500,
+        );
+        assert_eq!(parse(&both).unwrap().files.len(), 4);
+    }
+
+    #[test]
+    fn rank_crops_must_carry_the_rank_update_class() {
+        for path in RANK_CROP_PATHS {
+            for class in ["scoreboard", "outcome", "potg"] {
+                let mut v = with_rank_crop(sample_v2(), path, 500);
+                v["files"][2]["screen_class"] = serde_json::json!(class);
+                let err = parse(&v).unwrap_err();
+                assert!(err.contains("screen_class"), "{path} {class}: {err}");
+            }
+        }
+    }
+
+    #[test]
+    fn rank_update_class_is_only_for_the_rank_crops() {
+        for path in [
+            "crops/scoreboard.png",
+            "crops/frame.png",
+            "crops/outcome.png",
+        ] {
+            let mut v = sample_v2();
+            v["files"][1]["path"] = serde_json::json!(path);
+            v["files"][1]["screen_class"] = serde_json::json!("rank_update");
+            let err = parse(&v).unwrap_err();
+            assert!(err.contains("screen_class"), "{path}: {err}");
+        }
+    }
+
+    #[test]
+    fn rank_crop_size_cap_is_enforced() {
+        for path in RANK_CROP_PATHS {
+            parse(&with_rank_crop(sample_v2(), path, RANK_CROP_MAX_BYTES)).unwrap();
+            let over = with_rank_crop(sample_v2(), path, RANK_CROP_MAX_BYTES + 1);
+            let err = parse(&over).unwrap_err();
+            assert_eq!(err, "rank crop is over the size limit", "{path}");
+        }
+        let both_at_cap = with_rank_crop(
+            with_rank_crop(sample_v2(), "crops/rank.png", RANK_CROP_MAX_BYTES),
+            "crops/rank_banner.png",
+            RANK_CROP_MAX_BYTES,
+        );
+        assert_eq!(parse(&both_at_cap).unwrap().files.len(), 4);
     }
 
     #[test]

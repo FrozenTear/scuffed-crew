@@ -129,6 +129,8 @@ pub async fn clear_store(data_dir: std::path::PathBuf) -> Result<String, String>
             Ok(store) => {
                 store.clear_all_data().await.map_err(|e| e.to_string())?;
                 stat_tracker::storage::clear_match_log(&data_dir);
+                stat_tracker::storage::remove_pre_timeline_backups(&data_dir);
+                stat_tracker::storage::maintain::forget_last_vacuum_size(&data_dir);
             }
             Err(e) if stat_tracker::storage::is_store_busy(e.as_ref()) => {
                 return Err("Stop the tracker before deleting stored data".into());
@@ -141,7 +143,19 @@ pub async fn clear_store(data_dir: std::path::PathBuf) -> Result<String, String>
         Ok::<(), String>(())
     }
     .await;
-    result.map(|()| "All local match data deleted".into())
+    result?;
+    // The screen-share permission goes too, so the next share asks again.
+    // Same gate as the store: the daemon is stopped here. The matches are
+    // already gone, so a failure here is a warning on a finished delete
+    // (Ok), and the window still drops its games.
+    Ok(
+        match stat_tracker::capture::remove_restore_token(&data_dir) {
+            Ok(()) => "All local match data deleted".into(),
+            Err(e) => format!(
+                "All local match data deleted, but the screen-share permission could not be removed: {e}"
+            ),
+        },
+    )
 }
 
 #[cfg(test)]
@@ -205,12 +219,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn clear_store_removes_the_screencast_restore_token() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let token = dir.path().join("screencast-restore-token");
+        let tmp = dir.path().join("screencast-restore-token.tmp");
+        std::fs::write(&token, "tok").unwrap();
+        std::fs::write(&tmp, "half").unwrap();
+        let backup = dir
+            .path()
+            .join("stats.surrealkv.pre-timeline-20261029_101500");
+        std::fs::create_dir_all(&backup).unwrap();
+        std::fs::write(backup.join("db"), "games").unwrap();
+        let last_size = dir
+            .path()
+            .join(stat_tracker::storage::maintain::LAST_VACUUM_SIZE_FILE);
+        std::fs::write(&last_size, "33200000").unwrap();
+        assert!(stat_tracker::capture::share_restorable(dir.path()));
+
+        clear_store(dir.path().to_path_buf())
+            .await
+            .expect("clear with the tracker stopped");
+
+        assert!(!stat_tracker::capture::share_restorable(dir.path()));
+        assert!(!token.exists(), "restore token left behind");
+        assert!(!tmp.exists(), "restore token temp file left behind");
+        assert!(!backup.exists(), "the hero-timeline backup holds games too");
+        assert!(
+            !last_size.exists(),
+            "the old store's vacuum size would hold back auto-vacuum"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_store_counts_a_stuck_token_as_done_with_a_warning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A directory at the token path makes its removal fail.
+        std::fs::create_dir(dir.path().join("screencast-restore-token")).unwrap();
+        let tmp = dir.path().join("screencast-restore-token.tmp");
+        std::fs::write(&tmp, "half").unwrap();
+
+        let msg = clear_store(dir.path().to_path_buf())
+            .await
+            .expect("matches are deleted, so the delete is done");
+        assert!(msg.contains("could not be removed"), "{msg}");
+        assert!(!tmp.exists(), "the .tmp goes even when the token fails");
+    }
+
+    #[tokio::test]
     async fn clear_store_does_not_wipe_a_locked_store() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _held = stat_tracker::storage::LocalStore::open(dir.path())
             .await
             .expect("open");
         std::fs::write(dir.path().join("live_snapshot.json"), "{}").unwrap();
+        std::fs::write(dir.path().join("screencast-restore-token"), "tok").unwrap();
         let err = clear_store(dir.path().to_path_buf())
             .await
             .expect_err("locked store");
@@ -223,5 +285,9 @@ mod tests {
             "force-clear must not run while the store lock is held"
         );
         assert!(dir.path().join("live_snapshot.json").exists());
+        assert!(
+            stat_tracker::capture::share_restorable(dir.path()),
+            "a refused delete keeps the screen-share permission"
+        );
     }
 }

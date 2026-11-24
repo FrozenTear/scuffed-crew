@@ -1,0 +1,1428 @@
+//! The rank update wiring on injected reads: off by default, which frames
+//! are read, how the reads of one rank screen settle, what lands on the
+//! game record and in the upload, and that no failure costs the game.
+
+use super::*;
+use crate::daemon::queue_title::QueueTitleFeed;
+use stat_tracker::detect::stability::FrameStability;
+use stat_tracker::shadow::queue_title::Field;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+fn n(value: i64, confidence: f32) -> Option<RankNumber> {
+    Some(RankNumber { value, confidence })
+}
+
+fn t(value: &str, confidence: f32) -> Option<RankText> {
+    Some(RankText {
+        value: value.to_string(),
+        confidence,
+    })
+}
+
+/// A full read of one rank screen.
+fn full(pct: i64) -> RankUpdate {
+    RankUpdate {
+        role: t("Support", 0.9),
+        role_rank: t("Diamond", 0.8),
+        division: n(3, 0.9),
+        progress_pct: n(pct, 0.9),
+        progress_change: n(-15, 0.8),
+        change_tags: Some(RankTags {
+            value: vec!["Calibration Up".to_string()],
+            confidence: 0.7,
+        }),
+        higher_than_pct: n(88, 0.9),
+        hero_sr: n(3412, 0.85),
+        hero_sr_change: n(21, 0.8),
+        next_mode_hint: t("OPEN QUEUE", 0.75),
+    }
+}
+
+/// A reader that counts its calls and gives `out`.
+fn counting(out: Option<RankUpdate>, calls: &Arc<AtomicUsize>) -> RankReadFn {
+    let calls = Arc::clone(calls);
+    Arc::new(move |_| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        out.clone()
+    })
+}
+
+fn frame() -> RgbImage {
+    RgbImage::new(2560, 1440)
+}
+
+/// [`super::tick`] on a tick the stability gate did not hold back, as the
+/// store and hint tests run it.
+async fn tick(
+    feed: &mut RankFeed,
+    seen: Option<Option<RankUpdate>>,
+    game: Option<&str>,
+    store: &impl RankStore,
+    dump: Option<&mut PregameDump>,
+) -> bool {
+    super::tick(feed, seen, false, game, store, dump).await
+}
+
+/// The store, with its rank writes failing while `fail` is set.
+struct Failing<'a> {
+    store: &'a crate::storage::LocalStore,
+    fail: Mutex<bool>,
+}
+
+impl RankStore for Failing<'_> {
+    async fn attach_rank_update(&self, session_id: &str, rank: &RankUpdate) -> StoreResult<bool> {
+        if *self.fail.lock().unwrap() {
+            return Err("rank write refused (test)".into());
+        }
+        self.store.attach_rank_update(session_id, rank).await
+    }
+}
+
+async fn store_with(sid: &str) -> (tempfile::TempDir, crate::storage::LocalStore) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = crate::storage::LocalStore::open(dir.path())
+        .await
+        .expect("store");
+    store
+        .insert_match(crate::main_tests::test_match(sid, "victory"))
+        .await
+        .unwrap();
+    (dir, store)
+}
+
+/// The rows of `sid` and the upload body for them.
+async fn rows_and_body(
+    store: &crate::storage::LocalStore,
+    sid: &str,
+) -> (Vec<stat_tracker::model::PersonalMatch>, String) {
+    let rows = store.get_session_snapshots(sid).await.unwrap();
+    assert!(!rows.is_empty(), "the game is recorded");
+    let body = serde_json::to_string(&stat_tracker::sync::upload_request(&rows, &[])).unwrap();
+    (rows, body)
+}
+
+// ---- off by default ----
+
+#[test]
+fn the_feed_is_off_unless_switched_on_and_the_pack_loads() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    assert!(RankFeed::for_setting(RankSetting::default(), dir.path()).is_none());
+    assert!(RankFeed::for_setting(RankSetting::Off, dir.path()).is_none());
+    // on, but no pack: off as well
+    assert!(RankFeed::for_setting(RankSetting::RankV1, dir.path()).is_none());
+}
+
+#[test]
+fn with_the_reader_off_no_frame_is_read() {
+    let img = frame();
+    for source in [
+        Some(OutcomeSource::RankScreen),
+        Some(OutcomeSource::EndTitle),
+        None,
+    ] {
+        assert_eq!(read_rank_screen(None, source, false, &img), None);
+    }
+}
+
+#[test]
+fn only_rank_screen_frames_are_read() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let read = counting(Some(full(40)), &calls);
+    let img = frame();
+    for source in [
+        None,
+        Some(OutcomeSource::EndTitle),
+        Some(OutcomeSource::ResultWord),
+    ] {
+        assert_eq!(read_rank_screen(Some(&read), source, false, &img), None);
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let seen = read_rank_screen(Some(&read), Some(OutcomeSource::RankScreen), false, &img);
+    assert_eq!(seen, Some(Some(full(40))));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_reader_that_panics_is_a_frame_with_no_read() {
+    let read: RankReadFn = Arc::new(|_| panic!("reader failed (test)"));
+    let seen = read_rank_screen(
+        Some(&read),
+        Some(OutcomeSource::RankScreen),
+        false,
+        &frame(),
+    );
+    assert_eq!(seen, Some(None));
+}
+
+// ---- settling ----
+
+#[test]
+fn a_field_is_kept_only_where_two_reads_in_a_row_agree() {
+    // one read alone keeps nothing
+    assert!(settle(&[Some(full(40))]).is_empty());
+    assert!(settle(&[]).is_empty());
+    // the progress counts up, the rest holds still
+    let reads = [
+        Some(full(10)),
+        Some(full(25)),
+        Some(full(40)),
+        Some(full(40)),
+    ];
+    let r = settle(&reads);
+    assert_eq!(r.progress_pct, n(40, 0.9));
+    assert_eq!(r.hero_sr, n(3412, 0.85));
+    // still counting on the last two reads: no progress, the rest kept
+    let counting_up = [Some(full(10)), Some(full(25)), Some(full(40))];
+    let r = settle(&counting_up);
+    assert_eq!(r.progress_pct, None);
+    assert_eq!(r.division, n(3, 0.9));
+    // a frame with no read breaks the pair
+    let r = settle(&[Some(full(40)), None, Some(full(40))]);
+    assert!(r.is_empty());
+    // a last frame that reads a different value (a fade misread as another
+    // number) is a newer read that disagrees: the field is dropped
+    let mut fading = full(40);
+    fading.hero_sr = n(341, 0.6);
+    let r = settle(&[Some(full(40)), Some(full(40)), Some(fading)]);
+    assert_eq!(r.hero_sr, None);
+    assert_eq!(r.division, n(3, 0.9));
+    // a fade to no read is no value: the newest pair stands
+    let r = settle(&[Some(full(40)), Some(full(40)), None]);
+    assert_eq!(r, full(40));
+    let mut faded = full(40);
+    faded.hero_sr = None;
+    let r = settle(&[Some(full(40)), Some(full(40)), Some(faded)]);
+    assert_eq!(r.hero_sr, n(3412, 0.85));
+}
+
+#[test]
+fn an_agreed_field_has_the_lower_confidence() {
+    let mut a = full(40);
+    a.division = n(3, 0.6);
+    let r = settle(&[Some(a), Some(full(40))]);
+    assert_eq!(r.division, n(3, 0.6));
+}
+
+#[test]
+fn reads_are_held_for_their_game_and_settle_when_the_screen_is_gone() {
+    let mut feed = RankFeed::with_read(Arc::new(|_| None));
+    let now = Utc::now();
+    assert_eq!(feed.observe(Some(Some(full(40))), Some("g1"), now), None);
+    assert_eq!(feed.observe(Some(Some(full(40))), Some("g1"), now), None);
+    // one missed tick is not the end of the screen
+    assert_eq!(feed.observe(None, Some("g1"), now), None);
+    assert_eq!(RANK_SETTLE_MISSES, 2);
+    let s = feed.observe(None, Some("g1"), now).expect("settled");
+    assert_eq!(s.session, "g1");
+    assert_eq!(s.rank, full(40));
+    // nothing held any more
+    assert_eq!(feed.observe(None, Some("g1"), now), None);
+    assert_eq!(feed.observe(None, Some("g1"), now), None);
+    // a missed tick between two reads breaks the pair
+    feed.observe(Some(Some(full(40))), Some("g1"), now);
+    feed.observe(None, Some("g1"), now);
+    feed.observe(Some(Some(full(40))), Some("g1"), now);
+    feed.observe(None, Some("g1"), now);
+    assert_eq!(feed.observe(None, Some("g1"), now), None, "no pair");
+    // the open game closing (no game any more) settles at once
+    feed.observe(Some(Some(full(40))), Some("g1"), now);
+    feed.observe(Some(Some(full(40))), Some("g1"), now);
+    let s = feed.observe(None, None, now).expect("settled on close");
+    assert_eq!(s.session, "g1");
+    // as does the game process stopping
+    feed.observe(Some(Some(full(40))), Some("g1"), now);
+    feed.observe(Some(Some(full(40))), Some("g1"), now);
+    assert_eq!(feed.close().map(|s| s.session).as_deref(), Some("g1"));
+    assert_eq!(feed.close(), None);
+    // another game's screen settles the first game's reads
+    feed.observe(Some(Some(full(40))), Some("g1"), now);
+    feed.observe(Some(Some(full(40))), Some("g1"), now);
+    let s = feed.observe(Some(Some(full(50))), Some("g2"), now);
+    assert_eq!(s.map(|s| s.session).as_deref(), Some("g1"));
+    // a rank screen with no game to put it on is not held
+    let mut feed = RankFeed::with_read(Arc::new(|_| None));
+    feed.observe(Some(Some(full(40))), None, now);
+    feed.observe(Some(Some(full(40))), None, now);
+    assert_eq!(feed.observe(None, None, now), None);
+}
+
+// ---- the game record ----
+
+#[tokio::test]
+async fn a_settled_read_is_stored_on_its_game_and_uploaded() {
+    let (_dir, store) = store_with("g1").await;
+    let (before_rows, before) = rows_and_body(&store, "g1").await;
+    assert!(!before.contains("\"rank\""), "{before}");
+    let mut feed = RankFeed::with_read(Arc::new(|_| None));
+    for _ in 0..2 {
+        assert!(!tick(&mut feed, Some(Some(full(40))), Some("g1"), &store, None).await);
+    }
+    assert!(!tick(&mut feed, None, Some("g1"), &store, None).await);
+    assert!(
+        tick(&mut feed, None, Some("g1"), &store, None).await,
+        "stored: the caller refreshes the live snapshot"
+    );
+    let (rows, body) = rows_and_body(&store, "g1").await;
+    assert!(rows.iter().all(|r| r.rank_update == Some(full(40))));
+    assert!(!rows[0].synced, "queued for upload");
+    let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let rank = &json["matches"][0]["rank"];
+    assert_eq!(rank["hero_sr"]["value"], 3412, "{body}");
+    assert_eq!(rank["rank_recognizer"], "rank-v1");
+    // every other field of the game is as it was
+    let mut same = rows[0].clone();
+    same.rank_update = None;
+    same.sync_rev = before_rows[0].sync_rev;
+    same.synced = before_rows[0].synced;
+    same.upload_reject = before_rows[0].upload_reject.clone();
+    assert_eq!(same, before_rows[0]);
+}
+
+#[tokio::test]
+async fn an_unreadable_rank_screen_leaves_the_game_and_its_upload_as_they_were() {
+    let (_dir, store) = store_with("g1").await;
+    let before = rows_and_body(&store, "g1").await;
+    let mut feed = RankFeed::with_read(Arc::new(|_| None));
+    // frames read as the rank screen that the reader could not read (wrong
+    // size, a reader error or panic), then a single read alone
+    for seen in [Some(None), Some(None), Some(Some(full(40))), None, None] {
+        tick(&mut feed, seen, Some("g1"), &store, None).await;
+    }
+    assert_eq!(rows_and_body(&store, "g1").await, before);
+    assert!(feed.unsaved.is_none());
+}
+
+#[tokio::test]
+async fn a_store_error_is_retried_then_dropped_and_never_costs_the_game() {
+    let (_dir, store) = store_with("g1").await;
+    let before = rows_and_body(&store, "g1").await;
+    let failing = Failing {
+        store: &store,
+        fail: Mutex::new(true),
+    };
+    let mut feed = RankFeed::with_read(Arc::new(|_| None));
+    for seen in [Some(Some(full(40))), Some(Some(full(40))), None, None] {
+        tick(&mut feed, seen, Some("g1"), &failing, None).await;
+    }
+    assert!(feed.unsaved.is_some(), "kept for the next tick");
+    // still failing: tried on the next ticks, then dropped; tried on
+    // RANK_STORE_TRIES ticks in all, the settle tick among them
+    assert_eq!(RANK_STORE_TRIES, 3);
+    tick(&mut feed, None, Some("g1"), &failing, None).await;
+    assert!(feed.unsaved.is_some(), "still kept after one retry");
+    tick(&mut feed, None, Some("g1"), &failing, None).await;
+    assert!(feed.unsaved.is_none(), "dropped after its tries");
+    assert_eq!(rows_and_body(&store, "g1").await, before);
+    // a write that works on a retry stores it
+    for seen in [Some(Some(full(40))), Some(Some(full(40))), None, None] {
+        tick(&mut feed, seen, Some("g1"), &failing, None).await;
+    }
+    *failing.fail.lock().unwrap() = false;
+    tick(&mut feed, None, Some("g1"), &failing, None).await;
+    let rows = store.get_session_snapshots("g1").await.unwrap();
+    assert_eq!(rows[0].rank_update, Some(full(40)));
+}
+
+#[tokio::test]
+async fn an_unknown_game_gets_nothing_and_the_feed_goes_on() {
+    let (_dir, store) = store_with("g1").await;
+    let mut feed = RankFeed::with_read(Arc::new(|_| None));
+    for seen in [Some(Some(full(40))), Some(Some(full(40))), None, None] {
+        tick(&mut feed, seen, Some("nope"), &store, None).await;
+    }
+    assert!(feed.unsaved.is_none());
+    let rows = store.get_session_snapshots("g1").await.unwrap();
+    assert_eq!(rows[0].rank_update, None);
+}
+
+#[tokio::test]
+async fn the_banner_word_becomes_the_next_games_pending_hint() {
+    let (dir, store) = store_with("g1").await;
+    store
+        .insert_match(crate::main_tests::test_match("g2", "victory"))
+        .await
+        .unwrap();
+    let queue = QueueTitleFeed::with_read(Arc::new(|_, _| Field::none()));
+    let mut dump = PregameDump::with_readers(
+        false,
+        None,
+        Some(queue),
+        dir.path(),
+        std::time::Duration::from_millis(1_500),
+    )
+    .expect("a saver for the queue title reader");
+    assert!(dump.has_queue_reader());
+    let mut feed = RankFeed::with_read(Arc::new(|_| None));
+    // the hint's time is the newest rank read's, not the settle tick's
+    let t0 = Utc::now() - chrono::Duration::seconds(10);
+    let seq = [
+        (Some(Some(full(40))), t0),
+        (Some(Some(full(40))), t0 + chrono::Duration::seconds(2)),
+        (None, t0 + chrono::Duration::seconds(4)),
+        (None, t0 + chrono::Duration::seconds(6)),
+    ];
+    for (seen, at) in seq {
+        tick_at(
+            &mut feed,
+            seen,
+            false,
+            Some("g1"),
+            &store,
+            Some(&mut dump),
+            at,
+        )
+        .await;
+    }
+    assert_eq!(
+        dump.pending_hint(),
+        Some(("OPEN QUEUE".to_string(), "g1".to_string()))
+    );
+    assert_eq!(
+        dump.pending_hint_at(),
+        Some(t0 + chrono::Duration::seconds(2))
+    );
+    // a later rank screen with no banner word clears the older hint: a game
+    // came after the hint's source, so it no longer names the next queue
+    let mut no_banner = full(40);
+    no_banner.next_mode_hint = None;
+    for seen in [
+        Some(Some(no_banner.clone())),
+        Some(Some(no_banner)),
+        None,
+        None,
+    ] {
+        tick(&mut feed, seen, Some("g2"), &store, Some(&mut dump)).await;
+    }
+    assert_eq!(dump.pending_hint(), None);
+}
+
+#[tokio::test]
+async fn an_update_waiting_for_the_store_is_tried_before_a_newer_one() {
+    let (_dir, store) = store_with("g1").await;
+    store
+        .insert_match(crate::main_tests::test_match("g2", "victory"))
+        .await
+        .unwrap();
+    let failing = Failing {
+        store: &store,
+        fail: Mutex::new(true),
+    };
+    let mut feed = RankFeed::with_read(Arc::new(|_| None));
+    tick(&mut feed, Some(Some(full(40))), Some("g1"), &failing, None).await;
+    tick(&mut feed, Some(Some(full(40))), Some("g1"), &failing, None).await;
+    // g2's screen settles g1's at once; the store refuses it
+    tick(&mut feed, Some(Some(full(50))), Some("g2"), &failing, None).await;
+    assert_eq!(
+        feed.unsaved.as_ref().map(|(s, _)| s.session.as_str()),
+        Some("g1")
+    );
+    // keep the store failing through g2's second read so g1 still waits;
+    // the two updates have not met on one tick yet
+    tick(&mut feed, Some(Some(full(50))), Some("g2"), &failing, None).await;
+    assert_eq!(
+        feed.unsaved.as_ref().map(|(s, _)| s.session.as_str()),
+        Some("g1")
+    );
+    *failing.fail.lock().unwrap() = false;
+    // g1 is tried first, then g2 settles (the game closed) on the same
+    // tick: both are stored and nothing waits (were g1 tried only on a tick
+    // with nothing settling, it would still wait here)
+    assert!(tick(&mut feed, None, None, &failing, None).await);
+    assert!(feed.unsaved.is_none());
+    let g1 = store.get_session_snapshots("g1").await.unwrap();
+    let g2 = store.get_session_snapshots("g2").await.unwrap();
+    assert_eq!(g1[0].rank_update, Some(full(40)));
+    assert_eq!(g2[0].rank_update, Some(full(50)));
+}
+
+#[tokio::test]
+async fn the_game_process_stopping_stores_the_held_screen() {
+    let (_dir, store) = store_with("g1").await;
+    let mut feed = RankFeed::with_read(Arc::new(|_| None));
+    tick(&mut feed, Some(Some(full(40))), Some("g1"), &store, None).await;
+    tick(&mut feed, Some(Some(full(40))), Some("g1"), &store, None).await;
+    assert!(close(&mut feed, &store, None).await);
+    let rows = store.get_session_snapshots("g1").await.unwrap();
+    assert_eq!(rows[0].rank_update, Some(full(40)));
+    assert!(!close(&mut feed, &store, None).await, "nothing held");
+}
+
+#[tokio::test]
+async fn a_shutdown_on_the_rank_screen_stores_the_held_screen() {
+    let (_dir, store) = store_with("g1").await;
+    let mut feed = RankFeed::with_read(Arc::new(|_| None));
+    // the tracker stops while the rank screen still shows: no miss, no
+    // game close, nothing settled yet
+    tick(&mut feed, Some(Some(full(40))), Some("g1"), &store, None).await;
+    tick(&mut feed, Some(Some(full(40))), Some("g1"), &store, None).await;
+    let before = store.get_session_snapshots("g1").await.unwrap();
+    assert_eq!(before[0].rank_update, None);
+    // No upload runs in this test, so a new row is unsynced whether or not
+    // the rank write queues it. Mark the game uploaded first: then
+    // `!synced` below shows the stored rank queued it again for the next
+    // upload. The upload itself is not run here.
+    store
+        .mark_synced(&crate::storage::SyncClaim::capture(&before))
+        .await
+        .unwrap();
+    assert!(
+        store.get_session_snapshots("g1").await.unwrap()[0].synced,
+        "uploaded before the shutdown"
+    );
+    assert!(finish_on_shutdown(&mut feed, &store, None).await);
+    let rows = store.get_session_snapshots("g1").await.unwrap();
+    assert_eq!(rows[0].rank_update, Some(full(40)));
+    assert!(!rows[0].synced, "the stored rank queues the next upload");
+    assert!(
+        feed.held.is_none(),
+        "nothing left for the drop to throw away"
+    );
+    assert!(!finish_on_shutdown(&mut feed, &store, None).await);
+}
+
+#[tokio::test]
+async fn a_shutdown_gives_an_update_the_store_refused_one_last_try() {
+    let (_dir, store) = store_with("g1").await;
+    let failing = Failing {
+        store: &store,
+        fail: Mutex::new(true),
+    };
+    let mut feed = RankFeed::with_read(Arc::new(|_| None));
+    for seen in [Some(Some(full(40))), Some(Some(full(40))), None, None] {
+        tick(&mut feed, seen, Some("g1"), &failing, None).await;
+    }
+    assert!(feed.unsaved.is_some());
+    *failing.fail.lock().unwrap() = false;
+    assert!(finish_on_shutdown(&mut feed, &failing, None).await);
+    assert!(feed.unsaved.is_none());
+    let rows = store.get_session_snapshots("g1").await.unwrap();
+    assert_eq!(rows[0].rank_update, Some(full(40)));
+}
+
+// ---- the live feed and the event loop ----
+
+#[test]
+fn a_feed_with_a_pack_on_disk_is_on_and_reads_frames() {
+    use stat_tracker::shadow::rank::templates::ClassTemplate;
+    use stat_tracker::shadow::rank::{
+        Family, GATE_CLASS, RECOGNIZER_ID, TEMPLATE_DIR, TemplateSet,
+    };
+    // the smallest pack that loads: the gate template alone
+    let (w, h, _) = Family::Gate.shape();
+    let mut set = TemplateSet {
+        recognizer: RECOGNIZER_ID.to_string(),
+        ..TemplateSet::default()
+    };
+    set.families.insert(
+        Family::Gate,
+        vec![ClassTemplate {
+            class: GATE_CLASS.to_string(),
+            aspect: 1.0,
+            n: 1,
+            pooled: false,
+            vector: vec![0.5; w * h],
+        }],
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    set.save_dir(&dir.path().join(TEMPLATE_DIR)).unwrap();
+    let feed = RankFeed::for_setting(RankSetting::RankV1, dir.path()).expect("the feed is on");
+    // a frame flagged as the rank screen goes through the pack's reader:
+    // a blank frame is no rank screen, so no read, and no panic
+    let read = feed.reader();
+    let seen = read_rank_screen(
+        Some(&read),
+        Some(OutcomeSource::RankScreen),
+        false,
+        &frame(),
+    );
+    assert_eq!(seen, Some(None));
+    // another size is no read either (logged once per run)
+    let small = RgbImage::new(1920, 1080);
+    assert_eq!(read(&small), None);
+    assert_eq!(read(&small), None);
+    // switched off with the same pack: no feed
+    assert!(RankFeed::for_setting(RankSetting::Off, dir.path()).is_none());
+}
+
+#[test]
+fn the_rank_screen_belongs_to_the_open_game_while_it_is_recent() {
+    use crate::ActiveGame;
+    use std::time::{Duration, Instant};
+    let open = |idle: Duration| {
+        ActiveGame::open_at(
+            "g1".to_string(),
+            stat_tracker::detect::MatchOutcome::Unknown,
+            Vec::new(),
+            Instant::now().checked_sub(idle).expect("a past instant"),
+        )
+    };
+    assert_eq!(rank_game(None), None);
+    let recent = open(Duration::from_secs(5));
+    assert_eq!(rank_game(Some(&recent)), Some("g1"));
+    let quiet = open(crate::daemon::RANK_OUTCOME_MAX_IDLE + Duration::from_secs(60));
+    assert_eq!(rank_game(Some(&quiet)), None);
+}
+
+#[test]
+fn the_poll_loop_wires_the_feed_in_order() {
+    let run_loop = crate::main_tests::source_text::fn_source("run_loop");
+    let at = |needle: &str| {
+        run_loop
+            .find(needle)
+            .unwrap_or_else(|| panic!("run_loop must contain {needle:?}"))
+    };
+    // built once from config `rank_reader` (env override inside) by the
+    // caller (off is `None`), and handed in; the loop never builds its own
+    assert!(!run_loop.contains("RankFeed::from_env("));
+    assert!(!run_loop.contains("RankFeed::for_config("));
+    let feed = at("if rank_feed.is_some()");
+    // the game process stopping settles a held screen at once (the poll
+    // arm, not the keyboard arm's earlier `if !running`)
+    let poll = at("poll_timer.tick()");
+    let stopped = poll
+        + run_loop[poll..]
+            .find("if !running {")
+            .unwrap_or_else(|| panic!("the poll arm must contain if !running {{"));
+    let close = at("daemon::rank::close(feed, store, pregame_dump.as_mut())");
+    let pregame = at("daemon::focus::note_pregame(");
+    assert!(feed < poll && poll < stopped && stopped < close && close < pregame);
+    let branch = &run_loop[stopped..pregame];
+    let close_at = branch
+        .find("daemon::rank::close(feed, store, pregame_dump.as_mut())")
+        .expect("close sits in the poll-arm process-stop branch");
+    assert!(
+        !branch[..close_at].contains("continue;"),
+        "close sits before the process-stop branch's continue, not after the branch"
+    );
+    let refresh_at = branch
+        .find("refresh_snapshot(store, data_dir)")
+        .expect("the close's snapshot refresh sits in that branch");
+    assert!(
+        close_at < refresh_at,
+        "refresh_snapshot follows close in the process-stop branch"
+    );
+    // and before the branch's own `continue;`: a refresh after it would sit
+    // outside the branch and run on every poll tick, not when close stored
+    // a rank
+    let continue_at = close_at
+        + branch[close_at..]
+            .find("continue;")
+            .expect("the process-stop branch ends in continue");
+    assert!(
+        refresh_at < continue_at,
+        "refresh_snapshot sits before the process-stop branch's continue"
+    );
+    // read in the analysis thread, after the poll analysis perf sample
+    let perf = at("stat_tracker::perf::Stage::PollAnalyze");
+    let read = at("daemon::rank::read_rank_screen(");
+    assert!(
+        perf < read,
+        "the rank read is not in the poll analysis time"
+    );
+    // the held-back flag is this tick's: forgotten before the outcome
+    // detector runs, asked after it, and passed to the read
+    let holds = at("let rank_holds = rank_feed.as_ref().is_some_and(");
+    let forget = at("stability.forget_first_seen();");
+    let detect = at("detect::match_end::detect_outcome_signal_polled(");
+    let asked = at("stability.first_seen(detect::RANK_SCREEN_CONTEXT)");
+    assert!(holds < forget && forget < detect && detect < asked && asked < read);
+    // the held screen is the feed's own, not another flag
+    let holds_stmt = &run_loop[holds..];
+    let holds_stmt = &holds_stmt[..holds_stmt.find(';').expect("rank_holds ends")];
+    assert!(
+        holds_stmt.ends_with("is_some_and(daemon::rank::RankFeed::holds_screen)"),
+        "{holds_stmt}"
+    );
+    // the flag is the one gate function, fed the held screen and the
+    // first sighting, not an inline `&&` the loop could drift from
+    const GATE: &str = "let rank_held_back = daemon::rank::rank_held_back(";
+    let gate = at(GATE);
+    assert!(
+        detect < gate && gate < asked,
+        "the gate is built after the detector"
+    );
+    let gate_call = &run_loop[gate + GATE.len()..];
+    let gate_call = &gate_call[..gate_call.find(");").expect("the gate call ends")];
+    let args: Vec<&str> = gate_call
+        .split(',')
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+        .collect();
+    assert_eq!(
+        args,
+        [
+            "rank_holds",
+            "stability.first_seen(detect::RANK_SCREEN_CONTEXT)"
+        ],
+        "{gate_call}"
+    );
+    assert_eq!(
+        run_loop.matches("stability.first_seen(").count(),
+        1,
+        "first_seen is asked only through the gate"
+    );
+    let call = &run_loop[read..];
+    let call = &call[..call.find(");").expect("the read call ends")];
+    assert!(call.contains("rank_held_back"), "{call}");
+    // a failed analysis is skipped, and the tick runs before the session
+    // machine moves the open game on
+    let ok = at("let analysis_ok = matches!(&analyzed, Ok(Ok(_)));");
+    let tick = at("daemon::rank::tick(");
+    let apply = at("apply_poll_tick(");
+    assert!(read < ok && ok < tick && tick < apply);
+    assert!(run_loop[ok..tick].contains("if analysis_ok"));
+    assert!(run_loop[tick..apply].contains("refresh_snapshot(store, data_dir)"));
+    // the tick gets this tick's held-back flag, carried out of the analysis
+    // thread with its read, so a held-back frame never starts a screen for
+    // a new game (`RankFeed::observe_tick`)
+    let tick_call = &run_loop[tick..];
+    let tick_call = &tick_call[..tick_call.find(".await").expect("the tick call ends")];
+    let tick_args: Vec<&str> = tick_call.split(',').map(str::trim).collect();
+    assert_eq!(
+        tick_args[1..3],
+        ["rank_seen", "rank_held_back"],
+        "{tick_call}"
+    );
+    assert!(
+        run_loop.contains("rank_seen, rank_held_back, pregame, postgame)"),
+        "the analysis returns the flag next to its read"
+    );
+    assert!(
+        run_loop.contains("None, None, None, false, None, None)"),
+        "a failed analysis holds nothing back"
+    );
+    let game = at("daemon::rank::rank_game(st.active_game.as_ref())");
+    assert!(ok < game && game < apply);
+}
+
+// ---- review regressions: the newest pair only, and a missed tick ----
+
+#[test]
+fn a_newer_read_that_disagrees_keeps_no_older_pair() {
+    // [A, A, B]: the screen moved on from A, so A is not kept
+    let r = settle(&[Some(full(72)), Some(full(72)), Some(full(10))]);
+    assert_eq!(r.progress_pct, None);
+    // the fields the newest two reads agree on are kept
+    assert_eq!(r.hero_sr, n(3412, 0.85));
+    assert_eq!(r.division, n(3, 0.9));
+}
+
+#[test]
+fn a_rank_up_seen_once_before_the_screen_goes_keeps_no_old_division() {
+    // division 3 at 95%, then the rank-up to division 2 shows on the last
+    // read before the screen goes: neither division is kept
+    let mut up = full(5);
+    up.division = n(2, 0.9);
+    let r = settle(&[Some(full(95)), Some(full(95)), Some(up)]);
+    assert_eq!(r.division, None);
+    assert_eq!(r.progress_pct, None);
+    assert_eq!(r.role_rank, t("Diamond", 0.8));
+}
+
+#[tokio::test]
+async fn one_missed_tick_does_not_settle_the_screen_and_the_final_reads_are_stored() {
+    let (_dir, store) = store_with("g1").await;
+    let mut feed = RankFeed::with_read(Arc::new(|_| None));
+    // [10, 10, gap, 40, 40, gone]: the gap is one tick that missed the screen
+    for seen in [
+        Some(Some(full(10))),
+        Some(Some(full(10))),
+        None,
+        Some(Some(full(40))),
+        Some(Some(full(40))),
+        None,
+        None,
+    ] {
+        tick(&mut feed, seen, Some("g1"), &store, None).await;
+    }
+    let rows = store.get_session_snapshots("g1").await.unwrap();
+    let pct = rows[0]
+        .rank_update
+        .as_ref()
+        .and_then(|r| r.progress_pct.clone());
+    assert_eq!(pct, n(40, 0.9), "the final reads, not the first ones");
+}
+
+#[tokio::test]
+async fn a_second_settle_of_the_same_game_keeps_the_hint_its_first_settle_handed_on() {
+    let (dir, store) = store_with("g1").await;
+    let queue = QueueTitleFeed::with_read(Arc::new(|_, _| Field::none()));
+    let mut dump = PregameDump::with_readers(
+        false,
+        None,
+        Some(queue),
+        dir.path(),
+        std::time::Duration::from_millis(1_500),
+    )
+    .expect("a saver for the queue title reader");
+    let mut feed = RankFeed::with_read(Arc::new(|_| None));
+    // [A, A, miss, miss]: the first part agrees on the banner and settles
+    for seen in [Some(Some(full(40))), Some(Some(full(40))), None, None] {
+        tick(&mut feed, seen, Some("g1"), &store, Some(&mut dump)).await;
+    }
+    assert_eq!(
+        dump.pending_hint(),
+        Some(("OPEN QUEUE".to_string(), "g1".to_string()))
+    );
+    // the screen comes back after two misses with no agreed banner and
+    // settles again: the store refuses the second rank, and the hint the
+    // first settle handed on stays (no later game came)
+    let mut no_banner = full(40);
+    no_banner.next_mode_hint = None;
+    for seen in [
+        Some(Some(no_banner.clone())),
+        Some(Some(no_banner)),
+        None,
+        None,
+    ] {
+        tick(&mut feed, seen, Some("g1"), &store, Some(&mut dump)).await;
+    }
+    assert_eq!(
+        dump.pending_hint(),
+        Some(("OPEN QUEUE".to_string(), "g1".to_string()))
+    );
+}
+
+#[test]
+fn the_banner_classes_map_to_the_queue_title_spelling() {
+    use crate::daemon::queue_title::hint_agrees;
+    for (banner, hint, title, other) in [
+        (
+            "COMPETITIVE: 6V6 OPEN QUEUE",
+            "OPEN QUEUE",
+            "OPEN QUEUE",
+            "ROLE QUEUE",
+        ),
+        (
+            "COMPETITIVE-6V6-OPEN-QUEUE",
+            "OPEN-QUEUE",
+            "OPEN QUEUE",
+            "ROLE QUEUE",
+        ),
+        (
+            "COMPETITIVE_6V6_OPEN_QUEUE",
+            "OPEN_QUEUE",
+            "OPEN QUEUE",
+            "ROLE QUEUE",
+        ),
+        (
+            "competitive:6v6_open_queue",
+            "open_queue",
+            "OPEN QUEUE",
+            "ROLE QUEUE",
+        ),
+        (
+            "COMPETITIVE: 5V5 ROLE QUEUE",
+            "ROLE QUEUE",
+            "ROLE QUEUE",
+            "OPEN QUEUE",
+        ),
+        (
+            "COMPETITIVE: OPEN QUEUE",
+            "OPEN QUEUE",
+            "OPEN QUEUE",
+            "ROLE QUEUE",
+        ),
+        (
+            "COMPETITIVE: ROLE QUEUE",
+            "ROLE QUEUE",
+            "ROLE QUEUE",
+            "OPEN QUEUE",
+        ),
+        (
+            " competitive:role queue ",
+            "role queue",
+            "ROLE QUEUE",
+            "OPEN QUEUE",
+        ),
+        ("ROLE QUEUE", "ROLE QUEUE", "ROLE QUEUE", "OPEN QUEUE"),
+    ] {
+        assert_eq!(queue_hint(banner), hint, "{banner:?}");
+        assert!(hint_agrees(queue_hint(banner), title), "{banner:?}");
+        assert!(!hint_agrees(queue_hint(banner), other), "{banner:?}");
+    }
+    // Anything else is kept as read, trimmed. A team size word is dropped
+    // only right after a dropped COMPETITIVE.
+    for (banner, kept) in [
+        ("OPEN QUEUE", "OPEN QUEUE"),
+        (" ROLE QUEUE ", "ROLE QUEUE"),
+        ("6V6 OPEN QUEUE", "6V6 OPEN QUEUE"),
+        ("COMPETITIVE", "COMPETITIVE"),
+        ("COMPETITIVE:", "COMPETITIVE:"),
+        ("COMPETITIVE: 6V6", "COMPETITIVE: 6V6"),
+        ("COMPETITIVEROLE QUEUE", "COMPETITIVEROLE QUEUE"),
+        ("QUICK PLAY: ROLE QUEUE", "QUICK PLAY: ROLE QUEUE"),
+    ] {
+        assert_eq!(queue_hint(banner), kept, "{banner:?}");
+    }
+    // QUICK PLAY stays fail-closed: it never agrees with a queue title.
+    assert!(!hint_agrees(
+        queue_hint("QUICK PLAY: ROLE QUEUE"),
+        "ROLE QUEUE"
+    ));
+    assert!(!hint_agrees(
+        queue_hint("QUICK PLAY: OPEN QUEUE"),
+        "OPEN QUEUE"
+    ));
+}
+
+#[tokio::test]
+async fn an_open_queue_banner_is_handed_on_without_its_team_size() {
+    let (dir, store) = store_with("g1").await;
+    let queue = QueueTitleFeed::with_read(Arc::new(|_, _| Field::none()));
+    let mut dump = PregameDump::with_readers(
+        false,
+        None,
+        Some(queue),
+        dir.path(),
+        std::time::Duration::from_millis(1_500),
+    )
+    .expect("a saver for the queue title reader");
+    let mut feed = RankFeed::with_read(Arc::new(|_| None));
+    let mut read = full(40);
+    read.next_mode_hint = t("COMPETITIVE: 6V6 OPEN QUEUE", 0.75);
+    for seen in [
+        Some(Some(read.clone())),
+        Some(Some(read.clone())),
+        None,
+        None,
+    ] {
+        tick(&mut feed, seen, Some("g1"), &store, Some(&mut dump)).await;
+    }
+    assert_eq!(
+        dump.pending_hint(),
+        Some(("OPEN QUEUE".to_string(), "g1".to_string()))
+    );
+    let rows = store.get_session_snapshots("g1").await.unwrap();
+    assert_eq!(
+        rows[0].rank_update,
+        Some(read),
+        "the game record keeps the banner word as read"
+    );
+}
+
+#[tokio::test]
+async fn a_competitive_banner_is_handed_on_as_the_queue_title_spelling() {
+    let (dir, store) = store_with("g1").await;
+    let queue = QueueTitleFeed::with_read(Arc::new(|_, _| Field::none()));
+    let mut dump = PregameDump::with_readers(
+        false,
+        None,
+        Some(queue),
+        dir.path(),
+        std::time::Duration::from_millis(1_500),
+    )
+    .expect("a saver for the queue title reader");
+    let mut feed = RankFeed::with_read(Arc::new(|_| None));
+    let mut read = full(40);
+    read.next_mode_hint = t("COMPETITIVE: ROLE QUEUE", 0.75);
+    for seen in [
+        Some(Some(read.clone())),
+        Some(Some(read.clone())),
+        None,
+        None,
+    ] {
+        tick(&mut feed, seen, Some("g1"), &store, Some(&mut dump)).await;
+    }
+    assert_eq!(
+        dump.pending_hint(),
+        Some(("ROLE QUEUE".to_string(), "g1".to_string()))
+    );
+    let rows = store.get_session_snapshots("g1").await.unwrap();
+    assert_eq!(
+        rows[0].rank_update,
+        Some(read),
+        "the game record keeps the banner word as read"
+    );
+}
+
+// ---- the switch: config `rank_reader` under the env overrides ----
+
+#[test]
+fn rank_reader_drives_both_readers_and_the_env_overrides_it_both_ways() {
+    use stat_tracker::shadow::queue_title::QueueTitleSetting;
+    use stat_tracker::shadow::rank::override_of;
+    for config in [false, true] {
+        assert_eq!(RankSetting::for_config(config, None).is_on(), config);
+        assert_eq!(QueueTitleSetting::for_config(config, None).is_on(), config);
+        let on = Some(RankSetting::parse("on"));
+        let off = Some(RankSetting::parse("off"));
+        assert!(RankSetting::for_config(config, on).is_on());
+        assert!(!RankSetting::for_config(config, off).is_on());
+        let on = Some(QueueTitleSetting::parse("1"));
+        let off = Some(QueueTitleSetting::parse("0"));
+        assert!(QueueTitleSetting::for_config(config, on).is_on());
+        assert!(!QueueTitleSetting::for_config(config, off).is_on());
+    }
+    // unset or blank leaves the config in charge
+    assert_eq!(override_of(None), None);
+    assert_eq!(override_of(Some("")), None);
+    assert_eq!(override_of(Some("  ")), None);
+    assert_eq!(override_of(Some("off")), Some("off"));
+    // the default stays off: a file with no key reads no rank
+    assert!(!stat_tracker::config::Config::default().rank_reader);
+}
+
+/// Fail safe: a reader that is on with its pack missing or broken is no
+/// feed (the poll runs as with the reader off, so games record as before),
+/// and the app's warning names the pack.
+#[test]
+fn a_reader_on_with_no_usable_pack_records_games_and_warns() {
+    use stat_tracker::shadow::queue_title;
+    use stat_tracker::shadow::rank::{TEMPLATE_DIR, pack_warning};
+    let dir = tempfile::tempdir().expect("tempdir");
+    assert!(RankFeed::for_setting(RankSetting::RankV1, dir.path()).is_none());
+    let queue = queue_title::QueueTitleSetting::On;
+    assert!(queue_title::Reader::for_setting(queue, dir.path()).is_none());
+    // no feed reads no frame, held back or not
+    for held_back in [false, true] {
+        let seen = read_rank_screen(None, Some(OutcomeSource::RankScreen), held_back, &frame());
+        assert_eq!(seen, None);
+    }
+    // rank reader on, queue title reader on, the rank variable set; the
+    // queue title variable unset (`warn_q` below sets it)
+    let warn =
+        |rank: bool, queue: bool, env: bool| pack_warning(dir.path(), rank, queue, env, false);
+    assert_eq!(warn(false, false, false), None, "both off");
+    assert_eq!(warn(false, false, true), None, "both off by the env");
+    let missing = warn(true, true, false).expect("a warning");
+    // two packs: "those packs", and the restart the start-only load needs
+    assert_eq!(
+        missing,
+        "Read my rank is on, but the pack in templates/rank-v1 is not installed and the pack \
+         in templates/queue-title-v1 is not installed. Games still record, without what those \
+         packs read. The tracker loads packs only at start: restart it once it has downloaded \
+         the packs from the site, or turn off Read my rank after Comp games."
+    );
+    assert!(!missing.contains('\u{2014}'), "no em dash");
+    // the rank switch Off (STAT_TRACKER_RANK_RECOGNIZER=off) with the queue
+    // title reader still on: the line never says Read my rank is on
+    let only_queue = warn(false, true, true).expect("a warning");
+    assert_eq!(
+        only_queue,
+        "The queue title reader is on, but the pack in templates/queue-title-v1 is not \
+         installed. Games still record, without what that pack reads. The tracker loads packs \
+         only at start: restart it once it has downloaded the pack from the site, or set \
+         STAT_TRACKER_QUEUE_TITLE_RECOGNIZER to off."
+    );
+    // the queue title reader off by its variable: the rank reader alone
+    let only_rank = warn(true, false, false).expect("a warning");
+    assert_eq!(
+        only_rank,
+        "The rank screen reader is on, but the pack in templates/rank-v1 is not installed. \
+         Games still record, without what that pack reads. The tracker loads packs only at \
+         start: restart it once it has downloaded the pack from the site, or turn off Read my \
+         rank after Comp games."
+    );
+    // STAT_TRACKER_RANK_RECOGNIZER=on locks the switch: the line points at
+    // the variables, never at the switch it cannot turn
+    let env_rank = warn(true, false, true).expect("a warning");
+    assert_eq!(
+        env_rank,
+        "The rank screen reader is on, but the pack in templates/rank-v1 is not installed. \
+         Games still record, without what that pack reads. The tracker loads packs only at \
+         start: restart it once it has downloaded the pack from the site, or set \
+         STAT_TRACKER_RANK_RECOGNIZER to off."
+    );
+    let env_both = warn(true, true, true).expect("a warning");
+    assert_eq!(
+        env_both,
+        "Read my rank is on, but the pack in templates/rank-v1 is not installed and the pack \
+         in templates/queue-title-v1 is not installed. Games still record, without what those \
+         packs read. The tracker loads packs only at start: restart it once it has downloaded \
+         the packs from the site, or set STAT_TRACKER_RANK_RECOGNIZER and \
+         STAT_TRACKER_QUEUE_TITLE_RECOGNIZER to off."
+    );
+    for line in [&env_rank, &env_both] {
+        assert!(!line.contains("turn off Read my rank"), "{line}");
+    }
+    // the switch saved On with STAT_TRACKER_QUEUE_TITLE_RECOGNIZER=on and the
+    // rank variable unset: the switch turns the rank reader off, but only
+    // the variable turns the queue title reader off, so the line names both
+    let warn_q =
+        |rank: bool, queue: bool, env: bool| pack_warning(dir.path(), rank, queue, env, true);
+    let env_queue = warn_q(true, true, false).expect("a warning");
+    assert_eq!(
+        env_queue,
+        "Read my rank is on, but the pack in templates/rank-v1 is not installed and the pack \
+         in templates/queue-title-v1 is not installed. Games still record, without what those \
+         packs read. The tracker loads packs only at start: restart it once it has downloaded \
+         the packs from the site, or turn off Read my rank after Comp games and set \
+         STAT_TRACKER_QUEUE_TITLE_RECOGNIZER to off."
+    );
+    // both variables set: the switch is locked, so only the variables
+    assert_eq!(warn_q(true, true, true), Some(env_both.clone()));
+    // the queue title variable alone keeps its reader on: unchanged
+    assert_eq!(warn_q(false, true, true), Some(only_queue.clone()));
+    assert_eq!(warn_q(false, true, false), Some(only_queue.clone()));
+    // a pack file that does not parse: did not load
+    let rank_dir = dir.path().join(TEMPLATE_DIR);
+    std::fs::create_dir_all(&rank_dir).unwrap();
+    std::fs::write(rank_dir.join("templates.json"), "not a pack").unwrap();
+    assert!(RankFeed::for_setting(RankSetting::RankV1, dir.path()).is_none());
+    let broken = warn(true, false, false).expect("a warning");
+    assert!(
+        broken.starts_with(
+            "The rank screen reader is on, but the pack in templates/rank-v1 did not load ("
+        ),
+        "{broken}"
+    );
+    assert!(broken.contains("without what that pack reads"), "{broken}");
+    // a pack that did not load was edited or placed by hand: the sync will
+    // not download it again, so the line never waits for a download
+    assert!(
+        broken.ends_with(
+            ". The tracker loads packs only at start: replace or remove the pack folder, then \
+             restart the tracker, or turn off Read my rank after Comp games."
+        ),
+        "{broken}"
+    );
+    assert!(!broken.contains("downloaded"), "{broken}");
+    // one pack broken and the other not installed: fix the one, wait for
+    // the other
+    let mixed = warn(true, true, false).expect("a warning");
+    assert!(
+        mixed.ends_with(
+            "and the pack in templates/queue-title-v1 is not installed. Games still record, \
+             without what those packs read. The tracker loads packs only at start: replace or \
+             remove the pack folder that did not load, then restart the tracker once it has \
+             downloaded the other pack from the site, or turn off Read my rank after Comp games."
+        ),
+        "{mixed}"
+    );
+    // a queue title pack file that is there but cannot be read (here a
+    // folder) did not load; it is not "not installed"
+    let queue_dir = dir.path().join(queue_title::TEMPLATE_DIR);
+    std::fs::create_dir_all(queue_dir.join(queue_title::PACK_FILE)).unwrap();
+    let unreadable = warn(false, true, false).expect("a warning");
+    assert!(
+        unreadable.contains("the pack in templates/queue-title-v1 did not load ("),
+        "{unreadable}"
+    );
+    assert!(!unreadable.contains("not installed"), "{unreadable}");
+    assert!(
+        unreadable.ends_with(
+            "replace or remove the pack folder, then restart the tracker, or set \
+             STAT_TRACKER_QUEUE_TITLE_RECOGNIZER to off."
+        ),
+        "{unreadable}"
+    );
+    // both broken: one line, "those packs"
+    let both = warn(true, true, false).expect("a warning");
+    assert!(both.starts_with("Read my rank is on, but "), "{both}");
+    assert_eq!(both.matches("did not load (").count(), 2, "{both}");
+    assert!(both.contains("without what those packs read"), "{both}");
+    assert!(
+        both.ends_with(
+            "replace or remove the pack folders, then restart the tracker, or turn off Read my \
+             rank after Comp games."
+        ),
+        "{both}"
+    );
+    // both broken with the queue title variable keeping its reader on
+    let both_q = warn_q(true, true, false).expect("a warning");
+    assert!(
+        both_q.ends_with(
+            "replace or remove the pack folders, then restart the tracker, or turn off Read my \
+             rank after Comp games and set STAT_TRACKER_QUEUE_TITLE_RECOGNIZER to off."
+        ),
+        "{both_q}"
+    );
+}
+
+// ---- Numbani 2026-11-13: a focus pause must not cost the rank ----
+
+/// A synthetic frame: pixel (0, 0) says what it shows.
+fn shows(what: u8) -> RgbImage {
+    let mut img = frame();
+    img.put_pixel(0, 0, image::Rgb([what, 0, 0]));
+    img
+}
+const PROGRESSION: u8 = 1;
+const RANK: u8 = 2;
+const MENU: u8 = 3;
+
+/// rank-v1 on the synthetic frames: only the rank screen reads.
+fn rank_v1(calls: &Arc<AtomicUsize>) -> RankReadFn {
+    let calls = Arc::clone(calls);
+    Arc::new(move |img| {
+        calls.fetch_add(1, Ordering::SeqCst);
+        (img.get_pixel(0, 0).0[0] == RANK).then(|| full(40))
+    })
+}
+
+/// One analyzed poll tick as the loop runs it: `first_seen` goes through
+/// the loop's own gate ([`rank_held_back`]), with the held screen taken
+/// before the tick, and the feed gets the tick's held-back flag
+/// ([`RankFeed::observe_tick`]). `fixed` false replays the old wiring,
+/// which never read a held-back frame.
+fn poll(
+    feed: &mut RankFeed,
+    source: Option<OutcomeSource>,
+    first_seen: bool,
+    img: &RgbImage,
+    fixed: bool,
+) -> Option<Settled> {
+    let read = feed.reader();
+    let held_back = fixed && rank_held_back(feed.holds_screen(), first_seen);
+    let seen = read_rank_screen(Some(&read), source, held_back, img);
+    feed.observe_tick(seen, held_back, Some("g1"), Utc::now())
+}
+
+/// A black frame with white bars inside the rank word crop (x 1% to 25%,
+/// y 14.5% to 22.5% of the 16:9 frame): lit, so the stability gate checks
+/// it, but no real rank word.
+fn lit_word_crop() -> RgbImage {
+    let mut rgb = frame();
+    for y in (1440 * 160 / 1000)..(1440 * 200 / 1000) {
+        for x in (2560 * 20 / 1000)..(2560 * 200 / 1000) {
+            if (x / 24) % 2 == 0 {
+                rgb.put_pixel(x, y, image::Rgb([255, 255, 255]));
+            }
+        }
+    }
+    rgb
+}
+
+/// The poll loop's stability step on `rgb`: forget the last tick's first
+/// sightings, run the outcome detector, and ask whether it held the rank
+/// word back on a first sighting.
+fn first_seen_on(rgb: &RgbImage, stability: &mut FrameStability) -> bool {
+    use stat_tracker::detect::match_end::{
+        FinalScoreSource, ResultWords, Titles, detect_outcome_signal_polled,
+    };
+    stability.forget_first_seen();
+    let _ = detect_outcome_signal_polled(
+        &image::DynamicImage::ImageRgb8(rgb.clone()),
+        rgb,
+        stability,
+        FinalScoreSource::for_reader(false),
+        &Titles::for_rgb(false, rgb),
+        &ResultWords::for_reader(false),
+    );
+    stability.first_seen(stat_tracker::detect::RANK_SCREEN_CONTEXT)
+}
+
+/// The replay: a SUMMARY or progression frame the end detector took for
+/// the rank screen (rank-v1 rejects it), a tick after it that missed,
+/// the focus pause (no tick reaches the feed), the first tick after it
+/// held back by the stability gate on a real rank screen, one more read of
+/// it, then the screen is gone.
+///
+/// `first_seen` comes from a real [`FrameStability`] fed each tick's frame,
+/// reset on the pause as `focus::poll_pause` does. The source (what the end
+/// detector classified) stays by hand: the replay's rank screen is lit bars
+/// in the word crop, which the detector checks but never reads as a rank
+/// word, and no real rank screen frame may sit in the repo.
+fn numbani(fixed: bool) -> (Vec<Option<Settled>>, usize) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut feed = RankFeed::with_read(rank_v1(&calls));
+    let mut stability = FrameStability::default();
+    let rank_screen = Some(OutcomeSource::RankScreen);
+    let progression = shows(PROGRESSION);
+    let mut rank = lit_word_crop();
+    rank.put_pixel(0, 0, image::Rgb([RANK, 0, 0]));
+    let menu = shows(MENU);
+    let tick = |feed: &mut RankFeed,
+                stability: &mut FrameStability,
+                source: Option<OutcomeSource>,
+                img: &RgbImage| {
+        let first_seen = first_seen_on(img, stability);
+        poll(feed, source, first_seen, img, fixed)
+    };
+    // one entry held (the log's "1 entry"), then one miss before the pause
+    let mut out = vec![
+        tick(&mut feed, &mut stability, rank_screen, &progression),
+        tick(&mut feed, &mut stability, None, &progression),
+    ];
+    // focus pause: `poll_skip` continues before any capture or rank tick,
+    // and the pause edge drops the stability history
+    stability.reset();
+    // the first tick after it: the lit rank word has no history, so the
+    // gate holds it back and the detector does not classify the frame
+    out.push(tick(&mut feed, &mut stability, None, &rank));
+    out.push(tick(&mut feed, &mut stability, rank_screen, &rank));
+    out.push(tick(&mut feed, &mut stability, None, &menu));
+    out.push(tick(&mut feed, &mut stability, None, &menu));
+    (out, calls.load(Ordering::SeqCst))
+}
+
+#[test]
+fn a_held_back_tick_after_a_focus_pause_keeps_the_rank() {
+    let (settled, calls) = numbani(true);
+    let kept: Vec<_> = settled.into_iter().flatten().collect();
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(kept[0].session, "g1");
+    assert_eq!(kept[0].rank, full(40));
+    // the false fire, the held-back frame and the real read
+    assert_eq!(calls, 3);
+    // the old wiring counted the held-back tick as the second miss: it
+    // settled the false fire with no rank, then held the one real read
+    // alone, which keeps nothing
+    let (settled, calls) = numbani(false);
+    assert!(settled.iter().all(Option::is_none), "{settled:?}");
+    assert_eq!(calls, 2);
+}
+
+/// The gate the loop and the replay share: both halves, or no held-back
+/// read.
+#[test]
+fn a_frame_is_held_back_only_with_a_screen_held_and_a_first_sighting() {
+    assert!(rank_held_back(true, true));
+    assert!(!rank_held_back(true, false), "the gate looked at the crop");
+    assert!(!rank_held_back(false, true), "no screen held");
+    assert!(!rank_held_back(false, false));
+    // through the gate, a first sighting with no screen held reads nothing,
+    // and the same frame with a screen held is read
+    let calls = Arc::new(AtomicUsize::new(0));
+    let read = rank_v1(&calls);
+    let mut feed = RankFeed::with_read(Arc::clone(&read));
+    let gated = |feed: &RankFeed| rank_held_back(feed.holds_screen(), true);
+    assert_eq!(
+        read_rank_screen(Some(&read), None, gated(&feed), &shows(RANK)),
+        None
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    feed.observe(Some(Some(full(40))), Some("g1"), Utc::now());
+    assert_eq!(
+        read_rank_screen(Some(&read), None, gated(&feed), &shows(RANK)),
+        Some(Some(full(40)))
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    // a crop the gate looked at on a held screen is not read unless the
+    // detector classified it
+    let looked = rank_held_back(feed.holds_screen(), false);
+    assert_eq!(
+        read_rank_screen(Some(&read), None, looked, &shows(RANK)),
+        None
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+/// The open game changes while a screen is held, on a held-back tick: the
+/// tick finishes the old game's screen, and the frame (read only because
+/// that screen was held, never classified) starts nothing for the new game.
+#[test]
+fn a_held_back_frame_on_a_new_game_finishes_the_old_screen_only() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let read = rank_v1(&calls);
+    let now = Utc::now();
+    let held_g1 = || {
+        let mut feed = RankFeed::with_read(Arc::clone(&read));
+        feed.observe_tick(Some(Some(full(40))), false, Some("g1"), now);
+        feed.observe_tick(Some(Some(full(40))), false, Some("g1"), now);
+        feed
+    };
+    for game in [Some("g2"), None] {
+        let mut feed = held_g1();
+        let held_back = rank_held_back(feed.holds_screen(), true);
+        assert!(held_back);
+        let seen = read_rank_screen(Some(&read), None, held_back, &shows(RANK));
+        assert_eq!(seen, Some(Some(full(40))), "rank-v1 reads it");
+        let done = feed.observe_tick(seen, held_back, game, now);
+        let done = done.expect("the old game's screen settles");
+        assert_eq!((done.session.as_str(), done.rank), ("g1", full(40)));
+        assert!(!feed.holds_screen(), "{game:?}: nothing starts from it");
+        // so the next held-back tick reads nothing at all
+        assert!(!rank_held_back(feed.holds_screen(), true));
+    }
+    // a held-back read for the held game is still held
+    let mut feed = held_g1();
+    assert_eq!(
+        feed.observe_tick(Some(Some(full(40))), true, Some("g1"), now),
+        None
+    );
+    assert!(feed.holds_screen());
+    // a classified read for a new game still starts that game's screen
+    let mut feed = held_g1();
+    let done = feed.observe_tick(Some(Some(full(50))), false, Some("g2"), now);
+    assert_eq!(done.map(|s| s.session), Some("g1".to_string()));
+    assert!(
+        feed.holds_screen(),
+        "the classified frame starts g2's screen"
+    );
+    feed.observe_tick(Some(Some(full(50))), false, Some("g2"), now);
+    let g2 = feed.close().expect("g2 settles");
+    assert_eq!((g2.session.as_str(), g2.rank), ("g2", full(50)));
+}
+
+#[test]
+fn a_held_back_frame_counts_only_as_rank_v1_reads_it() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let read = rank_v1(&calls);
+    // the rank screen under a held-back crop is a read
+    let seen = read_rank_screen(Some(&read), None, true, &shows(RANK));
+    assert_eq!(seen, Some(Some(full(40))));
+    // a frame rank-v1 rejects was looked at and is no rank screen: a miss
+    assert_eq!(
+        read_rank_screen(Some(&read), None, true, &shows(PROGRESSION)),
+        None
+    );
+    // a classified frame rank-v1 rejects stays a frame with no read
+    let seen = read_rank_screen(
+        Some(&read),
+        Some(OutcomeSource::RankScreen),
+        true,
+        &shows(MENU),
+    );
+    assert_eq!(seen, Some(None));
+    // not held back: not read
+    assert_eq!(
+        read_rank_screen(Some(&read), None, false, &shows(RANK)),
+        None
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    // a reader that panics on a held-back frame is a miss
+    let panics: RankReadFn = Arc::new(|_| panic!("reader failed (test)"));
+    assert_eq!(read_rank_screen(Some(&panics), None, true, &frame()), None);
+    // with no screen held a held-back frame is not read at all
+    let mut feed = RankFeed::with_read(rank_v1(&calls));
+    assert!(!feed.holds_screen());
+    assert_eq!(poll(&mut feed, None, true, &shows(RANK), true), None);
+    assert!(!feed.holds_screen());
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    // progression frames held back while a screen is held settle it as
+    // misses (looked at, not a rank screen)
+    let rank_screen = Some(OutcomeSource::RankScreen);
+    poll(&mut feed, rank_screen, false, &shows(PROGRESSION), true);
+    assert!(feed.holds_screen());
+    poll(&mut feed, None, true, &shows(PROGRESSION), true);
+    poll(&mut feed, None, true, &shows(PROGRESSION), true);
+    assert!(!feed.holds_screen(), "two looked-at misses settle it");
+}
+
+/// The real gate: the first tick after the focus pause (which drops the
+/// stability history) holds a lit rank-screen word crop back, and names it.
+#[test]
+fn the_first_tick_after_a_pause_holds_the_rank_word_back() {
+    use stat_tracker::detect::RANK_SCREEN_CONTEXT;
+    use stat_tracker::detect::match_end::{
+        FinalScoreSource, ResultWords, Titles, detect_outcome_signal_polled,
+    };
+    let detect = |rgb: &RgbImage, stability: &mut FrameStability| {
+        stability.forget_first_seen();
+        detect_outcome_signal_polled(
+            &image::DynamicImage::ImageRgb8(rgb.clone()),
+            rgb,
+            stability,
+            FinalScoreSource::for_reader(false),
+            &Titles::for_rgb(false, rgb),
+            &ResultWords::for_reader(false),
+        )
+    };
+    let rgb = lit_word_crop();
+    let mut stability = FrameStability::default();
+    // as `focus::poll_pause` does on the pause edge
+    stability.reset();
+    assert_eq!(detect(&rgb, &mut stability), None, "deferred: no source");
+    assert!(stability.first_seen(RANK_SCREEN_CONTEXT));
+    // the next tick on the same crop has history: the detector looks at it,
+    // so the flag is gone and that tick is not held back
+    let _ = detect(&rgb, &mut stability);
+    assert!(!stability.first_seen(RANK_SCREEN_CONTEXT));
+    // a dark frame is never checked, so never a first sighting
+    let mut stability = FrameStability::default();
+    assert_eq!(detect(&frame(), &mut stability), None);
+    assert!(!stability.first_seen(RANK_SCREEN_CONTEXT));
+}

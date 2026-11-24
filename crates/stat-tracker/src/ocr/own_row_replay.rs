@@ -11,7 +11,7 @@ use std::path::Path;
 use image::DynamicImage;
 
 use super::preprocess;
-use crate::detect::hero_portrait::detect_team_size;
+use crate::frame::layout::detect_team_size;
 use crate::parse;
 
 /// Counts from one replay. `rows` maps a matched row index to how many

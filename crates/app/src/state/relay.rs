@@ -65,6 +65,15 @@ impl RelayAvailabilityState {
         self.tracker_latest.read().clone()
     }
 
+    /// The mapped reason of a failed health check (logged when it failed),
+    /// empty when it did not fail.
+    pub fn failure_reason(self) -> String {
+        match self.resource.read().as_ref() {
+            Some(Err(reason)) => reason.clone(),
+            _ => String::new(),
+        }
+    }
+
     /// Run the health check again after [`RelayAvailability::Failed`].
     /// The shell shows the checking state until the new response settles.
     pub fn retry(self) {
@@ -225,7 +234,7 @@ async fn load_relay_health() -> Result<RelayHealthSnapshot, String> {
             Err(err) => {
                 failed_attempts += 1;
                 let Some(delay_ms) = health_retry_delay_ms(&err, failed_attempts) else {
-                    return Err(err.to_string());
+                    return Err(crate::client_error::logged_message("relay health", &err));
                 };
                 pause_health_retry(delay_ms).await;
             }

@@ -323,6 +323,37 @@ fn the_switch_off_uses_tesseract_and_does_not_read_the_pack() {
     );
 }
 
+/// Every saved name is matched in one pass over the rows: a sure template
+/// row of the alt is the own row, and Tesseract is read once at most.
+/// `CAB` and `BAC` are synthetic letters, not members' names.
+#[test]
+fn every_saved_name_is_matched_with_one_read() {
+    let min = Params::DEFAULT.min_confidence;
+    let names = vec!["CAB".to_string(), "BAC".to_string()];
+    let rows = [named("OTHER", 90), named("BAC", 90)];
+    let found = choose_player_row(
+        &names,
+        1,
+        true,
+        Some(ReaderNames {
+            rows: &rows,
+            min_confidence: Some(min),
+        }),
+        BoardMatch::FullBoard,
+        || panic!("a full board of sure names does not call Tesseract"),
+    );
+    assert_eq!(
+        found.map(|m| (m.name.row, m.recognizer)),
+        Some((1, NameRecognizer::NamesV1))
+    );
+    let mut reads = 0;
+    let found = choose_player_row(&names, 1, false, None, BoardMatch::Cells, || {
+        reads += 1;
+        vec![named("ZZZ", 40), named("bac", 40)]
+    });
+    assert_eq!((found.map(|m| m.name.row), reads), (Some(1), 1));
+}
+
 #[test]
 fn the_switch_on_with_no_pack_reuses_the_cell_rows() {
     let tmp = tempfile::tempdir().unwrap();
@@ -538,7 +569,7 @@ fn a_names_pack_that_lands_after_startup_is_reloaded() {
 
     let staging = tmp.path().join("templates").join(".names-v1-staging");
     write_pack(&staging, &["ABC"]);
-    crate::packs::swap_dir(&staging, &crate::names::pack::dir_in(tmp.path())).unwrap();
+    crate::packs::layout::swap_dir(&staging, &crate::names::pack::dir_in(tmp.path())).unwrap();
 
     let board = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
         64,
@@ -575,7 +606,7 @@ fn a_names_pack_that_lands_after_startup_is_reloaded() {
     assert_eq!(switch.reload_spawns(), 1, "later reads do not load again");
     let again = tmp.path().join("templates").join(".names-v1-again");
     write_pack(&again, &["CAB"]);
-    crate::packs::swap_dir(&again, &crate::names::pack::dir_in(tmp.path())).unwrap();
+    crate::packs::layout::swap_dir(&again, &crate::names::pack::dir_in(tmp.path())).unwrap();
     assert!(
         std::sync::Arc::ptr_eq(&loaded, &switch.pack().expect("still cached")),
         "a pack swapped in after the first load waits for the next start"
@@ -619,7 +650,7 @@ fn a_names_pack_loaded_at_startup_is_cached() {
     assert_eq!(switch.reload_spawns(), 1);
     let staging = tmp.path().join("templates").join(".names-v1-next");
     write_pack(&staging, &["CAB"]);
-    crate::packs::swap_dir(&staging, &crate::names::pack::dir_in(tmp.path())).unwrap();
+    crate::packs::layout::swap_dir(&staging, &crate::names::pack::dir_in(tmp.path())).unwrap();
     assert!(std::sync::Arc::ptr_eq(
         &loaded,
         &switch.pack().expect("still the startup pack")
@@ -802,7 +833,7 @@ fn install_synthetic(data_dir: &std::path::Path, tag: &str, training: &[&str]) -
     let staging = data_dir.join("templates").join(format!(".names-v1-{tag}"));
     write_pack(&staging, training);
     let live = crate::names::pack::dir_in(data_dir);
-    crate::packs::swap_dir(&staging, &live).unwrap();
+    crate::packs::layout::swap_dir(&staging, &live).unwrap();
     installed(&live, "test")
 }
 
@@ -1155,7 +1186,7 @@ fn a_record_written_after_the_swap_and_a_read_still_reloads() {
         let staging = tmp.path().join("templates").join(".names-v1-next-1-2");
         write_pack(&staging, &["ABC", "CBA"]);
         set_version(&staging, Some("full-20990101"));
-        crate::packs::swap_dir(&staging, &live).unwrap();
+        crate::packs::layout::swap_dir(&staging, &live).unwrap();
         for _ in 0..5 {
             assert!(
                 std::sync::Arc::ptr_eq(&a, &switch.pack().unwrap()),

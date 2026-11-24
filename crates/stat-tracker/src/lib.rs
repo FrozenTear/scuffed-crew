@@ -1,28 +1,45 @@
+// The bottom layer, in its own crate (0.6 N4). Each module is re-exported
+// here at the path it had in this crate, so `stat_tracker::config::…` and
+// `crate::config::…` keep resolving.
+pub use stat_tracker_core::{
+    config, fs_mode, hero_auth, host_probe, model, ocr_status, omp, parse, perf, perf_log, proc_id,
+    replace, sandbox, setup, suspect, unsure_rule, version,
+};
+
 pub mod boundary;
 pub mod capture;
 pub mod capture_gate;
-pub mod config;
 pub mod detect;
-pub mod fs_mode;
-pub mod hero_auth;
-pub mod host_probe;
+pub mod frame;
+pub mod game_running;
+pub mod games;
+pub mod input;
 pub mod mapcrops;
 pub mod names;
 pub mod ocr;
 pub mod ocr_switch;
-pub mod omp;
+pub mod pack_cutter;
 pub mod packs;
-pub mod parse;
-pub mod perf;
-pub mod perf_log;
-pub mod proc_id;
+pub mod query;
 pub mod reader_apply;
-pub mod replace;
 pub mod report;
-pub mod sandbox;
-pub mod setup;
 pub mod shadow;
-pub mod stats;
 pub mod storage;
 pub mod sync;
 pub mod tab_retry;
+
+/// Pins the layering of the coming lib split (0.6 N4).
+#[cfg(test)]
+mod tests_layering;
+
+/// README, bootstrap and changelog pins on this package's version.
+#[cfg(test)]
+mod tests_release_pins;
+
+/// No tracker source file grows past its size cap (0.6 G1).
+#[cfg(test)]
+mod tests_file_size;
+
+/// The README's `config.toml` examples load as written.
+#[cfg(test)]
+mod tests_readme_config;

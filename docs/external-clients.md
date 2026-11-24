@@ -34,25 +34,32 @@ Best mobile Nostr client with full NIP-29 group support, push notifications, and
 
 ## Linking Your Existing Nostr Key
 
-If you already have a Nostr identity, link it to your clan account:
+If you already have a Nostr identity, link it to your clan account.
+
+Most members start with a server-managed key, and `/identity` offers **Link and verify** only when no key is linked and a NIP-07 extension is installed. So with a server-managed key, unlink it first:
 
 1. Install a NIP-07 browser extension (nos2x, Alby, or similar)
-2. Go to `/settings` on the clan site
-3. Click **Link Nostr Key**
-4. Approve the signing request in your extension
-5. Your Nostr pubkey is now linked — you're the same identity everywhere
+2. Go to `/identity` on the clan site
+3. If **Key mode** shows **Server-managed**, back the key up first if you want to keep it (see below). Then open **Advanced**, click **Unlink key** and confirm. Chat and direct messages stop working until a key is linked again
+4. Under **Link a key**, click **Detect from extension** to read your public key from the extension (or paste it)
+5. Click **Link and verify** and approve the signing request in your extension
+6. Your Nostr pubkey is now linked, and you're the same identity everywhere
 
-## Exporting Your Server-Managed Key
+## Backing Up Your Server-Managed Key
 
-If you started with a server-managed key and want to use it in external clients:
+If you started with a server-managed key, you can export an encrypted backup of it:
 
-1. Go to `/settings` on the clan site
-2. Click **Export Nostr Key**
-3. Save your secret key (`nsec...`) securely — treat it like a password
-4. Import it into your preferred Nostr client
-5. Your key mode will change from "server-managed" to "external"
+1. Go to `/identity` on the clan site
+2. Under **Back up your key**, enter a backup password (12 characters or more)
+3. Click **Export backup**
+4. Copy the backup (`ncryptsec1...`) right away. It is shown only once
+5. Store the backup and its password securely. You need both to use the key
 
-**Warning:** Once you export your key, the server can no longer sign events on your behalf. You'll need to use a NIP-07 extension for the web widget.
+The backup is your key locked with that password (NIP-49). It is not a plain `nsec`.
+
+Exporting does not change your key mode. Your key stays server-managed, and the server keeps signing for you on the clan site.
+
+To use the key in an external client, import the `ncryptsec` there if the client supports NIP-49 backups, and enter the backup password when asked.
 
 ## Our Relay
 

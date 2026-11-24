@@ -11,11 +11,57 @@ use crate::cli::FixtureKind;
 
 pub fn snapshot(kind: FixtureKind) -> Snapshot {
     match kind {
-        FixtureKind::Empty => Snapshot {
-            matches: Vec::new(),
-            sessions: Vec::new(),
-        },
+        FixtureKind::Empty => Snapshot::default(),
         FixtureKind::Sample => sample_snapshot(),
+        FixtureKind::Games => crate::fixtures_games::snapshot(),
+        FixtureKind::Full => crate::fixtures_full::snapshot(),
+    }
+}
+
+/// The season list a fixture starts with, when it has one.
+pub fn seasons_json(kind: FixtureKind) -> Option<&'static str> {
+    match kind {
+        FixtureKind::Empty => None,
+        FixtureKind::Sample | FixtureKind::Games => Some(sample_seasons_json()),
+        FixtureKind::Full => Some(crate::fixtures_full::seasons_json()),
+    }
+}
+
+/// The command line of a demo window on the empty fixture in `data_dir`,
+/// for tests ([`test_app`]).
+#[cfg(test)]
+pub(crate) fn test_cli(data_dir: &std::path::Path) -> crate::cli::Cli {
+    crate::cli::Cli {
+        data_dir: data_dir.to_path_buf(),
+        fixture: Some(FixtureKind::Empty),
+        seasons_url: None,
+        companion: false,
+        help: false,
+        version: false,
+        replace: false,
+    }
+}
+
+/// A demo app on the empty fixture in a fresh temp dir, for tests. A
+/// fixture never reads the host's config.toml or its env overlay, and a
+/// test app starts on the 0.6 layout whatever `SCUFFED_TRACKER_LAYOUT`
+/// says. It still reads the desktop and session variables, the installed
+/// tracker's version and the systemd unit, so a test must not depend on
+/// those.
+#[cfg(test)]
+pub(crate) fn test_app() -> (tempfile::TempDir, crate::app::TrackerApp) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let app = crate::app::TrackerApp::new(test_cli(dir.path())).0;
+    (dir, app)
+}
+
+/// The demo clock: the newest game's time on a fixture with games.
+pub fn clock(fixture: Option<FixtureKind>, games: &[crate::model::Game]) -> chrono::DateTime<Utc> {
+    match fixture {
+        Some(FixtureKind::Sample | FixtureKind::Games | FixtureKind::Full) => {
+            games.first().map(|g| g.played_at).unwrap_or_else(Utc::now)
+        }
+        _ => Utc::now(),
     }
 }
 
@@ -38,12 +84,12 @@ pub fn sample_seasons_json() -> &'static str {
 ]"#
 }
 
-fn dt(y: i32, m: u32, d: u32, hh: u32, mm: u32) -> SurrealDatetime {
+pub(crate) fn dt(y: i32, m: u32, d: u32, hh: u32, mm: u32) -> SurrealDatetime {
     SurrealDatetime::from(Utc.with_ymd_and_hms(y, m, d, hh, mm, 0).unwrap())
 }
 
 #[allow(clippy::too_many_arguments)]
-fn pm(
+pub(crate) fn pm(
     session_id: &str,
     hero: &str,
     map: &str,
@@ -92,6 +138,11 @@ fn pm(
         recognizer: String::new(),
         suspect_fields: Vec::new(),
         name_recognizer: None,
+        bans_picks: None,
+        bans_picks_status: None,
+        queue_title: None,
+        rank_update: None,
+        match_times: None,
     }
 }
 
@@ -220,5 +271,9 @@ fn sample_snapshot() -> Snapshot {
             final_outcome: "victory".into(),
         },
     ];
-    Snapshot { matches, sessions }
+    Snapshot {
+        matches,
+        sessions,
+        ..Snapshot::default()
+    }
 }

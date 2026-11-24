@@ -308,7 +308,7 @@ impl Reader {
     }
 
     /// What `ocr = "off"` needs, as this reader has it loaded now
-    /// ([`crate::ocr_switch::PackGroup`]): one flag per reader that has no
+    /// ([`crate::ocr_status::PackGroup`]): one flag per reader that has no
     /// OCR to fall back on.
     ///
     /// * heroes: a main hero set (heroes-v2 or heroes-v1). heroes-v2-1080
@@ -320,14 +320,14 @@ impl Reader {
     ///
     /// Like every read, this starts a background re-load of a pack whose
     /// folder changed, so a later call sees a pack that arrived or went away.
-    pub fn pack_readiness(&self) -> crate::ocr_switch::PackReadiness {
+    pub fn pack_readiness(&self) -> crate::ocr_status::PackReadiness {
         use super::result::ResultPack;
         let words = self
             .results
             .current()
             .filter(|loaded| loaded.pack == ResultPack::WordsV1);
         let words = words.as_deref();
-        crate::ocr_switch::PackReadiness {
+        crate::ocr_status::PackReadiness {
             heroes: self
                 .heroes
                 .current()
@@ -622,7 +622,7 @@ fn elapsed_ms(t0: Instant) -> u32 {
 /// needs [`digits::stat_columns_found`]; otherwise it is
 /// [`BoardStatus::NotFound`].
 pub fn board_layout(scoreboard: &DynamicImage) -> Result<usize, BoardStatus> {
-    let scan = crate::detect::hero_portrait::scan_rows(scoreboard);
+    let scan = crate::frame::layout::scan_rows(scoreboard);
     let labels = crate::ocr::preprocess::header_label_groups(scoreboard).len();
     let n = layout_from_scan(&scan, labels);
     if n != Err(BoardStatus::NotFound) && !digits::stat_columns_found(scoreboard) {
@@ -655,7 +655,7 @@ fn has_stat_rows(d: &digits::BoardRead) -> bool {
 /// as team size uncertain. With no pitch at all there is no layout either,
 /// where `checked_team_size` would default to 5. Nothing guesses a size.
 pub fn layout_from_scan(
-    scan: &crate::detect::hero_portrait::RowScan,
+    scan: &crate::frame::layout::RowScan,
     header_labels: usize,
 ) -> Result<usize, BoardStatus> {
     if !scan.looks_like_scoreboard() && !(3..=10).contains(&header_labels) {
@@ -975,7 +975,7 @@ pub fn read_phrase(phrase: Phrase, frame: &RgbImage) -> Option<PhraseRead> {
 }
 
 /// [`Reader::pack_readiness`] with the process-wide reader.
-pub fn pack_readiness() -> crate::ocr_switch::PackReadiness {
+pub fn pack_readiness() -> crate::ocr_status::PackReadiness {
     READER
         .get_or_init(|| Reader::load(&ReaderConfig::from_env()))
         .pack_readiness()
@@ -984,7 +984,7 @@ pub fn pack_readiness() -> crate::ocr_switch::PackReadiness {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::detect::hero_portrait::RowScan;
+    use crate::frame::layout::RowScan;
     use crate::shadow::digits::{CellRead, RowRead};
     use crate::shadow::heroes::HeroRead;
 
@@ -1156,8 +1156,8 @@ mod tests {
     /// no read at all.
     #[test]
     fn the_end_title_read_needs_end_title_templates() {
-        use crate::shadow::result::test_fixtures::{lay, paint, word, write_pack};
         use crate::shadow::result::{ACCOLADE, END_TITLE, Outcome, WORDS_SUBDIR};
+        use crate::shadow::tests_fixtures::result::{lay, paint, word, write_pack};
         let blank = || image::RgbImage::from_pixel(2560, 1440, image::Rgb([20, 26, 50]));
         let mut title = blank();
         paint(
@@ -1214,8 +1214,8 @@ mod tests {
     /// is no read, and no screen is named.
     #[test]
     fn the_result_screens_read_is_the_result_read_of_the_frame() {
-        use crate::shadow::result::test_fixtures::{lay, paint, word, write_pack};
         use crate::shadow::result::{ACCOLADE, Outcome, ResultScreen, WORDS_SUBDIR};
+        use crate::shadow::tests_fixtures::result::{lay, paint, word, write_pack};
         let blank = || image::RgbImage::from_pixel(2560, 1440, image::Rgb([20, 26, 50]));
         let mut victory = blank();
         paint(
@@ -1274,91 +1274,6 @@ mod tests {
         );
         let both = Reader::load(&config).result_screens();
         assert!(both.accolade && both.rank_screen);
-    }
-
-    /// Shadow-first, through the save merge `reader = "new"` uses: a sure
-    /// result (two agreeing sure reads from the words pack) is stored, a
-    /// suspect one never is (ocr-v1's result stays and `result` is marked),
-    /// and frames that read no word leave ocr-v1's result as it was, with no
-    /// mark.
-    #[test]
-    fn only_a_sure_result_from_the_words_pack_is_saved() {
-        use crate::reader_apply::{OwnRow, PolicyRow, merge_saved};
-        use crate::shadow::result::test_fixtures::{lay, paint, word, write_pack};
-        use crate::shadow::result::{ACCOLADE, Outcome, RANK_SCREEN, WORDS_SUBDIR};
-        let data = tempfile::tempdir().unwrap();
-        let words = data.path().join(WORDS_SUBDIR);
-        write_pack(
-            &words,
-            &[
-                ("accolade_victory.png", &word(1, 70, 30)),
-                ("accolade_defeat.png", &word(3, 60, 30)),
-                ("rank_screen_victory.png", &word(5, 66, 20)),
-                ("rank_screen_defeat.png", &word(7, 50, 20)),
-            ],
-        );
-        let reader = Reader::load(&ReaderConfig {
-            words_dir: Some(words),
-            ..Default::default()
-        });
-        let blank = || image::RgbImage::from_pixel(2560, 1440, image::Rgb([20, 26, 50]));
-        let accolade = |seed: u32, w: usize| {
-            let mut img = blank();
-            paint(&mut img, &lay(ACCOLADE), &word(seed, w, 30), [255, 220, 0]);
-            DynamicImage::ImageRgb8(img)
-        };
-        let victory = accolade(1, 70);
-        let defeat = accolade(3, 60);
-        let mut rank_victory = image::RgbImage::from_pixel(2560, 1440, image::Rgb([150, 100, 30]));
-        paint(
-            &mut rank_victory,
-            &lay(RANK_SCREEN),
-            &word(5, 66, 20),
-            [245, 245, 245],
-        );
-        let rank_victory = DynamicImage::ImageRgb8(rank_victory);
-        let nothing = DynamicImage::ImageRgb8(blank());
-        let ocr = PolicyRow {
-            map: "Ilios".into(),
-            mode: "Control".into(),
-            result: "defeat".into(),
-            hero: "Ana".into(),
-            elims: 1,
-            assists: 2,
-            deaths: 3,
-            damage: 4,
-            healing: 5,
-            mitigation: 6,
-        };
-        let own = OwnRow::Identified {
-            index: 0,
-            team_size: 5,
-        };
-        let save = |frames: &[&DynamicImage]| {
-            let mut e = ResultEvidence::default();
-            for f in frames {
-                e.add(reader.read_result(f));
-            }
-            let mut board = assemble(5, Some(&digits_board(10)), None);
-            board.set_result(result_field(&e));
-            let saved = merge_saved(&ocr, own, Some(&board));
-            let marked = saved.suspect_fields.iter().any(|f| f == "result");
-            (saved.result, marked)
-        };
-        assert_eq!(reader.read_result(&victory).outcome, Some(Outcome::Victory));
-        assert!(!reader.read_result(&victory).suspect);
-        // sure: the accolade and the rank screen agree
-        assert_eq!(save(&[&victory, &rank_victory]), ("victory".into(), false));
-        // one sure read is suspect: not saved
-        assert_eq!(save(&[&victory]), ("defeat".into(), true));
-        // a conflicting read is suspect: not saved
-        assert_eq!(
-            save(&[&victory, &rank_victory, &defeat]),
-            ("defeat".into(), true)
-        );
-        // no word on any frame: ocr-v1's result, unmarked, as before O1
-        assert_eq!(save(&[&nothing, &nothing]), ("defeat".into(), false));
-        assert_eq!(save(&[]), ("defeat".into(), false));
     }
 
     #[test]
@@ -1515,7 +1430,7 @@ mod tests {
         ];
         for (what, frame) in cases {
             let crop = crate::ocr::preprocess::crop_scoreboard(&frame);
-            let scan = crate::detect::hero_portrait::scan_rows(&crop);
+            let scan = crate::frame::layout::scan_rows(&crop);
             let labels = crate::ocr::preprocess::header_label_groups(&crop).len();
             // the stand-in fools the preflight and the pitch rule alone. The
             // history one's spectral pitch (0.0824) is in #201's no-guess
@@ -1618,7 +1533,7 @@ mod tests {
             let pitch = deciding_pitch(dip, spectral);
             let frame = stand_in_at(w, h, pitch, 0.45, None);
             let crop = crate::ocr::preprocess::crop_scoreboard(&frame);
-            let scan = crate::detect::hero_portrait::scan_rows(&crop);
+            let scan = crate::frame::layout::scan_rows(&crop);
             let labels = crate::ocr::preprocess::header_label_groups(&crop).len();
             assert!(scan.looks_like_scoreboard(), "{what}: {scan:?}");
             let got = scan.median_pitch.unwrap();
@@ -1741,7 +1656,7 @@ mod tests {
         for (team, pitch) in [(5, PITCH_5V5), (6, PITCH_6V6)] {
             let frame = tab_stand_in(2560, 1440, team, pitch, BLUE_RED, true);
             let crop = crate::ocr::preprocess::crop_scoreboard(&frame);
-            let scan = crate::detect::hero_portrait::scan_rows(&crop);
+            let scan = crate::frame::layout::scan_rows(&crop);
             let got = scan.median_pitch.unwrap();
             assert!((got - pitch).abs() < 0.004, "{team}v{team}: {scan:?}");
             let b = reader.read_board(&frame);
@@ -1754,7 +1669,8 @@ mod tests {
     /// portrait (synthetic art `ids[row]`) sit left of the crop edge, placed
     /// with the hero matcher's own geometry on the board's real header.
     fn clipped_tab_stand_in(ids: &[u32; 10], left: u32) -> DynamicImage {
-        use crate::shadow::heroes::{View, find_header, find_rows, portrait_box, test_fixtures};
+        use crate::shadow::heroes::{View, find_header, find_rows, portrait_box};
+        use crate::shadow::tests_fixtures::heroes as test_fixtures;
         let mut img = tab_stand_in(2560, 1440, 5, PITCH_5V5, BLUE_RED, true).to_rgb8();
         let (cx, cy, crop_w, ch) = crop_rect(2560, 1440);
         let strip = at_scale(26.0, ch).round() as u32;
@@ -1797,7 +1713,7 @@ mod tests {
     /// then shows v2 art).
     #[test]
     fn a_clipped_5v5_board_reads_its_heroes() {
-        use crate::shadow::heroes::test_fixtures::write_templates;
+        use crate::shadow::tests_fixtures::heroes::write_templates;
         let ids = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
         for art in [0, 100] {
             let data = tempfile::tempdir().unwrap();
@@ -1830,7 +1746,7 @@ mod tests {
     /// next board after the background reload reads with v2.
     #[test]
     fn heroes_v2_installed_after_start_is_used_on_a_later_board() {
-        use crate::shadow::heroes::test_fixtures::write_templates;
+        use crate::shadow::tests_fixtures::heroes::write_templates;
         let ids = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
         let data = tempfile::tempdir().unwrap();
         write_templates(&HeroTemplates::dir_in(data.path()), &ids, 95, 0);
@@ -1929,7 +1845,7 @@ mod tests {
             );
             let frame = tab_stand_in(w, h, team, dip, BLUE_RED, false);
             let crop = crate::ocr::preprocess::crop_scoreboard(&frame);
-            let scan = crate::detect::hero_portrait::scan_rows(&crop);
+            let scan = crate::frame::layout::scan_rows(&crop);
             let labels = crate::ocr::preprocess::header_label_groups(&crop).len();
             assert_eq!(layout_from_scan(&scan, labels), rule, "{what}: {scan:?}");
             assert!(!digits::stat_columns_found(&crop), "{what}");
@@ -2249,7 +2165,7 @@ mod tests {
 
     #[test]
     fn the_reader_reads_the_top_bar_from_maps_v1() {
-        use crate::shadow::banner::test_fixtures::{LETTERS, frame_with_banner, write_pack};
+        use crate::shadow::tests_fixtures::banner::{LETTERS, frame_with_banner, write_pack};
         let data = tempfile::tempdir().unwrap();
         write_pack(&MapTemplates::dir_v1_in(data.path()), LETTERS);
         let reader = Reader::load(&ReaderConfig::from_data_dir(data.path()));
@@ -2273,7 +2189,7 @@ mod tests {
     /// map pack nothing is read, and the answer says so (F265-3).
     #[test]
     fn the_reader_reads_the_accolade_map_from_maps_v1() {
-        use crate::shadow::banner::test_fixtures::{
+        use crate::shadow::tests_fixtures::banner::{
             Accolade, accolade_letters, frame_with_accolade, frame_with_banner, write_accolade_pack,
         };
         let data = tempfile::tempdir().unwrap();
@@ -2320,7 +2236,7 @@ mod tests {
     /// line is flagged, so there is no accolade map. Nothing is guessed.
     #[test]
     fn a_flagged_accolade_read_is_no_map() {
-        use crate::shadow::banner::test_fixtures::{
+        use crate::shadow::tests_fixtures::banner::{
             Accolade, LETTERS, frame_with_accolade, write_accolade_pack,
         };
         let data = tempfile::tempdir().unwrap();
@@ -2344,7 +2260,7 @@ mod tests {
     /// flagged, so nothing is stored, while a map it can spell still reads.
     #[test]
     fn a_flagged_top_bar_read_is_not_stored() {
-        use crate::shadow::banner::test_fixtures::{LETTERS, frame_with_banner, write_pack};
+        use crate::shadow::tests_fixtures::banner::{LETTERS, frame_with_banner, write_pack};
         let data = tempfile::tempdir().unwrap();
         write_pack(
             &MapTemplates::dir_in(data.path()),
@@ -2361,14 +2277,14 @@ mod tests {
     /// keeps abstaining, the next one after the background load reads.
     #[test]
     fn maps_v1_installed_after_start_is_used_on_a_later_read() {
-        use crate::shadow::banner::test_fixtures::{LETTERS, frame_with_banner, write_pack};
+        use crate::shadow::tests_fixtures::banner::{LETTERS, frame_with_banner, write_pack};
         let data = tempfile::tempdir().unwrap();
         let reader = Reader::load(&ReaderConfig::from_data_dir(data.path()));
         let frame = DynamicImage::ImageRgb8(frame_with_banner("ILIOS"));
         assert_eq!(reader.read_top_bar(&frame), None);
         let staging = data.path().join("templates/.maps-v1-staging");
         write_pack(&staging, LETTERS);
-        crate::packs::swap_dir(&staging, &MapTemplates::dir_v1_in(data.path())).unwrap();
+        crate::packs::layout::swap_dir(&staging, &MapTemplates::dir_v1_in(data.path())).unwrap();
         assert_eq!(reader.read_top_bar(&frame), None, "the noticing read");
         reader.maps.wait_reload();
         assert_eq!(reader.read_top_bar(&frame).unwrap().name, "Ilios");
@@ -2380,7 +2296,7 @@ mod tests {
         let c = ReaderConfig::from_data_dir(root);
         assert_eq!(c.map_v1_dir, Some(root.join("templates/maps-v1")));
         assert_eq!(c.map_dir, Some(root.join("templates/maps")));
-        let spec = crate::packs::PACKS
+        let spec = crate::packs::layout::PACKS
             .iter()
             .find(|s| s.name == "maps-v1.tar")
             .unwrap();
@@ -2393,7 +2309,7 @@ mod tests {
     /// (`None`) leaves it unread even when a pack is loaded.
     #[test]
     fn the_board_uses_the_banner_read_it_is_given() {
-        use crate::shadow::banner::test_fixtures::{LETTERS, write_pack};
+        use crate::shadow::tests_fixtures::banner::{LETTERS, write_pack};
         let data = tempfile::tempdir().unwrap();
         write_pack(&MapTemplates::dir_v1_in(data.path()), LETTERS);
         let reader = Reader::load(&ReaderConfig::from_data_dir(data.path()));
@@ -2631,8 +2547,8 @@ mod tests {
     /// reads the line; without the file it is `None` (P4 then uses OCR).
     #[test]
     fn the_reader_reads_the_final_score_line_from_the_words_pack() {
-        use crate::shadow::result::test_fixtures::{paint_at, word, write_pack};
         use crate::shadow::result::{FinalScoreRead, WORDS_SUBDIR};
+        use crate::shadow::tests_fixtures::result::{paint_at, word, write_pack};
         let line = word(4, 123, 28);
         let mut frame = image::RgbImage::from_pixel(2560, 1440, image::Rgb([20, 26, 50]));
         paint_at(&mut frame, 1102, 1060, &line, [235, 235, 235]);

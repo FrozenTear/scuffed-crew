@@ -1,80 +1,13 @@
 use dioxus::prelude::*;
 use scuffed_types::SiteSettings;
 
+use super::shell::SiteShell;
 use crate::routes::Route;
 use crate::state::use_site_settings;
 
 const STRATEGY_CSS: &str = r#"
-    .strategy-nav {
-        display: flex;
-        align-items: center;
-        gap: 1.5rem;
-        padding: 0 2rem;
-        height: 50px;
-        background: var(--surface);
-        border-bottom: 1px solid var(--border);
-    }
-    .strategy-nav .brand {
-        font-family: var(--font-head);
-        font-size: 0.95rem;
-        color: var(--accent);
-        text-transform: uppercase;
-        letter-spacing: 0.06em;
-    }
-    .strategy-nav .links {
-        display: flex;
-        gap: 0.25rem;
-        min-width: 0;
-    }
-    .strategy-nav .links a {
-        padding: 0.35rem 0.7rem;
-        color: var(--text-2);
-        font-size: 0.85rem;
-        border-radius: 5px;
-        transition: color 0.15s, background 0.15s;
-    }
-    .strategy-nav .links a:hover {
-        color: var(--text);
-        background: var(--surface-2);
-    }
-    .strategy-nav .back-link {
-        margin-left: auto;
-        color: var(--text-3);
-        font-size: 0.8rem;
-        transition: color 0.15s;
-    }
-    .strategy-nav .back-link:hover {
-        color: var(--text-2);
-    }
-    /* Phones: brand and Back to Clan share the top row, the section links
-       wrap onto their own rows below, so the page never gets wider than
-       the screen and every link stays reachable without a menu. */
-    @media (max-width: 720px) {
-        .strategy-nav {
-            flex-wrap: wrap;
-            height: auto;
-            min-height: 50px;
-            gap: 0.35rem 1rem;
-            padding: 0.6rem 1rem;
-        }
-        .strategy-nav .brand {
-            order: 1;
-        }
-        .strategy-nav .back-link {
-            order: 2;
-        }
-        .strategy-nav .links {
-            order: 3;
-            flex: 1 1 100%;
-            flex-wrap: wrap;
-            margin-left: -0.7rem;
-        }
-        .strategy-nav .links a {
-            white-space: nowrap;
-        }
-    }
     .strategy-off {
-        min-height: calc(100vh - 50px);
+        min-height: 60vh;
         display: flex;
         flex-direction: column;
         align-items: center;
@@ -89,7 +22,7 @@ const STRATEGY_CSS: &str = r#"
         margin: 0 0 0.5rem;
     }
     .strategy-off p {
-        color: var(--text-2);
+        color: var(--text-3);
         font-size: 0.95rem;
         max-width: 28rem;
         margin: 0 0 1.25rem;
@@ -105,18 +38,18 @@ const STRATEGY_CSS: &str = r#"
         display: inline-flex;
         align-items: center;
         padding: 0.55rem 1.1rem;
-        background: var(--accent);
-        color: var(--accent-fg);
+        background: var(--accent-solid);
+        color: var(--on-accent);
         font-family: var(--font-mono);
         font-size: 0.72rem;
         letter-spacing: 0.1em;
         text-transform: uppercase;
         text-decoration: none;
-        border-radius: var(--radius-md, 8px);
+        border-radius: var(--radius-control, 8px);
     }
     .strategy-off a.ghost {
         background: transparent;
-        color: var(--text-2);
+        color: var(--text-3);
         border: 1px solid var(--border);
     }
 "#;
@@ -161,10 +94,6 @@ fn flag_from_resolved(resolved: Option<&Result<SiteSettings, String>>) -> Option
 #[component]
 pub fn StrategyLayout() -> Element {
     let navigator = use_navigator();
-    // Saving needs an org membership. `try_` so layouts mounted without the
-    // auth context (tests) still render.
-    let can_create = try_use_context::<Signal<crate::state::auth::AuthState>>()
-        .is_some_and(|auth| auth.read().is_org_member());
     let site_settings = use_site_settings();
     // `resolved` is already memoized on the settings context. This memo reads
     // that slot once per change. Dioxus 0.7 effects re-run only when signals
@@ -192,47 +121,37 @@ pub fn StrategyLayout() -> Element {
             "pending"
         };
         return rsx! {
-            div { "data-accent": "strategy", "data-strategy-gate": "{gate}" }
+            SiteShell {
+                div { "data-accent": "strategy", "data-strategy-gate": "{gate}" }
+            }
         };
     }
 
     if surface == StrategyPathPolicy::Blocked {
         return rsx! {
-            div { "data-accent": "strategy",
-                crate::styles::StyleOnce { id: "scuffed-css-layouts-strategy-strategy-css", css: STRATEGY_CSS }
-                div { class: "strategy-off",
-                    h1 { "Strategies unavailable" }
-                    p {
-                        "This clan has turned Strategies off. Patch Notes are still on the main site."
-                    }
-                    div { class: "strategy-off-links",
-                        Link { to: Route::PatchNotes {}, "View Patch Notes" }
-                        Link { to: Route::Home {}, class: "ghost", "Back to home" }
+            SiteShell {
+                div { "data-accent": "strategy",
+                    crate::styles::StyleOnce { id: "scuffed-css-layouts-strategy-strategy-css", css: STRATEGY_CSS }
+                    div { class: "strategy-off",
+                        h1 { "Strategies unavailable" }
+                        p {
+                            "This clan has turned Strategies off. Patch Notes are still on the main site."
+                        }
+                        div { class: "strategy-off-links",
+                            Link { to: Route::PatchNotes {}, "View Patch Notes" }
+                            Link { to: Route::Home {}, class: "ghost", "Back to home" }
+                        }
                     }
                 }
             }
         };
     }
 
+    // The Strategy group in the site top bar lists these pages, so there is
+    // no second strategy bar. The wrapper keeps the page bodies as they were.
     rsx! {
-        div { "data-accent": "strategy",
-            crate::styles::StyleOnce { id: "scuffed-css-layouts-strategy-strategy-css", css: STRATEGY_CSS }
-            nav { class: "strategy-nav",
-                span { class: "brand", "Strategy Planner" }
-                div { class: "links",
-                    Link { to: Route::StrategyBrowse {}, "Browse" }
-                    Link { to: Route::StrategyMy {}, "My Strategies" }
-                    Link { to: Route::StrategyHeroes {}, "Heroes" }
-                    // Meta is hidden until /api/strategy/meta has global hero data
-                    // (it returns an empty list today, so the page is always empty).
-                    Link { to: Route::StrategyPatchNotes {}, "Patch Notes" }
-                    if can_create {
-                        Link { to: Route::StrategyEditorNew {}, "New Strategy" }
-                    }
-                }
-                Link { to: Route::Home {}, class: "back-link", "← Back to Clan" }
-            }
-            main { style: "min-height: calc(100vh - 50px);",
+        SiteShell {
+            div { "data-accent": "strategy",
                 Outlet::<Route> {}
             }
         }

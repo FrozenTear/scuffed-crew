@@ -10,6 +10,7 @@ use axum_extra::extract::cookie::CookieJar;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::strategy_heroes::list_heroes;
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{AuditAction, AuditTargetType};
 use scuffed_site_server::apply_api_method_not_allowed;
@@ -596,10 +597,6 @@ fn winrate_pct(wins: u32, matches: u32) -> f64 {
     }
 }
 
-async fn list_heroes() -> Json<Value> {
-    Json(json!({ "data": [] }))
-}
-
 /// GET /api/strategy/patch-notes — public list for the Site Patch Notes page.
 ///
 /// Auth matches other public strategy GETs (`/heroes`, `/strategies`): no login.
@@ -947,6 +944,7 @@ mod tests {
             reports_dir: PathBuf::from("/tmp/scuffed-test-reports"),
             reports_enabled: true,
             packs_dir: None,
+            hero_icons: scuffed_site_server::hero_icons::HeroIconStore::in_temp_dir(),
             notifier: None,
             nostr_challenge_key: [0u8; 32],
             consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(
@@ -1428,6 +1426,7 @@ mod tests {
                 None,
                 Some(enabled),
                 None,
+                None,
             )
             .await
             .expect("update strategies_enabled");
@@ -1472,6 +1471,8 @@ mod tests {
 
         let (status, body) = get_json(strategy_routes(state), "/api/strategy/heroes").await;
         assert_eq!(status, StatusCode::OK, "{body}");
+        let heroes = body["data"].as_array().expect("{ data: [...] } envelope");
+        assert_eq!(heroes.len(), scuffed_types::HERO_NAMES.len());
     }
 
     #[tokio::test]

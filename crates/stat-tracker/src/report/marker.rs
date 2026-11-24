@@ -318,7 +318,7 @@ impl RunMarkerGuard {
 impl Drop for RunMarkerGuard {
     /// Stop the heartbeat and leave the marker. Any exit that did not go
     /// through [`Self::finish`] is not clean: a panic, or an error return
-    /// such as "keyboard devices lost" (exit 1, restarted by systemd). Those
+    /// (exit 1, restarted by systemd). Those
     /// are the "tracking stopped" cases a crash report is for, so the next
     /// start must find the marker and offer one.
     fn drop(&mut self) {
@@ -474,13 +474,45 @@ mod tests {
             .expect("sleep binary")
     }
 
-    /// Spawn a just-copied binary. Another test thread's fork can still hold
-    /// the copy's write fd until its own exec, which fails this exec with
-    /// ETXTBSY ("Text file busy"); retry until that fd is gone.
+    /// A 30 s process whose `/proc/<pid>/exe` basename is `path`'s file
+    /// name. Built with rustc so it does not depend on the system
+    /// coreutils: a copy of uutils `sleep` named after the tracker
+    /// dispatches on the exec path (AT_EXECFN), prints "unknown program"
+    /// and exits 1, even when argv[0] is `sleep`.
+    fn write_fake_tracker(path: &Path) {
+        let src = path.with_extension("rs");
+        std::fs::write(
+            &src,
+            "fn main() { std::thread::sleep(std::time::Duration::from_secs(30)); }\n",
+        )
+        .unwrap();
+        let out = std::process::Command::new("rustc")
+            .args(["--edition", "2024", "-o"])
+            .arg(path)
+            .arg(&src)
+            .output()
+            .unwrap_or_else(|e| panic!("rustc {}: {e}", path.display()));
+        assert!(
+            out.status.success(),
+            "rustc {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Spawn `bin`. The retry is only a spawn guard: another test
+    /// thread's fork can still hold the file's write fd until its own
+    /// exec, which fails this exec with ETXTBSY ("Text file busy").
+    /// Stderr is piped so a child that has already exited can be
+    /// reported after wait.
     fn spawn_retrying_busy(bin: &Path) -> std::process::Child {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            match std::process::Command::new(bin).arg("30").spawn() {
+            match std::process::Command::new(bin)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+            {
                 Ok(child) => return child,
                 Err(e)
                     if e.kind() == std::io::ErrorKind::ExecutableFileBusy
@@ -491,6 +523,15 @@ mod tests {
                 Err(e) => panic!("spawn {}: {e}", bin.display()),
             }
         }
+    }
+
+    fn child_stderr(child: &mut std::process::Child) -> String {
+        let mut text = String::new();
+        if let Some(mut stderr) = child.stderr.take() {
+            use std::io::Read;
+            let _ = stderr.read_to_string(&mut text);
+        }
+        text
     }
 
     struct Child(std::process::Child);
@@ -656,16 +697,25 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bin_dir = tempfile::tempdir().unwrap();
         let fake = bin_dir.path().join(crate::proc_id::DAEMON_BIN);
-        std::fs::copy(sleep_bin(), &fake).unwrap();
-        let child = Child(spawn_retrying_busy(&fake));
+        write_fake_tracker(&fake);
+        let mut child = Child(spawn_retrying_busy(&fake));
         let pid = child.0.id();
         // The child can still show the test binary in /proc for a moment.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while !crate::proc_id::pid_is_live_tracker(pid) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the fake tracker never showed as live"
-            );
+            if std::time::Instant::now() >= deadline {
+                let waited = child.0.try_wait();
+                // Kill first so read_to_string cannot block for the
+                // sleeper's remaining 30 s.
+                let _ = child.0.kill();
+                let _ = child.0.wait();
+                panic!(
+                    "the fake tracker never showed as live: /proc exe {:?}, try_wait {:?}, stderr {:?}",
+                    crate::proc_id::proc_exe(pid),
+                    waited,
+                    child_stderr(&mut child.0),
+                );
+            }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         let text = marker(pid).format();

@@ -6,11 +6,11 @@ use serde::{Deserialize, Serialize};
 /// 403 is membership (OrgMember), not the 412 server-managed identity case.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DmLoadFailure {
-    /// 412 — server-managed identity missing or not enabled.
+    /// 412: server-managed identity missing or not enabled.
     IdentitySettings,
-    /// 403 — signed in, but not an active org member.
+    /// 403: signed in, but not an active org member.
     Membership,
-    /// 503 — relay URL is not configured.
+    /// 503: relay URL is not configured.
     RelayConfig,
     /// Any other failure; `message` is the client error string.
     Other(String),
@@ -33,11 +33,13 @@ impl DmLoadFailure {
 }
 
 pub fn classify_dm_client_error(err: &ClientError) -> DmLoadFailure {
+    // The raw error is console detail for every kind (Vision nit 8 on 748).
+    crate::util::log_client_error("DM load", err);
     match err {
         ClientError::Http { status: 412, .. } => DmLoadFailure::IdentitySettings,
         ClientError::Http { status: 403, .. } => DmLoadFailure::Membership,
         ClientError::Http { status: 503, .. } => DmLoadFailure::RelayConfig,
-        other => DmLoadFailure::Other(other.to_string()),
+        other => DmLoadFailure::Other(crate::client_error::user_message(other)),
     }
 }
 
@@ -123,18 +125,66 @@ pub fn normalize_recipient_pubkey(input: &str) -> Result<String, String> {
 }
 
 /// Format a pubkey as a short truncated label when no display name is known.
+///
+/// Counts and cuts by character, never by byte: the text can be a raw
+/// `/dm/:peer_pubkey` route parameter, and a byte cut inside a multibyte
+/// character panics.
 pub fn truncate_pubkey(pubkey: &str) -> String {
-    if pubkey.starts_with("npub1") {
-        if pubkey.len() > 16 {
-            format!("{}…{}", &pubkey[..10], &pubkey[pubkey.len() - 4..])
-        } else {
-            pubkey.to_string()
-        }
-    } else if pubkey.len() > 16 {
-        format!("npub1…{}", &pubkey[pubkey.len() - 6..])
-    } else {
-        pubkey.to_string()
+    let len = pubkey.chars().count();
+    if len <= 16 {
+        return pubkey.to_string();
     }
+    let tail = |n: usize| pubkey.chars().skip(len - n).collect::<String>();
+    if pubkey.starts_with("npub1") {
+        let head: String = pubkey.chars().take(10).collect();
+        format!("{head}…{}", tail(4))
+    } else {
+        format!("npub1…{}", tail(6))
+    }
+}
+
+/// A crew member as `/api/members` returns them, reduced to what DMs need:
+/// the name to show and the Nostr key to match a conversation or a
+/// recipient against.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct DmMember {
+    pub id: String,
+    pub display_name: String,
+    #[serde(default)]
+    pub nostr_pubkey: Option<String>,
+}
+
+/// One page of `/api/members`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DmMemberPage {
+    pub data: Vec<DmMember>,
+    #[serde(default)]
+    pub next_cursor: Option<String>,
+}
+
+/// The name to show for a peer: the server's display name when it sends one,
+/// else the crew member whose Nostr key matches, else a short npub label.
+pub fn peer_label(pubkey: &str, server_name: Option<&str>, members: &[DmMember]) -> String {
+    if let Some(name) = server_name.map(str::trim).filter(|s| !s.is_empty()) {
+        return name.to_string();
+    }
+    members
+        .iter()
+        .find(|m| {
+            m.nostr_pubkey
+                .as_deref()
+                .is_some_and(|pk| pk.trim().eq_ignore_ascii_case(pubkey.trim()))
+        })
+        .map(|m| m.display_name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| truncate_pubkey(pubkey))
+}
+
+/// Up to two initials for an avatar: the shared rule
+/// (`components::ui::avatar::name_initials`) the account avatar and the
+/// article byline use too ("Player02" is "P2", "Player Two" is "PT").
+pub fn avatar_initials(name: &str) -> String {
+    crate::components::ui::avatar::name_initials(name)
 }
 
 /// Render an RFC3339 timestamp as a relative label ("2m", "3h", "5d").
@@ -161,6 +211,73 @@ pub fn relative_time(rfc3339: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncate_pubkey_cuts_by_character_not_by_byte() {
+        // `/dm/%E2%82%AC%E2%82%AC%E2%82%AC%E2%82%AC%E2%82%AC%E2%82%ACa`:
+        // six euro signs and an "a" is 19 bytes, and byte 13 (19 - 6) is
+        // inside a euro sign. Seven characters is short, so it shows whole.
+        let euros = "€€€€€€a";
+        assert_eq!(euros.len(), 19);
+        assert!(!euros.is_char_boundary(euros.len() - 6));
+        assert_eq!(truncate_pubkey(euros), euros);
+
+        // Long multibyte text is cut on character boundaries.
+        let long = "€".repeat(20);
+        assert_eq!(truncate_pubkey(&long), format!("npub1…{}", "€".repeat(6)));
+        let npub = format!("npub1{}", "€".repeat(20));
+        assert_eq!(truncate_pubkey(&npub), "npub1€€€€€…€€€€");
+    }
+
+    #[test]
+    fn truncate_pubkey_keeps_short_input_and_shortens_real_keys() {
+        assert_eq!(truncate_pubkey(""), "");
+        assert_eq!(truncate_pubkey("abc"), "abc");
+        assert_eq!(truncate_pubkey("0123456789abcdef"), "0123456789abcdef");
+        assert_eq!(truncate_pubkey("npub1short"), "npub1short");
+        // Unchanged for the ASCII keys it is meant for.
+        let hex = format!("{}123456", "ab".repeat(29));
+        assert_eq!(truncate_pubkey(&hex), "npub1…123456");
+        let npub = "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqsxyzw";
+        assert_eq!(truncate_pubkey(npub), "npub1qqqqq…xyzw");
+    }
+
+    fn member(name: &str, pk: Option<&str>) -> DmMember {
+        DmMember {
+            id: format!("member:{name}"),
+            display_name: name.to_string(),
+            nostr_pubkey: pk.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn peers_show_by_name_when_the_app_can_resolve_them() {
+        let pk = "ab".repeat(32);
+        let members = vec![member("Player02", Some(&pk)), member("Player03", None)];
+        // The server's name wins.
+        assert_eq!(peer_label(&pk, Some("Player09"), &members), "Player09");
+        // A blank server name falls back to the member list, any key case.
+        assert_eq!(peer_label(&pk, Some("  "), &members), "Player02");
+        assert_eq!(
+            peer_label(&pk.to_ascii_uppercase(), None, &members),
+            "Player02"
+        );
+        // Nobody matches: the short npub label, never the full key.
+        let stranger = "cd".repeat(32);
+        assert_eq!(
+            peer_label(&stranger, None, &members),
+            truncate_pubkey(&stranger)
+        );
+    }
+
+    #[test]
+    fn avatar_initials_take_two_characters() {
+        assert_eq!(avatar_initials("Player02"), "P2");
+        assert_eq!(avatar_initials("Player03"), "P3");
+        assert_eq!(avatar_initials("Player Two"), "PT");
+        assert_eq!(avatar_initials("npub1\u{2026}abcdef"), "N1");
+        assert_eq!(avatar_initials(""), "?");
+    }
 
     #[test]
     fn dm_errors_map_412_403_503_and_otherwise_keep_the_string() {
@@ -219,7 +336,7 @@ mod tests {
         let network = classify_dm_client_error(&ClientError::Network("offline".into()));
         assert_eq!(
             network,
-            DmLoadFailure::Other("Network error: offline".into())
+            DmLoadFailure::Other(crate::client_error::NETWORK_ERROR_MESSAGE.into())
         );
     }
 }

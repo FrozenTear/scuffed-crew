@@ -338,6 +338,24 @@ impl Database {
         &self,
         member_ids: &[String],
     ) -> DbResult<HashMap<String, String>> {
+        self.display_names_for(member_ids, false).await
+    }
+
+    /// Like [`Self::member_display_names`], but only for members whose record
+    /// is active. Inactive and missing ids are absent from the map, so callers
+    /// can use it as a visibility filter.
+    pub async fn active_member_display_names(
+        &self,
+        member_ids: &[String],
+    ) -> DbResult<HashMap<String, String>> {
+        self.display_names_for(member_ids, true).await
+    }
+
+    async fn display_names_for(
+        &self,
+        member_ids: &[String],
+        active_only: bool,
+    ) -> DbResult<HashMap<String, String>> {
         let mut ids: Vec<&str> = member_ids
             .iter()
             .map(String::as_str)
@@ -355,11 +373,13 @@ impl Database {
                 id: Option<RecordId>,
                 display_name: String,
             }
-            let mut result = self
-                .client
-                .query("SELECT id, display_name FROM member WHERE id IN $rids")
-                .bind(("rids", rids))
-                .await?;
+            // Two fixed query strings, no user input in either.
+            let query = if active_only {
+                "SELECT id, display_name FROM member WHERE id IN $rids AND is_active = true"
+            } else {
+                "SELECT id, display_name FROM member WHERE id IN $rids"
+            };
+            let mut result = self.client.query(query).bind(("rids", rids)).await?;
             let rows: Vec<NameRow> = result.take(0)?;
             let mut map = HashMap::with_capacity(rows.len());
             for row in rows {
@@ -1312,5 +1332,32 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(blank.get(&alice.id).map(String::as_str), Some(""));
+    }
+
+    /// The active variant leaves out inactive and missing members.
+    #[tokio::test]
+    async fn active_member_display_names_skips_inactive() {
+        let db = test_db_with_crypto().await;
+        let alice = db
+            .create_member("user-alice", "Alice", OrgRole::Member)
+            .await
+            .unwrap();
+        let bob = db
+            .create_member("user-bob", "Bob", OrgRole::Member)
+            .await
+            .unwrap();
+        db.client
+            .query("UPDATE $rid SET is_active = false")
+            .bind(("rid", RecordId::new("member", bob.id.as_str())))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let ids = [alice.id.clone(), bob.id.clone(), "no-such-member".into()];
+        let active = db.active_member_display_names(&ids).await.unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active.get(&alice.id).map(String::as_str), Some("Alice"));
+        let all = db.member_display_names(&ids).await.unwrap();
+        assert_eq!(all.len(), 2);
     }
 }

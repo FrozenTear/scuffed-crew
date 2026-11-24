@@ -17,6 +17,7 @@ pub use client::{
 };
 pub use display_name::{display_name_key, DisplayNameError};
 pub use queries::daemon_tokens::DaemonTokenAuth;
+pub use queries::personal_stats::LegacyIdReuse;
 pub use queries::stat_reports::{retention_deadline, utc_day_start};
 pub use rewrap::{rewrap_all_encrypted_fields, RewrapStats};
 pub use scuffed_auth::is_production_env;
@@ -33,6 +34,12 @@ pub enum DbError {
     NotFound(String),
     #[error("Conflict: {0}")]
     Conflict(String),
+    /// The request cannot be carried out as asked (for example a bracket
+    /// with fewer than 2 participants). Only the tournament routes
+    /// (`site-server` `routes/tournaments.rs`) map this to HTTP 400 today;
+    /// other routes' catch-all arms make it a 500.
+    #[error("Invalid: {0}")]
+    Invalid(String),
     #[error("Configuration error: {0}")]
     Config(String),
     #[error("Operation timed out")]
@@ -47,6 +54,14 @@ pub enum DbError {
     /// HTTP 409 `{"error":"display_name_taken"}`.
     #[error("display_name_taken")]
     DisplayNameTaken,
+    /// A startup migration step failed. `step` names it (for example the DB7
+    /// roster dedupe), so a boot panic does not read like a connect failure.
+    #[error("{step} failed after {attempts} attempt(s): {source}")]
+    Migration {
+        step: &'static str,
+        attempts: u32,
+        source: Box<DbError>,
+    },
 }
 
 pub type DbResult<T> = Result<T, DbError>;

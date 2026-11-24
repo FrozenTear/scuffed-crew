@@ -2,6 +2,7 @@ pub mod calendar;
 pub mod challenge_store;
 pub mod dm_subscriber;
 pub mod extractors;
+pub mod hero_icons;
 pub mod leaderboard_cache;
 pub mod link_attempts;
 pub mod link_cleanup;
@@ -35,6 +36,7 @@ use tower_governor::{GovernorLayer, governor::GovernorConfigBuilder};
 use std::path::PathBuf;
 
 use rate_limit::TrustedProxyIpKeyExtractor;
+use scuffed_types::MAX_BUNDLE_BYTES;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
@@ -61,10 +63,43 @@ where
     router.method_not_allowed_fallback(routes::seo::api_method_not_allowed)
 }
 
+/// Per-IP budget of the shared public read governor (anonymous GETs of the
+/// main API): `burst` requests, then one more every `replenish_ms`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PublicReadLimit {
+    /// Milliseconds per token returned to the bucket.
+    pub replenish_ms: u64,
+    /// Requests allowed back to back from a full bucket.
+    pub burst: u32,
+}
+
+impl PublicReadLimit {
+    /// The limit every production router uses: 100 burst, then one every
+    /// 100 ms.
+    pub const PRODUCTION: PublicReadLimit = PublicReadLimit {
+        replenish_ms: 100,
+        burst: 100,
+    };
+}
+
 /// Same router as [`create_router`], with an explicit Dioxus output directory.
 ///
 /// Tests pass a temp dir so cache-header checks do not need a built frontend.
 pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) -> Router {
+    create_router_with_public_read_limit(state, dist_dir, PublicReadLimit::PRODUCTION)
+}
+
+/// Same router as [`create_router_with_dist`], with an explicit public read
+/// limit. Production always uses [`PublicReadLimit::PRODUCTION`] (through
+/// [`create_router`] or [`create_router_with_dist`]). This exists so a test
+/// can keep the production burst but stop the bucket from refilling on the
+/// wall clock while it runs, which makes "the next read is 429" exact
+/// instead of racing the 100 ms refill.
+pub fn create_router_with_public_read_limit(
+    state: AppState,
+    dist_dir: impl Into<PathBuf>,
+    public_read: PublicReadLimit,
+) -> Router {
     let dist_dir = dist_dir.into();
     let origins: Vec<HeaderValue> = state
         .oauth_config
@@ -142,6 +177,20 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
                 .error_handler(rate_limit::governor_error_response),
         );
 
+    // Per-IP rate limit for apply and withdraw only (#813): burst 3, then 1
+    // every 60s, one bucket for both routes. Tighter than the auth governor
+    // because a successful apply writes a row and notifies officers. The
+    // numbers live in `scuffed_types::application_message`. GET list, GET
+    // mine, GET expiring and PATCH update are not behind this layer.
+    let application_governor_config = std::sync::Arc::new(
+        GovernorConfigBuilder::default()
+            .key_extractor(key_extractor.clone())
+            .per_second(scuffed_types::APPLICATION_IP_REPLENISH_SECS)
+            .burst_size(scuffed_types::APPLICATION_IP_BURST)
+            .finish()
+            .expect("valid application governor config"),
+    );
+
     // Stat-report bundles are up to 10 MB, read in full before the daily cap
     // is checked, then inflated to validate every PNG. Same per-IP budget as
     // avatar and image uploads (burst 8, then 1 every 10s), own bucket. Only
@@ -155,6 +204,11 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
             .finish()
             .expect("valid stat-report governor config"),
     );
+
+    // POST /api/hero-icons: up to HERO_ICON_MAX_FILES_PER_UPLOAD parts of
+    // HERO_ICON_MAX_BYTES each, plus multipart headers. The per-member limiter
+    // runs in the handler before the body is read.
+    let hero_icon_body_limit = DefaultBodyLimit::max(scuffed_types::HERO_ICON_MAX_REQUEST_BYTES);
 
     // Same per-IP budget as avatar and image uploads (burst 8, then 1 every
     // 10s), but a separate bucket. Using up one does not block the other.
@@ -187,20 +241,40 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
             .finish()
             .expect("valid stats upload ip governor config"),
     );
+    // Per-IP budget for the training crop routes that take the tracker sync
+    // token (upload, consent read, own deletes). Same numbers as the stats
+    // sync IP limit (`STATS_UPLOAD_IP_BURST`, then one every
+    // `STATS_UPLOAD_IP_REPLENISH_SECS`), in its own bucket shared by those
+    // routes. It runs before the credential is checked, so a hot IP is
+    // refused before any token lookup. The upload also keeps its per-member,
+    // per-kind limiter in the handler.
+    let training_crop_ip_config = std::sync::Arc::new(
+        GovernorConfigBuilder::default()
+            .key_extractor(key_extractor.clone())
+            .per_second(scuffed_types::STATS_UPLOAD_IP_REPLENISH_SECS)
+            .burst_size(scuffed_types::STATS_UPLOAD_IP_BURST)
+            .finish()
+            .expect("valid training crop ip governor config"),
+    );
+    let training_crop_ip_limit = GovernorLayer::new(training_crop_ip_config)
+        .error_handler(rate_limit::governor_error_response);
+
     #[cfg(test)]
     let stats_token_governor = stats_upload_limits::take_stats_upload_governor_override()
         .unwrap_or_else(stats_upload_limits::StatsUploadGovernor::new);
     #[cfg(not(test))]
     let stats_token_governor = stats_upload_limits::StatsUploadGovernor::new();
 
-    // Own per-IP bucket, same budget as token-check (burst 8, then 1 every
-    // 10s). Filling this bucket does not block uploads or token-check.
-    // The governor calls `rate_limited_response` for the JSON 429.
+    // Own per-IP bucket (burst `PACK_IP_BURST`, then 1 every
+    // `PACK_IP_REPLENISH_SECS`), sized so a first install of every pack plus
+    // the list fits in the burst. Filling this bucket does not block uploads
+    // or token-check. The governor calls `rate_limited_response` for the
+    // JSON 429.
     let pack_governor_config = std::sync::Arc::new(
         GovernorConfigBuilder::default()
             .key_extractor(key_extractor.clone())
-            .per_second(10)
-            .burst_size(8)
+            .per_second(scuffed_types::PACK_IP_REPLENISH_SECS)
+            .burst_size(scuffed_types::PACK_IP_BURST)
             .finish()
             .expect("valid pack governor config"),
     );
@@ -250,8 +324,8 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
     let public_governor_config = std::sync::Arc::new(
         GovernorConfigBuilder::default()
             .key_extractor(key_extractor.clone())
-            .per_millisecond(100)
-            .burst_size(100)
+            .per_millisecond(public_read.replenish_ms)
+            .burst_size(public_read.burst)
             .finish()
             .expect("valid public governor config"),
     );
@@ -548,8 +622,13 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         // Application routes
         .route(
             "/api/applications",
-            get(routes::applications::list_applications)
-                .post(routes::applications::submit_application),
+            get(routes::applications::list_applications).merge(
+                post(routes::applications::submit_application)
+                    .layer::<_, std::convert::Infallible>(
+                        GovernorLayer::new(application_governor_config.clone())
+                            .error_handler(rate_limit::governor_error_response),
+                    ),
+            ),
         )
         .route(
             "/api/applications/mine",
@@ -557,7 +636,11 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         )
         .route(
             "/api/applications/mine/withdraw",
-            post(routes::applications::withdraw_my_application),
+            post(routes::applications::withdraw_my_application)
+                .layer::<_, std::convert::Infallible>(
+                    GovernorLayer::new(application_governor_config)
+                        .error_handler(rate_limit::governor_error_response),
+                ),
         )
         .route(
             "/api/applications/expiring",
@@ -590,6 +673,7 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         )
         .route("/api/stats/me", get(routes::stats::my_stats))
         .route("/api/stats/me/matches", get(routes::stats::my_matches))
+        .route("/api/stats/me/matches/{id}", get(routes::stats::my_match))
         .route("/api/stats/me/heroes", get(routes::stats::my_hero_stats))
         .route("/api/stats/me/roles", get(routes::stats::my_role_stats))
         .route("/api/stats/me/maps", get(routes::stats::my_map_stats))
@@ -607,6 +691,14 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
             get(routes::stats::member_map_stats),
         )
         .route(
+            "/api/stats/member/{id}/matches",
+            get(routes::stats::member_matches),
+        )
+        .route(
+            "/api/stats/member/{id}/matches/{match_id}",
+            get(routes::stats::member_match),
+        )
+        .route(
             "/api/stats/tokens",
             get(routes::stats::list_daemon_tokens).post(routes::stats::create_daemon_token),
         )
@@ -622,13 +714,90 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
             "/api/stats/daemon-config",
             get(routes::stats::daemon_config),
         )
+        // Contributed hero icons. Private storage, session only. See
+        // routes::hero_icons for the access rules.
+        .route(
+            "/api/hero-icons",
+            post(routes::hero_icons::upload_hero_icons)
+                .layer::<_, std::convert::Infallible>(hero_icon_body_limit)
+                .get(routes::hero_icons::list_hero_icons),
+        )
+        .route(
+            "/api/hero-icons/mine",
+            get(routes::hero_icons::list_mine).delete(routes::hero_icons::delete_mine),
+        )
+        .route(
+            "/api/hero-icons/opt-in",
+            get(routes::hero_icons::get_opt_in).put(routes::hero_icons::put_opt_in),
+        )
+        .route(
+            "/api/hero-icons/members",
+            get(routes::hero_icons::hero_icon_member_counts),
+        )
+        .route(
+            "/api/hero-icons/members/{member_id}",
+            get(routes::hero_icons::member_hero_icons)
+                .delete(routes::hero_icons::delete_member_hero_icons),
+        )
+        .route(
+            "/api/hero-icons/{id}/image",
+            get(routes::hero_icons::hero_icon_image),
+        )
+        .route(
+            "/api/hero-icons/{id}",
+            delete(routes::hero_icons::delete_hero_icon),
+        )
+        // Opt-in training crops from the tracker. Same private store as hero
+        // icons. Upload, own consent read and own deletes also take the sync
+        // token, and sit behind the per-IP training crop limit (each
+        // `.layer` wraps only the methods added before it). Setting consent
+        // is session only. See routes::training_crops for the access rules.
+        .route(
+            "/api/training-crops",
+            post(routes::training_crops::upload_training_crops)
+                .layer::<_, std::convert::Infallible>(hero_icon_body_limit)
+                // Outer layer: a hot IP is refused before the body is read.
+                .layer::<_, std::convert::Infallible>(training_crop_ip_limit.clone())
+                .get(routes::training_crops::list_training_crops),
+        )
+        .route(
+            "/api/training-crops/consent",
+            get(routes::training_crops::get_consent)
+                .layer::<_, std::convert::Infallible>(training_crop_ip_limit.clone())
+                .put(routes::training_crops::put_consent),
+        )
+        .route(
+            "/api/training-crops/mine",
+            delete(routes::training_crops::delete_mine)
+                .layer::<_, std::convert::Infallible>(training_crop_ip_limit.clone())
+                .get(routes::training_crops::list_mine),
+        )
+        .route(
+            "/api/training-crops/members",
+            get(routes::training_crops::member_counts),
+        )
+        .route(
+            "/api/training-crops/resolutions",
+            get(routes::training_crops::resolution_totals),
+        )
+        .route(
+            "/api/training-crops/{id}/image",
+            get(routes::training_crops::crop_image),
+        )
+        .route(
+            "/api/training-crops/{id}",
+            delete(routes::training_crops::delete_crop)
+                .layer::<_, std::convert::Infallible>(training_crop_ip_limit),
+        )
         // Calendar ICS feeds moved into `public_routes` (NS2-6) — they are
         // unauthenticated and now share the public per-IP governor.
         // Audit log
         .route(
             "/api/stat-reports",
             post(routes::stat_reports::create_stat_report)
-                .layer::<_, std::convert::Infallible>(DefaultBodyLimit::max(10 * 1024 * 1024))
+                .layer::<_, std::convert::Infallible>(DefaultBodyLimit::max(
+                    MAX_BUNDLE_BYTES as usize,
+                ))
                 // Outer layer, so a throttled request is refused before
                 // the body is read.
                 .layer(

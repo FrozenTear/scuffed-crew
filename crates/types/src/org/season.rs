@@ -32,6 +32,15 @@ pub struct MemberLeaderboardRow {
     pub member_id: String,
     pub display_name: String,
     pub games: u32,
+    /// Victories counted in `games`. `wins + losses + draws == games`.
+    #[serde(default)]
+    pub wins: u32,
+    /// Defeats counted in `games`.
+    #[serde(default)]
+    pub losses: u32,
+    /// Draws counted in `games`.
+    #[serde(default)]
+    pub draws: u32,
     pub winrate: f32,
     pub kd: f64,
 }

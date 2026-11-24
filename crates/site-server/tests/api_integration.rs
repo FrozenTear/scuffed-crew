@@ -47,6 +47,7 @@ async fn test_state() -> AppState {
         reports_dir: PathBuf::from("/tmp/scuffed-test-reports"),
         reports_enabled: true,
         packs_dir: None,
+        hero_icons: scuffed_site_server::hero_icons::HeroIconStore::in_temp_dir(),
         notifier: None,
         nostr_challenge_key: *blake3::hash(b"test-nostr-challenge-key").as_bytes(),
         consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(),
@@ -724,6 +725,42 @@ async fn game_account_name_is_trimmed_and_capped_at_64() {
     );
 }
 
+/// An officer may upsert a game account on their own member id. The rank rule
+/// applies only when the caller edits someone else.
+#[tokio::test]
+async fn officer_can_upsert_own_game_account() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_game(&state.db, "ow2", "Overwatch 2").await;
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/members/officermember/game-accounts",
+            OFFICER_TOKEN,
+            json!({
+                "game_id": "ow2",
+                "account_name": "OfficerOwl"
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["account_name"], "OfficerOwl");
+    assert_eq!(json["member_id"], "officermember");
+
+    let stored = state
+        .db
+        .list_member_game_accounts("officermember")
+        .await
+        .unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].account_name, "OfficerOwl");
+}
+
 /// NS2-5: the profile's team list now comes from one `plays_on` traversal
 /// instead of scanning every team's full roster. Two teams and zero teams are
 /// the cases the old loop and the new query can disagree on.
@@ -997,6 +1034,7 @@ async fn set_officers_can_edit_teams(db: &Database, allowed: bool) {
         None,
         None,
         Some(allowed),
+        None,
     )
     .await
     .expect("set officers_can_edit_teams");
@@ -1910,6 +1948,295 @@ async fn officer_can_toggle_strategies_enabled_only() {
     assert_eq!(json["officers_can_edit_teams"], false);
 }
 
+// --- brand_font_display ---
+
+async fn put_settings(state: &AppState, token: &str, body: Value) -> (StatusCode, Value) {
+    let resp = create_router(state.clone())
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/settings",
+            token,
+            body,
+        ))
+        .await
+        .unwrap();
+    let status = resp.status();
+    (status, body_json(resp).await)
+}
+
+async fn get_settings_json(state: &AppState) -> Value {
+    let resp = create_router(state.clone())
+        .oneshot(unauthed_request(Method::GET, "/api/settings"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    body_json(resp).await
+}
+
+#[tokio::test]
+async fn get_settings_always_includes_brand_font_display() {
+    let state = test_state().await;
+    let json = get_settings_json(&state).await;
+    assert_eq!(
+        json.get("brand_font_display"),
+        Some(&json!("")),
+        "key must be present even when empty: {json}"
+    );
+}
+
+#[tokio::test]
+async fn put_settings_accepts_each_allowed_brand_font_display() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    for font in ["ibm-plex-sans", "urbanist", ""] {
+        let (status, json) =
+            put_settings(&state, ADMIN_TOKEN, json!({ "brand_font_display": font })).await;
+        assert_eq!(status, StatusCode::OK, "{font:?}: {json}");
+        assert_eq!(
+            json.get("brand_font_display"),
+            Some(&json!(font)),
+            "PUT response carries the key for {font:?}"
+        );
+        let got = get_settings_json(&state).await;
+        assert_eq!(got.get("brand_font_display"), Some(&json!(font)));
+    }
+}
+
+#[tokio::test]
+async fn put_settings_rejects_brand_font_display_outside_the_allow_list() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    let (status, _) = put_settings(
+        &state,
+        ADMIN_TOKEN,
+        json!({ "brand_font_display": "ibm-plex-sans" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    for bad in [
+        "comic-sans",
+        // Looks like a listed id, and is not one.
+        "jetbrains-mono",
+        "ibm-plex-mono",
+        "https://fonts.example.test/evil.woff2",
+        "/assets/font.woff2",
+        "Urbanist",
+        " urbanist",
+        "urbanist ",
+        "IBM Plex Sans",
+    ] {
+        // org_name rides along to show a rejected body applies nothing.
+        let (status, json) = put_settings(
+            &state,
+            ADMIN_TOKEN,
+            json!({ "brand_font_display": bad, "org_name": "Should Not Apply" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad:?}: {json}");
+        assert_eq!(
+            json,
+            json!({ "error": "Display font must be urbanist or ibm-plex-sans (or empty for default)" }),
+            "{bad:?}"
+        );
+        let got = get_settings_json(&state).await;
+        assert_eq!(got["brand_font_display"], "ibm-plex-sans", "{bad:?}");
+        assert_eq!(got["org_name"], "My Clan", "{bad:?}");
+    }
+
+    // Same error shape as the other settings validators.
+    let (status, accent) =
+        put_settings(&state, ADMIN_TOKEN, json!({ "brand_accent_dark": "nope" })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let keys = |v: &Value| v.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+    assert_eq!(keys(&accent), vec!["error".to_string()]);
+
+    // A non-string value never reaches the allow-list.
+    for body in [
+        json!({ "brand_font_display": 1 }),
+        json!({ "brand_font_display": ["urbanist"] }),
+    ] {
+        // axum's Json extractor answers before the handler runs.
+        let resp = create_router(state.clone())
+            .oneshot(authed_json_request(
+                Method::PUT,
+                "/api/settings",
+                ADMIN_TOKEN,
+                body.clone(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        let got = get_settings_json(&state).await;
+        assert_eq!(got["brand_font_display"], "ibm-plex-sans", "{body}");
+    }
+}
+
+#[tokio::test]
+async fn put_settings_without_brand_font_display_keeps_the_stored_value() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    let (status, _) = put_settings(
+        &state,
+        ADMIN_TOKEN,
+        json!({ "brand_font_display": "ibm-plex-sans" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Key absent, and explicit null: both mean "keep".
+    for body in [
+        json!({ "org_name": "Renamed Clan" }),
+        json!({ "brand_font_display": null, "site_description": "new desc" }),
+    ] {
+        let (status, json) = put_settings(&state, ADMIN_TOKEN, body.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(json["brand_font_display"], "ibm-plex-sans", "{body}");
+    }
+    // An officer's strategies-only update keeps it too.
+    let (status, json) = put_settings(
+        &state,
+        OFFICER_TOKEN,
+        json!({ "strategies_enabled": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["brand_font_display"], "ibm-plex-sans");
+
+    let got = get_settings_json(&state).await;
+    assert_eq!(got["brand_font_display"], "ibm-plex-sans");
+    assert_eq!(got["org_name"], "Renamed Clan");
+    assert_eq!(got["site_description"], "new desc");
+    assert_eq!(got["strategies_enabled"], false);
+
+    // Empty string is a value, not "keep": it clears back to the default.
+    let (status, json) =
+        put_settings(&state, ADMIN_TOKEN, json!({ "brand_font_display": "" })).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json.get("brand_font_display"), Some(&json!("")));
+}
+
+#[tokio::test]
+async fn officer_cannot_set_brand_font_display() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    for font in ["ibm-plex-sans", "", "comic-sans"] {
+        let (status, json) =
+            put_settings(&state, OFFICER_TOKEN, json!({ "brand_font_display": font })).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{font:?}");
+        assert_eq!(json["error"], "Admin access required");
+    }
+    let got = get_settings_json(&state).await;
+    assert_eq!(got["brand_font_display"], "");
+
+    // docs/api/site-settings.md: a non-string is 422 for an officer too (the
+    // session is checked first, then axum's Json extractor answers), and
+    // `null` is "keep", so it is not refused.
+    for body in [
+        json!({ "brand_font_display": 1 }),
+        json!({ "brand_font_display": ["urbanist"] }),
+    ] {
+        let resp = create_router(state.clone())
+            .oneshot(authed_json_request(
+                Method::PUT,
+                "/api/settings",
+                OFFICER_TOKEN,
+                body.clone(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    }
+    let (status, _) = put_settings(
+        &state,
+        ADMIN_TOKEN,
+        json!({ "brand_font_display": "ibm-plex-sans" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, json) =
+        put_settings(&state, OFFICER_TOKEN, json!({ "brand_font_display": null })).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["brand_font_display"], "ibm-plex-sans");
+    let got = get_settings_json(&state).await;
+    assert_eq!(got["brand_font_display"], "ibm-plex-sans");
+}
+
+#[tokio::test]
+async fn member_recruit_and_signed_out_cannot_set_brand_font_display() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    // A signed-in user with no member row (an applicant), as in
+    // docs/api/site-settings.md.
+    let nomember_token = "test-nomember-settings-token";
+    seed_applicant(
+        &state.db,
+        "nomembersettings",
+        "NoMemberSettings",
+        nomember_token,
+    )
+    .await;
+
+    for font in ["ibm-plex-sans", "", "comic-sans"] {
+        for token in [MEMBER_TOKEN, RECRUIT_TOKEN] {
+            let (status, json) =
+                put_settings(&state, token, json!({ "brand_font_display": font })).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{token} {font:?}");
+            assert_eq!(json, json!({ "error": "Officer access required" }));
+        }
+
+        let (status, json) = put_settings(
+            &state,
+            nomember_token,
+            json!({ "brand_font_display": font }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "no member row {font:?}");
+        assert_eq!(json, json!({ "error": "Not an org member" }));
+
+        let (status, json) = put_settings(
+            &state,
+            "no-such-session-token",
+            json!({ "brand_font_display": font }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "unknown token {font:?}");
+        assert_eq!(json, json!({ "error": "Session expired or invalid" }));
+
+        // Signed out: the same body with no session cookie at all.
+        let resp = create_router(state.clone())
+            .oneshot(
+                rate_limit_ip(
+                    Request::builder()
+                        .method(Method::PUT)
+                        .uri("/api/settings")
+                        .header(header::CONTENT_TYPE, "application/json"),
+                )
+                .body(Body::from(
+                    json!({ "brand_font_display": font }).to_string(),
+                ))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "signed out {font:?}"
+        );
+        assert_eq!(
+            body_json(resp).await,
+            json!({ "error": "Authentication required" })
+        );
+    }
+    let got = get_settings_json(&state).await;
+    assert_eq!(got["brand_font_display"], "");
+}
+
 #[tokio::test]
 async fn get_settings_includes_officers_can_edit_teams_default_false() {
     let state = test_state().await;
@@ -2073,6 +2400,135 @@ async fn admin_can_update_full_settings() {
     assert_eq!(json["org_name"], "Admin Clan");
     assert_eq!(json["recruitment_open"], false);
     assert_eq!(json["strategies_enabled"], false);
+}
+
+/// Issue 698: the brand accent contrast lock the settings page applies is
+/// enforced on the server. `#d35400` fails it (no ink reaches 4.5:1 on it in
+/// the dark theme), so the save is refused and nothing is stored.
+#[tokio::test]
+async fn settings_put_refuses_an_accent_the_contrast_lock_blocks() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    let before = state.db.get_settings().await.expect("settings");
+
+    let resp = create_router(state.clone())
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/settings",
+            ADMIN_TOKEN,
+            json!({
+                "org_name": "Should Not Land",
+                "brand_accent_dark": "#d35400",
+                "brand_accent_light": "#d35400"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let json = body_json(resp).await;
+    assert_eq!(
+        json["error"],
+        "Ink on this accent does not reach 4.5:1 in the dark theme."
+    );
+
+    let after = state.db.get_settings().await.expect("settings");
+    assert_eq!(after.brand_accent_dark, before.brand_accent_dark);
+    assert_eq!(after.brand_accent_light, before.brand_accent_light);
+    assert_eq!(after.org_name, before.org_name);
+    assert_ne!(after.brand_accent_dark, "#d35400");
+
+    // A dark-only save is checked too.
+    let resp = create_router(state.clone())
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/settings",
+            ADMIN_TOKEN,
+            json!({ "brand_accent_dark": "#d35400" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let after = state.db.get_settings().await.expect("settings");
+    assert_eq!(after.brand_accent_dark, before.brand_accent_dark);
+}
+
+#[tokio::test]
+async fn settings_put_accepts_the_default_accent() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    let resp = create_router(state.clone())
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/settings",
+            ADMIN_TOKEN,
+            json!({
+                "brand_accent_dark": "#8f73ff",
+                "brand_accent_light": "#6d4aff"
+            }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["brand_accent_dark"], "#8f73ff");
+    assert_eq!(json["brand_accent_light"], "#6d4aff");
+
+    let stored = state.db.get_settings().await.expect("settings");
+    assert_eq!(stored.brand_accent_dark, "#8f73ff");
+    assert_eq!(stored.brand_accent_light, "#6d4aff");
+}
+
+/// Issue 698: a stored dark accent that fails the lock (stored before the
+/// lock, so it is still served) does not block a save that leaves the dark
+/// key out. Only light is in the request, so only light is checked.
+#[tokio::test]
+async fn settings_put_light_only_save_passes_over_a_stored_failing_dark() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    state
+        .db
+        .update_settings(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("#d35400"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("store a failing dark accent");
+
+    let resp = create_router(state.clone())
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/settings",
+            ADMIN_TOKEN,
+            json!({ "brand_accent_light": "#6d4aff" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["brand_accent_dark"], "#d35400");
+    assert_eq!(json["brand_accent_light"], "#6d4aff");
+
+    let stored = state.db.get_settings().await.expect("settings");
+    assert_eq!(stored.brand_accent_dark, "#d35400");
+    assert_eq!(stored.brand_accent_light, "#6d4aff");
 }
 
 #[tokio::test]
@@ -3881,7 +4337,7 @@ async fn application_submit_accept_creates_member() {
             json!({
                 "preferred_games": ["ow2"],
                 "preferred_roles": ["tank"],
-                "message": "hi"
+                "message": "I would like to join the crew"
             }),
         ))
         .await
@@ -3900,7 +4356,8 @@ async fn application_submit_accept_creates_member() {
             APPLICANT_TOKEN,
             json!({
                 "preferred_games": ["ow2"],
-                "preferred_roles": ["tank"]
+                "preferred_roles": ["tank"],
+                "message": "I would like to join the crew"
             }),
         ))
         .await
@@ -3916,7 +4373,8 @@ async fn application_submit_accept_creates_member() {
             MEMBER_TOKEN,
             json!({
                 "preferred_games": ["ow2"],
-                "preferred_roles": ["dps"]
+                "preferred_roles": ["dps"],
+                "message": "I would like to join the crew"
             }),
         ))
         .await
@@ -3956,7 +4414,7 @@ async fn application_refused_when_recruitment_closed_and_accepted_when_open() {
     let body = json!({
         "preferred_games": ["ow2"],
         "preferred_roles": ["tank"],
-        "message": "hello"
+        "message": "I would like to join the crew"
     });
 
     let app = create_router(state.clone());
@@ -4044,6 +4502,125 @@ async fn application_refused_when_recruitment_closed_and_accepted_when_open() {
 }
 
 #[tokio::test]
+async fn application_with_short_message_is_400_and_not_stored() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_applicant(&state.db, "appshort", "ShortApplicant", "tok-app-short").await;
+
+    for body in [
+        json!({ "preferred_games": ["ow2"], "preferred_roles": [], "message": "  too short  " }),
+        json!({ "preferred_games": ["ow2"], "preferred_roles": [], "message": null }),
+        json!({ "preferred_games": ["ow2"], "preferred_roles": [] }),
+    ] {
+        let app = create_router(state.clone());
+        let resp = app
+            .oneshot(authed_json_request(
+                Method::POST,
+                "/api/applications",
+                "tok-app-short",
+                body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let err = body_json(resp).await;
+        assert_eq!(err["error"], "Message must be at least 10 characters");
+    }
+    assert!(
+        state
+            .db
+            .get_application_by_user("appshort")
+            .await
+            .unwrap()
+            .is_none(),
+        "a short message must not store an application"
+    );
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/applications",
+            "tok-app-short",
+            json!({ "preferred_games": [], "preferred_roles": [], "message": "  æøåæøåæøåæ  " }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CREATED);
+}
+
+/// The message check runs before the recruitment gate: with recruitment
+/// closed, a short message still gets the 400, not the 403.
+#[tokio::test]
+async fn application_short_message_is_400_even_when_recruitment_closed() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_applicant(
+        &state.db,
+        "appshortclosed",
+        "ShortClosedApplicant",
+        "tok-app-short-closed",
+    )
+    .await;
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/settings",
+            ADMIN_TOKEN,
+            json!({ "recruitment_open": false }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        !state.db.get_settings().await.unwrap().recruitment_open,
+        "recruitment must be closed for this test"
+    );
+
+    // 9 chars after trim.
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/applications",
+            "tok-app-short-closed",
+            json!({ "preferred_games": ["ow2"], "preferred_roles": ["tank"], "message": "  123456789  " }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let err = body_json(resp).await;
+    assert_eq!(err["error"], "Message must be at least 10 characters");
+    assert!(
+        state
+            .db
+            .get_application_by_user("appshortclosed")
+            .await
+            .unwrap()
+            .is_none(),
+        "a short message must not store an application"
+    );
+
+    // Control: same user, valid message, recruitment still closed, gets the
+    // recruitment-closed 403. So the 400 above came from the message check.
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/applications",
+            "tok-app-short-closed",
+            json!({ "preferred_games": ["ow2"], "preferred_roles": ["tank"], "message": "I would like to join the crew" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let err = body_json(resp).await;
+    assert_eq!(err["error"], "recruitment is currently closed");
+}
+
+#[tokio::test]
 async fn application_trial_then_accept_promotes_to_member() {
     let state = test_state().await;
     seed_all_roles(&state.db).await;
@@ -4055,7 +4632,7 @@ async fn application_trial_then_accept_promotes_to_member() {
             Method::POST,
             "/api/applications",
             APPLICANT_TOKEN,
-            json!({ "preferred_games": ["ow2"], "preferred_roles": ["support"] }),
+            json!({ "preferred_games": ["ow2"], "preferred_roles": ["support"], "message": "I would like to join the crew" }),
         ))
         .await
         .unwrap();
@@ -4103,6 +4680,300 @@ async fn application_trial_then_accept_promotes_to_member() {
     assert_eq!(member.org_role.to_string(), "member");
 }
 
+/// Seed a deactivated member with a live session who has a pending application.
+/// Returns the application id.
+async fn seed_inactive_applicant(
+    state: &AppState,
+    user_key: &str,
+    member_key: &str,
+    username: &str,
+    role: &str,
+    token: &str,
+) -> String {
+    seed_user(&state.db, user_key, member_key, username, role, token).await;
+    state
+        .db
+        .client
+        .query(format!("UPDATE member:{member_key} SET is_active = false"))
+        .await
+        .unwrap_or_else(|e| panic!("deactivate {member_key}: {e}"));
+    let before = state.db.get_member(member_key).await.unwrap().unwrap();
+    assert!(!before.is_active, "fixture member must start inactive");
+    assert_eq!(before.org_role.to_string(), role);
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/applications",
+            token,
+            json!({ "preferred_games": [], "preferred_roles": [], "message": "I would like to rejoin the crew" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::CREATED,
+        "a deactivated, non-banned member can apply"
+    );
+    body_json(resp).await["id"].as_str().unwrap().to_string()
+}
+
+async fn patch_application_status(
+    state: &AppState,
+    app_id: &str,
+    token: &str,
+    status: &str,
+) -> axum::response::Response {
+    create_router(state.clone())
+        .oneshot(authed_json_request(
+            Method::PATCH,
+            &format!("/api/applications/{app_id}"),
+            token,
+            json!({ "status": status }),
+        ))
+        .await
+        .unwrap()
+}
+
+/// #812: an officer cannot restore a deactivated officer or admin by moving
+/// their application to trial or accepted. 403 (a rank denial, like
+/// `can_set_is_active`), nothing written.
+#[tokio::test]
+async fn officer_cannot_reactivate_deactivated_officer_or_admin_via_application() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    for (user_key, member_key, role, token) in [
+        ("exofficeruser", "exofficer", "officer", "tok-ex-officer"),
+        ("exadminuser", "exadmin", "admin", "tok-ex-admin"),
+    ] {
+        let app_id =
+            seed_inactive_applicant(&state, user_key, member_key, member_key, role, token).await;
+
+        for status in ["trial", "accepted"] {
+            let resp = patch_application_status(&state, &app_id, OFFICER_TOKEN, status).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::FORBIDDEN,
+                "officer {status} of a deactivated {role}"
+            );
+            let err = body_json(resp).await;
+            assert_eq!(
+                err["error"],
+                "Applicant is a deactivated officer or admin. Only an admin can reactivate them"
+            );
+
+            let member = state.db.get_member(member_key).await.unwrap().unwrap();
+            assert!(
+                !member.is_active,
+                "officer {status} must not reactivate a {role}"
+            );
+            assert_eq!(member.org_role.to_string(), role);
+            let application = state.db.get_application(&app_id).await.unwrap().unwrap();
+            assert_eq!(
+                application.status.to_string(),
+                "pending",
+                "a refused {status} must leave the application pending"
+            );
+        }
+    }
+}
+
+/// #812: an admin may reactivate a deactivated officer or admin through the
+/// application, on trial and on accept. The officer or admin role is kept.
+#[tokio::test]
+async fn admin_can_reactivate_deactivated_officer_or_admin_via_application() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    for (user_key, member_key, role, token, status) in [
+        ("exoff1user", "exoff1", "officer", "tok-ex-off-1", "trial"),
+        (
+            "exoff2user",
+            "exoff2",
+            "officer",
+            "tok-ex-off-2",
+            "accepted",
+        ),
+        ("exadm1user", "exadm1", "admin", "tok-ex-adm-1", "trial"),
+        ("exadm2user", "exadm2", "admin", "tok-ex-adm-2", "accepted"),
+    ] {
+        let app_id =
+            seed_inactive_applicant(&state, user_key, member_key, member_key, role, token).await;
+
+        let resp = patch_application_status(&state, &app_id, ADMIN_TOKEN, status).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "admin {status} of a deactivated {role}"
+        );
+        assert_eq!(body_json(resp).await["status"], status);
+
+        let member = state.db.get_member(member_key).await.unwrap().unwrap();
+        assert!(member.is_active, "admin {status} reactivates the {role}");
+        assert_eq!(
+            member.org_role.to_string(),
+            role,
+            "admin {status} keeps the {role} role"
+        );
+    }
+}
+
+/// #812 control: the officer path still brings back a deactivated member or
+/// recruit, the ranks an officer may set `is_active` on.
+#[tokio::test]
+async fn officer_can_reactivate_deactivated_member_or_recruit_via_application() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    for (user_key, member_key, role, token, status, role_after) in [
+        (
+            "exmem1user",
+            "exmem1",
+            "member",
+            "tok-ex-mem-1",
+            "trial",
+            "member",
+        ),
+        (
+            "exmem2user",
+            "exmem2",
+            "member",
+            "tok-ex-mem-2",
+            "accepted",
+            "recruit",
+        ),
+        (
+            "exrec1user",
+            "exrec1",
+            "recruit",
+            "tok-ex-rec-1",
+            "trial",
+            "recruit",
+        ),
+        (
+            "exrec2user",
+            "exrec2",
+            "recruit",
+            "tok-ex-rec-2",
+            "accepted",
+            "recruit",
+        ),
+    ] {
+        let app_id =
+            seed_inactive_applicant(&state, user_key, member_key, member_key, role, token).await;
+
+        let resp = patch_application_status(&state, &app_id, OFFICER_TOKEN, status).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "officer {status} of a deactivated {role}"
+        );
+
+        let member = state.db.get_member(member_key).await.unwrap().unwrap();
+        assert!(member.is_active, "officer {status} reactivates the {role}");
+        assert_eq!(member.org_role.to_string(), role_after);
+    }
+}
+
+/// #812: the guard also holds on accept from trial. An admin starts the trial
+/// (which reactivates the officer), the officer is deactivated again, and an
+/// officer reviewer then tries to accept. 403, the member stays inactive and
+/// the application stays in trial.
+#[tokio::test]
+async fn officer_cannot_accept_inactive_officer_whose_application_is_in_trial() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    let app_id = seed_inactive_applicant(
+        &state,
+        "extrialuser",
+        "extrial",
+        "extrial",
+        "officer",
+        "tok-ex-trial",
+    )
+    .await;
+
+    let resp = patch_application_status(&state, &app_id, ADMIN_TOKEN, "trial").await;
+    assert_eq!(resp.status(), StatusCode::OK, "admin trial");
+    let member = state.db.get_member("extrial").await.unwrap().unwrap();
+    assert!(member.is_active, "admin trial reactivates the officer");
+
+    state
+        .db
+        .client
+        .query("UPDATE member:extrial SET is_active = false")
+        .await
+        .expect("deactivate again during trial");
+
+    let resp = patch_application_status(&state, &app_id, OFFICER_TOKEN, "accepted").await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "officer accept of a deactivated officer in trial"
+    );
+    assert_eq!(
+        body_json(resp).await["error"],
+        "Applicant is a deactivated officer or admin. Only an admin can reactivate them"
+    );
+
+    let member = state.db.get_member("extrial").await.unwrap().unwrap();
+    assert!(!member.is_active, "officer accept must not reactivate");
+    assert_eq!(member.org_role.to_string(), "officer");
+    let application = state.db.get_application(&app_id).await.unwrap().unwrap();
+    assert_eq!(
+        application.status.to_string(),
+        "trial",
+        "a refused accept must leave the application in trial"
+    );
+}
+
+/// #812 control: the guard is about reactivation only. Once an admin trial has
+/// reactivated the officer and they are still active, an officer reviewer may
+/// finish the accept. 200, the application is accepted, the member stays
+/// active and keeps the officer role (accept never demotes).
+#[tokio::test]
+async fn officer_can_accept_after_admin_trial_while_member_is_still_active() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    let app_id = seed_inactive_applicant(
+        &state,
+        "exstilluser",
+        "exstill",
+        "exstill",
+        "officer",
+        "tok-ex-still",
+    )
+    .await;
+
+    let resp = patch_application_status(&state, &app_id, ADMIN_TOKEN, "trial").await;
+    assert_eq!(resp.status(), StatusCode::OK, "admin trial");
+    let member = state.db.get_member("exstill").await.unwrap().unwrap();
+    assert!(member.is_active, "admin trial reactivates the officer");
+    assert_eq!(member.org_role.to_string(), "officer");
+
+    let resp = patch_application_status(&state, &app_id, OFFICER_TOKEN, "accepted").await;
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "officer accept of an active officer after an admin trial"
+    );
+    assert_eq!(body_json(resp).await["status"], "accepted");
+
+    let member = state.db.get_member("exstill").await.unwrap().unwrap();
+    assert!(member.is_active);
+    assert_eq!(
+        member.org_role.to_string(),
+        "officer",
+        "accept keeps the officer role"
+    );
+    let application = state.db.get_application(&app_id).await.unwrap().unwrap();
+    assert_eq!(application.status.to_string(), "accepted");
+}
+
 #[tokio::test]
 async fn application_invalid_transition_rejected() {
     let state = test_state().await;
@@ -4115,7 +4986,7 @@ async fn application_invalid_transition_rejected() {
             Method::POST,
             "/api/applications",
             APPLICANT_TOKEN,
-            json!({ "preferred_games": [], "preferred_roles": [] }),
+            json!({ "preferred_games": [], "preferred_roles": [], "message": "I would like to join the crew" }),
         ))
         .await
         .unwrap();
@@ -4587,7 +5458,7 @@ async fn application_stale_transition_conflict() {
             Method::POST,
             "/api/applications",
             APPLICANT_TOKEN,
-            json!({ "preferred_games": ["ow2"], "preferred_roles": ["tank"] }),
+            json!({ "preferred_games": ["ow2"], "preferred_roles": ["tank"], "message": "I would like to join the crew" }),
         ))
         .await
         .unwrap();
@@ -4920,7 +5791,7 @@ async fn open_application_count_guards_duplicate() {
             Method::POST,
             "/api/applications",
             APPLICANT_TOKEN,
-            json!({ "preferred_games": ["ow2"], "preferred_roles": [] }),
+            json!({ "preferred_games": ["ow2"], "preferred_roles": [], "message": "I would like to join the crew" }),
         ))
         .await
         .unwrap();
@@ -4944,7 +5815,7 @@ async fn open_application_count_guards_duplicate() {
             Method::POST,
             "/api/applications",
             APPLICANT_TOKEN,
-            json!({ "preferred_games": [], "preferred_roles": [] }),
+            json!({ "preferred_games": [], "preferred_roles": [], "message": "I would like to join the crew" }),
         ))
         .await
         .unwrap();
@@ -4963,7 +5834,7 @@ async fn applicant_self_withdraw_pending() {
             Method::POST,
             "/api/applications",
             APPLICANT_TOKEN,
-            json!({ "preferred_games": ["ow2"], "preferred_roles": [] }),
+            json!({ "preferred_games": ["ow2"], "preferred_roles": [], "message": "I would like to join the crew" }),
         ))
         .await
         .unwrap();
@@ -5009,7 +5880,7 @@ async fn applicant_self_withdraw_trial_deactivates_recruit() {
             Method::POST,
             "/api/applications",
             APPLICANT_TOKEN,
-            json!({ "preferred_games": [], "preferred_roles": [] }),
+            json!({ "preferred_games": [], "preferred_roles": [], "message": "I would like to join the crew" }),
         ))
         .await
         .unwrap();
@@ -5068,7 +5939,7 @@ async fn trial_reject_deactivates_recruit_and_withdraw_audits_distinct() {
             Method::POST,
             "/api/applications",
             APPLICANT_TOKEN,
-            json!({ "preferred_games": ["ow2"], "preferred_roles": ["dps"] }),
+            json!({ "preferred_games": ["ow2"], "preferred_roles": ["dps"], "message": "I would like to join the crew" }),
         ))
         .await
         .unwrap();
@@ -5122,7 +5993,7 @@ async fn trial_reject_deactivates_recruit_and_withdraw_audits_distinct() {
             Method::POST,
             "/api/applications",
             "test-withdraw-token",
-            json!({ "preferred_games": [], "preferred_roles": [] }),
+            json!({ "preferred_games": [], "preferred_roles": [], "message": "I would like to join the crew" }),
         ))
         .await
         .unwrap();
@@ -6386,6 +7257,160 @@ async fn public_leaderboards_and_member_heroes() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
+/// Site record display: the leaderboard rows and the members list `hero_scoped`
+/// block carry `wins`, `losses` and `draws`, classified like `games`, so the
+/// three always add up to `games`. Includes a draw on purpose.
+#[tokio::test]
+async fn public_leaderboard_and_hero_scoped_carry_wins_losses_draws() {
+    use chrono::{TimeZone, Utc};
+    use scuffed_db::types::PersonalMatch;
+
+    fn wld_match(
+        member: &str,
+        session: &str,
+        hero: &str,
+        outcome: &str,
+        day: u32,
+    ) -> PersonalMatch {
+        PersonalMatch {
+            id: String::new(),
+            member_id: member.into(),
+            session_id: session.into(),
+            hero: hero.into(),
+            map_name: "Oasis".into(),
+            game_mode: "control".into(),
+            role: "Support".into(),
+            outcome: outcome.into(),
+            elims: 10,
+            deaths: 2,
+            assists: 8,
+            damage: 3000,
+            healing: 9000,
+            mitigation: 0,
+            played_at: Utc.with_ymd_and_hms(2026, 7, day, 20, 0, 0).unwrap(),
+            uploaded_at: Utc::now(),
+            edited: false,
+            recognizer: scuffed_types::RECOGNIZER_OCR_V1.into(),
+            name_recognizer: None,
+            suspect_fields: Vec::new(),
+            bans_picks: None,
+            rank: None,
+        }
+    }
+
+    fn assert_record(row: &serde_json::Value, games: u64, wins: u64, losses: u64, draws: u64) {
+        assert_eq!(row["games"], games, "{row}");
+        assert_eq!(row["wins"], wins, "{row}");
+        assert_eq!(row["losses"], losses, "{row}");
+        assert_eq!(row["draws"], draws, "{row}");
+        let sum = row["wins"].as_u64().unwrap()
+            + row["losses"].as_u64().unwrap()
+            + row["draws"].as_u64().unwrap();
+        assert_eq!(sum, row["games"].as_u64().unwrap(), "{row}");
+    }
+
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    // membermember: 5 Ana games (3W 1L 1D) plus 1 Mercy defeat.
+    state
+        .db
+        .upsert_personal_matches(
+            "membermember",
+            &[
+                wld_match("membermember", "wld-a1", "Ana", "victory", 1),
+                wld_match("membermember", "wld-a2", "Ana", "defeat", 2),
+                wld_match("membermember", "wld-a3", "Ana", "draw", 3),
+                wld_match("membermember", "wld-a4", "Ana", "victory", 4),
+                wld_match("membermember", "wld-a5", "Ana", "victory", 5),
+                wld_match("membermember", "wld-m1", "Mercy", "defeat", 6),
+            ],
+        )
+        .await
+        .unwrap();
+    // officermember: 1 Ana draw only.
+    state
+        .db
+        .upsert_personal_matches(
+            "officermember",
+            &[wld_match("officermember", "wld-o1", "Ana", "draw", 7)],
+        )
+        .await
+        .unwrap();
+
+    // Overall games board: every hero rolled up.
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/api/public/leaderboards?metric=games&limit=10",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let rows = json["rows"].as_array().expect("leaderboard rows");
+    let mm = rows
+        .iter()
+        .find(|r| r["member_id"] == "membermember")
+        .expect("membermember on games board");
+    assert_record(mm, 6, 3, 2, 1);
+    let om = rows
+        .iter()
+        .find(|r| r["member_id"] == "officermember")
+        .expect("officermember on games board");
+    assert_record(om, 1, 0, 0, 1);
+    for row in rows {
+        assert!(row.get("winrate").is_some() && row.get("kd").is_some());
+    }
+
+    // Hero-filtered winrate board: only the 5 Ana games count.
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/api/public/leaderboards?metric=winrate&limit=10&hero=ana",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let rows = json["rows"].as_array().expect("leaderboard rows");
+    let mm = rows
+        .iter()
+        .find(|r| r["member_id"] == "membermember")
+        .expect("membermember on Ana winrate board");
+    assert_record(mm, 5, 3, 1, 1);
+    let wr = mm["winrate"].as_f64().expect("winrate f64");
+    assert!((wr - 0.6).abs() < 1e-5, "winrate={wr}");
+
+    // Members list hero_scoped block.
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/api/public/members?limit=50&hero=ana",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let data = json["data"].as_array().expect("data array");
+    let scoped = |id: &str| {
+        data.iter()
+            .find(|m| m["id"] == id)
+            .unwrap_or_else(|| panic!("{id} on page"))
+            .get("hero_scoped")
+            .cloned()
+            .unwrap_or_else(|| panic!("hero_scoped present for {id}"))
+    };
+    let mm = scoped("membermember");
+    assert_record(&mm, 5, 3, 1, 1);
+    let wr = mm["winrate"].as_f64().expect("winrate f64");
+    assert!((wr - 0.6).abs() < 1e-5, "winrate={wr}");
+    assert_record(&scoped("officermember"), 1, 0, 0, 1);
+}
+
 /// W3 B3 + HS-DR P3: `GET /api/public/members?hero=` attaches optional `hero_scoped`.
 #[tokio::test]
 async fn public_members_hero_scoped_query() {
@@ -6418,6 +7443,8 @@ async fn public_members_hero_scoped_query() {
             recognizer: scuffed_types::RECOGNIZER_OCR_V1.into(),
             name_recognizer: None,
             suspect_fields: Vec::new(),
+            bans_picks: None,
+            rank: None,
         },
         PersonalMatch {
             id: String::new(),
@@ -6440,6 +7467,8 @@ async fn public_members_hero_scoped_query() {
             recognizer: scuffed_types::RECOGNIZER_OCR_V1.into(),
             name_recognizer: None,
             suspect_fields: Vec::new(),
+            bans_picks: None,
+            rank: None,
         },
         // Different hero must not count toward Ana-scoped games.
         PersonalMatch {
@@ -6463,6 +7492,8 @@ async fn public_members_hero_scoped_query() {
             recognizer: scuffed_types::RECOGNIZER_OCR_V1.into(),
             name_recognizer: None,
             suspect_fields: Vec::new(),
+            bans_picks: None,
+            rank: None,
         },
     ];
     state
@@ -7252,6 +8283,100 @@ async fn upload_avatar_oversized_dimensions_rejected() {
 
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     // Nothing persisted.
+    assert!(
+        !dir.join("avatars").exists()
+            || std::fs::read_dir(dir.join("avatars"))
+                .map(|mut d| d.next().is_none())
+                .unwrap_or(true),
+        "no file should be written for a rejected bomb"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Real 2x1 AVIF (see `tests/data/README.md`).
+const UPL_AVIF: &[u8] = include_bytes!("data/tiny-2x1.avif");
+
+/// `UPL_AVIF` with its single `ispe` box rewritten to declare `w` x `h`.
+fn upl_avif(w: u32, h: u32) -> Vec<u8> {
+    let mut out = UPL_AVIF.to_vec();
+    let at = out
+        .windows(4)
+        .position(|win| win == b"ispe")
+        .expect("fixture has an ispe box");
+    out[at + 8..at + 12].copy_from_slice(&w.to_be_bytes());
+    out[at + 12..at + 16].copy_from_slice(&h.to_be_bytes());
+    out
+}
+
+#[tokio::test]
+async fn upload_avatar_avif_succeeds_and_is_served_inline() {
+    let mut state = test_state().await;
+    state.upload_dir = unique_upload_dir("avif");
+    seed_all_roles(&state.db).await;
+    let dir = state.upload_dir.clone();
+    let app = create_router(state);
+
+    let resp = app
+        .clone()
+        .oneshot(upload_request(
+            "/api/upload/avatar",
+            MEMBER_TOKEN,
+            "a.avif",
+            "image/avif",
+            UPL_AVIF,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let url = body_json(resp).await["url"].as_str().unwrap().to_string();
+    assert!(url.starts_with("/uploads/avatars/"), "got {url}");
+    assert!(url.ends_with(".avif"), "got {url}");
+
+    let served = app
+        .oneshot(Request::builder().uri(&url).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(served.status(), StatusCode::OK);
+    let hdr = |name: header::HeaderName| {
+        served
+            .headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    };
+    assert_eq!(hdr(header::CONTENT_TYPE).as_deref(), Some("image/avif"));
+    assert_eq!(hdr(header::CONTENT_DISPOSITION).as_deref(), Some("inline"));
+    assert_eq!(
+        hdr(header::X_CONTENT_TYPE_OPTIONS).as_deref(),
+        Some("nosniff")
+    );
+    assert!(hdr(header::CONTENT_SECURITY_POLICY).is_none());
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn upload_avatar_avif_oversized_dimensions_rejected() {
+    let mut state = test_state().await;
+    state.upload_dir = unique_upload_dir("avif-bomb");
+    seed_all_roles(&state.db).await;
+    let dir = state.upload_dir.clone();
+    let app = create_router(state);
+
+    // 311-byte file whose header declares a 50000x50000 canvas.
+    let resp = app
+        .oneshot(upload_request(
+            "/api/upload/avatar",
+            MEMBER_TOKEN,
+            "bomb.avif",
+            "image/avif",
+            &upl_avif(50_000, 50_000),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     assert!(
         !dir.join("avatars").exists()
             || std::fs::read_dir(dir.join("avatars"))
@@ -8200,6 +9325,8 @@ async fn seasons_crud_and_stats_season_filter() {
         recognizer: scuffed_types::RECOGNIZER_OCR_V1.into(),
         name_recognizer: None,
         suspect_fields: Vec::new(),
+        bans_picks: None,
+        rank: None,
     };
     // January game inside season 1, July game outside it.
     let matches = vec![
@@ -8469,7 +9596,9 @@ fn role_row<'a>(rows: &'a [Value], role: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("missing role {role:?} in {rows:?}"))
 }
 
-/// Stored-role aggregates, plus the same session denials as `/heroes`.
+/// Role aggregates with the read-time role fill, plus the same session
+/// denials as `/heroes`. A recognized stored role is kept (Sombra stored as
+/// Support stays Support); the empty Reaper role reads as Damage.
 ///
 /// `/heroes` has no per-member privacy flag: any active org member may read
 /// any member id (including a suspended target). Anonymous and non-session
@@ -8514,6 +9643,8 @@ async fn role_stats_endpoints_match_heroes_auth_and_group_stored_role() {
         recognizer: scuffed_types::RECOGNIZER_OCR_V1.into(),
         name_recognizer: None,
         suspect_fields: Vec::new(),
+        bans_picks: None,
+        rank: None,
     };
 
     state
@@ -8697,7 +9828,8 @@ async fn role_stats_endpoints_match_heroes_auth_and_group_stored_role() {
         rows.iter()
             .map(|r| r["role"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        vec!["Support", "Damage", ""]
+        vec!["Damage", "Support"],
+        "matches desc, then role asc; no empty row once Reaper is filled"
     );
     let support = role_row(rows, "Support");
     assert_eq!(support["matches"], 3);
@@ -8707,15 +9839,34 @@ async fn role_stats_endpoints_match_heroes_auth_and_group_stored_role() {
     // 4 + 2 + 20 elims across the three Support games.
     approx_stat(&support["avg_elims"], 26.0 / 3.0);
     let damage = role_row(rows, "Damage");
-    assert_eq!(damage["matches"], 2, "Sombra Support is not Damage");
+    assert_eq!(
+        damage["matches"], 3,
+        "two Sombra Damage games plus the filled Reaper game; Sombra Support is not Damage"
+    );
     assert_eq!(damage["wins"], 1);
-    assert_eq!(damage["losses"], 1);
+    assert_eq!(damage["losses"], 2);
     assert_eq!(damage["draws"], 0);
-    let empty = role_row(rows, "");
-    assert_eq!(empty["matches"], 1);
-    assert_eq!(empty["wins"], 0);
-    assert_eq!(empty["losses"], 1);
-    assert_eq!(empty["draws"], 0);
+    assert!(
+        rows.iter().all(|r| r["role"] != ""),
+        "empty stored role is filled from the hero: {rows:?}"
+    );
+
+    // The fill is read-only: the stored rows keep their roles.
+    let stored = state
+        .db
+        .list_personal_matches("membermember", 20, 0)
+        .await
+        .unwrap();
+    let stored_role = |sid: &str| {
+        stored
+            .iter()
+            .find(|m| m.session_id == sid)
+            .map(|m| m.role.clone())
+            .unwrap()
+    };
+    assert_eq!(stored_role("e1"), "");
+    assert_eq!(stored_role("s1"), "Support");
+    assert_eq!(stored_role("d1"), "Damage");
 
     // Another active member sees the same rows. Own roles stay separate.
     let (status, seen) = get_json(
@@ -8756,7 +9907,7 @@ async fn role_stats_endpoints_match_heroes_auth_and_group_stored_role() {
             .iter()
             .map(|r| r["role"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        vec!["Damage", "Support", ""]
+        vec!["Damage", "Support"]
     );
     let s_support = role_row(season_rows, "Support");
     assert_eq!(s_support["matches"], 2);
@@ -8768,10 +9919,12 @@ async fn role_stats_endpoints_match_heroes_auth_and_group_stored_role() {
     approx_stat(&s_support["avg_damage"], 1500.0);
     approx_stat(&s_support["avg_healing"], 7000.0);
     let s_damage = role_row(season_rows, "Damage");
-    approx_stat(&s_damage["avg_elims"], 8.0);
+    assert_eq!(s_damage["matches"], 3);
+    // d1, d2, and the filled Reaper game e1.
+    approx_stat(&s_damage["avg_elims"], 17.0 / 3.0);
     approx_stat(&s_damage["avg_deaths"], 6.0);
-    approx_stat(&s_damage["avg_damage"], 6000.0);
-    approx_stat(&s_damage["avg_healing"], 50.0);
+    approx_stat(&s_damage["avg_damage"], 12500.0 / 3.0);
+    approx_stat(&s_damage["avg_healing"], 100.0 / 3.0);
 
     let (status, seen_season) = get_json(
         &state,
@@ -8786,7 +9939,7 @@ async fn role_stats_endpoints_match_heroes_auth_and_group_stored_role() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         blank.as_array().unwrap().len(),
-        3,
+        2,
         "blank season is all time"
     );
 
@@ -8917,7 +10070,7 @@ async fn role_stats_endpoints_match_heroes_auth_and_group_stored_role() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body.as_array().unwrap().len(),
-        3,
+        2,
         "suspending the target does not hide their role stats"
     );
     let (hs, _) = get_json(
@@ -9153,6 +10306,118 @@ async fn unpublished_article_hidden_from_non_editors() {
     assert_eq!(resp.status(), StatusCode::OK);
     let list = body_json(resp).await;
     assert!(list.as_array().unwrap().is_empty());
+}
+
+const COVER_IMAGE_URL_ERROR: &str =
+    "cover_image_url must be empty, an https URL, or an /uploads/images/ path";
+
+async fn article_create(app: &axum::Router, slug: &str, cover: Value) -> (StatusCode, Value) {
+    let resp = app
+        .clone()
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/articles",
+            OFFICER_TOKEN,
+            json!({
+                "slug": slug,
+                "title": "Cover test",
+                "content_markdown": "body",
+                "cover_image_url": cover,
+            }),
+        ))
+        .await
+        .unwrap();
+    let status = resp.status();
+    (status, body_json(resp).await)
+}
+
+async fn article_update(app: &axum::Router, slug: &str, body: Value) -> (StatusCode, Value) {
+    let resp = app
+        .clone()
+        .oneshot(authed_json_request(
+            Method::PUT,
+            &format!("/api/articles/{slug}"),
+            OFFICER_TOKEN,
+            body,
+        ))
+        .await
+        .unwrap();
+    let status = resp.status();
+    (status, body_json(resp).await)
+}
+
+/// Create rejects script / odd cover URLs before writing anything, and stores
+/// accepted values trimmed. Blank means no cover.
+#[tokio::test]
+async fn article_create_validates_cover_image_url() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    let app = create_router(state);
+
+    let (status, body) = article_create(&app, "cover-js", json!("javascript:alert(1)")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], COVER_IMAGE_URL_ERROR);
+    let (status, _) = article_get(&app, "cover-js", Some(OFFICER_TOKEN)).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "rejected create wrote nothing"
+    );
+
+    let upload = "/uploads/images/member_officer/cover.png";
+    let (status, body) = article_create(&app, "cover-upload", json!(format!(" {upload} "))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["cover_image_url"], upload);
+
+    let https = "HTTPS://cdn.example.com/cover.png";
+    let (status, body) = article_create(&app, "cover-https", json!(https)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["cover_image_url"], https);
+    let (_, stored) = article_get(&app, "cover-https", Some(OFFICER_TOKEN)).await;
+    assert_eq!(stored["cover_image_url"], https);
+
+    let (status, body) = article_create(&app, "cover-blank", json!("")).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert!(body["cover_image_url"].is_null(), "{body}");
+}
+
+/// Update rejects a bad cover without touching the row; blank clears it and
+/// omitting the field keeps it.
+#[tokio::test]
+async fn article_update_validates_cover_image_url() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    let app = create_router(state);
+
+    let cover = "https://cdn.example.com/cover.png";
+    let (status, _) = article_create(&app, "cover-edit", json!(cover)).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, body) = article_update(
+        &app,
+        "cover-edit",
+        json!({ "title": "Changed", "cover_image_url": "data:image/png;base64,AAAA" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], COVER_IMAGE_URL_ERROR);
+    let (_, stored) = article_get(&app, "cover-edit", Some(OFFICER_TOKEN)).await;
+    assert_eq!(stored["cover_image_url"], cover);
+    assert_eq!(
+        stored["title"], "Cover test",
+        "rejected update wrote nothing"
+    );
+
+    let (status, body) = article_update(&app, "cover-edit", json!({ "title": "Renamed" })).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["cover_image_url"], cover, "omitted field keeps cover");
+
+    let (status, body) =
+        article_update(&app, "cover-edit", json!({ "cover_image_url": "  " })).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["cover_image_url"].is_null(), "{body}");
+    let (_, stored) = article_get(&app, "cover-edit", Some(OFFICER_TOKEN)).await;
+    assert!(stored["cover_image_url"].is_null(), "{stored}");
 }
 
 /// Clock time is `HH:MM` (what the schedule form's time input sends). Duration
@@ -9518,4 +10783,310 @@ async fn missing_public_content_is_not_found_not_internal_error() {
     let event_body = body_json(missing_event).await;
     assert_eq!(event_body["error"], "Event not found");
     assert_ne!(event_body["error"], "Internal error");
+}
+
+// ── #813: per-IP governor on apply and withdraw ──
+
+/// A request from one fixed untrusted peer, so every call spends the same
+/// per-IP bucket (the other helpers use a fresh peer per request).
+fn request_from_peer(
+    method: Method,
+    uri: &str,
+    token: &str,
+    peer: [u8; 4],
+    body: Value,
+) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            peer, 47000,
+        ))))
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap()))
+        .unwrap()
+}
+
+fn apply_json() -> Value {
+    json!({ "preferred_games": ["ow2"], "preferred_roles": [], "message": "I would like to join the crew" })
+}
+
+/// Burst 3 on `POST /api/applications`, then 429 from the governor. The
+/// bucket refills one request per 60 s, so no token comes back mid-test.
+/// The governor is per-`Router`, so one instance serves every call.
+#[tokio::test]
+async fn apply_is_rate_limited_per_ip_after_a_burst_of_three() {
+    assert_eq!(scuffed_types::APPLICATION_IP_BURST, 3);
+    assert_eq!(scuffed_types::APPLICATION_IP_REPLENISH_SECS, 60);
+
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_applicant(&state.db, "ratelim", "RateLim", APPLICANT_TOKEN).await;
+    let app = create_router(state.clone());
+    let peer = [203, 0, 113, 7];
+
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        let resp = app
+            .clone()
+            .oneshot(request_from_peer(
+                Method::POST,
+                "/api/applications",
+                APPLICANT_TOKEN,
+                peer,
+                apply_json(),
+            ))
+            .await
+            .unwrap();
+        seen.push(resp.status());
+        if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+            // The existing governor error handler: Retry-After and JSON.
+            let retry_after: u64 = resp
+                .headers()
+                .get(header::RETRY_AFTER)
+                .expect("Retry-After on the governor 429")
+                .to_str()
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert!((1..=61).contains(&retry_after), "got {retry_after}");
+        }
+    }
+    // First stores the application, the next two reach the handler (open
+    // application, 409), the fourth is stopped by the governor.
+    assert_eq!(
+        seen,
+        vec![
+            StatusCode::CREATED,
+            StatusCode::CONFLICT,
+            StatusCode::CONFLICT,
+            StatusCode::TOO_MANY_REQUESTS,
+        ]
+    );
+
+    // Withdraw spends the same bucket: also 429 from this peer.
+    let resp = app
+        .clone()
+        .oneshot(request_from_peer(
+            Method::POST,
+            "/api/applications/mine/withdraw",
+            APPLICANT_TOKEN,
+            peer,
+            json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        state.db.count_open_applications("ratelim").await.unwrap(),
+        1,
+        "a rate-limited withdraw must not reach the handler"
+    );
+
+    // The read and officer routes are not behind this layer.
+    for (method, uri, token) in [
+        (Method::GET, "/api/applications/mine", APPLICANT_TOKEN),
+        (Method::GET, "/api/applications", OFFICER_TOKEN),
+        (Method::GET, "/api/applications/expiring", OFFICER_TOKEN),
+    ] {
+        for _ in 0..5 {
+            let resp = app
+                .clone()
+                .oneshot(request_from_peer(
+                    method.clone(),
+                    uri,
+                    token,
+                    peer,
+                    json!({}),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK, "{method} {uri}");
+        }
+    }
+    let app_id = state
+        .db
+        .get_application_by_user("ratelim")
+        .await
+        .unwrap()
+        .unwrap()
+        .id;
+    let resp = app
+        .clone()
+        .oneshot(request_from_peer(
+            Method::PATCH,
+            &format!("/api/applications/{app_id}"),
+            OFFICER_TOKEN,
+            peer,
+            json!({ "status": "rejected" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "PATCH is not rate limited here"
+    );
+
+    // Another IP has its own bucket: it reaches the handler (cooldown 429
+    // text from the handler, not the governor's).
+    let resp = app
+        .clone()
+        .oneshot(request_from_peer(
+            Method::POST,
+            "/api/applications",
+            APPLICANT_TOKEN,
+            [203, 0, 113, 8],
+            apply_json(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        body_json(resp).await["error"],
+        "You can apply again in 60 minutes"
+    );
+}
+
+/// Burst 3 on `POST /api/applications/mine/withdraw`, then 429, for callers
+/// with and without a session: the layer runs before the handler.
+#[tokio::test]
+async fn withdraw_is_rate_limited_per_ip_after_a_burst_of_three() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_applicant(&state.db, "ratewd", "RateWd", APPLICANT_TOKEN).await;
+    let app = create_router(state.clone());
+    let peer = [203, 0, 113, 9];
+
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        let resp = app
+            .clone()
+            .oneshot(request_from_peer(
+                Method::POST,
+                "/api/applications/mine/withdraw",
+                APPLICANT_TOKEN,
+                peer,
+                json!({}),
+            ))
+            .await
+            .unwrap();
+        seen.push(resp.status());
+    }
+    // No application yet: 404 from the handler three times, then the governor.
+    assert_eq!(
+        seen,
+        vec![
+            StatusCode::NOT_FOUND,
+            StatusCode::NOT_FOUND,
+            StatusCode::NOT_FOUND,
+            StatusCode::TOO_MANY_REQUESTS,
+        ]
+    );
+
+    // Apply spends the same bucket.
+    let resp = app
+        .clone()
+        .oneshot(request_from_peer(
+            Method::POST,
+            "/api/applications",
+            APPLICANT_TOKEN,
+            peer,
+            apply_json(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(
+        state
+            .db
+            .get_application_by_user("ratewd")
+            .await
+            .unwrap()
+            .is_none(),
+        "a rate-limited apply must not store an application"
+    );
+
+    // Unauthenticated callers spend a bucket too: 401 three times, then 429.
+    let anon_peer = [203, 0, 113, 10];
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/applications")
+                    .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                        anon_peer, 47000,
+                    ))))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(serde_json::to_vec(&apply_json()).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        seen.push(resp.status());
+    }
+    assert_eq!(
+        seen,
+        vec![
+            StatusCode::UNAUTHORIZED,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::TOO_MANY_REQUESTS,
+        ]
+    );
+}
+
+/// Route-level: withdraw, then an immediate resubmit is the cooldown 429.
+#[tokio::test]
+async fn resubmit_after_withdraw_is_429_over_http() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_applicant(&state.db, "httpcool", "HttpCool", APPLICANT_TOKEN).await;
+
+    for (uri, body, expected) in [
+        ("/api/applications", apply_json(), StatusCode::CREATED),
+        ("/api/applications/mine/withdraw", json!({}), StatusCode::OK),
+        (
+            "/api/applications",
+            apply_json(),
+            StatusCode::TOO_MANY_REQUESTS,
+        ),
+    ] {
+        let resp = create_router(state.clone())
+            .oneshot(authed_json_request(
+                Method::POST,
+                uri,
+                APPLICANT_TOKEN,
+                body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), expected, "{uri}");
+        if expected == StatusCode::TOO_MANY_REQUESTS {
+            assert_eq!(
+                body_json(resp).await["error"],
+                "You can apply again in 60 minutes"
+            );
+        }
+    }
+
+    // Over-max bodies are 400 at the route too.
+    let resp = create_router(state.clone())
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/applications",
+            APPLICANT_TOKEN,
+            json!({ "preferred_games": [], "preferred_roles": [], "message": "a".repeat(4001) }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body_json(resp).await["error"],
+        "Message must be at most 4000 characters"
+    );
 }

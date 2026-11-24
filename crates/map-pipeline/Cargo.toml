@@ -16,11 +16,7 @@ find_peaks = "0.1"
 
 # Image processing + tile generation
 image = { version = "0.25", default-features = false, features = ["png", "webp"] }
-fast_image_resize = "6"
 rayon = "1"
-
-# Edge adjacency
-rustc-hash = "2"
 
 # CLI
 clap = { version = "4", features = ["derive"] }

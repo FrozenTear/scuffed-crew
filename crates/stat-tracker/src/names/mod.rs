@@ -8,9 +8,10 @@
 //! accent the pack does not know, a gap that may be a space, ink no letter
 //! explains, or a margin under the pack's `min_confidence`.
 //!
-//! Without a usable pack nothing here runs: [`read_names`] hands the board to
-//! [`crate::ocr::recognize_scoreboard_names_pre_cropped`], today's ocr-v1
-//! path, and returns exactly what it returns.
+//! Without a usable pack nothing here runs: [`read_names`] (in
+//! `detect/names.rs`) hands the board to
+//! `ocr::recognize_scoreboard_names_pre_cropped`, today's ocr-v1 path, and
+//! returns exactly what it returns.
 //!
 //! Toolchain: this module uses `<[T]>::as_chunks`, stable since Rust 1.88,
 //! as other modules of the crate already do. The crate as a whole needs
@@ -24,9 +25,14 @@ mod resize;
 pub use pack::{NamePack, PackError, Params};
 pub use reader::{Abstain, RawRead};
 
+// The arbitration (names-v1 or Tesseract) moved to `detect/names.rs` (0.6
+// lane D V3). Re-exported so `names::read_names` and the other old paths
+// still work.
+pub use crate::detect::names::{BoardNames, match_player_row, read_names};
+
 use std::sync::Arc;
 
-use crate::ocr::{self, CellOcrResult, RowOcrResult};
+use crate::model::{CellOcrResult, RowOcrResult};
 use image::DynamicImage;
 
 /// Which reader produced a board's names. `as_str` is the value proposed for
@@ -92,7 +98,7 @@ pub fn cut_tiles(row: &DynamicImage, board_h: u32, team_size: usize) -> Vec<(Vec
     reader::cut_tiles(&rgb, w, h, cap_height(board_h, team_size))
 }
 
-/// The name in a player row (a [`ocr::preprocess::crop_player_row`] crop), or
+/// The name in a player row (a [`crate::frame::geometry::crop_player_row`] crop), or
 /// `None` when the reader is not sure.
 pub fn read_row_name(
     row: &DynamicImage,
@@ -112,66 +118,6 @@ pub fn accept(raw: RawRead, pack: &NamePack) -> Option<NameRead> {
             text,
             confidence: raw.confidence,
         })
-}
-
-/// The names on a cropped board, and which reader read them.
-///
-/// The two readers fill `rows` on different scales. With
-/// [`NameRecognizer::OcrV1`], a name's `CellOcrResult::confidence` is
-/// Tesseract's 0 to 100 and `name_alternates` holds the other name windows.
-/// With [`NameRecognizer::NamesV1`], `confidence` is the letter margin times
-/// 1000, rounded (16 and up at the default minimum of 0.016, see
-/// [`Params::min_confidence`]), and `name_alternates` is always empty.
-/// Never compare a confidence across the two.
-#[derive(Debug)]
-pub struct BoardNames {
-    pub recognizer: NameRecognizer,
-    pub rows: Vec<RowOcrResult>,
-}
-
-/// Every row's name on a cropped board.
-///
-/// With no pack this is [`ocr::recognize_scoreboard_names_pre_cropped`]
-/// called as the daemon calls it, unchanged (same reads, same Tesseract
-/// calls, same gate accounting). With a pack, each row gets the template
-/// reader's name or none, no name windows (`name_alternates` is empty), no
-/// Tesseract call, and `confidence` is the margin in thousandths. With OCR
-/// off nothing is read either way.
-// `#[track_caller]` is needed: the ocr-v1 call below is `#[track_caller]`
-// too, and the OCR gate records the line that asked when it refuses a read
-// (OCR off). With it, a refusal names the daemon's call site, as a direct
-// ocr-v1 call does; `tests/names_fallback.rs` checks this.
-#[track_caller]
-pub fn read_names(board: &DynamicImage, team_size: usize, pack: Option<&NamePack>) -> BoardNames {
-    let Some(pack) = pack else {
-        return BoardNames {
-            recognizer: NameRecognizer::OcrV1,
-            rows: ocr::recognize_scoreboard_names_pre_cropped(board, team_size),
-        };
-    };
-    if ocr::gate::is_off() {
-        return BoardNames {
-            recognizer: NameRecognizer::NamesV1,
-            rows: Vec::new(),
-        };
-    }
-    let rows = (0..team_size * 2)
-        .filter_map(|i| ocr::preprocess::crop_player_row(board, i, team_size))
-        .map(|row| RowOcrResult {
-            name: read_row_name(&row, board.height(), team_size, pack).map(|n| CellOcrResult {
-                value: n.text,
-                confidence: (n.confidence * 1000.0).round() as i32,
-                suspect: false,
-            }),
-            name_alternates: Vec::new(),
-            stats: Vec::new(),
-            mean_confidence: 0,
-        })
-        .collect();
-    BoardNames {
-        recognizer: NameRecognizer::NamesV1,
-        rows,
-    }
 }
 
 /// Load the installed pack under `data_dir`, or say why there is none.
@@ -209,7 +155,7 @@ pub struct InstalledNames {
 /// the daemon gets no call for those. Each name read also stats the live
 /// folder's `manifest.json` and the two record files sync writes after the
 /// swap (`pack-versions.json`, `pack-manifests.json`; see
-/// [`crate::packs::installed_record`]). When they changed since the latest
+/// [`crate::packs::layout::installed_record`]). When they changed since the latest
 /// load and describe a complete install of the live folder, the same
 /// checked reload runs in the background, and that read keeps the pack it
 /// has. See [`Self::watch`]. A folder changed by hand with no matching
@@ -291,13 +237,13 @@ impl LiveInner {
     }
 
     /// The live folder's `manifest.json`, then the two record files sync
-    /// writes after the swap ([`crate::packs::record_paths`]). Only the
+    /// writes after the swap ([`crate::packs::layout::record_paths`]). Only the
     /// live folder is looked at: a `.names-v1-next-*` staging folder or a
     /// `-prev-` backup never changes this key.
     fn watch_key(&self) -> WatchKey {
         let records = self
             .data_dir()
-            .map(crate::packs::record_paths)
+            .map(crate::packs::layout::record_paths)
             .map(|[versions, manifests]| (file_stamp(&versions), file_stamp(&manifests)))
             .unwrap_or((None, None));
         (
@@ -587,7 +533,7 @@ impl LiveNames {
         let record = self
             .inner
             .data_dir()
-            .and_then(|data_dir| crate::packs::installed_record(data_dir, pack::PACK_NAME));
+            .and_then(|data_dir| crate::packs::layout::installed_record(data_dir, pack::PACK_NAME));
         let complete = record.as_ref().is_some_and(|(version, sha)| {
             manifest_version(dir).as_deref() == Some(version.as_str())
                 && sha
@@ -807,18 +753,19 @@ fn row_meets(row: &RowOcrResult, min_confidence: f32) -> bool {
         .is_some_and(|cell| name_meets(cell, min_confidence))
 }
 
-/// Match `rows` against `player`. [`BoardMatch::FullBoard`] refuses a list
-/// that is not both teams.
+/// Match `rows` against `player`: one name, or every saved name of the
+/// member ([`crate::parse::match_player_row_by_names`]).
+/// [`BoardMatch::FullBoard`] refuses a list that is not both teams.
 pub fn match_named_rows(
     rows: &[RowOcrResult],
-    player: &str,
+    player: &(impl crate::parse::NameList + ?Sized),
     team_size: usize,
     policy: BoardMatch,
 ) -> Option<crate::parse::NameMatch> {
     if policy == BoardMatch::FullBoard && rows.len() != team_size * 2 {
         return None;
     }
-    crate::parse::match_player_row_by_name(rows, player)
+    crate::parse::match_player_row_by_names(rows, player)
 }
 
 fn sure_rows(rows: &[RowOcrResult], min_confidence: f32) -> Vec<RowOcrResult> {
@@ -888,7 +835,10 @@ pub struct PlayerRowMatch {
     pub recognizer: NameRecognizer,
 }
 
-fn player_row(name: crate::parse::NameMatch, recognizer: NameRecognizer) -> PlayerRowMatch {
+pub(crate) fn player_row(
+    name: crate::parse::NameMatch,
+    recognizer: NameRecognizer,
+) -> PlayerRowMatch {
     PlayerRowMatch { name, recognizer }
 }
 
@@ -909,7 +859,7 @@ fn player_row(name: crate::parse::NameMatch, recognizer: NameRecognizer) -> Play
 /// name came from the pack. A Tesseract row, including one filled in for a
 /// blank or low-confidence row, is [`NameRecognizer::OcrV1`].
 pub fn choose_player_row(
-    player: &str,
+    player: &(impl crate::parse::NameList + ?Sized),
     team_size: usize,
     enabled: bool,
     reader: Option<ReaderNames<'_>>,
@@ -965,45 +915,6 @@ pub fn choose_player_row(
         None => match_named_rows(&tess, player, team_size, policy)
             .map(|name| player_row(name, NameRecognizer::OcrV1)),
     }
-}
-
-/// Find `player` on `board`. `tesseract_rows` is the tracker's current name
-/// read for this cv mode (cell rows under ocr-v1, name windows under the
-/// new reader). See [`choose_player_row`].
-///
-/// With the switch on and no pack loaded (sync off, before install, or the
-/// read that notices a late install), this does not call [`read_names`].
-/// That would be a second Tesseract name read under ocr-v1, and it would
-/// match the new rows as a full board instead of the cell rows already in
-/// `tesseract_rows`. Those rows are matched with `policy` and tagged
-/// [`NameRecognizer::OcrV1`].
-pub fn match_player_row(
-    board: &DynamicImage,
-    team_size: usize,
-    player: &str,
-    switch: &NameSwitch,
-    policy: BoardMatch,
-    tesseract_rows: impl FnOnce() -> Vec<RowOcrResult>,
-) -> Option<PlayerRowMatch> {
-    if !switch.enabled {
-        return choose_player_row(player, team_size, false, None, policy, tesseract_rows);
-    }
-    let Some(pack) = switch.pack() else {
-        return match_named_rows(&tesseract_rows(), player, team_size, policy)
-            .map(|name| player_row(name, NameRecognizer::OcrV1));
-    };
-    let read = read_names(board, team_size, Some(pack.as_ref()));
-    choose_player_row(
-        player,
-        team_size,
-        true,
-        Some(ReaderNames {
-            rows: &read.rows,
-            min_confidence: Some(pack.params.min_confidence),
-        }),
-        policy,
-        tesseract_rows,
-    )
 }
 
 #[cfg(test)]

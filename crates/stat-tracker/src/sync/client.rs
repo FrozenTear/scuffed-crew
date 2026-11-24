@@ -1,0 +1,555 @@
+//! [`SyncClient`]: the HTTP client (reqwest), its redirect policy and the
+//! stats endpoints. `training_client` adds the training crop routes on the
+//! same client; no other file in `sync` uses reqwest.
+
+use std::sync::{Arc, Mutex};
+
+use crate::config::{SyncConfig, SyncUrlReject, validate_sync_server_url};
+use crate::storage::PersonalMatch;
+use crate::version::USER_AGENT;
+
+use scuffed_types::api::{DaemonConfigResponse, StatsUploadResponse};
+
+use super::backoff::parse_retry_after;
+use super::batching::{BatchCaps, RefusedRows};
+use super::errors::{SyncUploadError, parse_upload_error_body, server_error_text};
+use super::visibility::{
+    MAX_BODY_BYTES, StatsVisibility, parse_hero_icon_consent, parse_stats_visibility,
+};
+use super::wire::upload_request;
+
+/// Daemon-token route for the member's config. It carries `player_name` and,
+/// on servers that send it, `stats_visibility`.
+const DAEMON_CONFIG_PATH: &str = "/api/stats/daemon-config";
+
+/// Sync-token route for the member's training crop consent. Read only.
+const CROP_CONSENT_PATH: &str = "/api/training-crops/consent";
+
+#[derive(Clone)]
+pub struct SyncClient {
+    config: Arc<Mutex<SyncConfig>>,
+    pub(super) http: reqwest::Client,
+    /// Caps learned from HTTP 413. Shared by clones. Never raised.
+    batch_caps: Arc<Mutex<BatchCaps>>,
+    /// Rows the next pass sends after the others, and when the server last
+    /// accepted a row. Shared by clones.
+    refused_rows: Arc<Mutex<RefusedRows>>,
+    /// `stats_delete_scheduled_at` from the latest 409 `stats_delete_pending`.
+    /// Kept off [`SyncUploadError`] so that error stays small. Shared by clones.
+    delete_scheduled_at: Arc<Mutex<Option<String>>>,
+}
+
+impl SyncClient {
+    pub fn new(config: SyncConfig) -> Self {
+        // A hung connection must never hang the caller: sync runs concurrently
+        // with capture, and shutdown does a final inline upload. Fail closed,
+        // a client without the timeout re-opens the M4 daemon-stall bug.
+        // Redirects are followed only on the configured server's own
+        // scheme, host and port (`token_safe_redirects`), so the bearer
+        // token never follows a redirect to another host or to cleartext.
+        let http = reqwest::Client::builder()
+            .user_agent(USER_AGENT)
+            .timeout(std::time::Duration::from_secs(30))
+            .redirect(token_safe_redirects())
+            .build()
+            .expect("reqwest client with timeout must build");
+        Self {
+            http,
+            config: Arc::new(Mutex::new(config)),
+            batch_caps: Arc::new(Mutex::new(BatchCaps::default())),
+            refused_rows: Arc::new(Mutex::new(RefusedRows::default())),
+            delete_scheduled_at: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Take the deletion timestamp from the latest 409, if the body sent one.
+    pub fn take_delete_scheduled_at(&self) -> Option<String> {
+        self.delete_scheduled_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+    }
+
+    fn remember_delete_scheduled_at(&self, scheduled_at: Option<String>) {
+        *self
+            .delete_scheduled_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = scheduled_at;
+    }
+
+    /// Chunk sizes for the next upload. Lowered caps stick for this process.
+    pub fn batch_caps(&self) -> BatchCaps {
+        *self.batch_caps.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Keep `caps` when either limit fell. A higher value is ignored.
+    pub fn remember_batch_caps(&self, caps: BatchCaps) {
+        let mut slot = self.batch_caps.lock().unwrap_or_else(|e| e.into_inner());
+        if caps.matches < slot.matches {
+            slot.matches = caps.matches.max(1);
+        }
+        if caps.deletes < slot.deletes {
+            slot.deletes = caps.deletes.max(1);
+        }
+    }
+
+    /// Rows the next pass sends after the others, and when the server last
+    /// accepted a row.
+    pub fn refused_rows(&self) -> RefusedRows {
+        self.refused_rows
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Keep the set a pass ended with. `ran_with` is the URL and token the
+    /// pass started with. When Settings changed the server URL during the
+    /// pass, the set is dropped ([`Self::replace_credentials`] already reset
+    /// it). When only the token changed, the rows are kept but the time the
+    /// server last accepted a row is not: it was earned with the old token.
+    pub fn remember_refused_rows(&self, mut rows: RefusedRows, ran_with: &SyncConfig) {
+        let config = self.config.lock().unwrap_or_else(|e| e.into_inner());
+        if config.server_url != ran_with.server_url {
+            return;
+        }
+        if config.token != ran_with.token {
+            rows.forget_accepted();
+        }
+        *self.refused_rows.lock().unwrap_or_else(|e| e.into_inner()) = rows;
+    }
+
+    pub fn credentials(&self) -> SyncConfig {
+        self.config
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Swap the URL and token after Settings saved a different pair.
+    /// The HTTP client (timeout, redirect policy) stays. A different server
+    /// URL drops caps and refused rows learned from the previous host. A
+    /// token-only change keeps them, but drops the time the server last
+    /// accepted a row ([`RefusedRows`]), which was earned with the old token.
+    pub fn replace_credentials(&self, config: SyncConfig) {
+        let mut slot = self.config.lock().unwrap_or_else(|e| e.into_inner());
+        let url_changed = slot.server_url != config.server_url;
+        let token_changed = slot.token != config.token;
+        *slot = config;
+        drop(slot);
+        if url_changed {
+            *self.batch_caps.lock().unwrap_or_else(|e| e.into_inner()) = BatchCaps::default();
+            *self.refused_rows.lock().unwrap_or_else(|e| e.into_inner()) = RefusedRows::default();
+        } else if token_changed {
+            self.refused_rows
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .forget_accepted();
+        }
+    }
+
+    /// `new`, but refuse an unsafe server URL before a client exists.
+    /// The daemon logs this once and keeps running with sync off.
+    pub fn try_new(config: SyncConfig) -> Result<Self, SyncUrlReject> {
+        validate_sync_server_url(&config.server_url)?;
+        Ok(Self::new(config))
+    }
+
+    /// Last line before `bearer_auth`. `try_new` already rejected unsafe
+    /// configs; this still runs so a client built with `new` cannot send.
+    fn refuse_unsafe_transport(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        validate_sync_server_url(&self.credentials().server_url)?;
+        Ok(())
+    }
+
+    /// Fetch daemon configuration from the server (player_name, etc.).
+    /// Called on startup when local config has no player_name.
+    /// 401 and 403 are [`SyncAttempt::AuthRejected`], same as upload.
+    ///
+    /// [`SyncAttempt::AuthRejected`]: super::SyncAttempt::AuthRejected
+    pub async fn fetch_daemon_config(&self) -> Result<DaemonConfigResponse, SyncUploadError> {
+        self.refuse_unsafe_transport()
+            .map_err(|e| SyncUploadError::plain(e.to_string()))?;
+        let creds = self.credentials();
+        let url = format!("{}{DAEMON_CONFIG_PATH}", creds.server_url);
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(&creds.token)
+            .send()
+            .await
+            .map_err(|e| SyncUploadError::plain(send_error_text(&e)))?;
+
+        if !resp.status().is_success() {
+            return Err(error_from_response(resp, "daemon-config fetch").await.0);
+        }
+
+        resp.json::<DaemonConfigResponse>()
+            .await
+            .map_err(|e| SyncUploadError::plain(e.to_string()))
+    }
+
+    /// Who can see this member's stats on the site, for the Settings line.
+    ///
+    /// One GET of the daemon-config route with the saved token, reading only
+    /// `stats_visibility`. Any failure (unsafe URL, network, 401, 5xx, a body
+    /// that is too large or not JSON, a missing field from an older server, an
+    /// unknown value) is `None`: the line stays hidden and the sync state is
+    /// untouched, so this never pauses uploads.
+    pub async fn fetch_stats_visibility(&self) -> Option<StatsVisibility> {
+        self.refuse_unsafe_transport().ok()?;
+        let creds = self.credentials();
+        let url = format!("{}{DAEMON_CONFIG_PATH}", creds.server_url);
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(&creds.token)
+            .send()
+            .await
+            .ok()?;
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            return None;
+        }
+        let bytes = resp.bytes().await.ok()?;
+        if bytes.len() > MAX_BODY_BYTES {
+            return None;
+        }
+        parse_stats_visibility(status, std::str::from_utf8(&bytes).ok()?)
+    }
+
+    /// The member's `hero_icon` training crop consent, read only: one GET of
+    /// `/api/training-crops/consent` with the saved token. Members change it
+    /// on the website, never here. Any failure (unsafe URL, network, a non
+    /// 2xx answer, a body that is too large or not the consent shape) is
+    /// `None`, which callers take as no consent
+    /// ([`parse_hero_icon_consent`]).
+    pub async fn fetch_hero_icon_consent(&self) -> Option<bool> {
+        self.refuse_unsafe_transport().ok()?;
+        let creds = self.credentials();
+        let url = format!("{}{CROP_CONSENT_PATH}", creds.server_url);
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(&creds.token)
+            .send()
+            .await
+            .ok()?;
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            return None;
+        }
+        let bytes = read_body_capped(resp, MAX_BODY_BYTES).await?;
+        parse_hero_icon_consent(status, &bytes)
+    }
+
+    /// POST `/api/stats/upload`.
+    ///
+    /// HTTP 400 and 422 are returned as [`SyncUploadError`]. The sync pass
+    /// ([`isolate_rejected_in_pass`], called from `upload_chunked`) bisects
+    /// those batches. This function sends one request. 413, 401, 403, 409, and 429
+    /// are not payload rejects. 429 and 503 keep `Retry-After`. 409
+    /// `stats_delete_pending` stops the pass without a split.
+    ///
+    /// [`isolate_rejected_in_pass`]: super::isolate_rejected_in_pass
+    pub async fn upload_matches(
+        &self,
+        matches: &[PersonalMatch],
+        deleted_sessions: &[String],
+    ) -> Result<StatsUploadResponse, SyncUploadError> {
+        self.refuse_unsafe_transport()
+            .map_err(|e| SyncUploadError::plain(e.to_string()))?;
+        let creds = self.credentials();
+        let url = format!("{}/api/stats/upload", creds.server_url);
+        let resp = self
+            .http
+            .post(&url)
+            .bearer_auth(&creds.token)
+            .json(&upload_request(matches, deleted_sessions))
+            .send()
+            .await
+            .map_err(|e| SyncUploadError::plain(send_error_text(&e)))?;
+
+        if !resp.status().is_success() {
+            let (err, scheduled_at) = error_from_response(resp, "Upload").await;
+            if err.is_stats_delete_pending() {
+                self.remember_delete_scheduled_at(scheduled_at);
+            }
+            return Err(err);
+        }
+
+        let result: StatsUploadResponse = resp
+            .json()
+            .await
+            .map_err(|e| SyncUploadError::plain(e.to_string()))?;
+        tracing::info!(
+            inserted = result.inserted,
+            skipped = result.skipped,
+            deleted = result.deleted,
+            "stats upload complete"
+        );
+        Ok(result)
+    }
+}
+
+/// A response body of at most `max` bytes, read chunk by chunk. A declared
+/// `Content-Length` over `max` is refused before any body is read, and a
+/// body that passes `max` (no length, or a wrong one) is refused at the
+/// chunk that passes it, so no more than `max` bytes are kept. `None` for
+/// either, or for a read that fails.
+pub(super) async fn read_body_capped(mut resp: reqwest::Response, max: usize) -> Option<Vec<u8>> {
+    if resp.content_length().is_some_and(|len| len > max as u64) {
+        return None;
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = resp.chunk().await.ok()? {
+        if body.len().saturating_add(chunk.len()) > max {
+            return None;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Some(body)
+}
+
+/// Honor `Retry-After` only on 429 and 503, the statuses the API uses for
+/// rate limits and "try later". Other errors keep the plain exponential clock.
+async fn error_from_response(
+    resp: reqwest::Response,
+    what: &str,
+) -> (SyncUploadError, Option<String>) {
+    let status = resp.status();
+    let retry_after = retry_after_from_response(&resp);
+    let body = resp.text().await.unwrap_or_default();
+    let parsed = parse_upload_error_body(&body);
+    let scheduled_at = parsed.stats_delete_scheduled_at;
+    (
+        SyncUploadError {
+            message: server_error_text(what, status.as_u16(), &body),
+            status: Some(status.as_u16()),
+            retry_after,
+            code: parsed.code,
+            max_matches: parsed.max_matches,
+            max_deleted_sessions: parsed.max_deleted_sessions,
+        },
+        scheduled_at,
+    )
+}
+
+pub(super) fn retry_after_from_response(resp: &reqwest::Response) -> Option<std::time::Duration> {
+    let code = resp.status().as_u16();
+    if code != 429 && code != 503 {
+        return None;
+    }
+    let raw = resp
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?;
+    parse_retry_after(raw, chrono::Utc::now())
+}
+
+/// Follow a redirect only when it stays on the scheme, host and port of the
+/// first request, which is the configured server. The site's stats routes
+/// never redirect; a proxy may still send a same-site path redirect. Anything
+/// else (another host, another port, `https` to `http` or back) is an error,
+/// so neither the bearer token nor the upload body goes to a server the
+/// member did not configure. reqwest would drop `Authorization` on a
+/// cross-host hop, but the request would still go there, and a 401 from it
+/// would pause sync as a rejected token.
+///
+/// Public for every client that sends the sync token or a link secret: the
+/// desktop app's token check, sign-in link and report upload use it too.
+pub fn token_safe_redirects() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.previous().len() >= 10 {
+            return attempt.error(std::io::Error::other("too many sync redirects"));
+        }
+        let same_server = attempt
+            .previous()
+            .first()
+            .is_some_and(|first| same_origin(first, attempt.url()));
+        if !same_server {
+            let refused = OffSiteRedirect::to(attempt.url());
+            return attempt.error(refused);
+        }
+        if let Err(reject) = validate_sync_server_url(attempt.url().as_str()) {
+            return attempt.error(reject);
+        }
+        attempt.follow()
+    })
+}
+
+/// `e` as text. A refused redirect also names why: reqwest's own text is
+/// only "error following redirect for url (...)", and the reason sits in
+/// its source.
+pub(super) fn send_error_text(e: &reqwest::Error) -> String {
+    let mut text = e.to_string();
+    if e.is_redirect() {
+        let mut source = std::error::Error::source(e);
+        while let Some(cause) = source {
+            text.push_str(": ");
+            text.push_str(&cause.to_string());
+            source = cause.source();
+        }
+    }
+    text
+}
+
+/// The advice every redirect text ends with, kept in one place. `$field`
+/// says where the Website URL field is.
+macro_rules! website_url_fix {
+    ($field:literal) => {
+        concat!("the Website URL ", $field, " to the address the site uses")
+    };
+}
+
+/// The advice once the target is named. It asks rather than tells: the
+/// target may be a server the member does not trust. `$if` is "if" or "If".
+macro_rules! website_url_if_new {
+    ($if:literal, $field:literal) => {
+        concat!(
+            $if,
+            " that is your site's new address, set the Website URL ",
+            $field,
+            " to it"
+        )
+    };
+}
+
+/// The longest target origin a message names. A longer one (a host can be
+/// tens of thousands of characters) gives the "a different address" text,
+/// so it never floods the log or the window. `errors.rs` clips server
+/// bodies the same way.
+pub(super) const REDIRECT_ORIGIN_MAX_CHARS: usize = 200;
+
+/// Where the desktop app's Website URL field is, from the screen that shows
+/// the redirect advice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WebsiteUrlField {
+    /// In Settings: the report upload uses the saved Website URL.
+    Settings,
+    /// On the setup guide page itself, above its messages.
+    Above,
+}
+
+/// Error text for a redirect away from the configured server (daemon log),
+/// when the target is not known.
+pub(super) const SYNC_REDIRECT_OFF_SITE: &str = concat!(
+    "the site redirected sync to a different address; set ",
+    website_url_fix!("in Settings")
+);
+
+/// The same advice as a sentence for the desktop app, shown when
+/// [`is_off_site_redirect`] holds for a request error and the target is not
+/// known. [`off_site_redirect_message`] names the target when it is.
+pub const REDIRECT_OFF_SITE: &str = concat!(
+    "The site redirected to a different address. Set ",
+    website_url_fix!("in Settings"),
+    "."
+);
+
+/// [`REDIRECT_OFF_SITE`] for the setup guide, where the Website URL field is
+/// on the same page.
+pub const REDIRECT_OFF_SITE_ABOVE: &str = concat!(
+    "The site redirected to a different address. Set ",
+    website_url_fix!("above"),
+    "."
+);
+
+/// The desktop app's redirect advice for `field`. `target` is the
+/// redirect's origin ([`redirect_origin`]). When known it is named, and the
+/// advice asks whether it is the site's new address; else the text says
+/// "a different address".
+pub(super) fn redirect_off_site_text(target: Option<&str>, field: WebsiteUrlField) -> String {
+    let (fallback, fix) = match field {
+        WebsiteUrlField::Settings => (REDIRECT_OFF_SITE, website_url_if_new!("If", "in Settings")),
+        WebsiteUrlField::Above => (REDIRECT_OFF_SITE_ABOVE, website_url_if_new!("If", "above")),
+    };
+    match target {
+        Some(target) => format!("The site redirected to {target}. {fix}."),
+        None => fallback.to_string(),
+    }
+}
+
+/// The error [`token_safe_redirects`] refuses an off-site hop with, so a
+/// caller can tell it apart from other failures by type, not by text.
+/// `target` is the refused hop's origin only, so no path or query (which
+/// may carry a secret) ends up in a message.
+#[derive(Debug)]
+struct OffSiteRedirect {
+    target: Option<String>,
+}
+
+impl OffSiteRedirect {
+    fn to(url: &reqwest::Url) -> Self {
+        Self {
+            target: redirect_origin(url),
+        }
+    }
+}
+
+/// `url`'s scheme, host and port as a message names them: no userinfo,
+/// path or query, IDN hosts in punycode, the default port left out. `None`
+/// for an opaque origin or one longer than [`REDIRECT_ORIGIN_MAX_CHARS`].
+pub(super) fn redirect_origin(url: &reqwest::Url) -> Option<String> {
+    let origin = url.origin();
+    if !origin.is_tuple() {
+        return None;
+    }
+    let text = origin.ascii_serialization();
+    (text.chars().count() <= REDIRECT_ORIGIN_MAX_CHARS).then_some(text)
+}
+
+impl std::fmt::Display for OffSiteRedirect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.target {
+            Some(target) => write!(
+                f,
+                concat!(
+                    "the site redirected sync to {}; ",
+                    website_url_if_new!("if", "in Settings")
+                ),
+                target
+            ),
+            None => f.write_str(SYNC_REDIRECT_OFF_SITE),
+        }
+    }
+}
+
+impl std::error::Error for OffSiteRedirect {}
+
+/// The [`OffSiteRedirect`] in `e`'s sources, if any.
+fn off_site_redirect(e: &reqwest::Error) -> Option<&OffSiteRedirect> {
+    if !e.is_redirect() {
+        return None;
+    }
+    let mut source = std::error::Error::source(e);
+    while let Some(cause) = source {
+        if let Some(off_site) = cause.downcast_ref::<OffSiteRedirect>() {
+            return Some(off_site);
+        }
+        source = cause.source();
+    }
+    None
+}
+
+/// `true` when `e` is [`token_safe_redirects`] refusing a redirect to
+/// another scheme, host or port. Other redirect errors (too many hops)
+/// and network failures are `false`.
+pub fn is_off_site_redirect(e: &reqwest::Error) -> bool {
+    off_site_redirect(e).is_some()
+}
+
+/// The desktop app's advice for `e` when it is an off-site redirect
+/// refusal ([`is_off_site_redirect`]), naming the target's origin when
+/// known and saying where the Website URL field is (`field`). `None` for
+/// any other error.
+pub fn off_site_redirect_message(e: &reqwest::Error, field: WebsiteUrlField) -> Option<String> {
+    off_site_redirect(e).map(|off_site| redirect_off_site_text(off_site.target.as_deref(), field))
+}
+
+/// Same scheme, host and port (the default port counts as written).
+pub(super) fn same_origin(a: &reqwest::Url, b: &reqwest::Url) -> bool {
+    a.scheme() == b.scheme()
+        && a.host_str() == b.host_str()
+        && a.port_or_known_default() == b.port_or_known_default()
+}

@@ -38,9 +38,9 @@ Never ship with `root`/`root`. Migrations run as root during bootstrap only; the
 
 New daemon tokens expire 180 days after they are created. A token already stored with `expires_at` NONE keeps working. An expired token on upload or daemon-config is `401` `{"code":"token_expired"}`. Token-check and pack downloads still use one shared unauthorized body. These two limits are always on. They do not follow `STATS_UPLOAD_BATCH_CAP`.
 
-`STATS_UPLOAD_BATCH_CAP` is off when unset, empty, or `0` / `false` / `no` / `off` (any case). Any other value rejects one upload with more than 200 matches or more than 500 `deleted_sessions` before any write: `413` `{"code":"batch_too_large","max_matches":200,"max_deleted_sessions":500}`. While the flag is off, oversized batches are stored as they are today.
+`STATS_UPLOAD_BATCH_CAP` is on by default. Compose passes `1` when the variable is blank or unset, and the server also treats an unset variable as on. `0` / `false` / `no` / `off` (any case) or an empty value set directly in the process turns it off. While on, the server rejects one upload with more than 200 matches or more than 500 `deleted_sessions` before any write: `413` `{"code":"batch_too_large","max_matches":200,"max_deleted_sessions":500}`. While the flag is off, oversized batches are stored whole.
 
-Leave the flag off until a tracker release that sends at most 200 matches and 500 deletions, and that handles `413`, `429`, and `token_expired`, is out and most members are on it. Today's tracker puts every unsynced game in one request. Compose passes the variable through as `STATS_UPLOAD_BATCH_CAP` (blank by default). The process reads it on each upload.
+The cap needs a tracker that splits its sync into batches of at most 200 matches and 500 deletions (alpha.3 item 21). A tracker that sends every unsynced game in one request gets `413` once it has more than 200 queued. If older trackers are still in use after a deploy, set `STATS_UPLOAD_BATCH_CAP=0` in the host env and restart the site container. The process reads the variable on each upload.
 
 ### Split migrator vs app (optional multi-container)
 
@@ -86,6 +86,24 @@ Before compose runs, `scripts/lib/compose-env.sh` fills a blank `ALLOWED_ORIGINS
 On Contabo-style day-2 hosts, if a project Surreal is already Up, `update.sh` recreates site-server with `up -d --no-deps` so `/bin/podman-compose` does not spawn an underscore-named DB twin on the same volume (see Troubleshooting: duplicate Surreal `_` vs `-`).
 
 `update.sh` never creates or recreates the `surrealdb` container while one exists or its volume holds data. It starts `site-server` with `--no-deps` (starting a stopped database container as it is), and it stops with an error when the database container runs another image than `compose.yml` names. A new SurrealDB tag in `compose.yml` is applied only by [Upgrading the SurrealDB server](#upgrading-the-surrealdb-server). `SCUFFED_ALLOW_DB_IMAGE_MISMATCH=1 ./scripts/update.sh` updates the app and leaves the database on its current image.
+
+#### Rollback and `--backup`
+
+Before `update.sh` removes the running site-server it reads the live `git_sha` from `/api/health` and tags that container's image as `<repo>:rollback` (for example `ghcr.io/frozentear/scuffed-crew:rollback`). It prints both. If the new container is not healthy within 60 s (`SCUFFED_UPDATE_HEALTH_SECS` to change it), the script stops it, starts the `:rollback` image again (with `--no-deps`, the database is left alone) and **exits non-zero**, naming the previous `git_sha`. A non-zero exit means the update failed even when the old site is back up. If the rollback also fails, the output says so and gives the manual command. On success the script prints the new live `git_sha`.
+
+The same rollback runs for every failure from the removal of the site-server on, not only a failed health check: `HOST_PORT` still busy after the removal, a stopped database container that does not start (or is not Up afterwards), `compose up` failing, and an interrupt (Ctrl-C, SIGTERM), including one during the removal itself. Once the rollback has started, further interrupts are ignored until it is done. Run `update.sh` in the foreground, not under `nohup` and not with SIGINT ignored (for example `./scripts/update.sh &` from a script): bash cannot trap an ignored SIGINT, so Ctrl-C does nothing, though SIGTERM still rolls back. INT and TERM are ignored only during the rollback. Each podman or compose stop, rm and start in the removal and the rollback gets 60 s (`SCUFFED_UPDATE_PODMAN_SECS` to change it, 1 to 3600), then is killed and counts as failed, so a hung stop, rm or start cannot block the rollback. A SIGTERM sent only to the `update.sh` pid (`kill <pid>`, systemd `KillMode=process`) during a hung podman call before the rollback starts the rollback only when the bound ends that call, up to `SCUFFED_UPDATE_PODMAN_SECS` + 5 s (65 s by default). The database container is never created or recreated on these paths either. If the cause is still there (port taken, database down), the previous image cannot serve and the output says the rollback failed.
+
+- The tag is local to the host and is replaced on every update, so it only reaches back one update. If the site does not answer `/api/health` before the update and a `:rollback` tag already exists, that tag is kept.
+- After a rollback the container runs `<repo>:rollback`, but `SITE_SERVER_IMAGE` in `data/secrets.env` still names the image that failed. The next `compose up` of site-server, or the next `update.sh`, starts that pin again. The output prints what to set:
+  - To stay on the previous build, set `SITE_SERVER_IMAGE=<repo>:rollback`. The output names its image ID and `git_sha`.
+  - `:rollback` is a local tag and `update.sh` pulls its pin, so before the next `update.sh` set a tag that can be pulled: the fixed image, or `<repo>:sha-<short>` of the previous `git_sha` if that commit was published.
+- The rollback is the image only, on every path above. Database changes made by the failed boot (startup migrations) stay, so the old image can end up on an already-migrated database. Without `--backup` the script prints a warning that says so and goes on. `--backup` plus `scripts/backup.sh` or a volume snapshot is mandatory for the DB7 run. For an ordinary day-2 update `--backup` stays optional.
+- The rollback starts `:rollback` through the `compose.yml` as it is after the `git pull` and the current `data/secrets.env`, with only `SITE_SERVER_IMAGE` overridden. Env, volumes, ports and networks are not a snapshot of the old container.
+- A fresh install has no previous container, so there is nothing to tag and a failed health check only fails.
+
+`./scripts/update.sh --backup` takes a SurrealDB export first, before any container is touched. It calls the HTTP `/export` endpoint of the running project Surreal on its compose-network IP as the root user (`SURREALDB_USER`, `SURREALDB_NS`, `SURREALDB_DB` from `secrets.env`) and writes `backups-manual/surreal-export-<UTC timestamp>.surql` (directory mode 700, file mode 600, ignored by git). If the request fails, the HTTP status is not 2xx, the file is empty, or the body is not a SurrealQL export (an HTML or JSON error page, for example), the script exits non-zero and the site keeps running on the old image. The host must be able to reach the container IP, which is the case for rootful podman. The export holds the whole database in plain text: keep it off shared storage and delete it when it is no longer needed. This is a one-off logical export on the host. It does not replace `scripts/backup.sh` (restic, off-host, see [Backups](#backups)).
+
+Tested so far: the stub tests in `scripts/test-update-rollback.sh` (36 scenarios, stubbed podman and curl, no real containers), and one rootless dry run of commit 94e12813 by Soot, recorded in [PR 824](https://github.com/FrozenTear/scuffed-crew/pull/824#issuecomment-7101602787). Rootful podman and a Contabo-like host have not been tested yet.
 
 ### Which variables reach the server
 
@@ -141,7 +159,7 @@ This `up -d` creates the database container on the image `compose.yml` names. If
 
 ### SurrealDB: `is unhealthy` but logs show “Started web server”
 
-The database is fine; an old probe had a 5 s timeout, shorter than the time the `surreal` CLI waits before it exits. Current `compose.yml` probes with `/surreal is-ready` and a 20 s timeout. The probe belongs to the database container, so a fix only takes effect when that container is recreated, and `./scripts/update.sh` never does that. If `compose.yml` names the image the container already runs (`podman inspect <surreal container> --format '{{.ImageName}}'`), stop site-server, then `podman compose --env-file data/secrets.env up -d --no-deps surrealdb` recreates it on the same image and volume, then `./scripts/update.sh`. If the images differ, that is a database upgrade: follow [Upgrading the SurrealDB server](#upgrading-the-surrealdb-server).
+The database is fine; an old probe had a 5 s timeout, shorter than the time the `surreal` CLI waits before it exits. Current `compose.yml` has a Surreal healthcheck: `/surreal is-ready --endpoint http://127.0.0.1:8000` every 30 s, with a 20 s timeout, 3 retries and a 20 s start period. `site-server` still only waits for the database container to start, not for it to be healthy. The probe belongs to the database container, so a fix only takes effect when that container is recreated, and `./scripts/update.sh` never does that. If `compose.yml` names the image the container already runs (`podman inspect <surreal container> --format '{{.ImageName}}'`), stop site-server, then `podman compose --env-file data/secrets.env up -d --no-deps surrealdb` recreates it on the same image and volume, then `./scripts/update.sh`. If the images differ, that is a database upgrade: follow [Upgrading the SurrealDB server](#upgrading-the-surrealdb-server).
 
 ### SurrealDB: duplicate container (`_` vs `-`) and site-server stuck Created / public 502
 
@@ -241,10 +259,13 @@ Wait until `dig +short ow.scuffedcrew.no` returns the VPS.
 ```caddy
 ow.scuffedcrew.no {
 	encode zstd gzip
-	header X-Frame-Options "DENY"
-	header Referrer-Policy "strict-origin-when-cross-origin"
 	# Same-origin Nostr relay. See "Optional Nostr relay" below and deploy/Caddyfile.
 	handle /relay* {
+		header X-Frame-Options "DENY"
+		header Referrer-Policy "strict-origin-when-cross-origin"
+		header X-Content-Type-Options "nosniff"
+		header Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
 		uri strip_prefix /relay
 		reverse_proxy 127.0.0.1:7777
 	}
@@ -254,7 +275,7 @@ ow.scuffedcrew.no {
 }
 ```
 
-`X-Content-Type-Options: nosniff` is set by scuffed-server. Do not add `header X-Content-Type-Options "nosniff"` in Caddy. A second line is sent beside the origin header. If the live host file still has that line, delete it and reload Caddy.
+`X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY` and `Referrer-Policy: strict-origin-when-cross-origin` are set by scuffed-server on every response it serves. Do not add them for the site in Caddy. A second line is sent beside the origin header. Only the `/relay*` block sets these headers in Caddy, because strfry answers that path: the three above plus `Permissions-Policy` and the production `Strict-Transport-Security` value, all copied from `crates/server/src/security.rs`. If the live host file still has site-wide `header X-Content-Type-Options`, `header X-Frame-Options` or `header Referrer-Policy` lines, move or delete them as above and reload Caddy.
 
 Do not add a Caddy `Cache-Control` header for `*.wasm` / `*.js` / `*.css`. The origin is the only cache policy (`cache_control_value` in `crates/site-server`): Dioxus `dxh`-hashed assets are `public, max-age=31536000, immutable`, unhashed `.js` / `.css` / `.wasm` are `no-cache`, other static files are one day, and the HTML shell is `no-cache`. A matcher on every `.js` / `.css` / `.wasm` path also covers unhashed files and the HTML fallback, and Caddy emits a second `Cache-Control` beside the origin's.
 
@@ -733,6 +754,69 @@ and the server is restarted.
 `scripts/backup.sh` includes the `reports-data` volume in the restic snapshot,
 the same way it includes uploads.
 
+## Hero icon contributions
+
+Member-contributed hero icon PNGs (opt-in, owner and admins only) stay on
+disk, outside the web root and outside the upload tree. Compose sets
+`HERO_ICONS_DIR` to `/app/data/hero-icons` and mounts the named volume
+`hero-icons-data` there. Without the variable the server uses
+`data/hero-icons` relative to its working directory when `PRODUCTION` is set,
+and `scuffed-hero-icons` under the system temp dir otherwise, so a dev server
+started from the repo root never writes icons into the repo tree.
+
+The entrypoint prepares this directory the same way as `REPORTS_DIR`: it
+creates it, gives it to `scuffed`, and sets mode 0700. Icon files are written
+with mode 0600 and named by a server-made id only.
+
+If the directory is missing, not writable, or overlaps the upload directory,
+`REPORTS_DIR`, `PACKS_DIR` or the web root, hero icons turn themselves off. The log line is
+`hero icons disabled: ...`, the rest of the site keeps serving, and every
+`/api/hero-icons` route except `/api/hero-icons/opt-in` returns 503 with body
+`{"error":"hero_icons_disabled"}` until the directory is fixed and the server
+is restarted.
+
+At startup the server removes icon files older than one hour that have no
+database row, and logs `hero icon orphan sweep done` with the count.
+
+The `hero-icons-data` volume is not in `scripts/backup.sh`, by decision: the
+current server is a temporary dev platform and backups are dropped for it.
+Lost icons can be contributed again. Endpoints,
+caps and the privacy rule are in `docs/api/hero-icons.md`. The same directory
+also holds opt-in training crops from the tracker (`/api/training-crops`, see
+`docs/api/training-crops.md`).
+
+### Removing a deactivated or banned member's crops
+
+The API cannot delete the crops of an inactive member (a deactivated or
+banned member, since a ban deactivates): the owner can no longer sign in and
+admin deletes answer 404 for them, the same rule as for hero icons. When the
+crops must go anyway (for example the member asks by another channel), an
+operator removes them by hand. This deletes the member's contributions of
+every kind for good, so get FrozenTear's yes first and write it in the fleet
+log; it is not in the audit log. Nothing here runs on its own.
+
+1. Check the member is the right one and inactive (read only):
+   ```surql
+   SELECT id, display_name, is_active FROM member WHERE record::id(id) = '<member_id>';
+   ```
+2. List the crops and note the count (read only):
+   ```surql
+   SELECT id, kind, file_name FROM hero_icon WHERE member_id = '<member_id>';
+   ```
+3. Delete each listed `file_name` (`<id>.png`) from the `hero-icons-data`
+   volume (`HERO_ICONS_DIR`). Files go first, as in the API.
+4. Delete the rows:
+   ```surql
+   DELETE hero_icon WHERE member_id = '<member_id>';
+   ```
+   Add `AND kind = '<kind>'` to steps 2 and 4 to remove one kind only.
+5. Run step 2 again and expect no rows. A file left behind by mistake is
+   removed by the orphan sweep at the next start, once it is an hour old.
+
+The consent flags on `member_settings` are left as they are. They hide
+nothing once the crops are gone, and a member who is reactivated keeps the
+choice they made.
+
 ## Recognizer asset packs
 
 Hero icons and other recognizer packs are game art. Do not commit them, do not
@@ -740,6 +824,10 @@ attach them to a release, and do not put them in fixtures. Compose mounts the
 named volume `packs-data` (on the VPS: `scuffed-crew_packs-data`) read-only at
 `/app/data/packs` and sets `PACKS_DIR` to that path. The directory is outside
 SurrealDB and outside the web root.
+
+The one approved exception to the no-game-art rule is the nine rank emblems in
+`crates/app/assets/rank-icons` (see the `LICENCE-NOTE.md` there). They are
+built into the app, not served from `packs-data`.
 
 Fill the volume with `scripts/publish-packs.sh`, from the machine that built
 the packs. Do not copy files into the volume by hand:
@@ -769,6 +857,65 @@ If `PACKS_DIR` is unset, the directory cannot be read, or it has no valid
 `GET /api/tracker/packs/{name}` return 503 `{"error":"packs_disabled"}`.
 `packs-data` is not in `scripts/backup.sh`. The copy of record is the build
 folder on the operator's machine.
+
+## 0.6 first boot: roster dedupe (DB7)
+
+The first start of a 0.6 build collapses duplicate `plays_on` roster edges
+(one member on one team more than once), then installs the UNIQUE index
+`plays_on_member_team_idx` on (in, out). The deletes are permanent and every
+deleted edge is logged at info. Later boots see the index and skip the pass.
+
+1. **Back up first.** Roll out with `./scripts/update.sh --backup`: it
+   writes a SurrealDB HTTP export to `backups-manual/` (mode 600) before it
+   touches a container, and an empty, failed or junk export stops the
+   update with the site still running. Run `scripts/backup.sh` (restic,
+   off-host) as well, or snapshot the volume. Both are mandatory for this
+   run. Plain `./scripts/update.sh` takes no backup and only warns.
+   The `update.sh` with `--backup` and rollback must be merged and on the
+   host before any DB7 deploy.
+2. **Run the read-only duplicate count first** and note it:
+   ```surql
+   SELECT * FROM (SELECT in, out, count() AS n FROM plays_on GROUP BY in, out) WHERE n > 1;
+   ```
+   The dedupe runs inside startup migrations, before `/api/health` answers.
+   It handles about 74 duplicate groups per second (1783 groups took about
+   23 s in QA), so a large count means a longer wait before health is green.
+   Raise the health or start timeout if needed rather than restarting.
+   `update.sh` waits 60 s and then rolls the image back, which stops a boot
+   that is still migrating: for a large count run it with
+   `SCUFFED_UPDATE_HEALTH_SECS=<seconds>`.
+3. **Stop the old site-server first.** During a rolling deploy an old
+   container that still adds roster entries can create a duplicate between
+   the dedupe and the index, which blocks the new container from starting
+   until the old one stops. Bring the old one down, then start the new one.
+4. **The migrating container must run the new build.** Containers with
+   `SURREALDB_BOOTSTRAP=0` never run migrations, so they never run DB7. The
+   container that bootstraps (or the `SURREALDB_MIGRATE_ONLY=1` job) has to
+   be on the new image.
+5. **After boot:** expect the info log `plays_on is UNIQUE on (in, out)`.
+   Its `duplicate_pairs` equals the number of rows the step 2 query returned
+   (one row per duplicate group). Its `deleted` is the number of extra edges,
+   the sum of `n - 1` over those rows. Re-run the step 2 query: 0 rows.
+
+Two servers that boot against one database at the same moment can hit
+`Transaction conflict: Resource busy ... can be retried` in a startup
+migration. Each fatal migration step retries that error up to 4 times with
+a short backoff (about 2 s in total) before it gives up. A failed step names
+itself in the startup panic, for example
+`SurrealDB startup migration failed: DB7 roster dedupe/unique index failed after 1 attempt(s): ...`.
+A panic that starts with `Failed to connect to SurrealDB` is a connection or
+login problem, not a migration.
+
+**Rollback to a pre-0.6 build:** that build relates a new edge on every add,
+which the index rejects (500 on re-add or double click). Run
+`REMOVE INDEX plays_on_member_team_idx ON plays_on` as root, or accept that.
+Deleted duplicates come back only from the backup.
+
+`update.sh` does this image rollback by itself when the new container fails
+its health check: it restarts the image tagged `<repo>:rollback` and exits
+non-zero (see [Rollback and `--backup`](#rollback-and---backup)). That puts
+the old build back. It does not undo a dedupe that already ran, so the
+note above applies and the `--backup` export is the way back for the data.
 
 ## Upgrading the SurrealDB server
 

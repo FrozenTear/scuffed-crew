@@ -4454,18 +4454,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fast_image_resize"
-version = "6.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9c50201dc184ba6553da1695aac20a042efffbe2d84542cee31917c86c3ab1e"
-dependencies = [
- "cfg-if",
- "document-features",
- "num-traits",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "fastnum"
 version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6510,6 +6498,12 @@ dependencies = [
  "byteorder-lite",
  "quick-error",
 ]
+
+[[package]]
+name = "imagesize"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65b27460c2c92b037f3f94c538ed9a3342f3fdf923606781629ccb35f82d042a"
 
 [[package]]
 name = "imgref"
@@ -10774,7 +10768,9 @@ dependencies = [
  "serde-wasm-bindgen",
  "serde_json",
  "tokio",
+ "toml 1.1.6+spec-1.1.0",
  "tracing",
+ "url",
  "uuid",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -10855,6 +10851,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "unicode-normalization",
  "uuid",
  "zeroize",
@@ -10866,13 +10863,11 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
- "fast_image_resize",
  "find_peaks",
  "glam 0.30.10",
  "gltf",
  "image",
  "rayon",
- "rustc-hash 2.1.1",
  "scuffed-types",
  "serde",
  "serde_json",
@@ -10895,7 +10890,6 @@ dependencies = [
  "image",
  "scuffed-map-pipeline",
  "serde",
- "toml 0.8.2",
  "tracing",
 ]
 
@@ -10949,6 +10943,7 @@ dependencies = [
  "governor",
  "http-body-util",
  "image",
+ "imagesize",
  "ipnet",
  "nostr",
  "rand 0.8.8",
@@ -10957,6 +10952,7 @@ dependencies = [
  "scuffed-chat",
  "scuffed-db",
  "scuffed-types",
+ "semver",
  "serde",
  "serde_json",
  "sha2",
@@ -10969,6 +10965,7 @@ dependencies = [
  "tower_governor",
  "tracing",
  "tracing-subscriber",
+ "url",
  "urlencoding",
  "uuid",
  "zeroize",
@@ -10977,7 +10974,7 @@ dependencies = [
 
 [[package]]
 name = "scuffed-stat-tracker"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "ab_glyph",
  "anyhow",
@@ -10987,6 +10984,7 @@ dependencies = [
  "enumflags2",
  "evdev",
  "futures-util",
+ "idna",
  "image",
  "leptess",
  "libc",
@@ -10995,6 +10993,7 @@ dependencies = [
  "rayon",
  "regex",
  "reqwest 0.12.28",
+ "scuffed-stat-tracker-core",
  "scuffed-types",
  "serde",
  "serde_json",
@@ -11004,12 +11003,31 @@ dependencies = [
  "surrealdb-types",
  "tempfile",
  "tokio",
- "toml 1.1.6+spec-1.1.0",
- "toml_edit 0.23.10+spec-1.0.0",
  "tracing",
  "tracing-subscriber",
  "x11rb 0.14.0",
  "zip",
+]
+
+[[package]]
+name = "scuffed-stat-tracker-core"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "dirs",
+ "libc",
+ "scuffed-types",
+ "serde",
+ "serde_json",
+ "strsim",
+ "surrealdb-types",
+ "tempfile",
+ "tokio",
+ "toml 1.1.6+spec-1.1.0",
+ "toml_edit 0.23.10+spec-1.0.0",
+ "tracing",
+ "url",
 ]
 
 [[package]]
@@ -11039,6 +11057,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tray-icon 0.23.1",
+ "url",
 ]
 
 [[package]]

@@ -5,9 +5,10 @@
     <meta charset="UTF-8" />
     <meta content="text/html;charset=utf-8" http-equiv="Content-Type" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=Space+Grotesk:wght@400;600;700&amp;family=JetBrains+Mono:wght@400;500;600;700&amp;display=swap" />
+    <!-- Sets data-theme from the saved theme before first paint. -->
+    <script src="/assets/boot-theme.js"></script>
+    <!-- Self-hosted display face (crates/app/src/theme/fonts.rs). -->
+    <link rel="preload" as="font" type="font/woff2" href="/assets/urbanist.woff2" crossorigin />
     <meta name="description" content="A community site for teams, events, and scheduled play." />
     <meta property="og:title" content="Community" />
     <meta
@@ -29,7 +30,7 @@
         color: #f4f4f8;
         font-family: system-ui, sans-serif;
       }
-      #main {
+      #app-root {
         min-height: 100vh;
       }
       /* First paint before WASM boots */
@@ -60,6 +61,39 @@
         text-transform: uppercase;
         color: #9696a3;
       }
+      /* Light visitors get a light first paint. The app theme takes over after boot. */
+      @media (prefers-color-scheme: light) {
+        html, body {
+          background: #f7f7f9;
+          color: #16161c;
+        }
+        #sc-boot .label {
+          color: #696975;
+        }
+      }
+      /* A saved theme (assets/boot-theme.js) wins over the OS preference,
+         so the splash already matches the theme the app paints.
+         :where() keeps these page rules at the weight of a plain html or
+         body rule: they beat the media query above by coming later, and
+         the app's own html, body rule (theme/tokens.rs) still beats them
+         by coming later again, so a page background set in Admin Settings
+         shows. ThemeProvider keeps data-theme set for the whole visit. */
+      html:where([data-theme="dark"]),
+      :where(html[data-theme="dark"]) body {
+        background: #17171d;
+        color: #f4f4f8;
+      }
+      html[data-theme="dark"] #sc-boot .label {
+        color: #9696a3;
+      }
+      html:where([data-theme="light"]),
+      :where(html[data-theme="light"]) body {
+        background: #f7f7f9;
+        color: #16161c;
+      }
+      html[data-theme="light"] #sc-boot .label {
+        color: #696975;
+      }
     </style>
   </head>
   <body>
@@ -67,12 +101,12 @@
       <div class="mark"></div>
       <div class="label">Loading</div>
     </div>
-    <div id="main"></div>
+    <div id="app-root"></div>
     <!-- Dioxus injects the WASM loader here, before the closing body tag. -->
     <script>
-      // Hide boot skeleton once the app mounts content into #main
+      // Hide boot skeleton once the app mounts content into #app-root
       (function () {
-        var main = document.getElementById("main");
+        var main = document.getElementById("app-root");
         var boot = document.getElementById("sc-boot");
         if (!main || !boot) return;
         var hide = function () {

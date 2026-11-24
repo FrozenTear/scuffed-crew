@@ -24,11 +24,25 @@ pub enum DaemonVerb {
     Restart,
 }
 
+impl DaemonVerb {
+    /// The tracker this verb leaves running loads the config saved when it
+    /// began, so the Settings strip's changes waiting move to it.
+    pub fn applies_saved_config(self) -> bool {
+        matches!(self, DaemonVerb::Start | DaemonVerb::Restart)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonView {
     pub pid: Option<u32>,
     pub service_installed: bool,
     pub autostart: bool,
+    /// The tracker's last training crop warning (`training_crops/status.json`),
+    /// shown under Website account until a later pass clears it: a plain
+    /// warning goes after a pass with nothing to warn about, dropped crops
+    /// after a send that works, crops a delete left once they are gone, and
+    /// an ask to delete again after a later delete that worked.
+    pub training_warning: Option<String>,
 }
 
 impl Default for DaemonView {
@@ -37,6 +51,7 @@ impl Default for DaemonView {
             pid: None,
             service_installed: service_file_installed(),
             autostart: false,
+            training_warning: None,
         }
     }
 }
@@ -100,9 +115,18 @@ pub fn is_daemon_running(data_dir: &Path) -> bool {
 
 pub fn refresh_view(data_dir: &Path, current: &DaemonView) -> DaemonView {
     DaemonView {
+        autostart: current.autostart,
+        ..initial_view(data_dir)
+    }
+}
+
+/// The view at launch: autostart is read later.
+pub fn initial_view(data_dir: &Path) -> DaemonView {
+    DaemonView {
         pid: daemon_running(data_dir),
         service_installed: service_file_installed(),
-        autostart: current.autostart,
+        autostart: false,
+        training_warning: stat_tracker::sync::training_warning(data_dir),
     }
 }
 
@@ -640,6 +664,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn start_and_restart_load_the_saved_config_and_stop_does_not() {
+        assert!(DaemonVerb::Start.applies_saved_config());
+        assert!(DaemonVerb::Restart.applies_saved_config());
+        assert!(!DaemonVerb::Stop.applies_saved_config());
+    }
+
+    #[test]
     fn comm_identity_matches_daemon_rule() {
         assert!(comm_is_tracker("scuffed-stat-tr"));
         assert!(comm_is_tracker("scuffed-stat-tracker"));
@@ -817,6 +848,8 @@ Result=start-limit-hit
         );
     }
 
+    /// Also what lets uninstall go on: a stopped or foreign pid does not
+    /// block it.
     #[test]
     fn restart_proceeds_only_when_nothing_live_was_signalled() {
         assert!(StopError::NotRunning.allows_restart());
@@ -824,8 +857,13 @@ Result=start-limit-hit
             StopError::Refused("Saved process id is not the tracker, not stopping it")
                 .allows_restart()
         );
+        assert!(StopError::Refused("Refusing to stop this window's process").allows_restart());
         assert!(
             !StopError::Failed("Tracker is still shutting down, not starting another copy".into())
+                .allows_restart()
+        );
+        assert!(
+            !StopError::Failed("Could not stop the tracker: Permission denied".into())
                 .allows_restart()
         );
     }

@@ -50,7 +50,7 @@ pub async fn test_discord_webhook(
     }
 
     discord.notify_officers(
-        "🔔 Scuffed Crew test ping — Discord officers webhook is working.".to_string(),
+        "🔔 Scuffed Crew test ping. The Discord officers webhook is working.".to_string(),
     );
 
     audit(

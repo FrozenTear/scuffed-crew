@@ -152,7 +152,7 @@ pub fn stored_http_url(url: &str) -> Option<StoredUrl<'_>> {
 }
 
 /// How a `use_resource` slot that stores `Result` should be shown.
-/// Loading, failure, and a successful payload stay distinct — an error is not
+/// Loading, failure, and a successful payload stay distinct: an error is not
 /// "still loading" and an empty payload is not a failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FetchClass {
@@ -175,6 +175,16 @@ pub fn pluralize(n: usize, singular: &str, plural: &str) -> String {
         format!("1 {singular}")
     } else {
         format!("{n} {plural}")
+    }
+}
+
+/// Compact win, loss, draw record: `5W-2L-1D`, or `5W-2L` when there are no
+/// draws. Plain hyphens with no spaces, used everywhere a record is shown.
+pub fn record_label(wins: u32, losses: u32, draws: u32) -> String {
+    if draws > 0 {
+        format!("{wins}W-{losses}L-{draws}D")
+    } else {
+        format!("{wins}W-{losses}L")
     }
 }
 
@@ -402,7 +412,7 @@ pub fn encode_query(value: &str) -> String {
 }
 
 /// Append `season=<id>` to an API path (`?` or `&` as needed). `None` = all
-/// time, path returned unchanged — the server treats a missing/blank season
+/// time, path returned unchanged; the server treats a missing/blank season
 /// as "total".
 pub fn season_url(path: &str, season: Option<&str>) -> String {
     match season {
@@ -414,9 +424,144 @@ pub fn season_url(path: &str, season: Option<&str>) -> String {
     }
 }
 
+/// A fetch the browser cancelled: the page is being left, or the request was
+/// replaced. Not a failure, so it is never logged.
+pub fn is_aborted_fetch(err: &dyn std::fmt::Display) -> bool {
+    is_cancelled_fetch_text(&err.to_string(), page_is_leaving())
+}
+
+/// `AbortError` is always a cancel. Firefox also cancels the fetches of a
+/// page being left with a plain network `TypeError` ("NetworkError when
+/// attempting to fetch resource."), the same words a real network failure
+/// uses, so that counts as a cancel only while `leaving`.
+fn is_cancelled_fetch_text(text: &str, leaving: bool) -> bool {
+    if text.contains("AbortError") {
+        return true;
+    }
+    leaving
+        && text.contains("TypeError")
+        && ["NetworkError", "Failed to fetch", "Load failed"]
+            .iter()
+            .any(|words| text.contains(words))
+}
+
+/// A navigation away has started: `assets/boot-theme.js` marks the root
+/// with `data-sc-leaving` once `beforeunload` ran and nothing asked to stay.
+fn page_is_leaving() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.document_element())
+            .is_some_and(|root| root.has_attribute("data-sc-leaving"))
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        false
+    }
+}
+
+/// Log a raw client error to the browser console. User-facing copy stays a
+/// plain sentence; the technical text goes here for whoever debugs it.
+///
+/// `what` is the label before the colon. A lead written as page text
+/// ("Loading your choices failed.") keeps no trailing full stop or colon
+/// here, so the line reads "Loading your choices failed: ..." and never
+/// "failed.: ..." (QA round 7 on 748).
+pub fn log_client_error(what: &str, err: &dyn std::fmt::Display) {
+    if is_aborted_fetch(err) {
+        return;
+    }
+    let what = log_label(what);
+    #[cfg(target_arch = "wasm32")]
+    web_sys::console::warn_1(&format!("{what}: {err}").into());
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        #[cfg(test)]
+        LOGGED.with(|logged| logged.borrow_mut().push(format!("{what}: {err}")));
+        let _ = (what, err);
+    }
+}
+
+/// The console label for a lead: trimmed, with no trailing `.` or `:`.
+pub(crate) fn log_label(lead: &str) -> &str {
+    lead.trim().trim_end_matches(['.', ':']).trim_end()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// What [`log_client_error`] would have sent to the console on this test
+    /// thread, so a test can pin that a failure is logged.
+    static LOGGED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Takes the lines [`log_client_error`] logged on this test thread.
+#[cfg(test)]
+pub(crate) fn take_logged() -> Vec<String> {
+    LOGGED.with(|logged| std::mem::take(&mut *logged.borrow_mut()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// QA 696 nit 8: Firefox rejects an in-flight fetch with `AbortError`
+    /// when the page is left; that is not an error and is not logged.
+    #[test]
+    fn an_aborted_fetch_is_not_an_error() {
+        use scuffed_api_client::ClientError;
+        let aborted =
+            ClientError::Network("JsValue(AbortError: The operation was aborted. )".to_string());
+        assert!(is_aborted_fetch(&aborted));
+        assert!(!is_aborted_fetch(&ClientError::Network(
+            "JsValue(TypeError: NetworkError when attempting to fetch resource.)".to_string()
+        )));
+        assert!(!is_aborted_fetch(&ClientError::http(500, "{}", None)));
+        // Firefox's cancel of a page being left: a cancel only while leaving.
+        let firefox = "JsValue(TypeError: NetworkError when attempting to fetch resource.)";
+        assert!(is_cancelled_fetch_text(firefox, true));
+        assert!(!is_cancelled_fetch_text(firefox, false));
+        assert!(is_cancelled_fetch_text("JsValue(AbortError: x)", false));
+        // A server answer or another TypeError is never a cancel.
+        assert!(!is_cancelled_fetch_text("HTTP 500: {}", true));
+        assert!(!is_cancelled_fetch_text(
+            "JsValue(TypeError: x is not a function)",
+            true
+        ));
+        let src = include_str!("util.rs");
+        let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let log = prod
+            .split("pub fn log_client_error(")
+            .nth(1)
+            .expect("log_client_error");
+        let guard = log.find("if is_aborted_fetch(err)").expect("abort guard");
+        let warn = log.find("console::warn_1").expect("warn");
+        assert!(guard < warn, "the abort check runs before the log");
+
+        // The page-level guard for the bundle's own fetch: only AbortError,
+        // or a fetch TypeError once the page is leaving, is marked handled.
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/boot-theme.js");
+        let script = std::fs::read_to_string(path).expect("assets/boot-theme.js");
+        assert_eq!(
+            script
+                .matches("addEventListener(\"unhandledrejection\"")
+                .count(),
+            1,
+            "{script}"
+        );
+        assert!(
+            script.contains(
+                "var cancelled =\n      reason.name === \"AbortError\" ||\n      (reason.name === \"TypeError\" &&\n        root.hasAttribute(\"data-sc-leaving\") &&\n        FETCH_FAILED.test(String(reason.message)));\n    if (cancelled) {\n      event.preventDefault();"
+            ),
+            "{script}"
+        );
+        assert_eq!(script.matches("preventDefault()").count(), 1, "{script}");
+        // The marker is set when a navigation starts, dropped when a prompt
+        // kept the page, and read by `page_is_leaving` on this side.
+        assert!(script.contains("root.setAttribute(\"data-sc-leaving\", \"\");"));
+        assert!(script.contains("if (event.defaultPrevented) {\n        stay();"));
+        assert!(prod.contains(".is_some_and(|root| root.has_attribute(\"data-sc-leaving\"))"));
+    }
 
     #[test]
     fn truncate_chars_is_length_safe() {
@@ -425,7 +570,7 @@ mod tests {
         assert_eq!(truncate_chars("abcdefgh", 8), "abcdefgh");
         assert_eq!(truncate_chars("abcdefghi", 8), "abcdefgh");
         assert_eq!(truncate_chars("hello", 0), "");
-        // 9 scalars, 2 bytes each — a byte slice of 8 would split a scalar.
+        // 9 scalars, 2 bytes each; a byte slice of 8 would split a scalar.
         let multibyte = "ééééééééé";
         let short = truncate_chars(multibyte, 8);
         assert_eq!(short.chars().count(), 8);
@@ -761,5 +906,14 @@ mod tests {
         assert!(matches!(empty, Some(Ok(rows)) if rows.is_empty()));
         let rows: Option<Result<Vec<i32>, String>> = Some(Ok(vec![1, 2]));
         assert_eq!(classify_fetch(rows.as_ref()), FetchClass::Ready);
+    }
+
+    #[test]
+    fn record_label_is_compact() {
+        assert_eq!(record_label(5, 2, 1), "5W-2L-1D");
+        assert_eq!(record_label(5, 2, 0), "5W-2L");
+        assert_eq!(record_label(0, 0, 0), "0W-0L");
+        assert_eq!(record_label(12, 0, 3), "12W-0L-3D");
+        assert!(!record_label(5, 2, 1).contains(' '));
     }
 }

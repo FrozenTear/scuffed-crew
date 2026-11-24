@@ -12,6 +12,9 @@ scuffed-types = { path = "../types" }
 axum = { version = "0.8", features = ["multipart"] }
 uuid = { version = "1", features = ["v4"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+# Header-only AVIF width/height read (pure Rust, no AV1 decoder). The `image`
+# crate stays without its avif feature.
+imagesize = { version = "0.15", default-features = false, features = ["heif"] }
 axum-extra = { version = "0.10", features = ["cookie"] }
 tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
 tower = "0.5"
@@ -25,6 +28,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
 reqwest = { version = "0.12", features = ["json"] }
+url = "2.5"
 urlencoding = "2"
 # Keep in lockstep with scuffed-chat (0.44.2 yanked; fixes land in >=0.44.7).
 nostr = { version = "0.44.8", default-features = false, features = ["std"] }
@@ -34,6 +38,8 @@ base64 = "0.22"
 tower_governor = "0.8.0"
 governor = "0.10"
 ipnet = "2"
+# Tracker User-Agent version gate for legacy id reuse (alpha.3 item 22).
+semver = "1"
 zeroize = "1"
 sha2 = "0.10"
 flate2 = "1"

@@ -33,7 +33,7 @@ const CHARTS_CSS: &str = r#"
     }
     .donut-center-label {
         font-size: 0.6rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-transform: uppercase;
         letter-spacing: 0.06em;
     }
@@ -54,10 +54,10 @@ const CHARTS_CSS: &str = r#"
         border-radius: 2px;
         flex-shrink: 0;
     }
-    .legend-name { color: var(--text-2); }
+    .legend-name { color: var(--text-3); }
     .legend-val {
         margin-left: auto;
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-size: 0.8rem;
         padding-left: 0.5rem;
     }
@@ -68,7 +68,7 @@ const CHARTS_CSS: &str = r#"
     .hbar-label {
         min-width: 110px;
         font-size: 0.8rem;
-        color: var(--text-2);
+        color: var(--text-3);
         text-align: right;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -88,7 +88,7 @@ const CHARTS_CSS: &str = r#"
         transition: width 0.3s ease;
         min-width: 2px;
     }
-    /* Reference hairline (e.g. the 50% winrate mark) — recessive, one shade
+    /* Reference hairline (e.g. the 50% winrate mark): recessive, one shade
        off the track surface, drawn across the full track height. */
     .hbar-ref {
         position: absolute;
@@ -102,10 +102,10 @@ const CHARTS_CSS: &str = r#"
         min-width: 50px;
         font-size: 0.8rem;
         font-weight: 600;
-        color: var(--text-2);
+        color: var(--text-3);
         font-variant-numeric: tabular-nums;
     }
-    .hbar-row.muted .hbar-val { color: var(--text-3); font-weight: 400; }
+    .hbar-row.muted .hbar-val { color: var(--text-subtle); font-weight: 400; }
 "#;
 
 #[derive(Clone, PartialEq)]

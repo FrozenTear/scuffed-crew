@@ -1,0 +1,170 @@
+name: Install apt packages (cached .debs)
+description: >
+  apt-get install with the downloaded .debs kept in the Actions cache. A
+  restore installs offline (--no-download, no apt-get update), so a slow or
+  dead Ubuntu mirror cannot fail or stall the job. A miss, or cached .debs
+  that no longer fit the runner image, falls back to the mirror with the
+  same retries and timeouts as before, plus one resuming install retry.
+inputs:
+  packages:
+    description: Packages to install, separated by spaces or newlines.
+    required: true
+  save:
+    description: >
+      'true' to save the .debs after a miss. Callers pass true on main and
+      wip/0.6 only, like rust-cache's save-if, so PR runs don't fill the
+      repo cache.
+    required: false
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - name: Compute apt cache key
+      id: key
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+      run: |
+        set -euo pipefail
+        set -f # the package list is split on purpose, never globbed
+        . /etc/os-release
+        # Normalised package list: order and line breaks don't change the key.
+        pkgs="$(printf '%s\n' $PACKAGES | sort -u | tr '\n' ' ')"
+        hash="$(printf '%s' "$pkgs" | sha256sum | cut -c1-16)"
+        # 26.04 runners pull amd64v3 builds (APT::Architecture-Variants) while
+        # dpkg still says amd64: a runner pool without the variant must not
+        # restore v3 binaries.
+        # apt-config prints it as `APT::Architecture-Variants "amd64v3";`.
+        variants="$(apt-config dump | grep -i '^APT::Architecture-Variants' | grep -o '"[^"]\+"' | tr -d '"' | sort -u | paste -sd+ || true)"
+        arch="$(dpkg --print-architecture)${variants:+-$variants}"
+        # OS + arch (+variant) + package list, then ImageVersion (the weekly
+        # runner image build): an exact hit was saved on this very image.
+        # Bump v1 when the install logic below changes what gets cached.
+        prefix="apt-debs-v1-${ID}-${VERSION_ID}-${arch}-${hash}-"
+        dir=/var/cache/apt-ci-debs
+        sudo install -d -o "$(id -u)" -g "$(id -g)" "$dir"
+        echo "apt cache key: ${prefix}${ImageVersion:-unknown}"
+        {
+          echo "prefix=$prefix"
+          echo "key=${prefix}${ImageVersion:-unknown}"
+          echo "dir=$dir"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Restore cached .debs
+      id: restore
+      uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: /var/cache/apt-ci-debs
+        key: ${{ steps.key.outputs.key }}
+        # An older image's set (non-exact match). PR runs try it offline;
+        # saving runs refresh from the mirror instead (see below).
+        restore-keys: ${{ steps.key.outputs.prefix }}
+
+    - name: Install packages
+      id: install
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+        DEB_DIR: ${{ steps.key.outputs.dir }}
+        CACHE_HIT: ${{ steps.restore.outputs.cache-hit }}
+        CACHE_KEY: ${{ steps.restore.outputs.cache-matched-key }}
+        SAVE: ${{ inputs.save }}
+      run: |
+        set -euo pipefail
+        set -f # the package list is split on purpose, never globbed
+        read -ra PKGS <<< "$(printf '%s ' $PACKAGES)"
+        set +f
+        all_installed() {
+          local p
+          for p in "${PKGS[@]}"; do
+            [ "$(dpkg-query -W -f='${db:Status-Status}' "$p" 2>/dev/null)" = installed ] || return 1
+          done
+        }
+        start=$SECONDS
+        # libudev-dev pulls a newer libudev1, which upgrades systemd, and the
+        # dracut trigger then rebuilds the initramfs: ~30 s of a ~40 s
+        # offline install. This runner VM is thrown away and never boots
+        # it, so divert update-initramfs to a no-op.
+        if [ -x /usr/sbin/update-initramfs ] && ! dpkg-divert --list /usr/sbin/update-initramfs | grep -q .; then
+          sudo dpkg-divert --local --rename --divert /usr/sbin/update-initramfs.ci-real \
+            --add /usr/sbin/update-initramfs
+          sudo ln -s /bin/true /usr/sbin/update-initramfs
+        fi
+        shopt -s nullglob
+        debs=("$DEB_DIR"/*.deb)
+
+        if (( ${#debs[@]} )) && [ "$CACHE_HIT" != true ] && [ "$SAVE" = true ]; then
+          # A saving run never installs (and so never re-saves) an older
+          # image's set: it refreshes from the mirror, so cached versions
+          # can't be carried forward image after image. The restored .debs
+          # stay in the archive dir, and apt reuses those still current.
+          echo "Restored ${#debs[@]} .debs from an older image ($CACHE_KEY); refreshing from the mirror."
+        elif (( ${#debs[@]} )); then
+          echo "Restored ${#debs[@]} .debs ($CACHE_KEY, exact: ${CACHE_HIT:-false}). Installing offline."
+          # --no-download: apt resolves against the local .debs plus what the
+          # image already has, and never touches the mirror. If the image
+          # moved on (newer libudev1, …) apt refuses before changing anything.
+          # An empty lists dir hides the image's own (stale) package lists:
+          # with them apt may pick a mirror URI for a version it has locally
+          # and then fail to "fetch" it.
+          lists="$(mktemp -d)"
+          mkdir -p "$lists/partial"
+          OFFLINE_OPTS=(-o Dir::State::Lists="$lists" -o Dir::Cache::archives="$DEB_DIR")
+          if sudo apt-get "${OFFLINE_OPTS[@]}" install -y --no-install-recommends --no-download "${debs[@]}" \
+              && all_installed; then
+            echo "::notice title=apt cache::installed from ${#debs[@]} cached .debs in $((SECONDS - start)) s, no mirror"
+            # Only an exact hit is ever offline on a saving run, and an
+            # exact key is never saved again.
+            exit 0
+          fi
+          echo "::warning title=apt cache::cached .debs did not install on this runner image; using the mirror"
+          # What apt wanted from the network, for the log.
+          sudo apt-get "${OFFLINE_OPTS[@]}" install -y --no-install-recommends --print-uris "${debs[@]}" \
+            | grep "^'" | grep -v "^'file:" || true
+          # A dpkg failure halfway (postinst, file conflict) leaves dpkg
+          # marked interrupted, and every apt-get install after it refuses.
+          sudo dpkg --configure -a || true
+        fi
+
+        # Mirror path, as before: a dead mirror must fail the job in minutes,
+        # not hang it for 15-20 (same options as stat-tracker-release.yml).
+        APT_OPTS=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+        sudo timeout 300 apt-get "${APT_OPTS[@]}" update \
+          || { sleep 15; sudo timeout 300 apt-get "${APT_OPTS[@]}" update; }
+        sudo mkdir -p "$DEB_DIR/partial"
+        INSTALL=(apt-get "${APT_OPTS[@]}"
+          -o Dir::Cache::archives="$DEB_DIR" -o APT::Keep-Downloaded-Packages=true
+          install -y --no-install-recommends "${PKGS[@]}")
+        # A crawling mirror (30-40 KB/s) can hit the cap with most .debs
+        # already down. They stay in the archive dir, so one retry resumes
+        # with only the rest. At most 2 x 600 s.
+        if ! sudo timeout 600 "${INSTALL[@]}"; then
+          echo "::warning title=apt cache::mirror install failed or timed out after $((SECONDS - start)) s; retrying once (downloaded .debs are kept)"
+          sudo dpkg --configure -a || true
+          sudo timeout 600 "${INSTALL[@]}"
+        fi
+        all_installed
+        # Keep only the .debs: apt's lock and partial/ are not cache content,
+        # nor are restored .debs this image no longer installed (stale
+        # versions would turn into refused downgrades on the next hit).
+        sudo rm -rf "$DEB_DIR/partial" "$DEB_DIR/lock"
+        sudo chown -R "$(id -u):$(id -g)" "$DEB_DIR"
+        pruned=0
+        for f in "$DEB_DIR"/*.deb; do
+          p="" v=""
+          # A corrupt .deb reads as empty and is pruned, not a step failure.
+          read -r p v < <(dpkg-deb -f "$f" Package Version 2>/dev/null | awk '{print $2}' | paste -sd' ') || true
+          if [ -z "$p" ] || [ "$(dpkg-query -W -f='${Version}' "$p" 2>/dev/null)" != "$v" ]; then
+            rm -f "$f"; pruned=$((pruned + 1))
+          fi
+        done
+        debs=("$DEB_DIR"/*.deb)
+        echo "::notice title=apt cache::installed from the mirror in $((SECONDS - start)) s; ${#debs[@]} .debs ($pruned stale pruned), $(du -sh "$DEB_DIR" | cut -f1)"
+        if (( ${#debs[@]} )); then echo "saveable=true" >> "$GITHUB_OUTPUT"; fi
+
+    - name: Save .debs to the cache
+      if: inputs.save == 'true' && steps.restore.outputs.cache-hit != 'true' && steps.install.outputs.saveable == 'true'
+      uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: /var/cache/apt-ci-debs
+        key: ${{ steps.key.outputs.key }}

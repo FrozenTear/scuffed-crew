@@ -3,60 +3,12 @@
 //! Product default is a neutral purple. Live sites override via SiteSettings
 //! (`brand_accent_dark` / `brand_accent_light`). Homepage presets may suggest
 //! accents when applied in admin.
+//!
+//! The derivation and the contrast lock live in [`scuffed_types::brand`] so
+//! the site server enforces the same lock on `PUT /api/settings`. This module
+//! re-exports them and keeps the app-only favicon helpers.
 
-#[derive(Clone, PartialEq, Eq)]
-pub struct BrandConfig {
-    /// Accent in dark mode (hex).
-    pub accent_dark: String,
-    /// Accent in light mode (hex).
-    pub accent_light: String,
-    /// Soft accent fill, dark mode (rgba).
-    pub accent_soft_dark: String,
-    /// Soft accent fill, light mode (rgba).
-    pub accent_soft_light: String,
-}
-
-impl BrandConfig {
-    /// Product default accents (not clan-specific).
-    pub fn product_default() -> Self {
-        Self::from_accents("#8f73ff", "#6d4aff")
-    }
-
-    /// Build from primary dark/light hex accents; soft fills are derived.
-    pub fn from_accents(accent_dark: &str, accent_light: &str) -> Self {
-        let dark = normalize_hex(accent_dark).unwrap_or_else(|| "#8f73ff".into());
-        let light = normalize_hex(accent_light).unwrap_or_else(|| dark.clone());
-        Self {
-            accent_soft_dark: soft_rgba(&dark, 0.17),
-            accent_soft_light: soft_rgba(&light, 0.10),
-            accent_dark: dark,
-            accent_light: light,
-        }
-    }
-
-    /// Neutral accent while public settings are still unknown.
-    ///
-    /// The product purple is a real brand. Painting it before settings arrive
-    /// flashes the wrong accent on orgs that chose something else. This gray
-    /// stays at least 3:1 against both theme backgrounds and against the dark
-    /// `--border` used by a focused field. The boot mark in `index.html`,
-    /// `assets/favicon.svg`, and [`org_favicon_data_uri`] use the same hex.
-    pub fn pending() -> Self {
-        Self::from_accents("#808088", "#808088")
-    }
-
-    /// Resolve settings fields: empty → product default.
-    pub fn from_settings(accent_dark: &str, accent_light: &str) -> Self {
-        let d = accent_dark.trim();
-        let l = accent_light.trim();
-        if d.is_empty() && l.is_empty() {
-            return Self::product_default();
-        }
-        let dark = if d.is_empty() { "#8f73ff" } else { d };
-        let light = if l.is_empty() { dark } else { l };
-        Self::from_accents(dark, light)
-    }
-}
+pub use scuffed_types::brand::*;
 
 /// Product-default purple for callers that are not the public boot path.
 ///
@@ -94,55 +46,41 @@ pub fn runtime_favicon_href(settled_org_name: Option<&str>) -> Option<String> {
     }
 }
 
-/// Accept `#rgb` / `#rrggbb` / bare hex → lowercase `#rrggbb`.
-fn normalize_hex(raw: &str) -> Option<String> {
-    let s = raw.trim();
-    if s.is_empty() {
-        return None;
-    }
-    let hex = s.strip_prefix('#').unwrap_or(s);
-    if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
-        return None;
-    }
-    match hex.len() {
-        3 => {
-            let mut out = String::from("#");
-            for c in hex.chars() {
-                out.push(c);
-                out.push(c);
-            }
-            Some(out.to_ascii_lowercase())
-        }
-        6 => Some(format!("#{}", hex.to_ascii_lowercase())),
-        _ => None,
-    }
-}
-
-fn soft_rgba(hex: &str, alpha: f32) -> String {
-    let (r, g, b) = parse_rgb(hex).unwrap_or((143, 115, 255));
-    format!("rgba({r},{g},{b},{alpha})")
-}
-
-fn parse_rgb(hex: &str) -> Option<(u8, u8, u8)> {
-    let h = hex.strip_prefix('#')?;
-    if h.len() != 6 {
-        return None;
-    }
-    let r = u8::from_str_radix(&h[0..2], 16).ok()?;
-    let g = u8::from_str_radix(&h[2..4], 16).ok()?;
-    let b = u8::from_str_radix(&h[4..6], 16).ok()?;
-    Some((r, g, b))
-}
+/// An accent the contrast lock blocks: in dark neither white nor the dark
+/// ink reaches 4.5:1 on it.
+#[cfg(test)]
+pub const TEST_BLOCKED_ACCENT: &str = "#d35400";
+/// Text that is not a hex colour the server accepts, for the hex field.
+#[cfg(test)]
+pub const TEST_INVALID_ACCENTS: [&str; 4] = ["mint", "#12", "#46d8a4ff", "url(x)"];
+/// A short hex in upper case with stray spaces: accepted and normalized.
+#[cfg(test)]
+pub const TEST_SHORT_ACCENT: &str = " #ABC ";
+/// The live mint brand, for tests that need a passing accent.
+#[cfg(test)]
+pub const TEST_MINT_ACCENT: &str = MINT_DARK;
+/// A second passing accent that is not the mint and not in any token file.
+#[cfg(test)]
+pub const TEST_OTHER_ACCENT: &str = "#ff5fa2";
+/// An accent as dark as the dark page: every text pair passes, but a
+/// primary button in it has no edge, so the fill pair blocks it.
+#[cfg(test)]
+pub const TEST_EDGELESS_ACCENT: &str = "#000000";
+/// The historical marketing purple: its text and ink pairs pass, but a
+/// button fill in it does not reach 3:1, so only the fill floor blocks it.
+#[cfg(test)]
+pub const TEST_FILL_ONLY_ACCENT: &str = "#7c3aed";
+/// Accents for contrast sweeps: the extremes, the page colours, and the
+/// accents QA 694 measured (pale yellow, sky, lilac, mint, the defaults).
+#[cfg(test)]
+pub const TEST_SWEEP_ACCENTS: [&str; 11] = [
+    "#000000", "#ffffff", "#ffe680", "#46d8a4", "#38bdf8", "#c084fc", "#8f73ff", "#6d4aff",
+    "#ff0000", "#17171d", "#f7f7f9",
+];
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn from_settings_empty_uses_product_default() {
-        let b = BrandConfig::from_settings("", "");
-        assert_eq!(b.accent_dark, "#8f73ff");
-    }
 
     #[test]
     fn pending_accent_is_not_the_product_purple() {
@@ -157,28 +95,27 @@ mod tests {
 
     #[test]
     fn pending_accent_meets_ui_contrast_on_both_themes() {
-        use crate::theme::tokens::{contrast_ratio, scope_decls};
         let pending = BrandConfig::pending();
-        let css = crate::theme::theme_css(&pending);
-        let dark = scope_decls(&css, "[data-theme=\"dark\"]");
-        let light = scope_decls(&css, "[data-theme=\"light\"]");
-        for (scope, name) in [
-            (&dark, "--bg"),
-            (&dark, "--surface"),
-            (&dark, "--surface-2"),
-            (&dark, "--border"),
-            (&light, "--bg"),
-            (&light, "--surface"),
-            (&light, "--surface-2"),
-            (&light, "--border"),
+        // `--border` is the field outline a focused input sits next to.
+        let dark = DARK_SURFACES.iter().copied().chain(["#353541"]);
+        let light = LIGHT_SURFACES.iter().copied().chain(["#e3e3e9"]);
+        for (roles, surfaces) in [
+            (&pending.dark, dark.collect::<Vec<_>>()),
+            (&pending.light, light.collect::<Vec<_>>()),
         ] {
-            let accent = scope
-                .get("--accent")
-                .unwrap_or_else(|| panic!("missing --accent"));
-            let bg = scope.get(name).unwrap_or_else(|| panic!("missing {name}"));
-            let ratio = contrast_ratio(accent, bg);
-            assert!(ratio >= 3.0, "{accent} on {name} {bg} = {ratio:.2}");
+            for bg in &surfaces {
+                for fg in [&roles.accent, &roles.solid] {
+                    let ratio = contrast_ratio(fg, bg);
+                    assert!(ratio >= 3.0, "{fg} on {bg} = {ratio:.2}");
+                }
+            }
+            // `--border` is not a text surface; text clears AA on the other four.
+            for bg in &surfaces[..4] {
+                let ratio = contrast_ratio(&roles.text, bg);
+                assert!(ratio >= 4.5, "text {} on {bg} = {ratio:.2}", roles.text);
+            }
         }
+        // The favicon draws white initials on the raw pending gray.
         let accent = pending.accent_dark.as_str();
         let white_on_pending = contrast_ratio("#ffffff", accent);
         assert!(
@@ -218,12 +155,5 @@ mod tests {
         assert!(clan.contains("CL"), "{clan}");
         let bangs = runtime_favicon_href(Some("!!!")).expect("punctuation still has a name");
         assert!(bangs.starts_with("data:image/svg+xml,"), "{bangs}");
-    }
-
-    #[test]
-    fn from_accents_derives_soft() {
-        let b = BrandConfig::from_accents("#ff0000", "#cc0000");
-        assert_eq!(b.accent_dark, "#ff0000");
-        assert!(b.accent_soft_dark.contains("255,0,0"));
     }
 }

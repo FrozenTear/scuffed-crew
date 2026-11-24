@@ -1,21 +1,29 @@
 //! Stored per-game role.
 //!
-//! History reads the `role` string uploaded with each game. Overview and the
-//! member page read `GET /api/stats/me/roles` and
-//! `GET /api/stats/member/{id}/roles`, which group by that same stored role.
-//! An empty or unrecognized stored role is Unknown. The heroes filter is the
-//! current roster role from [`scuffed_types::role_for_hero_name`], because
-//! `/heroes` does not return the role captured with each game.
+//! History reads the `role` string uploaded with each game. A recognized
+//! stored role always wins, so an old Sombra game stored as Damage stays
+//! Damage. When the stored role is empty or unrecognized, History falls back
+//! to the current roster role for that game's hero from
+//! [`scuffed_types::role_for_hero_name`], and only an unknown hero stays
+//! Unknown. Overview and the member page read `GET /api/stats/me/roles` and
+//! `GET /api/stats/member/{id}/roles`. The server now fills an empty or
+//! unrecognized stored role from the game's hero at read time (API PR 502), so
+//! those rows only come back Unknown for heroes not on the shared list. The
+//! heroes filter is the current roster role, because `/heroes` does not
+//! return the role captured with each game.
 
 use scuffed_types::{HeroRole, RoleStats, role_for_hero_name};
 
 use crate::components::member_gate::is_http_status;
+use crate::sample::{TOO_FEW_GAMES, Tally};
 
 pub(crate) struct RoleAgg {
     pub name: &'static str,
     pub color: &'static str,
     pub matches: u32,
     pub wins: u32,
+    pub losses: u32,
+    pub draws: u32,
     weighted_elims: f64,
     weighted_deaths: f64,
     weighted_damage: f64,
@@ -29,6 +37,8 @@ impl RoleAgg {
             color,
             matches: 0,
             wins: 0,
+            losses: 0,
+            draws: 0,
             weighted_elims: 0.0,
             weighted_deaths: 0.0,
             weighted_damage: 0.0,
@@ -36,8 +46,9 @@ impl RoleAgg {
         }
     }
 
-    pub(crate) fn winrate(&self) -> f64 {
-        super::winrate_pct(self.wins, self.matches)
+    /// Games and results for the shared small-sample rule in [`crate::sample`].
+    pub(crate) fn tally(&self) -> Tally {
+        Tally::new(self.matches, self.wins, self.losses, self.draws)
     }
 
     pub(crate) fn avg_elims(&self) -> f64 {
@@ -56,22 +67,25 @@ impl RoleAgg {
         avg(self.weighted_healing, self.matches)
     }
 
-    fn add(
-        &mut self,
-        matches: u32,
-        wins: u32,
-        avg_elims: f64,
-        avg_deaths: f64,
-        avg_damage: f64,
-        avg_healing: f64,
-    ) {
-        let weight = f64::from(matches);
-        self.matches += matches;
-        self.wins += wins;
-        self.weighted_elims += avg_elims * weight;
-        self.weighted_deaths += avg_deaths * weight;
-        self.weighted_damage += avg_damage * weight;
-        self.weighted_healing += avg_healing * weight;
+    fn add(&mut self, row: &RoleStats) {
+        let weight = f64::from(row.matches);
+        self.matches += row.matches;
+        self.wins += row.wins;
+        self.losses += row.losses;
+        self.draws += row.draws;
+        self.weighted_elims += row.avg_elims * weight;
+        self.weighted_deaths += row.avg_deaths * weight;
+        self.weighted_damage += row.avg_damage * weight;
+        self.weighted_healing += row.avg_healing * weight;
+    }
+}
+
+/// Result text for one role, on the same rule as heroes: the win rate from
+/// 10 decided games, otherwise "Too few games" and the W-L-D record.
+pub(crate) fn role_result(tally: Tally) -> String {
+    match tally.win_rate_pct() {
+        Some(pct) => format!("{pct:.1}%"),
+        None => format!("{TOO_FEW_GAMES}, {}", tally.record()),
     }
 }
 
@@ -104,15 +118,21 @@ pub(super) fn known_role(stored: &str) -> Option<&'static str> {
     }
 }
 
-/// Label for a stored role. Empty or unrecognized stays Unknown.
-pub(super) fn stored_role_label(stored: &str) -> &'static str {
-    known_role(stored).unwrap_or("Unknown")
+/// Role label for one game. A recognized stored role is kept as is, even when
+/// the hero has since moved (an old Sombra game stored as Damage stays
+/// Damage). An empty or unrecognized stored role falls back to the current
+/// roster role for `hero`. Unknown only when the hero is not on the shared
+/// list either.
+pub(super) fn game_role_label(stored: &str, hero: &str) -> &'static str {
+    known_role(stored)
+        .or_else(|| current_role_label(hero))
+        .unwrap_or("Unknown")
 }
 
-/// History filter. Uses the stored role only, so an old Sombra game stays
-/// Damage and a missing role stays Unknown.
-pub(super) fn history_row_matches_role(stored: &str, filter: &str) -> bool {
-    filter.eq_ignore_ascii_case("all") || stored_role_label(stored).eq_ignore_ascii_case(filter)
+/// History filter. Matches on [`game_role_label`], so a recognized stored
+/// role wins and a missing one is filled from the hero.
+pub(super) fn history_row_matches_role(stored: &str, hero: &str, filter: &str) -> bool {
+    filter.eq_ignore_ascii_case("all") || game_role_label(stored, hero).eq_ignore_ascii_case(filter)
 }
 
 /// Current roster role. `None` when the name is not on the shared list, so
@@ -149,21 +169,72 @@ fn bucket_index(role: &str) -> usize {
     }
 }
 
-/// Overview totals from `/roles`. Rows keep the stored role. An empty or
-/// unrecognized `role` is Unknown.
+/// Overview totals from `/roles`. A recognized stored role is kept. The
+/// server fills an empty or unrecognized role from the hero at read time
+/// (API PR 502), so a row still Unknown here is a hero not on the shared list.
 pub(crate) fn role_aggs_from_rows(rows: &[RoleStats]) -> Vec<RoleAgg> {
     let mut buckets = fresh_buckets();
     for row in rows {
-        buckets[bucket_index(&row.role)].add(
-            row.matches,
-            row.wins,
-            row.avg_elims,
-            row.avg_deaths,
-            row.avg_damage,
-            row.avg_healing,
-        );
+        buckets[bucket_index(&row.role)].add(row);
     }
     buckets.into_iter().collect()
+}
+
+/// Elims per death over every row from `/roles`: each row's averages are
+/// weighted by its games, so the result is total elims over total deaths.
+/// `None` with no games or no deaths, so the tile never shows a made-up 0.00.
+pub(crate) fn kd_ratio(rows: &[RoleStats]) -> Option<f64> {
+    let (elims, deaths) = rows.iter().fold((0.0, 0.0), |(elims, deaths), row| {
+        let weight = f64::from(row.matches);
+        (
+            elims + row.avg_elims * weight,
+            deaths + row.avg_deaths * weight,
+        )
+    });
+    (deaths > 0.0).then(|| elims / deaths)
+}
+
+/// One "Time on role" row: the role, its games and its whole percent of all
+/// games.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RoleShare {
+    pub name: &'static str,
+    pub matches: u32,
+    pub pct: u32,
+}
+
+/// Share of games per role, in the fixed Tank, Damage, Support order. Tank,
+/// Damage and Support always get a row once there is a game, so a role at 0%
+/// is stated. Unknown only gets one when it has games. The percents are
+/// whole numbers that add up to 100 (largest remainder), so three rows never
+/// read 33, 33, 33.
+pub(crate) fn role_shares(aggs: &[RoleAgg]) -> Vec<RoleShare> {
+    let total: u64 = aggs.iter().map(|agg| u64::from(agg.matches)).sum();
+    if total == 0 {
+        return Vec::new();
+    }
+    let mut shares: Vec<(RoleShare, u64)> = aggs
+        .iter()
+        .filter(|agg| agg.name != "Unknown" || agg.matches > 0)
+        .map(|agg| {
+            let scaled = u64::from(agg.matches) * 100;
+            (
+                RoleShare {
+                    name: agg.name,
+                    matches: agg.matches,
+                    pct: (scaled / total) as u32,
+                },
+                scaled % total,
+            )
+        })
+        .collect();
+    let given: u32 = shares.iter().map(|(share, _)| share.pct).sum();
+    let mut order: Vec<usize> = (0..shares.len()).collect();
+    order.sort_by(|&a, &b| shares[b].1.cmp(&shares[a].1).then(a.cmp(&b)));
+    for &index in order.iter().take(100u32.saturating_sub(given) as usize) {
+        shares[index].0.pct += 1;
+    }
+    shares.into_iter().map(|(share, _)| share).collect()
 }
 
 /// What `use_api_with::<Vec<RoleStats>>` produced. An error string is a
@@ -208,6 +279,22 @@ mod tests {
         }
     }
 
+    fn row_wld(role: &str, wins: u32, losses: u32, draws: u32, matches: u32) -> RoleStats {
+        RoleStats {
+            matches,
+            wins,
+            losses,
+            draws,
+            ..row(role, matches, wins, 1.0)
+        }
+    }
+
+    fn role_text(rows: &[RoleStats], name: &str) -> String {
+        let aggs = role_aggs_from_rows(rows);
+        let agg = aggs.iter().find(|agg| agg.name == name).unwrap();
+        role_result(agg.tally())
+    }
+
     fn matches_of(aggs: &[RoleAgg], name: &str) -> u32 {
         aggs.iter()
             .find(|agg| agg.name == name)
@@ -248,24 +335,60 @@ mod tests {
         let aggs = role_aggs_from_rows(&[row("", 2, 1, 1.0), row("flex", 1, 0, 1.0)]);
         assert_eq!(matches_of(&aggs, "Unknown"), 3);
         assert_eq!(matches_of(&aggs, "Damage"), 0);
-        assert_eq!(stored_role_label(""), "Unknown");
-        assert_eq!(stored_role_label("not-a-role"), "Unknown");
+        assert_eq!(known_role(""), None);
+        assert_eq!(known_role("not-a-role"), None);
     }
 
     #[test]
-    fn history_keeps_the_stored_role() {
-        assert!(history_row_matches_role("Damage", "damage"));
-        assert!(!history_row_matches_role("Damage", "support"));
-        assert!(history_row_matches_role("Support", "support"));
-        assert!(history_row_matches_role("Damage", "all"));
-        assert_eq!(stored_role_label("Damage"), "Damage");
-        assert_eq!(stored_role_label("Support"), "Support");
-        // A missing role is not filled in from the hero, even for Sombra.
-        assert_eq!(stored_role_label(""), "Unknown");
-        assert!(!history_row_matches_role("", "support"));
-        assert!(!history_row_matches_role("", "damage"));
-        assert!(history_row_matches_role("", "all"));
-        assert!(!history_row_matches_role("not-a-role", "tank"));
+    fn history_keeps_a_recognized_stored_role() {
+        assert!(history_row_matches_role("Damage", "Sombra", "damage"));
+        assert!(!history_row_matches_role("Damage", "Sombra", "support"));
+        assert!(history_row_matches_role("Support", "Sombra", "support"));
+        assert!(history_row_matches_role("Damage", "Sombra", "all"));
+        assert_eq!(game_role_label("Damage", "Sombra"), "Damage");
+        assert_eq!(game_role_label(" damage ", "Sombra"), "Damage");
+        assert_eq!(game_role_label("Support", "Sombra"), "Support");
+        assert_eq!(game_role_label("TANK", "Doctrine"), "Tank");
+    }
+
+    #[test]
+    fn empty_role_is_filled_from_the_hero() {
+        assert_eq!(game_role_label("", "Doctrine"), "Support");
+        assert_eq!(game_role_label("   ", "Doctrine"), "Support");
+        assert!(history_row_matches_role("", "Doctrine", "support"));
+        assert!(!history_row_matches_role("", "Doctrine", "damage"));
+        assert_eq!(game_role_label("", "D.Mon"), "Tank");
+    }
+
+    #[test]
+    fn unrecognized_role_is_filled_from_the_hero() {
+        assert_eq!(game_role_label("flex", "Sombra"), "Support");
+        assert_eq!(game_role_label("not-a-role", "Sombra"), "Support");
+        assert!(history_row_matches_role("garbage", "Sombra", "support"));
+        assert!(!history_row_matches_role("garbage", "Sombra", "damage"));
+    }
+
+    #[test]
+    fn unknown_hero_with_no_role_stays_unknown() {
+        assert_eq!(game_role_label("", "NotAHero"), "Unknown");
+        assert_eq!(game_role_label("flex", "NotAHero"), "Unknown");
+        assert_eq!(game_role_label("", ""), "Unknown");
+        assert_eq!(game_role_label("", "   "), "Unknown");
+        assert!(!history_row_matches_role("", "NotAHero", "support"));
+        assert!(!history_row_matches_role("", "NotAHero", "damage"));
+        assert!(history_row_matches_role("", "NotAHero", "unknown"));
+        assert!(history_row_matches_role("", "NotAHero", "all"));
+    }
+
+    #[test]
+    fn hero_name_fallback_folds_case_space_and_accents() {
+        assert_eq!(game_role_label("", "SOMBRA"), "Support");
+        assert_eq!(game_role_label("", "  sombra "), "Support");
+        assert_eq!(game_role_label("", "doctrine"), "Support");
+        assert_eq!(game_role_label("", "Lucio"), "Support");
+        assert_eq!(game_role_label("", "Lúcio"), "Support");
+        assert_eq!(game_role_label("", "soldier-76"), "Damage");
+        assert_eq!(game_role_label("", "wrecking-ball"), "Tank");
     }
 
     #[test]
@@ -314,9 +437,115 @@ mod tests {
         assert_eq!(unknown.avg_deaths(), 3.0);
         assert_eq!(unknown.avg_damage(), 1000.0);
         assert_eq!(unknown.avg_healing(), 500.0);
-        assert_eq!(unknown.winrate(), 50.0);
+        assert_eq!(unknown.tally().win_rate_pct(), None);
+        assert_eq!(unknown.tally().record(), "2W-2L");
         assert_eq!(matches_of(&aggs, "Support"), 1);
         assert_eq!(matches_of(&aggs, "Damage"), 0);
+    }
+
+    #[test]
+    fn nine_decided_games_show_the_record_and_no_percent() {
+        let text = role_text(&[row_wld("Tank", 5, 4, 0, 9)], "Tank");
+        assert_eq!(text, "Too few games, 5W-4L");
+        assert!(!text.contains('%'));
+    }
+
+    #[test]
+    fn ten_decided_games_show_the_win_rate() {
+        assert_eq!(role_text(&[row_wld("Tank", 6, 4, 0, 10)], "Tank"), "60.0%");
+    }
+
+    #[test]
+    fn draws_count_as_decided_for_roles() {
+        assert_eq!(
+            role_text(&[row_wld("Support", 5, 4, 1, 10)], "Support"),
+            "50.0%"
+        );
+        let nine = role_text(&[row_wld("Support", 5, 3, 1, 9)], "Support");
+        assert_eq!(nine, "Too few games, 5W-3L-1D");
+    }
+
+    #[test]
+    fn undecided_games_do_not_count_toward_ten_for_roles() {
+        let text = role_text(&[row_wld("Damage", 5, 4, 0, 12)], "Damage");
+        assert_eq!(text, "Too few games, 5W-4L");
+    }
+
+    #[test]
+    fn small_roles_have_no_three_game_mute() {
+        let aggs = role_aggs_from_rows(&[row_wld("Tank", 1, 1, 0, 2)]);
+        let tank = aggs.iter().find(|agg| agg.name == "Tank").unwrap();
+        assert_eq!(role_result(tank.tally()), "Too few games, 1W-1L");
+    }
+
+    #[test]
+    fn rows_for_one_role_sum_their_results() {
+        let rows = [row_wld("Damage", 3, 2, 0, 5), row_wld("damage", 4, 1, 0, 5)];
+        assert_eq!(role_text(&rows, "Damage"), "70.0%");
+    }
+
+    #[test]
+    fn kd_is_total_elims_over_total_deaths() {
+        // 4 games at 12 elims and 3 deaths, 6 games at 6 elims and 3 deaths:
+        // 84 elims over 30 deaths.
+        let rows = [row("Damage", 4, 2, 12.0), row("Support", 6, 3, 6.0)];
+        let kd = kd_ratio(&rows).unwrap();
+        assert!((kd - 2.8).abs() < 1e-9, "{kd}");
+        assert_eq!(kd_ratio(&[]), None);
+        assert_eq!(kd_ratio(&[row("Tank", 0, 0, 5.0)]), None);
+        let no_deaths = RoleStats {
+            avg_deaths: 0.0,
+            ..row("Tank", 3, 3, 9.0)
+        };
+        assert_eq!(kd_ratio(&[no_deaths]), None);
+    }
+
+    #[test]
+    fn role_shares_are_whole_percents_that_add_up_to_100() {
+        let thirds = role_aggs_from_rows(&[
+            row("Tank", 1, 1, 1.0),
+            row("Damage", 1, 1, 1.0),
+            row("Support", 1, 1, 1.0),
+        ]);
+        let shares = role_shares(&thirds);
+        let names: Vec<&str> = shares.iter().map(|share| share.name).collect();
+        assert_eq!(names, ["Tank", "Damage", "Support"]);
+        let pcts: Vec<u32> = shares.iter().map(|share| share.pct).collect();
+        assert_eq!(pcts, [34, 33, 33]);
+
+        let frame = role_aggs_from_rows(&[
+            row("Tank", 8, 4, 1.0),
+            row("Damage", 5, 2, 1.0),
+            row("Support", 7, 4, 1.0),
+        ]);
+        let pcts: Vec<u32> = role_shares(&frame).iter().map(|share| share.pct).collect();
+        assert_eq!(pcts, [40, 25, 35]);
+    }
+
+    #[test]
+    fn role_shares_state_an_unplayed_role_and_hide_an_empty_unknown() {
+        let shares = role_shares(&role_aggs_from_rows(&[row("Support", 4, 2, 1.0)]));
+        assert_eq!(shares.len(), 3, "{shares:?}");
+        assert_eq!(
+            shares[0],
+            RoleShare {
+                name: "Tank",
+                matches: 0,
+                pct: 0
+            }
+        );
+        assert_eq!(shares[2].pct, 100);
+
+        let with_unknown = role_shares(&role_aggs_from_rows(&[
+            row("Support", 3, 2, 1.0),
+            row("flex", 1, 0, 1.0),
+        ]));
+        assert_eq!(with_unknown.len(), 4);
+        assert_eq!(with_unknown[3].name, "Unknown");
+        assert_eq!(with_unknown[3].pct, 25);
+        assert_eq!(with_unknown.iter().map(|share| share.pct).sum::<u32>(), 100);
+
+        assert!(role_shares(&role_aggs_from_rows(&[])).is_empty());
     }
 
     #[test]

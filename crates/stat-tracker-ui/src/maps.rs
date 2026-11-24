@@ -1,10 +1,11 @@
-use iced::widget::{Row, column, space, text};
+use iced::widget::{Row, column, space};
 use iced::{Element, Fill};
 
 use crate::aggregate::aggregate_filtered;
 use crate::app::{Message, TrackerApp};
 use crate::layout::maps_columns;
-use crate::theme::{FONT_BOLD, GRID_GAP, SIZE_TITLE, TEXT};
+use crate::model::Screen;
+use crate::theme::GRID_GAP;
 use crate::widgets;
 
 pub const MAPS_EMPTY: &str = "No maps in this window";
@@ -12,9 +13,10 @@ pub const MAPS_EMPTY: &str = "No maps in this window";
 pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
     let stats = aggregate_filtered(&app.games, &app.header_filter());
     let cols = maps_columns(content_width);
-    let mut col = column![text("Maps").size(SIZE_TITLE).font(FONT_BOLD).color(TEXT),]
-        .spacing(GRID_GAP)
-        .width(Fill);
+    let mut col = column![].spacing(GRID_GAP).width(Fill);
+    if let Some(title) = crate::nav::classic_title(app, Screen::Maps) {
+        col = col.push(title);
+    }
 
     if stats.maps.is_empty() {
         col = col.push(widgets::empty_surface(MAPS_EMPTY));

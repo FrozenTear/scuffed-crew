@@ -21,9 +21,17 @@ impl AuthState {
     }
 
     /// Session user has a recognized org role (recruit+). Logged-in accounts
-    /// without a member row — typical after local register — are not members.
+    /// without a member row (typical after local register) are not members.
     pub fn is_org_member(&self) -> bool {
         self.user.as_ref().and_then(|u| u.role.as_ref()).is_some()
+    }
+
+    /// The org role is `Recruit` (a trial applicant).
+    pub fn is_recruit(&self) -> bool {
+        self.user
+            .as_ref()
+            .and_then(|u| u.role.as_ref())
+            .is_some_and(|r| *r == OrgRole::Recruit)
     }
 
     pub fn is_admin(&self) -> bool {

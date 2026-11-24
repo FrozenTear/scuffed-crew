@@ -1,0 +1,867 @@
+//! One personal game: result, map, mode, hero, and every stat with its unsure
+//! mark.
+//!
+//! The page reads one game from `GET /api/stats/me/matches/{id}`. The server
+//! answers 404 for an id that is missing, malformed, or another member's, so
+//! the page shows "not in your match history" for that and leaves sign in,
+//! inactive and other errors to the member gate.
+
+use chrono::{DateTime, Utc};
+use dioxus::html::input_data::MouseButton;
+use dioxus::prelude::*;
+use serde::Deserialize;
+
+use crate::components::ui::{PageHeader, PageShell, PageWidth};
+use crate::components::{is_http_status, member_pending};
+use crate::hooks::use_api_with;
+use crate::pages::article_author::{ARTICLE_CSS, ARTICLE_CSS_ID, ArticleCrumb};
+use crate::pages::stats_member::{STATS_VIEWS_CSS, STATS_VIEWS_CSS_ID};
+use crate::pages::{NotFoundLink, NotFoundPanel};
+use crate::routes::Route;
+use crate::state::use_auth;
+use crate::util::encode_query;
+
+use super::bans_picks::{BANS_PICKS_CSS, bans_picks_section, lenient};
+use super::history::{cell_is_unsure, marked_value, outcome_badge, show_new_reader_badge};
+use super::rank::{RANK_CSS, rank_detail};
+use super::role::game_role_label;
+use super::{map_game_mode, member_stats_url};
+use scuffed_types::BansPicks;
+
+/// Base path for the member's own games. `game_path` appends the id to it as
+/// one encoded path segment.
+const MY_MATCHES_PATH: &str = "/api/stats/me/matches";
+
+const EDITED_BADGE: &str = "Edited";
+const EDITED_TITLE: &str = "Corrected by hand in the tracker";
+const NEW_READER_BADGE: &str = "New reader";
+const NEW_READER_TITLE: &str = "Read by the new stat reader";
+const MISSING_TEXT: &str = "This game is not in your match history. It may have been deleted.";
+
+/// Styles of the game page, on tokens only. The page column is the shared
+/// `PageShell` (wide), the title block is the shared page header, and the
+/// tiles and cards follow the stats and match frames.
+const GAME_CSS: &str = r#"
+/* A long map name wraps in the title instead of being cut. */
+.game-page .page-header h1 .stat-value-text {
+  overflow: visible;
+  white-space: normal;
+}
+/* "Hybrid · Ana · Support · date": the dot sits one small space from each
+   word, as the lead line of the match frame reads. */
+.game-page .game-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 var(--space-1);
+}
+.game-result {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3) var(--space-5);
+}
+.game-result-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+}
+.game-result-label {
+  font-family: var(--font-head);
+  font-size: var(--text-xs);
+  font-weight: var(--font-label-weight);
+  letter-spacing: var(--font-head-tracking);
+  text-transform: uppercase;
+  color: var(--text-subtle);
+}
+.game-outcome {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.game-page .game-rank { margin: 0; }
+.game-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+.game-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-3);
+  margin: 0;
+}
+/* A tile reads value over label, as on the stats frame. The markup keeps the
+   label first (dt before dd), so the tile is drawn in reverse. */
+.game-stat {
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column-reverse;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: var(--card-padding);
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--card-radius);
+  box-shadow: var(--card-shadow);
+  text-align: center;
+}
+.game-stat dt {
+  margin: 0;
+  color: var(--text-3);
+  font-size: var(--text-sm);
+  line-height: var(--leading-ui);
+}
+.game-stat dd {
+  max-width: 100%;
+  margin: 0;
+  font-family: var(--font-head);
+  font-weight: var(--font-head-weight);
+  font-size: var(--text-2xl);
+  letter-spacing: var(--font-head-tracking);
+  line-height: var(--leading-display);
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+.game-unsure-note {
+  margin: 0;
+  color: var(--text-3);
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+}
+@media (max-width: 520px) {
+  .game-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+"#;
+
+/// The bare `PersonalMatch` from `GET /api/stats/me/matches/{id}` (the same
+/// shape as one History row), with the fields this page shows.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub(super) struct GameRow {
+    id: String,
+    hero: String,
+    map_name: String,
+    #[serde(default)]
+    game_mode: String,
+    #[serde(default)]
+    role: String,
+    outcome: String,
+    elims: u32,
+    deaths: u32,
+    assists: u32,
+    damage: u32,
+    healing: u32,
+    /// Rows from before mitigation was returned read as 0.
+    #[serde(default)]
+    mitigation: u32,
+    played_at: DateTime<Utc>,
+    /// True when a value was corrected by hand in the tracker.
+    #[serde(default)]
+    edited: bool,
+    /// Reader id. Missing or null reads as `ocr-v1`.
+    #[serde(default)]
+    recognizer: Option<String>,
+    /// Cell names the reader flagged. Missing or null means no marks.
+    #[serde(default)]
+    suspect_fields: Option<Vec<String>>,
+    /// Bans and picks the tracker read for this game. Optional: older games
+    /// and trackers without the reader send nothing, and a value that does not
+    /// parse reads as None. See [`super::bans_picks`].
+    #[serde(default, deserialize_with = "lenient")]
+    bans_picks: Option<BansPicks>,
+    /// Rank update read for this game. Missing, `{}` or all-null reads as
+    /// None. See [`super::rank`].
+    #[serde(default, deserialize_with = "super::rank::lenient")]
+    rank: Option<scuffed_types::MatchRank>,
+}
+
+impl GameRow {
+    fn fields(&self) -> &[String] {
+        self.suspect_fields.as_deref().unwrap_or(&[])
+    }
+}
+
+/// App path for one game. History rows link here.
+pub(super) fn match_path(id: &str) -> String {
+    Route::StatsMatch { id: id.to_string() }.to_string()
+}
+
+/// A plain primary click stays in the app. Modifier or middle clicks keep the
+/// browser default (new tab or window), like the router's own links.
+fn opens_in_app(no_modifiers: bool, primary: bool) -> bool {
+    no_modifiers && primary
+}
+
+/// Click handler for a History row anchor. History rows render without a
+/// router in tests, so they use a plain anchor plus this instead of Link.
+pub(super) fn open_match(evt: MouseEvent, id: String) {
+    let no_modifiers = evt.modifiers().is_empty();
+    let primary = evt.trigger_button() == Some(MouseButton::Primary);
+    if opens_in_app(no_modifiers, primary) {
+        evt.prevent_default();
+        navigator().push(Route::StatsMatch { id });
+    }
+}
+
+/// True for an id the URL parser would read as a dot segment ("", ".", "..").
+/// Encoding does not help, since "%2E%2E" is a dot segment too.
+fn is_dot_segment(id: &str) -> bool {
+    id.chars().all(|c| c == '.')
+}
+
+/// API path for one of the member's own games, or None for an id that would
+/// not stay one path segment. Those ids never fetch and show as missing.
+fn game_path(id: &str) -> Option<String> {
+    if is_dot_segment(id) {
+        None
+    } else {
+        Some(format!("{MY_MATCHES_PATH}/{}", encode_query(id)))
+    }
+}
+
+/// What the page shows for the current fetch.
+#[derive(Debug, PartialEq)]
+enum GameView<'a> {
+    Found(&'a GameRow),
+    /// 404: missing, malformed, or another member's id.
+    Missing,
+    /// Loading, sign in, inactive, or another error: the member gate decides.
+    Pending,
+}
+
+fn game_view<'a>(id: &str, row: Option<&'a GameRow>, error: Option<&str>) -> GameView<'a> {
+    if is_dot_segment(id) {
+        return GameView::Missing;
+    }
+    match (row, error) {
+        (Some(row), _) => GameView::Found(row),
+        (None, Some(err)) if is_http_status(err, 404) => GameView::Missing,
+        _ => GameView::Pending,
+    }
+}
+
+/// The breadcrumb back to the stats page. The not found panel already offers
+/// that link.
+fn shows_top_back_link(view: &GameView) -> bool {
+    !matches!(view, GameView::Missing)
+}
+
+/// Known cells the reader flagged, each counted once.
+fn unsure_count(fields: &[String]) -> usize {
+    scuffed_types::SUSPECT_FIELD_NAMES
+        .iter()
+        .filter(|name| cell_is_unsure(fields, name))
+        .count()
+}
+
+/// One line under the stat grid, or None when nothing is unsure.
+fn unsure_summary(count: usize) -> Option<String> {
+    match count {
+        0 => None,
+        1 => Some("1 value might be misread. The question mark shows which one.".into()),
+        n => Some(format!(
+            "{n} values might be misread. The question marks show which ones."
+        )),
+    }
+}
+
+/// One numeric stat on the page.
+#[derive(Debug, Clone, PartialEq)]
+struct StatLine {
+    label: &'static str,
+    value: u32,
+    unsure: bool,
+}
+
+/// Stats in scoreboard order: E, A, D, then damage, healing, mitigation.
+fn stat_lines(row: &GameRow) -> Vec<StatLine> {
+    let fields = row.fields();
+    [
+        ("Eliminations", "e", row.elims),
+        ("Assists", "a", row.assists),
+        ("Deaths", "d", row.deaths),
+        ("Damage", "dmg", row.damage),
+        ("Healing", "h", row.healing),
+        ("Mitigation", "mit", row.mitigation),
+    ]
+    .into_iter()
+    .map(|(label, field, value)| StatLine {
+        label,
+        value,
+        unsure: cell_is_unsure(fields, field),
+    })
+    .collect()
+}
+
+fn map_label(map_name: &str) -> String {
+    let name = map_name.trim();
+    if name.is_empty() {
+        "Unknown map".to_string()
+    } else {
+        name.to_string()
+    }
+}
+
+/// Stored mode, or the mode the map implies for rows that left it blank.
+fn mode_label(game_mode: &str, map_name: &str) -> String {
+    let mode = game_mode.trim();
+    if mode.is_empty() {
+        map_game_mode(map_name).to_string()
+    } else {
+        mode.to_string()
+    }
+}
+
+/// "16 Jul 2026, 00:30 UTC+2": the date style of the frames, with the
+/// time, on the viewer's own clock. The day is the one History, Recent form
+/// and the chart show for the same game; the offset says which clock.
+fn game_time(played_at: &DateTime<Utc>) -> String {
+    super::local_date_time(played_at)
+}
+
+/// The game body. No Link inside, so tests can render it without a router.
+/// The map is the page's one H1 (the shared page header markup, written out
+/// because the title can carry an unsure mark). The result is the word Win,
+/// Loss or Draw on the shared pill.
+fn game_detail(row: &GameRow) -> Element {
+    let fields = row.fields();
+    let map = map_label(&row.map_name);
+    let mode = mode_label(&row.game_mode, &row.map_name);
+    let role = game_role_label(&row.role, &row.hero);
+    let date = game_time(&row.played_at);
+    let machine_date = row.played_at.to_rfc3339();
+    let new_reader = show_new_reader_badge(row.recognizer.as_deref().unwrap_or(""));
+    let edited = row.edited;
+    let stats = stat_lines(row);
+    let summary = unsure_summary(unsure_count(fields)).unwrap_or_default();
+    rsx! {
+        header { class: "page-header game-head",
+            h1 {
+                {marked_value(&row.id, "", &map, "Map", false, cell_is_unsure(fields, "map"))}
+            }
+            p { class: "page-lead game-meta",
+                {marked_value(&row.id, "game-mode", &mode, "Mode", false, cell_is_unsure(fields, "mode"))}
+                span { aria_hidden: "true", "·" }
+                {marked_value(&row.id, "game-hero", &row.hero, "Hero", false, cell_is_unsure(fields, "hero"))}
+                span { aria_hidden: "true", "·" }
+                span { class: "game-role", "{role}" }
+                span { aria_hidden: "true", "·" }
+                time { class: "game-date", datetime: "{machine_date}", "{date}" }
+            }
+        }
+        div { class: "stats-view-card game-result",
+            p { class: "game-result-line",
+                span { class: "game-result-label", "Result" }
+                {outcome_badge(&row.id, "game-outcome", &row.outcome, cell_is_unsure(fields, "result"))}
+            }
+            {rank_detail(&row.id, row.rank.as_ref())}
+            if new_reader || edited {
+                div { class: "game-badges",
+                    if new_reader {
+                        span { class: "ui-pill ui-pill--info reader-badge", title: NEW_READER_TITLE, "{NEW_READER_BADGE}" }
+                    }
+                    if edited {
+                        span { class: "ui-pill ui-pill--warn game-edited-badge", title: EDITED_TITLE, "{EDITED_BADGE}" }
+                    }
+                }
+            }
+        }
+        section { class: "ui-stack", aria_labelledby: "game-stats-title",
+            h2 { id: "game-stats-title", class: "ui-section-title", "Scoreboard" }
+            dl { class: "game-stats",
+                for stat in stats {
+                    div { class: "game-stat", key: "{stat.label}",
+                        dt { "{stat.label}" }
+                        dd {
+                            {marked_value(&row.id, "game-stat-value", &stat.value.to_string(), stat.label, false, stat.unsure)}
+                        }
+                    }
+                }
+            }
+            if !summary.is_empty() {
+                p { class: "game-unsure-note", "{summary}" }
+            }
+        }
+        {bans_picks_section(&row.id, row.bans_picks.as_ref())}
+    }
+}
+
+/// `/stats/match/:id`: one of the signed-in member's own games.
+#[component]
+pub fn StatsMatch(id: String) -> Element {
+    let auth = use_auth();
+    let route_id = id.clone();
+    // An empty URL means no fetch, same as while signed out.
+    let game = use_api_with::<GameRow>(move || {
+        game_path(&id)
+            .map(|path| member_stats_url(&auth(), path))
+            .unwrap_or_default()
+    });
+    let data = game.data.read();
+    let row = data.as_ref().and_then(|d| d.as_ref());
+    let error = game.error.read().clone();
+
+    let view = game_view(&route_id, row, error.as_deref());
+    let show_back = shows_top_back_link(&view);
+    let body = match view {
+        GameView::Found(row) => game_detail(row),
+        GameView::Missing => rsx! {
+            NotFoundPanel {
+                title: "Game not found",
+                message: MISSING_TEXT,
+                links: vec![
+                    NotFoundLink { label: "Back to your stats", to: Route::Stats {} },
+                    NotFoundLink { label: "Back home", to: Route::Home {} },
+                ],
+            }
+        },
+        // The gate's card is an H2. The game is not known yet, so the page's
+        // one H1 names the page by its kind.
+        GameView::Pending => rsx! {
+            PageHeader { title: "Game" }
+            {member_pending(&auth(), &game, "this game")}
+        },
+    };
+
+    rsx! {
+        crate::styles::StyleOnce { id: "scuffed-css-pages-stats-mod-stats-css", css: super::STATS_CSS }
+        crate::styles::StyleOnce { id: ARTICLE_CSS_ID, css: ARTICLE_CSS }
+        crate::styles::StyleOnce { id: STATS_VIEWS_CSS_ID, css: STATS_VIEWS_CSS }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-stats-game-game-css", css: GAME_CSS }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-stats-bans-picks-css", css: BANS_PICKS_CSS }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-stats-rank-css", css: RANK_CSS }
+        PageShell { width: PageWidth::Wide, class: "game-page",
+            if show_back {
+                // The shared trail of the match frame (44px links).
+                ArticleCrumb {
+                    to: Route::Stats {},
+                    section: "Your stats".to_string(),
+                    current: "This game".to_string(),
+                }
+            }
+            {body}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn row(id: &str, suspect: &[&str]) -> GameRow {
+        GameRow {
+            id: id.to_string(),
+            hero: "Ana".to_string(),
+            map_name: "Ilios".to_string(),
+            game_mode: "control".to_string(),
+            role: "Support".to_string(),
+            outcome: "victory".to_string(),
+            elims: 11,
+            deaths: 22,
+            assists: 33,
+            damage: 4444,
+            healing: 5555,
+            mitigation: 666,
+            played_at: Utc.with_ymd_and_hms(2026, 3, 15, 12, 0, 0).unwrap(),
+            edited: false,
+            recognizer: Some("ocr-v1".to_string()),
+            suspect_fields: Some(suspect.iter().map(|s| (*s).to_string()).collect()),
+            bans_picks: None,
+            rank: None,
+        }
+    }
+
+    #[test]
+    fn match_route_round_trips() {
+        assert_eq!(match_path("abc123"), "/stats/match/abc123");
+        assert_eq!(
+            "/stats/match/abc123".parse::<Route>().unwrap(),
+            Route::StatsMatch {
+                id: "abc123".into()
+            }
+        );
+    }
+
+    #[test]
+    fn only_a_plain_primary_click_stays_in_the_app() {
+        assert!(opens_in_app(true, true));
+        assert!(!opens_in_app(false, true));
+        assert!(!opens_in_app(true, false));
+        assert!(!opens_in_app(false, false));
+    }
+
+    #[test]
+    fn game_path_encodes_the_id_as_one_segment() {
+        assert_eq!(
+            game_path("abc123").as_deref(),
+            Some("/api/stats/me/matches/abc123")
+        );
+        assert_eq!(
+            game_path("a/b c").as_deref(),
+            Some("/api/stats/me/matches/a%2Fb%20c")
+        );
+        assert_eq!(
+            game_path("a?b#c%d").as_deref(),
+            Some("/api/stats/me/matches/a%3Fb%23c%25d")
+        );
+        assert_eq!(
+            game_path("a.b").as_deref(),
+            Some("/api/stats/me/matches/a.b")
+        );
+    }
+
+    #[test]
+    fn dot_segment_ids_never_fetch_and_show_missing() {
+        for id in ["", ".", "..", "..."] {
+            assert!(is_dot_segment(id), "{id:?}");
+            assert_eq!(game_path(id), None, "{id:?}");
+            assert_eq!(game_view(id, None, None), GameView::Missing, "{id:?}");
+            assert_eq!(
+                game_view(id, None, Some("HTTP error 401: Unauthorized")),
+                GameView::Missing,
+                "{id:?}"
+            );
+        }
+        assert!(!is_dot_segment("abc123"));
+        assert_eq!(game_view("abc123", None, None), GameView::Pending);
+    }
+
+    #[test]
+    fn only_404_maps_to_missing() {
+        let game = row("a", &[]);
+        assert_eq!(game_view("a", Some(&game), None), GameView::Found(&game));
+        assert_eq!(
+            game_view("a", None, Some("HTTP error 404: Match not found")),
+            GameView::Missing
+        );
+        assert_eq!(
+            game_view("a", None, Some("HTTP error: 404")),
+            GameView::Missing
+        );
+        for err in [
+            "HTTP error 401: Unauthorized",
+            "HTTP error 403: Membership inactive",
+            "HTTP error 500: Internal error",
+            "Network error: offline",
+        ] {
+            assert_eq!(game_view("a", None, Some(err)), GameView::Pending, "{err}");
+        }
+        assert_eq!(game_view("a", None, None), GameView::Pending);
+    }
+
+    #[test]
+    fn unsure_count_counts_known_cells_once() {
+        let fields: Vec<String> = ["e", "e", "map", "nope", "r3.dmg"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(unsure_count(&fields), 2);
+        assert_eq!(unsure_count(&[]), 0);
+        let all: Vec<String> = scuffed_types::SUSPECT_FIELD_NAMES
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(unsure_count(&all), scuffed_types::SUSPECT_FIELD_NAMES.len());
+    }
+
+    #[test]
+    fn unsure_summary_is_quiet_when_sure() {
+        assert_eq!(unsure_summary(0), None);
+        assert_eq!(
+            unsure_summary(1).unwrap(),
+            "1 value might be misread. The question mark shows which one."
+        );
+        assert_eq!(
+            unsure_summary(3).unwrap(),
+            "3 values might be misread. The question marks show which ones."
+        );
+    }
+
+    #[test]
+    fn stat_lines_follow_scoreboard_order_and_carry_marks() {
+        let lines = stat_lines(&row("a", &["d", "mit", "map"]));
+        let labels: Vec<_> = lines.iter().map(|l| l.label).collect();
+        assert_eq!(
+            labels,
+            [
+                "Eliminations",
+                "Assists",
+                "Deaths",
+                "Damage",
+                "Healing",
+                "Mitigation"
+            ]
+        );
+        let values: Vec<_> = lines.iter().map(|l| l.value).collect();
+        assert_eq!(values, [11, 33, 22, 4444, 5555, 666]);
+        let unsure: Vec<_> = lines.iter().filter(|l| l.unsure).map(|l| l.label).collect();
+        assert_eq!(unsure, ["Deaths", "Mitigation"]);
+    }
+
+    #[test]
+    fn labels_fill_blank_map_and_mode() {
+        assert_eq!(map_label("  "), "Unknown map");
+        assert_eq!(map_label("Ilios"), "Ilios");
+        assert_eq!(mode_label("push", "Ilios"), "push");
+        assert_eq!(mode_label("", "Ilios"), map_game_mode("Ilios"));
+    }
+
+    #[test]
+    fn match_list_json_deserializes_with_extra_and_missing_fields() {
+        let json = r#"{
+            "id": "m1", "member_id": "u1", "session_id": "",
+            "hero": "Ana", "map_name": "Ilios", "game_mode": "control",
+            "role": "Support", "outcome": "defeat",
+            "elims": 1, "deaths": 2, "assists": 3, "damage": 4, "healing": 5,
+            "played_at": "2026-03-15T12:00:00Z", "uploaded_at": "2026-03-15T12:10:00Z",
+            "edited": true, "recognizer": "cv-v1", "name_recognizer": null,
+            "suspect_fields": ["h"]
+        }"#;
+        let parsed: GameRow = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.mitigation, 0);
+        assert!(parsed.edited);
+        assert_eq!(parsed.fields(), ["h".to_string()]);
+    }
+
+    fn render(row: GameRow) -> String {
+        let mut dom = VirtualDom::new_with_props(|props: GameRow| game_detail(&props), row);
+        dom.rebuild_in_place();
+        dioxus_ssr::render(&dom)
+    }
+
+    #[test]
+    fn page_shows_every_stat_and_marks_only_unsure_ones() {
+        let html = render(row("a", &["hero", "dmg", "nope"]));
+        for text in [
+            "Win", "Ilios", "control", "Ana", "Support", "11", "33", "22", "4444", "5555", "666",
+        ] {
+            assert!(html.contains(text), "{text} missing: {html}");
+        }
+        // One H1 (the map), no landmark of its own, and the result as a word
+        // on the shared pill.
+        assert_eq!(html.matches("<h1").count(), 1, "{html}");
+        assert!(!html.contains("<main"), "{html}");
+        assert!(
+            html.contains("<span class=\"game-outcome outcome-win\"><span class=\"stat-value-text ui-pill ui-pill--ok\">Win</span></span>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<time class=\"game-date\" datetime=\"2026-03-15T12:00:00+00:00\">15 Mar 2026, 12:00 UTC</time>"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<h2 id=\"game-stats-title\" class=\"ui-section-title\">Scoreboard</h2>"),
+            "{html}"
+        );
+        assert_eq!(html.matches("stat-unsure-mark").count(), 2, "{html}");
+        assert!(
+            html.contains("title=\"Hero: might be misread. Check it in the tracker.\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("title=\"Damage: might be misread. Check it in the tracker.\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("2 values might be misread. The question marks show which ones."),
+            "{html}"
+        );
+        assert_eq!(
+            html.matches("<button class=\"stat-unsure-mark\"").count(),
+            2,
+            "{html}"
+        );
+        // Page body only, so every button here is an unsure mark.
+        assert_eq!(html.matches("<button").count(), 2, "{html}");
+        assert_eq!(html.matches("aria-expanded=\"false\"").count(), 2, "{html}");
+        assert_eq!(html.matches("type=\"button\"").count(), 2, "{html}");
+        for text in ["Hero might be misread", "Damage might be misread"] {
+            assert_eq!(
+                html.matches(&format!("<span class=\"visually-hidden\">{text}</span>"))
+                    .count(),
+                1,
+                "{text}: {html}"
+            );
+        }
+        assert!(!html.contains("(might be misread)"), "{html}");
+        // Each mark's note is always present, empty, and wired to its button.
+        assert_eq!(html.matches("role=\"status\"").count(), 2, "{html}");
+        assert!(
+            html.contains("aria-controls=\"unsure-note-a-hero\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("aria-controls=\"unsure-note-a-damage\""),
+            "{html}"
+        );
+        assert!(html.contains("id=\"unsure-note-a-hero\""), "{html}");
+        assert!(html.contains("id=\"unsure-note-a-damage\""), "{html}");
+        assert!(!html.contains("stat-unsure-note-open"), "{html}");
+        assert!(html.contains("outcome-win"), "{html}");
+        assert!(
+            !html.contains(NEW_READER_BADGE),
+            "ocr-v1 has no badge: {html}"
+        );
+        assert!(!html.contains(EDITED_BADGE), "{html}");
+        assert!(
+            !html.contains('\u{2014}') && !html.contains('\u{2013}'),
+            "{html}"
+        );
+    }
+
+    #[test]
+    fn page_shows_reader_and_edited_badges_and_no_note_when_sure() {
+        let mut game = row("a", &[]);
+        game.recognizer = Some("cv-v1".to_string());
+        game.edited = true;
+        game.outcome = "defeat".to_string();
+        let html = render(game);
+        assert!(html.contains(NEW_READER_BADGE), "{html}");
+        assert!(html.contains(EDITED_BADGE), "{html}");
+        assert!(html.contains("outcome-loss"), "{html}");
+        assert!(
+            html.contains("class=\"stat-value-text ui-pill ui-pill--danger\">Loss<"),
+            "a loss is the word Loss on the soft fill: {html}"
+        );
+        assert!(
+            html.contains("<span class=\"ui-pill ui-pill--info reader-badge\""),
+            "the reader badge is the shared pill: {html}"
+        );
+        assert!(
+            html.contains("<span class=\"ui-pill ui-pill--warn game-edited-badge\""),
+            "{html}"
+        );
+        assert!(!html.contains("stat-unsure-mark"), "{html}");
+        assert!(!html.contains("misread"), "{html}");
+        assert!(!html.contains("<button"), "{html}");
+    }
+
+    #[test]
+    fn unknown_and_row_indexed_names_stay_unmarked() {
+        let html = render(row("a", &["r3.dmg", "nope", "r01.e"]));
+        assert!(!html.contains("stat-unsure"), "{html}");
+        assert!(!html.contains("misread"), "{html}");
+        assert!(!html.contains("<button"), "{html}");
+        assert_eq!(unsure_count(&["r3.dmg".to_string()]), 0);
+        assert_eq!(unsure_summary(unsure_count(&["nope".to_string()])), None);
+    }
+
+    #[test]
+    fn page_css_uses_tokens_only_and_the_page_has_no_main() {
+        for line in GAME_CSS.lines() {
+            let decl = line.trim();
+            if decl.starts_with("/*") || decl.starts_with('@') || !decl.contains(':') {
+                continue;
+            }
+            assert!(!decl.contains("rem") && !decl.contains('#'), "{decl}");
+            assert!(!decl.contains("px") || decl.contains("1px solid"), "{decl}");
+        }
+        let src = include_str!("game.rs");
+        assert!(
+            !src.contains(&["main", " {"].concat()),
+            "the shell owns main"
+        );
+        assert_eq!(
+            game_time(&row("a", &[]).played_at),
+            "15 Mar 2026, 12:00 UTC"
+        );
+    }
+
+    #[test]
+    fn the_trail_is_the_shared_breadcrumb_not_a_local_copy() {
+        // The real page: `StatsMatch` renders `ArticleCrumb`, as the match and
+        // tournament pages do.
+        let html = crate::components::ui::test_support::render_routed(|| {
+            let auth = use_signal(|| crate::state::AuthState {
+                user: Some(scuffed_types::UserInfo {
+                    id: "u1".into(),
+                    username: "Player01".into(),
+                    avatar_url: None,
+                    role: Some(scuffed_types::OrgRole::Member),
+                }),
+                loading: false,
+            });
+            use_context_provider(|| auth);
+            crate::state::provide_site_settings();
+            rsx! { StatsMatch { id: "g1" } }
+        });
+        assert!(
+            html.contains(
+                "<nav class=\"article-crumb\" aria-label=\"Breadcrumb\"><a href=\"/stats\">Your stats</a>\
+                 <span aria-hidden=\"true\">/</span><span aria-current=\"page\">This game</span></nav>"
+            ),
+            "{html}"
+        );
+        assert_eq!(
+            html.matches("aria-label=\"Breadcrumb\"").count(),
+            1,
+            "{html}"
+        );
+        // So the game page keeps no crumb rules of its own.
+        assert!(!GAME_CSS.contains("crumb"), "{GAME_CSS}");
+        let meta = &GAME_CSS[GAME_CSS.find(".game-page .game-meta {").unwrap()..];
+        let meta = &meta[..meta.find('}').unwrap()];
+        assert!(meta.contains("gap: 0 var(--space-1)"), "{meta}");
+    }
+
+    #[test]
+    fn missing_game_offers_back_to_my_stats_once() {
+        assert!(!shows_top_back_link(&GameView::Missing));
+        assert!(shows_top_back_link(&GameView::Pending));
+    }
+    const OLD_GAME_JSON: &str = r#"{"id":"g1","hero":"Ana","map_name":"Ilios",
+        "game_mode":"control","role":"Support","outcome":"victory","elims":1,
+        "deaths":2,"assists":3,"damage":4,"healing":5,"mitigation":6,
+        "played_at":"2026-03-15T12:00:00Z","edited":false}"#;
+
+    fn game_json(extra: &str) -> GameRow {
+        let mut value: serde_json::Value = serde_json::from_str(OLD_GAME_JSON).unwrap();
+        let extra: serde_json::Value = serde_json::from_str(extra).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(value).expect("game row")
+    }
+
+    #[test]
+    fn an_old_game_without_bans_and_picks_renders_as_before() {
+        let old: GameRow = serde_json::from_str(OLD_GAME_JSON).expect("old row");
+        assert_eq!(old.bans_picks, None);
+        let html = render(old);
+        assert!(!html.contains("game-bans-picks"), "{html}");
+        for extra in [
+            r#"{"bans_picks": null}"#,
+            r#"{"bans_picks": {}}"#,
+            r#"{"bans_picks": {"bans": [], "picks": []}}"#,
+            r#"{"bans_picks": "garbled"}"#,
+        ] {
+            let html = render(game_json(extra));
+            assert!(!html.contains("game-bans-picks"), "{extra}: {html}");
+        }
+    }
+
+    #[test]
+    fn a_game_with_bans_and_picks_shows_them_after_the_stats() {
+        let game = game_json(
+            r#"{"bans_picks": {"bans": [{"hero": "ana", "team": "own"},
+            {"hero": "genji", "team": "enemy"}],
+            "picks": ["kiriko", null]}}"#,
+        );
+        let html = render(game);
+        assert!(html.contains("Bans and picks"), "{html}");
+        assert!(html.contains("id=\"bans-picks-g1-heading\""), "{html}");
+        for hero in ["Ana", "Genji", "Kiriko"] {
+            assert!(html.contains(hero), "{hero}: {html}");
+        }
+        assert!(
+            html.find("game-bans-picks").unwrap() > html.find("game-stats").unwrap_or(0),
+            "{html}"
+        );
+    }
+}

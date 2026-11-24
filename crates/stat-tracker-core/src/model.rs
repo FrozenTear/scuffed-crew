@@ -1,0 +1,786 @@
+//! Shared data of the stat tracker: the types and constants that more than
+//! one area reads or writes. A match result, an OCR row read, a stored game
+//! and its hero timeline, and the digit reader's id.
+//!
+//! Each item used to live next to its first user (`detect`, `ocr`,
+//! `storage`, `shadow::digits`), and the modules that only needed the type
+//! were tied into one dependency cycle through it. They live here now, below
+//! every module that uses them, and stay reachable at their old paths
+//! (`detect::MatchOutcome`, `storage::PersonalMatch`, ...) through `pub use`.
+//! Nothing here reads a frame, opens the store or talks to the network.
+
+use serde::{Deserialize, Serialize};
+use surrealdb_types::Datetime as SurrealDatetime;
+use surrealdb_types::SurrealValue;
+
+// ------------------------------------------------------------- match result
+
+/// A match result. The canonical wire/storage spelling is the lowercase
+/// `Display` form ("victory"/"defeat"/"draw"/"unknown") — every layer that
+/// needs a string goes through `to_string()`, and parsing goes through
+/// `FromStr` (strict: anything else is an error, callers decide whether that
+/// means `Unknown`). Do not hand-roll translations of these names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MatchOutcome {
+    Victory,
+    Defeat,
+    Draw,
+    Unknown,
+}
+
+impl std::fmt::Display for MatchOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            MatchOutcome::Victory => "victory",
+            MatchOutcome::Defeat => "defeat",
+            MatchOutcome::Draw => "draw",
+            MatchOutcome::Unknown => "unknown",
+        })
+    }
+}
+
+impl std::str::FromStr for MatchOutcome {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "victory" => Ok(MatchOutcome::Victory),
+            "defeat" => Ok(MatchOutcome::Defeat),
+            "draw" => Ok(MatchOutcome::Draw),
+            "unknown" => Ok(MatchOutcome::Unknown),
+            other => Err(format!("not a match outcome: {other:?}")),
+        }
+    }
+}
+
+impl MatchOutcome {
+    /// Parse storage/GUI outcome strings, including legacy `win`/`loss` spellings
+    /// from older local data. Unknown / empty / garbage → [`MatchOutcome::Unknown`].
+    pub fn parse_lenient(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "victory" | "win" => MatchOutcome::Victory,
+            "defeat" | "loss" => MatchOutcome::Defeat,
+            "draw" => MatchOutcome::Draw,
+            // FromStr's canonical spellings are all matched above, so any
+            // other string (incl. "unknown"/"") can only be Unknown.
+            _ => MatchOutcome::Unknown,
+        }
+    }
+
+    pub fn is_win(self) -> bool {
+        matches!(self, MatchOutcome::Victory)
+    }
+
+    pub fn is_loss(self) -> bool {
+        matches!(self, MatchOutcome::Defeat)
+    }
+
+    pub fn is_decided(self) -> bool {
+        !matches!(self, MatchOutcome::Unknown)
+    }
+
+    /// CSS suffix for history/dashboard rows: `win` / `loss` / `draw` / `undecided`.
+    pub fn row_class(self) -> &'static str {
+        match self {
+            MatchOutcome::Victory => "win",
+            MatchOutcome::Defeat => "loss",
+            MatchOutcome::Draw => "draw",
+            MatchOutcome::Unknown => "undecided",
+        }
+    }
+
+    /// CSS class for outcome text colour.
+    pub fn text_class(self) -> &'static str {
+        match self {
+            MatchOutcome::Victory => "outcome-win",
+            MatchOutcome::Defeat => "outcome-loss",
+            MatchOutcome::Draw => "outcome-draw",
+            MatchOutcome::Unknown => "outcome-unknown",
+        }
+    }
+}
+
+// --------------------------------------------------------------- OCR reads
+
+#[derive(Debug)]
+pub struct CellOcrResult {
+    pub value: String,
+    pub confidence: i32,
+    /// Glyph ink touches a vertical crop edge (CG-3 clip/bleed). Suspect values
+    /// are still parsed — they may be right — but the capture gate strips their
+    /// corroboration/un-latch influence (see `capture_gate::apply_gate`).
+    pub suspect: bool,
+}
+
+#[derive(Debug)]
+pub struct RowOcrResult {
+    /// Read of name window 0 (`ocr::preprocess::name_windows`).
+    pub name: Option<CellOcrResult>,
+    /// Reads of the other name windows: `name_alternates[k]` is window
+    /// `k + 1`, `None` where that read failed, so the index always names the
+    /// window. Empty for 6v6, which has one window. The row matcher scores
+    /// `name` and these together and keeps the best.
+    pub name_alternates: Vec<Option<CellOcrResult>>,
+    pub stats: Vec<CellOcrResult>,
+    pub mean_confidence: i32,
+}
+
+/// Whether a cell's OCR text looks like a real stat value: at least one digit,
+/// nothing but digits and thousands-separator commas.
+pub fn is_clean_stat(text: &str) -> bool {
+    if text.is_empty() {
+        return false;
+    }
+    let has_digit = text.chars().any(|c| c.is_ascii_digit());
+    let all_valid = text.chars().all(|c| c.is_ascii_digit() || c == ',');
+    has_digit && all_valid
+}
+
+// ------------------------------------------------------------- stored games
+
+// `#[surreal(crate = …)]` pins the path the `SurrealValue` derive writes.
+// Its default is `::surrealdb::types` whenever any crate in the build turns
+// on surrealdb's `sdk-path` feature (the surrealdb crate does), and this
+// crate does not depend on `surrealdb`. `surrealdb::types` is a re-export
+// of `surrealdb_types`, so the impls are the same either way.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SurrealValue)]
+#[surreal(crate = "::surrealdb_types")]
+pub struct PersonalMatch {
+    /// Local store record id — set on rows read back from SurrealKV, `None`
+    /// on freshly parsed captures. Excluded from the JSON snapshot/log
+    /// (readers identify games by `session_id`); used to mark exactly the
+    /// fetched rows as synced.
+    #[serde(skip)]
+    #[surreal(default)]
+    pub id: Option<surrealdb_types::RecordId>,
+    pub hero: String,
+    pub map_name: String,
+    pub game_mode: String,
+    pub role: String,
+    pub outcome: String,
+    pub elims: u32,
+    pub deaths: u32,
+    pub assists: u32,
+    pub damage: u32,
+    pub healing: u32,
+    pub mitigation: u32,
+    pub played_at: SurrealDatetime,
+    #[serde(default)]
+    pub synced: bool,
+    /// Payload revision for sync compare-and-swap. Every statement that
+    /// changes an uploaded field bumps this in the same write that sets
+    /// `synced = false`. `mark_synced` stamps a row only when the revision
+    /// still matches the value captured at read time, so a local write during
+    /// the HTTP upload is not marked synced. Missing on legacy rows (treated
+    /// as 0).
+    #[serde(default)]
+    #[surreal(default)]
+    pub sync_rev: u64,
+    /// Server refused this row with HTTP 400 or 422. The row stays
+    /// `synced = false` and is left out of automatic uploads until the
+    /// member edits the game or retries the upload. The string is the
+    /// game-list line (`Upload rejected by server: <message>`), including
+    /// the server code when the body sent one. Missing on older rows. With
+    /// [`UPLOAD_RETRY_MARK`] in front, a tracker update put the row back on
+    /// the upload queue and kept the reason as proof.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub upload_reject: Option<String>,
+    #[serde(default)]
+    pub session_id: String,
+
+    // --- Manual edit overlay (transparency) ---------------------------------
+    // The OCR-captured values above are IMMUTABLE. A manual correction records
+    // the fixed value in the matching `corrected_*` field and appends the field
+    // name to `edited_fields`; the effective (displayed) value is `corrected_*`
+    // if present, else the OCR read. This keeps "OCR read X → corrected Y"
+    // recoverable for the badge/tooltip and never destroys the original read.
+    // All fields are additive Options / empty-by-default, so rows written before
+    // this feature deserialize unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub corrected_hero: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub corrected_role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub corrected_map_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub corrected_outcome: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub corrected_elims: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub corrected_deaths: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub corrected_assists: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub corrected_damage: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub corrected_healing: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub corrected_mitigation: Option<u32>,
+    /// Names of fields carrying a manual correction (e.g. `["elims", "hero"]`).
+    /// Non-empty ⇒ the row is edited (drives the badge).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[surreal(default)]
+    pub edited_fields: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub edited_at: Option<SurrealDatetime>,
+
+    // --- Hero timeline (HS-1) -----------------------------------------------
+    /// Consecutive-run hero segments derived from the session's RAW snapshots
+    /// (see `storage::derive_hero_segments`). The daemon stamps this after each
+    /// capture; legacy rows (empty) are derived on the fly in
+    /// `storage::latest_per_game`. Per-snapshot `hero`/`role` stay raw — this field
+    /// carries the swap history, and the primary hero/role for the game is the
+    /// snapshot-count majority over these segments ([`primary_hero_role`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[surreal(default)]
+    pub heroes_played: Vec<HeroSegment>,
+    /// Manual confirm/dismiss decisions for hero segments, by segment index.
+    /// Source of truth for the flags inside `heroes_played`, which are
+    /// recomputed from these on every re-derivation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[surreal(default)]
+    pub segment_resolutions: Vec<SegmentResolution>,
+    /// Recognizer that produced the stored numbers. Empty on rows written
+    /// before the column existed; those read as `ocr-v1` at upload time.
+    #[serde(default)]
+    #[surreal(default)]
+    pub recognizer: String,
+    /// Flat or leftover row names the new reader was not sure about.
+    /// Uploads flatten this to the server's allowlist.
+    #[serde(default)]
+    #[surreal(default)]
+    pub suspect_fields: Vec<String>,
+    /// Which reader found this player's own scoreboard row.
+    /// `names-v1` or `ocr-v1`. Absent when this match never read a name.
+    /// A later snapshot of the same match keeps the value already stored, and
+    /// every upload of the match sends it. Omitted from JSON when absent, so
+    /// an older row sends nothing and an older server still accepts the row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub name_recognizer: Option<String>,
+    /// What the bans and picks reader (`cv-v1`) read around this game, as the
+    /// JSON the tracker writes (`daemon::bans_picks::Stored`): the bans, the
+    /// lobby ban, the six picks, the ban vote picks and the recognizer id.
+    /// `None` when nothing was read (the reader off, no pack, a frame that
+    /// was not 2560x1440). Kept on every snapshot of the match. The upload
+    /// sends the values of it (no confidences) when it holds any, and omits
+    /// the key otherwise. Omitted from JSON when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub bans_picks: Option<String>,
+    /// Why the bans and picks are as they are: read whole, read in part, or
+    /// not read and the reason. Set next to [`Self::bans_picks`] when the
+    /// game is first recorded. `None` on a game recorded before this field
+    /// existed, and on one that was never offered to the reader. Local
+    /// only, omitted from JSON when absent, so an older row reads as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub bans_picks_status: Option<BansPicksStatus>,
+    /// The queue Scuffed Vision's queue title reader (`rank-v1`) read on
+    /// this game's pre-game screens. Set once, when the game is first
+    /// recorded with the reader on, and kept on every snapshot of the match;
+    /// a later read never replaces it. `None` with the reader off, on games
+    /// recorded before the field existed, and on games never offered to the
+    /// reader (first stored outside the Tab path, such as a best guess kept
+    /// when the game closed, a capture landed at shutdown or an imported
+    /// hold, or stored under a session that was not the open game). Omitted
+    /// from JSON when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub queue_title: Option<QueueTitle>,
+    /// What Scuffed Vision's rank update reader (`rank-v1`) read on the rank
+    /// screen after this game. Set once, when the screen was read with the
+    /// reader on, and kept on every snapshot of the match; a later read never
+    /// replaces it. `None` with the reader off (the default), when the screen
+    /// was not seen or not read, and on games recorded before the field
+    /// existed. Omitted from JSON when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub rank_update: Option<RankUpdate>,
+    /// When the game itself started and ended, as far as the tracker saw
+    /// ([`MatchTimes`]). Kept on every snapshot of the match. `None` on games
+    /// recorded before the field existed; those time their length from the
+    /// first to the last Tab read. Local only: never uploaded. Omitted from
+    /// JSON when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub match_times: Option<MatchTimes>,
+}
+
+/// A game's real start and end ([`PersonalMatch::match_times`]). Either is
+/// `None` when the tracker did not see it: the start is a pre-game screen
+/// (map vote, hero select or ban) that opened the game, the end is when the
+/// tracker read the result itself (when it was first seen, if that read is
+/// fresh). A result set by hand is no end: a game with no end read stays
+/// without one, and a hand-corrected result keeps the end the tracker read.
+/// A game opened by its first Tab has no start. Either missing, the length
+/// falls back to the first to last Tab read.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, SurrealValue)]
+#[surreal(crate = "::surrealdb_types")]
+pub struct MatchTimes {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub started_at: Option<SurrealDatetime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub ended_at: Option<SurrealDatetime>,
+}
+
+/// One text value of a [`RankUpdate`] and how sure the reader was (0..1).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SurrealValue)]
+#[surreal(crate = "::surrealdb_types")]
+pub struct RankText {
+    pub value: String,
+    pub confidence: f32,
+}
+
+/// One number of a [`RankUpdate`] and how sure the reader was (0..1).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SurrealValue)]
+#[surreal(crate = "::surrealdb_types")]
+pub struct RankNumber {
+    pub value: i64,
+    pub confidence: f32,
+}
+
+/// The change tags of a [`RankUpdate`] and how sure the reader was (0..1).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SurrealValue)]
+#[surreal(crate = "::surrealdb_types")]
+pub struct RankTags {
+    pub value: Vec<String>,
+    pub confidence: f32,
+}
+
+/// The rank update screen after a game ([`PersonalMatch::rank_update`]), as
+/// the rank reader read it. Each field is `None` when it was not read; each
+/// value has its own confidence (the reader's blend of score and lead, not
+/// the queue title's raw score). The names are the site's `rank` fields.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, SurrealValue)]
+#[surreal(crate = "::surrealdb_types")]
+pub struct RankUpdate {
+    /// `Tank`, `Damage`, `Support` or `Open`, spelled as the site's
+    /// `RankRole`. The upload sends `Open` only when the game's queue title
+    /// names open queue ([`queue_key`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub role: Option<RankText>,
+    /// The tier word as the reader's pack spells it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub role_rank: Option<RankText>,
+    /// 1..=5.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub division: Option<RankNumber>,
+    /// Percent, negative under demotion protection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub progress_pct: Option<RankNumber>,
+    /// Signed percent points.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub progress_change: Option<RankNumber>,
+    /// At most [`RANK_MAX_CHANGE_TAGS`] tags, left to right.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub change_tags: Option<RankTags>,
+    /// "Higher ranked than X% of players", 0..=100.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub higher_than_pct: Option<RankNumber>,
+    /// The SR of the first hero the screen lists (not always the hero of
+    /// the game, after a hero swap).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub hero_sr: Option<RankNumber>,
+    /// That hero's SR change, signed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub hero_sr_change: Option<RankNumber>,
+    /// The mode banner word: a hint for the next game, never this game's
+    /// queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub next_mode_hint: Option<RankText>,
+}
+
+impl RankUpdate {
+    /// No field was read.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// The rank update reader's id (`stat_tracker::shadow::rank` re-exports it
+/// as `RECOGNIZER_ID`). The upload sends one `rank.rank_recognizer` for the
+/// queue title and the rank update, so the two readers share one id.
+pub const RANK_RECOGNIZER_ID: &str = QUEUE_TITLE_RECOGNIZER_ID;
+
+/// Most change tags the site keeps (`scuffed_types::api::RANK_MAX_CHANGE_TAGS`):
+/// a longer list is not stored or sent at all.
+pub const RANK_MAX_CHANGE_TAGS: usize = 8;
+
+/// The queue a title or hint names: upper case, every run of characters
+/// that are not letters or digits as one space, and a last word `QUEUE`
+/// dropped. `OPEN QUEUE`, `Open Queue`, `open_queue` and `OPEN` are all
+/// `OPEN`; `ROLE QUEUE` is `ROLE`; `QUEUE` alone is empty.
+pub fn queue_key(text: &str) -> String {
+    let upper = text.to_uppercase();
+    let mut words: Vec<&str> = upper
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    if words.last() == Some(&"QUEUE") {
+        words.pop();
+    }
+    words.join(" ")
+}
+
+/// The game's queue ([`PersonalMatch::queue_title`]): the confident read,
+/// or a warning that the queue is not known. Written once per game.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, SurrealValue)]
+#[surreal(crate = "::surrealdb_types")]
+pub struct QueueTitle {
+    /// The title as the pack spells it (`OPEN QUEUE`). Only a read the
+    /// reader accepted sets it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub value: Option<String>,
+    /// The confidence of the read that set `value`, 0..1; 0 without one.
+    #[serde(default)]
+    #[surreal(default)]
+    pub confidence: f32,
+    /// The game's read was weak or failed, or there was no pre-game frame
+    /// of this game to read, so `value` is `None`. Shown as
+    /// [`QUEUE_TITLE_WARNING`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[surreal(default)]
+    pub unsure: bool,
+    /// The pending next mode hint this game's read confirmed (the hint the
+    /// rank wiring handed on from the game before's rank screen, not the
+    /// banner word as read). `None` when there was none,
+    /// or the read dropped or expired it, or it was not this game's to
+    /// settle. Local only: never uploaded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub mode_hint: Option<String>,
+}
+
+/// The queue title reader's id (`stat_tracker::shadow::queue_title`
+/// re-exports it as `RECOGNIZER_ID`). Here so the upload, which may not use
+/// the readers, sends the same id as `rank.rank_recognizer`.
+pub const QUEUE_TITLE_RECOGNIZER_ID: &str = "rank-v1";
+
+/// Lowest whole title score a queue title read may have
+/// (`stat_tracker::shadow::queue_title` re-exports it as `MIN_SCORE`). Here
+/// so the upload checks the same bar.
+pub const QUEUE_TITLE_MIN_SCORE: f32 = 0.80;
+
+/// The warning for a game whose queue is not known: no confident read, for
+/// whatever reason (a weak or failed read, or no pre-game frame of it).
+pub const QUEUE_TITLE_WARNING: &str = "This game's queue is not known: its title was not seen or not recognized on the pre-game screens.";
+
+impl QueueTitle {
+    /// [`QUEUE_TITLE_WARNING`] when the game has no confident read, else
+    /// `None`.
+    pub fn warning(&self) -> Option<&'static str> {
+        self.unsure.then_some(QUEUE_TITLE_WARNING)
+    }
+
+    /// The value as the upload sends it: trimmed, not empty, and read at a
+    /// finite confidence of [`QUEUE_TITLE_MIN_SCORE`] to 1. `None` otherwise,
+    /// so a title stored some other way is never uploaded as confident.
+    pub fn confident_value(&self) -> Option<&str> {
+        let sure =
+            self.confidence.is_finite() && (QUEUE_TITLE_MIN_SCORE..=1.0).contains(&self.confidence);
+        self.value
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| sure && !v.is_empty())
+    }
+
+    /// The confident title names open queue: its [`queue_key`] ends in the
+    /// word `OPEN` (`OPEN QUEUE`, `COMPETITIVE: 6V6 OPEN QUEUE`).
+    pub fn is_open_queue(&self) -> bool {
+        self.confident_value()
+            .is_some_and(|v| queue_key(v).rsplit(' ').next() == Some("OPEN"))
+    }
+}
+
+/// A screen of the pre-game the bans and picks reader had no frame for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SurrealValue)]
+#[serde(rename_all = "snake_case")]
+#[surreal(crate = "::surrealdb_types", rename_all = "snake_case")]
+pub enum BansPicksMissing {
+    /// The ban vote screen (the local player's votes and the team ban score).
+    BanVote,
+    /// The hero select (the picks).
+    HeroSelect,
+    /// The ban results screen (the bans).
+    BanResults,
+}
+
+/// What came of the bans and picks reader for one game
+/// ([`PersonalMatch::bans_picks_status`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SurrealValue)]
+#[serde(rename_all = "snake_case")]
+#[surreal(crate = "::surrealdb_types", rename_all = "snake_case")]
+pub enum BansPicksStatus {
+    /// All three screens were read.
+    Ok,
+    /// Some screens were read, and `missing` were not seen.
+    Partial { missing: Vec<BansPicksMissing> },
+    /// None of this game's pre-game screens were seen.
+    NoFrames,
+    /// A frame was not the size the reader needs (2560x1440).
+    FrameSize { width: u32, height: u32 },
+    /// The pack is not installed; `linked` is whether this install has a
+    /// site account, which is what fetches it.
+    PackMissing { linked: bool },
+    /// The pack is there and did not load.
+    PackFailed,
+    /// The reader failed on this game's screens.
+    ReaderFailed,
+    /// The reader is switched off.
+    ReaderOff,
+}
+
+/// Prefix on [`PersonalMatch::upload_reject`] for a row a tracker update put
+/// back on the upload queue. The site's reason follows it.
+pub const UPLOAD_RETRY_MARK: &str = "retry once: ";
+
+/// Count an unconfirmed hero segment toward the majority (it was a real swap).
+pub const SEGMENT_CONFIRM: &str = "confirm";
+/// Mark a hero segment as a misread: excluded from display and from the
+/// majority vote. The raw snapshots stay untouched.
+pub const SEGMENT_DISMISS: &str = "dismiss";
+/// Undo a confirm or dismiss: the store keeps only [`SEGMENT_CONFIRM`] and
+/// [`SEGMENT_DISMISS`], so any other action, this one by name, drops the
+/// segment's resolution and it reads as derived again.
+pub const SEGMENT_CLEAR: &str = "clear";
+
+/// One consecutive run of the same hero across a session's snapshots, in
+/// capture-time order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SurrealValue)]
+#[surreal(crate = "::surrealdb_types")]
+pub struct HeroSegment {
+    pub hero: String,
+    pub role: String,
+    pub first_seen: SurrealDatetime,
+    pub last_seen: SurrealDatetime,
+    /// Number of captures in the run.
+    pub snapshots: u32,
+    /// ≥2 snapshots, or manually confirmed. A 1-snapshot segment is recorded
+    /// but unconfirmed — a lone minority read is indistinguishable from a
+    /// misread (the 07-18 Lijiang "Wuyang" flap), so it needs a human call.
+    pub confirmed: bool,
+    /// Manual resolution ([`SEGMENT_CONFIRM`] / [`SEGMENT_DISMISS`]), applied
+    /// from the match's `segment_resolutions` during derivation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub resolution: Option<String>,
+}
+
+impl HeroSegment {
+    /// Manually dismissed as a misread — excluded from display and majority.
+    pub fn is_dismissed(&self) -> bool {
+        self.resolution.as_deref() == Some(SEGMENT_DISMISS)
+    }
+}
+
+/// A manual decision about one derived hero segment, keyed by index into the
+/// derived segment list (stable: snapshots only ever append, so existing
+/// segments never change position).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SurrealValue)]
+#[surreal(crate = "::surrealdb_types")]
+pub struct SegmentResolution {
+    pub segment: u32,
+    /// [`SEGMENT_CONFIRM`] or [`SEGMENT_DISMISS`].
+    pub action: String,
+    /// A [`SEGMENT_DISMISS`] of a run the member had confirmed by hand: Undo
+    /// ([`SEGMENT_CLEAR`]) puts the confirm back instead of clearing it.
+    /// False (also when missing, on older rows) and not written while false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[surreal(default)]
+    pub after_confirm: bool,
+}
+
+impl PersonalMatch {
+    /// True when at least one field carries a manual correction.
+    pub fn is_edited(&self) -> bool {
+        !self.edited_fields.is_empty()
+    }
+
+    /// Id sent on upload. A missing column is `ocr-v1`.
+    pub fn stored_recognizer(&self) -> &str {
+        scuffed_types::effective_recognizer(&self.recognizer)
+    }
+
+    /// Server message for a quarantined row, or for a row a tracker update
+    /// put back on the queue ([`Self::upload_retry_pending`]), without
+    /// [`UPLOAD_RETRY_MARK`]. Empty and missing both mean the row was never
+    /// refused, or a retry or edit cleared it.
+    pub fn upload_rejection(&self) -> Option<&str> {
+        let message = self.upload_reject.as_deref()?.trim();
+        let message = message
+            .strip_prefix(UPLOAD_RETRY_MARK)
+            .unwrap_or(message)
+            .trim();
+        (!message.is_empty()).then_some(message)
+    }
+
+    /// True when a tracker update put this refused row back on the upload
+    /// queue with the site's reason kept. It uploads like any queued row,
+    /// and a refusal that names it again sets it aside at once.
+    pub fn upload_retry_pending(&self) -> bool {
+        self.upload_reject
+            .as_deref()
+            .is_some_and(|message| message.trim_start().starts_with(UPLOAD_RETRY_MARK))
+    }
+
+    /// True when `field` (storage name, e.g. `"map_name"`) was manually edited.
+    pub fn field_edited(&self, field: &str) -> bool {
+        self.edited_fields.iter().any(|f| f == field)
+    }
+
+    /// True when this row carries a member's own map choice (a map edit or
+    /// pick: `corrected_map_name`, or `map_name` in `edited_fields`).
+    pub fn has_member_map_edit(&self) -> bool {
+        self.corrected_map_name.is_some() || self.field_edited("map_name")
+    }
+
+    /// Effective hero: a manual correction wins, else the majority-derived
+    /// primary from the hero timeline, else the raw OCR read.
+    pub fn display_hero(&self) -> &str {
+        if let Some(h) = self.corrected_hero.as_deref() {
+            return h;
+        }
+        primary_hero_role(&self.heroes_played)
+            .map(|(h, _)| h)
+            .unwrap_or(&self.hero)
+    }
+    /// Effective role, resolved like [`Self::display_hero`].
+    pub fn display_role(&self) -> &str {
+        if let Some(r) = self.corrected_role.as_deref() {
+            return r;
+        }
+        primary_hero_role(&self.heroes_played)
+            .map(|(_, r)| r)
+            .unwrap_or(&self.role)
+    }
+    pub fn display_map_name(&self) -> &str {
+        self.corrected_map_name.as_deref().unwrap_or(&self.map_name)
+    }
+    pub fn display_outcome(&self) -> &str {
+        self.corrected_outcome.as_deref().unwrap_or(&self.outcome)
+    }
+    pub fn display_elims(&self) -> u32 {
+        self.corrected_elims.unwrap_or(self.elims)
+    }
+    pub fn display_deaths(&self) -> u32 {
+        self.corrected_deaths.unwrap_or(self.deaths)
+    }
+    pub fn display_assists(&self) -> u32 {
+        self.corrected_assists.unwrap_or(self.assists)
+    }
+    pub fn display_damage(&self) -> u32 {
+        self.corrected_damage.unwrap_or(self.damage)
+    }
+    pub fn display_healing(&self) -> u32 {
+        self.corrected_healing.unwrap_or(self.healing)
+    }
+    pub fn display_mitigation(&self) -> u32 {
+        self.corrected_mitigation.unwrap_or(self.mitigation)
+    }
+}
+
+/// The primary hero/role for a game: snapshot-count majority across its hero
+/// segments. Dismissed segments never vote; unconfirmed segments vote only
+/// when every non-dismissed segment is unconfirmed (a lone flap must not
+/// outvote 25 solid captures, but an all-unconfirmed game still needs a
+/// label). Ties break to the hero seen latest, then alphabetically for
+/// determinism. `None` when nothing can vote (no segments, or all dismissed)
+/// — callers fall back to the raw read.
+pub fn primary_hero_role(segments: &[HeroSegment]) -> Option<(&str, &str)> {
+    let live: Vec<&HeroSegment> = segments.iter().filter(|s| !s.is_dismissed()).collect();
+    let voters: Vec<&HeroSegment> = if live.iter().any(|s| s.confirmed) {
+        live.iter().copied().filter(|s| s.confirmed).collect()
+    } else {
+        live
+    };
+    struct Vote<'a> {
+        count: u32,
+        latest: chrono::DateTime<chrono::Utc>,
+        role: &'a str,
+    }
+    let mut votes: std::collections::HashMap<&str, Vote> = std::collections::HashMap::new();
+    for s in voters {
+        let seen: chrono::DateTime<chrono::Utc> = s.last_seen.into();
+        let v = votes.entry(s.hero.as_str()).or_insert(Vote {
+            count: 0,
+            latest: seen,
+            role: &s.role,
+        });
+        v.count += s.snapshots;
+        if seen >= v.latest {
+            v.latest = seen;
+            v.role = &s.role;
+        }
+    }
+    votes
+        .into_iter()
+        .max_by(|a, b| {
+            a.1.count
+                .cmp(&b.1.count)
+                .then(a.1.latest.cmp(&b.1.latest))
+                .then(b.0.cmp(a.0))
+        })
+        .map(|(hero, v)| (hero, v.role))
+}
+
+// ------------------------------------------------------------ digit reader
+
+/// Identifies this recognizer's output. Bump it whenever any value,
+/// confidence or suspect flag can change, so logged reads from different
+/// builds are never pooled by mistake. Every `shadow/digits.jsonl` line
+/// carries it. The `recognizer_snapshot_is_pinned` test fails until the bump
+/// is made when, on its synthetic fixtures, any value or suspect flag
+/// changes, any calibration constant changes, a pinned sample confidence
+/// moves more than 0.02, or a board's mean confidence moves more than 0.005.
+/// Float drift below those tolerances is accepted on purpose.
+///
+/// * `cv-v1`: template matcher as shipped in 0.4.23 (raw margins, 0.06 cut).
+/// * `cv-v2`: per-digit calibrated confidence, suspect below 0.35.
+/// * `cv-v3`: 1080p templates and typical margins rebuilt with real
+///   1920x1080 captures added to the downscaled 1440p set; cells with too
+///   little ink for the digits read are flagged.
+/// * `cv-v4`: pair checks for 4 vs 6 and for dim 0 vs 3 can lift a glyph
+///   margin that sits below the suspect line; touching glyphs can also be
+///   split along slanted cut lines.
+/// * `cv-v5`: a thousands-separator gap (width in range, or bottom-band comma
+///   ink) joins digit groups instead of splitting them; any ink left of the
+///   picked group inside the cell forces suspect.
+/// * `cv-v6`: alpha.8 reader. Written as `shadow::digits::RECOGNIZER_ID_NO_OCR` when the
+///   tracker runs with OCR off, so those rows and reports can be told apart.
+/// * `cv-v7`: header labels are found with
+///   `ocr::preprocess::header_label_groups_scaled`: the dark cut follows the
+///   strip's background brightness and a 2 px "H" label is kept on boards
+///   narrower than 1664 px. Downscaled and dimmed boards now find their
+///   columns; boards that already found them read the same.
+/// * `cv-v8`: the digit reads are the same as `cv-v7`. A held own-row cell
+///   now stores the reader's unsure read, flagged, when the capture gate
+///   would take that read, instead of the game's older accepted value
+///   (report a6f3). Stored stats can differ from `cv-v7` rows.
+pub const RECOGNIZER_ID: &str = "cv-v8";

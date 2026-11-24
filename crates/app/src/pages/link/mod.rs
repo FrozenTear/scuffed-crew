@@ -11,6 +11,8 @@ use dioxus::prelude::*;
 
 use scuffed_types::DeviceLinkLookupResponse;
 
+use crate::components::ui::{FieldError, PageHeader, PageShell, PageWidth, btn_class};
+use crate::pages::profile_settings::{ACCOUNT_CSS, ACCOUNT_CSS_ID};
 use crate::routes::Route;
 use crate::state::use_auth;
 use api::LinkCallError;
@@ -285,6 +287,9 @@ pub fn user_notice(status: Option<u16>, body: &str, retry_after: Option<&str>) -
 }
 
 fn notice_from_call(err: &LinkCallError) -> UserNotice {
+    if err.unreadable {
+        return UserNotice::Text(crate::client_error::UNREADABLE_ANSWER_MESSAGE.to_string());
+    }
     user_notice(err.status, &err.body, err.retry_after.as_deref())
 }
 
@@ -431,107 +436,84 @@ pub(crate) fn redirect_after_login_if_needed(loading: bool, logged_in: bool) -> 
     }
 }
 
+/// The device-code form: the narrow account card (profile_settings.rs) with
+/// the step heading, the code field and the actions. The code is set in the
+/// mono face so similar letters stay apart.
 const CSS: &str = r#"
-.link-page {
-    min-height: 70vh;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 2rem 1rem;
-}
-.link-card {
-    width: 100%;
-    max-width: 440px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 2rem;
-}
-.link-card h1 {
+.link-card .link-step {
     font-family: var(--font-head);
-    font-size: 1.5rem;
+    font-weight: var(--font-head-weight);
+    letter-spacing: var(--font-head-tracking);
+    line-height: var(--leading-display);
+    font-size: var(--text-lg);
     color: var(--text);
-    margin: 0 0 0.5rem;
 }
-.link-card p.lead,
-.link-card h2.link-step,
-.link-card p.note {
-    color: var(--text-2);
-    font-size: 0.9rem;
-    font-weight: 400;
-    font-family: inherit;
-    margin: 0 0 1.25rem;
-    line-height: 1.45;
+.link-card .link-step:focus { outline: none; }
+.link-card .link-step:focus-visible {
+    outline: var(--focus-ring-width) solid var(--focus-ring);
+    outline-offset: var(--focus-ring-offset);
+    border-radius: var(--radius-control);
 }
-.link-card h2.link-step:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 2px;
-}
-.link-field {
+.link-form {
     display: flex;
     flex-direction: column;
-    gap: 0.35rem;
-    margin-bottom: 1rem;
+    gap: var(--space-5);
+    min-width: 0;
+    margin: 0;
 }
-.link-field label {
-    font-size: 0.75rem;
-    color: var(--text-3);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-}
-.link-field input {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    color: var(--text);
-    padding: 0.6rem 0.75rem;
-    border-radius: 6px;
-    font-size: 1.1rem;
+.link-code-input {
     font-family: var(--font-mono);
-    letter-spacing: 0.08em;
-}
-.link-error {
-    color: var(--danger);
-    font-size: 0.85rem;
-    margin: 0 0 1rem;
+    letter-spacing: var(--tracking-open);
+    text-transform: uppercase;
 }
 .link-facts {
-    margin: 0 0 1.25rem;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
 }
-.link-facts div {
+.link-facts > div {
     display: flex;
     justify-content: space-between;
-    gap: 1rem;
-    padding: 0.45rem 0;
+    align-items: baseline;
+    gap: var(--space-4);
+    min-height: var(--density-row);
+    padding: var(--space-2) 0;
     border-bottom: 1px solid var(--border);
-    font-size: 0.9rem;
+    font-family: var(--font-body);
+    font-size: var(--text-md);
+    line-height: var(--leading-body);
 }
-.link-facts dt {
-    color: var(--text-3);
+.link-facts dt { margin: 0; color: var(--text-3); }
+.link-facts dd { margin: 0; color: var(--text); text-align: right; overflow-wrap: anywhere; }
+.link-card .account-lead a {
+    color: var(--accent-text);
+    text-decoration: underline;
+}
+.link-notice {
     margin: 0;
+    color: var(--loss);
+    font-family: var(--font-body);
+    font-size: var(--text-sm);
+    line-height: var(--leading-body);
 }
-.link-facts dd {
-    color: var(--text);
-    margin: 0;
-    text-align: right;
-    word-break: break-word;
+.link-notice:empty {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
 }
-.link-actions {
-    display: flex;
-    gap: 0.6rem;
-    flex-wrap: wrap;
-}
-.link-actions .ui-btn {
-    flex: 1;
-}
-.link-card a {
-    color: var(--accent);
-    font-weight: 600;
-}
-.link-wait {
-    color: var(--text-2);
-    text-align: center;
+@media (max-width: 820px) {
+    .link-facts > div { flex-direction: column; align-items: flex-start; gap: var(--space-1); }
+    .link-facts dd { text-align: left; }
 }
 "#;
+
+const LINK_LEAD: &str = "Approve the stat tracker on your account with the short code it shows.";
 
 #[component]
 pub fn LinkDevice() -> Element {
@@ -571,13 +553,15 @@ pub fn LinkDevice() -> Element {
     let gate = link_gate(auth().loading, auth().is_logged_in());
     if gate != LinkGate::Show {
         return rsx! {
+            crate::styles::StyleOnce { id: ACCOUNT_CSS_ID, css: ACCOUNT_CSS }
             crate::styles::StyleOnce { id: "scuffed-css-pages-link-mod-css", css: CSS }
-            div { class: "link-page",
-                p { class: "link-wait",
+            PageShell { width: PageWidth::Narrow, class: "link-page",
+                PageHeader { title: "Link the stat tracker", lead: LINK_LEAD }
+                p { class: "account-wait", role: "status",
                     if gate == LinkGate::Wait {
                         "Checking sign-in."
                     } else {
-                        "Sending you to sign in."
+                        "Sending you to Log in."
                     }
                 }
             }
@@ -586,7 +570,7 @@ pub fn LinkDevice() -> Element {
 
     let on_lookup = move |evt: Event<FormData>| {
         evt.prevent_default();
-        if intent_for_click(&step(), LinkIntent::Lookup).is_none() {
+        if busy() || intent_for_click(&step(), LinkIntent::Lookup).is_none() {
             return;
         }
         let normalized = normalize_user_code(&code());
@@ -610,7 +594,7 @@ pub fn LinkDevice() -> Element {
 
     let on_approve = move |_| {
         let current = step();
-        if intent_for_click(&current, LinkIntent::Approve).is_none() {
+        if busy() || intent_for_click(&current, LinkIntent::Approve).is_none() {
             return;
         }
         let LinkStep::Confirm { code } = current else {
@@ -639,7 +623,7 @@ pub fn LinkDevice() -> Element {
 
     let on_deny = move |_| {
         let current = step();
-        if intent_for_click(&current, LinkIntent::Deny).is_none() {
+        if busy() || intent_for_click(&current, LinkIntent::Deny).is_none() {
             return;
         }
         let LinkStep::Confirm { code } = current else {
@@ -678,10 +662,11 @@ pub fn LinkDevice() -> Element {
     };
 
     rsx! {
+        crate::styles::StyleOnce { id: ACCOUNT_CSS_ID, css: ACCOUNT_CSS }
         crate::styles::StyleOnce { id: "scuffed-css-pages-link-mod-css", css: CSS }
-        div { class: "link-page",
-            div { class: "link-card",
-                h1 { "Link the stat tracker" }
+        PageShell { width: PageWidth::Narrow, class: "link-page",
+            PageHeader { title: "Link the stat tracker", lead: LINK_LEAD }
+            div { class: "account-card link-card",
                 match step() {
                     LinkStep::Enter => rsx! {
                         LinkCodeEntry {
@@ -715,13 +700,11 @@ pub fn LinkDevice() -> Element {
                                 }
                                 div {
                                     dt { "Code" }
-                                    dd { "{shown}" }
+                                    dd { class: "link-code-input", "{shown}" }
                                 }
                             }
                         }
-                        if let Some(text) = notice() {
-                            p { class: "link-error", role: "alert", "{text}" }
-                        }
+                        p { class: "link-notice", role: "alert", {notice().unwrap_or_default()} }
                         LinkConfirmActions {
                             busy: busy(),
                             on_approve: on_approve,
@@ -736,7 +719,7 @@ pub fn LinkDevice() -> Element {
                             tabindex: "-1",
                             "{APPROVED_COPY}"
                         }
-                        p { class: "note",
+                        p { class: "account-lead",
                             "The new token can be revoked on the "
                             Link { to: Route::StatsTokens {}, "tracker tokens list" }
                             "."
@@ -748,6 +731,9 @@ pub fn LinkDevice() -> Element {
                             class: "link-step",
                             tabindex: "-1",
                             "{DENIED_COPY}"
+                        }
+                        p { class: "account-lead",
+                            "Nothing was linked. Start again from the app if you meant to approve it."
                         }
                     },
                 }
@@ -773,38 +759,41 @@ fn LinkCodeEntry(
             tabindex: "-1",
             "Type the short code shown in the app."
         }
-        if let Some(text) = notice {
-            p {
-                id: LINK_ERROR_ID,
-                class: "link-error",
-                role: "alert",
-                "{text}"
-            }
-        }
         form {
+            class: "link-form",
             onsubmit: move |evt| on_lookup.call(evt),
-            div { class: "link-field",
-                label { r#for: "link-code", "Device code" }
+            div { class: "account-field",
+                label { class: "field-label", r#for: "link-code", "Device code" }
                 input {
                     id: "link-code",
                     name: "link-code",
+                    class: "field-input link-code-input",
                     r#type: "text",
                     autocomplete: "off",
                     autocapitalize: "characters",
                     spellcheck: false,
                     maxlength: 32,
                     value: "{code}",
-                    disabled: busy,
+                    readonly: busy,
                     aria_invalid: code_invalid,
                     aria_describedby: code_described_by,
                     oninput: move |evt| on_code.call(evt.value()),
                 }
+                // Always rendered, so a new message is announced.
+                FieldError {
+                    id: LINK_ERROR_ID,
+                    text: notice.clone().unwrap_or_default(),
+                    role: "alert".to_string(),
+                }
             }
-            button {
-                class: "ui-btn ui-btn--primary ui-btn--md",
-                r#type: "submit",
-                disabled: busy,
-                if busy { "Checking the code." } else { "Continue" }
+            div { class: "account-actions",
+                button {
+                    class: btn_class(true),
+                    r#type: "submit",
+                    aria_disabled: if busy { "true" },
+                    aria_busy: if busy { "true" },
+                    if busy { "Checking the code." } else { "Continue" }
+                }
             }
         }
     }
@@ -834,26 +823,28 @@ fn LinkConfirmActions(
     on_deny: EventHandler<MouseEvent>,
     on_start_over: EventHandler<MouseEvent>,
 ) -> Element {
+    // Busy buttons stay focusable (`aria-disabled`); the handlers ignore a
+    // click while a request runs.
     rsx! {
-        div { class: "link-actions",
+        div { class: "account-actions",
             button {
-                class: "ui-btn ui-btn--primary ui-btn--md",
+                class: btn_class(true),
                 r#type: "button",
-                disabled: busy,
+                aria_disabled: if busy { "true" },
                 onclick: move |evt| on_approve.call(evt),
                 "Approve"
             }
             button {
-                class: "ui-btn ui-btn--ghost ui-btn--md",
+                class: btn_class(false),
                 r#type: "button",
-                disabled: busy,
+                aria_disabled: if busy { "true" },
                 onclick: move |evt| on_deny.call(evt),
                 "Deny"
             }
             button {
-                class: "ui-btn ui-btn--ghost ui-btn--md",
+                class: btn_class(false),
                 r#type: "button",
-                disabled: busy,
+                aria_disabled: if busy { "true" },
                 onclick: move |evt| on_start_over.call(evt),
                 "Start over"
             }
@@ -1144,7 +1135,10 @@ mod tests {
     #[test]
     fn clean_code_field_omits_aria_invalid() {
         let html = render_entry(clean_entry);
-        assert!(!html.contains("role=\"alert\""), "{html}");
+        assert!(
+            html.contains("<p class=\"field-error\" id=\"link-code-error\" role=\"alert\"></p>"),
+            "the alert line is rendered empty, so the next error is announced: {html}"
+        );
         assert!(
             !html.contains("aria-invalid"),
             "a valid field omits aria-invalid: {html}"
@@ -1248,7 +1242,10 @@ mod tests {
 
         let html = render_entry(started_over_entry);
         assert!(html.contains("id=\"link-step-enter\""), "{html}");
-        assert!(!html.contains("role=\"alert\""), "{html}");
+        assert!(
+            html.contains("<p class=\"field-error\" id=\"link-code-error\" role=\"alert\"></p>"),
+            "{html}"
+        );
         assert!(!html.contains("aria-invalid"), "{html}");
         assert!(html.contains("value=\"\""), "{html}");
 
@@ -1381,5 +1378,53 @@ mod tests {
             "consuming the flag clears the session copy too"
         );
         assert!(!take_return_to_link());
+    }
+
+    #[test]
+    fn page_is_one_narrow_column_with_one_h1() {
+        use crate::components::admin_shared::test_page::render_admin_route as render_route;
+        let html = render_route("/link", Some(scuffed_types::OrgRole::Member));
+        assert_eq!(html.matches("<h1").count(), 1, "{html}");
+        assert_eq!(html.matches("<main").count(), 1, "{html}");
+        assert!(
+            html.contains("ui-shell ui-shell--narrow link-page"),
+            "{html}"
+        );
+        assert!(
+            html.contains("<label class=\"field-label\" for=\"link-code\">"),
+            "{html}"
+        );
+        assert!(html.contains("class=\"account-card link-card\""), "{html}");
+
+        let guest = render_route("/link", None);
+        assert_eq!(guest.matches("<h1").count(), 1, "{guest}");
+        assert!(
+            guest.contains("role=\"status\">Sending you to Log in.</p>"),
+            "{guest}"
+        );
+    }
+
+    fn busy_actions() -> Element {
+        rsx! {
+            LinkConfirmActions {
+                busy: true,
+                on_approve: |_| {},
+                on_deny: |_| {},
+                on_start_over: |_| {},
+            }
+        }
+    }
+
+    #[test]
+    fn busy_buttons_keep_focus() {
+        let html = render_entry(busy_actions);
+        assert_eq!(html.matches("aria-disabled=\"true\"").count(), 3, "{html}");
+        assert!(!html.contains(" disabled"), "{html}");
+    }
+
+    #[test]
+    fn css_uses_tokens() {
+        crate::components::ui::test_support::assert_sizes_from_tokens(CSS);
+        assert!(!CSS.contains("70vh"));
     }
 }

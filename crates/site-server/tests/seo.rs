@@ -91,6 +91,7 @@ async fn test_state(upload_dir: PathBuf) -> AppState {
         reports_dir: PathBuf::from("/tmp/scuffed-test-reports"),
         reports_enabled: true,
         packs_dir: None,
+        hero_icons: scuffed_site_server::hero_icons::HeroIconStore::in_temp_dir(),
         notifier: None,
         nostr_challenge_key: [0u8; 32],
         consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(),
@@ -613,9 +614,81 @@ async fn write_settings(
         None,
         None,
         None,
+        None,
     )
     .await
     .expect("update settings");
+}
+
+#[tokio::test]
+async fn shell_embed_always_carries_brand_font_display() {
+    let tree = TempTree::new("embed-font");
+    let state = test_state(tree.uploads()).await;
+    let app = create_router_with_dist(state.clone(), tree.dist());
+
+    // Present on first paint even when it is the empty default.
+    let (_, _, body) = get(app.clone(), "/").await;
+    let first: Value = serde_json::from_str(settings_json_before_head(&body)).unwrap();
+    assert_eq!(
+        first.get("brand_font_display"),
+        Some(&Value::String(String::new())),
+        "{first}"
+    );
+
+    let user = state
+        .db
+        .create_local_user("embed-font-admin", "unused-hash")
+        .await
+        .unwrap();
+    state
+        .db
+        .create_member(&user.id, "Embed Font Admin", OrgRole::Admin)
+        .await
+        .unwrap();
+    state
+        .db
+        .create_session(&user.id, "embed-font-token", 24)
+        .await
+        .unwrap();
+    let put = |font: &'static str| {
+        let app = app.clone();
+        async move {
+            app.oneshot(
+                Request::builder()
+                    .method(Method::PUT)
+                    .uri("/api/settings")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, "sc_session=embed-font-token")
+                    .body(Body::from(format!(r#"{{"brand_font_display":"{font}"}}"#)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+            .status()
+        }
+    };
+
+    assert_eq!(put("ibm-plex-sans").await, StatusCode::OK);
+    for uri in ["/", "/admin/settings"] {
+        let (_, _, body) = get(app.clone(), uri).await;
+        let embedded: Value = serde_json::from_str(settings_json_before_head(&body)).unwrap();
+        assert_eq!(embedded["brand_font_display"], "ibm-plex-sans", "{uri}");
+    }
+
+    // A rejected value leaves the embed on the stored one.
+    assert_eq!(put("comic-sans").await, StatusCode::BAD_REQUEST);
+    let (_, _, body) = get(app.clone(), "/").await;
+    let embedded: Value = serde_json::from_str(settings_json_before_head(&body)).unwrap();
+    assert_eq!(embedded["brand_font_display"], "ibm-plex-sans");
+
+    // Clearing keeps the key, now empty.
+    assert_eq!(put("").await, StatusCode::OK);
+    let (_, _, body) = get(app, "/").await;
+    let embedded: Value = serde_json::from_str(settings_json_before_head(&body)).unwrap();
+    assert_eq!(
+        embedded.get("brand_font_display"),
+        Some(&Value::String(String::new()))
+    );
 }
 
 #[tokio::test]

@@ -19,11 +19,11 @@
 //! ocr-v1 takes no signal from them.
 //!
 //! The search and its certification are the result word's
-//! ([`super::search_fast`], [`super::certify`]): a fast score at the floor
-//! is a real window's score, so it is sure; a fast score between
-//! [`PRESENT`] and the floor may be an under-read, so the exact check
-//! decides whether any window reaches [`PHRASE_FLOOR`]. A sure read here is
-//! therefore a sure exhaustive read. Only a sure read is a phase signal.
+//! (`ncc::search_fast`, `ncc::certify`): a fast score at the floor is a real
+//! window's score, so it is sure; a fast score between [`PRESENT`] and the
+//! floor may be an under-read, so the exact check decides whether any window
+//! reaches [`PHRASE_FLOOR`]. A sure read here is therefore a sure exhaustive
+//! read. Only a sure read is a phase signal.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -31,9 +31,10 @@ use std::path::Path;
 use image::RgbImage;
 use serde::{Deserialize, Serialize};
 
-use super::{
-    CERT_MACS, Cert, Gray, Level, PRESENT, Phased, Plane, Proj, Stack, WORK, certify, load_gray,
-    make_phased, region, roi_is_valid, scaled_stacks, search_fast, search_full,
+use super::{Plane, WORK, region, roi_is_valid};
+use crate::shadow::ncc::{
+    CERT_MACS, Cert, Gray, Level, PRESENT, Phased, Proj, Stack, certify, load_gray, make_phased,
+    scaled_stacks, search_fast, search_full,
 };
 
 /// The phrase list in the words pack folder.
@@ -142,7 +143,7 @@ impl PhraseTemplates {
     ///
     /// The file comes from a downloaded pack, so a file that does not parse
     /// refuses the folder, and so does any entry (read or not) whose id is
-    /// not a plain word id ([`crate::packs::is_word_id`]), whose region is
+    /// not a plain word id ([`crate::packs::layout::is_word_id`]), whose region is
     /// not inside the game rect, or whose work scale is not the reader's.
     /// A listed phrase whose mask is missing or flat is left out, and so is
     /// one whose mask cannot fit its region ([`fits`]): a mask that can
@@ -167,7 +168,7 @@ impl PhraseTemplates {
         };
         let mut tpls = Vec::new();
         for (id, e) in entries {
-            if !crate::packs::is_word_id(&id)
+            if !crate::packs::layout::is_word_id(&id)
                 || !roi_is_valid(e.roi)
                 || !e.work.is_finite()
                 || (e.work - WORK).abs() > 1e-9

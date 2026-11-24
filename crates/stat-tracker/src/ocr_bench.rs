@@ -92,7 +92,7 @@ fn tab(
     let a = match analyze_frame(
         img,
         Arc::clone(matcher),
-        None,
+        Vec::new(),
         detect::MatchOutcome::Unknown,
         flags,
         // No own-name seeds: the bench has no data dir of a member.
@@ -110,7 +110,8 @@ fn tab(
         | FrameAnalysisOutcome::ShareOpening
         | FrameAnalysisOutcome::Declined
         | FrameAnalysisOutcome::CaptureBusy
-        | FrameAnalysisOutcome::PortalPaused => {
+        | FrameAnalysisOutcome::PortalPaused
+        | FrameAnalysisOutcome::NotFocused => {
             return json!({"status": "stream_miss"});
         }
     };

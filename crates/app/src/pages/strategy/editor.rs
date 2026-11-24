@@ -1,4 +1,4 @@
-//! Strategy editor page — main composition layer for the strategy editor.
+//! Strategy editor page: main composition layer for the strategy editor.
 //!
 //! Composes all editor sub-components (canvas, toolbar, panels, timeline)
 //! and manages top-level editor state using Dioxus signals.
@@ -26,7 +26,9 @@
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use wasm_bindgen::JsCast;
+
+use super::load_error::{is_retrying, strategy_load_error};
+use crate::components::retry_label;
 
 use scuffed_api_client::ApiClient;
 use scuffed_types::strategy::{
@@ -38,13 +40,16 @@ use crate::components::strategy::{
     HeroPicker, HeroWinRate, MapCanvas, PropertiesPanel, TeamPanel, Timeline, Toolbar,
 };
 use crate::components::{Toast, use_toast};
-use crate::keybindings::{self, EditorAction};
-use crate::state::editor::{CanvasState, DrawingState, StrategyState};
+use crate::keybindings::{self, CanvasHint, CanvasKey, EditorAction};
+use crate::state::editor::{
+    CanvasState, DrawingState, StrategyState, map_change_allowed, map_is_kept,
+};
 use crate::state::maps::{
     PICKER_MODE_ORDER, display_map_name, game_mode_api_str, game_mode_for_map, map_id_for_create,
     maps_for_mode,
 };
 use crate::state::undo::{UndoManager, UndoableAction};
+use crate::state::unsaved::use_unsaved_guard;
 
 // =============================================================================
 // API request/response types
@@ -86,6 +91,24 @@ struct EditorHeroEntry {
     winrate: f64,
 }
 
+/// Shown beside the map name once the map can no longer be changed.
+const MAP_FIXED_NOTE: &str = "fixed once saved";
+/// Shown beside a map picked for a saved strategy that has none stored: the
+/// update API takes no map, so the pick is never sent (issue 817).
+const MAP_NOT_SAVED_NOTE: &str = "not saved";
+
+/// The note beside the map name in the status bar, if any: why it cannot
+/// change, or that a map picked for a saved strategy is not kept.
+fn map_status_note(saved: bool, can_change: bool, has_current_map: bool) -> Option<&'static str> {
+    if !can_change {
+        Some(MAP_FIXED_NOTE)
+    } else if saved && has_current_map {
+        Some(MAP_NOT_SAVED_NOTE)
+    } else {
+        None
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct UpdateStrategyRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -108,7 +131,10 @@ const EDITOR_CSS: &str = r#"
     .editor-page {
         display: flex;
         flex-direction: column;
-        height: 100vh;
+        /* The site shell keeps its top bar (and the tab bar on phone) on
+           screen, so the editor takes the rest of the viewport. */
+        height: calc(100vh - var(--shell-chrome-height, 0px));
+        height: calc(100dvh - var(--shell-chrome-height, 0px));
         background: var(--bg);
         color: var(--text);
         overflow: hidden;
@@ -165,7 +191,7 @@ const EDITOR_CSS: &str = r#"
     .sidebar-collapse-btn {
         background: none;
         border: none;
-        color: var(--text-3);
+        color: var(--text-subtle);
         cursor: pointer;
         padding: 0.2rem 0.4rem;
         font-size: 0.7rem;
@@ -174,7 +200,7 @@ const EDITOR_CSS: &str = r#"
         flex-shrink: 0;
     }
     .sidebar-collapse-btn:hover {
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         color: var(--text);
     }
     .sidebar-content {
@@ -200,6 +226,29 @@ const EDITOR_CSS: &str = r#"
         position: relative;
         overflow: hidden;
     }
+    /* The map's live hint. Always mounted (a status node inserted together
+       with its text is often not announced); it shows only while it has
+       text, that is while the map holds focus. */
+    .canvas-key-hint {
+        position: absolute;
+        left: 50%;
+        bottom: 0.5rem;
+        transform: translateX(-50%);
+        z-index: 4;
+        max-width: calc(100% - 1rem);
+        padding: 0.3rem 0.6rem;
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        background: var(--surface);
+        color: var(--text);
+        font-size: 0.75rem;
+        text-align: center;
+        pointer-events: none;
+    }
+    .canvas-key-hint:empty {
+        padding: 0;
+        border: 0;
+    }
 
     /* Bottom panel (element list) */
     .element-list-wrapper {
@@ -219,9 +268,9 @@ const EDITOR_CSS: &str = r#"
         width: 100%;
         padding: 0.15rem;
         text-align: center;
-        background: var(--surface-2);
+        background: var(--surface-sunken);
         border: none;
-        color: var(--text-3);
+        color: var(--text-subtle);
         cursor: pointer;
         font-size: 0.65rem;
         transition: background 0.15s, color 0.15s;
@@ -243,11 +292,11 @@ const EDITOR_CSS: &str = r#"
         border-radius: 4px;
         cursor: pointer;
         font-size: 0.8rem;
-        color: var(--text-2);
+        color: var(--text-3);
         transition: background 0.1s;
     }
     .element-list-item:hover {
-        background: var(--surface-2);
+        background: var(--surface-sunken);
     }
     .element-list-item.selected {
         background: var(--accent-soft);
@@ -255,7 +304,7 @@ const EDITOR_CSS: &str = r#"
     }
     .element-list-item .el-number {
         font-size: 0.7rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         width: 1.5em;
         text-align: right;
     }
@@ -264,7 +313,7 @@ const EDITOR_CSS: &str = r#"
         padding: 0.1rem 0.35rem;
         border-radius: 3px;
         background: var(--accent-soft);
-        color: var(--accent);
+        color: var(--accent-text);
         text-transform: uppercase;
         letter-spacing: 0.04em;
     }
@@ -285,29 +334,36 @@ const EDITOR_CSS: &str = r#"
         background: var(--surface);
         border-top: 1px solid var(--border);
         font-size: 0.75rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
     }
     .status-item {
         white-space: nowrap;
     }
+    /* The map item gives way first, so Phase, Saving... and Unsaved
+       changes stay visible on a narrow bar. */
+    .status-map {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
     .status-map-link {
         background: none;
         border: none;
-        color: var(--text-2);
+        color: var(--text-3);
         cursor: pointer;
         font-size: 0.75rem;
         padding: 0;
         transition: color 0.15s;
     }
     .status-map-link:hover {
-        color: var(--accent);
+        color: var(--accent-text);
     }
     .status-item.unsaved {
-        color: var(--accent);
+        color: var(--accent-text);
         font-weight: 600;
     }
     .status-item.collaborators {
-        color: var(--text-2);
+        color: var(--text-3);
     }
 
     /* Map picker modal */
@@ -321,7 +377,8 @@ const EDITOR_CSS: &str = r#"
         display: flex;
         align-items: center;
         justify-content: center;
-        z-index: 100;
+        /* Above the site top bar and phone tab bar (100), below the drawer. */
+        z-index: 110;
     }
     .map-picker-dialog {
         background: var(--surface);
@@ -348,7 +405,7 @@ const EDITOR_CSS: &str = r#"
     .map-picker-close {
         background: none;
         border: none;
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-size: 1.2rem;
         cursor: pointer;
         padding: 0.25rem;
@@ -368,15 +425,15 @@ const EDITOR_CSS: &str = r#"
     .map-picker-error {
         margin: 0;
         padding: 0.65rem 0.75rem;
-        border: 1px solid var(--danger);
+        border: 1px solid var(--loss);
         border-radius: 8px;
-        background: color-mix(in srgb, var(--danger) 12%, transparent);
-        color: var(--danger);
+        background: color-mix(in srgb, var(--loss) 12%, transparent);
+        color: var(--loss);
         font-size: 0.85rem;
     }
     .map-picker-mode-title {
         margin: 0 0 0.5rem;
-        color: var(--text-2);
+        color: var(--text-3);
         font-size: 0.7rem;
         font-weight: 600;
         letter-spacing: 0.06em;
@@ -399,14 +456,14 @@ const EDITOR_CSS: &str = r#"
         transition: border-color 0.15s, background 0.15s, color 0.15s;
     }
     .map-picker-item:hover {
-        border-color: var(--accent);
+        border-color: var(--accent-solid);
         color: var(--text);
-        background: var(--surface-2);
+        background: var(--surface-sunken);
     }
     .map-picker-item.selected {
-        border-color: var(--accent);
+        border-color: var(--accent-solid);
         background: var(--accent-soft);
-        color: var(--accent);
+        color: var(--accent-text);
         font-weight: 600;
     }
 
@@ -414,11 +471,69 @@ const EDITOR_CSS: &str = r#"
     .panel-placeholder {
         padding: 0.75rem;
         text-align: center;
-        color: var(--text-3);
+        color: var(--text-subtle);
         font-size: 0.8rem;
         font-style: italic;
     }
 "#;
+
+/// The map picker dialog, its heading, its Close button and the selected map.
+const MAP_PICKER_ID: &str = "map-picker";
+const MAP_PICKER_TITLE_ID: &str = "map-picker-title";
+const MAP_PICKER_CLOSE_ID: &str = "map-picker-close";
+const MAP_PICKER_SELECTED_ID: &str = "map-picker-selected";
+/// The status bar's map item: the "Map:" button that opens the picker while
+/// the map can change, otherwise plain text with `tabindex="-1"`. Focus
+/// returns to it when the picker closes.
+const EDITOR_MAP_BUTTON_ID: &str = "editor-map-button";
+
+/// The picker id of the stored map, through the same lookup the rest of the
+/// app uses (a slug or a display name, any surrounding spaces), so the
+/// current map is marked and focused however it was stored. `None` for no
+/// map or one the picker does not list.
+fn picker_current_id(current_map: Option<&str>) -> Option<&'static str> {
+    current_map
+        .and_then(crate::state::maps::pickable_map_by_id)
+        .map(|map| map.id)
+}
+
+/// What a key does while the map picker is open. Every other key goes to
+/// the focused control in the picker; no editor shortcut runs behind it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PickerKey {
+    /// Esc: close the picker, focus back on the Map button.
+    Close,
+    /// Tab or Shift+Tab: wrap inside the picker.
+    KeepFocusInside,
+    /// Ctrl+S or Cmd+S: the editor does not save behind the modal (or the
+    /// phone drawer), and the browser's Save Page dialog must not open either.
+    BlockBrowserSave,
+}
+
+fn picker_key(binding: &keybindings::Keybinding) -> Option<PickerKey> {
+    let held = binding.modifiers;
+    match binding.key.as_str() {
+        "escape" => Some(PickerKey::Close),
+        "tab" => Some(PickerKey::KeepFocusInside),
+        "s" if held.ctrl || held.meta => Some(PickerKey::BlockBrowserSave),
+        _ => None,
+    }
+}
+
+/// Accessible name for a side panel's collapse button.
+fn panel_button_label(panel: &'static str, open: bool) -> String {
+    if open {
+        format!("Hide {panel} panel")
+    } else {
+        format!("Show {panel} panel")
+    }
+}
+
+/// `inert` for the editor behind the open map picker. Text or removed,
+/// never a bool (see `layouts::shell::background_inert`).
+fn behind_picker(open: bool) -> Option<&'static str> {
+    open.then_some("true")
+}
 
 // =============================================================================
 // Entry points
@@ -435,14 +550,16 @@ pub fn StrategyEditorNew() -> Element {
 /// Editor page for editing an existing strategy (loaded by ID).
 #[component]
 pub fn StrategyEditor(id: String) -> Element {
+    let mut refresh = use_signal(|| 0u32);
     let id_clone = id.clone();
     let strategy_resource = use_resource(move || {
         let id = id_clone.clone();
+        let _ = refresh();
         async move {
             ApiClient::web()
                 .fetch::<Strategy>(&format!("/api/strategy/strategies/{id}"))
                 .await
-                .ok()
+                .map_err(|e| crate::client_error::logged_message("strategy load", &e))
         }
     });
 
@@ -450,24 +567,40 @@ pub fn StrategyEditor(id: String) -> Element {
     match data.as_ref() {
         None => rsx! {
             div {
-                style: "display: flex; align-items: center; justify-content: center; height: 100vh; color: var(--text-3);",
+                style: "display: flex; align-items: center; justify-content: center; height: calc(100vh - var(--shell-chrome-height, 0px)); color: var(--text-subtle);",
                 "Loading strategy..."
             }
         },
-        Some(None) => rsx! {
-            div {
-                style: "display: flex; align-items: center; justify-content: center; height: 100vh; color: var(--danger);",
-                "Strategy not found or access denied."
+        Some(Err(err)) => {
+            let shown = strategy_load_error(err);
+            let retrying = is_retrying(*strategy_resource.state().read());
+            let label = retry_label(retrying);
+            rsx! {
+                div {
+                    style: "display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.75rem; height: calc(100vh - var(--shell-chrome-height, 0px)); color: var(--loss);",
+                    role: "alert",
+                    aria_busy: if retrying { "true" },
+                    "{shown.message}"
+                    if shown.retry {
+                        button {
+                            r#type: "button",
+                            class: "fetch-error__retry is-compact",
+                            disabled: retrying,
+                            onclick: move |_| refresh += 1,
+                            "{label}"
+                        }
+                    }
+                }
             }
-        },
-        Some(Some(strategy)) => rsx! {
+        }
+        Some(Ok(strategy)) => rsx! {
             EditorLayout { initial_strategy: Some(strategy.clone()) }
         },
     }
 }
 
 // =============================================================================
-// EditorLayout — main composition component
+// EditorLayout: main composition component
 // =============================================================================
 
 #[component]
@@ -491,8 +624,17 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
         if let Some(ref strategy) = initial_strategy {
             state.load_strategy(strategy.clone());
         }
+        // The team of a strategy that was just created here (issue 817).
+        state.take_team_hand_off();
         state
     });
+    // Ask before a link, a reload or closing the tab drops an unsaved
+    // drawing. Up here, ahead of any way out of the component, so it runs
+    // on every render; a save that clears the flag takes the guard off.
+    // The same `has_unsaved` feeds the toolbar and the "Unsaved changes"
+    // line below, so the prompt and the line cannot disagree.
+    let has_unsaved = strategy_state.read().has_unsaved_changes;
+    use_unsaved_guard(has_unsaved);
     let mut undo_manager = use_signal(UndoManager::default);
 
     // Sidebar collapse state
@@ -500,7 +642,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
     let mut right_open = use_signal(|| true);
     let mut bottom_open = use_signal(|| false);
 
-    // Map picker modal — open when creating (or a loaded strategy has no map).
+    // Map picker modal: open when creating (or a loaded strategy has no map).
     let mut show_map_picker = use_signal(|| {
         initial_strategy
             .as_ref()
@@ -508,13 +650,36 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
             .unwrap_or(true)
     });
     let mut map_picker_error = use_signal(|| None::<String>);
+    // Set when the picker closes: focus goes back to the status bar's Map
+    // button after the render that removed the picker and `inert`.
+    let mut picker_refocus = use_signal(|| false);
+    let picker_open = *show_map_picker.read();
+    // The picker is a modal: the shell chrome goes inert while it is open.
+    crate::layouts::use_page_modal(picker_open);
+    // Focus moves into the picker when it opens: the current map, or Close
+    // when there is none or it is not in the picker.
+    use_effect(move || {
+        if show_map_picker() && !crate::layouts::focus_element(MAP_PICKER_SELECTED_ID) {
+            crate::layouts::focus_element(MAP_PICKER_CLOSE_ID);
+        }
+    });
+    use_effect(move || {
+        if picker_refocus() {
+            picker_refocus.set(false);
+            crate::layouts::focus_element(EDITOR_MAP_BUTTON_ID);
+        }
+    });
+    let mut close_picker = move || {
+        show_map_picker.set(false);
+        picker_refocus.set(true);
+    };
 
     // Save status
     let save_in_progress = use_signal(|| false);
     let toast = use_toast();
     let navigator = use_navigator();
 
-    // Personal winrates per hero from /api/strategy/meta — fetched once on mount.
+    // Personal winrates per hero from /api/strategy/meta: fetched once on mount.
     // None while loading or when the user is not an authed org member.
     let hero_winrates = use_resource(|| async {
         let resp = ApiClient::web()
@@ -545,6 +710,15 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
         opened_as_new: initial_strategy.is_none(),
     };
 
+    // The map's key hint: shown on the first key pressed in the canvas (not
+    // on a mouse focus, so it does not cover the map while drawing), cleared
+    // when focus leaves it. The status node stays mounted; only its text
+    // changes.
+    let mut canvas_hint = use_signal(CanvasHint::default);
+    // Esc out of the canvas lands on `main#main`. Through the mounted handle,
+    // so it works in the desktop webview as well as on web.
+    let mut focus_main = crate::layouts::use_focus_main();
+
     // Track previous tool for space-to-pan behavior
     let _prev_tool = use_hook(|| std::cell::Cell::new(Tool::Select));
 
@@ -570,23 +744,55 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
     });
 
     // =========================================================================
-    // Keyboard shortcuts: document keydown, capture phase (so Tab is seen
-    // before the browser moves focus). Removed when the editor unmounts.
+    // Keyboard shortcuts: document keydown, capture phase. Removed when the
+    // editor unmounts. Tab is not handled here: `from_keyboard_event` never
+    // resolves it, so outside the map canvas Tab moves focus as on any page.
+    // The Tab panel toggle lives on the map canvas element's own `onkeydown`
+    // and reaches the editor through `on_canvas_key`.
+    //
+    // Where the key landed decides whether a shortcut fires
+    // (`keybindings::shortcut_allowed`, FrozenTear 2026-11-17): every
+    // shortcut, Ctrl/Cmd chords included, fires only with focus inside the
+    // map canvas. On a button, link, slider, select, text field, the page
+    // body or `main` the key stays with the browser and the focused element.
+    // Space on a focused button only presses the button.
     // =========================================================================
     crate::layouts::use_document_keydown_capture(move |event: web_sys::KeyboardEvent| {
-        // Don't handle shortcuts when typing in an input
-        if let Some(target) = event.target()
-            && let Ok(element) = target.dyn_into::<web_sys::HtmlElement>()
-        {
-            let tag = element.tag_name().to_lowercase();
-            if tag == "input" || tag == "textarea" || tag == "select" {
-                return;
+        // The site drawer (phone layout) covers the page and makes `main`
+        // inert: the editor behind it takes no shortcut, even with focus
+        // on the body after a click on blank drawer space. Ctrl/Cmd+S still
+        // stops the browser's Save Page dialog, as in the picker (prevent
+        // default only, nothing is saved).
+        if crate::layouts::main_is_inert() {
+            let binding = keybindings::Keybinding::from_keyboard_event(&event);
+            if picker_key(&binding) == Some(PickerKey::BlockBrowserSave) {
+                event.prevent_default();
             }
+            return;
+        }
+        // The map picker is a modal: while it is open the editor behind it
+        // takes no shortcut. Esc closes it and Tab stays inside it.
+        if *show_map_picker.peek() {
+            match picker_key(&keybindings::Keybinding::from_keyboard_event(&event)) {
+                Some(PickerKey::Close) => {
+                    event.prevent_default();
+                    close_picker();
+                }
+                Some(PickerKey::KeepFocusInside) => {
+                    crate::layouts::trap_tab_within(MAP_PICKER_ID, &event);
+                }
+                Some(PickerKey::BlockBrowserSave) => event.prevent_default(),
+                None => {}
+            }
+            return;
         }
 
         let Some(action) = keybindings::from_keyboard_event(&event) else {
             return;
         };
+        // A shortcut that fires owns the key: no page scroll on Space or the
+        // arrows, no browser Back on Backspace.
+        event.prevent_default();
 
         match action {
             // Tool selection
@@ -615,21 +821,18 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                 drawing_state.with_mut(|d| d.active_tool = Tool::Eraser);
             }
 
-            // Panel toggles
+            // Panel toggles. No default key resolves to the left panel
+            // here (it is Tab inside the canvas); a custom binding could.
             EditorAction::ToggleLeftPanel => {
-                event.prevent_default();
                 left_open.with_mut(|v| *v = !*v);
             }
             EditorAction::ToggleRightPanel => {
-                event.prevent_default();
                 right_open.with_mut(|v| *v = !*v);
             }
             EditorAction::ToggleBottomPanel => {
-                event.prevent_default();
                 bottom_open.with_mut(|v| *v = !*v);
             }
             EditorAction::ToggleHealthPacks => {
-                event.prevent_default();
                 canvas_state.with_mut(|c| c.show_health_packs = !c.show_health_packs);
             }
 
@@ -651,19 +854,16 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
 
             // Zoom
             EditorAction::ZoomIn => {
-                event.prevent_default();
                 canvas_state.with_mut(|c| {
                     c.zoom = (c.zoom * 1.2).clamp(0.03, 4.0);
                 });
             }
             EditorAction::ZoomOut => {
-                event.prevent_default();
                 canvas_state.with_mut(|c| {
                     c.zoom = (c.zoom / 1.2).clamp(0.03, 4.0);
                 });
             }
             EditorAction::ZoomReset => {
-                event.prevent_default();
                 canvas_state.with_mut(|c| {
                     c.zoom = 1.0;
                     c.pan_offset = Position::new(0.0, 0.0);
@@ -702,14 +902,12 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
 
             // Undo/Redo
             EditorAction::Undo => {
-                event.prevent_default();
                 let action = undo_manager.with_mut(|u| u.undo());
                 if let Some(action) = action {
                     apply_undo(&mut strategy_state, action);
                 }
             }
             EditorAction::Redo => {
-                event.prevent_default();
                 let action = undo_manager.with_mut(|u| u.redo());
                 if let Some(action) = action {
                     apply_redo(&mut strategy_state, action);
@@ -718,7 +916,6 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
 
             // Save
             EditorAction::Save => {
-                event.prevent_default();
                 save_strategy(save_ctx);
             }
         }
@@ -744,6 +941,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
         (Some(map), None) => display_map_name(map),
         (None, _) => "None".to_string(),
     };
+    let current_pick = picker_current_id(cs.current_map.as_deref());
     let element_count = ss.elements.len();
     let tool_display = format!("{}", ds.active_tool);
     let phase_display = {
@@ -754,7 +952,18 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
             None => format!("0/{}", total),
         }
     };
-    let has_unsaved = ss.has_unsaved_changes;
+    // The update API takes no map, so the map is fixed once the strategy is
+    // saved (and while a save is in flight).
+    let saved = ss.strategy_id.is_some();
+    let can_change_map = map_change_allowed(
+        saved,
+        *save_in_progress.read(),
+        map_is_kept(saved, ss.map_saved, cs.current_map.is_some()),
+    );
+    let map_label = match map_status_note(saved, can_change_map, cs.current_map.is_some()) {
+        Some(note) => format!("Map: {map_display} ({note})"),
+        None => format!("Map: {map_display}"),
+    };
 
     // Clone values needed in callbacks and child components
     let zoom_val = cs.zoom;
@@ -795,6 +1004,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
     drop(ds);
     drop(ss);
 
+    let hint_text = canvas_hint.read().text();
     let can_undo = undo_manager.read().can_undo();
     let can_redo = undo_manager.read().can_redo();
     let saving_val = *save_in_progress.read();
@@ -808,7 +1018,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
             // ===========================================================
             // Editor container (sidebars + main area)
             // ===========================================================
-            div { class: "editor-container",
+            div { class: "editor-container", inert: behind_picker(picker_open),
 
                 // ---- Left sidebar ----
                 aside {
@@ -818,7 +1028,10 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                         span { class: "sidebar-title", "Team & Heroes" }
                         button {
                             class: "sidebar-collapse-btn",
-                            title: "Toggle panel (Tab)",
+                            r#type: "button",
+                            title: "Toggle panel (Tab while the map has focus)",
+                            aria_label: panel_button_label("team", !left_collapsed),
+                            aria_expanded: if left_collapsed { "false" } else { "true" },
                             onclick: move |_| left_open.with_mut(|v| *v = !*v),
                             if left_collapsed { ">" } else { "<" }
                         }
@@ -829,10 +1042,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                             composition: composition_val,
                             selected_hero: hero_val.clone(),
                             on_format_change: move |f: TeamFormat| {
-                                strategy_state.with_mut(|s| {
-                                    s.team_format = f;
-                                    s.has_unsaved_changes = true;
-                                });
+                                strategy_state.with_mut(|s| s.set_team_format(f));
                             },
                             on_assign: move |slot: TeamSlot| {
                                 let hero = drawing_state.read().selected_hero.clone();
@@ -874,10 +1084,8 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                             on_clear_all: move |_| {
                                 let prev = strategy_state.read().team_composition.clone();
                                 if !prev.is_empty() {
-                                    strategy_state.with_mut(|s| {
-                                        s.team_composition.clear();
-                                        s.has_unsaved_changes = true;
-                                    });
+                                    strategy_state
+                                        .with_mut(|s| s.set_team_composition(Vec::new()));
                                     undo_manager.with_mut(|u| {
                                         u.push(UndoableAction::ClearAllSlots { previous: prev });
                                     });
@@ -973,6 +1181,8 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                     }
 
                     div { class: "canvas-container",
+                        onfocusout: move |_| canvas_hint.set(CanvasHint::Off),
+                        p { class: "canvas-key-hint", role: "status", "{hint_text}" }
                         MapCanvas {
                             zoom: zoom_val,
                             pan_offset: pan_val,
@@ -980,6 +1190,37 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                             show_health_packs: show_hp,
                             map_metadata: metadata_val,
                             current_map_id: map_id_val,
+                            // Keys the canvas element itself resolved while it
+                            // held focus (`keybindings::canvas_key`). Tab
+                            // toggles the left panel and focus stays. Esc first
+                            // drops a drawing or selection in progress (the
+                            // canvas clears its own arrow and the selection);
+                            // with nothing in progress Esc sends focus to the
+                            // main landmark. Shift+Tab is left to the browser,
+                            // which moves to the previous stop.
+                            on_canvas_key: move |key: CanvasKey| match key {
+                                CanvasKey::ToggleLeftPanel => {
+                                    let now_open = left_open.with_mut(|v| {
+                                        *v = !*v;
+                                        *v
+                                    });
+                                    canvas_hint.set(CanvasHint::PanelToggled(now_open));
+                                }
+                                CanvasKey::CancelInProgress => {
+                                    drawing_state.with_mut(|d| {
+                                        d.is_drawing = false;
+                                        d.drawing_points.clear();
+                                    });
+                                }
+                                CanvasKey::LeaveToShell => focus_main(),
+                                CanvasKey::LeaveBackwards => {}
+                            },
+                            on_canvas_keydown: move |_| {
+                                let next = canvas_hint.peek().after_key();
+                                if next != *canvas_hint.peek() {
+                                    canvas_hint.set(next);
+                                }
+                            },
                             active_tool: tool_val,
                             draw_color: color_val,
                             fill_opacity: opacity_val,
@@ -1124,13 +1365,16 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                         }
                     }
 
-                    // Bottom panel — element list
+                    // Bottom panel: element list
                     div {
                         class: if bottom_collapsed { "element-list-wrapper collapsed" } else { "element-list-wrapper" },
 
                         button {
                             class: "panel-collapse-btn panel-collapse-bottom",
-                            title: "Toggle elements panel ([)",
+                            r#type: "button",
+                            title: "Toggle elements panel ([ while the map has focus)",
+                            aria_label: panel_button_label("elements", !bottom_collapsed),
+                            aria_expanded: if bottom_collapsed { "false" } else { "true" },
                             onclick: move |_| bottom_open.with_mut(|v| *v = !*v),
                             if bottom_collapsed { "^" } else { "v" }
                         }
@@ -1160,7 +1404,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                                             }
                                             span { class: "el-type", "{type_name}" }
                                             if !label.is_empty() {
-                                                span { style: "color: var(--text-2);", "{label}" }
+                                                span { style: "color: var(--text-3);", "{label}" }
                                             }
                                         }
                                     }
@@ -1182,7 +1426,10 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                     div { class: "sidebar-header",
                         button {
                             class: "sidebar-collapse-btn",
-                            title: "Toggle panel (Shift+Tab)",
+                            r#type: "button",
+                            title: "Toggle panel (] while the map has focus)",
+                            aria_label: panel_button_label("properties", !right_collapsed),
+                            aria_expanded: if right_collapsed { "false" } else { "true" },
                             onclick: move |_| right_open.with_mut(|v| *v = !*v),
                             if right_collapsed { "<" } else { ">" }
                         }
@@ -1309,12 +1556,27 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
             // ===========================================================
             // Status bar
             // ===========================================================
-            div { class: "editor-statusbar",
-                button {
-                    class: "status-item status-map-link",
-                    title: "Change map",
-                    onclick: move |_| show_map_picker.set(true),
-                    "Map: {map_display}"
+            div { class: "editor-statusbar", inert: behind_picker(picker_open),
+                if can_change_map {
+                    button {
+                        id: EDITOR_MAP_BUTTON_ID,
+                        class: "status-item status-map status-map-link",
+                        r#type: "button",
+                        title: "Change map",
+                        onclick: move |_| show_map_picker.set(true),
+                        "{map_label}"
+                    }
+                } else {
+                    // Not a control: the map of a saved strategy cannot be
+                    // changed, and the reason is in the text itself. It keeps
+                    // the id (and takes script focus) so focus still has a
+                    // place to return to when the picker closes.
+                    span {
+                        id: EDITOR_MAP_BUTTON_ID,
+                        class: "status-item status-map",
+                        tabindex: "-1",
+                        "{map_label}"
+                    }
                 }
                 span { class: "status-item",
                     "Elements: {element_count}"
@@ -1335,17 +1597,25 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
             // ===========================================================
             // Map picker modal
             // ===========================================================
-            if *show_map_picker.read() {
+            // A modal dialog: named by its heading, focus moves in on open
+            // and stays in (the keydown listener above), Esc or Close or a
+            // click outside closes it and focus returns to the Map button.
+            // The editor behind it and the shell chrome are inert.
+            if picker_open {
                 div {
                     class: "map-picker-overlay",
-                    onclick: move |_| show_map_picker.set(false),
+                    onclick: move |_| close_picker(),
 
                     div {
+                        id: MAP_PICKER_ID,
                         class: "map-picker-dialog",
+                        role: "dialog",
+                        aria_modal: "true",
+                        aria_labelledby: MAP_PICKER_TITLE_ID,
                         onclick: move |evt| evt.stop_propagation(),
 
                         div { class: "map-picker-header",
-                            h3 {
+                            h3 { id: MAP_PICKER_TITLE_ID,
                                 if canvas_state.read().current_map.is_some() {
                                     "Change Map"
                                 } else {
@@ -1353,14 +1623,17 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                                 }
                             }
                             button {
+                                id: MAP_PICKER_CLOSE_ID,
                                 class: "map-picker-close",
-                                onclick: move |_| show_map_picker.set(false),
+                                r#type: "button",
+                                aria_label: "Close map picker",
+                                onclick: move |_| close_picker(),
                                 "X"
                             }
                         }
                         div { class: "map-picker-content",
-                            if let Some(err) = map_picker_error.read().as_ref() {
-                                p { class: "map-picker-error", "{err}" }
+                            if let Some(message) = map_picker_error.read().as_ref() {
+                                p { class: "map-picker-error", "{message}" }
                             }
                             for mode in PICKER_MODE_ORDER {
                                 {
@@ -1374,11 +1647,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                                                     for map in maps {
                                                         {
                                                             let map_id = map.id;
-                                                            let selected = canvas_state
-                                                                .read()
-                                                                .current_map
-                                                                .as_deref()
-                                                                == Some(map_id);
+                                                            let selected = current_pick == Some(map_id);
                                                             let item_class = if selected {
                                                                 "map-picker-item selected"
                                                             } else {
@@ -1386,17 +1655,38 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                                                             };
                                                             rsx! {
                                                                 button {
+                                                                    id: if selected { Some(MAP_PICKER_SELECTED_ID) } else { None },
                                                                     class: "{item_class}",
                                                                     r#type: "button",
+                                                                    aria_current: if selected { Some("true") } else { None },
                                                                     onclick: move |_| {
-                                                                        canvas_state.with_mut(|c| {
-                                                                            c.select_map(map_id.to_string(), None);
-                                                                        });
-                                                                        strategy_state.with_mut(|s| {
-                                                                            s.has_unsaved_changes = true;
-                                                                        });
+                                                                        let (saved, map_saved) = {
+                                                                            let s = strategy_state.peek();
+                                                                            (s.strategy_id.is_some(), s.map_saved)
+                                                                        };
+                                                                        let allowed = map_change_allowed(
+                                                                            saved,
+                                                                            *save_in_progress.peek(),
+                                                                            map_is_kept(
+                                                                                saved,
+                                                                                map_saved,
+                                                                                canvas_state.peek().current_map.is_some(),
+                                                                            ),
+                                                                        );
+                                                                        if allowed {
+                                                                            canvas_state.with_mut(|c| {
+                                                                                c.select_map(map_id.to_string(), None);
+                                                                            });
+                                                                            // The map is sent only on create, so it
+                                                                            // is an unsaved change only before that.
+                                                                            if !saved {
+                                                                                strategy_state.with_mut(|s| {
+                                                                                    s.has_unsaved_changes = true;
+                                                                                });
+                                                                            }
+                                                                        }
                                                                         map_picker_error.set(None);
-                                                                        show_map_picker.set(false);
+                                                                        close_picker();
                                                                     },
                                                                     "{map.name}"
                                                                 }
@@ -1558,19 +1848,25 @@ fn save_strategy(ctx: SaveContext) {
         match result {
             Ok(saved) => {
                 let id = saved.id.clone();
-                let clean =
-                    strategy_state.with_mut(|s| s.mark_saved(&snapshot, saved.id, saved.owner_id));
+                let map_saved = !saved.map_id.trim().is_empty();
+                let clean = strategy_state.with_mut(|s| {
+                    s.map_saved = map_saved;
+                    s.mark_saved(&snapshot, saved.id, saved.owner_id)
+                });
                 tracing::info!("Strategy saved successfully");
                 toast.show(Toast::success("Strategy saved."));
                 if opened_as_new && clean {
                     // Leave `/strategy/editor` so a reload or a second save
                     // works on this strategy instead of creating another.
+                    // The new route's editor loads from the server, which
+                    // has no team, so the team goes across by hand.
+                    strategy_state.peek().hand_off_team();
                     navigator.replace(crate::routes::Route::StrategyEditor { id });
                 }
             }
             Err(e) => {
                 tracing::error!("Failed to save strategy: {e}");
-                toast.show(Toast::error(format!("Failed to save strategy: {e}")));
+                toast.show(Toast::error_from("Failed to save strategy", &e));
             }
         }
         save_in_progress.set(false);
@@ -1665,10 +1961,7 @@ fn apply_undo(strategy_state: &mut Signal<StrategyState>, action: UndoableAction
             });
         }
         UndoableAction::ClearAllSlots { previous } => {
-            strategy_state.with_mut(|s| {
-                s.team_composition = previous;
-                s.has_unsaved_changes = true;
-            });
+            strategy_state.with_mut(|s| s.set_team_composition(previous));
         }
     }
 }
@@ -1722,10 +2015,335 @@ fn apply_redo(strategy_state: &mut Signal<StrategyState>, action: UndoableAction
             });
         }
         UndoableAction::ClearAllSlots { .. } => {
-            strategy_state.with_mut(|s| {
-                s.team_composition.clear();
-                s.has_unsaved_changes = true;
-            });
+            strategy_state.with_mut(|s| s.set_team_composition(Vec::new()));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Review 819: leaving the editor with an unsaved drawing asks first.
+    ///
+    /// The guard is a no-op off wasm, so this test cannot run it: the
+    /// wiring rests on these source pins alone. How `mark_saved` clears the
+    /// flag is covered in `state/editor.rs`; the prompt itself needs a
+    /// browser pass (see the PR's QA steps). The pins: one guard call, in
+    /// `EditorLayout`, ahead of anything that could leave the component; it
+    /// reads the same `has_unsaved` as the toolbar and the "Unsaved
+    /// changes" line; the save path still calls `mark_saved` and only
+    /// replaces the route when that save left the editor clean.
+    #[test]
+    fn the_leave_guard_follows_the_unsaved_drawing() {
+        let src = include_str!("editor.rs");
+        let prod = src.split("#[cfg(test)]\nmod tests").next().unwrap();
+        let flag = "let has_unsaved = strategy_state.read().has_unsaved_changes;";
+        let guard = "use_unsaved_guard(has_unsaved);";
+        assert_eq!(prod.matches(guard).count(), 1, "one guard, on the page");
+        let layout = prod
+            .split("fn EditorLayout(")
+            .nth(1)
+            .expect("EditorLayout is in this file");
+        let before_guard = layout.split(guard).next().unwrap();
+        assert!(
+            before_guard.len() < layout.len(),
+            "EditorLayout owns the guard"
+        );
+        assert!(
+            !before_guard.contains("return") && !before_guard.contains('?'),
+            "no way out of the component ahead of the guard"
+        );
+        // One binding, read just before the guard, reused below.
+        assert_eq!(prod.matches("let has_unsaved =").count(), 1);
+        assert!(
+            before_guard.trim_end().ends_with(flag),
+            "the guard reads the flag bound right above it"
+        );
+        assert!(prod.contains("has_unsaved_changes: has_unsaved,"));
+        assert!(prod.contains("} else if has_unsaved {"));
+        assert!(prod.contains("s.mark_saved(&snapshot, saved.id, saved.owner_id)"));
+        // A first save only moves to the new route when nothing was edited
+        // during it; a replace skips the guard and would drop that edit.
+        assert!(prod.contains("if opened_as_new && clean {"));
+    }
+
+    /// Vision blocking 2: Esc closes the picker, Tab stays inside it, and
+    /// no other key (Space, Delete, a tool letter) reaches the editor.
+    /// Vision nit 14: Ctrl+S and Cmd+S are held back from the browser.
+    #[test]
+    fn picker_keys_close_on_escape_trap_tab_and_block_save() {
+        use keybindings::Keybinding;
+        assert_eq!(
+            picker_key(&Keybinding::new("Escape")),
+            Some(PickerKey::Close)
+        );
+        assert_eq!(
+            picker_key(&Keybinding::new("Tab")),
+            Some(PickerKey::KeepFocusInside)
+        );
+        assert_eq!(
+            picker_key(&Keybinding::new("Tab").with_shift()),
+            Some(PickerKey::KeepFocusInside)
+        );
+        for save in [
+            Keybinding::new("s").with_ctrl(),
+            Keybinding::new("S").with_ctrl().with_shift(),
+            Keybinding::new("s").with_meta(),
+        ] {
+            assert_eq!(
+                picker_key(&save),
+                Some(PickerKey::BlockBrowserSave),
+                "{save:?}"
+            );
+        }
+        for key in [" ", "Enter", "Delete", "v", "s", "ArrowLeft", "]"] {
+            assert_eq!(picker_key(&Keybinding::new(key)), None, "{key:?}");
+        }
+    }
+
+    /// Vision nit 17: the current map is found however it was stored (slug,
+    /// display name, extra spaces), so it is marked and takes focus; an
+    /// unknown id marks nothing and focus falls back to Close.
+    #[test]
+    fn the_picker_finds_the_current_map_however_it_was_stored() {
+        let first = &crate::state::maps::PICKABLE_MAPS[0];
+        assert_eq!(picker_current_id(Some(first.id)), Some(first.id));
+        assert_eq!(
+            picker_current_id(Some(&format!("  {}  ", first.id))),
+            Some(first.id)
+        );
+        for map in crate::state::maps::PICKABLE_MAPS {
+            assert_eq!(
+                picker_current_id(Some(map.name)),
+                Some(map.id),
+                "{} finds its map by display name",
+                map.name
+            );
+        }
+        assert_eq!(picker_current_id(Some("not-a-map")), None);
+        assert_eq!(picker_current_id(Some("")), None);
+        assert_eq!(picker_current_id(None), None);
+    }
+
+    /// Vision nit 4: the panel buttons are named by what they do, not "<".
+    #[test]
+    fn panel_buttons_have_real_names() {
+        assert_eq!(panel_button_label("team", true), "Hide team panel");
+        assert_eq!(panel_button_label("team", false), "Show team panel");
+        assert_eq!(
+            panel_button_label("properties", false),
+            "Show properties panel"
+        );
+        assert_eq!(behind_picker(true), Some("true"));
+        assert_eq!(behind_picker(false), None);
+    }
+
+    /// This file without its tests, so a pin cannot match itself.
+    fn editor_source() -> &'static str {
+        let src = include_str!("editor.rs");
+        src.split("#[cfg(test)]").next().unwrap_or(src)
+    }
+
+    /// Issue 817: the update body is exactly what the server's update
+    /// handler reads. When team format, composition or map join it, they
+    /// must also join `StrategyState::mark_saved` and the stopgap (team
+    /// edits not dirty, map fixed after the first save) can go.
+    #[test]
+    fn the_update_body_sends_only_what_the_api_stores() {
+        let body = UpdateStrategyRequest {
+            name: Some("n".into()),
+            description: Some(None),
+            visibility: Some("private".into()),
+            elements: Some(Vec::new()),
+            phases: Some(Vec::new()),
+        };
+        let json = serde_json::to_value(&body).unwrap();
+        let mut keys: Vec<_> = json.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            ["description", "elements", "name", "phases", "visibility"]
+        );
+    }
+
+    /// Issue 817, the other half: the server's update body. If the server
+    /// starts reading a map or a team field, this fails along with the
+    /// stopgap it no longer needs.
+    #[test]
+    fn the_server_update_body_reads_only_those_five_fields() {
+        let route = include_str!("../../../../server/src/routes/strategy.rs");
+        let body = route
+            .split("struct UpdateStrategyRequest {")
+            .nth(1)
+            .expect("server UpdateStrategyRequest");
+        let body = &body[..body.find('}').expect("end of UpdateStrategyRequest")];
+        let mut fields: Vec<&str> = body
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.starts_with('#') && !l.starts_with("//") && l.contains(':'))
+            .map(|l| l.split(':').next().unwrap_or("").trim())
+            .collect();
+        fields.sort();
+        assert_eq!(
+            fields,
+            ["description", "elements", "name", "phases", "visibility"]
+        );
+    }
+
+    /// The source between `start` and the next `end` after it.
+    fn slice<'a>(src: &'a str, start: &str, end: &str) -> &'a str {
+        let from = src.find(start).unwrap_or_else(|| panic!("`{start}`"));
+        let rest = &src[from..];
+        let to = rest
+            .find(end)
+            .unwrap_or_else(|| panic!("`{end}` after `{start}`"));
+        &rest[..to]
+    }
+
+    /// Issue 817: nothing in the editor page marks the strategy unsaved for
+    /// a team edit. Team state changes only through the `StrategyState`
+    /// methods, which leave the flag alone, and no team handler or team
+    /// undo or redo arm sets the flag itself.
+    #[test]
+    fn the_editor_page_never_writes_team_state_directly() {
+        let src = editor_source();
+        // Any binding: `s.`, `strategy_state.write().`, and so on. A
+        // comparison (`==`) is a read, not a write.
+        for field in [".team_format =", ".team_composition ="] {
+            for (at, _) in src.match_indices(field) {
+                assert!(
+                    src[at + field.len()..].starts_with('='),
+                    "editor.rs writes `{field}` directly"
+                );
+            }
+        }
+        for direct in [
+            "team_composition.clear()",
+            "team_composition.push(",
+            "team_composition.retain(",
+            "team_composition.insert(",
+            "team_composition.remove(",
+            "team_composition.truncate(",
+        ] {
+            assert!(!src.contains(direct), "editor.rs still has `{direct}`");
+        }
+        let panel = slice(src, "TeamPanel {", "HeroPicker {");
+        for handler in [
+            "on_format_change:",
+            "on_assign:",
+            "on_clear_slot:",
+            "on_clear_all:",
+        ] {
+            assert!(panel.contains(handler), "TeamPanel has no `{handler}`");
+        }
+        assert!(
+            !panel.contains("has_unsaved_changes"),
+            "a team handler marks the strategy unsaved"
+        );
+        let undo = slice(src, "fn apply_undo(", "fn apply_redo(");
+        let redo = slice(src, "fn apply_redo(", "\n}\n");
+        for (name, body) in [("undo", undo), ("redo", redo)] {
+            let arms = &body[body
+                .find("UndoableAction::AssignHeroToSlot")
+                .unwrap_or_else(|| panic!("{name} has no team arms"))..];
+            assert!(arms.contains("UndoableAction::ClearSlot"));
+            assert!(arms.contains("UndoableAction::ClearAllSlots"));
+            assert!(
+                !arms.contains("has_unsaved_changes"),
+                "a team {name} arm marks the strategy unsaved"
+            );
+        }
+    }
+
+    /// Issue 817: Change map is offered only while the map can still be
+    /// sent, the picker re-checks before it switches and marks the strategy
+    /// unsaved only before the first save, and the fixed map is focusable
+    /// text with the same id, so focus can return to it.
+    #[test]
+    fn change_map_is_offered_only_while_the_map_can_be_saved() {
+        let src = editor_source();
+        let bar = slice(src, "if can_change_map {", "span { class: \"status-item\",");
+        let (offered, fixed) = bar.split_once("} else {").expect("fixed branch");
+        assert!(offered.contains("title: \"Change map\""));
+        assert!(offered.contains("onclick: move |_| show_map_picker.set(true),"));
+        assert!(offered.contains("\"{map_label}\""));
+        assert!(!fixed.contains("onclick"), "the fixed map is not a control");
+        assert!(!fixed.contains("button {"));
+        assert!(fixed.contains("span {"));
+        assert!(fixed.contains("id: EDITOR_MAP_BUTTON_ID,"));
+        assert!(fixed.contains("tabindex: \"-1\","));
+        assert!(fixed.contains("\"{map_label}\""));
+        assert!(fixed.contains("status-map"));
+        assert!(offered.contains("status-map"));
+
+        let pick = slice(src, "let allowed = map_change_allowed(", "close_picker();");
+        assert!(pick.contains("map_is_kept("));
+        let (_, guarded) = pick.split_once("if allowed {").expect("picker re-check");
+        assert!(guarded.contains("c.select_map(map_id.to_string(), None);"));
+        let (_, dirty) = guarded
+            .split_once("if !saved {")
+            .expect("unsaved only before save");
+        assert!(dirty.contains("s.has_unsaved_changes = true;"));
+        assert!(
+            !guarded
+                .split_once("if !saved {")
+                .unwrap()
+                .0
+                .contains("has_unsaved_changes"),
+            "the pick marks a saved strategy unsaved"
+        );
+        assert!(src.contains("map_is_kept(saved, ss.map_saved, cs.current_map.is_some())"));
+    }
+
+    /// Issue 817: the note beside the map name says why it is fixed, or that
+    /// a map picked for a saved strategy with none stored is not kept.
+    #[test]
+    fn the_map_note_matches_what_is_kept() {
+        assert_eq!(map_status_note(true, false, true), Some(MAP_FIXED_NOTE));
+        assert_eq!(map_status_note(false, false, true), Some(MAP_FIXED_NOTE));
+        // Saved, no stored map, one picked: shown but never sent.
+        assert_eq!(map_status_note(true, true, true), Some(MAP_NOT_SAVED_NOTE));
+        // Saved, nothing picked yet, or a new strategy: no note.
+        assert_eq!(map_status_note(true, true, false), None);
+        assert_eq!(map_status_note(false, true, true), None);
+        assert_eq!(map_status_note(false, true, false), None);
+        assert_eq!(MAP_FIXED_NOTE, "fixed once saved");
+        assert_eq!(MAP_NOT_SAVED_NOTE, "not saved");
+    }
+
+    /// Issue 817: the first save of a new strategy moves to the strategy's
+    /// own route, whose editor loads from the server (no team). The team is
+    /// handed across right before the move and taken when the editor mounts,
+    /// and the saved map state comes from the server's answer.
+    #[test]
+    fn the_team_survives_the_move_after_the_first_save() {
+        let src = editor_source();
+        let saved = slice(src, "Ok(saved) => {", "Err(e) => {");
+        assert!(saved.contains("s.map_saved = map_saved;"));
+        // Only the move hands the team across: outside this block every save
+        // would stash it, and reopening the strategy later would bring it back.
+        let (before, moving) = saved
+            .split_once("if opened_as_new && clean {")
+            .expect("first-save block");
+        assert!(
+            !before.contains("hand_off_team()"),
+            "hand-off outside the move"
+        );
+        let moving = &moving[..moving.find("\n                }\n").expect("block end")];
+        assert_eq!(saved.matches("hand_off_team()").count(), 1);
+        let hand_off = moving
+            .find("hand_off_team();")
+            .expect("hand-off in the block");
+        let replace = moving
+            .find("navigator.replace(crate::routes::Route::StrategyEditor { id });")
+            .expect("replace");
+        assert!(hand_off < replace);
+        let init = slice(
+            src,
+            "let mut strategy_state = use_signal(",
+            "let mut undo_manager",
+        );
+        assert!(init.contains("state.take_team_hand_off();"));
     }
 }

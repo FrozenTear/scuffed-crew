@@ -311,12 +311,15 @@ printf '%s\n' "$manual_out" | grep -q 'Update from the terminal' \
 pass "stat-tracker-v* notes carry a pinned terminal update; manual tags do not"
 
 # Internal merge-gate markers in PR titles must not reach members. A leading
-# "HOLD-MERGE:" or "[HOLD-MERGE]" and a "(HOLD-MERGE)" anywhere are dropped;
-# the rest of the subject, and a HOLD-MERGE that is not a marker, stay.
+# "HOLD-MERGE:", "HOLD-MERGE " or "[HOLD-MERGE]", a "[HOLD-MERGE]" anywhere,
+# and a "(HOLD-MERGE)" anywhere are dropped; the rest of the subject, and a
+# HOLD-MERGE that is not a marker, stay.
 {
   printf -- '- HOLD-MERGE: stat-tracker 0.5.0-rc.5 (service restart) (#415)\n'
   printf -- '- [HOLD-MERGE] app: stats tracker notice (#366)\n'
   printf -- '- stat-tracker: bundle Tesseract 5 in release builds (HOLD-MERGE) (#360)\n'
+  printf -- "- stat-tracker: do not store a finished game's board on a new session (#809) [HOLD-MERGE] (#834)\n"
+  printf -- '- HOLD-MERGE docs: alpha.3 item 17 README and API parts (#655)\n'
   printf -- '- HOLD-MERGE:no space after the colon\n'
   printf -- '- docs: explain the HOLD-MERGE: convention\n'
   printf -- '- plain subject (#1)\n'
@@ -327,6 +330,8 @@ want_hold="$(cat <<'WANT'
 - stat-tracker 0.5.0-rc.5 (service restart) (#415)
 - app: stats tracker notice (#366)
 - stat-tracker: bundle Tesseract 5 in release builds (#360)
+- stat-tracker: do not store a finished game's board on a new session (#809) (#834)
+- docs: alpha.3 item 17 README and API parts (#655)
 - no space after the colon
 - docs: explain the HOLD-MERGE: convention
 - plain subject (#1)
@@ -357,13 +362,43 @@ git_q commit -q -m 'HOLD-MERGE: stat-tracker 7.7.7 (#2)'
 echo b > "$GITREPO/crates/stat-tracker/b.txt"
 git_q add -A
 git_q commit -q -m 'stat-tracker: fix a thing (HOLD-MERGE) (#3)'
+echo b2 > "$GITREPO/crates/stat-tracker/b2.txt"
+git_q add -A
+git_q commit -q -m "stat-tracker: do not store a finished game's board on a new session (#809) [HOLD-MERGE] (#834)"
+echo b3 > "$GITREPO/crates/stat-tracker/b3.txt"
+git_q add -A
+git_q commit -q -m 'HOLD-MERGE docs: alpha.3 item 17 README and API parts (#655)'
+# A commit that touches only a crate split out of the tracker lib, one that
+# touches only the GUI, and one outside the tracker.
+mkdir -p "$GITREPO/crates/stat-tracker-core/src" "$GITREPO/crates/stat-tracker-ui/src" \
+  "$GITREPO/crates/site-server/src"
+echo c > "$GITREPO/crates/stat-tracker-core/src/c.rs"
+git_q add -A
+git_q commit -q -m 'stat-tracker-core: core-only change (#4)'
+echo u > "$GITREPO/crates/stat-tracker-ui/src/u.rs"
+git_q add -A
+git_q commit -q -m 'stat-tracker-ui: gui-only change (#5)'
+echo s > "$GITREPO/crates/site-server/src/s.rs"
+git_q add -A
+git_q commit -q -m 'site-server: not a tracker change (#6)'
 git_out="$(bash "$GITREPO/crates/stat-tracker/dist/release-notes.sh" --tag stat-tracker-v7.7.7)"
+printf '%s\n' "$git_out" | grep -qxF -- '- stat-tracker-core: core-only change (#4)' \
+  || fail "a commit touching only stat-tracker-core is missing: $git_out"
+printf '%s\n' "$git_out" | grep -qxF -- '- stat-tracker-ui: gui-only change (#5)' \
+  || fail "a commit touching only the GUI is missing: $git_out"
+printf '%s\n' "$git_out" | grep -qF 'site-server: not a tracker change' \
+  && fail "a commit outside the tracker crates is listed: $git_out"
+pass "commits since the previous tag cover every crates/stat-tracker* crate, and only those"
 printf '%s\n' "$git_out" | grep -qx '## Commits since v7.7.6' \
   || fail "git log path did not print a commit list: $git_out"
 printf '%s\n' "$git_out" | grep -qxF -- '- stat-tracker 7.7.7 (#2)' \
   || fail "git log path kept the HOLD-MERGE: prefix: $git_out"
 printf '%s\n' "$git_out" | grep -qxF -- '- stat-tracker: fix a thing (#3)' \
   || fail "git log path kept the (HOLD-MERGE) marker: $git_out"
+printf '%s\n' "$git_out" | grep -qxF -- "- stat-tracker: do not store a finished game's board on a new session (#809) (#834)" \
+  || fail "git log path kept a mid-subject [HOLD-MERGE]: $git_out"
+printf '%s\n' "$git_out" | grep -qxF -- '- docs: alpha.3 item 17 README and API parts (#655)' \
+  || fail "git log path kept a leading HOLD-MERGE space prefix: $git_out"
 printf '%s\n' "$git_out" | grep -q 'HOLD-MERGE' \
   && fail "git log path still contains HOLD-MERGE: $git_out"
 pass "commits since the previous tag drop HOLD-MERGE markers"

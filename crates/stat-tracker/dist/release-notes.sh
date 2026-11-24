@@ -92,13 +92,15 @@ flatten_subject_dashes() {
   printf '%s' "$text"
 }
 
-# "HOLD-MERGE:", "[HOLD-MERGE]" and "(HOLD-MERGE)" are internal merge-gate
-# markers in PR titles. Members read the commit list, so drop a leading
-# "HOLD-MERGE:" or "[HOLD-MERGE]" from each "- subject" line (or bare
-# subject line), and a "(HOLD-MERGE)" anywhere in it. The rest is kept.
+# "HOLD-MERGE:", a leading "HOLD-MERGE ", "[HOLD-MERGE]" and "(HOLD-MERGE)"
+# are internal merge-gate markers in PR titles. Members read the commit
+# list, so drop a leading "HOLD-MERGE:", "HOLD-MERGE " or "[HOLD-MERGE]"
+# from each "- subject" line (or bare subject line), a "[HOLD-MERGE]"
+# anywhere in it, and a "(HOLD-MERGE)" anywhere in it. The rest is kept.
 strip_hold_merge() {
   printf '%s' "$1" | sed -E \
-    -e 's/^(-[[:space:]]+)?(HOLD-MERGE:|\[HOLD-MERGE\])[[:space:]]*/\1/' \
+    -e 's/^(-[[:space:]]+)?(HOLD-MERGE:|HOLD-MERGE[[:space:]]+|\[HOLD-MERGE\])[[:space:]]*/\1/' \
+    -e 's/[[:space:]]*\[HOLD-MERGE\]//g' \
     -e 's/[[:space:]]*\(HOLD-MERGE\)//g'
 }
 
@@ -173,7 +175,7 @@ TERMINAL
   no_long_dash "terminal update" "$TERMINAL_UPDATE"
 fi
 
-INTRO="Prebuilt Linux x86_64 build of the Overwatch 2 stat tracker (daemon + Iced GUI)."
+INTRO="Prebuilt Linux x86_64 build of the Overwatch stat tracker (daemon + Iced GUI)."
 no_long_dash "release intro" "$INTRO"
 
 MAIN_BOOTSTRAP_URL="https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh"
@@ -197,8 +199,11 @@ if [[ "$SKIP_COMMITS" -eq 0 ]]; then
         | grep -vx "${TAG}" | grep -vE '^stat-tracker-v[^-]*-' | head -1 || true)"
     fi
     if [[ -n "${PREV}" ]]; then
+      # 'crates/stat-tracker*' is every tracker crate: the daemon, the GUI and
+      # the crates split out of the lib (stat-tracker-core, ...). A plain
+      # pathspec's * also matches '/', so it covers their files.
       subjects="$(strip_hold_merge "$(flatten_subject_dashes "$(git -C "$REPO" log "${PREV}..HEAD" --no-merges --pretty='- %s' -- \
-        crates/stat-tracker crates/stat-tracker-ui \
+        'crates/stat-tracker*' \
         .github/workflows/stat-tracker-release.yml)")")"
       COMMITS_BLOCK="$(printf '## Commits since %s\n\n%s' "${PREV#stat-tracker-}" "$subjects")"
     fi

@@ -13,19 +13,23 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 
-use super::marker::{self, LastExit};
+use super::fit::{CountKind, LeftOut, LeftOutReason, count_drops};
+use super::marker::LastExit;
 use super::scrub::{self, LogWindow, ScrubContext};
 use crate::capture::CaptureBackend;
-use crate::config::{Config, OcrSetting, ReaderSetting};
+use crate::config::{OcrSetting, ReaderSetting};
+
+pub use super::hash::sha256_hex;
+pub use super::input::session_corrections;
+pub use crate::capture::capture_backend_label;
+pub use crate::host_probe::SessionType;
+pub use crate::version::APP_VERSION;
 
 /// `bundle_version` this build writes.
 pub const BUNDLE_VERSION: u64 = 2;
 /// `recognizers.ocr`.
 pub const OCR_ID: &str = "ocr-v1";
-/// `app_version`: the tracker version of this build.
-pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// `session_id` of a report that is not about one game.
 pub const NO_SESSION: &str = "none";
 /// Longest `reason.text`, in characters.
@@ -49,71 +53,6 @@ impl LogOnlyCategory {
             Self::Performance => "performance",
             Self::Other => "other",
         }
-    }
-}
-
-/// `system.session_type`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionType {
-    X11,
-    Wayland,
-    Unknown,
-}
-
-impl SessionType {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::X11 => "x11",
-            Self::Wayland => "wayland",
-            Self::Unknown => "unknown",
-        }
-    }
-
-    /// `XDG_SESSION_TYPE` when it is `x11` or `wayland`, else
-    /// `WAYLAND_DISPLAY`, else `DISPLAY`. Empty values count as unset.
-    pub fn detect(
-        xdg_session_type: Option<&str>,
-        wayland_display: Option<&str>,
-        display: Option<&str>,
-    ) -> Self {
-        let set = |v: Option<&str>| v.is_some_and(|s| !s.trim().is_empty());
-        match xdg_session_type
-            .map(|s| s.trim().to_ascii_lowercase())
-            .as_deref()
-        {
-            Some("x11") => return Self::X11,
-            Some("wayland") => return Self::Wayland,
-            _ => {}
-        }
-        if set(wayland_display) {
-            Self::Wayland
-        } else if set(display) {
-            Self::X11
-        } else {
-            Self::Unknown
-        }
-    }
-
-    pub fn from_env() -> Self {
-        let var = |k: &str| std::env::var(k).ok();
-        Self::detect(
-            var("XDG_SESSION_TYPE").as_deref(),
-            var("WAYLAND_DISPLAY").as_deref(),
-            var("DISPLAY").as_deref(),
-        )
-    }
-}
-
-/// `system.capture_backend`.
-pub const fn capture_backend_label(backend: CaptureBackend) -> &'static str {
-    match backend {
-        CaptureBackend::X11 => "x11",
-        CaptureBackend::Wayshot => "wayshot",
-        // KDE direct goes out as `portal`: the site's validator
-        // (`scuffed_types::stat_report`) knows no other word yet, and a
-        // report it refuses is lost. The log in the bundle names the route.
-        CaptureBackend::Portal | CaptureBackend::Kwin => "portal",
-        CaptureBackend::None => "none",
     }
 }
 
@@ -150,49 +89,6 @@ pub struct SystemInfo {
     pub host: Option<String>,
 }
 
-impl SystemInfo {
-    /// Read the setup from `config`, the environment, and the markers in
-    /// `config.data_dir`. `capture_backend` is the backend the daemon uses
-    /// (or would select), and `daemon_running` whether it answered.
-    pub fn collect(config: &Config, capture_backend: CaptureBackend, daemon_running: bool) -> Self {
-        let cpu_threads = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1);
-        // The gate and its counters live in the daemon, which writes them
-        // to the status file. Only a status this tracker's daemon wrote is
-        // used: while a daemon runs, the file has to carry its pid, or it
-        // is another run's (or an older daemon never wrote one).
-        let running_pid = daemon_running
-            .then(|| std::fs::read_to_string(config.data_dir.join("daemon.pid")).ok())
-            .flatten()
-            .and_then(|text| crate::proc_id::parse_pid_record(&text))
-            .map(|record| record.pid);
-        let switch = switch_for_report(
-            crate::ocr_switch::read_status(&config.data_dir),
-            daemon_running,
-            running_pid,
-        );
-        let ocr = switch.as_ref().map_or(OcrSetting::On, |s| s.effective);
-        let session_type = SessionType::from_env();
-        Self {
-            session_type,
-            capture_backend,
-            cpu_threads: u32::try_from(cpu_threads).unwrap_or(u32::MAX).max(1),
-            ocr_threads: u32::try_from(config.ocr_threads_resolved())
-                .unwrap_or(1)
-                .max(1),
-            reader: crate::ocr_switch::effective_reader(ocr, config.reader),
-            ocr,
-            ocr_blocked_calls: switch.map_or_else(Vec::new, |s| blocked_sites(&s)),
-            shadow_recognizer: config.shadow_recognizer_enabled(),
-            prerelease: config.wants_prerelease_updates(),
-            daemon_running,
-            last_exit: marker::last_exit(&config.data_dir),
-            host: Some(crate::host_probe::host_line_now(session_type.as_str())),
-        }
-    }
-}
-
 /// `log.txt` with the scrubbed `host` line first, when there is one.
 fn with_host_line(ctx: &ScrubContext, host: Option<&str>, log_text: String) -> String {
     match host.map(str::trim).filter(|h| !h.is_empty()) {
@@ -206,49 +102,6 @@ fn with_host_line(ctx: &ScrubContext, host: Option<&str>, log_text: String) -> S
 
 /// Most call sites `system.ocr_blocked_calls` carries: the validator's cap.
 pub const OCR_BLOCKED_SITES_MAX: usize = scuffed_types::stat_report::OCR_BLOCKED_SITES_MAX;
-
-/// The status the report may use. With a daemon running, only the file that
-/// daemon wrote (its pid). With none running, the last run's file.
-pub(super) fn switch_for_report(
-    status: Option<crate::ocr_switch::Status>,
-    daemon_running: bool,
-    running_pid: Option<u32>,
-) -> Option<crate::ocr_switch::Status> {
-    status.filter(|s| !daemon_running || running_pid == Some(s.pid))
-}
-
-/// The blocked call sites of a run with OCR off, as the report sends them.
-/// Empty when the run had OCR on.
-///
-/// The status is a file read from disk, so nothing in it is trusted to fit
-/// what the site takes (`docs/report-bundle.md`, section 2):
-/// - a key that is not a call site
-///   ([`scuffed_types::stat_report::is_ocr_call_site`]: an absolute path,
-///   free text, over 96 bytes) is left out, so one key can not make the
-///   site refuse the whole report;
-/// - the same key twice is one site, counts added;
-/// - a count above `u32::MAX` is sent as `u32::MAX`;
-/// - only the [`OCR_BLOCKED_SITES_MAX`] sites with the largest counts go,
-///   the busiest first.
-pub(super) fn blocked_sites(status: &crate::ocr_switch::Status) -> Vec<(String, u32)> {
-    if status.effective.is_on() {
-        return Vec::new();
-    }
-    let mut by_key: std::collections::BTreeMap<&str, u64> = Default::default();
-    for s in &status.blocked {
-        if scuffed_types::stat_report::is_ocr_call_site(&s.site) {
-            let count = by_key.entry(s.site.as_str()).or_default();
-            *count = count.saturating_add(s.count);
-        }
-    }
-    let mut sites: Vec<(String, u32)> = by_key
-        .into_iter()
-        .map(|(site, count)| (site.to_string(), u32::try_from(count).unwrap_or(u32::MAX)))
-        .collect();
-    sites.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    sites.truncate(OCR_BLOCKED_SITES_MAX);
-    sites
-}
 
 /// Capture size in pixels. Both edges must be positive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -278,44 +131,6 @@ pub struct LogReportInput {
     pub log_dir: PathBuf,
 }
 
-impl LogReportInput {
-    /// Input for this machine: scrub values and system object from `config`,
-    /// logs from `config.data_dir`, and the section 6 window for a report
-    /// built at `built_at` (plus the crash window for `crash`). `names` is
-    /// the caller's scrub list of player names (other players, misreads,
-    /// short names) it knows were read in the window.
-    #[allow(clippy::too_many_arguments)]
-    pub fn from_config(
-        config: &Config,
-        category: LogOnlyCategory,
-        text: String,
-        resolution: Resolution,
-        capture_backend: CaptureBackend,
-        daemon_running: bool,
-        names: Vec<String>,
-        built_at: DateTime<Utc>,
-    ) -> Self {
-        let window = LogWindow::for_log_only(
-            built_at,
-            category == LogOnlyCategory::Crash,
-            marker::last_crash_seen(&config.data_dir),
-        );
-        let mut scrub = ScrubContext::from_config(config);
-        scrub.names = names;
-        Self {
-            category,
-            text,
-            resolution,
-            ui_scale: None,
-            system: SystemInfo::collect(config, capture_backend, daemon_running),
-            training: false,
-            scrub,
-            window,
-            log_dir: config.data_dir.clone(),
-        }
-    }
-}
-
 /// One `files` entry, as written into the manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ReportFile {
@@ -339,6 +154,9 @@ pub struct ReportZip {
     pub log_text: String,
     /// Every image in the zip, the same bytes, for the preview.
     pub images: Vec<ReportImage>,
+    /// Files left out to keep within the site's limits (sections 3 and 8),
+    /// for the preview to say so. Empty on a log-only report.
+    pub left_out: Vec<LeftOut>,
 }
 
 /// One image of a [`ReportZip`], as stored in the zip.
@@ -503,16 +321,6 @@ impl From<&SystemInfo> for SystemJson {
     }
 }
 
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    let digest = Sha256::digest(bytes);
-    let mut out = String::with_capacity(64);
-    for b in digest {
-        let _ = write!(out, "{b:02x}");
-    }
-    out
-}
-
 /// Scrubbed `reason.text`: section 6 rules, no NUL, at most 500 characters.
 pub fn scrub_reason_text(ctx: &ScrubContext, text: &str) -> String {
     let cleaned: String = text.chars().filter(|c| *c != '\0').collect();
@@ -592,6 +400,7 @@ pub fn build_log_report(input: &LogReportInput) -> Result<ReportZip, ReportError
         files,
         log_text,
         images: Vec::new(),
+        left_out: Vec::new(),
     })
 }
 
@@ -706,6 +515,9 @@ pub struct GameReportInput {
     pub system: SystemInfo,
     /// Training box. Off unless the member ticked it.
     pub training: bool,
+    /// "Include rank screen" box. Off unless the member ticked it: only
+    /// then do `crops/rank.png` and `crops/rank_banner.png` leave the PC.
+    pub rank_included: bool,
     pub scrub: ScrubContext,
     pub window: LogWindow,
     pub log_dir: PathBuf,
@@ -718,135 +530,6 @@ pub struct GameReportInput {
     pub built_at: DateTime<Utc>,
 }
 
-/// The member's edits on the newest snapshot of `session_id`, by read key.
-/// The original read stays in `reads` (section 2).
-pub fn session_corrections(
-    snapshot: &crate::storage::Snapshot,
-    session_id: &str,
-) -> std::collections::BTreeMap<String, String> {
-    let mut out = std::collections::BTreeMap::new();
-    let Some(m) = snapshot.matches.iter().find(|m| m.session_id == session_id) else {
-        return out;
-    };
-    let mut put = |key: &str, v: Option<String>| {
-        if let Some(v) = v.map(|v| v.trim().chars().take(64).collect::<String>())
-            && !v.is_empty()
-        {
-            out.insert(key.to_string(), v);
-        }
-    };
-    put("hero", m.corrected_hero.clone());
-    put("result", m.corrected_outcome.clone());
-    put("e", m.corrected_elims.map(|v| v.to_string()));
-    put("a", m.corrected_assists.map(|v| v.to_string()));
-    put("d", m.corrected_deaths.map(|v| v.to_string()));
-    put("dmg", m.corrected_damage.map(|v| v.to_string()));
-    put("h", m.corrected_healing.map(|v| v.to_string()));
-    put("mit", m.corrected_mitigation.map(|v| v.to_string()));
-    out
-}
-
-impl GameReportInput {
-    /// Input for this machine: the session's kit, the member's edits from
-    /// the live snapshot, the session log window (section 6), scrub values
-    /// and the system object from `config`. `names` is the caller's scrub
-    /// list of player names read in the window.
-    #[allow(clippy::too_many_arguments)]
-    pub fn from_config(
-        config: &Config,
-        session_id: &str,
-        category: GameCategory,
-        text: String,
-        capture_backend: CaptureBackend,
-        daemon_running: bool,
-        names: Vec<String>,
-        built_at: DateTime<Utc>,
-    ) -> Result<Self, ReportError> {
-        let mut kit = super::kit::load(&config.data_dir, session_id);
-        let snapshot = crate::storage::read_snapshot(&config.data_dir);
-        // A game from before alpha.8 (or one whose kit was pruned) has no
-        // saved reads. Its stored row still names the game, so the report
-        // carries those values and the session id, with no pictures.
-        if kit.reads.is_none()
-            && let Some(m) = snapshot
-                .as_ref()
-                .and_then(|s| s.matches.iter().find(|m| m.session_id == session_id))
-        {
-            let at: DateTime<Utc> = m.played_at.into();
-            let mut reads = super::kit::KitReads::from_capture(
-                m,
-                m,
-                0,
-                0,
-                super::blank::TeamLayout::Unknown,
-                at,
-            );
-            reads.map = Some(m.display_map_name().to_string()).filter(|s| !s.trim().is_empty());
-            kit = super::kit::Kit {
-                scoreboard_png: None,
-                outcome_png: None,
-                reads: Some(reads),
-            };
-        }
-        // The kit is written at Tab time, usually before the result screen.
-        // The stored row has the result the tracker uploaded.
-        if let (Some(reads), Some(m)) = (
-            kit.reads.as_mut(),
-            snapshot
-                .as_ref()
-                .and_then(|s| s.matches.iter().find(|m| m.session_id == session_id)),
-        ) {
-            reads.fill_result(&m.outcome);
-        }
-        if kit.reads.is_none() && category != GameCategory::MissedGame {
-            return Err(ReportError::InvalidInput(
-                "this game is not in the tracker's history",
-            ));
-        }
-        let corrections = snapshot
-            .as_ref()
-            .map(|s| session_corrections(s, session_id))
-            .unwrap_or_default();
-        let session = snapshot
-            .as_ref()
-            .and_then(|s| s.sessions.iter().find(|x| x.session_id == session_id));
-        let window = match (session, kit.reads.as_ref()) {
-            (Some(s), _) => LogWindow::session(s.started_at.into(), s.last_capture_at.into()),
-            (None, Some(r)) => LogWindow::session(r.captured_at, r.captured_at),
-            (None, None) => LogWindow::log_only(built_at),
-        };
-        let resolution = kit
-            .reads
-            .as_ref()
-            .filter(|r| r.width > 0 && r.height > 0)
-            .map(|r| Resolution {
-                width: r.width.max(r.height),
-                height: r.width.min(r.height),
-            })
-            .unwrap_or(Resolution {
-                width: 1920,
-                height: 1080,
-            });
-        let mut scrub = ScrubContext::from_config(config);
-        scrub.names = names;
-        Ok(Self {
-            session_id: session_id.to_string(),
-            category,
-            text,
-            resolution,
-            ui_scale: None,
-            system: SystemInfo::collect(config, capture_backend, daemon_running),
-            training: false,
-            scrub,
-            window,
-            log_dir: config.data_dir.clone(),
-            kit,
-            corrections,
-            built_at,
-        })
-    }
-}
-
 /// The zip may not be bigger than this (section 8).
 pub const MAX_ZIP_BYTES: usize = 10 * 1024 * 1024;
 
@@ -855,6 +538,22 @@ pub const MAX_FILES: usize = 30;
 
 /// Widest and tallest picture the site accepts, in pixels.
 pub const MAX_IMAGE_SIDE: u32 = 7680;
+
+/// Largest `crops/rank.png` or `crops/rank_banner.png`, in bytes. Mirrors
+/// the site's per-file cap for the rank crops (2 MiB). A bigger crop is
+/// left out of the report with a warning; the report is still built.
+pub const RANK_CROP_MAX_BYTES: usize = 2 * 1024 * 1024;
+
+/// The opt-in rank crop paths, `rank.png` then `rank_banner.png`. These two
+/// always carry `rank_update` ([`RANK_SCREEN_CLASS`]), and no other file does.
+pub const RANK_CROPS: [&str; 2] = ["crops/rank.png", "crops/rank_banner.png"];
+
+/// `screen_class` of [`RANK_CROPS`].
+pub const RANK_SCREEN_CLASS: &str = "rank_update";
+
+/// Room kept in the zip for `manifest.json`, the zip headers and directory,
+/// when [`build_game_report`] checks whether the rank crops still fit.
+const ZIP_SLACK_BYTES: usize = 256 * 1024;
 
 /// The pictures a game report for `kit` would carry, for a preview before
 /// a report is built. Same rule as the report: only a trusted kit with
@@ -941,6 +640,56 @@ pub fn build_game_report(input: &GameReportInput) -> Result<ReportZip, ReportErr
             });
         }
     }
+    let mut left_out = Vec::new();
+    if input.rank_included && reads.is_some() {
+        let (rank, dropped) = rank_crop_images(&input.kit);
+        left_out.extend(dropped);
+        // The rank crops are extra: a report they would push over the size
+        // limit goes without them. Counted uncompressed, so this errs safe.
+        let total: usize = log_text.len()
+            + ZIP_SLACK_BYTES
+            + images
+                .iter()
+                .chain(&rank)
+                .map(|i| i.png.len())
+                .sum::<usize>();
+        if total > MAX_ZIP_BYTES {
+            tracing::warn!("report: rank screen crops left out, the report would be over 10 MB");
+            left_out.extend(rank.iter().map(|i| LeftOut {
+                path: i.path.clone(),
+                reason: LeftOutReason::ReportTooBig,
+            }));
+        } else {
+            images.extend(rank);
+        }
+    }
+
+    // Section 8: the file count is checked before the zip is built. Over
+    // it, files leave in the spec's order (rank crops, then glyph pairs);
+    // the log, scoreboard and outcome crop always stay.
+    let kinds: Vec<CountKind> = std::iter::once(CountKind::Kept)
+        .chain(images.iter().map(|i| {
+            if RANK_CROPS.contains(&i.path.as_str()) {
+                CountKind::Rank
+            } else {
+                CountKind::Kept
+            }
+        }))
+        .collect();
+    let mut drops = count_drops(&kinds, MAX_FILES)?;
+    // Index 0 is the log, which is never dropped; image i is index i + 1.
+    for &i in &drops {
+        let path = images[i - 1].path.clone();
+        tracing::warn!(path, "report: left out, too many files");
+        left_out.push(LeftOut {
+            path,
+            reason: LeftOutReason::TooManyFiles,
+        });
+    }
+    drops.sort_unstable();
+    for i in drops.into_iter().rev() {
+        images.remove(i - 1);
+    }
 
     let mut files = vec![ReportFile {
         path: LOG_PATH.to_string(),
@@ -955,7 +704,9 @@ pub fn build_game_report(input: &GameReportInput) -> Result<ReportZip, ReportErr
             sha256: sha256_hex(&img.png),
             bytes: img.png.len() as u64,
             role: "crop",
-            screen_class: Some(if img.path == "crops/outcome.png" {
+            screen_class: Some(if RANK_CROPS.contains(&img.path.as_str()) {
+                RANK_SCREEN_CLASS
+            } else if img.path == "crops/outcome.png" {
                 "outcome"
             } else {
                 "scoreboard"
@@ -964,6 +715,7 @@ pub fn build_game_report(input: &GameReportInput) -> Result<ReportZip, ReportErr
     }
 
     if files.len() > MAX_FILES {
+        // Fail-safe: count_drops above already made the count fit.
         return Err(ReportError::InvalidInput("a report holds at most 30 files"));
     }
 
@@ -1064,5 +816,58 @@ pub fn build_game_report(input: &GameReportInput) -> Result<ReportZip, ReportErr
         files,
         log_text,
         images,
+        left_out,
     })
+}
+
+/// The kit's rank crops for a report with "Include rank screen" ticked,
+/// and the ones left out. A crop the kit does not have is not listed
+/// (debug log only); one that is not a readable PNG, is over
+/// [`MAX_IMAGE_SIDE`] or over [`RANK_CROP_MAX_BYTES`] is left out with a
+/// warning and listed for the preview. Never an error.
+pub fn rank_crop_images(kit: &super::kit::Kit) -> (Vec<ReportImage>, Vec<LeftOut>) {
+    let mut out = Vec::new();
+    let mut left_out = Vec::new();
+    for (path, png) in RANK_CROPS
+        .into_iter()
+        .zip([kit.rank_png.as_ref(), kit.rank_banner_png.as_ref()])
+    {
+        let Some(png) = png else {
+            tracing::debug!(path, "report: no rank screen crop for this game");
+            continue;
+        };
+        if png.len() > RANK_CROP_MAX_BYTES {
+            tracing::warn!(
+                path,
+                bytes = png.len(),
+                "report: rank screen crop left out, over the size cap"
+            );
+            left_out.push(LeftOut {
+                path: path.to_string(),
+                reason: LeftOutReason::OverSizeLimit,
+            });
+            continue;
+        }
+        match png_size(png) {
+            Ok((width, height)) if width <= MAX_IMAGE_SIDE && height <= MAX_IMAGE_SIDE => {
+                out.push(ReportImage {
+                    path: path.to_string(),
+                    png: png.clone(),
+                    width,
+                    height,
+                });
+            }
+            _ => {
+                tracing::warn!(
+                    path,
+                    "report: rank screen crop left out, not a readable picture"
+                );
+                left_out.push(LeftOut {
+                    path: path.to_string(),
+                    reason: LeftOutReason::NotReadable,
+                });
+            }
+        }
+    }
+    (out, left_out)
 }

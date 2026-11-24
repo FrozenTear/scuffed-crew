@@ -72,16 +72,26 @@ pub(super) fn letters(set_1440: bool) -> Option<&'static Letters> {
 mod tests {
     use super::*;
 
+    /// Lowercase hex SHA-256, as `report::bundle::sha256_hex` writes it
+    /// (that module sits above this one).
+    fn sha256_hex(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
     #[test]
     fn the_bundled_sets_are_the_generated_ones() {
         // `scripts/gen_blank_letters.py` output; regenerate and update both
         // hashes together, never one alone.
         assert_eq!(
-            crate::report::bundle::sha256_hex(LETTERS_1440),
+            sha256_hex(LETTERS_1440),
             "3f82659f1e519ee51ae1eabdadc80ba7adb95e6c02044eb43bab77c2d531702c"
         );
         assert_eq!(
-            crate::report::bundle::sha256_hex(LETTERS_1080),
+            sha256_hex(LETTERS_1080),
             "f091892ae65911a5e4c7ecdc66edaefbd8a5c065f4a170a181a9939bf0522b0f"
         );
         for set in [true, false] {

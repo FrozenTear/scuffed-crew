@@ -119,6 +119,9 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: daemon-2204-tesseract-5.5.3
+          # Restore only. Tag runs save under the tag ref, which no other
+          # ref can restore (~1.85 GB dead per release against the cap).
+          save-if: false
 
       - name: Set release version env
         run: |
@@ -300,6 +303,9 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: gui-iced-2204
+          # Restore only. Tag runs save under the tag ref, which no other
+          # ref can restore (~1.85 GB dead per release against the cap).
+          save-if: false
 
       - name: Set release version env
         run: |

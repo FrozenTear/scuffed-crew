@@ -28,98 +28,62 @@ struct ReactBody {
     content: String,
 }
 
+/// Reactions are the shared `chip` (44px, selected is fill plus border plus
+/// weight). Only the layout and the emoji size are set here. The picker opens
+/// as a row inside the bar, so it cannot run off a narrow screen.
 const REACTION_CSS: &str = r#"
 .reaction-bar {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    flex-wrap: wrap;
-    margin-top: 4px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
 }
-
-.reaction-pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 3px;
-    padding: 1px 6px;
-    border-radius: 10px;
-    border: 1px solid var(--border);
-    background: var(--bg);
-    font-size: 12px;
-    cursor: pointer;
-    transition: border-color 0.15s, background 0.15s;
-    color: var(--text-2);
-    line-height: 1.6;
+.reaction-pill__emoji,
+.reaction-pick {
+  font-size: var(--text-lg);
 }
-
-.reaction-pill:hover {
-    border-color: var(--accent-soft);
-    background: var(--surface-2);
-}
-
-.reaction-pill--mine {
-    border-color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 9%, transparent);
-}
-
 .reaction-pill__count {
-    font-size: 11px;
-    font-weight: 600;
-    min-width: 8px;
-    text-align: center;
+  font-variant-numeric: tabular-nums;
 }
-
-.reaction-add {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 24px;
-    height: 24px;
-    border-radius: 50%;
-    border: 1px dashed var(--border);
-    background: none;
-    cursor: pointer;
-    font-size: 12px;
-    color: var(--text-3);
-    transition: border-color 0.15s, color 0.15s;
-    position: relative;
+/* Your own reaction: drawn selected, but it is a count, not a control. */
+.reaction-pill.is-mine {
+  cursor: default;
 }
-
-.reaction-add:hover {
-    border-color: var(--accent-soft);
-    color: var(--text-2);
-}
-
 .reaction-picker {
-    position: absolute;
-    bottom: calc(100% + 6px);
-    left: 50%;
-    transform: translateX(-50%);
-    display: flex;
-    gap: 2px;
-    padding: 4px 6px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    box-shadow: 0 4px 12px var(--overlay);
-    z-index: 20;
-}
-
-.reaction-picker button {
-    background: none;
-    border: none;
-    cursor: pointer;
-    font-size: 16px;
-    padding: 4px;
-    border-radius: 4px;
-    transition: background 0.1s;
-    line-height: 1;
-}
-
-.reaction-picker button:hover {
-    background: var(--bg);
+  flex: 1 0 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
 }
 "#;
+
+/// What your own reaction reads as. There is no un-react, so it is not a
+/// toggle: no `aria-pressed`, and not a button that would add another.
+fn mine_text(emoji: &str, count: u32) -> String {
+    if count == 1 {
+        format!("{emoji}, 1 reaction, yours")
+    } else {
+        format!("{emoji}, {count} reactions, including yours")
+    }
+}
+
+/// Accessible name of a reaction chip: what a press does, then the count.
+fn pill_name(emoji: &str, count: u32) -> String {
+    if count == 1 {
+        format!("React with {emoji}, 1 reaction")
+    } else {
+        format!("React with {emoji}, {count} reactions")
+    }
+}
+
+/// Id of the picker row of one post. It comes from the event id, so two posts
+/// on a page never share it.
+fn picker_id(event_id: &str) -> String {
+    format!("reaction-picker-{event_id}")
+}
 
 #[component]
 pub fn ReactionBar(
@@ -129,10 +93,12 @@ pub fn ReactionBar(
 ) -> Element {
     let mut picker_open = use_signal(|| false);
     let toasts = use_toast();
+    let is_open = picker_open();
+    let picker = picker_id(&event_id);
 
     rsx! {
         crate::styles::StyleOnce { id: "scuffed-css-components-chat-reaction_bar-reaction-css", css: REACTION_CSS }
-        div { class: "reaction-bar",
+        div { class: "reaction-bar", role: "group", aria_label: "Reactions",
             for r in reactions.iter() {
                 {render_pill(
                     r.clone(),
@@ -141,25 +107,30 @@ pub fn ReactionBar(
                     toasts,
                 )}
             }
-            div { style: "position: relative; display: inline-flex;",
-                button {
-                    class: "reaction-add",
-                    aria_label: "Add reaction",
-                    onclick: move |_| picker_open.toggle(),
-                    "+"
-                }
-                if picker_open() {
-                    div { class: "reaction-picker",
-                        for &(emoji, label) in QUICK_EMOJIS.iter() {
-                            {render_picker_btn(
-                                emoji,
-                                label,
-                                event_id.clone(),
-                                event_author_pubkey.clone(),
-                                toasts,
-                                picker_open,
-                            )}
-                        }
+            button {
+                r#type: "button",
+                class: "chip reaction-add",
+                aria_label: "Add reaction",
+                aria_expanded: if is_open { "true" } else { "false" },
+                aria_controls: is_open.then(|| picker.clone()),
+                onclick: move |_| picker_open.toggle(),
+                span { aria_hidden: "true", "+" }
+            }
+            if is_open {
+                div {
+                    class: "reaction-picker",
+                    id: "{picker}",
+                    role: "group",
+                    aria_label: "Pick a reaction",
+                    for &(emoji, label) in QUICK_EMOJIS.iter() {
+                        {render_picker_btn(
+                            emoji,
+                            label,
+                            event_id.clone(),
+                            event_author_pubkey.clone(),
+                            toasts,
+                            picker_open,
+                        )}
                     }
                 }
             }
@@ -168,17 +139,24 @@ pub fn ReactionBar(
 }
 
 fn render_pill(r: ReactionCount, event_id: String, author: String, toasts: ToastState) -> Element {
-    let pill_class = if r.reacted_by_me {
-        "reaction-pill reaction-pill--mine"
-    } else {
-        "reaction-pill"
-    };
     let emoji = r.emoji.clone();
+    if r.reacted_by_me {
+        let text = mine_text(&r.emoji, r.count);
+        return rsx! {
+            span { class: "chip active reaction-pill is-mine",
+                span { class: "visually-hidden", "{text}" }
+                span { class: "reaction-pill__emoji", aria_hidden: "true", "{r.emoji}" }
+                span { class: "reaction-pill__count", aria_hidden: "true", "{r.count}" }
+            }
+        };
+    }
+    let name = pill_name(&r.emoji, r.count);
 
     rsx! {
         button {
-            class: pill_class,
-            aria_label: "React with {emoji}",
+            r#type: "button",
+            class: "chip reaction-pill",
+            aria_label: "{name}",
             onclick: move |_| {
                 let event_id = event_id.clone();
                 let author = author.clone();
@@ -188,8 +166,8 @@ fn render_pill(r: ReactionCount, event_id: String, author: String, toasts: Toast
                     send_reaction(&event_id, &author, &emoji, toasts).await;
                 });
             },
-            span { "{r.emoji}" }
-            span { class: "reaction-pill__count", "{r.count}" }
+            span { class: "reaction-pill__emoji", aria_hidden: "true", "{r.emoji}" }
+            span { class: "reaction-pill__count", aria_hidden: "true", "{r.count}" }
         }
     }
 }
@@ -203,11 +181,12 @@ fn render_picker_btn(
     mut picker_open: Signal<bool>,
 ) -> Element {
     let emoji_owned = emoji.to_string();
-    let label_owned = label.to_string();
 
     rsx! {
         button {
-            aria_label: "{label_owned}",
+            r#type: "button",
+            class: "chip reaction-pick",
+            aria_label: "React with {label}",
             onclick: move |_| {
                 let event_id = event_id.clone();
                 let author = author.clone();
@@ -218,7 +197,7 @@ fn render_picker_btn(
                     send_reaction(&event_id, &author, &emoji, toasts).await;
                 });
             },
-            "{emoji}"
+            span { aria_hidden: "true", "{emoji}" }
         }
     }
 }
@@ -236,7 +215,105 @@ async fn send_reaction(event_id: &str, author_pubkey: &str, content: &str, mut t
     {
         Ok(_) => {}
         Err(e) => {
-            toasts.show(Toast::error(format!("Reaction failed: {e}")));
+            // The one mapping says why (and logs it): an unreadable answer
+            // may mean the reaction is in, so no blind "try again".
+            toasts.show(Toast::error_from("Couldn't add the reaction.", &e));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::components::ToastProvider;
+    use crate::components::ui::test_support::{assert_sizes_from_tokens, css_rule, has_decl};
+
+    fn bar() -> Element {
+        rsx! {
+            ToastProvider {
+                ReactionBar {
+                    event_id: "ev01",
+                    event_author_pubkey: "pk01",
+                    reactions: vec![
+                        ReactionCount { emoji: "\u{1f44d}".into(), count: 3, reacted_by_me: true },
+                        ReactionCount { emoji: "\u{1f525}".into(), count: 1, reacted_by_me: false },
+                    ],
+                }
+            }
+        }
+    }
+
+    /// The bar only; the toast regions of the provider come after it.
+    fn render() -> String {
+        let mut dom = VirtualDom::new(bar);
+        dom.rebuild_in_place();
+        let html = dioxus_ssr::render(&dom);
+        let end = html.find("<div class=\"toast-container\"").expect("toasts");
+        html[..end].to_string()
+    }
+
+    #[test]
+    fn every_reaction_control_has_a_name_and_a_state() {
+        let html = render();
+        assert!(
+            html.contains("<div class=\"reaction-bar\" role=\"group\" aria-label=\"Reactions\">"),
+            "{html}"
+        );
+        // Your own reaction is shown selected but is not a control: a press
+        // would only add another, so it is not a toggle either.
+        assert!(
+            html.contains(
+                "<span class=\"chip active reaction-pill is-mine\"><span class=\"visually-hidden\">\u{1f44d}, 3 reactions, including yours</span>"
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains("<button type=\"button\" class=\"chip reaction-pill\" aria-label=\"React with \u{1f525}, 1 reaction\">"),
+            "{html}"
+        );
+        assert!(!html.contains("aria-pressed"), "{html}");
+        assert!(
+            html.contains(
+                "<button type=\"button\" class=\"chip reaction-add\" aria-label=\"Add reaction\" aria-expanded=\"false\">"
+            ),
+            "{html}"
+        );
+        assert_eq!(html.matches("<button").count(), 2, "{html}");
+        assert_eq!(
+            html.matches("<button type=\"button\" class=\"chip ")
+                .count(),
+            2,
+            "every control is the shared chip: {html}"
+        );
+        assert!(
+            !html.contains("reaction-picker"),
+            "closed by default: {html}"
+        );
+        assert!(!html.contains("style="), "{html}");
+        assert!(!html.contains("<a "), "{html}");
+    }
+
+    #[test]
+    fn names_and_ids_come_from_the_data() {
+        assert_eq!(pill_name("x", 1), "React with x, 1 reaction");
+        assert_eq!(pill_name("x", 0), "React with x, 0 reactions");
+        assert_eq!(pill_name("x", 12), "React with x, 12 reactions");
+        assert_eq!(mine_text("x", 1), "x, 1 reaction, yours");
+        assert_eq!(mine_text("x", 4), "x, 4 reactions, including yours");
+        assert_eq!(picker_id("ev01"), "reaction-picker-ev01");
+        assert_ne!(picker_id("ev01"), picker_id("ev02"));
+        for (emoji, label) in QUICK_EMOJIS {
+            assert!(!emoji.is_empty() && !label.is_empty());
+        }
+    }
+
+    #[test]
+    fn reaction_css_is_on_tokens_and_the_picker_stays_in_flow() {
+        assert_sizes_from_tokens(REACTION_CSS);
+        assert!(!REACTION_CSS.contains("position: absolute"));
+        assert!(!REACTION_CSS.contains("color-mix"));
+        let picker = css_rule(REACTION_CSS, ".reaction-picker {");
+        assert!(has_decl(&picker, "flex: 1 0 100%"), "{picker}");
+        assert!(has_decl(&picker, "flex-wrap: wrap"), "{picker}");
     }
 }

@@ -3,6 +3,9 @@ use serde::Deserialize;
 
 use scuffed_api_client::ApiClient;
 
+use super::load_error::{is_retrying, meta_load_error};
+use crate::components::fetch_error_state;
+
 // --- Types ---
 
 #[derive(Debug, Clone, Deserialize)]
@@ -59,28 +62,28 @@ impl SortDir {
 fn role_color(role: &str) -> &'static str {
     match role {
         "Tank" | "tank" => "var(--chart-5)",
-        "Damage" | "damage" => "var(--danger)",
-        "Support" | "support" => "var(--ok)",
-        _ => "var(--text-3)",
+        "Damage" | "damage" => "var(--loss)",
+        "Support" | "support" => "var(--win)",
+        _ => "var(--text-subtle)",
     }
 }
 
 fn role_bg(role: &str) -> &'static str {
     match role {
         "Tank" | "tank" => "color-mix(in srgb, var(--chart-5) 12%, transparent)",
-        "Damage" | "damage" => "color-mix(in srgb, var(--danger) 12%, transparent)",
-        "Support" | "support" => "color-mix(in srgb, var(--ok) 12%, transparent)",
-        _ => "color-mix(in srgb, var(--text-3) 12%, transparent)",
+        "Damage" | "damage" => "color-mix(in srgb, var(--loss) 12%, transparent)",
+        "Support" | "support" => "color-mix(in srgb, var(--win) 12%, transparent)",
+        _ => "color-mix(in srgb, var(--text-subtle) 12%, transparent)",
     }
 }
 
 fn winrate_bar_color(wr: f64) -> &'static str {
     if wr >= 52.0 {
-        "var(--ok)"
+        "var(--win)"
     } else if wr <= 48.0 {
-        "var(--danger)"
+        "var(--loss)"
     } else {
-        "var(--text-3)"
+        "var(--text-subtle)"
     }
 }
 
@@ -194,7 +197,7 @@ const PAGE_CSS: &str = r#"
     }
     .meta-role-card-stat {
         font-size: 0.8rem;
-        color: var(--text-2);
+        color: var(--text-3);
     }
     .meta-role-card-stat strong {
         color: var(--text);
@@ -213,7 +216,7 @@ const PAGE_CSS: &str = r#"
         font-weight: 600;
         border: 1px solid var(--border);
         background: var(--surface);
-        color: var(--text-2);
+        color: var(--text-3);
         cursor: pointer;
         transition: all 0.15s;
         text-transform: uppercase;
@@ -224,9 +227,9 @@ const PAGE_CSS: &str = r#"
         color: var(--text);
     }
     .meta-chip.active {
-        border-color: var(--accent);
+        border-color: var(--accent-solid);
         background: var(--accent-soft);
-        color: var(--accent);
+        color: var(--accent-text);
     }
     .meta-table-wrap {
         overflow-x: auto;
@@ -247,7 +250,7 @@ const PAGE_CSS: &str = r#"
         font-size: 0.75rem;
         text-transform: uppercase;
         letter-spacing: 0.06em;
-        color: var(--text-3);
+        color: var(--text-subtle);
         border-bottom: 1px solid var(--border);
         cursor: pointer;
         user-select: none;
@@ -255,10 +258,10 @@ const PAGE_CSS: &str = r#"
         transition: color 0.15s;
     }
     .meta-table th:hover {
-        color: var(--text-2);
+        color: var(--text-3);
     }
     .meta-table th.sorted {
-        color: var(--accent);
+        color: var(--accent-text);
     }
     .meta-table th .sort-ind {
         margin-left: 0.3rem;
@@ -273,7 +276,7 @@ const PAGE_CSS: &str = r#"
         border-bottom: none;
     }
     .meta-table tr:hover td {
-        background: var(--surface-2);
+        background: var(--surface-sunken);
     }
     .meta-hero-cell {
         display: flex;
@@ -329,11 +332,11 @@ const PAGE_CSS: &str = r#"
     .meta-footer {
         margin-top: 1rem;
         font-size: 0.75rem;
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-align: right;
     }
     .meta-loading, .meta-empty {
-        color: var(--text-3);
+        color: var(--text-subtle);
         text-align: center;
         padding: 3rem 0;
     }
@@ -348,11 +351,15 @@ const PAGE_CSS: &str = r#"
 
 #[component]
 pub fn StrategyMeta() -> Element {
-    let meta_data = use_resource(|| async {
-        ApiClient::web()
-            .fetch::<MetaResponse>("/api/strategy/meta")
-            .await
-            .ok()
+    let refresh = use_signal(|| 0u32);
+    let meta_data = use_resource(move || {
+        let _ = refresh();
+        async {
+            ApiClient::web()
+                .fetch::<MetaResponse>("/api/strategy/meta")
+                .await
+                .map_err(|e| crate::client_error::logged_message("strategy meta", &e))
+        }
     });
 
     let mut role_filter = use_signal(|| "All".to_string());
@@ -367,14 +374,19 @@ pub fn StrategyMeta() -> Element {
 
             {
                 let data = meta_data.read();
-                let data = data.as_ref().and_then(|d| d.as_ref());
+                let data = data.as_ref().map(|d| d.as_ref());
 
                 match data {
                     None => rsx! { p { class: "meta-loading", "Loading meta data..." } },
-                    Some(resp) if resp.heroes.is_empty() => rsx! {
+                    Some(Err(err)) => {
+                        let shown = meta_load_error(err);
+                        let retrying = is_retrying(*meta_data.state().read());
+                        fetch_error_state(&shown.message, shown.retry.then_some(refresh), retrying)
+                    }
+                    Some(Ok(resp)) if resp.heroes.is_empty() => rsx! {
                         p { class: "meta-empty", "No hero data available." }
                     },
-                    Some(resp) => {
+                    Some(Ok(resp)) => {
                         let summaries = compute_role_summaries(&resp.heroes);
                         let current_filter = (role_filter)();
                         let filtered: Vec<HeroMeta> = if current_filter == "All" {
@@ -557,7 +569,7 @@ fn render_hero_row(hero: &HeroMeta) -> Element {
                     div { class: "meta-bar-track",
                         div {
                             class: "meta-bar-fill",
-                            style: "width: {pr_width}; background: var(--accent);",
+                            style: "width: {pr_width}; background: var(--accent-solid);",
                         }
                     }
                 }

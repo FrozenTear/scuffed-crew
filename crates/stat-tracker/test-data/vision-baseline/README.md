@@ -10,7 +10,7 @@ name, no timer):
 - `s075_tab_board_stats_only.png` is an in-match table at 1248x756.
 
 `committed_baseline_boards_match_the_generator` fails if those files are
-replaced with anything else. `tests/vision_baseline_fixtures.rs` reads all
+replaced with anything else. `tests/integration/vision_baseline_fixtures.rs` reads all
 of them.
 
 ## Bottom-row cells (finding 1)

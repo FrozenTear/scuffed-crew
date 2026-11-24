@@ -4,6 +4,7 @@ pub mod articles;
 pub mod chat;
 pub mod events;
 pub mod games;
+pub mod hero_icons;
 pub mod link;
 pub mod matches;
 pub mod members;
@@ -13,6 +14,7 @@ pub mod settings;
 pub mod stats;
 pub mod teams;
 pub mod tournaments;
+pub mod training_crops;
 
 pub use announcements::*;
 pub use applications::*;
@@ -20,6 +22,7 @@ pub use articles::*;
 pub use chat::*;
 pub use events::*;
 pub use games::*;
+pub use hero_icons::*;
 pub use link::*;
 pub use matches::*;
 pub use members::*;
@@ -29,6 +32,7 @@ pub use settings::*;
 pub use stats::*;
 pub use teams::*;
 pub use tournaments::*;
+pub use training_crops::*;
 
 use serde::{Deserialize, Serialize};
 
