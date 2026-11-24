@@ -11,10 +11,15 @@
 use std::collections::HashSet;
 
 use iced::advanced::Layout;
+use iced::advanced::Shell;
+use iced::advanced::clipboard;
 use iced::advanced::layout::Limits;
 use iced::advanced::widget::operation::{Operation, Scrollable};
 use iced::advanced::widget::{Id, Tree};
-use iced::{Element, Rectangle, Size, Vector};
+use iced::keyboard::key::Named;
+use iced::keyboard::{self, Key};
+use iced::mouse::{Button, Cursor, Event as Mouse};
+use iced::{Element, Event, Point, Rectangle, Size, Vector};
 
 use crate::app::Message;
 use crate::layout::SCROLLBAR_WIDTH;
@@ -152,7 +157,7 @@ fn what_leaves_your_pc_keeps_its_text_clear_of_the_bar() {
     let (_dir, mut app) = crate::fixtures::test_app();
     let _ = app.update(Message::SettingsPage(Msg::Open(OpenMsg::WhatLeaves(true))));
     assert_clear("what leaves", GRID_GAP, || {
-        crate::what_leaves::layer(&app).expect("open")
+        crate::what_leaves::layer(&app).expect("open").content
     });
 }
 
@@ -270,8 +275,11 @@ fn what_leaves_keeps_its_close_button_in_view() {
     let (_dir, mut app) = crate::fixtures::test_app();
     let _ = app.update(Message::SettingsPage(Msg::Open(OpenMsg::WhatLeaves(true))));
     for window in WINDOWS {
-        let close_box = close_bounds(crate::what_leaves::layer(&app).expect("open"), window)
-            .unwrap_or_else(|| panic!("Close is laid out at {window:?}"));
+        let close_box = close_bounds(
+            crate::what_leaves::layer(&app).expect("open").content,
+            window,
+        )
+        .unwrap_or_else(|| panic!("Close is laid out at {window:?}"));
         assert!(
             close_box.y >= 0.0
                 && close_box.x >= 0.0
@@ -307,4 +315,196 @@ fn close_bounds(mut element: Element<'_, Message>, window: (f32, f32)) -> Option
         .as_widget_mut()
         .operate(&mut tree, Layout::new(&node), &renderer, &mut find);
     find.0
+}
+
+/// The What leaves layer as it sits in the window: a top dialog_focus
+/// layer with the Esc message from [`Dialog::new`].
+fn what_leaves_top(app: &crate::app::TrackerApp) -> Element<'_, Message> {
+    let dialog = crate::what_leaves::layer(app).expect("open");
+    crate::dialog_focus::layer(
+        dialog.content,
+        crate::dialog_focus::Role::Top,
+        dialog.on_escape,
+    )
+}
+
+/// Messages a left click at `point` publishes on the laid-out layer.
+fn press_at(mut element: Element<'_, Message>, window: (f32, f32), point: Point) -> Vec<Message> {
+    let renderer = headless();
+    let mut tree = Tree::new(&element);
+    let size = Size::new(window.0, window.1);
+    let node = element
+        .as_widget_mut()
+        .layout(&mut tree, &renderer, &Limits::new(Size::ZERO, size));
+    let viewport = Rectangle::new(Point::ORIGIN, size);
+    let mut messages = Vec::new();
+    let mut shell = Shell::new(&mut messages);
+    element.as_widget_mut().update(
+        &mut tree,
+        &Event::Mouse(Mouse::ButtonPressed(Button::Left)),
+        Layout::new(&node),
+        Cursor::Available(point),
+        &renderer,
+        &mut clipboard::Null,
+        &mut shell,
+        &viewport,
+    );
+    messages
+}
+
+fn esc_event() -> Event {
+    Event::Keyboard(keyboard::Event::KeyPressed {
+        key: Key::Named(Named::Escape),
+        modified_key: Key::Named(Named::Escape),
+        physical_key: keyboard::key::Physical::Unidentified(
+            keyboard::key::NativeCode::Unidentified,
+        ),
+        location: keyboard::Location::Standard,
+        modifiers: keyboard::Modifiers::empty(),
+        text: None,
+        repeat: false,
+    })
+}
+
+/// Messages Esc publishes on the laid-out What leaves dialog layer.
+fn press_esc(mut element: Element<'_, Message>, window: (f32, f32)) -> Vec<Message> {
+    let renderer = headless();
+    let mut tree = Tree::new(&element);
+    let size = Size::new(window.0, window.1);
+    let node = element
+        .as_widget_mut()
+        .layout(&mut tree, &renderer, &Limits::new(Size::ZERO, size));
+    let viewport = Rectangle::new(Point::ORIGIN, size);
+    let mut messages = Vec::new();
+    let mut shell = Shell::new(&mut messages);
+    element.as_widget_mut().update(
+        &mut tree,
+        &esc_event(),
+        Layout::new(&node),
+        Cursor::Unavailable,
+        &renderer,
+        &mut clipboard::Null,
+        &mut shell,
+        &viewport,
+    );
+    messages
+}
+
+/// The padded What leaves card: the container whose top-left is the title
+/// inset by the 24 px panel padding.
+fn card_bounds(mut element: Element<'_, Message>, window: (f32, f32)) -> Rectangle {
+    const PANEL_PAD: f32 = 24.0;
+    let renderer = headless();
+    let mut tree = Tree::new(&element);
+    let node = element.as_widget_mut().layout(
+        &mut tree,
+        &renderer,
+        &Limits::new(Size::ZERO, Size::new(window.0, window.1)),
+    );
+    struct FindCard {
+        title: Option<Rectangle>,
+        containers: Vec<Rectangle>,
+    }
+    impl Operation<()> for FindCard {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<()>)) {
+            operate(self);
+        }
+        fn container(&mut self, _id: Option<&Id>, bounds: Rectangle) {
+            self.containers.push(bounds);
+        }
+        fn text(&mut self, _id: Option<&Id>, bounds: Rectangle, text: &str) {
+            if text == "What leaves your PC" {
+                self.title = Some(bounds);
+            }
+        }
+    }
+    let mut find = FindCard {
+        title: None,
+        containers: Vec::new(),
+    };
+    element
+        .as_widget_mut()
+        .operate(&mut tree, Layout::new(&node), &renderer, &mut find);
+    let title = find
+        .title
+        .unwrap_or_else(|| panic!("title is laid out at {window:?}"));
+    find.containers
+        .into_iter()
+        .find(|b| {
+            (b.x - (title.x - PANEL_PAD)).abs() < 0.5 && (b.y - (title.y - PANEL_PAD)).abs() < 0.5
+        })
+        .unwrap_or_else(|| panic!("padded card at {window:?}, title {title:?}"))
+}
+
+fn is_close(messages: &[Message]) -> bool {
+    messages.iter().any(|m| {
+        matches!(
+            m,
+            Message::SettingsPage(Msg::Open(OpenMsg::WhatLeaves(false)))
+        )
+    })
+}
+
+/// A click on the card's 24 px panel padding stays on the card; only a
+/// click on the dimmed backdrop closes the dialog.
+#[test]
+fn what_leaves_card_padding_does_not_close() {
+    let (_dir, mut app) = crate::fixtures::test_app();
+    let _ = app.update(Message::SettingsPage(Msg::Open(OpenMsg::WhatLeaves(true))));
+    for window in WINDOWS {
+        let card = card_bounds(
+            crate::what_leaves::layer(&app).expect("open").content,
+            window,
+        );
+        let on_pad = Point::new(card.x + 12.0, card.y + 12.0);
+        let on_dim = Point::new(8.0, window.1 / 2.0);
+        assert!(
+            card.contains(on_pad),
+            "{window:?}: pad click {on_pad:?} is outside the card {card:?}"
+        );
+        assert!(
+            !card.contains(on_dim),
+            "{window:?}: backdrop click {on_dim:?} is inside the card {card:?}"
+        );
+        let pad = press_at(
+            crate::what_leaves::layer(&app).expect("open").content,
+            window,
+            on_pad,
+        );
+        assert!(
+            !is_close(&pad),
+            "{window:?}: a click on the card padding closed the dialog: {pad:?}"
+        );
+        let dim = press_at(
+            crate::what_leaves::layer(&app).expect("open").content,
+            window,
+            on_dim,
+        );
+        assert!(
+            is_close(&dim),
+            "{window:?}: a click on the backdrop did not close the dialog: {dim:?}"
+        );
+    }
+}
+
+/// Esc closes What leaves once, through the dialog layer's on_escape
+/// (Dialog::new(..., Some(close()))), not a second app subscription.
+#[test]
+fn what_leaves_escape_closes_once() {
+    let (_dir, mut app) = crate::fixtures::test_app();
+    let _ = app.update(Message::SettingsPage(Msg::Open(OpenMsg::WhatLeaves(true))));
+    let messages = press_esc(what_leaves_top(&app), WINDOWS[0]);
+    let closes = messages
+        .iter()
+        .filter(|m| {
+            matches!(
+                m,
+                Message::SettingsPage(Msg::Open(OpenMsg::WhatLeaves(false)))
+            )
+        })
+        .count();
+    assert_eq!(
+        closes, 1,
+        "Esc should close What leaves once, got {messages:?}"
+    );
 }

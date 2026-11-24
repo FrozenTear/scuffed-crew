@@ -75,9 +75,10 @@ pub(crate) const SECTIONS: [(&str, &[&str]); 6] = [
     ),
 ];
 
-/// The dialog as a layer over the window, while it is open.
-pub(crate) fn layer(app: &TrackerApp) -> Option<Element<'_, Message>> {
-    app.page_state.opened.what_leaves_open.then(dialog)
+/// The dialog as a layer over the window, while it is open. Esc closes it.
+pub(crate) fn layer(app: &TrackerApp) -> Option<crate::dialog_focus::Dialog<'_>> {
+    let open = app.page_state.opened.what_leaves_open;
+    open.then(|| crate::dialog_focus::Dialog::new(dialog(), Some(close())))
 }
 
 pub(crate) fn close() -> Message {
@@ -132,23 +133,13 @@ fn dialog<'a>() -> Element<'a, Message> {
     opaque(
         stack![
             mouse_area(container(space().width(Fill).height(Fill)).style(dim)).on_press(close()),
-            container(card).padding(28).center(Fill),
+            // Presses on the card, including its 24 px panel padding, are
+            // absorbed here so they do not fall through to the backdrop.
+            container(opaque(card)).padding(28).center(Fill),
         ]
         .width(Fill)
         .height(Fill),
     )
-}
-
-/// Esc closes this dialog the same way Close does.
-pub(crate) fn escape(
-    event: iced::Event,
-    _status: iced::event::Status,
-    _window: iced::window::Id,
-) -> Option<Message> {
-    let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) = event else {
-        return None;
-    };
-    crate::notes::escape_closes_notes(&key).then_some(close())
 }
 
 #[cfg(test)]

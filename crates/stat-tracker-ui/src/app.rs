@@ -229,7 +229,7 @@ pub enum Message {
     Pages(crate::tab_bits::PageMsg),
 }
 
-struct NotesDialog {
+pub(crate) struct NotesDialog {
     subtitle: String,
     sections: Vec<ShownRelease>,
     /// Installed version written when this dialog closes. Set for the
@@ -398,12 +398,12 @@ pub struct TrackerApp {
     pub update_notes_expanded: bool,
     dialog_open_details: HashSet<String>,
     dialog_show_older: bool,
-    notes_dialog: Option<NotesDialog>,
+    pub(crate) notes_dialog: Option<NotesDialog>,
     notes_seen: NotesSeen,
     pub(crate) uninstall_dialog: Option<crate::uninstall::UninstallDialog>,
-    uninstall_busy: bool,
+    pub(crate) uninstall_busy: bool,
     /// Report a problem dialog, or the crash prompt shown at start.
-    report: Option<crate::report::ReportUi>,
+    pub(crate) report: Option<crate::report::ReportUi>,
     /// Resolved once at startup so Settings can pin a tag without spawning
     /// the daemon on every frame.
     pub installed_version: Option<String>,
@@ -767,25 +767,17 @@ impl TrackerApp {
         {
             subs.push(hotkey::subscription(bind));
         }
-        if self.page_state.opened.what_leaves_open {
-            subs.push(iced::event::listen_with(crate::what_leaves::escape));
-        } else if self.report.is_some() {
-            subs.push(iced::event::listen_with(|event, _, _| {
-                escape_to(event, Message::Report(crate::report::ReportMessage::Close))
-            }));
-        } else if self.uninstall_dialog.is_some() {
-            subs.push(iced::event::listen_with(|event, _, _| {
-                escape_to(event, Message::DismissUninstall)
-            }));
-        } else if self.setup.open {
+        // The dialog layers take Esc themselves ([`crate::dialog_focus`]),
+        // but for the guide's keys; no page key listener while one is open.
+        let top = crate::chrome::top_dialog(self);
+        let page = top.is_none();
+        if top == Some(crate::chrome::TopDialog::Guide) {
             subs.push(iced::event::listen_with(setup_guide_keys));
-        } else if self.notes_dialog.is_some() {
-            subs.push(iced::event::listen_with(notes_dialog_escape));
-        } else if self.page_state.chip_draft().is_some() {
+        } else if page && self.page_state.chip_draft().is_some() {
             subs.push(iced::event::listen_with(
                 crate::settings_update::chip_escape,
             ));
-        } else if self.screen == Screen::Games && crate::games_panel::listens(self) {
+        } else if page && self.screen == Screen::Games && crate::games_panel::listens(self) {
             subs.push(iced::event::listen_with(crate::games_panel::close_keys));
         }
         crate::nav::with_clear_on_pointer(self, subs)
@@ -2607,21 +2599,21 @@ impl TrackerApp {
     }
 
     pub fn view(&self, _window: window::Id) -> Element<'_, Message> {
-        // `notes::dialog` includes the backdrop and is opaque, so a press
-        // on the scrim or the card does not reach Update now underneath.
-        let notes = self.notes_dialog.as_ref().map(|dialog| {
-            notes::dialog(&dialog.subtitle, &dialog.sections, self.dialog_notes_ui())
-        });
-        let guide = self
-            .setup
-            .open
-            .then(|| crate::setup_guide::view(&self.setup));
-        let uninstall = self
-            .uninstall_dialog
-            .as_ref()
-            .map(|dialog| crate::uninstall::view(dialog, self.uninstall_busy));
-        let report = self.report.as_ref().map(crate::report::view);
-        crate::chrome::with_layers(self, [notes, guide, uninstall, report])
+        crate::chrome::window(self)
+    }
+
+    /// What's new, while it is open. `notes::dialog` has the backdrop and is
+    /// opaque, so a press on it does not reach Update now underneath.
+    pub(crate) fn notes_layer(&self) -> Option<Element<'_, Message>> {
+        let dialog = self.notes_dialog.as_ref()?;
+        let ui = self.dialog_notes_ui();
+        Some(notes::dialog(&dialog.subtitle, &dialog.sections, ui))
+    }
+
+    /// Lets a test put in its own restart watch.
+    #[cfg(test)]
+    pub(crate) fn set_restart_watch(&mut self, watch: RestartWatch) {
+        self.restart_watch = watch;
     }
 
     pub fn update_notes_ui(&self) -> notes::NotesUi<'_> {
@@ -2724,13 +2716,6 @@ fn health_with_ocr_notice(base: String, notice: Option<&str>) -> String {
     }
 }
 
-fn escape_to(event: iced::Event, message: Message) -> Option<Message> {
-    let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) = event else {
-        return None;
-    };
-    notes::escape_closes_notes(&key).then_some(message)
-}
-
 /// A pid that is already gone, or that is not the tracker, is not a running
 /// tracker. Killing it was refused on purpose. Uninstall can continue.
 /// `disable --now` inside [`crate::uninstall::apply`] stops a unit systemd
@@ -2772,17 +2757,6 @@ async fn probe_own_package_owner() -> Option<crate::uninstall::PackageOwner> {
             None
         }
     }
-}
-
-fn notes_dialog_escape(
-    event: iced::Event,
-    _status: iced::event::Status,
-    _window: window::Id,
-) -> Option<Message> {
-    let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) = event else {
-        return None;
-    };
-    foreground_key_message(false, true, &key)
 }
 
 fn setup_guide_keys(
