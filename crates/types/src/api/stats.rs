@@ -501,6 +501,35 @@ pub enum RankRole {
     Open,
 }
 
+/// Queue a game was played in (`rank.queue`): queue kind and team size.
+///
+/// Set by the tracker from the queue title and the board's team size, for
+/// Competitive and Quick Play alike (`game_mode` says which). `Unknown` is
+/// sent when the tracker could not tell, and is also what any value this
+/// server does not know reads as, so a newer tracker never fails an upload.
+/// No value at all (an older tracker) stays `None`, never a guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// Wire values are snake_case with an underscore before the team size
+/// (`role_6v6`); serde's `snake_case` alone would give `role6v6`.
+#[serde(rename_all = "snake_case")]
+pub enum RankQueue {
+    /// Role Queue 5v5 (1-2-2).
+    #[serde(rename = "role_5v5")]
+    Role5v5,
+    /// Open Queue 5v5.
+    #[serde(rename = "open_5v5")]
+    Open5v5,
+    /// Role Queue 6v6 (2-2-2), Season 6 onward.
+    #[serde(rename = "role_6v6")]
+    Role6v6,
+    /// Open Queue 6v6.
+    #[serde(rename = "open_6v6")]
+    Open6v6,
+    /// The tracker could not tell, or a value newer than this server.
+    #[serde(other)]
+    Unknown,
+}
+
 /// One rank-v1 field: the value read and how sure the reader was.
 ///
 /// Either part is `None` (JSON null) when it was omitted or failed its
@@ -551,8 +580,15 @@ pub struct MatchRank {
     pub hero_sr_change: RankField<i32>,
     #[serde(default)]
     pub next_mode_hint: RankField<String>,
+    /// Raw pre-game queue title words as read (`"ROLE QUEUE"`). Kept as is:
+    /// it is the reader's text, while [`MatchRank::queue`] is the decided
+    /// queue.
     #[serde(default)]
     pub queue_title: RankField<String>,
+    /// Queue the game was played in. `value` is null when the upload did
+    /// not send it (trackers before 0.7) and on rows stored before it.
+    #[serde(default)]
+    pub queue: RankField<RankQueue>,
     #[serde(default)]
     pub rank_recognizer: Option<String>,
 }
@@ -595,7 +631,8 @@ fn rank_field<T>(
 /// `higher_than_pct` at most 100, `confidence` finite in 0..=1, integers in
 /// their type's range, strings at most [`RANK_STRING_MAX_CHARS`] characters,
 /// `change_tags` at most [`RANK_MAX_CHANGE_TAGS`] strings (otherwise the whole
-/// list is null), `role` one of `Tank`, `Damage`, `Support`, `Open`, and
+/// list is null), `role` one of `Tank`, `Damage`, `Support`, `Open`, `queue`
+/// a string (one [`RankQueue`] does not know is `unknown`), and
 /// `rank_recognizer` the same id format as `recognizer`.
 pub fn resolve_rank(value: Option<&serde_json::Value>) -> Option<MatchRank> {
     let obj = value?.as_object()?;
@@ -620,6 +657,10 @@ pub fn resolve_rank(value: Option<&serde_json::Value>) -> Option<MatchRank> {
         hero_sr_change: rank_field(obj, "hero_sr_change", rank_int::<i32>),
         next_mode_hint: rank_field(obj, "next_mode_hint", rank_string),
         queue_title: rank_field(obj, "queue_title", rank_string),
+        queue: rank_field(obj, "queue", |v| {
+            v.as_str()?;
+            serde_json::from_value::<RankQueue>(v.clone()).ok()
+        }),
         rank_recognizer: obj
             .get("rank_recognizer")
             .and_then(serde_json::Value::as_str)
@@ -1989,5 +2030,88 @@ mod tests {
         let m: StatsUploadMatch =
             serde_json::from_value(serde_json::to_value(valid_entry()).unwrap()).unwrap();
         assert_eq!(m.bans_picks, None);
+    }
+
+    #[test]
+    fn rank_queue_round_trips_as_snake_case() {
+        for (queue, json) in [
+            (RankQueue::Role5v5, "role_5v5"),
+            (RankQueue::Open5v5, "open_5v5"),
+            (RankQueue::Role6v6, "role_6v6"),
+            (RankQueue::Open6v6, "open_6v6"),
+            (RankQueue::Unknown, "unknown"),
+        ] {
+            let value = serde_json::to_value(queue).unwrap();
+            assert_eq!(value, serde_json::json!(json));
+            assert_eq!(serde_json::from_value::<RankQueue>(value).unwrap(), queue);
+            let rank = resolve_rank(Some(&serde_json::json!({
+                "queue": { "value": json, "confidence": 0.9 }
+            })))
+            .unwrap();
+            assert_eq!(rank.queue.value, Some(queue));
+            assert_eq!(rank.queue.confidence, Some(0.9));
+            // stored and returned as one fixed `{value, confidence}` shape
+            let back = serde_json::to_value(&rank).unwrap();
+            assert_eq!(
+                back["queue"],
+                serde_json::json!({ "value": json, "confidence": 0.9f32 })
+            );
+            assert_eq!(serde_json::from_value::<MatchRank>(back).unwrap(), rank);
+        }
+    }
+
+    #[test]
+    fn rank_queue_missing_is_none_not_a_guess() {
+        let old_tracker = serde_json::json!({
+            "role": { "value": "Tank", "confidence": 0.9 },
+            "queue_title": { "value": "ROLE QUEUE", "confidence": 0.8 },
+            "rank_recognizer": "rank-v1"
+        });
+        let rank = resolve_rank(Some(&old_tracker)).unwrap();
+        assert_eq!(rank.queue, RankField::default());
+        assert_eq!(rank.queue_title.value.as_deref(), Some("ROLE QUEUE"));
+        let typed: MatchRank = serde_json::from_value(old_tracker).unwrap();
+        assert_eq!(typed, rank);
+        let back = serde_json::to_value(&rank).unwrap();
+        assert_eq!(
+            back["queue"],
+            serde_json::json!({ "value": null, "confidence": null })
+        );
+        // a stored row from before the field reads back the same
+        let reread = resolve_rank(Some(&back)).unwrap();
+        assert_eq!(reread, rank);
+    }
+
+    #[test]
+    fn rank_queue_unknown_value_falls_back_to_unknown() {
+        let newer = serde_json::json!({
+            "role": { "value": "Support", "confidence": 0.9 },
+            "queue": { "value": "role_7v7", "confidence": 0.6 }
+        });
+        let rank = resolve_rank(Some(&newer)).unwrap();
+        assert_eq!(rank.queue.value, Some(RankQueue::Unknown));
+        assert_eq!(rank.queue.confidence, Some(0.6));
+        assert_eq!(rank.role.value, Some(RankRole::Support));
+        let typed: MatchRank = serde_json::from_value(newer).unwrap();
+        assert_eq!(typed.queue.value, Some(RankQueue::Unknown));
+    }
+
+    #[test]
+    fn rank_queue_wrong_type_is_null_and_keeps_the_rest() {
+        for bad in [
+            serde_json::json!(2),
+            serde_json::json!(true),
+            serde_json::json!(["role_6v6"]),
+            serde_json::json!({ "role_6v6": null }),
+        ] {
+            let rank = resolve_rank(Some(&serde_json::json!({
+                "division": { "value": 2, "confidence": 0.5 },
+                "queue": { "value": bad, "confidence": 0.5 }
+            })))
+            .unwrap();
+            assert_eq!(rank.queue.value, None, "{bad}");
+            assert_eq!(rank.queue.confidence, Some(0.5));
+            assert_eq!(rank.division.value, Some(2));
+        }
     }
 }
