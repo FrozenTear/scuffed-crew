@@ -217,7 +217,8 @@ fn check_case(
     // The name (in full, or shortened with "…" when even the mode chip's
     // stub would not fit beside it wrapped), then one text a chip.
     let name = &drawn.texts[0].0;
-    if name != m {
+    let name_short = name != m;
+    if name_short {
         let kept = name.strip_suffix(ELLIPSIS).unwrap_or_default();
         assert!(m.starts_with(kept), "{at}: name {name:?}");
         // Never a bare "…": the name keeps its first letters too.
@@ -273,8 +274,8 @@ fn check_case(
     }
     changed.extend(left_out.iter().cloned());
     // The tooltip: map and mode in full, and every chip not shown in full;
-    // none when every chip shows in full.
-    let want_tip = (!changed.is_empty()).then(|| {
+    // none when the name and every chip show in full.
+    let want_tip = (!changed.is_empty() || name_short).then(|| {
         let mut words = vec![m.to_string()];
         words.extend(mode.map(str::to_string));
         words.extend(changed.iter().filter(|c| Some(c.as_str()) != mode).cloned());
@@ -421,6 +422,25 @@ fn map_chips_never_clip_silently_at_any_window() {
     problems.extend(n.cut);
     problems.extend(n.bare);
     assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+/// A name shortened with no chip cut still gets the tooltip: a one-word
+/// name too wide for the cell beside a one-letter chip, whose stub ("X…")
+/// is wider than the chip, so the chip shows in full.
+#[test]
+fn a_shortened_name_alone_gets_the_tooltip() {
+    let _renderer = crate::games_bans_view::tests::headless();
+    let name = "W".repeat(40);
+    let parts = [MapPart::Name, MapPart::Chip("X".into())];
+    let fit = crate::games_map_fit::fit(120.0, 40.0, &name, FONT_BOLD, &parts, Some("X"));
+    let short = fit.name.clone().expect("the name is shortened");
+    let kept = short.strip_suffix(ELLIPSIS).expect("ends in …");
+    assert!(
+        kept.chars().count() >= MIN_KEPT && name.starts_with(kept),
+        "{short:?}"
+    );
+    assert_eq!(fit.parts, parts, "no chip cut or left out");
+    assert_eq!(fit.tip, Some(format!("{name}, X")));
 }
 
 /// A chip that fits shows its full text and the cell has no tooltip:
