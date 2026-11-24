@@ -508,11 +508,13 @@ pub enum RankRole {
 /// the `rank` object (and so `rank.queue`) entirely. `Unknown` means a
 /// Competitive game whose queue could not be read, and is also what any
 /// value this server does not know reads as, so a newer tracker never fails
-/// an upload. The server does not check `game_mode` against it. No value at
-/// all (an older tracker) stays `None`, never a guess.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// an upload. The server does not check `game_mode` against it, so a queue
+/// sent for another mode is stored as is. No value at all (an older tracker)
+/// stays `None`, never a guess.
+///
 /// Wire values are snake_case with an underscore before the team size
 /// (`role_6v6`); serde's `snake_case` alone would give `role6v6`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RankQueue {
     /// Role Queue 5v5 (1-2-2).

@@ -3095,7 +3095,7 @@ mod tests {
 
     /// `rank.queue` (#654): each known value is stored and read back, a value
     /// this server does not know reads as `unknown`, and an upload without it
-    /// (a tracker before 0.7) stores no queue at all.
+    /// (a tracker before 0.7) stores a null queue, not a guess.
     #[tokio::test]
     async fn upload_rank_queue_known_unknown_and_missing() {
         let (state, member_id, daemon_token, session_token) = member_reader().await;
@@ -3145,7 +3145,7 @@ mod tests {
         assert_eq!(
             old["rank"]["queue"],
             serde_json::json!({ "value": null, "confidence": null }),
-            "no queue sent is no queue stored, not a guess"
+            "no queue sent stores a null queue, not a guess"
         );
 
         let rows = state
