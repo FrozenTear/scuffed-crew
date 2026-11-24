@@ -52,7 +52,7 @@ const CAPS: &[(&str, usize)] = &[
     ("stat-tracker/src/shadow/heroes.rs", 2538),
     ("stat-tracker/src/shadow/reader.rs", 2576),
     ("stat-tracker/src/shadow/result.rs", 4141),
-    ("stat-tracker/src/tests_layering.rs", 1917),
+    ("stat-tracker/src/tests_layering.rs", 1916),
 ];
 
 /// Every `.rs` file the guard covers, by path under `crates/` with `/`

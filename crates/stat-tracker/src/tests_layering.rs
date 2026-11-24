@@ -1,7 +1,6 @@
 //! The layering the stat-tracker lib split (0.6 N4) cuts along, pinned.
 //!
-//! The lib is to become six crates. Each module below belongs to one of
-//! them ([`CRATE_OF`]), and a crate may use only the crates under it:
+//! The lib is to become six crates. Each module below belongs to one of them ([`CRATE_OF`]), and a crate may use only the crates under it:
 //!
 //! ```text
 //!   top: report, reader_apply, tab_retry, games, query (+ the bin)

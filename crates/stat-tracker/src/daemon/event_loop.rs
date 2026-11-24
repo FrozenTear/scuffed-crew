@@ -875,14 +875,14 @@ pub(crate) async fn run_loop(
                             accolade_map,
                         );
 
+                        // The companion reads each known phase as its pre-game stage.
+                        daemon::companion_stage::publish(data_dir, &phase);
                         // Boundaries live in `boundary::decide_poll`. A map vote
                         // or a hero ban after a board-followed hint splits and
                         // seals it. A hero select only arms. A confirmed word
                         // on a trusted different map opens the next session.
                         // A start screen still inside the debounce does not
-                        // open another session. The companion reads the
-                        // known phases as its pre-game stage.
-                        daemon::companion_stage::publish(data_dir, &phase);
+                        // open another session.
                         let start_screen = match &phase {
                             detect::GamePhase::MapVote { maps } => {
                                 let candidates: Vec<String> = maps

@@ -608,7 +608,13 @@ pub struct Status {
     /// warning when `unreadable`. Games record all the same. `None` otherwise.
     pub vision_size: Option<VisionSizeStatus>,
     /// The pre-game stage the daemon last saw, for the companion's pages
-    /// (`companion_stage`). `None` in a file from an older build.
+    /// (`companion_stage`). `None` in a file from an older build, or when
+    /// the value is a shape this build cannot parse (the rest of the file
+    /// still loads).
+    #[serde(
+        default,
+        deserialize_with = "crate::companion_stage::deserialize_lenient"
+    )]
     pub companion_stage: Option<crate::companion_stage::CompanionStage>,
 }
 

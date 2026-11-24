@@ -28,6 +28,8 @@ pub(crate) mod snapshot_policy;
 mod sync_sched;
 mod tab;
 #[cfg(test)]
+mod tests_companion_stage;
+#[cfg(test)]
 mod tests_debug_dumps;
 #[cfg(test)]
 mod tests_focus_gate;
