@@ -24,6 +24,7 @@ use stat_tracker::game_running::GameProcessGate;
 use crate::aggregate::{Record, aggregate};
 use crate::cli::{Cli, FixtureKind};
 use crate::model::{Game, Outcome, Role, SeasonSel, display_hero_name};
+use crate::overlay_pages::{self, Page, PageState};
 use crate::overview::tonight_games;
 use crate::seasons;
 use crate::snapshot::{self, games_from_snapshot};
@@ -312,6 +313,8 @@ pub struct OverlayModel {
     pub live: bool,
     /// One-line footer when a companion shortcut is on. `None` when disabled.
     pub hotkey_hint: Option<String>,
+    /// The page on show and the safe-page hold (`overlay_pages`).
+    pub pages: PageState,
 }
 
 impl OverlayModel {
@@ -373,6 +376,7 @@ pub fn build_model(
         },
         live,
         hotkey_hint: None,
+        pages: PageState::default(),
     }
 }
 
@@ -390,7 +394,20 @@ fn season_label(sel: &SeasonSel, seasons: &[Season]) -> String {
 /// Height of the layer surface. Layer-shell needs an explicit size; this
 /// tracks the card stack so the panel is "height to content".
 pub fn content_height(model: &OverlayModel) -> u32 {
-    let mut h: u32 = 16 + 48 + 12;
+    // The page indicator row, on every page.
+    let mut h: u32 = 16 + 18 + 12;
+    if model.pages.held {
+        h += 22;
+    }
+    if model.pages.page != Page::Tonight {
+        // Pages other than Tonight are stubs for now: indicator and footer.
+        h += 36 + 16;
+        if model.hotkey_hint.is_some() {
+            h += 22;
+        }
+        return h.clamp(200, 900);
+    }
+    h += 48 + 12;
     h += if model.last_game.is_some() { 196 } else { 72 };
     h += 12 + 28;
     h += 12 + 18;
@@ -547,10 +564,17 @@ pub enum OverlayViewMessage {
 }
 
 pub fn view<'a>(model: &'a OverlayModel) -> Element<'a, OverlayViewMessage> {
-    let mut body = column![header_row(model)].spacing(GRID_GAP).width(Fill);
-    body = body.push(last_game_card(model.last_game.as_ref()));
-    body = body.push(tonight_strip(&model.tonight_outcomes));
-    body = body.push(heroes_block(&model.top_heroes));
+    let mut body = column![page_indicator(&model.pages)]
+        .spacing(GRID_GAP)
+        .width(Fill);
+    // Only Tonight has its content yet; the other pages show the indicator
+    // and the footer. Nothing hint-related is ever drawn on Tonight.
+    if model.pages.page == Page::Tonight {
+        body = body.push(header_row(model));
+        body = body.push(last_game_card(model.last_game.as_ref()));
+        body = body.push(tonight_strip(&model.tonight_outcomes));
+        body = body.push(heroes_block(&model.top_heroes));
+    }
     body = body.push(footer_row(model));
 
     container(body)
@@ -691,16 +715,101 @@ fn format_stat(n: u32) -> String {
     }
 }
 
+/// The letter in a Tonight square, so the result is not colour alone. An
+/// unknown result has no letter.
+pub fn outcome_letter(outcome: Outcome) -> &'static str {
+    match outcome {
+        Outcome::Win => "W",
+        Outcome::Loss => "L",
+        Outcome::Draw => "D",
+        Outcome::Unknown => "",
+    }
+}
+
 fn tonight_strip(outcomes: &[Outcome]) -> Element<'static, OverlayViewMessage> {
     let mut row = row![label("Tonight")].spacing(6).align_y(Alignment::Center);
     if outcomes.is_empty() {
         row = row.push(text("-").size(SIZE_META).font(FONT_MEDIUM).color(TEXT_3));
     } else {
         for outcome in outcomes {
-            row = row.push(container(space().width(10).height(16)).style(theme::stripe(*outcome)));
+            let letter = text(outcome_letter(*outcome))
+                .size(SIZE_LABEL)
+                .font(FONT_BOLD)
+                .color(theme::BG);
+            row = row.push(
+                container(letter)
+                    .center_x(14)
+                    .center_y(16)
+                    .style(theme::stripe(*outcome)),
+            );
         }
     }
     row.into()
+}
+
+/// Four dots and the page name in words, on every in-match page. The
+/// Tonight pip carries a T, the lit dot is larger and filled, and the name
+/// is spelled out, so colour is never the only cue. Tip shows only its
+/// name. The hold adds its tag beside the name.
+fn page_indicator(pages: &PageState) -> Element<'static, OverlayViewMessage> {
+    let ind = overlay_pages::indicator(pages);
+    let mut row = row![].spacing(6).align_y(Alignment::Center);
+    if let Some(lit) = ind.dot {
+        for i in 0..Page::IN_MATCH.len() {
+            let dot = page_dot(i == lit);
+            row = if i == 0 {
+                let pip = text("T")
+                    .size(SIZE_LABEL)
+                    .font(FONT_BOLD)
+                    .color(if lit == 0 { TEXT } else { TEXT_3 });
+                row.push(row![pip, dot].spacing(3).align_y(Alignment::Center))
+            } else {
+                row.push(dot)
+            };
+        }
+    }
+    row = row.push(
+        text(ind.name)
+            .size(SIZE_META)
+            .font(FONT_SEMIBOLD)
+            .color(TEXT),
+    );
+    if ind.held {
+        row = row.push(
+            container(
+                text(overlay_pages::HELD_TAG)
+                    .size(SIZE_LABEL)
+                    .font(FONT_SEMIBOLD)
+                    .color(TEXT),
+            )
+            .padding(Padding::from([2, 8]))
+            .style(|_t| container::Style {
+                background: Some(Background::Color(theme::ACCENT_SOFT)),
+                border: Border {
+                    color: theme::ACCENT,
+                    width: 1.0,
+                    radius: theme::RADIUS_CHIP.into(),
+                },
+                ..container::Style::default()
+            }),
+        );
+    }
+    container(row).height(18).center_y(18).into()
+}
+
+fn page_dot(lit: bool) -> Element<'static, OverlayViewMessage> {
+    let size = if lit { 8.0 } else { 6.0 };
+    container(space().width(size).height(size))
+        .style(move |_| container::Style {
+            background: lit.then_some(Background::Color(theme::ACCENT)),
+            border: Border {
+                color: if lit { theme::ACCENT } else { TEXT_3 },
+                width: 1.0,
+                radius: 999.0.into(),
+            },
+            ..container::Style::default()
+        })
+        .into()
 }
 
 fn heroes_block(heroes: &[OverlayHero]) -> Element<'static, OverlayViewMessage> {
@@ -756,20 +865,21 @@ fn footer_row(model: &OverlayModel) -> Element<'_, OverlayViewMessage> {
     .spacing(8)
     .align_y(Alignment::Center);
 
-    match &model.hotkey_hint {
-        Some(hint) => column![
-            chips,
+    let safe = model
+        .pages
+        .held
+        .then(|| overlay_pages::safe_page_footer(overlay_pages::DEFAULT_SAFE_BIND));
+    let mut col = column![chips].spacing(6).width(Fill);
+    for hint in [model.hotkey_hint.clone(), safe].into_iter().flatten() {
+        col = col.push(
             text(hint)
                 .size(SIZE_LABEL)
                 .font(FONT_MEDIUM)
                 .color(TEXT_3)
                 .width(Fill),
-        ]
-        .spacing(6)
-        .width(Fill)
-        .into(),
-        None => chips.into(),
+        );
     }
+    col.into()
 }
 
 fn chip<'a>(label_s: &'a str) -> Element<'a, OverlayViewMessage> {
@@ -912,6 +1022,7 @@ impl OverlayApp {
             let season = seasons::resolve_selection(persisted, &seasons.seasons);
             self.clock = Utc::now();
             let config = stat_tracker::config::Config::load().unwrap_or_default();
+            let pages = self.model.pages;
             self.model = build_model(
                 &games,
                 &seasons.seasons,
@@ -920,6 +1031,7 @@ impl OverlayApp {
                 config.sync.is_some(),
                 detect_game_running(&self.data_dir, &config.game_process_names, false),
             );
+            self.model.pages = pages;
         }
         self.model.hotkey_hint = hint;
     }
@@ -1217,6 +1329,50 @@ mod tests {
             true,
         );
         let _ = view(&sample);
+    }
+
+    #[test]
+    fn tonight_squares_carry_a_letter() {
+        assert_eq!(outcome_letter(Outcome::Win), "W");
+        assert_eq!(outcome_letter(Outcome::Loss), "L");
+        assert_eq!(outcome_letter(Outcome::Draw), "D");
+        assert_eq!(outcome_letter(Outcome::Unknown), "");
+    }
+
+    #[test]
+    fn every_page_and_the_hold_build_a_view() {
+        let games = sample_games();
+        let clock = games[0].played_at;
+        let tonight = build_model(
+            &games,
+            &sample_seasons(),
+            &SeasonSel::AllTime,
+            clock,
+            true,
+            true,
+        );
+        let tonight_h = content_height(&tonight);
+        for page in [Page::MapVote, Page::PicksAndBans, Page::Matchup, Page::Tip] {
+            let model = OverlayModel {
+                pages: PageState {
+                    page,
+                    ..PageState::default()
+                },
+                ..tonight.clone()
+            };
+            let _ = view(&model);
+            // A stub page draws no Tonight content.
+            assert!(content_height(&model) < tonight_h, "{page:?}");
+        }
+        let held = OverlayModel {
+            pages: overlay_pages::safe_page(PageState::default()),
+            ..tonight.clone()
+        };
+        let _ = view(&held);
+        assert!(
+            content_height(&held) > tonight_h,
+            "the hold adds the footer line"
+        );
     }
 
     #[test]
