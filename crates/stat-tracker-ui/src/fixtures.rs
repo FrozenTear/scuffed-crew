@@ -143,6 +143,7 @@ pub(crate) fn pm(
         queue_title: None,
         rank_update: None,
         match_times: None,
+        team_size: None,
     }
 }
 

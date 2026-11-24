@@ -1405,7 +1405,6 @@ pub(super) mod game {
             Some("unknown"),
             "the kit still holds the Tab read"
         );
-
         let snapshot = crate::storage::Snapshot {
             matches: vec![crate::storage::PersonalMatch {
                 id: None,
@@ -1447,6 +1446,7 @@ pub(super) mod game {
                 queue_title: None,
                 rank_update: None,
                 match_times: None,
+                team_size: None,
             }],
             ..crate::storage::Snapshot::default()
         };

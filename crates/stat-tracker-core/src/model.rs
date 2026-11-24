@@ -318,6 +318,15 @@ pub struct PersonalMatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[surreal(default)]
     pub match_times: Option<MatchTimes>,
+    /// Players per team on this game's Tab board (5 or 6). Set on each Tab
+    /// capture when the board size is known, and carried onto later
+    /// snapshots. `None` on games recorded before the field existed, on a
+    /// game first stored with no Tab (a best guess on close, a held board),
+    /// and when the board size was not 5 or 6. Used with the queue title
+    /// to decide `rank.queue` on upload. Omitted from JSON when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub team_size: Option<u8>,
 }
 
 /// A game's real start and end ([`PersonalMatch::match_times`]). Either is

@@ -327,9 +327,9 @@ pub(crate) fn test_match(session_id: &str, outcome: &str) -> storage::PersonalMa
         queue_title: None,
         rank_update: None,
         match_times: None,
+        team_size: None,
     }
 }
-
 // ---- S1: the OCR on/off switch (`ocr` in config.toml).
 
 /// A 1080p stand-in for a Tab frame: a bright header band with six dark

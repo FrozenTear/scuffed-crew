@@ -77,6 +77,7 @@ const CRATE_OF: &[(&str, Crate)] = &[
     ("perf", Crate::Core),
     ("perf_log", Crate::Core),
     ("proc_id", Crate::Core),
+    ("rank_queue", Crate::Core),
     ("replace", Crate::Core),
     ("sandbox", Crate::Core),
     ("setup", Crate::Core),
@@ -309,8 +310,7 @@ fn all_sources() -> Vec<Source> {
         .collect()
 }
 
-/// Every lib source file of `crates/{dir}`, reached from its `lib.rs`
-/// through its `mod`s.
+/// Every lib source file of `crates/{dir}`, reached from its `lib.rs` through its `mod`s.
 fn crate_sources(dir: &'static str, home: Crate) -> Vec<Source> {
     let src = crates_dir().join(dir).join("src");
     let src = src.as_path();

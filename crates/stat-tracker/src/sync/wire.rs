@@ -5,7 +5,7 @@ use std::ops::{Deref, DerefMut};
 
 use crate::storage::PersonalMatch;
 
-use scuffed_types::api::{RankRole, StatsUploadEntry};
+use scuffed_types::api::{RankQueue, RankRole, StatsUploadEntry};
 use serde::Serialize;
 
 use super::bans_picks::{UploadBansPicks, upload_bans_picks};
@@ -20,10 +20,11 @@ pub struct UploadEntry {
     entry: StatsUploadEntry,
     #[serde(skip_serializing_if = "Option::is_none")]
     bans_picks: Option<UploadBansPicks>,
-    /// What the `rank-v1` readers read for the game ([`upload_rank`]). Left
-    /// out when they read nothing, so an older server, a game with the
-    /// readers off and a game with no confident read see the same body as
-    /// before.
+    /// What the `rank-v1` readers read for the game ([`upload_rank`]),
+    /// including the decided Competitive queue. Left out when they read
+    /// nothing and the game has no queue to send, so an older server, a
+    /// game with the readers off and a game that is not Competitive see
+    /// the same body as before.
     #[serde(skip_serializing_if = "Option::is_none")]
     rank: Option<UploadRank>,
 }
@@ -71,8 +72,22 @@ pub struct UploadRank {
     /// The queue read on the pre-game screens.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queue_title: Option<UploadRankField<String>>,
+    /// The queue the game was played in ([`upload_queue`]). Sent for
+    /// Competitive games only, next to the other rank fields, and on a
+    /// Competitive game with no rank screen read (the object then holds
+    /// this and, when it was read, the queue title).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue: Option<UploadQueueField>,
     /// The reader id ([`RANK_RECOGNIZER_ID`]), sent with any field.
     pub rank_recognizer: &'static str,
+}
+
+/// `rank.queue` on the upload: the decided value and how sure the input
+/// that decided it was. `confidence` is null when the queue is unknown.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct UploadQueueField {
+    pub value: RankQueue,
+    pub confidence: Option<f32>,
 }
 
 /// The reader id sent as `rank.rank_recognizer`, for the queue title and
@@ -81,8 +96,8 @@ pub struct UploadRank {
 pub const RANK_RECOGNIZER_ID: &str = crate::model::RANK_RECOGNIZER_ID;
 
 /// The game's `rank` object as the upload sends it: each field only when
-/// the reader read it, and `None` (no key, the old body) when no field is
-/// set.
+/// the reader read it, plus `queue` on a Competitive game, and `None` (no
+/// key, the old body) when no field is set.
 ///
 /// The local `QueueTitle::mode_hint` is not sent as `rank.next_mode_hint`:
 /// that site field belongs to the game whose rank screen was read (the
@@ -99,7 +114,7 @@ pub(super) fn upload_rank(m: &PersonalMatch) -> Option<UploadRank> {
     });
     let open_queue = m.queue_title.as_ref().is_some_and(|t| t.is_open_queue());
     let r = m.rank_update.clone().unwrap_or_default();
-    let rank = UploadRank {
+    let mut rank = UploadRank {
         role: field(&r.role, |v| rank_role(v, open_queue)),
         role_rank: field(&r.role_rank, |v| text(v)),
         division: field(&r.division, |v| {
@@ -122,9 +137,47 @@ pub(super) fn upload_rank(m: &PersonalMatch) -> Option<UploadRank> {
         hero_sr_change: field(&r.hero_sr_change, |v| i32::try_from(*v).ok()),
         next_mode_hint: field(&r.next_mode_hint, |v| text(v)),
         queue_title,
+        queue: None,
         rank_recognizer: RANK_RECOGNIZER_ID,
     };
+    if rank != UploadRank::none() {
+        rank.queue = Some(upload_queue(m));
+    }
     (rank != UploadRank::none()).then_some(rank)
+}
+
+/// The decided `rank.queue` for a Competitive game that already has a
+/// `rank` object (a confident queue title, a rank screen field, or both).
+/// A title or board size that does not map is `unknown` with no
+/// confidence; the game is still uploaded.
+fn upload_queue(m: &PersonalMatch) -> UploadQueueField {
+    // Use the stored title and role, not the fields the upload already
+    // kept: an Open role line is dropped from the body when there is no
+    // open queue title, but with 6 per team and no title it still decides
+    // open_6v6.
+    let title = m.queue_title.as_ref().and_then(|t| t.confident_value());
+    let title_confidence = title.and_then(|_| sure(m.queue_title.as_ref()?.confidence));
+    let role = m
+        .rank_update
+        .as_ref()
+        .and_then(|r| r.role.as_ref())
+        .map(|t| t.value.as_str());
+    let role_confidence = m
+        .rank_update
+        .as_ref()
+        .and_then(|r| r.role.as_ref())
+        .and_then(|t| sure(t.confidence));
+    let decided = crate::rank_queue::decide_rank_queue(
+        title,
+        title_confidence,
+        m.team_size,
+        role,
+        role_confidence,
+    );
+    UploadQueueField {
+        value: decided.value,
+        confidence: decided.confidence,
+    }
 }
 
 /// Whether storing `rank` on `m` changes the `rank` object the upload
@@ -155,6 +208,7 @@ impl UploadRank {
             hero_sr_change: None,
             next_mode_hint: None,
             queue_title: None,
+            queue: None,
             rank_recognizer: RANK_RECOGNIZER_ID,
         }
     }
