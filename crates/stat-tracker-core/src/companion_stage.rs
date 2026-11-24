@@ -76,8 +76,9 @@ pub fn seen_current_for_secs(poll_interval: std::time::Duration) -> i64 {
 }
 
 /// True when `now - seen` is in
-/// `-SEEN_FUTURE_SLACK_SECS..=seen_current_for_secs(poll_interval)`. A
-/// `seen` further in the future is not current.
+/// `-SEEN_FUTURE_SLACK_SECS..=seen_current_for_secs(poll_interval)` (see
+/// [`SEEN_FUTURE_SLACK_SECS`] and [`seen_current_for_secs`]). A `seen`
+/// further in the future is not current.
 pub fn stage_is_current(seen: i64, now: i64, poll_interval: std::time::Duration) -> bool {
     let age = now.saturating_sub(seen);
     let bound = seen_current_for_secs(poll_interval);
