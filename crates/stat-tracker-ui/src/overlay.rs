@@ -33,7 +33,7 @@ use crate::theme::{
     SIZE_LABEL, SIZE_META, SIZE_TITLE, STRIPE, TEXT, TEXT_2, TEXT_3,
 };
 
-/// Design §4.6, width 360, margins 24, exclusive zone 0.
+/// UX Spec companion-spec: width 360, bottom-right, margins 24, exclusive zone 0.
 pub const OVERLAY_WIDTH: u32 = 360;
 pub const OVERLAY_MARGIN: i32 = 24;
 pub const OVERLAY_EXCLUSIVE_ZONE: i32 = 0;
@@ -233,6 +233,9 @@ pub struct OverlayShellSpec {
     pub width: u32,
     pub height: u32,
     pub margin: i32,
+    /// Bottom-right, 24 px margin: clear of the pick and ban map name.
+    pub anchor_bottom: bool,
+    pub anchor_right: bool,
     pub exclusive_zone: i32,
     pub layer_overlay: bool,
     pub keyboard_none: bool,
@@ -246,6 +249,8 @@ pub fn overlay_shell_spec(height: u32, capture_output: Option<&str>) -> OverlayS
         width: OVERLAY_WIDTH,
         height: height.max(200),
         margin: OVERLAY_MARGIN,
+        anchor_bottom: true,
+        anchor_right: true,
         exclusive_zone: OVERLAY_EXCLUSIVE_ZONE,
         layer_overlay: true,
         keyboard_none: true,
@@ -1256,6 +1261,8 @@ mod tests {
         let spec = overlay_shell_spec(412, Some("DP-1"));
         assert_eq!(spec.width, 360);
         assert_eq!(spec.margin, 24);
+        assert!(spec.anchor_bottom, "bottom-right, not top-right");
+        assert!(spec.anchor_right, "bottom-right, not top-right");
         assert_eq!(spec.exclusive_zone, 0);
         assert!(spec.layer_overlay);
         assert!(spec.keyboard_none);
