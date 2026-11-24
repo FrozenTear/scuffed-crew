@@ -56,7 +56,11 @@ impl RankShown {
     /// (a rank text, progress or change).
     pub fn from_game(g: &Game) -> Option<Self> {
         let rank = g.rank_update.as_ref()?;
-        let open_queue = g.queue_title.as_ref().is_some_and(|t| t.is_open_queue());
+        let open_queue = g
+            .queue_title
+            .as_ref()
+            .and_then(|t| t.confident_value())
+            .is_some_and(stat_tracker::rank_queue::title_is_open);
         // A word or number the upload sends: one read with a confidence it
         // keeps ([`sure`]), and text of a length it keeps ([`upload_text`]).
         fn word(w: &Option<RankText>) -> Option<&str> {

@@ -1,6 +1,6 @@
 use super::*;
 use crate::games_rows::tests::game;
-use crate::games_rows::{Col, Grid, Width, columns};
+use crate::games_rows::{columns, Col, Grid, Width};
 use crate::model::Outcome;
 use stat_tracker::model::{QueueTitle, RankNumber, RankText, RankUpdate};
 
@@ -387,7 +387,12 @@ fn upload_cases() -> Vec<(RankUpdate, Option<QueueTitle>)> {
         "x".repeat(65),
     ];
     let roles = ["Tank", "Damage", "Support", "Open", "Healer"];
-    let queues = [None, Some("ROLE QUEUE"), Some("OPEN QUEUE")];
+    let queues = [
+        None,
+        Some("ROLE QUEUE"),
+        Some("OPEN QUEUE"),
+        Some("OPEN QUEUE 6V6"),
+    ];
     let numbers = [-101, -100, 0, 45, 100, 101, i64::MAX];
     let mut cases = Vec::new();
     let mut i = 0;
