@@ -162,11 +162,12 @@ impl RankShown {
 /// send it: the site's `RankRole` spellings only, `Open` only with an open
 /// queue title, and a role icon never with one.
 fn role_name(value: &str, open_queue: bool) -> Option<&'static str> {
-    match value {
-        "Tank" if !open_queue => Some("Tank"),
-        "Damage" if !open_queue => Some("Damage"),
-        "Support" if !open_queue => Some("Support"),
-        "Open" if open_queue => Some(OPEN_ROLE),
+    use scuffed_types::api::RankRole;
+    match stat_tracker::rank_queue::parse_rank_role(value)? {
+        RankRole::Tank if !open_queue => Some("Tank"),
+        RankRole::Damage if !open_queue => Some("Damage"),
+        RankRole::Support if !open_queue => Some("Support"),
+        RankRole::Open if open_queue => Some(OPEN_ROLE),
         _ => None,
     }
 }
@@ -179,7 +180,7 @@ fn role_name(value: &str, open_queue: bool) -> Option<&'static str> {
 pub fn context_label(role: Option<&str>, queue: Option<&str>) -> String {
     let role = role.unwrap_or(ROLE_UNKNOWN);
     match queue {
-        Some(q) if role == OPEN_ROLE && q.to_uppercase().contains("OPEN QUEUE") => q.to_string(),
+        Some(q) if role == OPEN_ROLE && stat_tracker::rank_queue::title_is_open(q) => q.to_string(),
         Some(q) if !q.eq_ignore_ascii_case(role) => format!("{role}, {q}"),
         _ => role.to_string(),
     }

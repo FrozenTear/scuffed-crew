@@ -239,7 +239,9 @@ mod tests {
 
     #[test]
     fn a_role_line_spelling_rank_role_does_not_take_is_unknown() {
-        for role in ["tank", "TANK", "damage", "support", "open", "OPEN"] {
+        for role in [
+            "tank", "TANK", "damage", "support", "open", "OPEN", " Tank", "Tank ", " Open",
+        ] {
             let (value, confidence) = decide(None, Some(6), Some(role));
             assert_eq!(value, RankQueue::Unknown, "{role}");
             assert_eq!(confidence, None, "{role}");

@@ -522,6 +522,10 @@ impl QueueTitle {
 
     /// The confident title names open queue: its [`queue_key`] ends in the
     /// word `OPEN` (`OPEN QUEUE`, `COMPETITIVE: 6V6 OPEN QUEUE`).
+    ///
+    /// Not the upload's open queue check: for anything that must match
+    /// `rank.role` or `rank.queue`, use `confident_value()` with
+    /// `rank_queue::title_is_open`.
     pub fn is_open_queue(&self) -> bool {
         self.confident_value()
             .is_some_and(|v| queue_key(v).rsplit(' ').next() == Some("OPEN"))

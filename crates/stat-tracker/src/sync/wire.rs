@@ -209,6 +209,11 @@ pub(crate) fn rank_update_changes_upload(
 impl UploadRank {
     /// A field read on the rank screen itself, not the pre-game title.
     fn has_rank_screen_field(&self) -> bool {
+        // No `..`. A field read on the rank screen goes in the `||` chain
+        // below and gets a row in
+        // `each_rank_screen_field_alone_sends_a_rank_object`. Only fields
+        // not read on the rank screen (`queue_title`, `queue`,
+        // `rank_recognizer`) are ignored with `_`.
         let Self {
             role,
             role_rank,

@@ -147,10 +147,27 @@ fn open_queue_role_follows_the_upload() {
         shown(&g).sentence(),
         "Rank: COMPETITIVE: 6V6 OPEN QUEUE, Silver 1, 10% progress, ±0% this game"
     );
+    // OPEN not next to QUEUE is still an open queue title, said once.
+    g.queue_title = Some(queue("OPEN 6V6 QUEUE"));
+    assert_eq!(shown(&g).context(), "OPEN 6V6 QUEUE");
     let mut g = with_rank(rank("Tank", "Silver", 1, 10, 0));
     g.queue_title = Some(queue("OPEN QUEUE"));
     assert_eq!(shown(&g).context(), "Role unknown, OPEN QUEUE");
     assert_eq!(context_label(Some("Tank"), None), "Tank");
+}
+
+/// The role shows only for the exact `RankRole` spellings the upload
+/// sends; other case or surrounding spaces show no role.
+#[test]
+fn only_the_rank_role_spellings_show_a_role() {
+    assert_eq!(role_name("Tank", false), Some("Tank"));
+    assert_eq!(role_name("Damage", false), Some("Damage"));
+    assert_eq!(role_name("Support", false), Some("Support"));
+    assert_eq!(role_name("Open", true), Some(OPEN_ROLE));
+    for value in ["TANK", "tank", " Tank", "Tank ", "SUPPORT", "OPEN", " Open"] {
+        assert_eq!(role_name(value, false), None, "{value:?}");
+        assert_eq!(role_name(value, true), None, "{value:?}");
+    }
 }
 
 /// The rank tooltip spells the queue as the queue chip and the Map
