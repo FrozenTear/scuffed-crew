@@ -212,6 +212,30 @@ fn report_a_problem_keeps_its_text_clear_of_the_bar() {
     });
 }
 
+/// A host-header token with no spaces (every report includes a line like
+/// `drm=card1:i915[DP-1:...,HDMI-A-1:...]`) must wrap on glyphs so it
+/// stays left of the log gutter instead of running past it and being cut.
+#[test]
+fn report_log_wraps_a_no_space_host_header_line() {
+    use crate::report::{ReportDialog, ReportUi};
+    use stat_tracker::report::{LogOnlyCategory, ReportZip};
+    use std::sync::Arc;
+    let host = "drm=card1:i915[DP-1:3840x2160@60,HDMI-A-1:1920x1080@60,DP-2:2560x1440@144,HDMI-A-2:1280x720@60]";
+    let token = host.to_string() + &"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".repeat(6);
+    let mut crash = ReportDialog::new(Some(LogOnlyCategory::Crash), true);
+    crash.built = Some(Ok(Arc::new(ReportZip {
+        bytes: vec![1, 2, 3],
+        manifest_json: r#"{"game":null,"reason":{"category":"crash"}}"#.into(),
+        files: Vec::new(),
+        log_text: token,
+        images: Vec::new(),
+        left_out: Vec::new(),
+    })));
+    crash.show_log = true;
+    let ui = ReportUi::Dialog(Box::new(crash));
+    assert_clear("report no-space log", GRID_GAP, || crate::report::view(&ui));
+}
+
 #[test]
 fn uninstall_keeps_its_text_clear_of_the_bar() {
     use crate::uninstall::UninstallDialog;
@@ -287,6 +311,26 @@ fn what_leaves_keeps_its_close_button_in_view() {
                 && close_box.x + close_box.width <= window.0 + 0.5,
             "Close at {close_box:?} is outside {window:?}"
         );
+        let card = card_bounds(
+            crate::what_leaves::layer(&app).expect("open").content,
+            window,
+        );
+        let window_cap = window.1 - 28.0 * 2.0;
+        let cap = window_cap.min(560.0);
+        assert!(
+            card.height <= cap + 0.5,
+            "{window:?}: card height {} exceeds cap {cap}",
+            card.height
+        );
+        // On a tall window, Fill would stretch the card to the layer.
+        // On 720x480 the cap is the layer itself, so the card may use it.
+        if 560.0 < window_cap {
+            assert!(
+                card.height < window_cap - 0.5,
+                "{window:?}: card height {} fills the layer ({window_cap})",
+                card.height
+            );
+        }
     }
 }
 
@@ -436,6 +480,39 @@ fn card_bounds(mut element: Element<'_, Message>, window: (f32, f32)) -> Rectang
         .unwrap_or_else(|| panic!("padded card at {window:?}, title {title:?}"))
 }
 
+fn text_bounds(mut element: Element<'_, Message>, window: (f32, f32), needle: &str) -> Rectangle {
+    let renderer = headless();
+    let mut tree = Tree::new(&element);
+    let node = element.as_widget_mut().layout(
+        &mut tree,
+        &renderer,
+        &Limits::new(Size::ZERO, Size::new(window.0, window.1)),
+    );
+    struct FindText<'a> {
+        needle: &'a str,
+        found: Option<Rectangle>,
+    }
+    impl Operation<()> for FindText<'_> {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<()>)) {
+            operate(self);
+        }
+        fn text(&mut self, _id: Option<&Id>, bounds: Rectangle, text: &str) {
+            if text == self.needle {
+                self.found = Some(bounds);
+            }
+        }
+    }
+    let mut find = FindText {
+        needle,
+        found: None,
+    };
+    element
+        .as_widget_mut()
+        .operate(&mut tree, Layout::new(&node), &renderer, &mut find);
+    find.found
+        .unwrap_or_else(|| panic!("{needle:?} is laid out at {window:?}"))
+}
+
 fn is_close(messages: &[Message]) -> bool {
     messages.iter().any(|m| {
         matches!(
@@ -445,41 +522,38 @@ fn is_close(messages: &[Message]) -> bool {
     })
 }
 
-/// A click on the card's 24 px panel padding stays on the card; only a
-/// click on the dimmed backdrop closes the dialog.
+/// A click on the card (title, body text, or 24 px panel padding) stays
+/// on the card; only a click on the dimmed backdrop closes the dialog.
 #[test]
-fn what_leaves_card_padding_does_not_close() {
+fn what_leaves_card_clicks_do_not_close() {
     let (_dir, mut app) = crate::fixtures::test_app();
     let _ = app.update(Message::SettingsPage(Msg::Open(OpenMsg::WhatLeaves(true))));
+    const BODY: &str = "Game uploads, while Upload games is on";
     for window in WINDOWS {
-        let card = card_bounds(
-            crate::what_leaves::layer(&app).expect("open").content,
-            window,
-        );
+        let layer = || what_leaves_top(&app);
+        let card = card_bounds(layer(), window);
+        let title = text_bounds(layer(), window, "What leaves your PC");
+        let body = text_bounds(layer(), window, BODY);
+        let on_title = Point::new(title.x + title.width / 2.0, title.y + title.height / 2.0);
+        let on_text = Point::new(body.x + body.width.min(40.0), body.y + body.height / 2.0);
         let on_pad = Point::new(card.x + 12.0, card.y + 12.0);
         let on_dim = Point::new(8.0, window.1 / 2.0);
         assert!(
-            card.contains(on_pad),
-            "{window:?}: pad click {on_pad:?} is outside the card {card:?}"
+            card.contains(on_title) && card.contains(on_text) && card.contains(on_pad),
+            "{window:?}: a card click is outside the card {card:?}:              title {on_title:?}, text {on_text:?}, pad {on_pad:?}"
         );
         assert!(
             !card.contains(on_dim),
             "{window:?}: backdrop click {on_dim:?} is inside the card {card:?}"
         );
-        let pad = press_at(
-            crate::what_leaves::layer(&app).expect("open").content,
-            window,
-            on_pad,
-        );
-        assert!(
-            !is_close(&pad),
-            "{window:?}: a click on the card padding closed the dialog: {pad:?}"
-        );
-        let dim = press_at(
-            crate::what_leaves::layer(&app).expect("open").content,
-            window,
-            on_dim,
-        );
+        for (name, point) in [("title", on_title), ("text", on_text), ("padding", on_pad)] {
+            let messages = press_at(layer(), window, point);
+            assert!(
+                !is_close(&messages),
+                "{window:?}: a click on the card {name} closed the dialog: {messages:?}"
+            );
+        }
+        let dim = press_at(layer(), window, on_dim);
         assert!(
             is_close(&dim),
             "{window:?}: a click on the backdrop did not close the dialog: {dim:?}"

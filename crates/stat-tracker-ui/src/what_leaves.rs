@@ -7,7 +7,7 @@
 //! problem.
 
 use iced::widget::{
-    Column, button, column, container, mouse_area, opaque, row, space, stack, text,
+    Column, button, column, container, mouse_area, opaque, responsive, row, space, text,
 };
 use iced::{Element, Fill, Padding};
 
@@ -20,6 +20,17 @@ use crate::theme::{
 };
 
 const TITLE: &str = "What leaves your PC";
+
+/// Inset around the card, same as the other dialog shells.
+const LAYER_PAD: f32 = 28.0;
+const CARD_PAD: f32 = 24.0;
+const CARD_MAX_WIDTH: f32 = 560.0;
+/// Soft cap, same as the Uninstall dialog. A short window caps it lower.
+const CARD_MAX_HEIGHT: f32 = 560.0;
+/// Reserved for the title and Close row so the body cap does not eat them.
+const TITLE_SLOT: f32 = 32.0;
+const CLOSE_SLOT: f32 = 36.0;
+const COL_SPACING: f32 = 16.0;
 
 /// The bans and picks in the game upload: values only, never a picture.
 /// Read at 2560x1440, and the switch starts on.
@@ -90,56 +101,75 @@ fn dialog<'a>() -> Element<'a, Message> {
     // body uses [`guttered_scrollable`]: the Settings gutter stays free
     // on the right whether or not the bar shows, and the lines do not
     // rewrap when the window gets short enough to scroll.
-    let mut body = Column::new().spacing(14);
-    for (heading, lines) in SECTIONS {
-        let mut part =
-            column![text(heading).size(SIZE_META).font(FONT_BOLD).color(TEXT)].spacing(4);
-        for line in lines {
-            part = part.push(text(*line).size(SIZE_LABEL).font(FONT_MEDIUM).color(TEXT_2));
-        }
-        body = body.push(part);
-    }
-    let done = button(
-        text("Close")
-            .size(SIZE_META)
-            .font(FONT_SEMIBOLD)
-            .color(TEXT),
-    )
-    .padding(Padding::from([7, 14]))
-    .style(theme::ghost_btn())
-    .on_press(close());
-    let card = container(
-        column![
-            text(TITLE)
-                .size(SIZE_BODY + 4.0)
-                .font(FONT_BOLD)
-                .color(TEXT),
-            guttered_scrollable(body).height(Fill),
-            row![space().width(Fill), done],
-        ]
-        .spacing(16)
-        .height(Fill),
-    )
-    .padding(24)
-    .max_width(560)
-    .height(Fill)
-    .style(theme::surface_panel);
+    //
+    // The card shrinks to its content, capped at [`CARD_MAX_HEIGHT`] or
+    // the window minus [`LAYER_PAD`] on each side, and the body scrolls
+    // so Close stays in view. Height(Fill) used to keep Close visible
+    // after Shrink clipped it, but it also stretched the card over the
+    // window. Presses on the dimmed backdrop close the dialog; the card
+    // is opaque so a click on the title, the body, or the 24 px panel
+    // padding does not fall through.
     let mut backdrop = theme::BG;
     backdrop.a = 0.88;
     let dim = move |_theme: &iced::Theme| container::Style {
         background: Some(iced::Background::Color(backdrop)),
         ..container::Style::default()
     };
-    opaque(
-        stack![
-            mouse_area(container(space().width(Fill).height(Fill)).style(dim)).on_press(close()),
-            // Presses on the card, including its 24 px panel padding, are
-            // absorbed here so they do not fall through to the backdrop.
-            container(opaque(card)).padding(28).center(Fill),
-        ]
-        .width(Fill)
-        .height(Fill),
-    )
+    responsive(move |size| {
+        let card_max = (size.height - LAYER_PAD * 2.0).clamp(
+            TITLE_SLOT + CLOSE_SLOT + COL_SPACING * 2.0 + CARD_PAD * 2.0,
+            CARD_MAX_HEIGHT,
+        );
+        let body_max =
+            (card_max - CARD_PAD * 2.0 - TITLE_SLOT - CLOSE_SLOT - COL_SPACING * 2.0).max(64.0);
+        let mut body = Column::new().spacing(14);
+        for (heading, lines) in SECTIONS {
+            let mut part =
+                column![text(heading).size(SIZE_META).font(FONT_BOLD).color(TEXT)].spacing(4);
+            for line in lines {
+                part = part.push(text(*line).size(SIZE_LABEL).font(FONT_MEDIUM).color(TEXT_2));
+            }
+            body = body.push(part);
+        }
+        let done = button(
+            text("Close")
+                .size(SIZE_META)
+                .font(FONT_SEMIBOLD)
+                .color(TEXT),
+        )
+        .padding(Padding::from([7, 14]))
+        .style(theme::ghost_btn())
+        .on_press(close());
+        let card = container(
+            column![
+                text(TITLE)
+                    .size(SIZE_BODY + 4.0)
+                    .font(FONT_BOLD)
+                    .color(TEXT),
+                container(guttered_scrollable(body)).max_height(body_max),
+                row![space().width(Fill), done],
+            ]
+            .spacing(COL_SPACING),
+        )
+        .padding(CARD_PAD)
+        .max_width(CARD_MAX_WIDTH)
+        .max_height(card_max)
+        .style(theme::surface_panel);
+        // Content is updated first, so opaque(card) absorbs presses on
+        // the title, body, and padding; only a press on the dimmed area
+        // reaches on_press and closes.
+        mouse_area(
+            container(opaque(card))
+                .padding(LAYER_PAD)
+                .center(Fill)
+                .width(Fill)
+                .height(Fill)
+                .style(dim),
+        )
+        .on_press(close())
+        .into()
+    })
+    .into()
 }
 
 #[cfg(test)]

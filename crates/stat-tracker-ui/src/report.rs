@@ -869,9 +869,8 @@ pub fn outcome_for(
                 .filter(|secs| *secs > 0)
                 .map(|secs| format!(" Try again in {}.", wait_text(secs)))
                 .unwrap_or_default();
-            // The site's own words, e.g. "Daily report limit reached". The
-            // game's saved pictures are kept (only a sent report removes
-            // them), so it can be sent again tomorrow.
+            // The site's own words, e.g. "Daily report limit reached".
+            // Saved pictures stay; only a sent report removes them.
             let said = serde_json::from_str::<serde_json::Value>(body)
                 .ok()
                 .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
@@ -1402,7 +1401,8 @@ fn preview_block(d: &ReportDialog) -> Element<'_, Message> {
                             text(log)
                                 .size(SIZE_LABEL)
                                 .font(iced::Font::MONOSPACE)
-                                .color(TEXT_2),
+                                .color(TEXT_2)
+                                .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
                         )
                         .height(Length::Fixed(220.0))
                         .width(Fill),
