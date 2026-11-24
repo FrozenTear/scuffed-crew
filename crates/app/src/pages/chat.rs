@@ -6,7 +6,9 @@
 //! composer stays in view. Mounts `ChatWidget` against F-API-003/004.
 
 use dioxus::prelude::*;
-use scuffed_types::{Team, TeamChannel};
+use scuffed_api_client::ApiClient;
+use scuffed_types::{MeResponse, Team, TeamChannel};
+use serde::Deserialize;
 
 use crate::components::chat::ThreadHead;
 use crate::components::chat::thread::thread_label;
@@ -63,29 +65,280 @@ fn room_title(teams: Option<&[Team]>, selected: Option<&str>) -> String {
         .unwrap_or_else(|| PAGE_TITLE.to_string())
 }
 
+/// The teams the signed-in member is rostered on, as far as the page knows.
+/// A team room is readable by its roster only (the relay read gate checks
+/// `plays_on`), and a public send is refused off the roster (`send-public`
+/// checks it too), whatever the org role.
+#[derive(Clone, Debug, PartialEq)]
+enum OwnTeams {
+    /// The roster answer: ids of the member's teams (empty: on no team).
+    Known(Vec<String>),
+    /// The lookup failed. The page then behaves as it did before it asked:
+    /// every team is offered and none is called out of reach.
+    Unknown,
+}
+
+impl OwnTeams {
+    fn ids(&self) -> &[String] {
+        match self {
+            Self::Known(ids) => ids,
+            Self::Unknown => &[],
+        }
+    }
+
+    /// The member is known not to be on this team's roster.
+    fn excludes(&self, team_id: &str) -> bool {
+        match self {
+            Self::Known(ids) => !ids.iter().any(|id| id == team_id),
+            Self::Unknown => false,
+        }
+    }
+}
+
+/// The part of `GET /api/public/members/{id}` this page reads: the member's
+/// active roster entries. `teams` is required: a profile without it is a
+/// contract drift, which lands in `OwnTeams::Unknown` and hides no room.
+#[derive(Debug, Deserialize)]
+struct OwnTeamsProfile {
+    teams: Vec<OwnTeamEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OwnTeamEntry {
+    team_id: String,
+}
+
+/// The session's member id from `/api/auth/me`, then that member's teams
+/// from the public profile (the one existing read of a member's roster
+/// entries). A session with no member row is on no team.
+async fn load_own_teams() -> OwnTeams {
+    let me = match ApiClient::web().fetch::<MeResponse>("/api/auth/me").await {
+        Ok(me) => me,
+        Err(e) => {
+            crate::util::log_client_error("chat me", &e);
+            return OwnTeams::Unknown;
+        }
+    };
+    let Some(member) = me.member else {
+        return OwnTeams::Known(Vec::new());
+    };
+    let path = format!(
+        "/api/public/members/{}",
+        crate::util::encode_query(&member.id)
+    );
+    match ApiClient::web().fetch::<OwnTeamsProfile>(&path).await {
+        Ok(profile) => OwnTeams::Known(profile.teams.into_iter().map(|t| t.team_id).collect()),
+        Err(e) => {
+            crate::util::log_client_error("chat own teams", &e);
+            OwnTeams::Unknown
+        }
+    }
+}
+
+/// The picker order: the member's own teams, then the rest. Each half keeps
+/// the order of `list` (by name, as `/api/teams` sends it).
+fn own_first<'a>(list: &'a [Team], own: &[String]) -> (Vec<&'a Team>, Vec<&'a Team>) {
+    list.iter().partition(|team| own.contains(&team.id))
+}
+
+/// The team the page opens: the first of the member's own teams. A member
+/// on no listed team still gets the first team picked, so the picker and the
+/// title agree; the body then says that room is out of reach.
+fn default_team<'a>(list: &'a [Team], own: &[String]) -> Option<&'a str> {
+    let (mine, others) = own_first(list, own);
+    mine.first().or(others.first()).map(|team| team.id.as_str())
+}
+
+/// Group labels of the picker, shown when the member has teams on both sides.
+const OWN_TEAMS_LABEL: &str = "Your teams";
+const OTHER_TEAMS_LABEL: &str = "Other teams";
+
+fn team_option(team: &Team, selected: Option<&str>) -> Element {
+    rsx! {
+        option {
+            key: "{team.id}",
+            value: "{team.id}",
+            selected: selected == Some(team.id.as_str()),
+            "{team.name}"
+        }
+    }
+}
+
+/// The placeholder the picker shows while the roster lookup is out. Short:
+/// an auto-width select sizes to its widest option, and the longer "Loading
+/// your teams..." made the select wide enough to wrap the head bar onto a
+/// second row at 360px in Chromium, which then jumped back when the lookup
+/// answered (issue 816 browser check). The status line says the full text.
+const PICKER_LOADING: &str = "Loading...";
+
+/// What the picker shows: the option it selects (`None`: the placeholder)
+/// and whether it waits for the roster lookup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PickerView<'a> {
+    selected: Option<&'a str>,
+    loading: bool,
+}
+
+/// The picker for a state of the page. Issue 816 QA: while the roster lookup
+/// was out the picker showed the first team by name and took picks, then
+/// jumped to the member's own team. Until the answer is in it stays drawn (no
+/// layout jump) but disabled on a placeholder. Once the answer is in, or the
+/// lookup failed, it shows the team the page opens (`default_team`) even in
+/// the render before the effect stores that pick.
+fn picker_view<'a>(
+    list: &'a [Team],
+    own: Option<&OwnTeams>,
+    selected: Option<&'a str>,
+) -> PickerView<'a> {
+    match (selected, own) {
+        (Some(id), _) => PickerView {
+            selected: Some(id),
+            loading: false,
+        },
+        (None, Some(own)) => PickerView {
+            selected: default_team(list, own.ids()),
+            loading: false,
+        },
+        (None, None) => PickerView {
+            selected: None,
+            loading: true,
+        },
+    }
+}
+
 /// The picker. Each option carries `selected`, so a re-render never shows
 /// the first team while the room is another's (the `value` attribute alone
-/// is set before the options exist).
-fn team_picker(list: &[Team], selected: Option<&str>, on_pick: EventHandler<String>) -> Element {
+/// is set before the options exist). The member's own teams come first.
+/// `loading`: disabled, with the placeholder selected and no team picked.
+fn team_picker(
+    list: &[Team],
+    own: &[String],
+    selected: Option<&str>,
+    loading: bool,
+    on_pick: EventHandler<String>,
+) -> Element {
+    let (mine, others) = own_first(list, own);
+    let grouped = !mine.is_empty() && !others.is_empty();
     rsx! {
         div { class: "chat-thread__team",
             label { class: "field-label", r#for: TEAM_SELECT_ID, "Team" }
             select {
                 id: TEAM_SELECT_ID,
                 class: "field-input",
+                disabled: loading,
                 value: selected.unwrap_or_default(),
                 onchange: move |evt| on_pick.call(evt.value()),
-                for team in list.iter() {
-                    option {
-                        key: "{team.id}",
-                        value: "{team.id}",
-                        selected: selected == Some(team.id.as_str()),
-                        "{team.name}"
+                if loading {
+                    option { value: "", selected: true, "{PICKER_LOADING}" }
+                }
+                if grouped {
+                    optgroup { label: OWN_TEAMS_LABEL,
+                        for team in mine.iter() {
+                            {team_option(team, selected)}
+                        }
+                    }
+                    optgroup { label: OTHER_TEAMS_LABEL,
+                        for team in others.iter() {
+                            {team_option(team, selected)}
+                        }
+                    }
+                } else {
+                    for team in mine.iter().chain(others.iter()) {
+                        {team_option(team, selected)}
                     }
                 }
             }
         }
     }
+}
+
+/// What the page shows in place of a room the member is not rostered on: no
+/// socket, no empty message list and no composer that can only answer 403.
+/// `can_add_self`: officers and admins edit rosters (`POST
+/// /api/teams/{id}/roster` takes an officer), so they can add themselves.
+fn off_roster_card(team_name: &str, on_any_team: bool, can_add_self: bool) -> Element {
+    let message = if on_any_team {
+        format!(
+            "Only players on the {team_name} roster can read and post in this chat. \
+             Pick one of your teams above."
+        )
+    } else {
+        let next = if can_add_self {
+            "Add yourself to a roster in team admin."
+        } else {
+            "An officer can add you to a roster."
+        };
+        format!(
+            "Only players on the {team_name} roster can read and post in this chat, \
+             and you are not on a team yet. {next}"
+        )
+    };
+    rsx! {
+        EmptyCard { title: "You are not on this team", message }
+    }
+}
+
+/// What fills the body under the head bar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BodyKind {
+    /// The team list is not in yet: the member gate on that fetch.
+    TeamsPending,
+    /// The session is known to hold no org membership: the member gate's
+    /// wall (log in, or apply), never a roster card.
+    MemberWall,
+    NoTeams,
+    /// The team list is in, the roster answer is not.
+    LoadingOwnTeams,
+    /// The picked team is known not to be the member's.
+    OffRoster {
+        on_any_team: bool,
+        can_add_self: bool,
+    },
+    /// The room, or the member gate on its channels fetch (`room_body`).
+    Room,
+}
+
+/// The body for a state of the page. The roster card waits for
+/// `channels_loaded`: that fetch takes an active org member, so until it
+/// has loaded the member gate answers first (an inactive or suspended member
+/// gets its wall, not the roster card).
+fn body_kind(
+    list: Option<&[Team]>,
+    selected: Option<&str>,
+    own: Option<&OwnTeams>,
+    auth: &AuthState,
+    channels_loaded: bool,
+) -> BodyKind {
+    let Some(list) = list else {
+        return BodyKind::TeamsPending;
+    };
+    if !auth.loading && !auth.is_org_member() {
+        return BodyKind::MemberWall;
+    }
+    if list.is_empty() {
+        return BodyKind::NoTeams;
+    }
+    match (selected, own) {
+        (None, None) => BodyKind::LoadingOwnTeams,
+        (Some(team_id), Some(own)) if channels_loaded && own.excludes(team_id) => {
+            BodyKind::OffRoster {
+                on_any_team: !own.ids().is_empty(),
+                can_add_self: auth.is_officer_or_above(),
+            }
+        }
+        _ => BodyKind::Room,
+    }
+}
+
+/// The status line of the roster lookup. It is in the head bar in every
+/// state; only its text changes, so the wait is announced.
+const LOADING_OWN_TEAMS: &str = "Loading your teams.";
+
+/// True only once the OrgMember-gated channels fetch has answered with data.
+/// `Some(None)` is a failed (for example 403 for a suspended member) or skipped
+/// fetch and must not count, or the roster card would replace the member gate.
+fn channels_loaded<T>(slot: Option<&Option<T>>) -> bool {
+    matches!(slot, Some(Some(_)))
 }
 
 /// The thread: one region and one head bar for every state of the page.
@@ -114,6 +367,14 @@ pub fn TeamChat() -> Element {
             String::new()
         }
     });
+    // `None` until the answer is in: the default team waits for it.
+    let own_teams = use_resource(move || async move {
+        if relay.current().allows_connection() {
+            Some(load_own_teams().await)
+        } else {
+            None
+        }
+    });
     let mut selected_team = use_signal(|| Option::<String>::None);
     #[cfg(feature = "web")]
     let room = RoomLink {
@@ -136,10 +397,13 @@ pub fn TeamChat() -> Element {
         if selected_team().is_some() {
             return;
         }
+        // Not before the roster answer: the first team by name is the wrong
+        // room for most members.
         if let Some(list) = teams.data.read().as_ref().and_then(|d| d.as_ref())
-            && let Some(first) = list.first()
+            && let Some(own) = own_teams.read().as_ref().and_then(|o| o.as_ref())
+            && let Some(team) = default_team(list, own.ids())
         {
-            selected_team.set(Some(first.id.clone()));
+            selected_team.set(Some(team.to_string()));
         }
     });
 
@@ -157,13 +421,36 @@ pub fn TeamChat() -> Element {
     let team_list = teams_data.as_ref().and_then(|d| d.as_ref());
     let selected = selected_team();
     let title = room_title(team_list.map(Vec::as_slice), selected.as_deref());
+    let own_data = own_teams.read();
+    let own = own_data.as_ref().and_then(|o| o.as_ref());
+    let own_ids = own.map(OwnTeams::ids).unwrap_or_default();
+    let channels_loaded = channels_loaded(channels.data.read().as_ref());
+    let auth_now = auth();
+    let kind = body_kind(
+        team_list.map(Vec::as_slice),
+        selected.as_deref(),
+        own,
+        &auth_now,
+        channels_loaded,
+    );
+    let own_status = if kind == BodyKind::LoadingOwnTeams {
+        LOADING_OWN_TEAMS
+    } else {
+        ""
+    };
 
     // The picker shows once there is a team to pick. The cap notice is a live
     // region, so it is in the bar in every state.
-    let toolbar = rsx! {
-        if let Some(list) = team_list.filter(|list| !list.is_empty()) {
-            {team_picker(list, selected.as_deref(), EventHandler::new(move |id: String| {
-                if selected_team.peek().as_deref() == Some(id.as_str()) {
+    let picker = team_list.filter(|list| !list.is_empty()).map(|list| {
+        let view = picker_view(list, own, selected.as_deref());
+        team_picker(
+            list,
+            own_ids,
+            view.selected,
+            view.loading,
+            EventHandler::new(move |id: String| {
+                // The placeholder is not a team.
+                if id.is_empty() || selected_team.peek().as_deref() == Some(id.as_str()) {
                     return;
                 }
                 // The next room has not dialled yet.
@@ -173,14 +460,25 @@ pub fn TeamChat() -> Element {
                     state.set(RelayConnectionState::Connecting);
                 }
                 selected_team.set(Some(id));
-            }))}
-        }
+            }),
+        )
+    });
+    let toolbar = rsx! {
+        {picker}
         {list_cap_notice(&teams, "teams")}
+        p { class: "visually-hidden", role: "status", "{own_status}" }
     };
 
-    let (body, live) = match team_list {
-        None => (state_body(member_pending(&auth(), &teams, "teams")), false),
-        Some(list) if list.is_empty() => (
+    let (body, live) = match kind {
+        BodyKind::TeamsPending => (
+            state_body(member_pending(&auth_now, &teams, "teams")),
+            false,
+        ),
+        BodyKind::MemberWall => (
+            state_body(member_pending(&auth_now, &channels, "team channels")),
+            false,
+        ),
+        BodyKind::NoTeams => (
             state_body(rsx! {
                 EmptyCard {
                     title: "No teams yet",
@@ -189,7 +487,21 @@ pub fn TeamChat() -> Element {
             }),
             false,
         ),
-        Some(_) => room_body(&auth(), selected, &channels, room),
+        // The head bar's status line speaks; this copy is for the eye only.
+        BodyKind::LoadingOwnTeams => (
+            state_body(rsx! {
+                p { class: "chat-thread__note", aria_hidden: "true", "{LOADING_OWN_TEAMS}" }
+            }),
+            false,
+        ),
+        BodyKind::OffRoster {
+            on_any_team,
+            can_add_self,
+        } => (
+            state_body(off_roster_card(&title, on_any_team, can_add_self)),
+            false,
+        ),
+        BodyKind::Room => room_body(&auth_now, selected, &channels, room),
     };
     #[cfg(feature = "web")]
     let status = live.then(|| {
@@ -337,7 +649,13 @@ mod tests {
         thread(
             "Squad Alpha".to_string(),
             None,
-            team_picker(&teams, Some("team:a"), EventHandler::new(|_| {})),
+            team_picker(
+                &teams,
+                &[],
+                Some("team:a"),
+                false,
+                EventHandler::new(|_| {}),
+            ),
             state_body(rsx! {
                 EmptyCard {
                     title: "No chat channels",
@@ -351,7 +669,13 @@ mod tests {
     fn the_picked_team_is_the_selected_option() {
         fn probe() -> Element {
             let teams = vec![team("team:a", "Squad Alpha"), team("team:b", "Squad Bravo")];
-            team_picker(&teams, Some("team:b"), EventHandler::new(|_| {}))
+            team_picker(
+                &teams,
+                &[],
+                Some("team:b"),
+                false,
+                EventHandler::new(|_| {}),
+            )
         }
         let mut dom = VirtualDom::new(probe);
         dom.rebuild_in_place();
@@ -364,6 +688,439 @@ mod tests {
             html.contains("<option value=\"team:a\">Squad Alpha</option>"),
             "only the picked team is selected: {html}"
         );
+    }
+
+    fn ids(ids: &[&str]) -> Vec<String> {
+        ids.iter().map(|id| (*id).to_string()).collect()
+    }
+
+    /// Issue 816: the page opened the first team by name, a room most members can
+    /// neither read nor post in.
+    #[test]
+    fn the_default_team_is_one_the_member_is_on() {
+        let teams = vec![
+            team("team:a", "Squad Alpha"),
+            team("team:b", "Squad Bravo"),
+            team("team:c", "Squad Charlie"),
+        ];
+        assert_eq!(default_team(&teams, &ids(&["team:c"])), Some("team:c"));
+        assert_eq!(
+            default_team(&teams, &ids(&["team:c", "team:b"])),
+            Some("team:b"),
+            "the first own team in list order"
+        );
+        assert_eq!(
+            default_team(&teams, &ids(&["team:gone", "team:b"])),
+            Some("team:b"),
+            "a roster entry for a team not in the list is skipped"
+        );
+        assert_eq!(
+            default_team(&teams, &[]),
+            Some("team:a"),
+            "on no team: the first team, which the body marks out of reach"
+        );
+        assert_eq!(default_team(&teams, &ids(&["team:gone"])), Some("team:a"));
+        assert_eq!(default_team(&[], &ids(&["team:a"])), None);
+    }
+
+    #[test]
+    fn own_teams_come_first_and_both_halves_keep_list_order() {
+        let teams = vec![
+            team("team:a", "Squad Alpha"),
+            team("team:b", "Squad Bravo"),
+            team("team:c", "Squad Charlie"),
+            team("team:d", "Squad Delta"),
+        ];
+        let (mine, others) = own_first(&teams, &ids(&["team:d", "team:b"]));
+        let names = |half: &[&Team]| half.iter().map(|t| t.id.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&mine), ["team:b", "team:d"]);
+        assert_eq!(names(&others), ["team:a", "team:c"]);
+    }
+
+    #[test]
+    fn only_a_known_roster_puts_a_team_out_of_reach() {
+        let own = OwnTeams::Known(ids(&["team:b"]));
+        assert!(own.excludes("team:a"));
+        assert!(!own.excludes("team:b"));
+        assert!(OwnTeams::Known(Vec::new()).excludes("team:a"));
+        assert!(
+            !OwnTeams::Unknown.excludes("team:a"),
+            "a failed lookup hides no room"
+        );
+        assert!(OwnTeams::Unknown.ids().is_empty());
+    }
+
+    #[test]
+    fn own_teams_are_read_from_the_public_profile_shape() {
+        let profile: OwnTeamsProfile = serde_json::from_str(
+            r#"{"id":"m1","display_name":"Ana","teams":[
+                {"team_id":"b","team_name":"Squad Bravo","team_role":"player"}
+            ],"game_accounts":[]}"#,
+        )
+        .expect("profile");
+        let own: Vec<String> = profile.teams.into_iter().map(|t| t.team_id).collect();
+        assert_eq!(own, ["b"]);
+        assert!(
+            serde_json::from_str::<OwnTeamsProfile>("{}").is_err(),
+            "a profile with no teams key is a contract drift (Unknown), not on no team"
+        );
+        let none: OwnTeamsProfile = serde_json::from_str(r#"{"teams":[]}"#).expect("no teams");
+        assert!(none.teams.is_empty());
+    }
+
+    #[test]
+    fn the_picker_groups_own_teams_first() {
+        fn probe() -> Element {
+            let teams = vec![
+                team("team:a", "Squad Alpha"),
+                team("team:b", "Squad Bravo"),
+                team("team:c", "Squad Charlie"),
+            ];
+            let own = vec!["team:c".to_string()];
+            team_picker(
+                &teams,
+                &own,
+                Some("team:c"),
+                false,
+                EventHandler::new(|_| {}),
+            )
+        }
+        let mut dom = VirtualDom::new(probe);
+        dom.rebuild_in_place();
+        let html = dioxus_ssr::render(&dom);
+        let mine = html
+            .find("<optgroup label=\"Your teams\">")
+            .unwrap_or_else(|| panic!("{html}"));
+        let others = html
+            .find("<optgroup label=\"Other teams\">")
+            .unwrap_or_else(|| panic!("{html}"));
+        let charlie = html.find("Squad Charlie").expect("own team");
+        let alpha = html.find("Squad Alpha").expect("other team");
+        assert!(
+            mine < charlie && charlie < others && others < alpha,
+            "{html}"
+        );
+        assert!(
+            html.contains("<option value=\"team:c\" selected=true>Squad Charlie</option>"),
+            "{html}"
+        );
+        assert_eq!(html.matches("selected=true").count(), 1, "{html}");
+    }
+
+    #[test]
+    fn the_picker_is_flat_when_there_is_one_group() {
+        fn render(own: &'static [&'static str]) -> String {
+            thread_local! {
+                static OWN: std::cell::Cell<&'static [&'static str]> =
+                    const { std::cell::Cell::new(&[]) };
+            }
+            fn probe() -> Element {
+                let teams = vec![team("team:a", "Squad Alpha"), team("team:b", "Squad Bravo")];
+                let own = ids(OWN.with(|o| o.get()));
+                team_picker(
+                    &teams,
+                    &own,
+                    Some("team:a"),
+                    false,
+                    EventHandler::new(|_| {}),
+                )
+            }
+            OWN.with(|o| o.set(own));
+            let mut dom = VirtualDom::new(probe);
+            dom.rebuild_in_place();
+            dioxus_ssr::render(&dom)
+        }
+        for own in [&[][..], &["team:a", "team:b"][..]] {
+            let html = render(own);
+            assert!(!html.contains("<optgroup"), "{own:?}: {html}");
+            assert_eq!(html.matches("<option").count(), 2, "{html}");
+        }
+    }
+
+    /// Issue 816 QA: while the roster lookup was out the picker showed the
+    /// first team by name, took picks, then jumped to the member's own team.
+    #[test]
+    fn the_picker_waits_for_the_roster_lookup() {
+        let teams = vec![team("team:a", "Squad Alpha"), team("team:b", "Squad Bravo")];
+        let mine = OwnTeams::Known(ids(&["team:b"]));
+        let on_none = OwnTeams::Known(Vec::new());
+        let unknown = OwnTeams::Unknown;
+        let view = |own: Option<&OwnTeams>, selected: Option<&'static str>| {
+            picker_view(&teams, own, selected)
+        };
+        assert_eq!(
+            view(None, None),
+            PickerView {
+                selected: None,
+                loading: true
+            },
+            "loading: no team picked, picker disabled"
+        );
+        assert_eq!(
+            view(Some(&mine), None),
+            PickerView {
+                selected: Some("team:b"),
+                loading: false
+            },
+            "loaded: the member's own team, before the effect stores it"
+        );
+        assert_eq!(
+            view(Some(&on_none), None),
+            PickerView {
+                selected: Some("team:a"),
+                loading: false
+            },
+            "on no team: the first team, as default_team opens it"
+        );
+        assert_eq!(
+            view(Some(&unknown), None),
+            PickerView {
+                selected: Some("team:a"),
+                loading: false
+            },
+            "failed lookup: the first team, enabled, as before the lookup"
+        );
+        assert_eq!(
+            view(Some(&mine), Some("team:a")),
+            PickerView {
+                selected: Some("team:a"),
+                loading: false
+            },
+            "a stored pick wins"
+        );
+        assert_eq!(
+            view(None, Some("team:a")),
+            PickerView {
+                selected: Some("team:a"),
+                loading: false
+            },
+            "a pick already made is not taken back by a lookup rerun"
+        );
+
+        fn probe() -> Element {
+            let teams = vec![team("team:a", "Squad Alpha"), team("team:b", "Squad Bravo")];
+            team_picker(&teams, &[], None, true, EventHandler::new(|_| {}))
+        }
+        let mut dom = VirtualDom::new(probe);
+        dom.rebuild_in_place();
+        let html = dioxus_ssr::render(&dom);
+        assert!(
+            html.contains("<select id=\"team-chat-team\" class=\"field-input\" disabled=true"),
+            "the picker is drawn but disabled while loading: {html}"
+        );
+        assert!(
+            html.contains("<option value=\"\" selected=true>Loading...</option>"),
+            "{html}"
+        );
+        assert_eq!(html.matches("selected=true").count(), 1, "{html}");
+        let placeholder = html.find("Loading...").expect("placeholder");
+        let alpha = html.find("Squad Alpha").expect("team option");
+        assert!(placeholder < alpha, "the placeholder is first: {html}");
+
+        // No wider than a short team name, so the select does not grow past
+        // the loaded width and wrap the head bar at 360px while loading.
+        assert!(
+            PICKER_LOADING.chars().count() <= "Squad Alpha".chars().count(),
+            "the placeholder stays short: {PICKER_LOADING}"
+        );
+
+        let src = include_str!("chat.rs");
+        let prod = src.split("#[cfg(test)]").next().expect("production source");
+        assert!(
+            prod.contains("disabled: loading,"),
+            "the select is disabled while loading"
+        );
+        assert!(
+            prod.contains("let view = picker_view(list, own, selected.as_deref());"),
+            "the page asks picker_view what the picker shows"
+        );
+        assert!(
+            prod.contains("view.selected,\n            view.loading,"),
+            "the page passes the view's pick and loading state"
+        );
+        assert!(
+            prod.contains("if id.is_empty() ||"),
+            "the placeholder never opens a room"
+        );
+    }
+
+    #[test]
+    fn a_room_out_of_reach_says_so_instead_of_mounting_the_room() {
+        fn probe() -> Element {
+            rsx! {
+                {off_roster_card("Squad Alpha", true, false)}
+                {off_roster_card("Squad Alpha", false, false)}
+                {off_roster_card("Squad Alpha", false, true)}
+            }
+        }
+        let mut dom = VirtualDom::new(probe);
+        dom.rebuild_in_place();
+        let html = dioxus_ssr::render(&dom);
+        assert_eq!(
+            html.matches("<h2>You are not on this team</h2>").count(),
+            3,
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                "Only players on the Squad Alpha roster can read and post in this chat. \
+                 Pick one of your teams above."
+            ),
+            "{html}"
+        );
+        assert_eq!(
+            html.matches("you are not on a team yet").count(),
+            2,
+            "{html}"
+        );
+        assert_eq!(
+            html.matches("An officer can add you to a roster.").count(),
+            1,
+            "{html}"
+        );
+        assert_eq!(
+            html.matches("Add yourself to a roster in team admin.")
+                .count(),
+            1,
+            "an officer edits rosters: {html}"
+        );
+
+        let src = include_str!("chat.rs");
+        let prod = src.split("#[cfg(test)]").next().expect("production source");
+        assert!(
+            prod.contains("let (body, live) = match kind {"),
+            "the page renders the body `body_kind` chose"
+        );
+        assert!(
+            prod.contains("&& let Some(team) = default_team(list, own.ids())"),
+            "the default team comes from the roster answer"
+        );
+        assert!(
+            !prod.contains("list.first()"),
+            "the first team by name is not the default"
+        );
+    }
+
+    #[test]
+    fn channels_count_as_loaded_only_with_data() {
+        // issue 816 review: a 403'd channels fetch leaves Some(None).
+        assert!(channels_loaded(Some(&Some(Vec::<TeamChannel>::new()))));
+        assert!(!channels_loaded(Some(&None::<Vec<TeamChannel>>)));
+        assert!(!channels_loaded(None::<&Option<Vec<TeamChannel>>>));
+
+        let src = include_str!("chat.rs");
+        let prod = src.split("#[cfg(test)]").next().expect("production source");
+        assert!(
+            prod.contains("let channels_loaded = channels_loaded(channels.data.read().as_ref());"),
+            "the page uses the Some(Some(_)) helper for the roster card gate"
+        );
+    }
+
+    #[test]
+    fn own_teams_wait_is_announced_by_an_always_rendered_status_line() {
+        let src = include_str!("chat.rs");
+        let prod = src.split("#[cfg(test)]").next().expect("production source");
+        let toolbar = prod
+            .split("let toolbar = rsx! {")
+            .nth(1)
+            .and_then(|rest| rest.split("let (body, live) = match kind {").next())
+            .expect("toolbar block");
+        assert!(
+            toolbar.contains(r#"p { class: "visually-hidden", role: "status", "{own_status}" }"#),
+            "the head bar status line is rendered in every state with role status"
+        );
+        // The line sits at the toolbar's top level, not inside the picker's `if`.
+        let status_at = toolbar.find(r#"role: "status""#).expect("status line");
+        let cap_at = toolbar.find("list_cap_notice(&teams").expect("cap notice");
+        assert!(
+            cap_at < status_at,
+            "status line follows the always-shown cap notice"
+        );
+        assert!(
+            prod.contains(
+                "let own_status = if kind == BodyKind::LoadingOwnTeams {\n        LOADING_OWN_TEAMS"
+            ),
+            "the status line carries the LoadingOwnTeams text"
+        );
+    }
+
+    fn auth_as(role: Option<scuffed_types::OrgRole>) -> AuthState {
+        AuthState {
+            user: Some(scuffed_types::UserInfo {
+                id: "u1".into(),
+                username: "Player01".into(),
+                avatar_url: None,
+                role,
+            }),
+            loading: false,
+        }
+    }
+
+    /// A row of the body table: case, team list, pick, roster answer, auth,
+    /// channels loaded, and the body wanted.
+    type BodyCase<'a> = (
+        &'a str,
+        Option<&'a [Team]>,
+        Option<&'a str>,
+        Option<&'a OwnTeams>,
+        &'a AuthState,
+        bool,
+        BodyKind,
+    );
+
+    /// The body for each state of the page. Review of issue 816: an account
+    /// with no member row, or an inactive member, got the roster card in
+    /// place of the member gate's wall.
+    #[test]
+    fn the_body_follows_the_page_state_and_the_member_gate_answers_first() {
+        use scuffed_types::OrgRole;
+        let teams = vec![team("a", "Squad Alpha"), team("b", "Squad Bravo")];
+        let list = Some(teams.as_slice());
+        let member = auth_as(Some(OrgRole::Member));
+        let officer = auth_as(Some(OrgRole::Officer));
+        let no_member_row = auth_as(None);
+        let signed_out = AuthState {
+            user: None,
+            loading: false,
+        };
+        let auth_loading = AuthState::new();
+        let mine = OwnTeams::Known(ids(&["b"]));
+        let on_none = OwnTeams::Known(Vec::new());
+        let unknown = OwnTeams::Unknown;
+        let off_roster = |on_any_team, can_add_self| BodyKind::OffRoster {
+            on_any_team,
+            can_add_self,
+        };
+
+        #[rustfmt::skip]
+        let table: Vec<BodyCase> = vec![
+            ("teams pending", None, None, None, &member, false, BodyKind::TeamsPending),
+            ("teams pending, no member row", None, None, None, &no_member_row, false, BodyKind::TeamsPending),
+            ("no teams", Some(&teams[..0]), None, None, &member, false, BodyKind::NoTeams),
+            ("roster pending", list, None, None, &member, false, BodyKind::LoadingOwnTeams),
+            ("roster pending, auth loading", list, None, None, &auth_loading, false, BodyKind::LoadingOwnTeams),
+            ("unknown roster: the room", list, Some("a"), Some(&unknown), &member, true, BodyKind::Room),
+            ("own pick: the room", list, Some("b"), Some(&mine), &member, true, BodyKind::Room),
+            ("own pick, channels pending", list, Some("b"), Some(&mine), &member, false, BodyKind::Room),
+            ("off-roster pick", list, Some("a"), Some(&mine), &member, true, off_roster(true, false)),
+            ("off-roster, on no team", list, Some("a"), Some(&on_none), &member, true, off_roster(false, false)),
+            ("off-roster officer, on no team", list, Some("a"), Some(&on_none), &officer, true, off_roster(false, true)),
+            ("off-roster officer, on a team", list, Some("a"), Some(&mine), &officer, true, off_roster(true, true)),
+            // An inactive or suspended member keeps its role in /api/auth/me;
+            // the channels fetch (OrgMember) then fails, so the gate answers.
+            ("off-roster, channels not loaded", list, Some("a"), Some(&on_none), &member, false, BodyKind::Room),
+            ("no member row", list, Some("a"), Some(&on_none), &no_member_row, false, BodyKind::MemberWall),
+            ("no member row, roster pending", list, None, None, &no_member_row, false, BodyKind::MemberWall),
+            ("no member row, no teams", Some(&teams[..0]), None, None, &no_member_row, false, BodyKind::MemberWall),
+            ("signed out", list, Some("a"), Some(&on_none), &signed_out, false, BodyKind::MemberWall),
+        ];
+        for (case, list, selected, own, auth, channels_loaded, want) in table {
+            assert_eq!(
+                body_kind(list, selected, own, auth, channels_loaded),
+                want,
+                "{case}"
+            );
+        }
     }
 
     thread_local! {
@@ -379,7 +1136,7 @@ mod tests {
         thread(
             title,
             None,
-            team_picker(&teams, Some(picked), EventHandler::new(|_| {})),
+            team_picker(&teams, &[], Some(picked), false, EventHandler::new(|_| {})),
             rsx! {
                 ProbeRoom { key: "{picked}", picked }
             },
