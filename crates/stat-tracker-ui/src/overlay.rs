@@ -726,21 +726,38 @@ pub fn outcome_letter(outcome: Outcome) -> &'static str {
     }
 }
 
+use crate::overlay_marks::{page_indicator_labels, tonight_strip_cells, tonight_strip_labels};
+
 fn tonight_strip(outcomes: &[Outcome]) -> Element<'static, OverlayViewMessage> {
+    let labels = tonight_strip_labels(outcomes);
     let mut row = row![label("Tonight")].spacing(6).align_y(Alignment::Center);
     if outcomes.is_empty() {
-        row = row.push(text("-").size(SIZE_META).font(FONT_MEDIUM).color(TEXT_3));
+        row = row.push(
+            text(labels[0].clone())
+                .size(SIZE_META)
+                .font(FONT_MEDIUM)
+                .color(TEXT_3),
+        );
     } else {
-        for outcome in outcomes {
-            let letter = text(outcome_letter(*outcome))
+        let (shown, _) = tonight_strip_cells(outcomes);
+        for (outcome, letter) in shown.iter().zip(labels.iter()) {
+            let mark = text(letter.clone())
                 .size(SIZE_LABEL)
                 .font(FONT_BOLD)
                 .color(theme::BG);
             row = row.push(
-                container(letter)
+                container(mark)
                     .center_x(14)
                     .center_y(16)
                     .style(theme::stripe(*outcome)),
+            );
+        }
+        if let Some(plus) = labels.iter().find(|s| s.starts_with('+')) {
+            row = row.push(
+                text(plus.clone())
+                    .size(SIZE_META)
+                    .font(FONT_SEMIBOLD)
+                    .color(TEXT_2),
             );
         }
     }
@@ -753,15 +770,18 @@ fn tonight_strip(outcomes: &[Outcome]) -> Element<'static, OverlayViewMessage> {
 /// name. The hold adds its tag beside the name.
 fn page_indicator(pages: &PageState) -> Element<'static, OverlayViewMessage> {
     let ind = overlay_pages::indicator(pages);
+    let labels = page_indicator_labels(pages);
     let mut row = row![].spacing(6).align_y(Alignment::Center);
+    let mut label_i = 0;
     if let Some(lit) = ind.dot {
         for i in 0..Page::IN_MATCH.len() {
             let dot = page_dot(i == lit);
             row = if i == 0 {
-                let pip = text("T")
+                let pip = text(labels[label_i])
                     .size(SIZE_LABEL)
                     .font(FONT_BOLD)
                     .color(if lit == 0 { TEXT } else { TEXT_3 });
+                label_i += 1;
                 row.push(row![pip, dot].spacing(3).align_y(Alignment::Center))
             } else {
                 row.push(dot)
@@ -769,15 +789,16 @@ fn page_indicator(pages: &PageState) -> Element<'static, OverlayViewMessage> {
         }
     }
     row = row.push(
-        text(ind.name)
+        text(labels[label_i])
             .size(SIZE_META)
             .font(FONT_SEMIBOLD)
             .color(TEXT),
     );
+    label_i += 1;
     if ind.held {
         row = row.push(
             container(
-                text(overlay_pages::HELD_TAG)
+                text(labels[label_i])
                     .size(SIZE_LABEL)
                     .font(FONT_SEMIBOLD)
                     .color(TEXT),
@@ -1057,6 +1078,9 @@ mod tests {
     use crate::cli::FixtureKind;
     use crate::fixtures;
     use crate::model::Game;
+    use crate::overlay_marks::{
+        TONIGHT_PIP, TONIGHT_STRIP_MAX, page_indicator_labels, tonight_strip_labels,
+    };
     use crate::snapshot::games_from_snapshot;
     use chrono::{TimeZone, Utc};
 
@@ -1337,6 +1361,44 @@ mod tests {
         assert_eq!(outcome_letter(Outcome::Loss), "L");
         assert_eq!(outcome_letter(Outcome::Draw), "D");
         assert_eq!(outcome_letter(Outcome::Unknown), "");
+        let games = sample_games();
+        let model = build_model(
+            &games,
+            &sample_seasons(),
+            &SeasonSel::AllTime,
+            games[0].played_at,
+            true,
+            true,
+        );
+        let _ = view(&model);
+        // The view draws tonight_strip_labels: a dropped W/L/D fails here.
+        assert_eq!(
+            tonight_strip_labels(&model.tonight_outcomes),
+            vec!["W".to_string(), "L".to_string(), "W".to_string()],
+        );
+        assert!(page_indicator_labels(&model.pages).contains(&TONIGHT_PIP));
+    }
+
+    #[test]
+    fn tonight_strip_shows_newest_13_and_plus_n() {
+        for (n, plus) in [(15, "+2"), (20, "+7")] {
+            let outcomes = vec![Outcome::Win; n];
+            let labels = tonight_strip_labels(&outcomes);
+            assert_eq!(labels.len(), TONIGHT_STRIP_MAX + 1, "{n}");
+            assert!(labels[..TONIGHT_STRIP_MAX].iter().all(|s| s == "W"), "{n}");
+            assert_eq!(labels[TONIGHT_STRIP_MAX], plus, "{n}");
+            let mut model = build_model(
+                &sample_games(),
+                &sample_seasons(),
+                &SeasonSel::AllTime,
+                sample_games()[0].played_at,
+                true,
+                true,
+            );
+            model.tonight_outcomes = outcomes;
+            let _ = view(&model);
+        }
+        assert_eq!(tonight_strip_labels(&[Outcome::Win; 13]).len(), 13);
     }
 
     #[test]
@@ -1352,6 +1414,11 @@ mod tests {
             true,
         );
         let tonight_h = content_height(&tonight);
+        let _ = view(&tonight);
+        assert_eq!(
+            page_indicator_labels(&tonight.pages),
+            vec![TONIGHT_PIP, "Tonight"]
+        );
         for page in [Page::MapVote, Page::PicksAndBans, Page::Matchup, Page::Tip] {
             let model = OverlayModel {
                 pages: PageState {
@@ -1361,6 +1428,13 @@ mod tests {
                 ..tonight.clone()
             };
             let _ = view(&model);
+            let labels = page_indicator_labels(&model.pages);
+            if page == Page::Tip {
+                assert_eq!(labels, vec!["Tip"], "{page:?}");
+            } else {
+                assert!(labels.contains(&TONIGHT_PIP), "{page:?}");
+                assert!(labels.contains(&page.name()), "{page:?}");
+            }
             // A stub page draws no Tonight content.
             assert!(content_height(&model) < tonight_h, "{page:?}");
         }
@@ -1369,6 +1443,10 @@ mod tests {
             ..tonight.clone()
         };
         let _ = view(&held);
+        assert_eq!(
+            page_indicator_labels(&held.pages),
+            vec![TONIGHT_PIP, "Tonight", overlay_pages::HELD_TAG]
+        );
         assert!(
             content_height(&held) > tonight_h,
             "the hold adds the footer line"

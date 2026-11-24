@@ -66,6 +66,7 @@ pub mod nav;
 pub mod nav_fit;
 pub mod notes;
 pub mod overlay;
+mod overlay_marks;
 pub mod overlay_pages;
 #[cfg(feature = "companion")]
 pub mod overlay_shell;
