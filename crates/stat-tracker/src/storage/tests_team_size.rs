@@ -4,7 +4,7 @@
 
 use super::tests::{mark_current, snap};
 use super::*;
-use crate::model::QueueTitle;
+use crate::model::{BansPicksStatus, MatchTimes, QueueTitle, RankUpdate};
 use crate::sync::upload_request;
 use scuffed_types::api::RankQueue;
 use serde_json::Value;
@@ -33,7 +33,9 @@ fn sent_queue(m: &PersonalMatch) -> Value {
 }
 
 /// A later snapshot that did not read a size takes the one already stored
-/// on the game (`carry_game_fields`).
+/// on the game (`carry_game_fields`). The later row already has the other
+/// six game fields, so only the `team_size` clause in `lacks_game_fields`
+/// starts the carry.
 #[tokio::test]
 async fn a_later_snapshot_without_a_size_takes_the_stored_one() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -41,7 +43,17 @@ async fn a_later_snapshot_without_a_size_takes_the_stored_one() {
     let mut first = snap("g1", 1);
     first.team_size = Some(6);
     store.insert_match(first).await.unwrap();
-    store.insert_match(snap("g1", 2)).await.unwrap();
+    let mut later = snap("g1", 2);
+    later.name_recognizer = Some("name-v1".into());
+    later.bans_picks = Some("[]".into());
+    later.bans_picks_status = Some(BansPicksStatus::Ok);
+    later.queue_title = Some(role_queue());
+    later.rank_update = Some(RankUpdate::default());
+    later.match_times = Some(MatchTimes {
+        started_at: None,
+        ended_at: None,
+    });
+    store.insert_match(later).await.unwrap();
     let rows = store.get_session_snapshots("g1").await.unwrap();
     assert_eq!(rows.len(), 2);
     assert!(
