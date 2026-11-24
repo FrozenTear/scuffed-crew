@@ -275,7 +275,7 @@ fn text(v: &str) -> Option<String> {
 /// Damage, Support) never with an open queue title: open queue screens have
 /// no role line, so an icon read there is a misread.
 fn rank_role(v: &str, open_queue: bool) -> Option<RankRole> {
-    let role: RankRole = serde_json::from_value(serde_json::Value::String(v.to_string())).ok()?;
+    let role = crate::rank_queue::parse_rank_role(v)?;
     let sent = match role {
         RankRole::Tank | RankRole::Damage | RankRole::Support => !open_queue,
         RankRole::Open => open_queue,

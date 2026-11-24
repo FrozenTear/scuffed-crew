@@ -93,27 +93,16 @@ fn usable_confidence(confidence: Option<f32>) -> Option<f32> {
     confidence.filter(|c| c.is_finite() && *c > 0.0 && *c <= 1.0)
 }
 
+/// Parse a rank-screen role line as [`RankRole`]: only the exact serde
+/// spellings `Tank`, `Damage`, `Support`, and `Open`.
+pub fn parse_rank_role(role: &str) -> Option<RankRole> {
+    serde_json::from_value(serde_json::Value::String(role.to_string())).ok()
+}
+
 /// The rank screen role line as a queue kind, parsed the same way the
-/// upload maps `rank.role` ([`RankRole`]), and by case-insensitive name
-/// when that parse does not take the spelling.
+/// upload maps `rank.role` ([`parse_rank_role`]).
 fn role_line_kind(role: &str) -> Option<QueueKind> {
-    let parsed = serde_json::from_value(serde_json::Value::String(role.to_string()))
-        .ok()
-        .or_else(|| {
-            let t = role.trim();
-            if t.eq_ignore_ascii_case("tank") {
-                Some(RankRole::Tank)
-            } else if t.eq_ignore_ascii_case("damage") {
-                Some(RankRole::Damage)
-            } else if t.eq_ignore_ascii_case("support") {
-                Some(RankRole::Support)
-            } else if t.eq_ignore_ascii_case("open") {
-                Some(RankRole::Open)
-            } else {
-                None
-            }
-        })?;
-    match parsed {
+    match parse_rank_role(role)? {
         RankRole::Tank | RankRole::Damage | RankRole::Support => Some(QueueKind::Role),
         RankRole::Open => Some(QueueKind::Open),
     }
@@ -139,8 +128,8 @@ fn from_kind_and_size(kind: QueueKind, size: u8, confidence: Option<f32>) -> Opt
 /// - Title names OPEN and the size is 6: `open_6v6`. With 5: `open_5v5`.
 /// - Size comes from the board when it is 5 or 6, else from a `5V5` or
 ///   `6V6` word in the title. If those two disagree, the queue is unknown.
-/// - No confident title and 6 per team: a Tank, Damage or Support role
-///   line is `role_6v6`; Open is `open_6v6`.
+/// - No confident title and 6 per team: a sure Tank, Damage or Support
+///   role line is `role_6v6`; Open is `open_6v6`.
 /// - Anything else is [`RankQueue::Unknown`].
 pub fn decide_rank_queue(
     title: Option<&str>,
@@ -238,15 +227,22 @@ mod tests {
 
     #[test]
     fn no_title_and_six_a_side_uses_the_rank_role_line() {
-        for role in ["Tank", "Damage", "Support", "tank", "TANK"] {
+        for role in ["Tank", "Damage", "Support"] {
             let (value, confidence) = decide(None, Some(6), Some(role));
             assert_eq!(value, RankQueue::Role6v6, "{role}");
             assert_eq!(confidence, Some(0.8), "{role}");
         }
-        for role in ["Open", "OPEN", "open"] {
+        let (value, confidence) = decide(None, Some(6), Some("Open"));
+        assert_eq!(value, RankQueue::Open6v6);
+        assert_eq!(confidence, Some(0.8));
+    }
+
+    #[test]
+    fn a_role_line_spelling_rank_role_does_not_take_is_unknown() {
+        for role in ["tank", "TANK", "damage", "support", "open", "OPEN"] {
             let (value, confidence) = decide(None, Some(6), Some(role));
-            assert_eq!(value, RankQueue::Open6v6, "{role}");
-            assert_eq!(confidence, Some(0.8), "{role}");
+            assert_eq!(value, RankQueue::Unknown, "{role}");
+            assert_eq!(confidence, None, "{role}");
         }
     }
 
