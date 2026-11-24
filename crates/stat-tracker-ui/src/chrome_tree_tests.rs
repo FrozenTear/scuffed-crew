@@ -784,27 +784,50 @@ fn shares_page_clicks(bare: &[String], over: &[String]) -> bool {
 /// The reserved bottom inset is at least as tall as a toast and the
 /// restart bar stacked with the bottom gap, including a long wrapped
 /// toast, so the slot cannot cover the last control when both show.
+///
+/// The slot is laid out at a page width narrow enough that an uncapped
+/// wrap of this toast would overflow both [`crate::widgets::TOAST_MAX`]
+/// and the inset. At 640 px, and even at the classic 720 pane width
+/// (488 px), an uncapped wrap still fitted; 400 px is the width that
+/// pins the cap. The toast bar itself is also checked to stay within
+/// [`crate::widgets::TOAST_MAX`].
 #[test]
 fn the_prompts_inset_covers_a_toast_and_the_restart_bar() {
     use iced::advanced::layout::Limits;
     let renderer = headless();
+    // Narrower than FLOAT_MAX and the classic 720 page (488). At those
+    // widths an uncapped wrap of WRAPPED_TOAST still fitted in the inset.
+    let page = 400.0;
     for (name, toast) in [("one line", "Report sent"), ("wrapped", WRAPPED_TOAST)] {
-        let mut slot = super::prompts_slot(toast, 640.0);
+        let mut slot = super::prompts_slot(toast, page);
         let mut tree = Tree::new(&slot);
         let node = slot.as_widget_mut().layout(
             &mut tree,
             &renderer,
-            &Limits::new(Size::ZERO, Size::new(640.0, 400.0)),
+            &Limits::new(Size::ZERO, Size::new(page, 400.0)),
         );
         let height = node.size().height;
         assert!(
             height <= super::PROMPTS_INSET,
-            "{name}: inset {} is short of the slot {height}",
+            "{name}: inset {} is short of the slot {height} at page {page}",
             super::PROMPTS_INSET
         );
         assert!(
             height > super::PROMPTS_INSET / 2.0,
             "{name}: slot {height} looks too small; the inset may be guessing"
+        );
+        let mut bar = crate::widgets::toast_bar(toast, None);
+        let mut tree = Tree::new(&bar);
+        let node = bar.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &Limits::new(Size::ZERO, Size::new(page, 400.0)),
+        );
+        let toast_h = node.size().height;
+        assert!(
+            toast_h <= crate::widgets::TOAST_MAX + 0.5,
+            "{name}: toast bar {toast_h} taller than TOAST_MAX {} at page {page}",
+            crate::widgets::TOAST_MAX
         );
     }
 }
