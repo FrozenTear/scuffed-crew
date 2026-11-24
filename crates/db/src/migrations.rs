@@ -769,7 +769,7 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE bans_picks ON personal_match TYPE option<object> FLEXIBLE;
         -- Rank update screen read for this game: { role, role_rank, division,
         -- progress_pct, progress_change, change_tags, higher_than_pct,
-        -- hero_sr, hero_sr_change, next_mode_hint, queue_title } each as
+        -- hero_sr, hero_sr_change, next_mode_hint, queue_title, queue } each as
         -- { value, confidence }, plus rank_recognizer. The tracker's bbox is
         -- not stored. Omitted or null is stored as NONE. FLEXIBLE for the
         -- nested keys, like bans_picks.
