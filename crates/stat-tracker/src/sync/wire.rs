@@ -221,7 +221,9 @@ impl UploadRank {
             || self.next_mode_hint.is_some()
     }
 
-    /// No field read: what [`upload_rank`] never sends.
+    /// No field read: what [`upload_rank`] never sends. Kept for tests
+    /// that build a partial object with `..UploadRank::none()`.
+    #[cfg(test)]
     pub(super) fn none() -> Self {
         Self {
             role: None,
