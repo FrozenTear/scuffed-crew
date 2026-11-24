@@ -310,7 +310,8 @@ fn all_sources() -> Vec<Source> {
         .collect()
 }
 
-/// Every lib source file of `crates/{dir}`, reached from its `lib.rs` through its `mod`s.
+/// Every lib source file of `crates/{dir}`, reached from its `lib.rs`
+/// through its `mod`s.
 fn crate_sources(dir: &'static str, home: Crate) -> Vec<Source> {
     let src = crates_dir().join(dir).join("src");
     let src = src.as_path();
@@ -630,8 +631,7 @@ fn compat_reexport(e: &Edge) -> bool {
 
 /// Every place in `sources` that reaches a [`COMPAT_REEXPORTS`] item
 /// through its old path, as `file:line: what`:
-/// * a path in any form (`crate::`, `super::`, `self::`, the lib name) to
-///   `<from>::<alias>`;
+/// * a path in any form (`crate::`, `super::`, `self::`, the lib name) to `<from>::<alias>`;
 /// * a `use` of the `from` module itself, or a glob of it, outside it
 ///   (`detect::TabKey` after `use crate::detect;`, or a bare name after
 ///   `use crate::detect::*;`);

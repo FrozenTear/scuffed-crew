@@ -828,8 +828,7 @@ fn le32(b: &[u8], at: usize) -> u32 {
     u32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]])
 }
 
-/// Walk the central directory by hand and check each header field the
-/// spec fixes. Returns the entry names in zip order.
+/// Walk the central directory by hand and check each header the spec fixes; names in zip order.
 fn raw_zip_entries(b: &[u8]) -> Vec<String> {
     let eocd = (0..=b.len() - 22)
         .rev()
@@ -1405,6 +1404,7 @@ pub(super) mod game {
             Some("unknown"),
             "the kit still holds the Tab read"
         );
+
         let snapshot = crate::storage::Snapshot {
             matches: vec![crate::storage::PersonalMatch {
                 id: None,
