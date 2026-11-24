@@ -24,7 +24,7 @@ pub(crate) const BANS_PICKS_LINE: &str = "With Read bans and picks on (it starts
 
 /// The rank fields in the game upload: read values only, never a picture.
 /// Rank screen pictures go only as training crops, when that kind is on.
-pub(crate) const RANK_LINE: &str = "With Read my rank after Comp games on: what the tracker read on the rank screen after the game (role, rank, division, progress and its change, its labels, the share of players you rank above, hero SR and its change, the next mode banner) and on the queue title before it, each with how sure the reader was, and the queue the game was played in (role_5v5, open_5v5, role_6v6, open_6v6, or unknown). A Competitive game with no rank screen read still sends the queue. Only the values it read are sent with the game, never a picture of either screen. Parts of the rank screen go only as training crops (below), when you turn that kind on.";
+pub(crate) const RANK_LINE: &str = "With Read my rank after Comp games on: what the tracker read on the rank screen after the game (role, rank, division, progress and its change, its labels, the share of players you rank above, hero SR and its change, the next mode banner) and on the queue title before it, each with how sure the reader was, and the queue the game was played in (role or open queue, 5v5 or 6v6, or unknown). A Competitive game with no rank screen read still sends the queue when the queue title was read as role or open queue. Only the values it read are sent with the game, never a picture of either screen. Parts of the rank screen go only as training crops (below), when you turn that kind on.";
 
 /// Heading and lines for each thing that is sent.
 pub(crate) const SECTIONS: [(&str, &[&str]); 6] = [
@@ -192,7 +192,7 @@ mod tests {
         assert_eq!(SECTIONS[0].1[3], RANK_LINE);
         assert_eq!(
             RANK_LINE,
-            "With Read my rank after Comp games on: what the tracker read on the rank screen after the game (role, rank, division, progress and its change, its labels, the share of players you rank above, hero SR and its change, the next mode banner) and on the queue title before it, each with how sure the reader was, and the queue the game was played in (role_5v5, open_5v5, role_6v6, open_6v6, or unknown). A Competitive game with no rank screen read still sends the queue. Only the values it read are sent with the game, never a picture of either screen. Parts of the rank screen go only as training crops (below), when you turn that kind on."
+            "With Read my rank after Comp games on: what the tracker read on the rank screen after the game (role, rank, division, progress and its change, its labels, the share of players you rank above, hero SR and its change, the next mode banner) and on the queue title before it, each with how sure the reader was, and the queue the game was played in (role or open queue, 5v5 or 6v6, or unknown). A Competitive game with no rank screen read still sends the queue when the queue title was read as role or open queue. Only the values it read are sent with the game, never a picture of either screen. Parts of the rank screen go only as training crops (below), when you turn that kind on."
         );
         let help = crate::settings_keys::RANK_HELP;
         assert!(

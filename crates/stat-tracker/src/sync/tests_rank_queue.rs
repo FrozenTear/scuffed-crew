@@ -1,7 +1,8 @@
 //! Tests of `rank.queue` on the upload (T15, #654): the five values, a
-//! Competitive game with no rank screen read still sends a rank object
-//! that holds the queue, a failed queue read is `unknown` and never drops
-//! the game, and Quick Play / a game with the readers off still omit `rank`.
+//! game with no rank screen read still sends a rank object that holds the
+//! queue when the title names role or open queue, a failed queue read is
+//! `unknown` and never drops the game, and Quick Play / a game with the
+//! readers off still omit `rank`.
 
 use super::tests_wire::row;
 use super::wire::{UploadQueueField, upload_rank};
@@ -71,7 +72,8 @@ fn open_queue_with_five_per_team_is_open_5v5() {
     let rank = sent(&m);
     assert_eq!(rank["queue"], f(json!("open_5v5"), 0.93));
     assert_eq!(rank["queue_title"]["value"], json!("OPEN QUEUE"));
-    // No rank screen read: the object still holds the queue.
+    // No rank screen read: the title names open queue, so the object still
+    // holds the queue.
     assert!(rank.get("role").is_none(), "{rank}");
     let site = resolve_rank(Some(&rank)).expect("a rank object");
     assert_eq!(site.queue.value, Some(RankQueue::Open5v5));
@@ -192,4 +194,49 @@ fn upload_rank_struct_carries_the_decided_queue() {
             confidence: Some(0.93),
         })
     );
+}
+
+#[test]
+fn a_title_that_does_not_name_role_or_open_omits_the_rank_object() {
+    for title in ["QUICK PLAY", "6V6 QUICK PLAY", "ARCADE", "COMPETITIVE"] {
+        let m = game(Some(queue(title)), Some(6), None);
+        assert!(upload_rank(&m).is_none(), "{title}");
+        let body = body_of(&m);
+        assert!(!body.contains("rank"), "{title}: {body}");
+    }
+}
+
+#[test]
+fn open_queue_in_any_word_order_drops_an_icon_role() {
+    let m = game(
+        Some(queue("OPEN QUEUE 6V6")),
+        Some(6),
+        Some(RankUpdate {
+            role: t("Tank", 0.9),
+            hero_sr: n(3412, 0.85),
+            ..RankUpdate::default()
+        }),
+    );
+    let rank = sent(&m);
+    assert_eq!(rank["queue"]["value"], json!("open_6v6"));
+    assert!(rank.get("role").is_none(), "{rank}");
+    assert_eq!(rank["hero_sr"]["value"], json!(3412));
+}
+
+#[test]
+fn an_unsure_role_line_does_not_decide_the_queue() {
+    let m = game(
+        None,
+        Some(6),
+        Some(RankUpdate {
+            role: t("Tank", f32::NAN),
+            hero_sr: n(3412, 0.85),
+            ..RankUpdate::default()
+        }),
+    );
+    let rank = sent(&m);
+    assert_eq!(rank["queue"]["value"], json!("unknown"));
+    assert_eq!(rank["queue"]["confidence"], Value::Null);
+    assert!(rank.get("role").is_none(), "{rank}");
+    assert_eq!(rank["hero_sr"]["value"], json!(3412));
 }

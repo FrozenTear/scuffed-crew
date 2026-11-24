@@ -73,9 +73,9 @@ pub struct UploadRank {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queue_title: Option<UploadRankField<String>>,
     /// The queue the game was played in ([`upload_queue`]). Sent for
-    /// Competitive games only, next to the other rank fields, and on a
-    /// Competitive game with no rank screen read (the object then holds
-    /// this and, when it was read, the queue title).
+    /// Competitive games only, next to the other rank fields. A game with
+    /// no rank screen read still sends this (and the queue title) when
+    /// the title names role or open queue.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queue: Option<UploadQueueField>,
     /// The reader id ([`RANK_RECOGNIZER_ID`]), sent with any field.
@@ -97,7 +97,8 @@ pub const RANK_RECOGNIZER_ID: &str = crate::model::RANK_RECOGNIZER_ID;
 
 /// The game's `rank` object as the upload sends it: each field only when
 /// the reader read it, plus `queue` on a Competitive game, and `None` (no
-/// key, the old body) when no field is set.
+/// key, the old body) when no field is set. A title-only object is sent
+/// only when the title names ROLE or OPEN.
 ///
 /// The local `QueueTitle::mode_hint` is not sent as `rank.next_mode_hint`:
 /// that site field belongs to the game whose rank screen was read (the
@@ -112,7 +113,11 @@ pub(super) fn upload_rank(m: &PersonalMatch) -> Option<UploadRank> {
             confidence: t.confidence,
         })
     });
-    let open_queue = m.queue_title.as_ref().is_some_and(|t| t.is_open_queue());
+    let open_queue = m
+        .queue_title
+        .as_ref()
+        .and_then(|t| t.confident_value())
+        .is_some_and(crate::rank_queue::title_is_open);
     let r = m.rank_update.clone().unwrap_or_default();
     let mut rank = UploadRank {
         role: field(&r.role, |v| rank_role(v, open_queue)),
@@ -140,16 +145,24 @@ pub(super) fn upload_rank(m: &PersonalMatch) -> Option<UploadRank> {
         queue: None,
         rank_recognizer: RANK_RECOGNIZER_ID,
     };
-    if rank != UploadRank::none() {
+    let title_names_queue = rank
+        .queue_title
+        .as_ref()
+        .is_some_and(|t| crate::rank_queue::title_names_role_or_open(&t.value));
+    if rank.has_rank_screen_field() || title_names_queue {
         rank.queue = Some(upload_queue(m));
+        Some(rank)
+    } else {
+        // A confident title that does not name ROLE or OPEN, and no rank
+        // screen field, is not Competitive evidence: omit the object.
+        None
     }
-    (rank != UploadRank::none()).then_some(rank)
 }
 
 /// The decided `rank.queue` for a Competitive game that already has a
-/// `rank` object (a confident queue title, a rank screen field, or both).
-/// A title or board size that does not map is `unknown` with no
-/// confidence; the game is still uploaded.
+/// `rank` object (a title that names ROLE or OPEN, a rank screen field,
+/// or both). A title or board size that does not map is `unknown` with
+/// no confidence; the game is still uploaded.
 fn upload_queue(m: &PersonalMatch) -> UploadQueueField {
     // Use the stored title and role, not the fields the upload already
     // kept: an Open role line is dropped from the body when there is no
@@ -161,7 +174,7 @@ fn upload_queue(m: &PersonalMatch) -> UploadQueueField {
         .rank_update
         .as_ref()
         .and_then(|r| r.role.as_ref())
-        .map(|t| t.value.as_str());
+        .and_then(|t| sure(t.confidence).map(|_| t.value.as_str()));
     let role_confidence = m
         .rank_update
         .as_ref()
@@ -194,6 +207,20 @@ pub(crate) fn rank_update_changes_upload(
 }
 
 impl UploadRank {
+    /// A field read on the rank screen itself, not the pre-game title.
+    fn has_rank_screen_field(&self) -> bool {
+        self.role.is_some()
+            || self.role_rank.is_some()
+            || self.division.is_some()
+            || self.progress_pct.is_some()
+            || self.progress_change.is_some()
+            || self.change_tags.is_some()
+            || self.higher_than_pct.is_some()
+            || self.hero_sr.is_some()
+            || self.hero_sr_change.is_some()
+            || self.next_mode_hint.is_some()
+    }
+
     /// No field read: what [`upload_rank`] never sends.
     pub(super) fn none() -> Self {
         Self {

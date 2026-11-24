@@ -4,7 +4,7 @@
 //! title is missing, the rank screen's role line. A failed or incomplete
 //! read is [`RankQueue::Unknown`]; it never drops the game.
 
-use scuffed_types::api::RankQueue;
+use scuffed_types::api::{RankQueue, RankRole};
 
 /// 5 or 6 players per team, as the Tab board gave it. Any other count is
 /// stored as `None`, so a bad detection cannot look like a real size.
@@ -62,6 +62,19 @@ fn kind_in(words: &[String]) -> Option<QueueKind> {
     }
 }
 
+/// The title names ROLE or OPEN (any word order, case and punctuation),
+/// and not both. Used to decide whether a title-only upload is
+/// Competitive evidence.
+pub fn title_names_role_or_open(text: &str) -> bool {
+    kind_in(&title_words(text)).is_some()
+}
+
+/// The title names OPEN and not ROLE, with the same word reader as
+/// [`title_names_role_or_open`].
+pub fn title_is_open(text: &str) -> bool {
+    kind_in(&title_words(text)) == Some(QueueKind::Open)
+}
+
 fn size_in(words: &[String]) -> Option<u8> {
     let has5 = words.iter().any(|w| w == "5V5");
     let has6 = words.iter().any(|w| w == "6V6");
@@ -80,15 +93,30 @@ fn usable_confidence(confidence: Option<f32>) -> Option<f32> {
     confidence.filter(|c| c.is_finite() && *c > 0.0 && *c <= 1.0)
 }
 
-fn role_is_icon(role: &str) -> bool {
-    matches!(
-        role.trim(),
-        "Tank" | "Damage" | "Support" | "tank" | "damage" | "support"
-    )
-}
-
-fn role_is_open(role: &str) -> bool {
-    role.trim().eq_ignore_ascii_case("Open")
+/// The rank screen role line as a queue kind, parsed the same way the
+/// upload maps `rank.role` ([`RankRole`]), and by case-insensitive name
+/// when that parse does not take the spelling.
+fn role_line_kind(role: &str) -> Option<QueueKind> {
+    let parsed = serde_json::from_value(serde_json::Value::String(role.to_string()))
+        .ok()
+        .or_else(|| {
+            let t = role.trim();
+            if t.eq_ignore_ascii_case("tank") {
+                Some(RankRole::Tank)
+            } else if t.eq_ignore_ascii_case("damage") {
+                Some(RankRole::Damage)
+            } else if t.eq_ignore_ascii_case("support") {
+                Some(RankRole::Support)
+            } else if t.eq_ignore_ascii_case("open") {
+                Some(RankRole::Open)
+            } else {
+                None
+            }
+        })?;
+    match parsed {
+        RankRole::Tank | RankRole::Damage | RankRole::Support => Some(QueueKind::Role),
+        RankRole::Open => Some(QueueKind::Open),
+    }
 }
 
 fn from_kind_and_size(kind: QueueKind, size: u8, confidence: Option<f32>) -> Option<DecidedQueue> {
@@ -144,20 +172,11 @@ pub fn decide_rank_queue(
     }
 
     if size == Some(6)
-        && let Some(role) = rank_role
+        && usable_confidence(rank_role_confidence).is_some()
+        && let Some(kind) = rank_role.and_then(role_line_kind)
+        && let Some(decided) = from_kind_and_size(kind, 6, rank_role_confidence)
     {
-        if role_is_icon(role) {
-            return DecidedQueue::known(
-                RankQueue::Role6v6,
-                usable_confidence(rank_role_confidence),
-            );
-        }
-        if role_is_open(role) {
-            return DecidedQueue::known(
-                RankQueue::Open6v6,
-                usable_confidence(rank_role_confidence),
-            );
-        }
+        return decided;
     }
 
     DecidedQueue::unknown()
@@ -219,14 +238,38 @@ mod tests {
 
     #[test]
     fn no_title_and_six_a_side_uses_the_rank_role_line() {
-        for role in ["Tank", "Damage", "Support", "tank"] {
+        for role in ["Tank", "Damage", "Support", "tank", "TANK"] {
             let (value, confidence) = decide(None, Some(6), Some(role));
             assert_eq!(value, RankQueue::Role6v6, "{role}");
             assert_eq!(confidence, Some(0.8), "{role}");
         }
-        let (value, confidence) = decide(None, Some(6), Some("Open"));
-        assert_eq!(value, RankQueue::Open6v6);
-        assert_eq!(confidence, Some(0.8));
+        for role in ["Open", "OPEN", "open"] {
+            let (value, confidence) = decide(None, Some(6), Some(role));
+            assert_eq!(value, RankQueue::Open6v6, "{role}");
+            assert_eq!(confidence, Some(0.8), "{role}");
+        }
+    }
+
+    #[test]
+    fn a_role_line_without_a_sure_confidence_is_not_used() {
+        let d = decide_rank_queue(None, None, Some(6), Some("Tank"), Some(f32::NAN));
+        assert_eq!(d.value, RankQueue::Unknown);
+        assert_eq!(d.confidence, None);
+        let d = decide_rank_queue(None, None, Some(6), Some("Tank"), None);
+        assert_eq!(d.value, RankQueue::Unknown);
+    }
+
+    #[test]
+    fn title_word_reader_names_role_or_open_in_any_order() {
+        assert!(title_names_role_or_open("OPEN QUEUE 6V6"));
+        assert!(title_is_open("OPEN QUEUE 6V6"));
+        assert!(title_is_open("COMPETITIVE: 6V6 OPEN QUEUE"));
+        assert!(title_names_role_or_open("ROLE QUEUE"));
+        assert!(!title_is_open("ROLE QUEUE"));
+        assert!(!title_names_role_or_open("QUICK PLAY"));
+        assert!(!title_names_role_or_open("6V6 QUICK PLAY"));
+        assert!(!title_names_role_or_open("ARCADE"));
+        assert!(!title_names_role_or_open("ROLE OPEN QUEUE"));
     }
 
     #[test]
