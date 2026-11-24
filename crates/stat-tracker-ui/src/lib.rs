@@ -54,6 +54,8 @@ mod games_state;
 mod games_table;
 mod hero_pack_hint;
 pub mod heroes;
+mod heroes_banned;
+mod heroes_banned_view;
 mod heroes_page;
 pub mod hotkey;
 pub mod icons;

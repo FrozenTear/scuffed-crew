@@ -80,7 +80,7 @@ fn sidebar(app: &TrackerApp) -> Element<'_, Message> {
 /// below a 1440 px window).
 fn top_tabs(app: &TrackerApp) -> Element<'_, Message> {
     responsive(move |size| {
-        let mut content = column![crate::nav::page_heading(app.screen)];
+        let mut content = column![crate::heroes_banned_view::heading(app)];
         // No Tracker health panel here: without a keyboard Tab is never
         // seen, so the reason and its fix sit under the title on every tab.
         if let Some(notice) = top_tabs_input_notice(app) {

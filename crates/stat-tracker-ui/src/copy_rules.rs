@@ -29,6 +29,11 @@ const SOURCES: &[(&str, &str)] = &[
     ("games_state.rs", include_str!("games_state.rs")),
     ("games_table.rs", include_str!("games_table.rs")),
     ("hero_pack_hint.rs", include_str!("hero_pack_hint.rs")),
+    ("heroes_banned.rs", include_str!("heroes_banned.rs")),
+    (
+        "heroes_banned_view.rs",
+        include_str!("heroes_banned_view.rs"),
+    ),
     ("heroes_page.rs", include_str!("heroes_page.rs")),
     ("icons.rs", include_str!("icons.rs")),
     ("maps_tab.rs", include_str!("maps_tab.rs")),
