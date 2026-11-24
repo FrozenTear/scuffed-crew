@@ -450,5 +450,8 @@ mod tests {
 mod tree_tests;
 
 #[cfg(test)]
+pub(crate) use tree_tests::headless;
+
+#[cfg(test)]
 #[path = "chrome_focus_tests.rs"]
 mod focus_tests;

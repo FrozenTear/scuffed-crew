@@ -183,8 +183,23 @@ pub fn asks_first(app: &TrackerApp, verb: DaemonVerb) -> bool {
     verb != DaemonVerb::Start && app.fixture.is_none() && match_in_progress(app)
 }
 
-/// [`Message::Daemon`]: start a verb, as before, and record it. Ignored
-/// in the demo and while anything else runs.
+/// [`Message::Daemon`]: from the 0.6 Settings status strip and the
+/// classic Tracker service card. Stop and Restart ask first mid-game,
+/// the same as the header pill; Start never does.
+pub(crate) fn request(app: &mut TrackerApp, verb: DaemonVerb) -> Task<Message> {
+    if asks_first(app, verb) {
+        app.pill.confirm = Some(Confirm {
+            verb,
+            on_action: false,
+        });
+        return Task::none();
+    }
+    run(app, verb)
+}
+
+/// Start a verb and record it. Ignored in the demo and while anything
+/// else runs. The confirm's Go, and a verb that does not ask first,
+/// come here.
 pub(crate) fn run(app: &mut TrackerApp, verb: DaemonVerb) -> Task<Message> {
     if app.fixture.is_some() || app.daemon_busy {
         return Task::none();

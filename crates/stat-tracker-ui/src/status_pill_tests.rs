@@ -482,3 +482,156 @@ fn the_tracker_service_row_points_to_the_pill() {
     let (_dir, app) = running();
     let _ = crate::settings_cards::tracker_service(&app, false);
 }
+
+/// Messages a click on the first `label` in `view` publishes.
+fn press_label(view: Element<'_, Message>, label: &str) -> Vec<Message> {
+    use iced::advanced::widget::{Operation, Tree};
+    use iced::advanced::{Layout, Shell, clipboard, layout::Limits};
+    use iced::mouse::{Button, Cursor, Event as Mouse};
+    use iced::{Event, Point, Rectangle, Size};
+
+    let renderer = crate::chrome::headless();
+    let size = Size::new(1280.0, 2000.0);
+    let mut element = view;
+    let mut tree = Tree::new(&element);
+    let node = element
+        .as_widget_mut()
+        .layout(&mut tree, &renderer, &Limits::new(Size::ZERO, size));
+    struct Find<'a> {
+        needle: &'a str,
+        bounds: Option<Rectangle>,
+    }
+    impl Operation<()> for Find<'_> {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<()>)) {
+            operate(self);
+        }
+
+        fn text(
+            &mut self,
+            _id: Option<&iced::advanced::widget::Id>,
+            bounds: Rectangle,
+            text: &str,
+        ) {
+            if self.bounds.is_none() && text == self.needle {
+                self.bounds = Some(bounds);
+            }
+        }
+    }
+    let mut find = Find {
+        needle: label,
+        bounds: None,
+    };
+    element
+        .as_widget_mut()
+        .operate(&mut tree, Layout::new(&node), &renderer, &mut find);
+    let bounds = find
+        .bounds
+        .unwrap_or_else(|| panic!("{label} is in the view"));
+    let cursor = Cursor::Available(Point::new(
+        bounds.x + bounds.width / 2.0,
+        bounds.y + bounds.height / 2.0,
+    ));
+    let viewport = Rectangle::new(Point::ORIGIN, size);
+    let mut messages = Vec::new();
+    for event in [
+        Mouse::ButtonPressed(Button::Left),
+        Mouse::ButtonReleased(Button::Left),
+    ] {
+        let mut shell = Shell::new(&mut messages);
+        element.as_widget_mut().update(
+            &mut tree,
+            &Event::Mouse(event),
+            Layout::new(&node),
+            cursor,
+            &renderer,
+            &mut clipboard::Null,
+            &mut shell,
+            &viewport,
+        );
+    }
+    assert!(!messages.is_empty(), "{label} published nothing");
+    messages
+}
+
+fn click_label(
+    app: &mut TrackerApp,
+    view: impl FnOnce(&TrackerApp) -> Element<'_, Message>,
+    label: &str,
+) {
+    let messages = press_label(view(app), label);
+    for msg in messages {
+        let _ = app.update(msg);
+    }
+}
+
+fn mid_game_live() -> (tempfile::TempDir, TrackerApp) {
+    let (dir, mut app) = live();
+    app.live_game_session = Some("live".into());
+    (dir, app)
+}
+
+fn mid_game_running() -> (tempfile::TempDir, TrackerApp) {
+    let (dir, mut app) = running();
+    app.live_game_session = Some("live".into());
+    (dir, app)
+}
+
+#[test]
+fn the_settings_strip_start_does_not_ask_mid_game() {
+    let (_dir, mut app) = mid_game_live();
+    click_label(
+        &mut app,
+        |app| crate::settings_page::view(app, 976.0),
+        "Start tracker",
+    );
+    assert_eq!(app.pill.confirm, None, "strip Start never asks");
+    assert_eq!(app.pill.in_flight, Some(DaemonVerb::Start));
+}
+
+#[test]
+fn the_settings_strip_restart_asks_first_mid_game() {
+    let (_dir, mut app) = mid_game_running();
+    click_label(
+        &mut app,
+        |app| crate::settings_page::view(app, 976.0),
+        "Restart tracker",
+    );
+    assert_eq!(app.pill.confirm.map(|c| c.verb), Some(DaemonVerb::Restart));
+    assert_eq!(app.pill.in_flight, None);
+}
+
+#[test]
+fn classic_settings_start_does_not_ask_mid_game() {
+    let (_dir, mut app) = mid_game_live();
+    click_label(
+        &mut app,
+        |app| crate::settings::service_body(app, false),
+        "Start",
+    );
+    assert_eq!(app.pill.confirm, None, "classic Start never asks");
+    assert_eq!(app.pill.in_flight, Some(DaemonVerb::Start));
+}
+
+#[test]
+fn classic_settings_restart_asks_first_mid_game() {
+    let (_dir, mut app) = mid_game_running();
+    click_label(
+        &mut app,
+        |app| crate::settings::service_body(app, false),
+        "Restart",
+    );
+    assert_eq!(app.pill.confirm.map(|c| c.verb), Some(DaemonVerb::Restart));
+    assert_eq!(app.pill.in_flight, None);
+}
+
+#[test]
+fn classic_settings_stop_asks_first_mid_game() {
+    let (_dir, mut app) = mid_game_running();
+    click_label(
+        &mut app,
+        |app| crate::settings::service_body(app, false),
+        "Stop",
+    );
+    assert_eq!(app.pill.confirm.map(|c| c.verb), Some(DaemonVerb::Stop));
+    assert_eq!(app.pill.in_flight, None);
+}

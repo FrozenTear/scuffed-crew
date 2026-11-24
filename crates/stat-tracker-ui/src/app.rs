@@ -1140,7 +1140,7 @@ impl TrackerApp {
             Message::SaveSettings => {
                 self.save_settings(crate::settings_save::SaveFrom::Classic, None)
             }
-            Message::Daemon(verb) => crate::status_pill::run(self, verb),
+            Message::Daemon(verb) => crate::status_pill::request(self, verb),
             Message::DaemonDone(result) => crate::status_pill::done(self, result),
             Message::Pill(msg) => crate::status_pill::update(self, msg),
             Message::ToggleAutostart => {
