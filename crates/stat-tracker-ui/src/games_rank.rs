@@ -4,13 +4,16 @@
 //! the site say the same thing for the same game: "Diamond 2", "45%",
 //! "+23%", and one sentence for the tooltip.
 //!
-//! The values shown are the ones the upload sends the site for this game:
-//! the tier word in title case (the pack may spell it in capitals), the
-//! division 1..=5, progress and change -100..=100, the role only when the
-//! upload would send it (`Open` only with an open queue title, a role icon
-//! never with one), and the queue only when its title was read confidently
-//! (the same queue the map chip shows). A game with nothing to show keeps
-//! the plain "-" the column had before ranks were read.
+//! The values shown are the ones the upload sends the site for this game
+//! (`stat_tracker::sync` `upload_rank`), shown as the site shows them: a
+//! value only with a confidence the upload keeps (finite, above 0, at most
+//! 1), text only when it is at most 64 characters once trimmed, the tier
+//! word in title case (the pack may spell it in capitals), the division
+//! 1..=5, progress and change -100..=100, the role only when the upload
+//! would send it (`Open` only with an open queue title, a role icon never
+//! with one), and the queue only when its title was read confidently (the
+//! same queue the map chip shows). A game with nothing to show keeps the
+//! plain "-" the column had before ranks were read.
 
 use iced::widget::text::Wrapping;
 use iced::widget::{column, container, text, tooltip};
@@ -20,6 +23,7 @@ use crate::app::Message;
 use crate::games_table::pill_box;
 use crate::model::Game;
 use crate::theme::{BORDER, SIZE_LABEL, SIZE_META, TEXT, TEXT_2, TEXT_3};
+use stat_tracker::model::{RankNumber, RankText};
 
 /// A missing or unsure role, as the site words it.
 pub const ROLE_UNKNOWN: &str = "Role unknown";
@@ -50,25 +54,31 @@ impl RankShown {
     pub fn from_game(g: &Game) -> Option<Self> {
         let rank = g.rank_update.as_ref()?;
         let open_queue = g.queue_title.as_ref().is_some_and(|t| t.is_open_queue());
-        let num = |n: &Option<stat_tracker::model::RankNumber>| {
-            n.as_ref().and_then(|n| i32::try_from(n.value).ok())
+        // A word or number the upload sends: one read with a confidence it
+        // keeps ([`sure`]), and text of a length it keeps ([`upload_text`]).
+        fn word(w: &Option<RankText>) -> Option<&str> {
+            w.as_ref()
+                .filter(|w| sure(w.confidence).is_some())
+                .map(|w| w.value.as_str())
+        }
+        let num = |n: &Option<RankNumber>| {
+            n.as_ref()
+                .filter(|n| sure(n.confidence).is_some())
+                .and_then(|n| i32::try_from(n.value).ok())
         };
         let shown = Self {
-            role: rank
-                .role
-                .as_ref()
-                .and_then(|r| role_name(&r.value, open_queue)),
-            tier: rank
-                .role_rank
-                .as_ref()
-                .and_then(|t| clean_text(&t.value))
-                .map(|t| title_case(&t)),
+            role: word(&rank.role).and_then(|r| role_name(r, open_queue)),
+            tier: word(&rank.role_rank)
+                .and_then(upload_text)
+                .and_then(|t| clean_text(&t))
+                .map(|t| title_case(&t.to_lowercase())),
             division: num(&rank.division)
                 .and_then(|d| u8::try_from(d).ok())
                 .filter(|d| (1..=5).contains(d)),
             progress: num(&rank.progress_pct).filter(|p| (-100..=100).contains(p)),
             change: num(&rank.progress_change).filter(|c| (-100..=100).contains(c)),
             queue: crate::games_detail::queue_value(g)
+                .and_then(|q| upload_text(&q))
                 .and_then(|q| clean_text(&q))
                 .map(|q| q.to_uppercase()),
         };
@@ -153,7 +163,7 @@ fn role_name(value: &str, open_queue: bool) -> Option<&'static str> {
 /// title "OPEN QUEUE") shows once.
 pub fn context_label(role: Option<&str>, queue: Option<&str>) -> String {
     let role = role.unwrap_or(ROLE_UNKNOWN);
-    match queue.map(title_case) {
+    match queue.map(title_case_upper) {
         Some(q) if !q.eq_ignore_ascii_case(role) => format!("{role}, {q}"),
         _ => role.to_string(),
     }
@@ -168,13 +178,29 @@ pub fn change_text(change: i32) -> String {
     }
 }
 
+/// A confidence the upload keeps: finite, above 0, at most 1. Copied from
+/// `upload_rank`'s `sure` (`crates/stat-tracker/src/sync/wire.rs`), which
+/// the GUI cannot reach.
+fn sure(confidence: f32) -> Option<f32> {
+    (confidence.is_finite() && confidence > 0.0 && confidence <= 1.0).then_some(confidence)
+}
+
+/// Text the upload sends: trimmed, not empty, at most
+/// `scuffed_types::api::RANK_STRING_MAX_CHARS` characters. Copied from
+/// `upload_rank`'s `text` (`crates/stat-tracker/src/sync/wire.rs`).
+fn upload_text(v: &str) -> Option<String> {
+    let v = v.trim();
+    (!v.is_empty() && v.chars().count() <= scuffed_types::api::RANK_STRING_MAX_CHARS)
+        .then(|| v.to_string())
+}
+
 /// Trimmed, single spaced, or None when blank.
 fn clean_text(text: &str) -> Option<String> {
     let joined = text.split_whitespace().collect::<Vec<_>>().join(" ");
     (!joined.is_empty()).then_some(joined)
 }
 
-/// "DIAMOND" or "diamond" to "Diamond", "ROLE QUEUE" to "Role Queue".
+/// "ROLE QUEUE" to "Role Queue". The screen draws these in capitals.
 fn title_case(text: &str) -> String {
     text.split(' ')
         .map(|word| {
@@ -189,6 +215,11 @@ fn title_case(text: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Title case for a key that is stored in capitals.
+fn title_case_upper(key: &str) -> String {
+    title_case(&key.to_lowercase())
 }
 
 /// The Rank cell: the rank text with progress and change under it, and the

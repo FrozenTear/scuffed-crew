@@ -180,8 +180,10 @@ fn rank(
 fn sample_snapshot() -> Snapshot {
     // Newest first, matching `get_all_matches` / live_snapshot.json.
     // Each session_id is one game (latest_per_game). Tonight is the local day.
-    // The first three have a rank (full and up, full and down, tier only)
-    // for the Games table's Rank column; the rest have none.
+    // The first four have a rank for the Games table's Rank column: full
+    // and up, Champion full and down, tier only, and Grandmaster 5 at
+    // -100% -100% (the widest rank text and second line, which the column
+    // must fit). The last has none.
     let matches = vec![
         {
             let mut m = pm(
@@ -218,7 +220,7 @@ fn sample_snapshot() -> Snapshot {
             );
             m.corrected_elims = Some(21);
             m.edited_fields = vec!["elims".into()];
-            m.rank_update = Some(rank("Damage", "PLATINUM", Some(4), Some(80), Some(-15)));
+            m.rank_update = Some(rank("Damage", "CHAMPION", Some(3), Some(80), Some(-15)));
             m
         },
         {
@@ -259,20 +261,24 @@ fn sample_snapshot() -> Snapshot {
             m.rank_update = Some(rank("Support", "GOLD", None, None, None));
             m
         },
-        pm(
-            "sess-s16-1",
-            "Reinhardt",
-            "Numbani",
-            "Tank",
-            "victory",
-            22,
-            8,
-            11,
-            8100,
-            0,
-            24100,
-            dt(2026, 8, 18, 19, 40),
-        ),
+        {
+            let mut m = pm(
+                "sess-s16-1",
+                "Reinhardt",
+                "Numbani",
+                "Tank",
+                "victory",
+                22,
+                8,
+                11,
+                8100,
+                0,
+                24100,
+                dt(2026, 8, 18, 19, 40),
+            );
+            m.rank_update = Some(rank("Tank", "GRANDMASTER", Some(5), Some(-100), Some(-100)));
+            m
+        },
         pm(
             "sess-s16-2",
             "Soldier: 76",

@@ -94,7 +94,9 @@ impl Col {
         }
     }
 
-    /// Columns whose header sorts. Rank and Crew hold no data yet.
+    /// Columns whose header sorts. Rank is stored (`rank_update`, only
+    /// with the rank reader on) and shown, but does not sort; Crew holds no
+    /// data yet.
     pub fn sortable(self) -> bool {
         matches!(
             self,
@@ -109,7 +111,17 @@ impl Col {
     }
 }
 
-/// The columns at `grid` with their widths (spec r1.1 `A-games.html`).
+/// The Rank column at every grid: the widest rank text, "Grandmaster 5"
+/// (86 to 90 px at `SIZE_META` in the bundled Urbanist Medium), fits with
+/// room for hinting, so the division never clips. The spec's 64 px cut
+/// "Champion 3" to the tier word, and its 64 and 72 px both cut
+/// "Grandmaster 2". The extra width
+/// comes out of the Map and Hero shares
+/// (`games_table`'s fit tests check the whole row at 720 to 1920 px).
+pub const RANK_W: f32 = 96.0;
+
+/// The columns at `grid` with their widths (spec r1.1 `A-games.html`,
+/// with [`RANK_W`] for Rank).
 /// The header row and every game row draw from this one list, so a column
 /// the rows fold away at 1024 (Hero, E/D/A) is gone from the header too.
 pub fn columns(grid: Grid) -> Vec<(Col, Width)> {
@@ -121,7 +133,7 @@ pub fn columns(grid: Grid) -> Vec<(Col, Width)> {
             (Col::Map, Share(12)),
             (Col::Hero, Share(13)),
             (Col::Eda, Px(88.0)),
-            (Col::Rank, Px(72.0)),
+            (Col::Rank, Px(RANK_W)),
             (Col::Length, Px(56.0)),
             (Col::Time, Px(56.0)),
             (Col::Crew, Px(72.0)),
@@ -133,7 +145,7 @@ pub fn columns(grid: Grid) -> Vec<(Col, Width)> {
             (Col::Map, Share(12)),
             (Col::Hero, Share(13)),
             (Col::Eda, Px(76.0)),
-            (Col::Rank, Px(64.0)),
+            (Col::Rank, Px(RANK_W)),
             (Col::Length, Px(56.0)),
             (Col::Time, Px(48.0)),
             (Col::Crew, Px(72.0)),
@@ -143,7 +155,7 @@ pub fn columns(grid: Grid) -> Vec<(Col, Width)> {
             (Col::Stripe, Px(4.0)),
             (Col::Result, Px(72.0)),
             (Col::Map, Share(10)),
-            (Col::Rank, Px(64.0)),
+            (Col::Rank, Px(RANK_W)),
             (Col::Time, Px(48.0)),
             (Col::Unsure, Px(120.0)),
         ],
@@ -607,7 +619,7 @@ where
 }
 
 /// Under the last table (spec p2), after the split rule.
-const SORT_NOTE: &str = "Columns sort; unsure and empty values always sort last. Length runs from the game's start screen to its result. When either was not seen, it is your first to last Tab press, so the game ran at least that long. The queue shows by the map only when the queue title reader (off by default) recognized its title. Rank shows when the rank reader read the rank screen after the game; it does not sort. Crew is not recorded yet.";
+const SORT_NOTE: &str = "Columns sort; unsure and empty values always sort last. Length runs from the game's start screen to its result. When either was not seen, it is your first to last Tab press, so the game ran at least that long. The queue shows by the map only when the queue title reader (off by default) recognized its title. Rank shows only when the rank reader (off by default) read the rank screen after the game; it does not sort. Crew is not recorded yet.";
 /// No games stored at all.
 pub const EMPTY_NONE: &str = "No games yet. A game shows here once the tracker saves it.";
 /// Games stored, none left by the filters.
@@ -1205,6 +1217,11 @@ pub(crate) mod tests {
             "The queue shows by the map only when the queue title reader (off by default) recognized its title."
         ));
         assert!(!SORT_NOTE.contains("The queue shows by the map when"));
+        // The rank reader (Read my rank after Comp games) starts off too.
+        assert!(SORT_NOTE.contains(
+            "Rank shows only when the rank reader (off by default) read the rank screen after the game; it does not sort."
+        ));
+        assert!(!SORT_NOTE.contains("Rank shows when"));
         assert!(SORT_NOTE.contains("Length runs from the game's start screen to its result"));
         assert!(SORT_NOTE.contains("at least that long"));
     }

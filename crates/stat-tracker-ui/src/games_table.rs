@@ -1005,6 +1005,10 @@ fn chip_box(
 }
 
 #[cfg(test)]
+#[path = "games_table_fit_tests.rs"]
+mod fit_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::fixtures_games::{NORMAL, UNSURE};
