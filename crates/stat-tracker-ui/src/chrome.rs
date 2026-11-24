@@ -406,7 +406,7 @@ fn page_body<'a>(
 /// A toast and the restart bar, stacked as [`floating_prompts`] stacks
 /// them, with only the bottom [`FLOAT_GAP`]. Used to check the inset.
 #[cfg(test)]
-pub(crate) fn prompts_slot(toast: &'static str, page: f32) -> Element<'static, Message> {
+pub(crate) fn prompts_slot(toast: &str, page: f32) -> Element<'_, Message> {
     prompts_measure_slot(Some(toast), None, true, page)
 }
 

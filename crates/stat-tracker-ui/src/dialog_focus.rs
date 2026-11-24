@@ -117,8 +117,8 @@ struct State {
     /// click blurs the field before the dialog opens, so Esc can restore
     /// that field rather than the button that was clicked. Cleared when
     /// a click on the live page leaves nothing focused, unless that
-    /// click opens a dialog (cleared on the live event after that
-    /// click's ButtonReleased).
+    /// click published a message: then [`State::open_restore`] holds
+    /// the target until the layer is covered.
     last_id: Option<Id>,
     /// A click on the live page left nothing focused. Set on the press,
     /// armed on the matching release, and applied to `last_id` on a
@@ -129,6 +129,12 @@ struct State {
     /// The blurring click's ButtonReleased has been seen, so the next
     /// live event that still has nothing focused may clear `last_id`.
     blur_released: bool,
+    /// The restore target recorded when a live ButtonReleased published
+    /// a message (the opening click). iced 0.14 may then deliver
+    /// CursorMoved or RedrawRequested to the still-live page, which
+    /// would otherwise clear `last_id` before the dialog covers it.
+    /// Close restores this id even if those events arrived first.
+    open_restore: Option<Id>,
 }
 
 /// Counts the focusable widgets and finds the focused one.
@@ -328,11 +334,12 @@ impl Layer<'_> {
             if let Some(id) = census.focused_id {
                 next.last_id = Some(id);
             }
-            next.held = match next.last_id.clone() {
+            next.held = match next.last_id.clone().or_else(|| next.open_restore.clone()) {
                 Some(id) => Held::Child(id),
                 None if state.itself => Held::Itself,
                 None => Held::Nothing,
             };
+            next.open_restore = None;
             if census.focused.is_some() {
                 self.focus_at(tree, layout, renderer, None);
             }
@@ -406,13 +413,17 @@ impl Layer<'_> {
     /// it on a later live event if nothing is focused, so Esc does not
     /// restore a field the user already left. Events between press and
     /// release are ignored, so a shaky opening click does not drop the
-    /// id before the dialog opens.
+    /// id before the dialog opens. A release that published a message
+    /// records `open_restore`, so a later CursorMoved or RedrawRequested
+    /// on the still-live page can clear `last_id` without losing the
+    /// target the opening click should restore.
     fn after_live_click(
         &mut self,
         tree: &mut Tree,
         layout: Layout<'_>,
         renderer: &iced::Renderer,
         event: &Event,
+        published: bool,
     ) {
         let press = matches!(event, Event::Mouse(mouse::Event::ButtonPressed(_)));
         let release = matches!(event, Event::Mouse(mouse::Event::ButtonReleased(_)));
@@ -424,9 +435,16 @@ impl Layer<'_> {
         } else if press {
             state.pending_blur = true;
             state.blur_released = false;
+            // A later press on the still-live page is a new click; a
+            // leftover open_restore was a message that did not open a
+            // dialog.
+            state.open_restore = None;
         } else if state.pending_blur {
             if release {
                 state.blur_released = true;
+                if published {
+                    state.open_restore = state.last_id.clone();
+                }
             } else if state.blur_released {
                 state.last_id = None;
                 state.pending_blur = false;
@@ -584,7 +602,7 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Layer<'_> {
             );
         }
         if self.role == Role::Live {
-            self.after_live_click(tree, layout, renderer, event);
+            self.after_live_click(tree, layout, renderer, event, !shell.is_empty());
         }
     }
 

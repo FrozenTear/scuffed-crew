@@ -161,6 +161,36 @@ impl Ui {
         }
     }
 
+    /// A press and release at `point`, then the events iced can deliver
+    /// to the still-live page in the same batch, before messages apply
+    /// and the view rebuilds: a `CursorMoved` 1 px away, a second move,
+    /// and a `RedrawRequested`. The open message comes from the release.
+    fn click_with_moves_before_rebuild(&mut self, app: &TrackerApp, point: Point) -> Sent {
+        let press = self.press_at(app, point);
+        let release = self.release_at(app, point);
+        let mid = Point::new(point.x + 1.0, point.y);
+        let move1 = self.mouse_at(app, mid, mouse::Event::CursorMoved { position: mid });
+        let end = Point::new(point.x + 2.0, point.y);
+        let move2 = self.mouse_at(app, end, mouse::Event::CursorMoved { position: end });
+        let redraw = self.redraw(app);
+        Sent {
+            messages: [
+                press.messages,
+                release.messages,
+                move1.messages,
+                move2.messages,
+                redraw.messages,
+            ]
+            .concat(),
+            captured: press.captured
+                || release.captured
+                || move1.captured
+                || move2.captured
+                || redraw.captured,
+            typing: false,
+        }
+    }
+
     /// Center of a text block whose string contains `needle`. `pick`
     /// chooses among matches (the rightmost in-page button, for example).
     fn click_point_for(
@@ -189,6 +219,7 @@ impl Ui {
             chosen.y + chosen.height / 2.0,
         )
     }
+
     /// The first event after a view change, as iced sends one each frame.
     fn redraw(&mut self, app: &TrackerApp) -> Sent {
         let now = std::time::Instant::now();
@@ -1032,4 +1063,162 @@ fn esc_restores_the_field_after_a_press_and_release_on_a_page_button() {
             page_field,
         );
     }
+}
+
+/// The live iced 0.14 loop delivers later events in the same batch to
+/// the still-live page before it applies the open message and rebuilds
+/// the view. A CursorMoved (and a second move) plus a RedrawRequested
+/// after the release must not drop the restore target; Esc still
+/// returns focus to the field. Covers both layouts for "What leaves
+/// your PC" and "Report a problem", and Games "Report misread".
+#[test]
+fn esc_restores_the_field_after_a_click_and_moves_on_the_still_live_page() {
+    fn apply(ui: &mut Ui, app: &mut TrackerApp, sent: Sent) {
+        assert!(
+            !sent.messages.is_empty(),
+            "the page button should open a dialog: {:?}",
+            sent.messages
+        );
+        for message in sent.messages {
+            let _ = app.update(message);
+        }
+        ui.redraw(app);
+    }
+
+    fn restore_after_moves(
+        nav: NavStyle,
+        label: &str,
+        point: Point,
+        app: &mut TrackerApp,
+        ui: &mut Ui,
+        field: Focus,
+        types_back: fn(&Sent) -> bool,
+    ) {
+        let sent = ui.click_with_moves_before_rebuild(app, point);
+        apply(ui, app, sent);
+        let esc = ui.send(app, named(Named::Escape));
+        assert!(
+            !esc.messages.is_empty(),
+            "{nav:?}, {label}: Esc does nothing"
+        );
+        for message in esc.messages {
+            let _ = app.update(message);
+        }
+        ui.redraw(app);
+        let focused = ui.focuses(app).focused();
+        assert_eq!(
+            focused,
+            vec![field],
+            "{nav:?}, {label}: the field focused before the click should have it back"
+        );
+        assert!(
+            types_back(&ui.send(app, type_x())),
+            "{nav:?}, {label}: typing should reach the field again"
+        );
+    }
+
+    // Top tabs: "What leaves your PC". Classic: in-page "Report a problem".
+    {
+        let nav = NavStyle::TopTabs;
+        let (_dir, mut app, mut ui, field) = settings_field_in_at(nav, Size::new(1280.0, 2000.0));
+        let page_field = ui.focuses(&app).all[field];
+        let point = ui.click_point_for(&app, "What leaves your PC", |hits| hits[0]);
+        restore_after_moves(
+            nav,
+            "What leaves your PC",
+            point,
+            &mut app,
+            &mut ui,
+            page_field,
+            types_into_settings,
+        );
+    }
+    {
+        let nav = NavStyle::ClassicSidebar;
+        let (_dir, mut app, mut ui, field) = settings_field_in_at(nav, Size::new(1280.0, 2000.0));
+        let page_field = ui.focuses(&app).all[field];
+        let point = ui.click_point_for(&app, "Report a problem", |hits| {
+            *hits
+                .iter()
+                .filter(|b| b.x >= SIDEBAR_WIDTH)
+                .max_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)))
+                .expect("classic Settings has an in-page Report a problem")
+        });
+        restore_after_moves(
+            nav,
+            "in-page Report a problem",
+            point,
+            &mut app,
+            &mut ui,
+            page_field,
+            types_into_settings,
+        );
+    }
+
+    // Games Edit, Elims focused. Top tabs uses the 0.7 "Report misread"
+    // on the open row; classic uses "Report this game" on the card.
+    for nav in LAYOUTS {
+        let (_dir, mut app, mut ui, field) =
+            games_elims_field_in_at(nav, Size::new(1280.0, 2000.0));
+        let page_field = ui.focuses(&app).all[field];
+        let label = match nav {
+            NavStyle::TopTabs => "Report misread",
+            NavStyle::ClassicSidebar => "Report this game",
+        };
+        let point = ui.click_point_for(&app, label, |hits| hits[0]);
+        restore_after_moves(
+            nav,
+            label,
+            point,
+            &mut app,
+            &mut ui,
+            page_field,
+            types_into_elims,
+        );
+    }
+}
+
+fn types_into_elims(sent: &Sent) -> bool {
+    sent.messages
+        .iter()
+        .any(|m| matches!(m, Message::EditField(crate::model::EditField::Elims, _)))
+}
+
+/// A Games fixture row in Edit, with the Elims field focused, so
+/// "Report misread" is on the page and typing goes to that field.
+fn games_elims_field_in_at(
+    nav: NavStyle,
+    size: Size,
+) -> (tempfile::TempDir, TrackerApp, Ui, usize) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut cli = crate::fixtures::test_cli(dir.path());
+    cli.fixture = Some(crate::cli::FixtureKind::Games);
+    let mut app = TrackerApp::new(cli).0;
+    super::tree_tests::close_launch_notes(&mut app);
+    app.nav_style = nav;
+    app.screen = Screen::Games;
+    app.toast = None;
+    app.expanded = Some(crate::fixtures_games::NORMAL.into());
+    let _ = app.update(Message::ToggleEdit);
+    assert!(app.editing, "{nav:?}: Edit should be open");
+    let mut ui = Ui::with_size(size);
+    ui.redraw(&app);
+    let total = ui.focuses(&app).all.len();
+    let field = (0..total)
+        .find(|&n| {
+            ui.operate(&app, &mut FocusNth { n, current: 0 });
+            types_into_elims(&ui.send(&app, type_x()))
+        })
+        .expect("Games Edit has an Elims field");
+    ui.operate(
+        &app,
+        &mut FocusNth {
+            n: field,
+            current: 0,
+        },
+    );
+    ui.redraw(&app);
+    let focused = ui.focuses(&app).focused();
+    assert_eq!(focused.len(), 1, "{nav:?}, Elims: {focused:?}");
+    (dir, app, ui, field)
 }
