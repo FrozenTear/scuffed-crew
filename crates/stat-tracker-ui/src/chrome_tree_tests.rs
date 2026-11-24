@@ -1,5 +1,5 @@
-//! #806: the page scroll must survive a toast or a dialog coming and
-//! going. iced keeps a widget's state (the pane's scroll offset) only while
+//! The page scroll must survive a toast or a dialog coming and going.
+//! iced keeps a widget's state (the pane's scroll offset) only while
 //! the widget sits at the same place in the tree with the same tag, so these
 //! tests walk the laid-out tree from the root to the page pane
 //! ([`crate::focus_status::PANE_SCROLL_ID`]) and compare that path.
@@ -50,8 +50,9 @@ fn app() -> (tempfile::TempDir, TrackerApp) {
     (dir, app)
 }
 
-/// `top_tabs` as it was before #806: the prompts layer only while there
-/// is a toast or the restart bar, the window alone otherwise.
+/// `top_tabs` as it was before the scroll-reset fix: the prompts layer
+/// only while there is a toast or the restart bar, the window alone
+/// otherwise.
 fn old_top_tabs(app: &TrackerApp) -> Element<'_, Message> {
     responsive(move |size| match top_tabs_parts(app, size.width) {
         (window, Some(prompts)) => stack![window, prompts].width(Fill).height(Fill).into(),
@@ -78,6 +79,77 @@ fn no_dialog(app: &TrackerApp) -> Element<'_, Message> {
 
 fn a_dialog(app: &TrackerApp) -> Element<'_, Message> {
     window_with(app, true)
+}
+
+fn closed_three_slots(app: &TrackerApp) -> Element<'_, Message> {
+    with_layers(app, [None, None, None])
+}
+
+/// A dialog over the page, with two closed slots under it and the usual
+/// trailing What leaves slot, all empty.
+fn dialog_with_empty_slots_above(app: &TrackerApp) -> Element<'_, Message> {
+    let layer = container(text("A dialog")).into();
+    with_layers(app, [None, None, Some(layer)])
+}
+
+/// The page and one dialog, with no empty slots after the dialog.
+fn dialog_only(app: &TrackerApp) -> Element<'_, Message> {
+    let page = container(top_tabs(app))
+        .width(Fill)
+        .height(Fill)
+        .style(theme::page_background);
+    Stack::with_children([page.into(), container(text("A dialog")).into()])
+        .width(Fill)
+        .height(Fill)
+        .into()
+}
+
+/// The window stacked with its real prompts layer, and nothing else.
+fn stacked_prompts(app: &TrackerApp) -> Element<'_, Message> {
+    responsive(move |size| {
+        let (window, prompts) = top_tabs_parts(app, size.width);
+        stack![window, prompts.expect("a toast or the restart bar")]
+            .width(Fill)
+            .height(Fill)
+            .into()
+    })
+    .width(Fill)
+    .height(Fill)
+    .into()
+}
+
+fn show_restart_bar(app: &mut TrackerApp) {
+    use crate::restart_prompt::{BinStamp, RestartWatch};
+    let first = BinStamp {
+        modified: None,
+        dev: 1,
+        ino: 1,
+        len: 100,
+    };
+    let next = BinStamp {
+        modified: None,
+        dev: 1,
+        ino: 2,
+        len: 100,
+    };
+    let mut watch = RestartWatch::new("own-build-id", Some(first));
+    let probe = watch.on_tick(Some(next), false).expect("probe");
+    watch.on_probe(
+        probe,
+        Ok("other-build-id
+"
+        .into()),
+    );
+    assert!(
+        watch.prompt_pending(),
+        "a different installed binary should show the bar"
+    );
+    app.restart_watch = watch;
+    app.update_progress = crate::update::UpdateProgress::Idle;
+    assert!(
+        app.restart_bar_visible(),
+        "the restart bar should be on for this test"
+    );
 }
 
 fn lay_out(element: &mut Element<'_, Message>, tree: &mut Tree, renderer: &iced::Renderer) -> Node {
@@ -236,8 +308,8 @@ fn show_toast(app: &mut TrackerApp) {
     app.toast = Some("Report sent".into());
 }
 
-/// The cause of #806: in the old shape the path to the pane is not the
-/// same with a toast, so iced gives the pane a fresh state.
+/// The cause of the scroll-reset bug: in the old shape the path to the
+/// pane is not the same with a toast, so iced gives the pane a fresh state.
 #[test]
 fn the_old_top_tabs_shape_moves_the_pane_when_a_toast_shows() {
     let (_dir, mut app) = app();
@@ -302,6 +374,69 @@ fn a_dialog_keeps_the_pane_and_its_scroll() {
     assert!(kept > 0.0, "closing the dialog reset the scroll");
 }
 
+/// The same path and scroll check for the restart bar, and for a toast
+/// and the restart bar together. Both live in the one prompts slot, so
+/// the path should match the toast-only path.
+#[test]
+fn a_restart_bar_keeps_the_pane_and_its_scroll() {
+    let (_dir, mut app) = app();
+    let quiet = pane_path(&app, current_top_tabs);
+    show_restart_bar(&mut app);
+    let bar = pane_path(&app, current_top_tabs);
+    show_toast(&mut app);
+    let both = pane_path(&app, current_top_tabs);
+    eprintln!("new, restart bar: {:?}", readable(&bar));
+    assert_eq!(quiet, bar, "{:?} vs {:?}", readable(&quiet), readable(&bar));
+    assert_eq!(quiet, both);
+    app.toast = None;
+    // offset_after starts from the current app (bar showing) after we
+    // reset the toast; go back to a quiet app first.
+    app.restart_watch = crate::restart_prompt::RestartWatch::new("own-build-id", None);
+    assert!(!app.restart_bar_visible());
+    let kept = offset_after(
+        &mut app,
+        current_top_tabs,
+        current_top_tabs,
+        show_restart_bar,
+    );
+    assert!(kept > 0.0, "the restart bar reset the scroll");
+    let kept = offset_after(&mut app, current_top_tabs, current_top_tabs, |app| {
+        show_toast(app);
+    });
+    assert!(
+        kept > 0.0,
+        "a toast on top of the restart bar reset the scroll"
+    );
+}
+
+/// Opening a dialog that has empty slots under and after it keeps the
+/// same path and scroll as a closed stack with the same number of slots.
+#[test]
+fn a_dialog_with_empty_slots_above_keeps_the_pane_and_its_scroll() {
+    let (_dir, mut app) = app();
+    let closed = pane_path(&app, closed_three_slots);
+    let open = pane_path(&app, dialog_with_empty_slots_above);
+    eprintln!("empty slots, no dialog: {:?}", readable(&closed));
+    eprintln!("empty slots, a dialog:  {:?}", readable(&open));
+    assert_eq!(
+        closed,
+        open,
+        "{:?} vs {:?}",
+        readable(&closed),
+        readable(&open)
+    );
+    let kept = offset_after(
+        &mut app,
+        closed_three_slots,
+        dialog_with_empty_slots_above,
+        |_| (),
+    );
+    assert!(
+        kept > 0.0,
+        "opening a dialog under empty slots reset the scroll"
+    );
+}
+
 /// What clicking at each point of a grid over the window publishes.
 fn clicks(app: &TrackerApp, view: View) -> Vec<String> {
     use iced::advanced::{Shell, clipboard};
@@ -355,4 +490,135 @@ fn the_empty_layers_let_clicks_through() {
     assert!(!bare.is_empty(), "the grid hits something on the page");
     assert_eq!(clicks(&app, current_top_tabs), bare);
     assert_eq!(clicks(&app, no_dialog), bare);
+}
+
+/// Trailing empty slots over an open dialog do not steal clicks from
+/// the dialog or the page: the published clicks match a stack that has
+/// only that dialog.
+#[test]
+fn an_open_dialog_with_empty_slots_keeps_its_clicks() {
+    let (_dir, app) = app();
+    let only = clicks(&app, dialog_only);
+    assert!(!only.is_empty(), "the grid hits the page or the dialog");
+    assert_eq!(clicks(&app, a_dialog), only);
+    assert_eq!(clicks(&app, dialog_with_empty_slots_above), only);
+}
+
+/// Clicks beside a toast or the restart bar still reach the page, and
+/// the production prompts slot matches a stack of just the window and
+/// those prompts.
+#[test]
+fn a_toast_or_restart_bar_keeps_page_clicks() {
+    let (_dir, mut app) = app();
+    let bare = clicks(&app, bare_window);
+    assert!(!bare.is_empty(), "the grid hits something on the page");
+
+    show_toast(&mut app);
+    let toast = clicks(&app, current_top_tabs);
+    assert_eq!(toast, clicks(&app, stacked_prompts));
+    assert!(
+        shares_page_clicks(&bare, &toast),
+        "clicks beside the toast should still reach the page"
+    );
+
+    app.toast = None;
+    show_restart_bar(&mut app);
+    let bar = clicks(&app, current_top_tabs);
+    assert_eq!(bar, clicks(&app, stacked_prompts));
+    assert!(
+        shares_page_clicks(&bare, &bar),
+        "clicks beside the restart bar should still reach the page"
+    );
+
+    show_toast(&mut app);
+    let both = clicks(&app, current_top_tabs);
+    assert_eq!(both, clicks(&app, stacked_prompts));
+    assert!(
+        shares_page_clicks(&bare, &both),
+        "clicks beside the toast and the restart bar should still reach the page"
+    );
+}
+
+/// Some grid points publish the same message with the overlay as they
+/// do on the bare page, so the overlay has not swallowed the whole window.
+fn shares_page_clicks(bare: &[String], over: &[String]) -> bool {
+    let over: std::collections::HashSet<&String> = over.iter().collect();
+    bare.iter().any(|click| over.contains(click))
+}
+
+/// A focused field on the page keeps that focus when a dialog opens, now
+/// the page is not remounted. This records the current behaviour; it does
+/// not change focus. QA should still Tab and type with a Games edit field
+/// focused and a dialog open.
+#[test]
+fn a_dialog_leaves_page_focus_in_place() {
+    use iced::advanced::widget::operation::focusable::{self, Focusable};
+    use iced::widget::text_input;
+
+    const FIELD: &str = "page-field";
+
+    fn field_stack(dialog: bool) -> Element<'static, Message> {
+        let field = text_input("Name", "held").id(Id::new(FIELD)).into();
+        let dialog_layer = if dialog {
+            container(text("A dialog")).into()
+        } else {
+            empty_layer()
+        };
+        Stack::with_children([field, empty_layer(), dialog_layer, empty_layer()])
+            .width(Fill)
+            .height(Fill)
+            .into()
+    }
+
+    fn focused(
+        element: &mut Element<'_, Message>,
+        tree: &mut Tree,
+        node: &Node,
+        renderer: &iced::Renderer,
+    ) -> bool {
+        let mut find = FocusOf {
+            target: Id::new(FIELD),
+            focused: None,
+        };
+        element
+            .as_widget_mut()
+            .operate(tree, Layout::new(node), renderer, &mut find);
+        find.focused == Some(true)
+    }
+
+    struct FocusOf {
+        target: Id,
+        focused: Option<bool>,
+    }
+
+    impl Operation<()> for FocusOf {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<()>)) {
+            operate(self);
+        }
+
+        fn focusable(&mut self, id: Option<&Id>, _bounds: Rectangle, state: &mut dyn Focusable) {
+            if id == Some(&self.target) {
+                self.focused = Some(state.is_focused());
+            }
+        }
+    }
+
+    let renderer = headless();
+    let mut element = field_stack(false);
+    let mut tree = Tree::new(&element);
+    let node = lay_out(&mut element, &mut tree, &renderer);
+    let mut focus = focusable::focus::<()>(Id::new(FIELD));
+    run(&mut element, &mut tree, &node, &renderer, &mut focus);
+    assert!(
+        focused(&mut element, &mut tree, &node, &renderer),
+        "the field should be focused before the dialog opens"
+    );
+
+    let mut next = field_stack(true);
+    tree.diff(&next);
+    let node = lay_out(&mut next, &mut tree, &renderer);
+    assert!(
+        focused(&mut next, &mut tree, &node, &renderer),
+        "opening the dialog should not remount the page field or drop its focus"
+    );
 }

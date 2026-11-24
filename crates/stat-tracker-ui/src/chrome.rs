@@ -18,7 +18,7 @@ use crate::{restart_prompt, widgets};
 /// The whole window: the chrome for the layout picked at start on the page
 /// background, with each open dialog in `layers` stacked over it in order.
 /// A closed dialog keeps its place as an empty layer ([`empty_layer`]), so
-/// the page keeps its scroll when a dialog opens or closes (#806).
+/// the page keeps its scroll when a dialog opens or closes.
 pub(crate) fn with_layers<'a, const N: usize>(
     app: &'a TrackerApp,
     layers: [Option<Element<'a, Message>>; N],
@@ -86,7 +86,7 @@ fn sidebar(app: &TrackerApp) -> Element<'_, Message> {
 /// restart bar ([`empty_layer`]), so the widget tree keeps its shape when a
 /// toast comes and goes. iced matches widget state by position in the
 /// tree: with the layer only there while a toast shows, the page scroll
-/// got a fresh state and jumped to the top (#806).
+/// got a fresh state and jumped to the top.
 fn top_tabs(app: &TrackerApp) -> Element<'_, Message> {
     responsive(move |size| {
         let (window, prompts) = top_tabs_parts(app, size.width);

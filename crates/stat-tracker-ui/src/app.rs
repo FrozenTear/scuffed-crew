@@ -437,7 +437,7 @@ pub struct TrackerApp {
     /// This process's path at launch, for [`TrackerApp::restart_target`].
     own_exe: PathBuf,
     /// Watches the installed GUI binary for a changed build (G3).
-    restart_watch: RestartWatch,
+    pub(crate) restart_watch: RestartWatch,
     /// Puts text on the system clipboard ([`crate::clipboard::copy_text`]).
     /// Tests swap it so they never reach the real clipboard.
     copy_text: fn(&str) -> Result<crate::clipboard::ClipboardBackend, String>,
