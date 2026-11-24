@@ -182,8 +182,8 @@ fn sample_snapshot() -> Snapshot {
     // Each session_id is one game (latest_per_game). Tonight is the local day.
     // The first four have a rank for the Games table's Rank column: full
     // and up, Champion full and down, tier only, and Grandmaster 5 at
-    // -100% -100% (the widest rank text and second line, which the column
-    // must fit). The last has none.
+    // -100% -100% (the widest rank text, which the column must fit; the
+    // widest second line is "-100% +100%"). The last has none.
     let matches = vec![
         {
             let mut m = pm(

@@ -1377,9 +1377,11 @@ mod tests {
     /// laid out with the tiny-skia renderer for every real window from 720
     /// to 1920 px in 1 px steps: the window's grid, and its width minus both
     /// page gutters as the row width, so the Map cell's `responsive` runs.
-    /// Also with the two names that wrap in real windows, where an uncapped
-    /// sign shrinks: "Wuxing University - Water College" (1100 to 1239 px)
-    /// and "Workshop Green Screen" (1100 to 1107 px). The sign keeps its
+    /// Also with two long names that wrap in some real windows, where an
+    /// uncapped sign shrinks: "Wuxing University - Water College" and
+    /// "Workshop Green Screen", both from 1100 px up. With the 96 px Rank
+    /// column (`games_rows::RANK_W`) more names wrap, over slightly wider
+    /// window ranges than under the spec's 64 and 72 px. The sign keeps its
     /// full width inside the cell, after the name and its gap, and the name
     /// stays within its cap, wrapping inside it.
     #[test]

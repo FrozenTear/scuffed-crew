@@ -443,7 +443,7 @@ fn every_rank_line_fits_the_rank_column() {
         "GRANDMASTER",
         "CHAMPION",
     ];
-    let numbers = [(-100, -100), (100, 100), (-99, -100), (0, 0)];
+    let numbers = [(-100, -100), (-100, 100), (100, 100), (-99, -100), (0, 0)];
     let mut widest = (0.0_f32, String::new());
     for tier in tiers {
         for division in 1..=5 {
@@ -457,13 +457,14 @@ fn every_rank_line_fits_the_rank_column() {
         }
     }
     let gm5 = line("Grandmaster 5", SIZE_META);
-    let second = line("-100% -100%", SIZE_LABEL);
+    let second = line("-100% +100%", SIZE_LABEL);
     eprintln!(
         "widest cell {widest:?}; Grandmaster 5 {gm5}, Grandmaster 1 {}, Champion 5 {}, \
-         Champion 1 {}, -100% -100% {second}, 100% +100% {}",
+         Champion 1 {}, -100% +100% {second}, -100% -100% {}, 100% +100% {}",
         line("Grandmaster 1", SIZE_META),
         line("Champion 5", SIZE_META),
         line("Champion 1", SIZE_META),
+        line("-100% -100%", SIZE_LABEL),
         line("100% +100%", SIZE_LABEL),
     );
     // The widest line is a Grandmaster one, past the old 72 px.

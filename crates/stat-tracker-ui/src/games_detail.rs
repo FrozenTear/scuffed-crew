@@ -1415,10 +1415,12 @@ pub(crate) mod tests {
     }
 
     /// With the sign in the Map cell, the name is capped so that, after
-    /// every gap, the sign keeps its full 12 px at every cell width the
-    /// grids use (Mid at 1100 and 1280, Wide at 1440, Narrow at 780), and a
-    /// name at the cap leaves no room the sign has to give up. With no sign
-    /// the name is not capped.
+    /// every gap, the sign keeps its full 12 px, and a name at the cap
+    /// leaves no room the sign has to give up. The widths below are the Map
+    /// cell at Mid 1100 and 1280, Wide 1440 and Narrow 780 under the spec's
+    /// Rank widths; with the 96 px Rank column (`games_rows::RANK_W`) they
+    /// are about 160, 247, 293 and 290 px. The property holds at any width.
+    /// With no sign the name is not capped.
     #[test]
     fn the_unsure_map_name_leaves_the_sign_its_full_width() {
         let chip = |s: &str| MapPart::Chip(s.into());

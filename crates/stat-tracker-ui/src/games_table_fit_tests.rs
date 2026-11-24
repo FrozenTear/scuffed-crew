@@ -31,7 +31,7 @@ fn natural_width(renderer: &iced::Renderer, element: Element<'_, Message>) -> f3
 }
 
 /// A game with the widest rank the cell draws: "Grandmaster 5" over
-/// "-100% -100%".
+/// "-100% +100%", the widest second line.
 fn widest_rank_game() -> Game {
     let mut g = crate::games_rows::tests::game(Outcome::Win, "2026-09-02T21:14:00Z", &[]);
     let word = |value: &str| {
@@ -51,7 +51,7 @@ fn widest_rank_game() -> Game {
         role_rank: word("GRANDMASTER"),
         division: num(5),
         progress_pct: num(-100),
-        progress_change: num(-100),
+        progress_change: num(100),
         ..RankUpdate::default()
     });
     g.role = Role::Damage;
