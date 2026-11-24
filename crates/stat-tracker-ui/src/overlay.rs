@@ -21,9 +21,9 @@ use scuffed_types::Season;
 use stat_tracker::detect::MatchOutcome;
 use stat_tracker::game_running::GameProcessGate;
 
-use crate::aggregate::{Record, aggregate};
+use crate::aggregate::{aggregate, Record};
 use crate::cli::{Cli, FixtureKind};
-use crate::model::{Game, Outcome, Role, SeasonSel, display_hero_name};
+use crate::model::{display_hero_name, Game, Outcome, Role, SeasonSel};
 use crate::overlay_pages::{self, Page, PageState};
 use crate::overview::tonight_games;
 use crate::seasons;
@@ -889,10 +889,7 @@ fn footer_row(model: &OverlayModel) -> Element<'_, OverlayViewMessage> {
     .spacing(8)
     .align_y(Alignment::Center);
 
-    let safe = model
-        .pages
-        .held
-        .then(|| overlay_pages::safe_page_footer(&model.safe_bind));
+    let safe = crate::overlay_marks::safe_page_footer_label(&model.pages, &model.safe_bind);
     let mut col = column![chips].spacing(6).width(Fill);
     for hint in [model.hotkey_hint.clone(), safe].into_iter().flatten() {
         col = col.push(
@@ -1087,7 +1084,8 @@ mod tests {
     use crate::fixtures;
     use crate::model::Game;
     use crate::overlay_marks::{
-        TONIGHT_PIP, TONIGHT_STRIP_MAX, page_indicator_labels, tonight_strip_labels,
+        page_indicator_labels, safe_page_footer_label, tonight_strip_labels, TONIGHT_PIP,
+        TONIGHT_STRIP_MAX,
     };
     use crate::snapshot::games_from_snapshot;
     use chrono::{TimeZone, Utc};
@@ -1379,7 +1377,7 @@ mod tests {
             true,
         );
         let _ = view(&model);
-        // The view draws tonight_strip_labels: a dropped W/L/D fails here.
+        // tonight_strip_labels is what the view is given for the strip.
         assert_eq!(
             tonight_strip_labels(&model.tonight_outcomes),
             vec!["W".to_string(), "L".to_string(), "W".to_string()],
@@ -1389,23 +1387,23 @@ mod tests {
 
     #[test]
     fn tonight_strip_shows_newest_13_and_plus_n() {
-        for (n, plus) in [(15, "+2"), (20, "+7")] {
-            let outcomes = vec![Outcome::Win; n];
-            let labels = tonight_strip_labels(&outcomes);
-            assert_eq!(labels.len(), TONIGHT_STRIP_MAX + 1, "{n}");
-            assert!(labels[..TONIGHT_STRIP_MAX].iter().all(|s| s == "W"), "{n}");
-            assert_eq!(labels[TONIGHT_STRIP_MAX], plus, "{n}");
-            let mut model = build_model(
-                &sample_games(),
-                &sample_seasons(),
-                &SeasonSel::AllTime,
-                sample_games()[0].played_at,
-                true,
-                true,
-            );
-            model.tonight_outcomes = outcomes;
-            let _ = view(&model);
-        }
+        // Newest first: W, D, then 13 L. Taking the oldest 13 would be
+        // all L, so the first two labels would not be W and D.
+        let mut outcomes = vec![Outcome::Win, Outcome::Draw];
+        outcomes.extend(vec![Outcome::Loss; 13]);
+        let labels = tonight_strip_labels(&outcomes);
+        assert_eq!(&labels[..2], ["W", "D"]);
+        assert_eq!(labels[TONIGHT_STRIP_MAX], "+2");
+        let mut model = build_model(
+            &sample_games(),
+            &sample_seasons(),
+            &SeasonSel::AllTime,
+            sample_games()[0].played_at,
+            true,
+            true,
+        );
+        model.tonight_outcomes = outcomes;
+        let _ = view(&model);
         assert_eq!(tonight_strip_labels(&[Outcome::Win; 13]).len(), 13);
     }
 
@@ -1455,9 +1453,13 @@ mod tests {
             page_indicator_labels(&held.pages),
             vec![TONIGHT_PIP, "Tonight", overlay_pages::HELD_TAG]
         );
-        assert!(
-            content_height(&held) > tonight_h,
-            "the hold adds the footer line"
+        assert_eq!(
+            safe_page_footer_label(&held.pages, overlay_pages::DEFAULT_SAFE_BIND).as_deref(),
+            Some("Safe page with Super+Shift+T")
+        );
+        assert_eq!(
+            safe_page_footer_label(&tonight.pages, overlay_pages::DEFAULT_SAFE_BIND),
+            None
         );
     }
 

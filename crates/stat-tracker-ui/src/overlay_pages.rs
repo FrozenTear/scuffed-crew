@@ -5,13 +5,13 @@
 //! stream page and the default.
 //!
 //! - Auto-advance (on unless "Hold the stream page" is on): Map vote when the
-//!   three vote maps were read, then Picks and bans when the map locks. A
+//!   three vote maps were read, then Bans and picks when the map locks. A
 //!   stage whose maps were not read leaves the page on Tonight.
 //! - Auto-return to Tonight at match start (the loading screen or the first
 //!   live Tab), always, whatever the hold or the setting says. Match start
 //!   also sets an in-match flag. While that flag is set, a later locked-map
 //!   stage does not auto-advance (a hero select mid-match must not put
-//!   Picks and bans up on stream). The next map-vote stage clears the flag,
+//!   Bans and picks up on stream). The next map-vote stage clears the flag,
 //!   so the next game can auto-advance again.
 //! - The safe-page key jumps to Tonight and holds there, suppressing
 //!   auto-advance, until the next next-page press or the hold is cleared.
@@ -63,7 +63,7 @@ impl Page {
         match self {
             Page::Tonight => "Tonight",
             Page::MapVote => "Map vote",
-            Page::PicksAndBans => "Picks and bans",
+            Page::PicksAndBans => "Bans and picks",
             Page::Matchup => "Matchup",
             Page::Tip => "Tip",
         }
@@ -280,7 +280,7 @@ mod tests {
         );
         // Vote read, locked map not: the vote page does not stay up.
         assert_eq!(run(&[VOTE, LOCKED_UNREAD], false).page, Page::Tonight);
-        // Vote not read, locked map read: Picks and bans.
+        // Vote not read, locked map read: Bans and picks.
         assert_eq!(run(&[VOTE_UNREAD, LOCKED], false).page, Page::PicksAndBans);
         assert!(vote_maps_read(&["A".into(), "B".into(), "C".into()]));
         assert!(!vote_maps_read(&["A".into(), "B".into()]));
@@ -369,7 +369,7 @@ mod tests {
     #[test]
     fn indicator_names_and_tip_has_no_dots() {
         let names: Vec<_> = Page::IN_MATCH.iter().map(|p| p.name()).collect();
-        assert_eq!(names, ["Tonight", "Map vote", "Picks and bans", "Matchup"]);
+        assert_eq!(names, ["Tonight", "Map vote", "Bans and picks", "Matchup"]);
         let tip = PageState {
             page: Page::Tip,
             ..PageState::default()
@@ -431,5 +431,16 @@ mod tests {
         assert_eq!(on_stage(s, VOTE, false), s);
         // A cancelled vote that becomes None is a no-op: Map vote stays.
         assert_eq!(on_stage(s, Stage::None, false).page, Page::MapVote);
+    }
+
+    #[test]
+    fn unread_vote_after_match_start_clears_in_match() {
+        // The default reader often names no vote maps, so only a read
+        // vote would leave in_match set for the rest of the session. An
+        // unread vote still clears the flag, and the following lock can
+        // auto-advance.
+        let s = run(&[Stage::MatchStart, VOTE_UNREAD, LOCKED], false);
+        assert_eq!(s.page, Page::PicksAndBans);
+        assert!(!s.in_match);
     }
 }
