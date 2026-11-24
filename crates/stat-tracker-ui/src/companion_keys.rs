@@ -603,13 +603,14 @@ mod tests {
     fn a_stale_seen_or_wrong_pid_is_ignored() {
         let dir = tempfile::tempdir().unwrap();
         let start = PageState::default();
-        // Bound at the new reader's 1.5 s poll is 7 s; 8 s old is stale.
+        let bound = stat_tracker::companion_stage::seen_current_for_secs(poll());
+        // Age bound+1 is stale (10 s at the new reader's 1.5 s poll, then +1).
         write_stage(
             dir.path(),
             LIVE_PID,
             "map_vote",
             r#"["Busan","Ilios","Lijiang Tower"]"#,
-            NOW - 8,
+            NOW - (bound + 1),
         );
         assert_eq!(apply_now(start, dir.path(), false), start);
 
