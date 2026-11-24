@@ -33,7 +33,7 @@ pub(crate) fn publish(data_dir: &Path, phase: &GamePhase) {
 }
 
 #[cfg(test)]
-mod tests {
+mod tests_companion_stage {
     use super::*;
 
     #[test]
