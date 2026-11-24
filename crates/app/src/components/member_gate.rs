@@ -227,10 +227,12 @@ enum GateView {
     },
 }
 
-/// `error` is the last fetch error. `failed_before` is true when the slot
-/// holds a failed load; `pending` when a fetch is in flight. `use_api` clears
-/// the error when a refetch starts, so a failed slot that is pending again is
-/// a retry, and the error card stays up for it.
+/// `error` is the last fetch error. `failed_before` is true when the last
+/// finished fetch failed (`ApiResource::failed`); `pending` when a fetch is in
+/// flight. `use_api` clears the error when a refetch starts, so a failed load
+/// that is pending again is a retry, and the error card stays up for it. A
+/// skipped fetch (empty URL) is not a failure: the fetch after it is a first
+/// load.
 fn gate_view(
     auth: &AuthState,
     error: Option<&str>,
@@ -271,6 +273,19 @@ fn gate_status(view: GateView, what: &str, reason: &str) -> String {
     }
 }
 
+/// [`gate_view`] of a live resource, with its last error.
+fn resource_view<T: 'static>(
+    auth: &AuthState,
+    resource: &ApiResource<T>,
+) -> (GateView, Option<String>) {
+    let error = resource.error.read().as_ref().cloned();
+    // Not "the slot holds `None`": a skipped fetch leaves that too (issue 821).
+    let failed_before = *resource.failed.read();
+    let pending = resource.data.state()() == UseResourceState::Pending;
+    let view = gate_view(auth, error.as_deref(), failed_before, pending);
+    (view, error)
+}
+
 /// Pending UI for a member-only `use_api*` whose `data` holds no rows yet.
 /// Call from the `None` arm only.
 pub fn member_pending<T: 'static>(
@@ -278,10 +293,7 @@ pub fn member_pending<T: 'static>(
     resource: &ApiResource<T>,
     what: &str,
 ) -> Element {
-    let error = resource.error.read().as_ref().cloned();
-    let failed_before = matches!(resource.data.read().as_ref(), Some(None));
-    let pending = resource.data.state()() == UseResourceState::Pending;
-    let view = gate_view(auth, error.as_deref(), failed_before, pending);
+    let (view, error) = resource_view(auth, resource);
     let reason = error.as_deref().unwrap_or_default();
     let status = gate_status(view, what, reason);
     // The line is the visible content while loading. Next to a card it only
@@ -495,6 +507,132 @@ mod tests {
         );
         // First load: nothing failed before.
         assert_eq!(gate_view(&member, None, false, true), GateView::Loading);
+    }
+
+    thread_local! {
+        /// Fetches the probe has started. The first one ends like the hook's
+        /// skip or failure; later ones stay in flight.
+        static PROBE_RUN: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+        static PROBE_FIRST_FAILS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        static PROBE_REFRESH: std::cell::Cell<Option<Signal<u64>>> =
+            const { std::cell::Cell::new(None) };
+        /// What the gate decided on the probe's latest render.
+        static PROBE_VIEW: std::cell::Cell<Option<GateView>> =
+            const { std::cell::Cell::new(None) };
+    }
+
+    /// A member page whose first fetch finishes with no rows, as a skip
+    /// (empty URL) or as a failure, recorded the way the `use_api*` hooks
+    /// record them. Any later fetch never finishes. It records the gate's
+    /// decision for its resource on every render.
+    fn pending_probe() -> Element {
+        let auth = member();
+        let refresh = use_signal(|| 0u64);
+        PROBE_REFRESH.with(|slot| slot.set(Some(refresh)));
+        let mut error = use_signal(|| None::<String>);
+        let mut failed = use_signal(|| false);
+        let truncated = use_signal(|| false);
+        let shown = use_signal(|| 0usize);
+        let page_budget = use_signal(|| 1usize);
+        let data = use_resource(move || async move {
+            let _ = refresh();
+            error.set(None);
+            if PROBE_RUN.with(|run| run.replace(run.get() + 1)) > 0 {
+                return std::future::pending::<Option<()>>().await;
+            }
+            if PROBE_FIRST_FAILS.with(|fails| fails.get()) {
+                error.set(Some("The server had a problem.".to_string()));
+                failed.set(true);
+            } else {
+                failed.set(false);
+            }
+            None
+        });
+        let resource = ApiResource {
+            data,
+            refresh,
+            error,
+            failed,
+            truncated,
+            shown,
+            page_budget,
+        };
+        let (view, _) = resource_view(&auth, &resource);
+        PROBE_VIEW.with(|slot| slot.set(Some(view)));
+        rsx! {}
+    }
+
+    /// The gate's decision after the probe's first fetch finished, then
+    /// after a second fetch started (the URL resolved, or Retry was pressed).
+    fn first_fetch_then_pending(first_fails: bool) -> (GateView, GateView) {
+        fn pump(dom: &mut VirtualDom) -> GateView {
+            for _ in 0..8 {
+                dom.render_immediate(&mut dioxus::dioxus_core::NoOpMutations);
+            }
+            PROBE_VIEW.with(|slot| slot.get()).expect("probe rendered")
+        }
+        PROBE_RUN.with(|run| run.set(0));
+        PROBE_FIRST_FAILS.with(|fails| fails.set(first_fails));
+        let mut dom = VirtualDom::new(pending_probe);
+        dom.rebuild_in_place();
+        let settled = pump(&mut dom);
+        assert_eq!(PROBE_RUN.with(|run| run.get()), 1, "one fetch finished");
+
+        // Restart the fetch the way a dependency change or Retry does.
+        let mut refresh = PROBE_REFRESH
+            .with(|slot| slot.get())
+            .expect("probe mounted");
+        dom.in_runtime(|| refresh += 1);
+        let pending = pump(&mut dom);
+        assert_eq!(PROBE_RUN.with(|run| run.get()), 2, "a second fetch began");
+        (settled, pending)
+    }
+
+    /// Issue 821: /stats starts with an empty URL while auth or the saved season
+    /// resolves. That skip leaves `None` in the slot like a failure does; the
+    /// real fetch after it is a first load, not a retry.
+    #[test]
+    fn a_skip_followed_by_a_pending_fetch_renders_loading_not_the_error_card() {
+        let (settled, pending) = first_fetch_then_pending(false);
+        assert_eq!(settled, GateView::Loading);
+        assert_eq!(pending, GateView::Loading);
+        assert_eq!(gate_status(pending, "stats", ""), "Loading stats");
+    }
+
+    /// The gate's retry rule still holds for a real failure: the card stays
+    /// up, as retrying, while the refetch is in flight.
+    #[test]
+    fn a_failure_followed_by_a_pending_fetch_keeps_the_card_as_retrying() {
+        let (settled, pending) = first_fetch_then_pending(true);
+        assert_eq!(settled, GateView::Failed { retrying: false });
+        assert_eq!(pending, GateView::Failed { retrying: true });
+        assert_eq!(gate_status(pending, "stats", ""), "Loading stats");
+    }
+
+    /// The same two cases on the pure decision.
+    #[test]
+    fn only_a_recorded_failure_makes_a_pending_fetch_a_retry() {
+        let member = member();
+        // Skip, then the real fetch: nothing failed.
+        assert_eq!(gate_view(&member, None, false, true), GateView::Loading);
+        // A skip no fetch has followed yet.
+        assert_eq!(gate_view(&member, None, false, false), GateView::Loading);
+        // Failure, then a refetch in flight.
+        assert_eq!(
+            gate_view(&member, None, true, true),
+            GateView::Failed { retrying: true }
+        );
+        // The gate asks the hook's flag, not whether the slot is empty.
+        let src = include_str!("member_gate.rs");
+        let src = src.split("pub(crate) mod test_route").next().unwrap();
+        assert!(src.contains("let failed_before = *resource.failed.read();"));
+        assert!(
+            !src.contains("Some(None)"),
+            "an empty slot is not a failure"
+        );
+        // The status line is rendered in every state, not mounted per state.
+        assert_eq!(src.matches("role: \"status\"").count(), 1);
+        assert!(src.contains("p { class: status_class, role: \"status\", \"{status}\" }"));
     }
 
     #[test]
