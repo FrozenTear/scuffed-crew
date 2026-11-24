@@ -600,3 +600,93 @@ fn esc_in_a_field_of_the_guide_leaves_the_field_first() {
         "a second Esc goes on to the guide's listener"
     );
 }
+
+/// A counted page of fields, with a dialog over it when [`DIALOG_OPEN`]
+/// is set. The layers are the same [`dialog_focus::layer`] widgets
+/// [`with_layers`] uses; the page is only the fields, so a dropped
+/// field is the only change in the focusable count.
+fn page_of_fields(_app: &TrackerApp) -> Element<'_, Message> {
+    use iced::widget::{container, space, text, text_input};
+    const LABELS: [&str; 3] = ["field 0", "field 1", "field 2"];
+    let n = PAGE_FIELDS.get();
+    let mut fields = iced::widget::Column::new();
+    for label in LABELS.iter().take(n) {
+        fields = fields.push(text_input(label, ""));
+    }
+    let page = container(fields).width(Fill).height(Fill);
+    let dialog = DIALOG_OPEN
+        .get()
+        .then(|| Dialog::new(text("a dialog"), Some(Message::DismissToast)));
+    let role = if dialog.is_some() {
+        Role::Covered
+    } else {
+        Role::Live
+    };
+    let page = dialog_focus::layer(page, role, None);
+    let top = match dialog {
+        Some(dialog) => dialog_focus::layer(dialog.content, Role::Top, dialog.on_escape),
+        None => space().into(),
+    };
+    Stack::with_children([page, top])
+        .width(Fill)
+        .height(Fill)
+        .into()
+}
+
+thread_local! {
+    static PAGE_FIELDS: std::cell::Cell<usize> = const { std::cell::Cell::new(3) };
+    static DIALOG_OPEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn set_page(fields: usize, dialog: bool) {
+    PAGE_FIELDS.set(fields);
+    DIALOG_OPEN.set(dialog);
+}
+
+/// If the opener is dropped, or another field goes away so the page's
+/// focusable count changes, Esc must not move the focus to a different
+/// field. Restore only happens when the count is unchanged; otherwise
+/// nothing on the page is focused.
+#[test]
+fn esc_does_not_focus_the_wrong_field_when_the_page_changes() {
+    let (_dir, app) = crate::fixtures::test_app();
+    let mut ui = Ui::new();
+    ui.view = page_of_fields;
+
+    // Three fields, the middle one focused. Drop the first so the opener
+    // is still there, but at a new index: a restore-by-index would land
+    // on the last field instead.
+    set_page(3, false);
+    ui.redraw(&app);
+    ui.operate(&app, &mut FocusNth { n: 1, current: 0 });
+    assert_eq!(ui.focuses(&app).focused().len(), 1);
+    set_page(3, true);
+    ui.redraw(&app);
+    set_page(2, true);
+    ui.redraw(&app);
+    set_page(2, false);
+    ui.redraw(&app);
+    let focused = ui.focuses(&app).focused();
+    assert!(
+        focused.is_empty(),
+        "a leftover page field has the focus after the count changed: {focused:?}"
+    );
+
+    // The opener itself is removed (the last of three). Esc still must
+    // not pick another field.
+    set_page(3, false);
+    ui.redraw(&app);
+    ui.operate(&app, &mut FocusNth { n: 2, current: 0 });
+    assert_eq!(ui.focuses(&app).focused().len(), 1);
+    set_page(3, true);
+    ui.redraw(&app);
+    set_page(2, true);
+    ui.redraw(&app);
+    set_page(2, false);
+    ui.redraw(&app);
+    let focused = ui.focuses(&app).focused();
+    assert!(
+        focused.is_empty(),
+        "a field has the focus after the opener was dropped: {focused:?}"
+    );
+}

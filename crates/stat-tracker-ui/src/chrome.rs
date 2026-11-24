@@ -251,6 +251,18 @@ fn with_vision_notice<'a>(
 const FLOAT_MAX: f32 = 640.0;
 /// Space between them and the window's bottom edge.
 const FLOAT_GAP: f32 = 16.0;
+/// Space between a toast and the restart bar when both show.
+const PROMPTS_SPACING: f32 = 8.0;
+/// One toast or restart bar: 1 px border, [8, 14] pad, and a line as tall
+/// as a meta-size button with [4, 10] pad, with room for the font's line
+/// box. A test lays out both bars and checks [`PROMPTS_INSET`] covers them.
+const PROMPT_BAR: f32 = 48.0;
+/// Bottom padding kept in scrolled content so the last control can scroll
+/// clear of a toast and the restart bar. Always present, even when no
+/// prompt is showing, so the page does not reflow when one appears. It is
+/// the slot from the bottom: [`FLOAT_GAP`] plus two bars and the space
+/// between them.
+pub(crate) const PROMPTS_INSET: f32 = FLOAT_GAP + PROMPT_BAR + PROMPTS_SPACING + PROMPT_BAR;
 
 /// The toast and the restart bar, centred at the bottom of the window (of
 /// the pane in the classic layout), at most [`FLOAT_MAX`] wide and never
@@ -261,7 +273,7 @@ fn floating_prompts(app: &TrackerApp, page: f32) -> Option<Element<'_, Message>>
     if app.toast.is_none() && !restart {
         return None;
     }
-    let mut prompts = Column::new().spacing(8);
+    let mut prompts = Column::new().spacing(PROMPTS_SPACING);
     if let Some(t) = &app.toast {
         prompts = prompts.push(widgets::toast_bar(t, app.toast_action.clone()));
     }
@@ -281,8 +293,11 @@ fn floating_prompts(app: &TrackerApp, page: f32) -> Option<Element<'_, Message>>
 
 /// The pane right of the sidebar or under the tabs: `content` (what the
 /// layout puts first: the header, or the title and controls), then the
-/// screen, padded `pad_x` at the sides. The toast and the restart bar are
-/// never in it; they float over it ([`floating_prompts`]).
+/// screen, padded `pad_x` at the sides and [`PROMPTS_INSET`] at the
+/// bottom so the last control can scroll clear of the floating toast and
+/// restart bar ([`floating_prompts`]). That bottom space is always there,
+/// so the page does not reflow when a prompt appears. The prompts
+/// themselves are never in the scrolled content; they float over it.
 /// The classic Settings (`settings_scrolls`) fills the height and scrolls
 /// its own form; every other screen, the 0.6 Settings page included,
 /// scrolls the whole pane, so the scrollbar sits in one place on every tab.
@@ -324,7 +339,7 @@ fn page_body<'a>(
         .height(height)
         .padding(Padding {
             top: PAGE_PAD_Y,
-            bottom: PAGE_PAD_Y,
+            bottom: PROMPTS_INSET,
             left: pad_x,
             right: pad_x,
         });
@@ -337,6 +352,24 @@ fn page_body<'a>(
             .height(Fill)
             .into()
     }
+}
+
+/// A toast and the restart bar, stacked as [`floating_prompts`] stacks
+/// them, with only the bottom [`FLOAT_GAP`]. Used to check
+/// [`PROMPTS_INSET`] covers the slot.
+#[cfg(test)]
+pub(crate) fn both_prompts_slot() -> Element<'static, Message> {
+    container(
+        Column::new()
+            .spacing(PROMPTS_SPACING)
+            .push(widgets::toast_bar("Report sent", None))
+            .push(restart_prompt::bar()),
+    )
+    .padding(Padding {
+        bottom: FLOAT_GAP,
+        ..Padding::ZERO
+    })
+    .into()
 }
 
 #[cfg(test)]

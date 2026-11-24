@@ -770,3 +770,139 @@ fn shares_page_clicks(bare: &[String], over: &[String]) -> bool {
     let over: std::collections::HashSet<&String> = over.iter().collect();
     bare.iter().any(|click| over.contains(click))
 }
+
+/// The reserved bottom inset is at least as tall as a toast and the
+/// restart bar stacked with the bottom gap, so the slot cannot cover the
+/// last control when both show.
+#[test]
+fn the_prompts_inset_covers_a_toast_and_the_restart_bar() {
+    use iced::advanced::layout::Limits;
+    let mut slot = super::both_prompts_slot();
+    let renderer = headless();
+    let mut tree = Tree::new(&slot);
+    let node = slot.as_widget_mut().layout(
+        &mut tree,
+        &renderer,
+        &Limits::new(Size::ZERO, Size::new(640.0, 400.0)),
+    );
+    let height = node.size().height;
+    assert!(
+        height <= super::PROMPTS_INSET,
+        "inset {} is short of the slot {height}",
+        super::PROMPTS_INSET
+    );
+    assert!(
+        height > super::PROMPTS_INSET / 2.0,
+        "slot {height} looks too small; the inset may be guessing"
+    );
+}
+
+/// At max scroll the last control in the pane (and the classic Settings
+/// form) sits above the prompts slot, with a toast and the restart bar
+/// showing and with them hidden: the reserved inset is always there.
+#[test]
+fn the_last_control_scrolls_clear_of_the_prompts_slot() {
+    let size = WINDOW;
+    let (_dir, mut tabs) = app();
+    last_control_clears(&mut tabs, whole_window, Target::Pane, size);
+    let (_classic_dir, mut classic) = classic_app(Screen::Games);
+    last_control_clears(&mut classic, whole_window, Target::Pane, size);
+    let (_form_dir, mut form) = classic_app(Screen::Settings);
+    last_control_clears(&mut form, whole_window, Target::Form, size);
+}
+
+fn last_control_clears(app: &mut TrackerApp, view: View, target: Target, size: Size) {
+    use iced::advanced::Layout;
+    quiet(app);
+    let renderer = headless();
+    let clear = |app: &TrackerApp, label: &str| {
+        let mut element = view(app);
+        let mut tree = Tree::new(&element);
+        let node = lay_out(&mut element, &mut tree, &renderer, size);
+        let found = find(&mut element, &mut tree, &node, &renderer, target)
+            .unwrap_or_else(|| panic!("{target:?} is in the tree"));
+        let max = found.content.height - found.bounds.height;
+        assert!(
+            max > 1.0,
+            "{label}: {target:?} does not overflow: {found:?}"
+        );
+        let mut scroll = Scrollables {
+            scroll: Some((found.state, max)),
+            ..Scrollables::default()
+        };
+        run(&mut element, &mut tree, &node, &renderer, &mut scroll);
+        let node = lay_out(&mut element, &mut tree, &renderer, size);
+        let after = find(&mut element, &mut tree, &node, &renderer, target)
+            .unwrap_or_else(|| panic!("{target:?} is in the tree after scrolling"));
+        let layout = Layout::new(&node);
+        let lowest = lowest_inside_scrollable(layout, target, &after);
+        // iced lays out the scrollable's content with the viewport's origin,
+        // but does not apply the scroll offset in the layout nodes.
+        let in_window = if lowest > after.bounds.y + after.bounds.height + 1.0 {
+            lowest - after.offset.y
+        } else {
+            lowest
+        };
+        let slot_top = size.height - super::PROMPTS_INSET;
+        assert!(
+            in_window <= slot_top + 0.5,
+            "{label}: last control at {in_window} (content {lowest}, offset {}, box {:?}, content-h {}) sits under the slot starting at {slot_top}",
+            after.offset.y,
+            after.bounds,
+            after.content.height
+        );
+    };
+    clear(app, "quiet");
+    show_toast(app);
+    show_restart_bar(app);
+    clear(app, "toast and restart bar");
+    quiet(app);
+    clear(app, "cleared");
+}
+
+/// The lowest edge of a child inside `target`'s padded content. Layout
+/// nodes still include the scroll offset only as state, so the value is
+/// in unscrolled window coordinates (the viewport's origin).
+fn lowest_inside_scrollable(layout: Layout<'_>, _target: Target, found: &Seen) -> f32 {
+    fn is_found(layout: Layout<'_>, found: &Seen) -> bool {
+        let bounds = layout.bounds();
+        (bounds.y - found.bounds.y).abs() < 1.0
+            && (bounds.width - found.bounds.width).abs() < 1.0
+            && (bounds.height - found.bounds.height).abs() < 1.0
+    }
+    /// Bottom of this node or any descendant.
+    fn max_y(layout: Layout<'_>) -> f32 {
+        let bounds = layout.bounds();
+        layout
+            .children()
+            .map(max_y)
+            .fold(bounds.y + bounds.height, f32::max)
+    }
+    /// The padded content box is as tall as the scrollable's content;
+    /// skip clip wrappers to find it, then measure its children so the
+    /// reserved bottom padding is not counted as a control.
+    fn content_box(layout: Layout<'_>, content_h: f32) -> Option<Layout<'_>> {
+        if (layout.bounds().height - content_h).abs() < 1.0 {
+            return Some(layout);
+        }
+        layout
+            .children()
+            .find_map(|child| content_box(child, content_h))
+    }
+    fn walk(layout: Layout<'_>, found: &Seen) -> Option<f32> {
+        if is_found(layout, found) {
+            let padded = content_box(layout, found.content.height)?;
+            let bottom = padded
+                .children()
+                .map(max_y)
+                .fold(f32::NEG_INFINITY, f32::max);
+            return Some(if bottom.is_finite() {
+                bottom
+            } else {
+                padded.bounds().y
+            });
+        }
+        layout.children().find_map(|child| walk(child, found))
+    }
+    walk(layout, found).expect("the scrollable is in the layout")
+}
