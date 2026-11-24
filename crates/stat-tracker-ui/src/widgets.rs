@@ -933,10 +933,25 @@ pub(crate) fn edit_form<'a>(form: &'a EditForm, _sid: &str) -> Element<'a, Messa
     .into()
 }
 
+fn edit_input_id(field: EditField) -> iced::widget::Id {
+    iced::widget::Id::new(match field {
+        EditField::Hero => "edit-hero",
+        EditField::Role => "edit-role",
+        EditField::Map => "edit-map",
+        EditField::Elims => "edit-elims",
+        EditField::Deaths => "edit-deaths",
+        EditField::Assists => "edit-assists",
+        EditField::Damage => "edit-damage",
+        EditField::Healing => "edit-healing",
+        EditField::Mitigation => "edit-mitigation",
+    })
+}
+
 fn field_input<'a>(label: &'static str, value: &'a str, field: EditField) -> Element<'a, Message> {
     column![
         label_text(label),
         text_input(label, value)
+            .id(edit_input_id(field))
             .on_input(move |v| Message::EditField(field, v))
             .padding(Padding::from([8, 10]))
             .size(SIZE_BODY)

@@ -280,6 +280,9 @@ fn settings_field_in(nav: NavStyle) -> (tempfile::TempDir, TrackerApp, Ui, usize
             current: 0,
         },
     );
+    // Settle while live so last_id is this field, not the last field
+    // the probe loop focused.
+    ui.redraw(&app);
     let focused = ui.focuses(&app).focused();
     assert_eq!(focused.len(), 1, "{focused:?}");
     (dir, app, ui, field)
@@ -607,11 +610,10 @@ fn esc_in_a_field_of_the_guide_leaves_the_field_first() {
 /// field is the only change in the focusable count.
 fn page_of_fields(_app: &TrackerApp) -> Element<'_, Message> {
     use iced::widget::{container, space, text, text_input};
-    const LABELS: [&str; 3] = ["field 0", "field 1", "field 2"];
-    let n = PAGE_FIELDS.get();
+    let ids = PAGE_IDS.with(|c| c.borrow().clone());
     let mut fields = iced::widget::Column::new();
-    for label in LABELS.iter().take(n) {
-        fields = fields.push(text_input(label, ""));
+    for id in &ids {
+        fields = fields.push(text_input(id.as_str(), "").id(Id::from(id.clone())));
     }
     let page = container(fields).width(Fill).height(Fill);
     let dialog = DIALOG_OPEN
@@ -634,59 +636,148 @@ fn page_of_fields(_app: &TrackerApp) -> Element<'_, Message> {
 }
 
 thread_local! {
-    static PAGE_FIELDS: std::cell::Cell<usize> = const { std::cell::Cell::new(3) };
+    static PAGE_IDS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
     static DIALOG_OPEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-fn set_page(fields: usize, dialog: bool) {
-    PAGE_FIELDS.set(fields);
+fn set_page(ids: &[&str], dialog: bool) {
+    PAGE_IDS.with(|c| {
+        *c.borrow_mut() = ids.iter().map(|s| (*s).to_string()).collect();
+    });
     DIALOG_OPEN.set(dialog);
 }
 
-/// If the opener is dropped, or another field goes away so the page's
-/// focusable count changes, Esc must not move the focus to a different
-/// field. Restore only happens when the count is unchanged; otherwise
-/// nothing on the page is focused.
+/// If the focused field is still on the page, Esc gives it back even when
+/// another field was dropped (the same widget, by id). If the focused
+/// field itself is gone, or the page swaps in a different field at the
+/// same count, Esc must not move the focus to a different field.
 #[test]
 fn esc_does_not_focus_the_wrong_field_when_the_page_changes() {
     let (_dir, app) = crate::fixtures::test_app();
     let mut ui = Ui::new();
     ui.view = page_of_fields;
 
-    // Three fields, the middle one focused. Drop the first so the opener
-    // is still there, but at a new index: a restore-by-index would land
-    // on the last field instead.
-    set_page(3, false);
+    // Three fields, the middle one focused. Drop the first: the middle
+    // field is still there, at a new index, and gets the focus back.
+    set_page(&["field 0", "field 1", "field 2"], false);
     ui.redraw(&app);
     ui.operate(&app, &mut FocusNth { n: 1, current: 0 });
+    ui.redraw(&app);
     assert_eq!(ui.focuses(&app).focused().len(), 1);
-    set_page(3, true);
+    set_page(&["field 0", "field 1", "field 2"], true);
     ui.redraw(&app);
-    set_page(2, true);
+    set_page(&["field 1", "field 2"], true);
     ui.redraw(&app);
-    set_page(2, false);
+    set_page(&["field 1", "field 2"], false);
     ui.redraw(&app);
-    let focused = ui.focuses(&app).focused();
-    assert!(
-        focused.is_empty(),
-        "a leftover page field has the focus after the count changed: {focused:?}"
+    let focuses = ui.focuses(&app);
+    let focused = focuses.focused();
+    // field 1 is now the first of the two remaining fields. A restore by
+    // the old index would have given up (the count changed).
+    assert_eq!(
+        focused.len(),
+        1,
+        "the same field should have the focus back: {focused:?}"
     );
+    assert_eq!(focused[0].bounds, focuses.all[0].bounds);
 
     // The opener itself is removed (the last of three). Esc still must
     // not pick another field.
-    set_page(3, false);
+    set_page(&["field 0", "field 1", "field 2"], false);
     ui.redraw(&app);
     ui.operate(&app, &mut FocusNth { n: 2, current: 0 });
+    ui.redraw(&app);
     assert_eq!(ui.focuses(&app).focused().len(), 1);
-    set_page(3, true);
+    set_page(&["field 0", "field 1", "field 2"], true);
     ui.redraw(&app);
-    set_page(2, true);
+    set_page(&["field 0", "field 1"], true);
     ui.redraw(&app);
-    set_page(2, false);
+    set_page(&["field 0", "field 1"], false);
     ui.redraw(&app);
     let focused = ui.focuses(&app).focused();
     assert!(
         focused.is_empty(),
         "a field has the focus after the opener was dropped: {focused:?}"
     );
+}
+
+/// Same number of fields, but a different widget in the focused slot:
+/// restore is by id, so the new field must not get the focus.
+#[test]
+fn esc_does_not_focus_a_new_field_at_the_same_index() {
+    let (_dir, app) = crate::fixtures::test_app();
+    let mut ui = Ui::new();
+    ui.view = page_of_fields;
+
+    set_page(&["alpha", "beta"], false);
+    ui.redraw(&app);
+    ui.operate(&app, &mut FocusNth { n: 0, current: 0 });
+    ui.redraw(&app);
+    assert_eq!(ui.focuses(&app).focused().len(), 1);
+    set_page(&["alpha", "beta"], true);
+    ui.redraw(&app);
+    set_page(&["gamma", "beta"], true);
+    ui.redraw(&app);
+    set_page(&["gamma", "beta"], false);
+    ui.redraw(&app);
+    let focused = ui.focuses(&app).focused();
+    assert!(
+        focused.is_empty(),
+        "a new field at the old index got the focus: {focused:?}"
+    );
+}
+
+struct UnfocusAll;
+
+impl Operation for UnfocusAll {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+        operate(self);
+    }
+
+    fn focusable(
+        &mut self,
+        _id: Option<&iced::widget::Id>,
+        _bounds: Rectangle,
+        state: &mut dyn iced::advanced::widget::operation::Focusable,
+    ) {
+        state.unfocus();
+    }
+}
+
+/// A click on a page button blurs the field before the dialog opens. Esc
+/// still returns focus to the field that was focused before that click.
+#[test]
+fn esc_returns_focus_to_the_field_blurred_by_the_opening_click() {
+    for nav in LAYOUTS {
+        let (_dir, mut app, mut ui, field) = settings_field_in(nav);
+        let page_field = ui.focuses(&app).all[field];
+        ui.operate(&app, &mut UnfocusAll);
+        ui.redraw(&app);
+        assert!(
+            ui.focuses(&app).focused().is_empty(),
+            "{nav:?}: the click has already blurred the field"
+        );
+        let open = crate::settings_open::OpenMsg::WhatLeaves(true);
+        let _ = app.update(Message::SettingsPage(crate::settings_update::Msg::Open(
+            open,
+        )));
+        ui.redraw(&app);
+        let esc = ui.send(&app, named(Named::Escape));
+        assert!(!esc.messages.is_empty(), "{nav:?}: Esc does nothing");
+        for message in esc.messages {
+            let _ = app.update(message);
+        }
+        ui.redraw(&app);
+        let focused = ui.focuses(&app).focused();
+        assert_eq!(
+            focused,
+            vec![page_field],
+            "{nav:?}: the field focused before the click should have it back"
+        );
+        assert!(
+            types_into_settings(&ui.send(&app, type_x())),
+            "{nav:?}: typing should reach the field again"
+        );
+    }
 }

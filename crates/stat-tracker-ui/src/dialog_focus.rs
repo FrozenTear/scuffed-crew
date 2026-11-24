@@ -92,17 +92,17 @@ struct Layer<'a> {
 }
 
 /// The focus a layer gives back when it is no longer covered.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 enum Held {
     #[default]
     Nothing,
-    /// The `index`th of `total` focusable widgets.
-    Child { index: usize, total: usize },
+    /// The widget with this id, if it is still on the page.
+    Child(Id),
     /// The layer itself.
     Itself,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 struct State {
     /// The role was [`Role::Covered`] at the last event.
     covered: bool,
@@ -113,6 +113,10 @@ struct State {
     itself: bool,
     /// How many focusable widgets a top dialog had at the last event.
     shown: usize,
+    /// The last focused widget id while this layer was live. Kept when a
+    /// click blurs the field before the dialog opens, so Esc can restore
+    /// that field rather than the button that was clicked.
+    last_id: Option<Id>,
 }
 
 /// Counts the focusable widgets and finds the focused one.
@@ -120,6 +124,14 @@ struct State {
 struct Census {
     total: usize,
     focused: Option<usize>,
+    focused_id: Option<Id>,
+    ids: Vec<Id>,
+}
+
+impl Census {
+    fn has(&self, id: &Id) -> bool {
+        self.ids.iter().any(|seen| seen == id)
+    }
 }
 
 impl Operation for Census {
@@ -127,8 +139,14 @@ impl Operation for Census {
         operate(self);
     }
 
-    fn focusable(&mut self, _id: Option<&Id>, _bounds: Rectangle, state: &mut dyn Focusable) {
-        if state.is_focused() {
+    fn focusable(&mut self, id: Option<&Id>, _bounds: Rectangle, state: &mut dyn Focusable) {
+        if let Some(id) = id {
+            self.ids.push(id.clone());
+            if state.is_focused() {
+                self.focused = Some(self.total);
+                self.focused_id = Some(id.clone());
+            }
+        } else if state.is_focused() {
             self.focused = Some(self.total);
         }
         self.total += 1;
@@ -154,6 +172,26 @@ impl Operation for FocusAt {
             state.unfocus();
         }
         self.current += 1;
+    }
+}
+
+/// Focuses the widget with `target` and unfocuses the rest; with `None`,
+/// unfocuses them all.
+struct FocusId {
+    target: Option<Id>,
+}
+
+impl Operation for FocusId {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+        operate(self);
+    }
+
+    fn focusable(&mut self, id: Option<&Id>, _bounds: Rectangle, state: &mut dyn Focusable) {
+        if id.is_some() && id == self.target.as_ref() {
+            state.focus();
+        } else {
+            state.unfocus();
+        }
     }
 }
 
@@ -246,20 +284,40 @@ impl Layer<'_> {
         self.run(tree, layout, renderer, &mut focus);
     }
 
+    fn focus_id(
+        &mut self,
+        tree: &mut Tree,
+        layout: Layout<'_>,
+        renderer: &iced::Renderer,
+        target: Option<Id>,
+    ) {
+        let mut focus = FocusId { target };
+        self.run(tree, layout, renderer, &mut focus);
+    }
+
     /// Brings the focus in line with the role: let go of it when covered,
     /// give it back when not, and take the first focus once on top.
     /// Returns whether the focus moved.
     fn settle(&mut self, tree: &mut Tree, layout: Layout<'_>, renderer: &iced::Renderer) -> bool {
-        let state = *tree.state.downcast_ref::<State>();
-        let mut next = state;
+        let state = tree.state.downcast_ref::<State>().clone();
+        let mut next = state.clone();
         let mut moved = false;
+        // Snapshot the focused id while live, before a later click blurs it.
+        if self.role == Role::Live
+            && let Some(id) = self.census(tree, layout, renderer).focused_id
+        {
+            next.last_id = Some(id);
+        }
         if self.role == Role::Covered && !state.covered {
             let census = self.census(tree, layout, renderer);
-            next.held = match census.focused {
-                Some(index) => Held::Child {
-                    index,
-                    total: census.total,
-                },
+            // Still focused on this frame (Esc, or a test that focused
+            // then opened): take that id. A click may already have
+            // blurred it; then last_id stays the previous live snapshot.
+            if let Some(id) = census.focused_id {
+                next.last_id = Some(id);
+            }
+            next.held = match next.last_id.clone() {
+                Some(id) => Held::Child(id),
                 None if state.itself => Held::Itself,
                 None => Held::Nothing,
             };
@@ -270,11 +328,9 @@ impl Layer<'_> {
             next.covered = true;
             moved = true;
         } else if self.role != Role::Covered && state.covered {
-            match state.held {
-                Held::Child { index, total }
-                    if self.census(tree, layout, renderer).total == total =>
-                {
-                    self.focus_at(tree, layout, renderer, Some(index));
+            match &state.held {
+                Held::Child(id) if self.census(tree, layout, renderer).has(id) => {
+                    self.focus_id(tree, layout, renderer, Some(id.clone()));
                 }
                 Held::Itself => next.itself = true,
                 _ => {}

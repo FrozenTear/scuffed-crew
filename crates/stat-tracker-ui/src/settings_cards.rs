@@ -109,6 +109,7 @@ pub(crate) fn companion(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let mut shortcut = column![boxed, hint(SHORTCUT_HELP)].spacing(6);
     if app.settings.overlay_hotkey_enabled {
         let mut input = text_input(crate::hotkey::DEFAULT_BIND, &app.settings.overlay_hotkey)
+            .id(crate::settings_rows::field_id(SettingsField::OverlayHotkey))
             .padding(Padding::from([8, 10]))
             .size(SIZE_BODY)
             .style(theme::text_input_style)

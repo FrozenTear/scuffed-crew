@@ -1859,6 +1859,7 @@ fn field_input<'a>(
     hint_copy: Option<&'static str>,
 ) -> Element<'a, Message> {
     let mut input = text_input(placeholder, value)
+        .id(crate::settings_rows::field_id(field))
         .padding(Padding::from([8, 10]))
         .size(SIZE_BODY)
         .style(theme::text_input_style)
@@ -1874,8 +1875,7 @@ fn field_input<'a>(
     if let Some(copy) = hint_copy {
         col = col.push(hint(copy));
     }
-    // No max width on the column: a row ignores it (see `field_fill_portion`).
-    // The input is capped above and the hint by `HELP_MEASURE`.
+    // No max width on the column (a row ignores it; see `field_fill_portion`); the input is capped above and the hint by `HELP_MEASURE`.
     col.width(Length::FillPortion(field_fill_portion(field)))
         .into()
 }
