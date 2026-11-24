@@ -21,9 +21,9 @@ use scuffed_types::Season;
 use stat_tracker::detect::MatchOutcome;
 use stat_tracker::game_running::GameProcessGate;
 
-use crate::aggregate::{aggregate, Record};
+use crate::aggregate::{Record, aggregate};
 use crate::cli::{Cli, FixtureKind};
-use crate::model::{display_hero_name, Game, Outcome, Role, SeasonSel};
+use crate::model::{Game, Outcome, Role, SeasonSel, display_hero_name};
 use crate::overlay_pages::{self, Page, PageState};
 use crate::overview::tonight_games;
 use crate::seasons;
@@ -1084,8 +1084,8 @@ mod tests {
     use crate::fixtures;
     use crate::model::Game;
     use crate::overlay_marks::{
-        page_indicator_labels, safe_page_footer_label, tonight_strip_labels, TONIGHT_PIP,
-        TONIGHT_STRIP_MAX,
+        TONIGHT_PIP, TONIGHT_STRIP_MAX, page_indicator_labels, safe_page_footer_label,
+        tonight_strip_labels,
     };
     use crate::snapshot::games_from_snapshot;
     use chrono::{TimeZone, Utc};
