@@ -238,9 +238,9 @@ fn report_log_wraps_a_no_space_host_header_line() {
     assert_clear("report no-space log", GRID_GAP, || crate::report::view(&ui));
     // Layout boxes are clipped to the guttered width, so assert_clear
     // still passes if WordOrGlyph is dropped. The host-header token also
-    // has commas, which Word wrapping can break on. A second, unbreakable
-    // token must actually wrap: its laid-out height has to be more than
-    // one line.
+    // has hyphens (HDMI-A-1), which Word wrapping can break after. A
+    // second, unbreakable token must actually wrap: its laid-out height
+    // has to be more than one line.
     let nospace = "drm=".to_string() + &"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".repeat(8);
     let mut wrap_dialog = ReportDialog::new(Some(LogOnlyCategory::Crash), true);
     wrap_dialog.built = Some(Ok(Arc::new(ReportZip {
