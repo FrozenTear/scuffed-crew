@@ -98,7 +98,17 @@ pub fn run(cli: Cli) -> anyhow::Result<()> {
             layer_settings: LayerShellSettings {
                 size: Some((spec.width, spec.height)),
                 exclusive_zone: spec.exclusive_zone,
-                anchor: Anchor::Top | Anchor::Right,
+                anchor: {
+                    let mut a = if spec.anchor_bottom {
+                        Anchor::Bottom
+                    } else {
+                        Anchor::Top
+                    };
+                    if spec.anchor_right {
+                        a = a | Anchor::Right;
+                    }
+                    a
+                },
                 margin: (spec.margin, spec.margin, spec.margin, spec.margin),
                 layer: Layer::Overlay,
                 keyboard_interactivity: KeyboardInteractivity::None,
