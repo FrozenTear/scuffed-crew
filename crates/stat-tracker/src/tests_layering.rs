@@ -13,7 +13,7 @@
 //!   game_running
 //!          \        |          |           /
 //!     core: config, parse, perf, perf_log, setup, replace, proc_id, fs_mode, omp,
-//!           host_probe, sandbox, hero_auth, model, version, suspect, ocr_status, unsure_rule
+//!           host_probe, sandbox, hero_auth, model, version, suspect, ocr_status, companion_stage, unsure_rule
 //! ```
 //!
 //! The four middle crates do not use each other. The test reads the `src/`
@@ -66,6 +66,7 @@ impl Crate {
 
 /// Module path prefix -> crate; the longest wins (`report::blank` is vision, `report` top).
 const CRATE_OF: &[(&str, Crate)] = &[
+    ("companion_stage", Crate::Core),
     ("config", Crate::Core),
     ("fs_mode", Crate::Core),
     ("hero_auth", Crate::Core),
