@@ -1761,7 +1761,7 @@ pub fn Stats() -> Element {
                                 }
                                 p { "On other distros, or without an AUR helper, use the install script:" }
                                 code { class: "tracker-install",
-                                    "curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | STAT_TRACKER_CHANNEL=prerelease bash"
+                                    "curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash"
                                 }
                                 p {
                                     "After installing, start the GUI, then paste this server's URL and a "
@@ -2461,16 +2461,20 @@ mod tracker_platform_copy_tests {
     }
 
     #[test]
-    fn install_script_command_installs_the_prerelease_the_note_names() {
+    fn install_script_command_installs_the_stable_release_the_note_names() {
         let src = include_str!("mod.rs");
         let prod = src.split("mod tracker_platform_copy_tests").next().unwrap();
         let script = "crates/stat-tracker/dist/bootstrap.sh";
         let at = prod.find(script).expect("install script command");
         let line = prod[at..].lines().next().unwrap();
-        // The channel is assigned on bash, not curl, so bootstrap.sh sees it.
+        // No channel means stable, so 0.6 test builds are not offered here.
         assert!(
-            line.contains("| STAT_TRACKER_CHANNEL=prerelease bash"),
-            "the install script must take the prerelease channel the note names: {line}"
+            line.ends_with("bootstrap.sh | bash\""),
+            "the install script must install the stable release the note names: {line}"
+        );
+        assert!(
+            !prod.contains("STAT_TRACKER_CHANNEL=prerelease"),
+            "the /stats install command must not opt members into prereleases"
         );
     }
 
