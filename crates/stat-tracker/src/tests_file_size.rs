@@ -24,9 +24,9 @@ const DIRS: &[&str] = &["src", "tests", "examples"];
 /// last shrank, by path under `crates/`, sorted. Lower a cap when its file
 /// shrinks; never raise one.
 const CAPS: &[(&str, usize)] = &[
-    ("stat-tracker-ui/src/app.rs", 2911),
+    ("stat-tracker-ui/src/app.rs", 2902),
     ("stat-tracker-ui/src/instance.rs", 1690),
-    ("stat-tracker-ui/src/notes.rs", 1598),
+    ("stat-tracker-ui/src/notes.rs", 1592),
     ("stat-tracker-ui/src/report.rs", 2319),
     ("stat-tracker-ui/src/settings.rs", 3791),
     ("stat-tracker-ui/src/setup_guide.rs", 3063),

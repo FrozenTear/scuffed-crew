@@ -130,17 +130,17 @@ fn assert_clear<'a>(name: &str, min_gap: f32, build: impl Fn() -> Element<'a, Me
             placed[0].scroll,
         );
         for p in &placed {
+            let gap = p.bar_left() - p.text_right;
             assert!(
-                p.text_right <= p.bar_left() + 0.5,
-                "{name} {window:?}: text ends at {:.1}, bar starts at {:.1}: {:?}",
+                gap > 0.0,
+                "{name} {window:?}: text ends at {:.1}, bar starts at {:.1} (gap {gap:.1}): {:?}",
                 p.text_right,
                 p.bar_left(),
                 p.text
             );
             assert!(
-                p.bar_left() - p.text_right >= min_gap - 0.5,
-                "{name} {window:?}: gap is {:.1}, need at least {min_gap}: {:?}",
-                p.bar_left() - p.text_right,
+                gap >= min_gap,
+                "{name} {window:?}: gap is {gap:.1}, need at least {min_gap}: {:?}",
                 p.text
             );
         }
@@ -162,7 +162,7 @@ fn whats_new_keeps_its_text_clear_of_the_bar() {
     let closed = HashSet::new();
     let open: HashSet<String> = sections.iter().map(|s| s.version.clone()).collect();
     for (show_older, open_details) in [(false, &closed), (true, &open)] {
-        assert_clear("what's new", 0.0, || {
+        assert_clear("what's new", GRID_GAP, || {
             crate::notes::dialog(
                 "Release notes",
                 &sections,
@@ -181,28 +181,49 @@ fn whats_new_keeps_its_text_clear_of_the_bar() {
 #[test]
 fn report_a_problem_keeps_its_text_clear_of_the_bar() {
     use crate::report::{ReportDialog, ReportUi};
+    use stat_tracker::report::{LogOnlyCategory, ReportZip};
+    use std::sync::Arc;
     for dialog in [
         ReportDialog::new(None, true),
         ReportDialog::for_game(None, true),
     ] {
         let ui = ReportUi::Dialog(Box::new(dialog));
-        assert_clear("report", 0.0, || crate::report::view(&ui));
+        assert_clear("report", GRID_GAP, || crate::report::view(&ui));
     }
+    let mut crash = ReportDialog::new(Some(LogOnlyCategory::Crash), true);
+    let long = "word ".repeat(80) + "end";
+    crash.built = Some(Ok(Arc::new(ReportZip {
+        bytes: vec![1, 2, 3],
+        manifest_json: r#"{"game":null,"reason":{"category":"crash"}}"#.into(),
+        files: Vec::new(),
+        log_text: format!("{long}\n{long}\nmore than one line to test the wrap"),
+        images: Vec::new(),
+        left_out: Vec::new(),
+    })));
+    crash.show_log = true;
+    let ui = ReportUi::Dialog(Box::new(crash));
+    assert_clear("report preview and log", GRID_GAP, || {
+        crate::report::view(&ui)
+    });
 }
 
 #[test]
 fn uninstall_keeps_its_text_clear_of_the_bar() {
     use crate::uninstall::UninstallDialog;
-    let home = std::path::PathBuf::from("/home/a-rather-long-account-name-for-testing");
+    let home = std::path::PathBuf::from(
+        "/home/qa a b c d e f g h i j k l m n o p q r s t u v w x y z end",
+    );
     let dialog = UninstallDialog::Confirm {
         prefix: home.join(".local"),
-        data_dir: home.join(".local/share/scuffed-stat-tracker"),
-        appimage: Some(home.join("Applications/Scuffed-Stat-Tracker-x86_64.AppImage")),
+        data_dir: home.join(".local/share/scuffed-stat-tracker with spaces in the data dir path"),
+        appimage: Some(home.join("Applications/Scuffed Stat Tracker x86_64.AppImage")),
         home,
         delete_data: true,
         fallback: true,
     };
-    assert_clear("uninstall", 0.0, || crate::uninstall::view(&dialog, false));
+    assert_clear("uninstall", GRID_GAP, || {
+        crate::uninstall::view(&dialog, false)
+    });
 }
 
 /// Each step the guide reaches with Skip this step, from the first.
@@ -210,10 +231,80 @@ fn uninstall_keeps_its_text_clear_of_the_bar() {
 fn the_setup_guide_keeps_its_text_clear_of_the_bar() {
     let (_dir, mut app) = crate::fixtures::test_app();
     let _ = app.update(Message::Setup(SetupMessage::Open));
-    for step in 0..4 {
+    assert_clear("setup guide step 0", GRID_GAP, || {
+        crate::setup_guide::view(&app.setup)
+    });
+    app.setup.capture_ready(Ok(crate::setup_guide::MemoryFrame {
+        width: 1920,
+        height: 1080,
+        preview_width: 2,
+        preview_height: 1,
+        rgba: vec![0, 0, 0, 255, 0, 0, 0, 255],
+    }));
+    assert_clear("setup guide capture picture", GRID_GAP, || {
+        crate::setup_guide::view(&app.setup)
+    });
+    for step in 1..4 {
+        let _ = app.update(Message::Setup(SetupMessage::SkipStep));
         assert_clear(&format!("setup guide step {step}"), GRID_GAP, || {
             crate::setup_guide::view(&app.setup)
         });
-        let _ = app.update(Message::Setup(SetupMessage::SkipStep));
     }
+    // SkipStep from capture (with a picture) advances one step; after the
+    // loop we have walked later steps. Open the token field on a fresh
+    // guide at the Sync step.
+    let (_dir, mut app) = crate::fixtures::test_app();
+    let _ = app.update(Message::Setup(SetupMessage::Open));
+    let _ = app.update(Message::Setup(SetupMessage::SkipStep)); // Overwatch
+    let _ = app.update(Message::Setup(SetupMessage::SkipStep)); // Sync
+    app.setup.toggle_paste();
+    app.setup.set_paste_token("a-token-from-the-website".into());
+    assert_clear("setup guide token open", GRID_GAP, || {
+        crate::setup_guide::view(&app.setup)
+    });
+}
+
+/// Close stays inside the window at every size the dialog is checked at.
+#[test]
+fn what_leaves_keeps_its_close_button_in_view() {
+    let (_dir, mut app) = crate::fixtures::test_app();
+    let _ = app.update(Message::SettingsPage(Msg::Open(OpenMsg::WhatLeaves(true))));
+    for window in WINDOWS {
+        let close_box = close_bounds(crate::what_leaves::layer(&app).expect("open"), window)
+            .unwrap_or_else(|| panic!("Close is laid out at {window:?}"));
+        assert!(
+            close_box.y >= 0.0
+                && close_box.x >= 0.0
+                && close_box.y + close_box.height <= window.1 + 0.5
+                && close_box.x + close_box.width <= window.0 + 0.5,
+            "Close at {close_box:?} is outside {window:?}"
+        );
+    }
+}
+
+/// The Close widget's bounds, if a "Close" text block is laid out.
+fn close_bounds(mut element: Element<'_, Message>, window: (f32, f32)) -> Option<Rectangle> {
+    let renderer = headless();
+    let mut tree = Tree::new(&element);
+    let node = element.as_widget_mut().layout(
+        &mut tree,
+        &renderer,
+        &Limits::new(Size::ZERO, Size::new(window.0, window.1)),
+    );
+    struct FindClose(Option<Rectangle>);
+    impl Operation<()> for FindClose {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<()>)) {
+            operate(self);
+        }
+        fn text(&mut self, _id: Option<&Id>, bounds: Rectangle, text: &str) {
+            if text == "Close" {
+                self.0 = Some(bounds);
+            }
+        }
+    }
+    let mut find = FindClose(None);
+    element
+        .as_widget_mut()
+        .operate(&mut tree, Layout::new(&node), &renderer, &mut find);
+    find.0
 }

@@ -6,7 +6,9 @@
 //! (GitHub releases), the season list, the token check, and Report a
 //! problem.
 
-use iced::widget::{Column, button, column, container, opaque, row, space, text};
+use iced::widget::{
+    Column, button, column, container, mouse_area, opaque, row, space, stack, text,
+};
 use iced::{Element, Fill, Padding};
 
 use crate::app::{Message, TrackerApp};
@@ -78,7 +80,7 @@ pub(crate) fn layer(app: &TrackerApp) -> Option<Element<'_, Message>> {
     app.page_state.opened.what_leaves_open.then(dialog)
 }
 
-fn close() -> Message {
+pub(crate) fn close() -> Message {
     Message::SettingsPage(Msg::Open(OpenMsg::WhatLeaves(false)))
 }
 
@@ -111,25 +113,42 @@ fn dialog<'a>() -> Element<'a, Message> {
                 .size(SIZE_BODY + 4.0)
                 .font(FONT_BOLD)
                 .color(TEXT),
-            guttered_scrollable(body).height(iced::Length::Shrink),
+            guttered_scrollable(body).height(Fill),
             row![space().width(Fill), done],
         ]
-        .spacing(16),
+        .spacing(16)
+        .height(Fill),
     )
     .padding(24)
     .max_width(560)
+    .height(Fill)
     .style(theme::surface_panel);
     let mut backdrop = theme::BG;
     backdrop.a = 0.88;
+    let dim = move |_theme: &iced::Theme| container::Style {
+        background: Some(iced::Background::Color(backdrop)),
+        ..container::Style::default()
+    };
     opaque(
-        container(card)
-            .padding(28)
-            .center(Fill)
-            .style(move |_theme| container::Style {
-                background: Some(iced::Background::Color(backdrop)),
-                ..container::Style::default()
-            }),
+        stack![
+            mouse_area(container(space().width(Fill).height(Fill)).style(dim)).on_press(close()),
+            container(card).padding(28).center(Fill),
+        ]
+        .width(Fill)
+        .height(Fill),
     )
+}
+
+/// Esc closes this dialog the same way Close does.
+pub(crate) fn escape(
+    event: iced::Event,
+    _status: iced::event::Status,
+    _window: iced::window::Id,
+) -> Option<Message> {
+    let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) = event else {
+        return None;
+    };
+    crate::notes::escape_closes_notes(&key).then_some(close())
 }
 
 #[cfg(test)]

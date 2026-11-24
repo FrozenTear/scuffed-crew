@@ -16,14 +16,14 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use iced::widget::{button, checkbox, column, container, opaque, row, scrollable, text};
+use iced::widget::{button, checkbox, column, container, opaque, row, text};
 use iced::{Alignment, Element, Fill, Length, Padding};
 
-use crate::app::Message;
 use crate::theme::{
     self, FONT_BOLD, FONT_EXTRABOLD, FONT_MEDIUM, FONT_SEMIBOLD, SIZE_BODY, SIZE_FEATURED,
     SIZE_LABEL, SIZE_META, SIZE_TITLE, TEXT, TEXT_2, TEXT_3,
 };
+use crate::{app::Message, scroll_gutter::guttered_area};
 
 pub(crate) use crate::uninstall_names::is_tracker_data_name;
 
@@ -1289,7 +1289,7 @@ fn confirm_card<'a>(
 
     body = body.push(row![cancel, confirm].spacing(8).align_y(Alignment::Center));
 
-    dialog_shell(scrollable(body).height(Fill).width(Fill).into())
+    dialog_shell(guttered_area(body, Fill))
 }
 
 fn manual_card<'a>(

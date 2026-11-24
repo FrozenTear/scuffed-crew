@@ -1,6 +1,8 @@
 //! A scrollable whose body keeps the Settings gutter free on the right
 //! and whose bar is pinned to [`crate::layout::SCROLLBAR_WIDTH`], so line
-//! ends stay clear of the bar whether or not it shows.
+//! ends stay clear of the bar whether or not it shows. The dialogs (What
+//! leaves your PC, the setup guide, What's new, Report a problem, and
+//! Uninstall) use this helper for that gap.
 
 use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::{Scrollable, container, scrollable};
@@ -27,4 +29,12 @@ pub(crate) fn guttered_scrollable<'a>(
             .width(SCROLLBAR_WIDTH)
             .scroller_width(SCROLLBAR_WIDTH),
     ))
+}
+
+/// A [`guttered_scrollable`] that fills the width and uses `height`.
+pub(crate) fn guttered_area<'a>(
+    body: impl Into<Element<'a, Message>>,
+    height: impl Into<iced::Length>,
+) -> Element<'a, Message> {
+    guttered_scrollable(body).height(height).width(Fill).into()
 }

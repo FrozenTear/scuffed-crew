@@ -15,10 +15,11 @@
 use std::collections::HashSet;
 
 use iced::widget::markdown::{self, Item};
-use iced::widget::{button, column, container, opaque, rich_text, row, scrollable, text};
+use iced::widget::{button, column, container, opaque, rich_text, row, text};
 use iced::{Alignment, Element, Fill, Font, Length, Padding};
 
 use crate::app::Message;
+use crate::scroll_gutter::guttered_scrollable;
 use crate::theme::{
     self, FONT_BOLD, FONT_EXTRABOLD, FONT_MEDIUM, FONT_SEMIBOLD, SIZE_BODY, SIZE_FEATURED,
     SIZE_META, SIZE_TITLE, TEXT, TEXT_2,
@@ -310,16 +311,9 @@ pub fn dialog<'a>(
     let card = container(
         column![
             header,
-            scrollable(
-                container(notes_column(sections, ui))
-                    .padding(Padding {
-                        right: 8.0,
-                        ..Padding::ZERO
-                    })
-                    .width(Fill),
-            )
-            .height(Fill)
-            .width(Fill),
+            guttered_scrollable(notes_column(sections, ui))
+                .height(Fill)
+                .width(Fill),
         ]
         .spacing(16)
         .height(Fill),

@@ -35,10 +35,13 @@ use stat_tracker::report::{
     GameReportInput, LogOnlyCategory, LogReportInput, ReportZip, Resolution,
 };
 
-use crate::app::Message;
 use crate::theme::{
     self, FONT_BOLD, FONT_EXTRABOLD, FONT_MEDIUM, FONT_SEMIBOLD, SIZE_BODY, SIZE_FEATURED,
     SIZE_LABEL, SIZE_META, SIZE_TITLE, TEXT, TEXT_2, TEXT_3,
+};
+use crate::{
+    app::Message,
+    scroll_gutter::{guttered_area, guttered_scrollable},
 };
 
 #[path = "report_rank.rs"]
@@ -1193,10 +1196,7 @@ fn dialog_card(d: &ReportDialog) -> Element<'_, Message> {
     body = body.push(status_block(d));
     body = body.push(actions(d));
 
-    shell(
-        scrollable(body).height(Length::Shrink).width(Fill).into(),
-        620.0,
-    )
+    shell(guttered_area(body, Length::Shrink), 620.0)
 }
 
 fn game_hint(category: GameCategory) -> &'static str {
@@ -1398,7 +1398,7 @@ fn preview_block(d: &ReportDialog) -> Element<'_, Message> {
                 };
                 col = col.push(
                     container(
-                        scrollable(
+                        guttered_scrollable(
                             text(log)
                                 .size(SIZE_LABEL)
                                 .font(iced::Font::MONOSPACE)

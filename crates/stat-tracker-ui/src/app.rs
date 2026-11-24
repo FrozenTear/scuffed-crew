@@ -767,10 +767,16 @@ impl TrackerApp {
         {
             subs.push(hotkey::subscription(bind));
         }
-        if self.report.is_some() {
-            subs.push(iced::event::listen_with(report_dialog_escape));
+        if self.page_state.opened.what_leaves_open {
+            subs.push(iced::event::listen_with(crate::what_leaves::escape));
+        } else if self.report.is_some() {
+            subs.push(iced::event::listen_with(|event, _, _| {
+                escape_to(event, Message::Report(crate::report::ReportMessage::Close))
+            }));
         } else if self.uninstall_dialog.is_some() {
-            subs.push(iced::event::listen_with(uninstall_dialog_escape));
+            subs.push(iced::event::listen_with(|event, _, _| {
+                escape_to(event, Message::DismissUninstall)
+            }));
         } else if self.setup.open {
             subs.push(iced::event::listen_with(setup_guide_keys));
         } else if self.notes_dialog.is_some() {
@@ -2718,26 +2724,11 @@ fn health_with_ocr_notice(base: String, notice: Option<&str>) -> String {
     }
 }
 
-fn report_dialog_escape(
-    event: iced::Event,
-    _status: iced::event::Status,
-    _window: window::Id,
-) -> Option<Message> {
+fn escape_to(event: iced::Event, message: Message) -> Option<Message> {
     let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) = event else {
         return None;
     };
-    notes::escape_closes_notes(&key).then_some(Message::Report(crate::report::ReportMessage::Close))
-}
-
-fn uninstall_dialog_escape(
-    event: iced::Event,
-    _status: iced::event::Status,
-    _window: window::Id,
-) -> Option<Message> {
-    let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) = event else {
-        return None;
-    };
-    notes::escape_closes_notes(&key).then_some(Message::DismissUninstall)
+    notes::escape_closes_notes(&key).then_some(message)
 }
 
 /// A pid that is already gone, or that is not the tracker, is not a running

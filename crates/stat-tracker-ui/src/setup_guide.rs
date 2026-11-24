@@ -51,7 +51,7 @@ use crate::theme::{
     self, FONT_BOLD, FONT_MEDIUM, FONT_SEMIBOLD, SIZE_BODY, SIZE_FEATURED, SIZE_META, SIZE_TITLE,
     TEXT, TEXT_2, TEXT_3,
 };
-use crate::{app::Message, scroll_gutter::guttered_scrollable as guttered};
+use crate::{app::Message, scroll_gutter::guttered_area};
 
 pub const CAPTURE_FAILED: &str =
     "Could not capture the screen. Allow screen capture for this app, then try again.";
@@ -1577,7 +1577,7 @@ pub fn view(guide: &GuideUi) -> Element<'_, Message> {
     footer = footer.push(guide_button(forward, true, forward_msg));
 
     let card = container(
-        column![header, guttered(body).height(Fill).width(Fill), footer,]
+        column![header, guttered_area(body, Fill), footer,]
             .spacing(16)
             .height(Fill),
     )
