@@ -116,9 +116,10 @@ struct State {
     /// The last focused widget id while this layer was live. Kept when a
     /// click blurs the field before the dialog opens, so Esc can restore
     /// that field rather than the button that was clicked. Cleared when
-    /// a click on the live page leaves nothing focused, unless that
-    /// click published a message: then [`State::open_restore`] holds
-    /// the target until the layer is covered.
+    /// a later live event after a click leaves nothing focused, including
+    /// after a click that published a message; then [`State::open_restore`]
+    /// holds the target until the layer is covered, or a later unfocused
+    /// press drops it.
     last_id: Option<Id>,
     /// A click on the live page left nothing focused. Set on the press,
     /// armed on the matching release, and applied to `last_id` on a
@@ -134,6 +135,13 @@ struct State {
     /// CursorMoved or RedrawRequested to the still-live page, which
     /// would otherwise clear `last_id` before the dialog covers it.
     /// Close restores this id even if those events arrived first.
+    ///
+    /// This relies on dialogs opening only from a page click. In iced
+    /// 0.14, `published = !shell.is_empty()` covers the whole batch, so
+    /// `open_restore` can linger after a publishing click that opens no
+    /// dialog, until the next unfocused live press or a cover. The
+    /// shipped app cannot reach a restore from that leftover: every
+    /// dialog after startup opens from a click in the live layer.
     open_restore: Option<Id>,
 }
 
