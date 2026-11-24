@@ -40,6 +40,7 @@ fn headless() -> iced::Renderer {
 struct Placed {
     text: String,
     text_right: f32,
+    height: f32,
     scroll: Rectangle,
     overflows: bool,
 }
@@ -90,6 +91,7 @@ impl Operation<()> for Collect {
             self.placed.push(Placed {
                 text: text.to_string(),
                 text_right: bounds.x + bounds.width,
+                height: bounds.height,
                 scroll,
                 overflows,
             });
@@ -234,6 +236,56 @@ fn report_log_wraps_a_no_space_host_header_line() {
     crash.show_log = true;
     let ui = ReportUi::Dialog(Box::new(crash));
     assert_clear("report no-space log", GRID_GAP, || crate::report::view(&ui));
+    // Layout boxes are clipped to the guttered width, so assert_clear
+    // still passes if WordOrGlyph is dropped. The host-header token also
+    // has commas, which Word wrapping can break on. A second, unbreakable
+    // token must actually wrap: its laid-out height has to be more than
+    // one line.
+    let nospace = "drm=".to_string() + &"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".repeat(8);
+    let mut wrap_dialog = ReportDialog::new(Some(LogOnlyCategory::Crash), true);
+    wrap_dialog.built = Some(Ok(Arc::new(ReportZip {
+        bytes: vec![1, 2, 3],
+        manifest_json: r#"{"game":null,"reason":{"category":"crash"}}"#.into(),
+        files: Vec::new(),
+        log_text: nospace,
+        images: Vec::new(),
+        left_out: Vec::new(),
+    })));
+    wrap_dialog.show_log = true;
+    let wrap_ui = ReportUi::Dialog(Box::new(wrap_dialog));
+    let mut short_dialog = ReportDialog::new(Some(LogOnlyCategory::Crash), true);
+    short_dialog.built = Some(Ok(Arc::new(ReportZip {
+        bytes: vec![1, 2, 3],
+        manifest_json: r#"{"game":null,"reason":{"category":"crash"}}"#.into(),
+        files: Vec::new(),
+        log_text: "drm=one-line-token".into(),
+        images: Vec::new(),
+        left_out: Vec::new(),
+    })));
+    short_dialog.show_log = true;
+    let short_ui = ReportUi::Dialog(Box::new(short_dialog));
+    for window in WINDOWS {
+        let rows = placed(crate::report::view(&wrap_ui), window);
+        let token = rows
+            .iter()
+            .find(|p| p.text.contains("drm=ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"))
+            .unwrap_or_else(|| {
+                panic!("report unbreakable log {window:?}: no-space token is not in a scrollable")
+            });
+        let short_rows = placed(crate::report::view(&short_ui), window);
+        let one = short_rows
+            .iter()
+            .find(|p| p.text.contains("drm=one-line-token"))
+            .unwrap_or_else(|| {
+                panic!("report short log {window:?}: one-line token is not in a scrollable")
+            });
+        assert!(
+            token.height > one.height + 0.5,
+            "{window:?}: no-space token is only {} tall (one line is {}); it should wrap",
+            token.height,
+            one.height
+        );
+    }
 }
 
 #[test]
