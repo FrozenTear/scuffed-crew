@@ -90,8 +90,37 @@ impl BarLayout {
 
 /// The round "?" button that stands for the unreadable pill under 1100px.
 pub const QUESTION_BUTTON: f32 = 28.0;
-/// Border of the unreadable pill, both sides.
-const PILL_BORDER: f32 = 2.0;
+/// Border of the status pill, both sides (1 px each).
+pub const PILL_BORDER: f32 = 2.0;
+/// The status pill's side padding. Tighter than the chip so the 1024 px
+/// bar can stay one line with tab icons after the pill adds a border.
+pub const PILL_PAD_X: f32 = 4.0;
+/// The pill's down chevron (the menu) and the gap before it.
+pub const PILL_CHEVRON: f32 = 12.0;
+/// Least room between the last tab and the Error pill (spec 1.3: 16 px
+/// at 1000 px, so "Couldn't start" never touches the Settings tab).
+pub const ERROR_GAP: f32 = 16.0;
+
+/// Whether the status pill draws its down chevron (spec 1.3): from
+/// [`crate::nav::STATUS_LONG_MIN`] wide, never while a verb runs, and
+/// on the unreadable pill whenever it has words (the chevron is its menu
+/// part; the "?" button has none). Under 1200 px the Error pill drops it.
+pub fn pill_chevron(status: HeaderStatus, form: StatusForm, width: f32) -> bool {
+    match status {
+        _ if crate::tracker_status::is_busy(status) => false,
+        HeaderStatus::FocusUnknown => form != StatusForm::Short,
+        _ => width >= crate::nav::STATUS_LONG_MIN,
+    }
+}
+
+/// Least room kept between the last tab and the status for `status`.
+pub fn status_gap(status: HeaderStatus) -> f32 {
+    if status == HeaderStatus::StartFailed {
+        ERROR_GAP
+    } else {
+        MIN_GAP
+    }
+}
 
 /// Text weight for [`text_width`]. `Heavy` covers semibold to extra bold
 /// with the extra bold advances, so it never comes out short.
@@ -179,33 +208,34 @@ pub fn badge_width(count: usize) -> f32 {
     text_width(&count.to_string(), SIZE_BADGE, Weight::Heavy) + 2.0 * BADGE_PAD_X
 }
 
-/// The status slot for `status` in `form`: the unreadable pill or its "?"
-/// button, else [`status_width`] (a dot or the pause ring, words, time).
+/// The status pill for `status` in `form` (spec 1.3): its border and side
+/// padding around [`status_width`] (a dot or the pause ring, words, time),
+/// and the down chevron when `chevron` ([`pill_chevron`]). Under 1100 px
+/// the unreadable state is the round "?" button instead.
 pub fn status_slot_width(
     status: HeaderStatus,
     form: StatusForm,
     label: &str,
     time: Option<&str>,
+    chevron: bool,
 ) -> f32 {
-    if status != HeaderStatus::FocusUnknown {
-        return status_width(label, time);
-    }
-    if form == StatusForm::Short {
+    if status == HeaderStatus::FocusUnknown && form == StatusForm::Short {
         return QUESTION_BUTTON;
     }
-    2.0 * CHIP_PAD_X
-        + PILL_BORDER
-        + DOT
-        + DOT_GAP
-        + text_width(label, SIZE_STATUS, Weight::Medium)
-        + CHIP_GLYPH_GAP
-        + text_width(CHEVRON, SIZE_STATUS, Weight::Heavy)
+    let chevron = if chevron {
+        CHIP_GLYPH_GAP + PILL_CHEVRON
+    } else {
+        0.0
+    };
+    2.0 * PILL_PAD_X + PILL_BORDER + status_width(label, time) + chevron
 }
 
-/// Dot, words, and the time when there is one.
+/// Dot, words, and the time when there is one. The words are semibold
+/// (spec 1.3), measured with the heavy advances so they never come out
+/// short.
 pub fn status_width(label: &str, time: Option<&str>) -> f32 {
     DOT + DOT_GAP
-        + text_width(label, SIZE_STATUS, Weight::Medium)
+        + text_width(label, SIZE_STATUS, Weight::Heavy)
         + time.map_or(0.0, |t| {
             TIME_GAP + text_width(t, SIZE_STATUS, Weight::Heavy)
         })
@@ -224,8 +254,9 @@ pub fn chip_width(count: usize, compact: bool) -> f32 {
         + text_width(CHEVRON, SIZE_CHIP, Weight::Heavy)
 }
 
-/// Status plus, with games to look at, the chip.
+/// Status plus, with games to look at, the chip, on a `width` px window.
 fn right_width(
+    width: f32,
     status: HeaderStatus,
     last_game: Option<&str>,
     count: usize,
@@ -238,7 +269,8 @@ fn right_width(
     } else {
         0.0
     };
-    status_slot_width(status, form, &label, time.as_deref()) + chip
+    let chevron = pill_chevron(status, form, width);
+    status_slot_width(status, form, &label, time.as_deref(), chevron) + chip
 }
 
 /// Width the one-line bar needs at window `width` in the form given.
@@ -258,8 +290,15 @@ pub fn one_line_width(
         + BRAND_WIDTH
         + title_gap
         + tabs_width(form.icons, count)
-        + MIN_GAP
-        + right_width(status, last_game, count, form.status, form.compact_chip)
+        + status_gap(status)
+        + right_width(
+            width,
+            status,
+            last_game,
+            count,
+            form.status,
+            form.compact_chip,
+        )
 }
 
 /// First line of the two-line bar: title, room, status and chip.
@@ -354,7 +393,7 @@ pub fn layout_after(
     if let Some(fit) = chosen.map(|at| tries[at]) {
         return fit;
     }
-    let full = right_width(status, last_game, count, StatusForm::Short, false);
+    let full = right_width(width, status, last_game, count, StatusForm::Short, false);
     let first_line = first_line_width(gutter, full);
     // The two-line bar's chip goes back to its words with the same spare.
     let was_compact = prev.is_some_and(|p| !p.one_line && p.compact_chip);
@@ -463,6 +502,7 @@ mod tests {
                             assert!(need <= width, "{width} {status:?} {count}: {need}");
                         } else {
                             let right = right_width(
+                                width,
                                 status,
                                 time,
                                 count,
@@ -545,14 +585,21 @@ mod tests {
         // The pill is wider than the same words with a dot; under 1100px it
         // is the round "?" button.
         let words = crate::focus_status::UNREADABLE_LONG;
-        assert!(
-            status_slot_width(HeaderStatus::FocusUnknown, StatusForm::Medium, words, None)
-                > status_width(words, None)
-        );
-        assert_eq!(
-            status_slot_width(HeaderStatus::FocusUnknown, StatusForm::Short, "?", None),
-            QUESTION_BUTTON
-        );
+        let unreadable = |form, words, chevron| {
+            status_slot_width(HeaderStatus::FocusUnknown, form, words, None, chevron)
+        };
+        assert!(unreadable(StatusForm::Medium, words, true) > status_width(words, None));
+        assert_eq!(unreadable(StatusForm::Short, "?", false), QUESTION_BUTTON);
+        assert!(pill_chevron(
+            HeaderStatus::FocusUnknown,
+            StatusForm::Medium,
+            1100.0
+        ));
+        assert!(!pill_chevron(
+            HeaderStatus::FocusUnknown,
+            StatusForm::Short,
+            1000.0
+        ));
         // The long focus words measure about 200 to 260 px.
         for words in [crate::focus_status::PAUSED_LONG, words] {
             let w = status_width(words, None);

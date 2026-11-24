@@ -984,3 +984,59 @@ fn lowest_inside_scrollable(layout: Layout<'_>, _target: Target, found: &Seen) -
     }
     walk(layout, found).expect("the scrollable is in the layout")
 }
+
+/// The status pill's menu and confirm are layers that are always
+/// there, so opening or closing either keeps the pane and its scroll.
+#[test]
+fn the_pill_menu_and_confirm_keep_the_pane_and_its_scroll() {
+    use crate::daemon::DaemonVerb;
+    use crate::status_pill::Confirm;
+    let (_dir, mut app) = app();
+    // A live app with the tracker up, so the pill has a menu.
+    app.fixture = None;
+    app.daemon.pid = Some(4242);
+    let closed = pane_path(&app, no_dialog);
+    app.pill.menu = Some(0);
+    assert!(crate::status_pill::menu_layer(&app).is_some());
+    let menu = pane_path(&app, no_dialog);
+    app.pill.menu = None;
+    app.pill.confirm = Some(Confirm {
+        verb: DaemonVerb::Stop,
+        on_action: false,
+    });
+    assert!(crate::status_pill::confirm_layer(&app).is_some());
+    let confirm = pane_path(&app, no_dialog);
+    app.pill.confirm = None;
+    eprintln!("pill closed: {:?}", readable(&closed));
+    assert_eq!(
+        closed,
+        menu,
+        "{:?} vs {:?}",
+        readable(&closed),
+        readable(&menu)
+    );
+    assert_eq!(
+        closed,
+        confirm,
+        "{:?} vs {:?}",
+        readable(&closed),
+        readable(&confirm)
+    );
+    let kept = offset_after(&mut app, no_dialog, no_dialog, |app| {
+        app.pill.menu = Some(0)
+    });
+    assert!(kept > 0.0, "opening the menu reset the scroll");
+    let kept = offset_after(&mut app, no_dialog, no_dialog, |app| app.pill.menu = None);
+    assert!(kept > 0.0, "closing the menu reset the scroll");
+    let kept = offset_after(&mut app, no_dialog, no_dialog, |app| {
+        app.pill.confirm = Some(Confirm {
+            verb: DaemonVerb::Restart,
+            on_action: false,
+        })
+    });
+    assert!(kept > 0.0, "opening the confirm reset the scroll");
+    let kept = offset_after(&mut app, no_dialog, no_dialog, |app| {
+        app.pill.confirm = None
+    });
+    assert!(kept > 0.0, "closing the confirm reset the scroll");
+}
