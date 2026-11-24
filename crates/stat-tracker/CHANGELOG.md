@@ -17,8 +17,8 @@ summary, then the highlights, and tucks the remaining text under Details.
 
 ## Unreleased
 
-- The desktop app keeps your place on a page when a toast, the restart bar or a dialog shows up or goes away, instead of jumping back to the top, in both the default top tabs layout and the classic sidebar. In the classic sidebar the toast and the restart bar now float over the bottom of the page, as in the top tabs, instead of pushing the page down. The page keeps a reserved space at the bottom so the last control can scroll clear of them (#806).
-- While a dialog is open, the keyboard stays in it: it starts with the focus, Tab and Shift+Tab move only between its own fields, the page under it no longer takes typing or Enter, and Esc closes it (now What leaves your PC too) and puts you back in the field you were in.
+- The desktop app keeps your place on a page when a toast, the restart bar or a dialog shows up or goes away, instead of jumping back to the top, in both the default top tabs layout and the classic sidebar. In the classic sidebar the toast and the restart bar now float over the bottom of the page, as in the top tabs, instead of pushing the page down. The page keeps a reserved space at the bottom, at least enough for a toast and the restart bar and taller when a toast wraps, so the last control can scroll clear of them (#806).
+- While a dialog is open, the keyboard stays in it: it starts with the focus, Tab and Shift+Tab move only between its own fields, the page under it no longer takes typing or Enter, and Esc closes it (now What leaves your PC too) and puts you back in the field you were in, including when you opened the dialog with a click on the page.
 
 ## 0.6.0
 

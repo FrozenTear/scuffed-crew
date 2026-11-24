@@ -22,6 +22,16 @@ const WINDOW: Size = Size::new(1280.0, 300.0);
 /// The windows the click grid runs over.
 const CLICK_WINDOWS: [Size; 3] = [WINDOW, Size::new(1280.0, 860.0), Size::new(1000.0, 768.0)];
 
+/// A systemd-style start failure: it wraps to several lines at the toast
+/// width, past the one-line bar the reserved floor is sized for.
+const WRAPPED_TOAST: &str = concat!(
+    r#"Job for scuffed-stat-tracker.service failed because the control process exited with error code. "#,
+    r#"See "systemctl --user status scuffed-stat-tracker.service" and "#,
+    r#""journalctl --user -xeu scuffed-stat-tracker.service" for details."#,
+);
+
+const INSET_WINDOWS: [Size; 3] = [WINDOW, Size::new(1280.0, 860.0), Size::new(720.0, 480.0)];
+
 /// How far the tests scroll down before the change.
 const SCROLL_Y: f32 = 120.0;
 
@@ -802,20 +812,84 @@ fn the_prompts_inset_covers_a_toast_and_the_restart_bar() {
 /// showing and with them hidden: the reserved inset is always there.
 #[test]
 fn the_last_control_scrolls_clear_of_the_prompts_slot() {
-    let size = WINDOW;
-    let (_dir, mut tabs) = app();
-    last_control_clears(&mut tabs, whole_window, Target::Pane, size);
-    let (_classic_dir, mut classic) = classic_app(Screen::Games);
-    last_control_clears(&mut classic, whole_window, Target::Pane, size);
-    let (_form_dir, mut form) = classic_app(Screen::Settings);
-    last_control_clears(&mut form, whole_window, Target::Form, size);
+    for size in INSET_WINDOWS {
+        for toast in ["Report sent", WRAPPED_TOAST] {
+            let (_dir, mut tabs) = app();
+            last_control_clears(&mut tabs, whole_window, Target::Pane, size, toast);
+            let (_classic_dir, mut classic) = classic_app(Screen::Games);
+            last_control_clears(&mut classic, whole_window, Target::Pane, size, toast);
+            let (_form_dir, mut form) = classic_app(Screen::Settings);
+            last_control_clears(&mut form, whole_window, Target::Form, size, toast);
+        }
+    }
 }
 
-fn last_control_clears(app: &mut TrackerApp, view: View, target: Target, size: Size) {
+/// The measured slot for a wrapped toast is taller than the one-line floor,
+/// at the 640 px toast cap and at a 720 px window.
+#[test]
+fn the_prompts_slot_grows_for_a_wrapped_toast() {
+    use iced::advanced::layout::Limits;
+    let renderer = headless();
+    for page in [640.0, 720.0 - 2.0 * crate::theme::page_gutter(720.0)] {
+        let mut slot = super::prompts_slot(WRAPPED_TOAST, page);
+        let mut tree = Tree::new(&slot);
+        let height = slot
+            .as_widget_mut()
+            .layout(
+                &mut tree,
+                &renderer,
+                &Limits::new(Size::ZERO, Size::new(page.max(1.0), 4000.0)),
+            )
+            .size()
+            .height;
+        assert!(
+            height > super::PROMPTS_INSET,
+            "wrapped toast at page {page} is {height}, not taller than the floor {}",
+            super::PROMPTS_INSET
+        );
+    }
+}
+
+fn prompts_page(app: &TrackerApp, window: Size) -> f32 {
+    match app.nav_style {
+        crate::nav::NavStyle::TopTabs => {
+            let gutter = crate::theme::page_gutter(window.width);
+            window.width - 2.0 * gutter
+        }
+        crate::nav::NavStyle::ClassicSidebar => {
+            window.width - crate::theme::SIDEBAR_WIDTH - 2.0 * crate::theme::PAGE_PAD_X
+        }
+    }
+}
+
+fn reserved_bottom(toast: &'static str, page: f32, renderer: &iced::Renderer) -> f32 {
+    use iced::advanced::layout::Limits;
+    let mut slot = super::prompts_slot(toast, page);
+    let mut tree = Tree::new(&slot);
+    let height = slot
+        .as_widget_mut()
+        .layout(
+            &mut tree,
+            renderer,
+            &Limits::new(Size::ZERO, Size::new(page.max(1.0), 4000.0)),
+        )
+        .size()
+        .height;
+    height.max(super::PROMPTS_INSET)
+}
+
+fn last_control_clears(
+    app: &mut TrackerApp,
+    view: View,
+    target: Target,
+    size: Size,
+    toast: &'static str,
+) {
     use iced::advanced::Layout;
     quiet(app);
     let renderer = headless();
-    let clear = |app: &TrackerApp, label: &str| {
+    let page = prompts_page(app, size);
+    let clear = |app: &TrackerApp, label: &str, slot_h: f32| {
         let mut element = view(app);
         let mut tree = Tree::new(&element);
         let node = lay_out(&mut element, &mut tree, &renderer, size);
@@ -843,21 +917,25 @@ fn last_control_clears(app: &mut TrackerApp, view: View, target: Target, size: S
         } else {
             lowest
         };
-        let slot_top = size.height - super::PROMPTS_INSET;
+        let slot_top = size.height - slot_h;
         assert!(
             in_window <= slot_top + 0.5,
-            "{label}: last control at {in_window} (content {lowest}, offset {}, box {:?}, content-h {}) sits under the slot starting at {slot_top}",
+            "{label}: last control at {in_window} (content {lowest}, offset {}, box {:?}, content-h {}) sits under the slot starting at {slot_top} (slot {slot_h})",
             after.offset.y,
             after.bounds,
             after.content.height
         );
     };
-    clear(app, "quiet");
-    show_toast(app);
+    clear(app, "quiet", super::PROMPTS_INSET);
+    app.toast = Some(toast.to_string());
     show_restart_bar(app);
-    clear(app, "toast and restart bar");
+    clear(
+        app,
+        "toast and restart bar",
+        reserved_bottom(toast, page, &renderer),
+    );
     quiet(app);
-    clear(app, "cleared");
+    clear(app, "cleared", super::PROMPTS_INSET);
 }
 
 /// The lowest edge of a child inside `target`'s padded content. Layout
