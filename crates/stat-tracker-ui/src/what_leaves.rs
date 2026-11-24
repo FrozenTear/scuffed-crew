@@ -10,6 +10,7 @@ use iced::widget::{Column, button, column, container, opaque, row, scrollable, s
 use iced::{Element, Fill, Padding};
 
 use crate::app::{Message, TrackerApp};
+use crate::layout::SETTINGS_SCROLL_GUTTER;
 use crate::settings_open::OpenMsg;
 use crate::settings_update::Msg;
 use crate::theme::{
@@ -82,7 +83,14 @@ fn close() -> Message {
 }
 
 fn dialog<'a>() -> Element<'a, Message> {
-    let mut body = Column::new().spacing(14);
+    // iced draws the scrollbar over the right edge of the body, so the
+    // body keeps the Settings gutter (bar plus a gap) free on the right.
+    // The gutter is there whether or not the bar shows, so the lines do
+    // not rewrap when the window gets short enough to scroll.
+    let mut body = Column::new().spacing(14).padding(Padding {
+        right: SETTINGS_SCROLL_GUTTER,
+        ..Padding::ZERO
+    });
     for (heading, lines) in SECTIONS {
         let mut part =
             column![text(heading).size(SIZE_META).font(FONT_BOLD).color(TEXT)].spacing(4);

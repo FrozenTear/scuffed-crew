@@ -114,6 +114,8 @@ pub mod widgets;
 mod winrate_bar;
 
 #[cfg(test)]
+mod tests_dialog_scroll;
+#[cfg(test)]
 mod tests_settings_to_config;
 #[cfg(test)]
 mod tests_uninstall_names;
