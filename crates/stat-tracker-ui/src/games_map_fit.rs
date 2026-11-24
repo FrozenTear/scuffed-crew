@@ -5,6 +5,7 @@
 //! `responsive` gives it. A chip that fits shows unchanged. A chip that
 //! does not is shortened to the letters that fit and "…", and the cell
 //! gets a tooltip with the map, its mode and every shortened chip in full.
+//! The name is shortened with "…" before any chip is left out.
 //! Nothing after the name is cut without an ellipsis.
 
 use iced::advanced::graphics::text::Paragraph;
@@ -30,8 +31,8 @@ pub struct MapFit {
     pub parts: Vec<MapPart>,
     pub name_max: Option<f32>,
     pub tip: Option<String>,
-    /// The name shortened with "…" when even a wrapped name would leave the
-    /// mode chip less than its [`stub`]; None draws the name in full.
+    /// The name shortened with "…" when even a wrapped name would leave a
+    /// chip less than its [`stub`]; None draws the name in full.
     pub name: Option<String>,
 }
 
@@ -98,8 +99,9 @@ fn shorten(full: &str, room: f32) -> String {
 }
 
 /// The longest start of `name` that, with "…" after it, wraps within `cap`
-/// and fits `height`; at least one letter.
-fn shorten_name(name: &str, font: Font, cap: f32, height: f32) -> String {
+/// and fits `height`, keeping at least [`MIN_KEPT`] letters; None when
+/// not even that fits.
+fn shorten_name(name: &str, font: Font, cap: f32, height: f32) -> Option<String> {
     let fits = |n: usize| {
         let m = measure(
             &kept(name, n),
@@ -110,7 +112,11 @@ fn shorten_name(name: &str, font: Font, cap: f32, height: f32) -> String {
         );
         m.height <= height && m.width <= cap
     };
-    let (mut lo, mut hi) = (1, name.chars().count().saturating_sub(1).max(1));
+    let floor = MIN_KEPT.min(name.chars().count().saturating_sub(1)).max(1);
+    if !fits(floor) {
+        return None;
+    }
+    let (mut lo, mut hi) = (floor, name.chars().count().saturating_sub(1).max(floor));
     while lo < hi {
         let mid = (lo + hi).div_ceil(2);
         if fits(mid) {
@@ -119,7 +125,7 @@ fn shorten_name(name: &str, font: Font, cap: f32, height: f32) -> String {
             hi = mid - 1;
         }
     }
-    kept(name, lo)
+    Some(kept(name, lo))
 }
 
 /// The Map cell `cell` wide and `height` tall holding `parts`, the name in
@@ -130,11 +136,12 @@ fn shorten_name(name: &str, font: Font, cap: f32, height: f32) -> String {
 /// with the sign, [`map_name_max_width`]) and the sign come first and the
 /// chips share what is left. A name that would leave less than a
 /// [`stub`] chip (two letters and "…") for each chip wraps a little sooner
-/// instead, as long as it still fits the row's height. Each chip leaves
-/// room for a stub of every chip after it. When not even that fits, the
-/// last chips are left out whole (the tooltip names them) and the last
-/// chip shown ends in "…". When even the mode chip's stub does not fit
-/// beside the wrapped name, the name is shortened with "…" instead. No
+/// instead, as long as it still fits the row's height. When the wrapped
+/// name still leaves less, the name is shortened with "…" (at least two
+/// letters) so every chip keeps its stub. Each chip leaves room for a
+/// stub of every chip after it. Only when not even a two-letter name
+/// leaves that room are the last chips left out whole (the tooltip names
+/// them), and the last chip shown ends in "…". Neither the name nor a
 /// chip is ever a bare "…".
 pub fn fit(
     cell: f32,
@@ -179,10 +186,11 @@ pub fn fit(
             let need = tall(cap);
             name_max = Some(cap);
             if need.height > height || need.width > cap {
-                if shown > 1 {
+                // Shorten the name before leaving a chip out, and leave
+                // one out only when not even two letters of the name fit.
+                let Some(short) = shorten_name(name, font, cap, height) else {
                     continue;
-                }
-                let short = shorten_name(name, font, cap, height);
+                };
                 name_w = measure(&short, SIZE_META, font, Size::new(cap, height), WRAP).width;
                 short_name = Some(short);
             } else {

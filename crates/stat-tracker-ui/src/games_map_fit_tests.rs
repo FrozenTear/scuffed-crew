@@ -219,10 +219,11 @@ fn check_case(
     let name = &drawn.texts[0].0;
     if name != m {
         let kept = name.strip_suffix(ELLIPSIS).unwrap_or_default();
-        assert!(
-            !kept.is_empty() && m.starts_with(kept),
-            "{at}: name {name:?}"
-        );
+        assert!(m.starts_with(kept), "{at}: name {name:?}");
+        // Never a bare "…": the name keeps its first letters too.
+        if kept.trim().chars().count() < MIN_KEPT {
+            n.bare.push(format!("{at}: name {name:?}"));
+        }
         n.short_names.push(format!("{at}: {name:?}"));
     }
     let chips = &drawn.texts[1..];
@@ -314,11 +315,14 @@ fn map_chips_never_clip_silently() {
     // maps `stat_tracker::parse::stats_row_is_tracked` keeps (33 today)
     // reach the list. Wuxing University - Water College (Stadium) and
     // Workshop Green Screen (Workshop), the longest names, are not among
-    // them. At the windows below, Wuxing (with the sign, at 1100) is the
-    // only map whose name is shortened.
+    // them. The name is shortened before any chip is left out, so at the
+    // windows below no chip is left out, and names are shortened only at
+    // 1100 (pinned below).
     assert!(maps.len() >= 54, "{}", maps.len());
     let mut problems: Vec<String> = Vec::new();
     let mut report = Vec::new();
+    // Per window: chips left out, names shortened (of 372 cases each).
+    let mut pinned = Vec::new();
     for window in WINDOWS {
         let mut n = Counts::default();
         for &m in &maps {
@@ -340,9 +344,18 @@ fn map_chips_never_clip_silently() {
             n.left_out,
             n.short_names,
         ));
+        pinned.push((window, n.left_out.len(), n.short_names.len()));
         problems.extend(n.cut);
         problems.extend(n.bare);
     }
+    // Chief's rule (24 Nov): no chip is left out where shortening the name
+    // to two letters and "…" makes room. At 1100 that shortens 74 names
+    // (with the sign or a queue chip) and leaves nothing out.
+    let want: Vec<(f32, usize, usize)> = WINDOWS
+        .iter()
+        .map(|&w| (w, 0, if w == 1100.0 { 74 } else { 0 }))
+        .collect();
+    assert_eq!(pinned, want, "(window, chips left out, names shortened)");
     let listed: Vec<&str> = maps
         .iter()
         .copied()
