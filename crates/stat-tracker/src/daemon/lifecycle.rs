@@ -1003,7 +1003,7 @@ pub(crate) fn handle_preinit_flags() -> bool {
     }
     if std::env::args().any(|a| a == "--help" || a == "-h") {
         println!(
-            "scuffed-stat-tracker {}: Overwatch 2 scoreboard OCR daemon\n\n\
+            "scuffed-stat-tracker {}: Overwatch scoreboard reader daemon\n\n\
              USAGE: scuffed-stat-tracker [FLAGS]\n\n\
              FLAGS:\n\
              \x20 --version, -V         print version and exit\n\
