@@ -17,7 +17,7 @@ summary, then the highlights, and tucks the remaining text under Details.
 
 ## Unreleased
 
-- What leaves your PC no longer draws its scrollbar over the end of its lines. The text now stops a little short of the bar, as on the Settings page (#879).
+- What leaves your PC and the first-run setup guide no longer draw a scrollbar over the end of their lines. The text now stops a little short of the bar, as on the Settings page, including at the 720x480 minimum window (#879).
 
 ## 0.6.0
 

@@ -77,6 +77,7 @@ mod overview_side;
 pub mod report;
 mod report_choices;
 pub mod restart_prompt;
+mod scroll_gutter;
 pub mod seasons;
 pub mod seasons_tab;
 mod session_bits;

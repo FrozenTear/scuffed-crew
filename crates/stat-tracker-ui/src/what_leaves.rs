@@ -6,12 +6,11 @@
 //! (GitHub releases), the season list, the token check, and Report a
 //! problem.
 
-use iced::widget::scrollable::{Direction, Scrollbar};
-use iced::widget::{Column, button, column, container, opaque, row, scrollable, space, text};
+use iced::widget::{Column, button, column, container, opaque, row, space, text};
 use iced::{Element, Fill, Padding};
 
 use crate::app::{Message, TrackerApp};
-use crate::layout::{SCROLLBAR_WIDTH, SETTINGS_SCROLL_GUTTER};
+use crate::scroll_gutter::guttered_scrollable;
 use crate::settings_open::OpenMsg;
 use crate::settings_update::Msg;
 use crate::theme::{
@@ -85,13 +84,10 @@ fn close() -> Message {
 
 fn dialog<'a>() -> Element<'a, Message> {
     // iced draws the scrollbar over the right edge of the body, so the
-    // body keeps the Settings gutter (bar plus a gap) free on the right.
-    // The gutter is there whether or not the bar shows, so the lines do
-    // not rewrap when the window gets short enough to scroll.
-    let mut body = Column::new().spacing(14).padding(Padding {
-        right: SETTINGS_SCROLL_GUTTER,
-        ..Padding::ZERO
-    });
+    // body uses [`guttered_scrollable`]: the Settings gutter stays free
+    // on the right whether or not the bar shows, and the lines do not
+    // rewrap when the window gets short enough to scroll.
+    let mut body = Column::new().spacing(14);
     for (heading, lines) in SECTIONS {
         let mut part =
             column![text(heading).size(SIZE_META).font(FONT_BOLD).color(TEXT)].spacing(4);
@@ -115,13 +111,7 @@ fn dialog<'a>() -> Element<'a, Message> {
                 .size(SIZE_BODY + 4.0)
                 .font(FONT_BOLD)
                 .color(TEXT),
-            scrollable(body)
-                .direction(Direction::Vertical(
-                    Scrollbar::new()
-                        .width(SCROLLBAR_WIDTH)
-                        .scroller_width(SCROLLBAR_WIDTH),
-                ))
-                .height(iced::Length::Shrink),
+            guttered_scrollable(body).height(iced::Length::Shrink),
             row![space().width(Fill), done],
         ]
         .spacing(16),
