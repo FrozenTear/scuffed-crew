@@ -23,10 +23,12 @@
 //! [`SIGHTING_GAP_SECS`] does not clear it: after that long with no known
 //! phase, a later repeat is a new sighting (`since` is reset). `seen` is
 //! refreshed at most every [`SEEN_REFRESH_SECS`] while the stage is still
-//! on screen. A reader should treat the stage as current only while
-//! `now - seen` is at most [`seen_current_for_secs`] (that refresh plus
-//! two poll intervals plus 1 s, because `seen` is a whole second rounded
-//! down, and one poll may be skipped).
+//! on screen. A reader should treat the stage as current only when
+//! [`stage_is_current`] is true: `now - seen` is at most
+//! [`seen_current_for_secs`] (that refresh plus two poll intervals plus
+//! 1 s, because `seen` is a whole second rounded down, and one poll may
+//! be skipped), and `seen` is at most [`SEEN_FUTURE_SLACK_SECS`] ahead
+//! of `now`.
 //!
 //! Read across versions like the rest of the status file: a file from an
 //! older build has no stage (`None`), and a stage name a newer daemon adds
@@ -73,9 +75,9 @@ pub fn seen_current_for_secs(poll_interval: std::time::Duration) -> i64 {
         .saturating_add(1)
 }
 
-/// True when `now - seen` is in `-2..=seen_current_for_secs` (`-2` is
-/// [`SEEN_FUTURE_SLACK_SECS`]). A `seen` further in the future is not
-/// current.
+/// True when `now - seen` is in
+/// `-SEEN_FUTURE_SLACK_SECS..=seen_current_for_secs(poll_interval)`. A
+/// `seen` further in the future is not current.
 pub fn stage_is_current(seen: i64, now: i64, poll_interval: std::time::Duration) -> bool {
     let age = now.saturating_sub(seen);
     let bound = seen_current_for_secs(poll_interval);
@@ -122,11 +124,12 @@ pub struct CompanionStage {
     /// once [`SEEN_REFRESH_SECS`] have passed since the last `seen`.
     /// While the stage is on screen and the daemon misses at most one
     /// poll in a row, `now - seen` is at most [`seen_current_for_secs`].
-    /// A longer gap reads as stale until the next known tick. Treat the
-    /// stage as current only when [`stage_is_current`] is true; that also
-    /// rejects a `seen` more than [`SEEN_FUTURE_SLACK_SECS`] ahead. A
-    /// missed screen or a stopped daemon leaves `seen` behind, including
-    /// across an update restart that keeps the same pid.
+    /// A longer gap can pass the bound; the stage then reads as stale
+    /// until the next known tick. Treat the stage as current only when
+    /// [`stage_is_current`] is true; that also rejects a `seen` more
+    /// than [`SEEN_FUTURE_SLACK_SECS`] ahead. A missed screen or a
+    /// stopped daemon leaves `seen` behind, including across an update
+    /// restart that keeps the same pid.
     pub seen: i64,
 }
 
