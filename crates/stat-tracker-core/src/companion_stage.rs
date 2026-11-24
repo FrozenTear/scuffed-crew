@@ -22,7 +22,7 @@
 //! An unknown phase publishes nothing, so the last stage stays in the file.
 //! [`SIGHTING_GAP_SECS`] does not clear it: after that long with no known
 //! phase, a later repeat is a new sighting (`since` is reset). `seen` is
-//! refreshed at least every [`SEEN_REFRESH_SECS`] while the stage is still
+//! refreshed at most every [`SEEN_REFRESH_SECS`] while the stage is still
 //! on screen. A reader should treat the stage as current only while
 //! `now - seen` is at most [`seen_current_for_secs`] (that refresh plus
 //! two poll intervals plus 1 s, because `seen` is a whole second rounded
@@ -119,7 +119,7 @@ pub struct CompanionStage {
     /// gap is a new sighting.
     pub since: i64,
     /// When the daemon last saw this sighting, in Unix seconds. Refreshed
-    /// once [`SEEN_REFRESH_SECS`] have passed since the last write.
+    /// once [`SEEN_REFRESH_SECS`] have passed since the last `seen`.
     /// While the stage is on screen, `now - seen` is at most
     /// [`seen_current_for_secs`]; treat the stage as current only within
     /// that bound. A missed screen or a stopped daemon leaves `seen`
@@ -209,8 +209,8 @@ fn settle_stage(slot: &mut Slot, kind: StageKind, maps: Vec<String>, now: i64) {
 /// Write this tick's stage into the status file (`None` clears it), keeping
 /// everything else there. `tick` is `(kind, maps, now)`: `now` is this
 /// tick's Unix time, used as `since` on a new sighting and to refresh
-/// `seen`. A `CompanionStage` that was read back must not be passed in;
-/// its `seen` is ignored because only `now` is the tick time. A repeat of
+/// `seen`. Pass that tick time; do not pass a `since` copied from a
+/// `CompanionStage` that was read back. A repeat of
 /// the same kind within [`SIGHTING_GAP_SECS`] keeps the first `since`
 /// (map names may change). The held slot is keyed by `data_dir` and is
 /// marked written only after the file write succeeds. Later status writes
@@ -291,6 +291,7 @@ where
 mod tests {
     use super::*;
     use crate::ocr_status::Status;
+    #[cfg(unix)]
     use std::os::unix::fs::MetadataExt;
 
     fn publish_tick(dir: &Path, kind: StageKind, maps: Vec<String>, now: i64) {
@@ -490,6 +491,7 @@ mod tests {
         ];
         publish_tick(dir.path(), StageKind::MapVote, maps.clone(), 1_000);
         let path = crate::ocr_status::status_path(dir.path());
+        #[cfg(unix)]
         let inode = std::fs::metadata(&path).unwrap().ino();
         let held = written_stage(dir.path()).unwrap();
         assert_eq!(held.since, 1_000);
@@ -500,6 +502,7 @@ mod tests {
         let held = written_stage(dir.path()).unwrap();
         assert_eq!(held.since, 1_000);
         assert_eq!(held.seen, 1_000);
+        #[cfg(unix)]
         assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
 
         // t + 5: rewritten, same since, seen is t + 5.
