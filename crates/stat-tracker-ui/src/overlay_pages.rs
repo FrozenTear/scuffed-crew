@@ -29,8 +29,9 @@
 //!   `MapVote { maps_read: true }`, so it is not a stage change and does
 //!   nothing. A cancelled vote that becomes `None` leaves Map vote up.
 //! - `hero_select` / `hero_ban`: [`Stage::MapLocked`]. C3 lock stages
-//!   carry no map name, so a caller that only has that field treats the
-//!   lock itself as `map_read: true`.
+//!   carry no map name. The C3-only caller (`companion_keys`) maps them
+//!   as `map_read: false` until detect produces InGame or another
+//!   match-on signal, so the page does not auto-advance to Bans and picks.
 //! - `in_game`: [`Stage::MatchStart`].
 
 use serde::{Deserialize, Serialize};
@@ -86,8 +87,9 @@ pub enum Stage {
     /// The map vote. `maps_read`: the three candidate maps were read.
     MapVote { maps_read: bool },
     /// Hero select or hero ban: the map is locked. C3's lock stages carry
-    /// no map name. `map_read` is for a caller that has one; a caller that
-    /// only has the C3 field treats the lock itself as `map_read: true`.
+    /// no map name. `map_read` is for a caller that has one. The C3-only
+    /// caller maps the lock as `map_read: false` until detect produces
+    /// InGame or another match-on signal.
     MapLocked { map_read: bool },
     /// The loading screen or the first live Tab of the match.
     MatchStart,
