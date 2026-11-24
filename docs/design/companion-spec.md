@@ -66,7 +66,7 @@ Full example, with the slot: "Circuit Royal. On this map you have a high death r
 
 Without the slot: "Circuit Royal. You win more often when Kiriko, Ana or Widowmaker is banned, and when you play Widowmaker, Ashe and Cassidy."
 
-"Is banned" means a ban by either team, which is what the rates count. Robert chose this past-results wording on 2026-11-24. "When you ban" can come back once own and enemy bans are split. The tip frames ending in -alt and sheet 25b-companion-tip-alt.png show this wording; the older 25b-companion-tip.png sheet is superseded.
+"Is banned" means a ban by either team, which is what the rates count. FrozenTear chose this past-results wording on 2026-11-24. "When you ban" can come back once own and enemy bans are split. The tip frames ending in -alt and sheet 25b-companion-tip-alt.png show this wording; the older 25b-companion-tip.png sheet is superseded.
 
 If there is too little data for a side, drop that clause rather than fill it. Ban and play each need 5 decided games on this map (the same per-map play and ban floor as in section 4). Both missing: "Circuit Royal. Not enough games (0 of 5) for a ban or play hint." Only play: "Circuit Royal. You win more often when you play Widowmaker, Ashe and Cassidy. Not enough games (n of 5) for a ban hint." And the other way around. Never invent heroes, and never say "should ban."
 
