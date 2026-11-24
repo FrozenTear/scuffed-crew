@@ -5,7 +5,7 @@
 use super::tests::{mark_current, snap};
 use super::*;
 use crate::model::QueueTitle;
-use crate::sync::wire::upload_request;
+use crate::sync::upload_request;
 use scuffed_types::api::RankQueue;
 use serde_json::Value;
 
