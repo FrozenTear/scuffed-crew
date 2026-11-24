@@ -3,8 +3,10 @@ use serde::Deserialize;
 
 use crate::components::ui::{ChipButton, LoadError, SkeletonRows};
 use crate::routes::Route;
+use crate::state::maps::{PICKER_MODE_ORDER, game_mode_api_str};
 use crate::util::encode_query;
 use scuffed_api_client::ApiClient;
+use scuffed_types::strategy::GameMode;
 
 // --- Types ---
 
@@ -32,15 +34,20 @@ struct ListResponse {
 
 // --- Constants ---
 
-const GAME_MODES: &[&str] = &[
-    "All",
-    "Escort",
-    "Hybrid",
-    "Control",
-    "Push",
-    "Flashpoint",
-    "Clash",
-];
+/// Label of the chip that clears the mode filter.
+const ALL_MODES_LABEL: &str = "All";
+
+/// The mode chips in display order: "All" (`None`, no filter) and then one
+/// chip per mode the map picker offers.
+fn mode_chips() -> impl Iterator<Item = Option<GameMode>> {
+    std::iter::once(None).chain(PICKER_MODE_ORDER.iter().copied().map(Some))
+}
+
+/// What a chip reads as. The label is for people only; the request carries
+/// `game_mode_api_str`, because the server filters on the stored token.
+fn mode_chip_label(mode: Option<GameMode>) -> String {
+    mode.map_or_else(|| ALL_MODES_LABEL.to_string(), |m| m.to_string())
+}
 
 const PAGE_CSS: &str = r#"
     .strategy-browse {
@@ -221,14 +228,21 @@ const PAGE_CSS: &str = r#"
 /// `GET /api/strategy/strategies` with the search box and mode filter.
 /// Both values are percent-encoded, so `&`, `#`, `+` and spaces in a search
 /// stay part of it instead of splitting or cutting the query (APP10, FC-9).
-fn strategy_list_path(search: &str, mode: &str) -> String {
+///
+/// The mode goes out as its stored token (`escort`, not `Escort`): the server
+/// compares `game_mode` exactly against the lowercase value it saved, so a
+/// chip label there matches nothing (issue 818).
+fn strategy_list_path(search: &str, mode: Option<GameMode>) -> String {
     let mut path = String::from("/api/strategy/strategies");
     let mut params: Vec<String> = Vec::new();
     if !search.is_empty() {
         params.push(format!("search={}", encode_query(search)));
     }
-    if mode != "All" {
-        params.push(format!("game_mode={}", encode_query(mode)));
+    if let Some(mode) = mode {
+        params.push(format!(
+            "game_mode={}",
+            encode_query(game_mode_api_str(mode))
+        ));
     }
     if !params.is_empty() {
         path.push('?');
@@ -244,7 +258,7 @@ pub fn StrategyBrowse() -> Element {
         .is_some_and(|auth| auth.read().is_org_member());
     let mut search_input = use_signal(String::new);
     let mut debounced_search = use_signal(String::new);
-    let mut selected_mode = use_signal(|| "All".to_string());
+    let mut selected_mode = use_signal(|| None::<GameMode>);
 
     // Debounce: sync search_input → debounced_search after 300ms
     let _debounce = use_resource(move || {
@@ -268,7 +282,7 @@ pub fn StrategyBrowse() -> Element {
         let search = debounced_search();
         let mode = selected_mode();
         async move {
-            let path = strategy_list_path(&search, &mode);
+            let path = strategy_list_path(&search, mode);
             ApiClient::web()
                 .fetch::<ListResponse>(&path)
                 .await
@@ -306,16 +320,16 @@ pub fn StrategyBrowse() -> Element {
 
             // Filter chips
             div { class: "strategy-filters", role: "group", aria_label: "Filter by mode",
-                for mode in GAME_MODES.iter() {
+                for mode in mode_chips() {
                     {
-                        let mode_str = mode.to_string();
+                        let label = mode_chip_label(mode);
                         rsx! {
                             ChipButton {
-                                key: "{mode}",
+                                key: "{label}",
                                 class: "filter-chip".to_string(),
-                                label: mode.to_string(),
-                                pressed: selected_mode() == *mode,
-                                onclick: move |_| selected_mode.set(mode_str.clone()),
+                                label: label.clone(),
+                                pressed: selected_mode() == mode,
+                                onclick: move |_| selected_mode.set(mode),
                             }
                         }
                     }
@@ -337,7 +351,7 @@ pub fn StrategyBrowse() -> Element {
                     },
                     Some(Ok(resp)) if resp.data.is_empty() => rsx! {
                         div { class: "strategy-empty",
-                            if !debounced_search().is_empty() || selected_mode() != "All" {
+                            if !debounced_search().is_empty() || selected_mode().is_some() {
                                 p { "No strategies match these filters." }
                                 p { style: "margin-top:0.5rem; font-size:0.85rem;",
                                     "Try clearing search or switching the mode filter."
@@ -392,37 +406,82 @@ mod tests {
 
     #[test]
     fn no_filters_is_the_bare_list() {
-        assert_eq!(strategy_list_path("", "All"), "/api/strategy/strategies");
+        assert_eq!(strategy_list_path("", None), "/api/strategy/strategies");
     }
 
     #[test]
     fn search_is_url_encoded() {
         assert_eq!(
-            strategy_list_path("dive & poke", "All"),
+            strategy_list_path("dive & poke", None),
             "/api/strategy/strategies?search=dive%20%26%20poke"
         );
         assert_eq!(
-            strategy_list_path("C# rush", "All"),
+            strategy_list_path("C# rush", None),
             "/api/strategy/strategies?search=C%23%20rush"
         );
         assert_eq!(
-            strategy_list_path("2+2", "All"),
+            strategy_list_path("2+2", None),
             "/api/strategy/strategies?search=2%2B2"
         );
         assert_eq!(
-            strategy_list_path("Lúcio speed", "All"),
+            strategy_list_path("Lúcio speed", None),
             "/api/strategy/strategies?search=L%C3%BAcio%20speed"
         );
     }
 
     #[test]
     fn a_search_cannot_add_or_cut_parameters() {
-        let path = strategy_list_path("a&game_mode=Push#x", "Control");
+        let path = strategy_list_path("a&game_mode=Push#x", Some(GameMode::Control));
         assert_eq!(
             path,
-            "/api/strategy/strategies?search=a%26game_mode%3DPush%23x&game_mode=Control"
+            "/api/strategy/strategies?search=a%26game_mode%3DPush%23x&game_mode=control"
         );
         assert_eq!(path.matches('&').count(), 1);
         assert!(!path.contains('#'));
+    }
+
+    /// Issue 818: the server filters `game_mode = $game_mode` exactly against the
+    /// lowercase token it stored (`game_mode_to_string` in
+    /// db/src/queries/strategies.rs), so each chip must send that token and
+    /// never its capitalised label.
+    #[test]
+    fn each_mode_chip_sends_the_token_the_server_filters_on() {
+        let expected = [
+            ("All", None),
+            ("Escort", Some("escort")),
+            ("Hybrid", Some("hybrid")),
+            ("Control", Some("control")),
+            ("Push", Some("push")),
+            ("Flashpoint", Some("flashpoint")),
+            ("Clash", Some("clash")),
+        ];
+        let chips: Vec<Option<GameMode>> = mode_chips().collect();
+        assert_eq!(chips.len(), expected.len());
+        for (chip, (label, token)) in chips.into_iter().zip(expected) {
+            assert_eq!(mode_chip_label(chip), label);
+            let path = strategy_list_path("", chip);
+            match token {
+                None => assert_eq!(path, "/api/strategy/strategies"),
+                Some(token) => assert_eq!(
+                    path,
+                    format!("/api/strategy/strategies?game_mode={token}"),
+                    "the {label} chip"
+                ),
+            }
+        }
+    }
+
+    /// The token is the same one the editor saves with, which is serde's
+    /// `snake_case` name of the mode, so a saved strategy is found by its chip.
+    #[test]
+    fn chip_token_is_the_saved_wire_token() {
+        for mode in mode_chips().flatten() {
+            let wire = serde_json::to_value(mode).unwrap();
+            assert_eq!(wire.as_str(), Some(game_mode_api_str(mode)));
+            assert!(
+                strategy_list_path("", Some(mode))
+                    .ends_with(&format!("game_mode={}", game_mode_api_str(mode)))
+            );
+        }
     }
 }
