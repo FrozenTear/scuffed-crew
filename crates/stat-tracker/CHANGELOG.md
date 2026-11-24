@@ -17,6 +17,8 @@ summary, then the highlights, and tucks the remaining text under Details.
 
 ## Unreleased
 
+- The desktop app keeps your place on a page when a toast, the restart bar or a dialog shows up or goes away, instead of jumping back to the top, in both the default top tabs layout and the classic sidebar. In the classic sidebar the toast and the restart bar now float over the bottom of the page, as in the top tabs, instead of pushing the page down. The page keeps a fixed reserved space at the bottom, enough for a few-line toast and the restart bar, so the last control can scroll clear of them. A longer toast (a systemd or copy-command error) scrolls inside the toast, with a gutter so the scrollbar does not cover the text, and dismissing it does not move the page (#806).
+- While a dialog is open, the keyboard stays in it: it starts with the focus, Tab and Shift+Tab move only between its own fields, the page under it no longer takes typing or Enter, and Esc closes it (now What leaves your PC too) and puts you back in the field you were in, including when you opened the dialog with a click on a page button, not a field you had already left by clicking elsewhere on the page.
 - In the top tabs layout, the Heroes tab has a When banned view: for each hero banned in your games, how often it was banned and your record and win rate in those games, split by your team's bans and the enemy's. The classic sidebar layout does not have it yet (#779).
 
 ## 0.6.0

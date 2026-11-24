@@ -496,6 +496,19 @@ pub(crate) fn processes_row(app: &TrackerApp, demo: bool) -> Element<'_, Message
     )
 }
 
+pub(crate) fn field_id(field: SettingsField) -> iced::widget::Id {
+    iced::widget::Id::new(match field {
+        SettingsField::PlayerName => "settings-player-name",
+        SettingsField::SessionWindow => "settings-session-window",
+        SettingsField::ProcessNames => "settings-process-names",
+        SettingsField::PollInterval => "settings-poll-interval",
+        SettingsField::Cooldown => "settings-cooldown",
+        SettingsField::SyncUrl => "settings-sync-url",
+        SettingsField::SyncToken => "settings-sync-token",
+        SettingsField::OverlayHotkey => "settings-overlay-hotkey",
+    })
+}
+
 /// A text field that writes on Enter (`commit`). Demo draws it read-only.
 pub(crate) fn page_field<'a>(
     placeholder: &'static str,
@@ -506,6 +519,7 @@ pub(crate) fn page_field<'a>(
     demo: bool,
 ) -> Element<'a, Message> {
     let mut input = text_input(placeholder, value)
+        .id(field_id(field))
         .padding(Padding::from([6, 10]))
         .size(SIZE_META)
         .style(theme::text_input_style)
