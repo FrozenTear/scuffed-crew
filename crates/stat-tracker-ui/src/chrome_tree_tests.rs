@@ -225,7 +225,7 @@ fn run(
 }
 
 /// Which scrollable a test follows.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Target {
     /// The page pane ([`PANE_SCROLL_ID`]).
     Pane,
@@ -782,39 +782,46 @@ fn shares_page_clicks(bare: &[String], over: &[String]) -> bool {
 }
 
 /// The reserved bottom inset is at least as tall as a toast and the
-/// restart bar stacked with the bottom gap, so the slot cannot cover the
-/// last control when both show.
+/// restart bar stacked with the bottom gap, including a long wrapped
+/// toast, so the slot cannot cover the last control when both show.
 #[test]
 fn the_prompts_inset_covers_a_toast_and_the_restart_bar() {
     use iced::advanced::layout::Limits;
-    let mut slot = super::both_prompts_slot();
     let renderer = headless();
-    let mut tree = Tree::new(&slot);
-    let node = slot.as_widget_mut().layout(
-        &mut tree,
-        &renderer,
-        &Limits::new(Size::ZERO, Size::new(640.0, 400.0)),
-    );
-    let height = node.size().height;
-    assert!(
-        height <= super::PROMPTS_INSET,
-        "inset {} is short of the slot {height}",
-        super::PROMPTS_INSET
-    );
-    assert!(
-        height > super::PROMPTS_INSET / 2.0,
-        "slot {height} looks too small; the inset may be guessing"
-    );
+    for (name, toast) in [("one line", "Report sent"), ("wrapped", WRAPPED_TOAST)] {
+        let mut slot = super::prompts_slot(toast, 640.0);
+        let mut tree = Tree::new(&slot);
+        let node = slot.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &Limits::new(Size::ZERO, Size::new(640.0, 400.0)),
+        );
+        let height = node.size().height;
+        assert!(
+            height <= super::PROMPTS_INSET,
+            "{name}: inset {} is short of the slot {height}",
+            super::PROMPTS_INSET
+        );
+        assert!(
+            height > super::PROMPTS_INSET / 2.0,
+            "{name}: slot {height} looks too small; the inset may be guessing"
+        );
+    }
 }
 
 /// At max scroll the last control in the pane (and the classic Settings
-/// form) sits above the prompts slot, with a toast and the restart bar
-/// showing and with them hidden: the reserved inset is always there.
+/// form) sits above the reserved inset, with a toast and the restart bar
+/// showing and with them hidden. The space below the last control is
+/// bounded above so a measured slot cannot eat the whole pane. Dismissing
+/// a wrapped toast does not change the page's content height.
 #[test]
 fn the_last_control_scrolls_clear_of_the_prompts_slot() {
     for size in INSET_WINDOWS {
         for toast in ["Report sent", WRAPPED_TOAST] {
-            let (_dir, mut tabs) = app();
+            // Settings on the games fixture is taller than the pane at
+            // every inset window, including 1280x860. Overview is not.
+            let (_dir, mut tabs) = classic_app(Screen::Settings);
+            tabs.nav_style = NavStyle::TopTabs;
             last_control_clears(&mut tabs, whole_window, Target::Pane, size, toast);
             let (_classic_dir, mut classic) = classic_app(Screen::Games);
             last_control_clears(&mut classic, whole_window, Target::Pane, size, toast);
@@ -822,60 +829,6 @@ fn the_last_control_scrolls_clear_of_the_prompts_slot() {
             last_control_clears(&mut form, whole_window, Target::Form, size, toast);
         }
     }
-}
-
-/// The measured slot for a wrapped toast is taller than the one-line floor,
-/// at the 640 px toast cap and at a 720 px window.
-#[test]
-fn the_prompts_slot_grows_for_a_wrapped_toast() {
-    use iced::advanced::layout::Limits;
-    let renderer = headless();
-    for page in [640.0, 720.0 - 2.0 * crate::theme::page_gutter(720.0)] {
-        let mut slot = super::prompts_slot(WRAPPED_TOAST, page);
-        let mut tree = Tree::new(&slot);
-        let height = slot
-            .as_widget_mut()
-            .layout(
-                &mut tree,
-                &renderer,
-                &Limits::new(Size::ZERO, Size::new(page.max(1.0), 4000.0)),
-            )
-            .size()
-            .height;
-        assert!(
-            height > super::PROMPTS_INSET,
-            "wrapped toast at page {page} is {height}, not taller than the floor {}",
-            super::PROMPTS_INSET
-        );
-    }
-}
-
-fn prompts_page(app: &TrackerApp, window: Size) -> f32 {
-    match app.nav_style {
-        crate::nav::NavStyle::TopTabs => {
-            let gutter = crate::theme::page_gutter(window.width);
-            window.width - 2.0 * gutter
-        }
-        crate::nav::NavStyle::ClassicSidebar => {
-            window.width - crate::theme::SIDEBAR_WIDTH - 2.0 * crate::theme::PAGE_PAD_X
-        }
-    }
-}
-
-fn reserved_bottom(toast: &'static str, page: f32, renderer: &iced::Renderer) -> f32 {
-    use iced::advanced::layout::Limits;
-    let mut slot = super::prompts_slot(toast, page);
-    let mut tree = Tree::new(&slot);
-    let height = slot
-        .as_widget_mut()
-        .layout(
-            &mut tree,
-            renderer,
-            &Limits::new(Size::ZERO, Size::new(page.max(1.0), 4000.0)),
-        )
-        .size()
-        .height;
-    height.max(super::PROMPTS_INSET)
 }
 
 fn last_control_clears(
@@ -888,8 +841,7 @@ fn last_control_clears(
     use iced::advanced::Layout;
     quiet(app);
     let renderer = headless();
-    let page = prompts_page(app, size);
-    let clear = |app: &TrackerApp, label: &str, slot_h: f32| {
+    let measure = |app: &TrackerApp, label: &str| {
         let mut element = view(app);
         let mut tree = Tree::new(&element);
         let node = lay_out(&mut element, &mut tree, &renderer, size);
@@ -917,25 +869,72 @@ fn last_control_clears(
         } else {
             lowest
         };
-        let slot_top = size.height - slot_h;
+        let slot_top = size.height - super::PROMPTS_INSET;
         assert!(
             in_window <= slot_top + 0.5,
-            "{label}: last control at {in_window} (content {lowest}, offset {}, box {:?}, content-h {}) sits under the slot starting at {slot_top} (slot {slot_h})",
+            "{label}: last control at {in_window} (content {lowest}, offset {}, box {:?}, content-h {}) sits under the slot starting at {slot_top}",
             after.offset.y,
             after.bounds,
             after.content.height
         );
+        let below = space_below_last(layout, &after, lowest);
+        if target == Target::Pane {
+            assert!(
+                below <= super::PROMPTS_INSET + 32.0,
+                "{label}: space below the last control is {below}, over the inset {}",
+                super::PROMPTS_INSET
+            );
+            assert!(
+                below < size.height - 32.0,
+                "{label}: space below the last control is {below}, a full pane at height {}",
+                size.height
+            );
+        }
+        (after.content.height, below)
     };
-    clear(app, "quiet", super::PROMPTS_INSET);
+    let (quiet_h, _) = measure(app, "quiet");
     app.toast = Some(toast.to_string());
     show_restart_bar(app);
-    clear(
-        app,
-        "toast and restart bar",
-        reserved_bottom(toast, page, &renderer),
+    let (shown_h, _) = measure(app, "toast and restart bar");
+    assert_eq!(
+        shown_h, quiet_h,
+        "showing {toast:?} changed the page content height from {quiet_h} to {shown_h}"
     );
     quiet(app);
-    clear(app, "cleared", super::PROMPTS_INSET);
+    let (cleared_h, _) = measure(app, "cleared");
+    assert_eq!(
+        cleared_h, shown_h,
+        "dismissing {toast:?} shifted the page content height from {shown_h} to {cleared_h}"
+    );
+}
+
+/// Room between the last control and the bottom of the scrollable's
+/// padded content (the reserved inset, plus any trailing spacing).
+fn space_below_last(layout: Layout<'_>, found: &Seen, lowest: f32) -> f32 {
+    fn is_found(layout: Layout<'_>, found: &Seen) -> bool {
+        let bounds = layout.bounds();
+        (bounds.y - found.bounds.y).abs() < 1.0
+            && (bounds.width - found.bounds.width).abs() < 1.0
+            && (bounds.height - found.bounds.height).abs() < 1.0
+    }
+    fn content_box(layout: Layout<'_>, content_h: f32) -> Option<Layout<'_>> {
+        if (layout.bounds().height - content_h).abs() < 1.0 {
+            return Some(layout);
+        }
+        layout
+            .children()
+            .find_map(|child| content_box(child, content_h))
+    }
+    fn walk(layout: Layout<'_>, found: &Seen, lowest: f32) -> Option<f32> {
+        if is_found(layout, found) {
+            let padded = content_box(layout, found.content.height)?;
+            return Some((padded.bounds().y + padded.bounds().height) - lowest);
+        }
+        layout
+            .children()
+            .find_map(|child| walk(child, found, lowest))
+    }
+    walk(layout, found, lowest).expect("the scrollable is in the layout")
 }
 
 /// The lowest edge of a child inside `target`'s padded content. Layout
