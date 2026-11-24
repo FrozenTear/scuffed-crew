@@ -20,10 +20,13 @@
 //! so the daemon does not write `in_game` on a live run.
 //!
 //! An unknown phase publishes nothing, so the last stage stays in the file.
-//! After [`SIGHTING_GAP_SECS`] with no known phase, a later repeat is a
-//! new sighting (`since` is reset). `seen` is refreshed every few seconds
-//! while the stage repeats, so the companion can treat it as current while
-//! `now - seen` is small.
+//! [`SIGHTING_GAP_SECS`] does not clear it: after that long with no known
+//! phase, a later repeat is a new sighting (`since` is reset). `seen` is
+//! refreshed at least every [`SEEN_REFRESH_SECS`] while the stage is still
+//! on screen. A reader should treat the stage as current only while
+//! `now - seen` is at most [`seen_current_for_secs`] (that refresh plus
+//! one poll interval plus 1 s, because `seen` is a whole second rounded
+//! down).
 //!
 //! Read across versions like the rest of the status file: a file from an
 //! older build has no stage (`None`), and a stage name a newer daemon adds
@@ -43,7 +46,29 @@ use crate::ocr_status::{read_status, status_write_lock, write_status};
 /// in between is a new sighting (new `since`).
 pub const SIGHTING_GAP_SECS: i64 = 60;
 /// How often `seen` is rewritten while the same sighting repeats.
-const SEEN_REFRESH_SECS: i64 = 5;
+///
+/// A reader should not use this alone as the freshness limit. While the
+/// stage is still on screen, `now - seen` can reach [`seen_current_for_secs`].
+pub const SEEN_REFRESH_SECS: i64 = 5;
+
+/// The largest `now - seen` a reader should treat as current while the
+/// stage is still on screen: [`SEEN_REFRESH_SECS`] plus one poll interval
+/// plus 1 s (`seen` is a whole second, rounded down). A shorter poll
+/// still counts as 1 s in this bound.
+pub fn seen_current_for_secs(poll_interval: std::time::Duration) -> i64 {
+    let poll_secs = poll_interval.as_secs() as i64;
+    let poll_secs = if poll_interval.is_zero() {
+        0
+    } else {
+        poll_secs.max(1)
+    };
+    SEEN_REFRESH_SECS + poll_secs + 1
+}
+
+/// True when `seen` is still within [`seen_current_for_secs`] of `now`.
+pub fn stage_is_current(seen: i64, now: i64, poll_interval: std::time::Duration) -> bool {
+    now.saturating_sub(seen) <= seen_current_for_secs(poll_interval)
+}
 
 /// Which pre-game screen the daemon last saw. Written in snake case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -70,10 +95,11 @@ pub enum StageKind {
 #[serde(default)]
 pub struct CompanionStage {
     pub kind: StageKind,
-    /// Canonical map names (the `MAPS` display names), deduped, order not
-    /// meaningful, empty when none was read. Empty on every stage but a
-    /// vote, and on a vote where no name was read (including every vote
-    /// under the default reader).
+    /// Canonical map names (the `MAPS` display names) from the latest
+    /// tick's read, deduped, order not meaningful. The list can shrink or
+    /// empty within one sighting if a later tick reads fewer names. Empty
+    /// on every stage but a vote, and on a vote where no name was read
+    /// (including every vote under the default reader).
     pub maps: Vec<String>,
     /// When the daemon first saw this sighting, in Unix seconds. A stage
     /// that repeats within [`SIGHTING_GAP_SECS`] keeps this time, even if
@@ -81,8 +107,11 @@ pub struct CompanionStage {
     /// gap is a new sighting.
     pub since: i64,
     /// When the daemon last saw this sighting, in Unix seconds. Refreshed
-    /// at most every few seconds while the stage repeats. The companion
-    /// can treat the stage as current while `now - seen` is small.
+    /// once [`SEEN_REFRESH_SECS`] have passed since the last write.
+    /// While the stage is on screen, `now - seen` stays under
+    /// [`seen_current_for_secs`]; treat the stage as current only within
+    /// that bound. A missed screen or a stopped daemon leaves `seen`
+    /// behind, including across an update restart that keeps the same pid.
     pub seen: i64,
 }
 
@@ -130,53 +159,58 @@ pub fn companion_stage_for(data_dir: &Path) -> Option<CompanionStage> {
     slots().get(data_dir).and_then(|slot| slot.stage.clone())
 }
 
-fn settle_stage(slot: &mut Slot, new: CompanionStage) -> Option<CompanionStage> {
-    let now = new.since;
-    let same_sighting = slot.stage.as_ref().is_some_and(|old| old.kind == new.kind)
-        && now >= slot.last_known_at
-        && now - slot.last_known_at < SIGHTING_GAP_SECS;
-    let stage = if same_sighting {
-        let old = slot.stage.as_ref().expect("same_sighting implies a stage");
-        let seen = if now - old.seen >= SEEN_REFRESH_SECS {
+fn settle_stage(slot: &mut Slot, kind: StageKind, maps: Vec<String>, now: i64) {
+    let kept = slot.stage.as_ref().and_then(|old| {
+        if old.kind == kind
+            && now >= slot.last_known_at
+            && now - slot.last_known_at < SIGHTING_GAP_SECS
+        {
+            Some((old.since, old.seen))
+        } else {
+            None
+        }
+    });
+    let stage = if let Some((since, old_seen)) = kept {
+        let seen = if now - old_seen >= SEEN_REFRESH_SECS {
             now
         } else {
-            old.seen
+            old_seen
         };
         CompanionStage {
-            kind: new.kind,
-            maps: new.maps,
-            since: old.since,
+            kind,
+            maps,
+            since,
             seen,
         }
     } else {
         CompanionStage {
-            kind: new.kind,
-            maps: new.maps,
+            kind,
+            maps,
             since: now,
             seen: now,
         }
     };
     slot.last_known_at = now;
-    slot.stage = Some(stage.clone());
-    Some(stage)
+    slot.stage = Some(stage);
 }
 
-/// Write the stage into the status file (`None` clears it), keeping
-/// everything else there. A repeat of the same kind within
-/// [`SIGHTING_GAP_SECS`] keeps the first `since` (map names may change).
-/// `seen` is refreshed at most every few seconds. The held slot is keyed
-/// by `data_dir` and is marked written only after the file write succeeds.
-/// Later status writes keep the stage too.
-pub fn publish_companion_stage(data_dir: &Path, stage: Option<CompanionStage>) {
+/// Write this tick's stage into the status file (`None` clears it), keeping
+/// everything else there. `tick` is `(kind, maps, now)`: `now` is this
+/// tick's Unix time, used as `since` on a new sighting and to refresh
+/// `seen`. A `CompanionStage` that was read back must not be passed in;
+/// its `seen` is ignored because only `now` is the tick time. A repeat of
+/// the same kind within [`SIGHTING_GAP_SECS`] keeps the first `since`
+/// (map names may change). The held slot is keyed by `data_dir` and is
+/// marked written only after the file write succeeds. Later status writes
+/// keep the stage too.
+pub fn publish_companion_stage(data_dir: &Path, tick: Option<(StageKind, Vec<String>, i64)>) {
     let _guard = status_write_lock();
     let to_write = {
         let mut slots = slots();
         let slot = slots.entry(data_dir.to_path_buf()).or_default();
-        match stage {
+        match tick {
             None => slot.stage = None,
-            Some(new) => {
-                settle_stage(slot, new);
-            }
+            Some((kind, maps, now)) => settle_stage(slot, kind, maps, now),
         }
         if slot.written == slot.stage {
             return;
@@ -228,9 +262,12 @@ pub fn read_companion_stage(data_dir: &Path, live_pid: u32) -> Option<CompanionS
     status.companion_stage
 }
 
-/// Deserialize [`Status::companion_stage`] so a shape this build cannot
-/// parse becomes `None` instead of failing the whole status file.
-pub fn deserialize_lenient<'de, D>(deserializer: D) -> Result<Option<CompanionStage>, D::Error>
+/// Deserialize [`crate::ocr_status::Status::companion_stage`] so a shape
+/// this build cannot parse becomes `None` instead of failing the whole
+/// status file.
+pub(crate) fn deserialize_lenient<'de, D>(
+    deserializer: D,
+) -> Result<Option<CompanionStage>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -242,6 +279,11 @@ where
 mod tests {
     use super::*;
     use crate::ocr_status::Status;
+    use std::os::unix::fs::MetadataExt;
+
+    fn publish_tick(dir: &Path, kind: StageKind, maps: Vec<String>, now: i64) {
+        publish_companion_stage(dir, Some((kind, maps, now)));
+    }
 
     fn written_stage(dir: &Path) -> Option<CompanionStage> {
         let status = read_status(dir).unwrap();
@@ -257,7 +299,7 @@ mod tests {
             vec!["Circuit Royal".into(), "Havana".into(), "Ilios".into()],
             100,
         );
-        publish_companion_stage(dir.path(), Some(vote.clone()));
+        publish_tick(dir.path(), vote.kind, vote.maps.clone(), vote.since);
         assert_eq!(read_companion_stage(dir.path(), 0), Some(vote.clone()));
         assert_eq!(companion_stage_for(dir.path()), Some(vote.clone()));
 
@@ -268,7 +310,7 @@ mod tests {
             .modified()
             .unwrap();
         let later = CompanionStage::new(StageKind::MapVote, vote.maps.clone(), 102);
-        publish_companion_stage(dir.path(), Some(later));
+        publish_tick(dir.path(), later.kind, later.maps.clone(), later.since);
         assert_eq!(read_companion_stage(dir.path(), 0), Some(vote.clone()));
         let mtime_later = std::fs::metadata(crate::ocr_status::status_path(dir.path()))
             .unwrap()
@@ -288,7 +330,7 @@ mod tests {
         assert_eq!(read_companion_stage(dir.path(), 0), None);
 
         let ban = CompanionStage::new(StageKind::HeroBan, Vec::new(), 120);
-        publish_companion_stage(dir.path(), Some(ban.clone()));
+        publish_tick(dir.path(), ban.kind, ban.maps.clone(), ban.since);
         assert_eq!(read_companion_stage(dir.path(), 9), Some(ban));
         // Other fields in the file stay.
         assert_eq!(read_status(dir.path()).unwrap().pid, 9);
@@ -302,19 +344,19 @@ mod tests {
     fn a_repeat_after_the_gap_is_a_new_sighting() {
         let dir = tempfile::tempdir().unwrap();
         let first = CompanionStage::new(StageKind::MapVote, Vec::new(), 1_000);
-        publish_companion_stage(dir.path(), Some(first.clone()));
+        publish_tick(dir.path(), first.kind, first.maps.clone(), first.since);
         assert_eq!(written_stage(dir.path()).unwrap().since, 1_000);
 
         // t + 2: same since, no write.
         let soon = CompanionStage::new(StageKind::MapVote, Vec::new(), 1_002);
-        publish_companion_stage(dir.path(), Some(soon));
+        publish_tick(dir.path(), soon.kind, soon.maps.clone(), soon.since);
         let held = written_stage(dir.path()).unwrap();
         assert_eq!(held.since, 1_000);
         assert_eq!(held.seen, 1_000);
 
         // t + 600: new since, file rewritten.
         let later = CompanionStage::new(StageKind::MapVote, Vec::new(), 1_600);
-        publish_companion_stage(dir.path(), Some(later));
+        publish_tick(dir.path(), later.kind, later.maps.clone(), later.since);
         let held = written_stage(dir.path()).unwrap();
         assert_eq!(held.since, 1_600);
         assert_eq!(held.seen, 1_600);
@@ -324,13 +366,13 @@ mod tests {
     fn map_names_changing_inside_the_gap_keep_since() {
         let dir = tempfile::tempdir().unwrap();
         let first = CompanionStage::new(StageKind::MapVote, vec!["Havana".into()], 50);
-        publish_companion_stage(dir.path(), Some(first));
+        publish_tick(dir.path(), first.kind, first.maps.clone(), first.since);
         let richer = CompanionStage::new(
             StageKind::MapVote,
             vec!["Havana".into(), "Ilios".into()],
             52,
         );
-        publish_companion_stage(dir.path(), Some(richer));
+        publish_tick(dir.path(), richer.kind, richer.maps.clone(), richer.since);
         let held = written_stage(dir.path()).unwrap();
         assert_eq!(held.since, 50);
         assert_eq!(held.maps, vec!["Havana", "Ilios"]);
@@ -341,8 +383,8 @@ mod tests {
         let a = tempfile::tempdir().unwrap();
         let b = tempfile::tempdir().unwrap();
         let vote = CompanionStage::new(StageKind::MapVote, vec!["Ilios".into()], 10);
-        publish_companion_stage(a.path(), Some(vote.clone()));
-        publish_companion_stage(b.path(), Some(vote.clone()));
+        publish_tick(a.path(), vote.kind, vote.maps.clone(), vote.since);
+        publish_tick(b.path(), vote.kind, vote.maps.clone(), vote.since);
         assert_eq!(read_companion_stage(a.path(), 0), Some(vote.clone()));
         assert_eq!(read_companion_stage(b.path(), 0), Some(vote));
     }
@@ -378,6 +420,52 @@ mod tests {
         assert_eq!(status.pid, 5);
         assert!(status.share_open);
         assert_eq!(status.companion_stage, None);
+    }
+
+    #[test]
+    fn seen_is_refreshed_after_the_interval_and_keeps_the_inode_before() {
+        let dir = tempfile::tempdir().unwrap();
+        let maps = vec![
+            "Circuit Royal".into(),
+            "Esperanca".into(),
+            "Throne of Anubis".into(),
+        ];
+        publish_tick(dir.path(), StageKind::MapVote, maps.clone(), 1_000);
+        let path = crate::ocr_status::status_path(dir.path());
+        let inode = std::fs::metadata(&path).unwrap().ino();
+        let held = written_stage(dir.path()).unwrap();
+        assert_eq!(held.since, 1_000);
+        assert_eq!(held.seen, 1_000);
+
+        // t + 3: same inode, seen stays t (refresh is 5 s).
+        publish_tick(dir.path(), StageKind::MapVote, maps.clone(), 1_003);
+        let held = written_stage(dir.path()).unwrap();
+        assert_eq!(held.since, 1_000);
+        assert_eq!(held.seen, 1_000);
+        assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
+
+        // t + 6: rewritten, same since, seen is t + 6.
+        publish_tick(dir.path(), StageKind::MapVote, maps, 1_006);
+        let held = written_stage(dir.path()).unwrap();
+        assert_eq!(held.since, 1_000);
+        assert_eq!(held.seen, 1_006);
+    }
+
+    #[test]
+    fn a_failed_write_is_retried_and_keeps_the_first_since() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("no_status_dir");
+        publish_tick(missing.as_path(), StageKind::HeroSelect, Vec::new(), 100);
+        assert!(!crate::ocr_status::status_path(&missing).exists());
+
+        std::fs::create_dir(&missing).unwrap();
+        // Same kind 1 s later: the first tick's since is kept, and the
+        // write is retried now that the dir exists.
+        publish_tick(missing.as_path(), StageKind::HeroSelect, Vec::new(), 101);
+        let held = written_stage(&missing).unwrap();
+        assert_eq!(held.kind, StageKind::HeroSelect);
+        assert_eq!(held.since, 100);
+        assert_eq!(held.seen, 100);
     }
 
     #[test]

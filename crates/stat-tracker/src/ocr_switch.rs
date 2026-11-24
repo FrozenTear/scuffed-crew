@@ -407,7 +407,10 @@ mod tests {
             vec!["Ilios".into()],
             20,
         );
-        crate::companion_stage::publish_companion_stage(dir.path(), Some(vote.clone()));
+        crate::companion_stage::publish_companion_stage(
+            dir.path(),
+            Some((vote.kind, vote.maps.clone(), vote.since)),
+        );
         let config = crate::config::Config {
             data_dir: dir.path().to_path_buf(),
             ..crate::config::Config::default()

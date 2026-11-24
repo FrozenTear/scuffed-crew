@@ -50,15 +50,16 @@ fn vote_maps_are_canonical_display_names_deduped() {
     .unwrap();
     assert_eq!(watchpoint.maps, vec!["Watchpoint: Gibraltar"]);
 
-    // Circuit Royal (not "Royale") and a split Throne of Anubis both
-    // collapse to one display name each.
+    // Circuit Royal (not "Royale"), Esperanca (ascii and accented), and
+    // a split Throne of Anubis, all from a real detector list.
     let throne = stage_of(
         &GamePhase::MapVote {
             maps: vec![
                 "CIRCUIT ROYAL".into(),
+                "ESPERANCA".into(),
+                "ESPERANÇA".into(),
                 "THRONE".into(),
                 "ANUBIS".into(),
-                "THRONE OF ANUBIS".into(),
             ],
         },
         2,
@@ -66,7 +67,11 @@ fn vote_maps_are_canonical_display_names_deduped() {
     .unwrap();
     assert_eq!(
         throne.maps,
-        vec!["Circuit Royal".to_string(), "Throne of Anubis".into()]
+        vec![
+            "Circuit Royal".to_string(),
+            "Esperanca".into(),
+            "Throne of Anubis".into(),
+        ]
     );
 }
 
