@@ -1,5 +1,5 @@
 [Unit]
-Description=Scuffed Stat Tracker: OW2 personal stats capture daemon
+Description=Scuffed Stat Tracker: Overwatch personal stats capture daemon
 After=graphical-session.target scuffed-stat-tracker-session.service
 # Soft dependency: a failed session import must not keep the daemon down.
 # graphical-session.target does not put WAYLAND_DISPLAY or DISPLAY on the

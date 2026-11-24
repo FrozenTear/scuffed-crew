@@ -1,7 +1,7 @@
 [Desktop Entry]
 Name=Scuffed Stat Tracker
-GenericName=OW2 Stats Tracker
-Comment=Capture your Overwatch 2 personal stats automatically
+GenericName=Overwatch Stats Tracker
+Comment=Capture your Overwatch personal stats automatically
 # Exec/TryExec are rewritten at install time to the absolute
 # $PREFIX/bin/stat-tracker-gui. A bare name fails in app launchers whose
 # session PATH omits ~/.local/bin (AerynOS, Cosmic, GNOME). Terminal
