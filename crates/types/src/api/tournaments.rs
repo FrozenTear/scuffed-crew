@@ -19,9 +19,17 @@ pub struct StatusChangeRequest {
     pub status: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+/// Mirrors site-server `AddParticipantRequest` (POST .../participants): an
+/// org team (`team_id`) or an outside entrant (`external_name`). The server
+/// answers 400 when both are missing.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AddParticipantRequest {
-    pub member_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub team_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seed: Option<u32>,
 }
 
 /// Mirrors site-server `ReportMatchRequest` (PATCH .../matches/{mid}/report).

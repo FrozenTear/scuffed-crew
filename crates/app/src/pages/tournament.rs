@@ -41,12 +41,11 @@ struct TournamentDetail {
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-struct Participant {
-    id: String,
-    team_id: Option<String>,
-    external_name: Option<String>,
-    #[allow(dead_code)]
-    seed: Option<u32>,
+pub(crate) struct Participant {
+    pub(crate) id: String,
+    pub(crate) team_id: Option<String>,
+    pub(crate) external_name: Option<String>,
+    pub(crate) seed: Option<u32>,
     #[allow(dead_code)]
     status: String,
 }
@@ -82,23 +81,41 @@ fn summary_lead(format: &str, teams: usize, best_of: u32) -> String {
     lead
 }
 
-/// Display name of each participant, keyed by participant id. An entrant
-/// with nothing to show yet has no entry and reads "To be decided".
-fn participant_names(
+/// An entrant with neither a team nor a name. One word on the public page
+/// and the admin page; "To be decided" stays for a slot with no entrant.
+pub(crate) const UNNAMED_ENTRANT: &str = "Unnamed entrant";
+
+/// An entrant whose team is not in the loaded teams list: the team was
+/// deactivated, the list is still loading or failed, or it is past the
+/// loaded page. Never the raw record key.
+pub(crate) const UNLISTED_TEAM: &str = "Unlisted team";
+
+/// Display name of each participant, keyed by participant id: the typed
+/// name, else the team's name, else [`UNLISTED_TEAM`], else
+/// [`UNNAMED_ENTRANT`]. Every participant has an entry, so only a slot with
+/// no entrant reads "To be decided". The admin tournaments page names its
+/// participants with this too.
+pub(crate) fn participant_names(
     participants: &[Participant],
     team_names: &HashMap<String, String>,
 ) -> HashMap<String, String> {
     participants
         .iter()
-        .filter_map(|p| {
-            let name = if let Some(ext) = &p.external_name {
-                ext.clone()
-            } else if let Some(tid) = &p.team_id {
-                team_names.get(tid).cloned().unwrap_or_else(|| tid.clone())
-            } else {
-                return None;
+        .map(|p| {
+            let external = p
+                .external_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|n| !n.is_empty());
+            let name = match (external, &p.team_id) {
+                (Some(ext), _) => ext.to_string(),
+                (None, Some(tid)) => team_names
+                    .get(tid)
+                    .cloned()
+                    .unwrap_or_else(|| UNLISTED_TEAM.to_string()),
+                (None, None) => UNNAMED_ENTRANT.to_string(),
             };
-            Some((p.id.clone(), name))
+            (p.id.clone(), name)
         })
         .collect()
 }
@@ -617,14 +634,21 @@ mod tests {
             participant("p:b", Some("team:alpha"), Some("Crew Beta")),
             participant("p:c", Some("team:unknown"), None),
             participant("p:d", None, None),
+            participant("p:e", Some("team:alpha"), Some("   ")),
+            participant("p:f", None, Some("")),
         ];
         let names = participant_names(&list, &team_names());
         assert_eq!(names.get("p:a").map(String::as_str), Some("Squad Alpha"));
         assert_eq!(names.get("p:b").map(String::as_str), Some("Crew Beta"));
-        // Unchanged: a team the list does not know falls back to its id.
-        assert_eq!(names.get("p:c").map(String::as_str), Some("team:unknown"));
-        // Nothing to show yet: the slot reads "To be decided".
-        assert_eq!(names.get("p:d"), None);
+        // Review on PR 828: a team the list does not know reads a word, never
+        // its raw record key, and an entrant with no team and no name reads
+        // the same word on both pages ("To be decided" is for an empty slot).
+        assert_eq!(names.get("p:c").map(String::as_str), Some(UNLISTED_TEAM));
+        assert_eq!(names.get("p:d").map(String::as_str), Some(UNNAMED_ENTRANT));
+        // A blank typed name counts as missing.
+        assert_eq!(names.get("p:e").map(String::as_str), Some("Squad Alpha"));
+        assert_eq!(names.get("p:f").map(String::as_str), Some(UNNAMED_ENTRANT));
+        assert_eq!(names.len(), list.len());
     }
 
     #[test]
