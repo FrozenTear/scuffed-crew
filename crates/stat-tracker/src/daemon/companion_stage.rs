@@ -38,7 +38,11 @@ mod tests {
 
     #[test]
     fn each_game_phase_maps_to_its_stage() {
-        let maps = vec!["Circuit Royale".to_string(), "Havana".into(), "Ilios".into()];
+        let maps = vec![
+            "Circuit Royale".to_string(),
+            "Havana".into(),
+            "Ilios".into(),
+        ];
         let vote = stage_of(&GamePhase::MapVote { maps: maps.clone() }, 10).unwrap();
         assert_eq!(vote, CompanionStage::new(StageKind::MapVote, maps, 10));
         // A vote read with no names is still the vote, with no maps.

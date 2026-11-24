@@ -187,7 +187,10 @@ mod tests {
             let stage = CompanionStage::new(kind, Vec::new(), 1);
             let text = serde_json::to_string(&stage).unwrap();
             assert!(text.contains(&format!("\"{name}\"")), "{text}");
-            assert_eq!(serde_json::from_str::<CompanionStage>(&text).unwrap(), stage);
+            assert_eq!(
+                serde_json::from_str::<CompanionStage>(&text).unwrap(),
+                stage
+            );
         }
     }
 }
