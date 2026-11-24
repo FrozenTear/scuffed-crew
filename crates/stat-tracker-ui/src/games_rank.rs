@@ -1,0 +1,227 @@
+//! The Games table's Rank cell: what the rank reader read on the rank update
+//! screen after the game ([`Game::rank_update`]). The words are the site's
+//! (`crates/app/src/pages/stats/rank.rs`), copied here so the tracker and
+//! the site say the same thing for the same game: "Diamond 2", "45%",
+//! "+23%", and one sentence for the tooltip.
+//!
+//! The values shown are the ones the upload sends the site for this game:
+//! the tier word in title case (the pack may spell it in capitals), the
+//! division 1..=5, progress and change -100..=100, the role only when the
+//! upload would send it (`Open` only with an open queue title, a role icon
+//! never with one), and the queue only when its title was read confidently
+//! (the same queue the map chip shows). A game with nothing to show keeps
+//! the plain "-" the column had before ranks were read.
+
+use iced::widget::text::Wrapping;
+use iced::widget::{column, container, text, tooltip};
+use iced::{Element, Padding};
+
+use crate::app::Message;
+use crate::games_table::pill_box;
+use crate::model::Game;
+use crate::theme::{BORDER, SIZE_LABEL, SIZE_META, TEXT, TEXT_2, TEXT_3};
+
+/// A missing or unsure role, as the site words it.
+pub const ROLE_UNKNOWN: &str = "Role unknown";
+
+/// The tooltip text size (the bans and picks tooltips use the same).
+const TIP_SIZE: f32 = 12.0;
+
+/// What one game's rank shows: every value that is in range.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RankShown {
+    /// "Tank", "Damage", "Support" or "Open queue".
+    pub role: Option<&'static str>,
+    /// Tier name in title case, e.g. "Diamond".
+    pub tier: Option<String>,
+    /// 1..=5.
+    pub division: Option<u8>,
+    /// -100..=100. A negative value is demotion protection and shows as is.
+    pub progress: Option<i32>,
+    /// Progress points gained or lost this game, -100..=100.
+    pub change: Option<i32>,
+    /// The confident queue title, single spaced, in capitals.
+    pub queue: Option<String>,
+}
+
+impl RankShown {
+    /// None when the game has no rank, or no rank value the cell can show
+    /// (a rank text, progress or change).
+    pub fn from_game(g: &Game) -> Option<Self> {
+        let rank = g.rank_update.as_ref()?;
+        let open_queue = g.queue_title.as_ref().is_some_and(|t| t.is_open_queue());
+        let num = |n: &Option<stat_tracker::model::RankNumber>| {
+            n.as_ref().and_then(|n| i32::try_from(n.value).ok())
+        };
+        let shown = Self {
+            role: rank
+                .role
+                .as_ref()
+                .and_then(|r| role_name(&r.value, open_queue)),
+            tier: rank
+                .role_rank
+                .as_ref()
+                .and_then(|t| clean_text(&t.value))
+                .map(|t| title_case(&t)),
+            division: num(&rank.division)
+                .and_then(|d| u8::try_from(d).ok())
+                .filter(|d| (1..=5).contains(d)),
+            progress: num(&rank.progress_pct).filter(|p| (-100..=100).contains(p)),
+            change: num(&rank.progress_change).filter(|c| (-100..=100).contains(c)),
+            queue: crate::games_detail::queue_value(g)
+                .and_then(|q| clean_text(&q))
+                .map(|q| q.to_uppercase()),
+        };
+        (!shown.badge_parts().is_empty()).then_some(shown)
+    }
+
+    /// "Diamond 2", "Diamond", "Division 2", or None.
+    pub fn rank_text(&self) -> Option<String> {
+        match (&self.tier, self.division) {
+            (Some(t), Some(d)) => Some(format!("{t} {d}")),
+            (Some(t), None) => Some(t.clone()),
+            (None, Some(d)) => Some(format!("Division {d}")),
+            (None, None) => None,
+        }
+    }
+
+    /// "Support, Role Queue", or the role alone. See [`context_label`].
+    pub fn context(&self) -> String {
+        context_label(self.role, self.queue.as_deref())
+    }
+
+    /// The short visible pieces: rank, progress, change.
+    pub fn badge_parts(&self) -> Vec<String> {
+        let mut parts = Vec::new();
+        if let Some(rank) = self.rank_text() {
+            parts.push(rank);
+        }
+        if let Some(p) = self.progress {
+            parts.push(format!("{p}%"));
+        }
+        if let Some(c) = self.change {
+            parts.push(change_text(c));
+        }
+        parts
+    }
+
+    /// One sentence for the tooltip.
+    pub fn sentence(&self) -> String {
+        let mut parts = vec![self.context()];
+        if let Some(rank) = self.rank_text() {
+            parts.push(rank);
+        }
+        if let Some(p) = self.progress {
+            parts.push(format!("{p}% progress"));
+        }
+        if let Some(c) = self.change {
+            parts.push(format!("{} this game", change_text(c)));
+        }
+        format!("Rank: {}", parts.join(", "))
+    }
+
+    /// The cell's lines: the rank text, then progress and change ("45%
+    /// +23%") smaller under it. Without a rank text, progress and change
+    /// are the one line.
+    pub fn lines(&self) -> Vec<String> {
+        let numbers: Vec<String> = self
+            .progress
+            .map(|p| format!("{p}%"))
+            .into_iter()
+            .chain(self.change.map(change_text))
+            .collect();
+        let numbers = (!numbers.is_empty()).then(|| numbers.join(" "));
+        self.rank_text().into_iter().chain(numbers).collect()
+    }
+}
+
+/// The stored role as the site shows it, or None when the upload would not
+/// send it: the site's `RankRole` spellings only, `Open` only with an open
+/// queue title, and a role icon never with one.
+fn role_name(value: &str, open_queue: bool) -> Option<&'static str> {
+    match value {
+        "Tank" if !open_queue => Some("Tank"),
+        "Damage" if !open_queue => Some("Damage"),
+        "Support" if !open_queue => Some("Support"),
+        "Open" if open_queue => Some("Open queue"),
+        _ => None,
+    }
+}
+
+/// Role and queue for display: "Support, Role Queue". A missing queue is
+/// left out, and a queue that only repeats the role ("Open queue" with the
+/// title "OPEN QUEUE") shows once.
+pub fn context_label(role: Option<&str>, queue: Option<&str>) -> String {
+    let role = role.unwrap_or(ROLE_UNKNOWN);
+    match queue.map(title_case) {
+        Some(q) if !q.eq_ignore_ascii_case(role) => format!("{role}, {q}"),
+        _ => role.to_string(),
+    }
+}
+
+/// "+23%", "-15%", "0%".
+pub fn change_text(change: i32) -> String {
+    if change > 0 {
+        format!("+{change}%")
+    } else {
+        format!("{change}%")
+    }
+}
+
+/// Trimmed, single spaced, or None when blank.
+fn clean_text(text: &str) -> Option<String> {
+    let joined = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!joined.is_empty()).then_some(joined)
+}
+
+/// "DIAMOND" or "diamond" to "Diamond", "ROLE QUEUE" to "Role Queue".
+fn title_case(text: &str) -> String {
+    text.split(' ')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => first
+                    .to_uppercase()
+                    .chain(chars.flat_map(char::to_lowercase))
+                    .collect(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The Rank cell: the rank text with progress and change under it, and the
+/// sentence as its tooltip. A game with no rank draws "-" as before.
+pub fn cell(g: &Game) -> Element<'static, Message> {
+    let Some(shown) = RankShown::from_game(g) else {
+        return text("-").size(SIZE_META).color(TEXT_3).into();
+    };
+    let mut lines = shown.lines().into_iter();
+    let mut body = column![];
+    if let Some(top) = lines.next() {
+        body = body.push(
+            text(top)
+                .size(SIZE_META)
+                .color(TEXT_2)
+                .wrapping(Wrapping::None),
+        );
+    }
+    for line in lines {
+        body = body.push(
+            text(line)
+                .size(SIZE_LABEL)
+                .color(TEXT_3)
+                .wrapping(Wrapping::None),
+        );
+    }
+    let tip = container(text(shown.sentence()).size(TIP_SIZE).color(TEXT))
+        .padding(Padding::from([4, 8]))
+        .max_width(360)
+        .style(pill_box(BORDER));
+    tooltip(body, tip, tooltip::Position::Top).gap(4).into()
+}
+
+#[cfg(test)]
+#[path = "games_rank_tests.rs"]
+mod tests;

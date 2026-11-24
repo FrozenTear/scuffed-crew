@@ -607,7 +607,7 @@ where
 }
 
 /// Under the last table (spec p2), after the split rule.
-const SORT_NOTE: &str = "Columns sort; unsure and empty values always sort last. Length runs from the game's start screen to its result. When either was not seen, it is your first to last Tab press, so the game ran at least that long. The queue shows by the map only when the queue title reader (off by default) recognized its title. Rank and crew are not recorded yet.";
+const SORT_NOTE: &str = "Columns sort; unsure and empty values always sort last. Length runs from the game's start screen to its result. When either was not seen, it is your first to last Tab press, so the game ran at least that long. The queue shows by the map only when the queue title reader (off by default) recognized its title. Rank shows when the rank reader read the rank screen after the game; it does not sort. Crew is not recorded yet.";
 /// No games stored at all.
 pub const EMPTY_NONE: &str = "No games yet. A game shows here once the tracker saves it.";
 /// Games stored, none left by the filters.
@@ -678,6 +678,7 @@ pub(crate) mod tests {
             bans_picks: None,
             bans_picks_status: None,
             queue_title: None,
+            rank_update: None,
             match_times: None,
         }
     }
@@ -1193,7 +1194,10 @@ pub(crate) mod tests {
             };
             assert_eq!(order, want);
         }
-        assert!(SORT_NOTE.contains("Rank and crew are not recorded yet"));
+        // Rank is recorded now (0.7) but still does not sort; crew is not.
+        assert!(SORT_NOTE.contains("Crew is not recorded yet"));
+        assert!(SORT_NOTE.contains("it does not sort"));
+        assert!(!SORT_NOTE.contains("Rank and crew are not recorded"));
         assert!(!SORT_NOTE.contains("queue and crew are not recorded"));
         // Every player sees the note, and the reader is off by default, so
         // it must not promise a queue chip without saying so.
