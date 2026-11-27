@@ -14,13 +14,14 @@ impl LocalStore {
     /// replace a confident title with a warning.
     ///
     /// A title that changes the `rank` object the upload sends for the game
-    /// (`sync::wire`) re-queues it in the same statement
-    /// (`storage::upload_queue`), as every payload write does. One that
-    /// changes no uploaded byte leaves the queue, and a set-aside game, as
-    /// it is: a warning, a title naming a mode that is not Competitive
-    /// (QUICK, UNRANKED, ARCADE, STADIUM, CUSTOM), or one naming neither
-    /// ROLE nor OPEN on a game with no rank screen read. Same rule as
-    /// `attach_rank_update`.
+    /// (`sync::wire::queue_title_changes_upload`) re-queues it in the same
+    /// statement (`storage::upload_queue`), as every payload write does. One
+    /// that changes no uploaded byte leaves the queue, and a set-aside game,
+    /// as it is: a warning, and, on a game with no rank screen read, a title
+    /// naming a mode that is not Competitive (QUICK, UNRANKED, ARCADE,
+    /// STADIUM, CUSTOM) or naming neither ROLE nor OPEN. On a game with a
+    /// rank screen read those titles do change the body, so they re-queue
+    /// it. Same rule as `attach_rank_update`.
     pub async fn attach_queue_title(
         &self,
         session_id: &str,
@@ -31,6 +32,9 @@ impl LocalStore {
         if snaps.is_empty() || snaps.iter().any(|m| m.queue_title.is_some()) {
             return Ok(false);
         }
+        // Every snapshot of a game shares its title and rank update, and the
+        // team size never decides whether the `rank` object exists, so a
+        // title changes every snapshot's body or none: `any` is `all`.
         let uploaded = snaps
             .iter()
             .any(|m| crate::sync::queue_title_changes_upload(m, title));

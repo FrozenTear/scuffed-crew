@@ -65,13 +65,27 @@ pub struct RankSlot {
     /// rank screen field for it. Plays no part in [`RankSlot::same_slot`].
     #[serde(default)]
     pub rank_read: bool,
+    /// The upload's `rank` object holds a tier: `rank.role_rank` or
+    /// `rank.division`, each only as the upload keeps it. A per-slot
+    /// current rank view counts only such games, so a newer read with no
+    /// tier (a role line, a banner word, change tags alone) never hides an
+    /// older game's real tier. Implies `rank_read`. Plays no part in
+    /// [`RankSlot::same_slot`].
+    #[serde(default)]
+    pub tier_read: bool,
 }
 
 impl RankSlot {
-    /// Same queue and same role: the two games' ranks may be compared.
-    /// The confidence plays no part.
+    /// The two games' ranks may be compared: the same queue and, in a role
+    /// queue or an unknown queue, the same role. An open queue has one rank
+    /// whatever its role line read (`Open`, or none when the line was
+    /// missed, misspelled or read as a role icon), so open queue slots
+    /// match on the queue alone and a view never shows two current open
+    /// queue ranks for one queue. The confidence and the read flags play no
+    /// part.
     pub fn same_slot(&self, other: &Self) -> bool {
-        self.queue == other.queue && self.role == other.role
+        let open = matches!(self.queue, RankQueue::Open5v5 | RankQueue::Open6v6);
+        self.queue == other.queue && (open || self.role == other.role)
     }
 }
 
@@ -485,6 +499,35 @@ mod tests {
     /// Two slots match only on the same queue and the same role; the
     /// confidence and `rank_read` play no part. A JSON slot from before a
     /// field existed reads that field as `None` (`rank_read` as false).
+    /// An open queue slot matches on the queue alone: a missed or
+    /// misspelled role line (no role) is the same open queue rank as the
+    /// `Open` line. Role queue and unknown queue slots still need the same
+    /// role, and two open queues of another size never match.
+    #[test]
+    fn an_open_queue_slot_matches_on_the_queue_alone() {
+        let slot = |queue, role| RankSlot {
+            queue,
+            queue_confidence: Some(0.9),
+            role,
+            rank_read: true,
+            tier_read: true,
+        };
+        for q in [RankQueue::Open5v5, RankQueue::Open6v6] {
+            let open = slot(q, Some(RankRole::Open));
+            for other in [slot(q, None), slot(q, Some(RankRole::Tank))] {
+                assert!(open.same_slot(&other), "{q:?} {other:?}");
+                assert!(other.same_slot(&open), "{q:?} {other:?}");
+            }
+        }
+        let open6 = slot(RankQueue::Open6v6, None);
+        assert!(!open6.same_slot(&slot(RankQueue::Open5v5, None)));
+        for q in [RankQueue::Role5v5, RankQueue::Role6v6, RankQueue::Unknown] {
+            let tank = slot(q, Some(RankRole::Tank));
+            assert!(!tank.same_slot(&slot(q, None)), "{q:?}");
+            assert!(!slot(q, None).same_slot(&tank), "{q:?}");
+        }
+    }
+
     #[test]
     fn a_rank_slot_is_one_queue_and_one_role() {
         let slot = |queue, role| RankSlot {
@@ -492,11 +535,13 @@ mod tests {
             queue_confidence: Some(0.9),
             role,
             rank_read: true,
+            tier_read: true,
         };
         let tank6 = slot(RankQueue::Role6v6, Some(RankRole::Tank));
         let other_conf = RankSlot {
             queue_confidence: None,
             rank_read: false,
+            tier_read: false,
             ..tank6
         };
         assert!(tank6.same_slot(&other_conf));
@@ -513,7 +558,7 @@ mod tests {
         let read: RankSlot = serde_json::from_str(r#"{"queue":"role_6v6"}"#).unwrap();
         assert_eq!(read.queue, RankQueue::Role6v6);
         assert_eq!((read.queue_confidence, read.role), (None, None));
-        assert!(!read.rank_read);
+        assert!(!read.rank_read && !read.tier_read);
     }
 
     #[test]

@@ -11,15 +11,18 @@
 use super::model::Game;
 use crate::rank_queue::RankSlot;
 
-/// The game has a rank screen read the upload keeps
-/// ([`RankSlot::rank_read`]) and a slot to file it under. The stored
-/// `rank_update` is not looked at: a field the upload drops is no rank here.
+/// The game has a tier the upload keeps ([`RankSlot::tier_read`]: the
+/// tier word or the division) and a slot to file it under. The stored
+/// `rank_update` is not looked at: a field the upload drops is no rank
+/// here. A read with no tier (a role line, a banner word, change tags or
+/// hero SR alone) is left out, so it never hides an older game's real tier.
 fn ranked_slot(g: &Game) -> Option<RankSlot> {
-    g.rank_slot.filter(|s| s.rank_read)
+    g.rank_slot.filter(|s| s.tier_read)
 }
 
-/// The newest ranked game of each slot (queue and role), newest first. A
-/// game with no rank screen read the upload keeps, or no slot (not Competitive evidence, a
+/// The newest ranked game of each slot ([`RankSlot::same_slot`]: queue and
+/// role, or the queue alone for an open queue), newest first. A game with
+/// no tier the upload keeps, or no slot (not Competitive evidence, a
 /// mode that is not Competitive, or the readers off), is left out. Two
 /// games of one slot played at the same time keep the one listed first.
 pub fn latest_rank_per_slot(games: &[Game]) -> Vec<&Game> {

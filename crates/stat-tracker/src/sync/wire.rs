@@ -196,13 +196,16 @@ fn upload_queue(m: &PersonalMatch) -> UploadQueueField {
 }
 
 /// Where this game's rank belongs locally: the queue and role of the `rank`
-/// object the upload sends for it (`rank.queue`, `rank.role`), so the local
-/// value can never say another queue than the site gets. `None` when the
-/// upload sends no `rank` object: not Competitive evidence, a title naming
-/// a mode that is not Competitive, or the readers off.
+/// object the upload sends for this row once the game is sent (`rank.queue`,
+/// `rank.role`), so the local value can never say another queue than the
+/// site gets. A game the upload holds back for review still has its slot
+/// here; it is the same once the game is sent from the same newest row.
+/// `None` when that `rank` object is not sent: not Competitive evidence, a
+/// title naming a mode that is not Competitive, or the readers off.
 pub fn rank_slot(m: &PersonalMatch) -> Option<crate::rank_queue::RankSlot> {
     let rank = upload_rank(m)?;
     let rank_read = rank.has_rank_screen_field();
+    let tier_read = rank.role_rank.is_some() || rank.division.is_some();
     // `upload_rank` sets the queue on every object it returns; an object
     // without one would be a bug there, and is read as unknown here.
     let queue = rank.queue.unwrap_or(UploadQueueField {
@@ -211,6 +214,7 @@ pub fn rank_slot(m: &PersonalMatch) -> Option<crate::rank_queue::RankSlot> {
     });
     Some(crate::rank_queue::RankSlot {
         rank_read,
+        tier_read,
         queue: queue.value,
         queue_confidence: queue.confidence,
         role: rank.role.map(|r| r.value),
@@ -218,10 +222,14 @@ pub fn rank_slot(m: &PersonalMatch) -> Option<crate::rank_queue::RankSlot> {
 }
 
 /// Whether storing `title` on `m` changes the `rank` object the upload
-/// sends for it. A title the upload does not send or that decides nothing
-/// (a warning, a title naming a mode that is not Competitive, or one naming
-/// neither ROLE nor OPEN with no rank screen read) changes no uploaded
-/// byte, so the store leaves the game's upload state as it is.
+/// sends for it. A warning changes no uploaded byte, and neither does a
+/// confident title naming a mode that is not Competitive, or naming neither
+/// ROLE nor OPEN, on a game with no rank screen read: the store leaves that
+/// game's upload state as it is. On a game with a rank screen read the same
+/// titles do change the body (a mode that is not Competitive drops the
+/// whole `rank` object; a title naming neither adds `rank.queue_title`), so
+/// they re-queue it. Decided on the whole `rank` object, never on
+/// [`rank_slot`]: a title can change the body and leave the slot as it was.
 pub(crate) fn queue_title_changes_upload(
     m: &PersonalMatch,
     title: &crate::model::QueueTitle,

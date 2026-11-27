@@ -187,3 +187,121 @@ async fn a_06_store_opens_with_its_rank_history_and_an_unknown_queue() {
     assert_eq!(slot.queue, RankQueue::Role6v6);
     assert_eq!(slot.role, Some(RankRole::Tank));
 }
+
+fn tank_gold() -> RankUpdate {
+    RankUpdate {
+        role: Some(RankText {
+            value: "Tank".into(),
+            confidence: 0.9,
+        }),
+        role_rank: Some(RankText {
+            value: "GOLD".into(),
+            confidence: 0.9,
+        }),
+        ..RankUpdate::default()
+    }
+}
+
+/// A synced or set-aside game with a Tank GOLD read and `size` a side.
+async fn ranked_game(store: &LocalStore, session_id: &str, size: Option<u8>, set_aside: bool) {
+    let mut row = snap(session_id, 1);
+    row.rank_update = Some(tank_gold());
+    row.team_size = size;
+    store.insert_match(row).await.unwrap();
+    let rows: Vec<_> = store
+        .get_unsynced()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.session_id == session_id)
+        .collect();
+    let claims = SyncClaim::capture(&rows);
+    if set_aside {
+        store
+            .quarantine_upload(&claims, None, "matches[0]: refused")
+            .await
+            .unwrap();
+    } else {
+        store.mark_synced(&claims).await.unwrap();
+    }
+}
+
+/// R1 and R4 of the #926 review: on a game with a rank screen read, a
+/// title re-queues it whenever the uploaded `rank` object changes, even
+/// when the slot does not. A bare `COMPETITIVE` title leaves the slot at
+/// (unknown, Tank) but adds `rank.queue_title`; a title naming a mode that
+/// is not Competitive drops the whole object. Both re-queue a synced game
+/// and retry a set-aside one.
+#[tokio::test]
+async fn a_title_that_changes_the_rank_object_requeues_even_with_the_same_slot() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalStore::open(dir.path()).await.expect("open store");
+    let cases = [
+        ("COMPETITIVE", None, true),
+        ("COMPETITIVE", Some(5), true),
+        ("ROLE QUEUE: QUICK PLAY", None, false),
+        ("ARCADE: OPEN QUEUE", Some(6), false),
+    ];
+    for (i, (value, size, same_slot)) in cases.into_iter().enumerate() {
+        for set_aside in [false, true] {
+            let session = format!("r1-{i}-{set_aside}");
+            ranked_game(&store, &session, size, set_aside).await;
+            let before = store.get_session_snapshots(&session).await.unwrap();
+            let slot_before = crate::sync::rank_slot(&before[0]);
+            assert!(
+                store
+                    .get_unsynced()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .all(|r| r.session_id != session)
+            );
+            assert!(
+                store
+                    .attach_queue_title(&session, &title(value))
+                    .await
+                    .unwrap()
+            );
+            let after = store.get_session_snapshots(&session).await.unwrap();
+            let slot_after = crate::sync::rank_slot(&after[0]);
+            assert_eq!(slot_before == slot_after, same_slot, "{value} {size:?}");
+            let rows = store.get_unsynced().await.unwrap();
+            assert!(
+                queued(&rows, &session),
+                "{value} {size:?} set_aside={set_aside}"
+            );
+            assert!(after[0].upload_rejection().is_none(), "{value}: retried");
+        }
+    }
+}
+
+/// Q2: the newest row decides. Tabs read 5, then 6, then a Tab with no
+/// size: it carries 6 (the newest read), so its slot is role queue 6v6, the
+/// same queue the upload sends for it.
+#[tokio::test]
+async fn a_tab_with_no_size_carries_the_newest_size() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalStore::open(dir.path()).await.expect("open store");
+    for (elims, size) in [(1, Some(5)), (2, Some(6)), (3, None)] {
+        let mut row = snap("q2", elims);
+        row.hero = "Ana".into();
+        row.map_name = "Busan".into();
+        row.game_mode = "Control".into();
+        row.role = "Support".into();
+        row.team_size = size;
+        row.queue_title = Some(title("ROLE QUEUE"));
+        row.rank_update = Some(tank_gold());
+        store.insert_match(row).await.unwrap();
+    }
+    let rows = store.get_session_snapshots("q2").await.unwrap();
+    let newest = rows.iter().find(|r| r.elims == 3).unwrap();
+    assert_eq!(newest.team_size, Some(6));
+    let slot = crate::sync::rank_slot(newest).unwrap();
+    assert_eq!(slot.queue, RankQueue::Role6v6);
+    let body = serde_json::to_value(crate::sync::upload_request(
+        std::slice::from_ref(newest),
+        &[],
+    ))
+    .unwrap();
+    assert_eq!(body["matches"][0]["rank"]["queue"]["value"], "role_6v6");
+}
