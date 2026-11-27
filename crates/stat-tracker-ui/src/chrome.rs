@@ -96,6 +96,7 @@ pub(crate) fn with_layers<'a, const N: usize>(
     let pill = [
         crate::status_pill::menu_layer(app),
         crate::status_pill::confirm_layer(app),
+        crate::settings_bar::leave_layer(app),
     ];
     let layers: Vec<_> = layers
         .into_iter()
@@ -182,14 +183,21 @@ fn sidebar_pane_parts(
 /// restart bar ([`empty_layer`]), so the widget tree keeps its shape when a
 /// toast comes and goes. iced matches widget state by position in the
 /// tree: with the layer only there while a toast shows, the page scroll
-/// got a fresh state and jumped to the top.
+/// got a fresh state and jumped to the top. The pinned Settings bar's slot
+/// under them is always there too ([`crate::settings_bar::slot`]), so the
+/// toast and the restart bar float just above the bar.
 fn top_tabs(app: &TrackerApp) -> Element<'_, Message> {
     responsive(move |size| {
         let (window, prompts) = top_tabs_parts(app, size.width);
-        stack![window, prompts.unwrap_or_else(empty_layer)]
-            .width(Fill)
-            .height(Fill)
-            .into()
+        column![
+            stack![window, prompts.unwrap_or_else(empty_layer)]
+                .width(Fill)
+                .height(Fill),
+            crate::settings_bar::slot(app, size.width),
+        ]
+        .width(Fill)
+        .height(Fill)
+        .into()
     })
     .width(Fill)
     .height(Fill)

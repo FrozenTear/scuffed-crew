@@ -64,11 +64,15 @@ pub enum Commit {
     Sync,
     /// The shortcut's box, or Enter in the shortcut field.
     Shortcut,
+    /// Save on the pinned bar ([`crate::settings_bar`]): every typed group
+    /// at once, in one write.
+    Drafts,
 }
 
-/// Typed text that only an explicit commit writes.
+/// Typed text that only an explicit commit writes: one group of the
+/// pinned bar's unsaved count ([`dirty_drafts`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Draft {
+pub(crate) enum Draft {
     Timings,
     Sync,
     Shortcut,
@@ -76,11 +80,57 @@ enum Draft {
 
 const DRAFTS: [Draft; 3] = [Draft::Timings, Draft::Sync, Draft::Shortcut];
 
+impl Draft {
+    /// The tracker reads this group at start, so saving it while the
+    /// tracker runs leaves a change waiting. The shortcut is this app's.
+    pub(crate) fn tracker_reads(self) -> bool {
+        self != Draft::Shortcut
+    }
+
+    /// The group's typed text differs between `typed` and `saved`.
+    fn differs(self, typed: &SettingsForm, saved: &SettingsForm) -> bool {
+        match self {
+            Draft::Timings => {
+                typed.poll_interval_secs != saved.poll_interval_secs
+                    || typed.cooldown_secs != saved.cooldown_secs
+            }
+            Draft::Sync => typed.sync_url != saved.sync_url || typed.sync_token != saved.sync_token,
+            Draft::Shortcut => {
+                typed.overlay_hotkey != saved.overlay_hotkey
+                    || typed.overlay_hotkey_enabled != saved.overlay_hotkey_enabled
+            }
+        }
+    }
+}
+
+/// The draft groups `typed` holds that are not what is saved (`saved`, the
+/// form for the saved file and shortcut), in [`DRAFTS`] order.
+pub(crate) fn dirty_drafts(typed: &SettingsForm, saved: &SettingsForm) -> Vec<Draft> {
+    DRAFTS
+        .into_iter()
+        .filter(|draft| draft.differs(typed, saved))
+        .collect()
+}
+
+/// One typed group back to `saved` ([`crate::settings_bar::drop_hidden_drafts`]).
+pub(crate) fn discard_draft(form: &mut SettingsForm, saved: &SettingsForm, draft: Draft) {
+    copy_draft(form, saved, draft);
+}
+
+/// Discard on the pinned bar: every typed group back to `saved`. Switches,
+/// chips and the session window are already written and stay as they are.
+pub(crate) fn discard_drafts(form: &mut SettingsForm, saved: &SettingsForm) {
+    for draft in DRAFTS {
+        copy_draft(form, saved, draft);
+    }
+}
+
 impl Commit {
     fn commits(self, draft: Draft) -> bool {
         matches!(
             (self, draft),
-            (Commit::Timings, Draft::Timings)
+            (Commit::Drafts, _)
+                | (Commit::Timings, Draft::Timings)
                 | (Commit::Sync, Draft::Sync)
                 | (Commit::Shortcut, Draft::Shortcut)
         )
@@ -323,15 +373,26 @@ impl TrackerApp {
         from: SaveFrom,
         edit: Option<ConfigEdit>,
     ) -> Task<Message> {
+        self.save_settings_checked(from, edit).0
+    }
+
+    /// [`Self::save_settings`], and whether the file now holds the form:
+    /// `false` for demo mode, a refusal, a reload from disk or a failed
+    /// write (the pinned bar then keeps its drafts and restarts nothing).
+    pub(crate) fn save_settings_checked(
+        &mut self,
+        from: SaveFrom,
+        edit: Option<ConfigEdit>,
+    ) -> (Task<Message>, bool) {
         if self.fixture.is_some() {
-            return Task::none();
+            return (Task::none(), false);
         }
         let config_path = match self.settings_config_path() {
             Ok(path) => path,
             Err(_) => {
                 self.config_unreadable = true;
                 self.show_refused_toast();
-                return Task::none();
+                return (Task::none(), false);
             }
         };
         let typed = self.settings.clone();
@@ -349,7 +410,11 @@ impl TrackerApp {
                 } else {
                     commit
                 };
-                form_for_commit(&typed, &saved_form, commit)
+                let mut form = form_for_commit(&typed, &saved_form, commit);
+                if commit == Commit::Drafts && self.sync_locked() {
+                    copy_draft(&mut form, &saved_form, Draft::Sync);
+                }
+                form
             }
         };
         let saved_ocr = self.saved_config.ocr;
@@ -357,7 +422,7 @@ impl TrackerApp {
         let known_packs = self.ocr_switch.packs;
         let hotkey_enabled = form.overlay_hotkey_enabled;
         let hotkey_bind = form.overlay_hotkey.clone();
-        let timings = (from == SaveFrom::Page(Commit::Timings))
+        let timings = matches!(from, SaveFrom::Page(Commit::Timings | Commit::Drafts))
             .then(|| (form.poll_interval_secs.clone(), form.cooldown_secs.clone()));
         let mut stored_hotkey = None;
         let outcome = save_settings_form(
@@ -408,8 +473,14 @@ impl TrackerApp {
                     self.saved_config.shadow_recognizer_control(),
                 )
                 .with_installed_version(&self.saved_config, self.installed_version.as_deref());
-                if let SaveFrom::Page(commit) = from {
-                    keep_uncommitted(&mut self.settings, &typed, commit);
+                match from {
+                    // The pinned bar's Save commits every group, so none
+                    // would come back: put all the typed text back, so the
+                    // refusal keeps it and the next Save writes it against
+                    // the fresh file (#776).
+                    SaveFrom::Page(Commit::Drafts) => keep_drafts(&mut self.settings, &typed),
+                    SaveFrom::Page(commit) => keep_uncommitted(&mut self.settings, &typed, commit),
+                    SaveFrom::Classic => {}
                 }
                 self.config_unreadable = false;
                 self.page_state.file_read(&self.saved_config);
@@ -423,16 +494,19 @@ impl TrackerApp {
             Ok(SettingsFileSave::Saved(config)) => {
                 let Some(hotkey) = stored_hotkey else {
                     self.replace_toast("Could not save settings: shortcut was not checked");
-                    return Task::none();
+                    return (Task::none(), false);
                 };
                 if let SaveFrom::Page(commit) = from {
                     return self.after_page_save(commit, config, hotkey, &typed, &config_path);
                 }
                 if let Err(e) = seasons::save_overlay_hotkey(&self.data_dir, &hotkey) {
                     self.replace_toast(format!("Could not save companion shortcut: {e}"));
-                    return Task::none();
+                    return (Task::none(), false);
                 }
-                return self.after_save(from, config, hotkey, &typed, &config_path);
+                return (
+                    self.after_save(from, config, hotkey, &typed, &config_path),
+                    true,
+                );
             }
             Err(SettingsSaveError::Blocked(message)) => {
                 self.replace_toast(message);
@@ -443,7 +517,7 @@ impl TrackerApp {
                 self.page_refused(from, &typed);
             }
         }
-        Task::none()
+        (Task::none(), false)
     }
 
     /// A 0.6 page apply was refused or failed, so nothing was written. The
@@ -469,7 +543,8 @@ impl TrackerApp {
 
     /// A 0.6 page apply wrote config.toml. ui_state.json is written only
     /// when the shortcut changed. If that write fails, config.toml is still
-    /// taken in (it holds `config` now) and the shortcut error shows alone.
+    /// taken in (it holds `config` now) and the shortcut error shows alone;
+    /// the save then counts as failed, since the shortcut is still typed.
     fn after_page_save(
         &mut self,
         commit: Commit,
@@ -477,19 +552,19 @@ impl TrackerApp {
         hotkey: OverlayHotkey,
         typed: &SettingsForm,
         path: &std::path::Path,
-    ) -> Task<Message> {
+    ) -> (Task<Message>, bool) {
         let from = SaveFrom::Page(commit);
         if commit != Commit::Shortcut && hotkey == self.overlay_hotkey {
-            return self.after_save(from, config, hotkey, typed, path);
+            return (self.after_save(from, config, hotkey, typed, path), true);
         }
         match seasons::save_overlay_hotkey(&self.data_dir, &hotkey) {
-            Ok(()) => self.after_save(from, config, hotkey, typed, path),
+            Ok(()) => (self.after_save(from, config, hotkey, typed, path), true),
             Err(e) => {
                 let kept = self.overlay_hotkey.clone();
                 let task = self.after_save(from, config, kept, typed, path);
                 copy_draft(&mut self.settings, typed, Draft::Shortcut);
                 self.replace_toast(format!("Could not save companion shortcut: {e}"));
-                task
+                (task, false)
             }
         }
     }

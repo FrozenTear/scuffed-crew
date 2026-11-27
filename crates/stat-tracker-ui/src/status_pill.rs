@@ -183,18 +183,24 @@ pub fn asks_first(app: &TrackerApp, verb: DaemonVerb) -> bool {
     verb != DaemonVerb::Start && app.fixture.is_none() && match_in_progress(app)
 }
 
-/// [`Message::Daemon`]: from the 0.6 Settings status strip and the
-/// classic Tracker service card. Stop and Restart ask first mid-game,
-/// the same as the header pill; Start never does.
+/// [`Message::Daemon`] from the classic Tracker service card, and the
+/// pinned Settings bar's tracker verbs ([`crate::settings_bar`]). Typed
+/// Settings text is saved first, or Stop asks (spec 1.5). Stop and
+/// Restart ask first mid-game, the same as the header pill; Start never
+/// does.
 pub(crate) fn request(app: &mut TrackerApp, verb: DaemonVerb) -> Task<Message> {
+    let saved = match crate::settings_bar::before_verb(app, verb) {
+        crate::settings_bar::Gate::Go(saved) => saved,
+        crate::settings_bar::Gate::Held(task) => return task,
+    };
     if asks_first(app, verb) {
         app.pill.confirm = Some(Confirm {
             verb,
             on_action: false,
         });
-        return Task::none();
+        return saved;
     }
-    run(app, verb)
+    Task::batch([saved, run(app, verb)])
 }
 
 /// Start a verb and record it. Ignored in the demo and while anything
@@ -295,19 +301,27 @@ fn choose(app: &mut TrackerApp, item: Item) -> Task<Message> {
         Item::Restart => DaemonVerb::Restart,
         Item::Stop => DaemonVerb::Stop,
     };
+    // Typed Settings text is saved first, or Stop asks (spec 1.5).
+    let saved = match crate::settings_bar::before_verb(app, verb) {
+        crate::settings_bar::Gate::Go(saved) => saved,
+        crate::settings_bar::Gate::Held(task) => return task,
+    };
     if matches!(item, Item::Restart | Item::Stop) && asks_first(app, verb) {
         app.pill.confirm = Some(Confirm {
             verb,
             on_action: false,
         });
-        return Task::none();
+        return saved;
     }
-    run(app, verb)
+    Task::batch([saved, run(app, verb)])
 }
 
 fn on_key(app: &mut TrackerApp, key: Key) -> Task<Message> {
     if app.nav_style != NavStyle::TopTabs {
         return Task::none();
+    }
+    if app.page_state.bar.leave.is_some() {
+        return crate::settings_bar::leave_key(app, key);
     }
     if let Some(confirm) = app.pill.confirm.as_mut() {
         return match key {
@@ -336,13 +350,21 @@ fn on_key(app: &mut TrackerApp, key: Key) -> Task<Message> {
         }
         return Task::none();
     }
+    if let Some(task) = crate::settings_bar::focus_key(app, key) {
+        return task;
+    }
     if !app.pill.focused {
         // Tab from the page lands on the pill, the bar's one focus stop.
         app.pill.focused = key == Key::Tab;
         return Task::none();
     }
     match key {
-        Key::Tab | Key::Escape => app.pill.focused = false,
+        // Then the pinned Settings bar's buttons, when it shows (#776).
+        Key::Tab => {
+            app.pill.focused = false;
+            crate::settings_bar::focus_first(app);
+        }
+        Key::Escape => app.pill.focused = false,
         Key::Down => open_menu(app),
         Key::Enter | Key::Space
             if tracker_status::header_status_for(app) == HeaderStatus::FocusUnknown =>
@@ -358,7 +380,10 @@ fn on_key(app: &mut TrackerApp, key: Key) -> Task<Message> {
 /// The pill's menu, confirm or focus has the keys: Escape is theirs, not
 /// the page's.
 pub(crate) fn owns_keys(app: &TrackerApp) -> bool {
-    app.pill.menu.is_some() || app.pill.confirm.is_some() || app.pill.focused
+    app.pill.menu.is_some()
+        || app.pill.confirm.is_some()
+        || app.pill.focused
+        || crate::settings_bar::owns_keys(app)
 }
 
 /// Push the pill's key listener (top tabs only). True when the pill owns
@@ -765,7 +790,7 @@ pub(crate) fn confirm_layer(app: &TrackerApp) -> Option<Element<'_, Message>> {
 }
 
 /// `style` with a 2 px ACCENT ring when the button has the keyboard.
-fn with_ring<S>(style: S, ring: bool) -> impl Fn(&Theme, button::Status) -> button::Style
+pub(crate) fn with_ring<S>(style: S, ring: bool) -> impl Fn(&Theme, button::Status) -> button::Style
 where
     S: Fn(&Theme, button::Status) -> button::Style,
 {

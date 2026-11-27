@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, Utc};
-use gtk::gdk::prelude::MonitorExt;
 use iced::widget::image::Handle;
 use iced::{Element, Subscription, Task, window};
 use stat_tracker::capture::CaptureBackend;
@@ -203,6 +202,8 @@ pub enum Message {
     RestartLater,
     WindowOpened(window::Id),
     WindowClosed(window::Id),
+    /// The window's close button: the leave confirm may hold it (#776).
+    WindowCloseRequested(window::Id),
     Tray(TrayAction),
     ToggleOverlay,
     OpenAbout,
@@ -277,7 +278,7 @@ pub(crate) fn tray_show_op(window_id: Option<window::Id>) -> TrayWindowOp {
 }
 
 pub fn window_settings() -> window::Settings {
-    let fit = match current_display_size() {
+    let fit = match crate::layout::current_display_size() {
         Some((width, height)) => crate::layout::fit_window(width, height),
         None => crate::layout::fit_window(0.0, 0.0),
     };
@@ -287,24 +288,11 @@ pub fn window_settings() -> window::Settings {
             crate::layout::WINDOW_MIN_W.min(fit.width),
             crate::layout::WINDOW_MIN_H.min(fit.height),
         )),
+        // The close button asks first while Settings has unsaved text
+        // and there is no tray (`Message::WindowCloseRequested`).
+        exit_on_close_request: false,
         ..window::Settings::default()
     }
-}
-
-/// Primary monitor size in px, when GTK has a display.
-fn current_display_size() -> Option<(f32, f32)> {
-    if !gtk::is_initialized() {
-        return None;
-    }
-    let display = gtk::gdk::Display::default()?;
-    let monitor = display.primary_monitor().or_else(|| display.monitor(0))?;
-    let rect = monitor.geometry();
-    let width = rect.width();
-    let height = rect.height();
-    if width <= 0 || height <= 0 {
-        return None;
-    }
-    Some((width as f32, height as f32))
 }
 
 fn live_game_session_now(
@@ -428,7 +416,7 @@ pub struct TrackerApp {
     update_gate: &'static update::UpdateGate,
     window_id: Option<window::Id>,
     tick_count: u64,
-    tray: Option<TrayHandle>,
+    pub(crate) tray: Option<TrayHandle>,
     pub overlay_hold: OverlayHold,
     pub(crate) overlay_child: Option<CompanionChild>,
     overlay_spawn_blocked: bool,
@@ -765,6 +753,7 @@ impl TrackerApp {
         let mut subs = vec![
             iced::time::every(Duration::from_secs(1)).map(|_| Message::Tick),
             window::close_events().map(Message::WindowClosed),
+            window::close_requests().map(Message::WindowCloseRequested),
         ];
         if self.overlay_hotkey.enabled
             && self.companion_enabled()
@@ -849,6 +838,9 @@ impl TrackerApp {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         crate::games_table::before_message(self, &message);
+        if let Some(task) = crate::settings_bar::intercept(self, &message) {
+            return task;
+        }
         match message {
             Message::Tick => self.on_tick(),
             Message::Navigate(screen) => {
@@ -1672,6 +1664,7 @@ impl TrackerApp {
                     Task::none()
                 }
             }
+            Message::WindowCloseRequested(id) => window::close(id),
             Message::Tray(action) => self.apply_tray(action),
             Message::ToggleOverlay => self.toggle_overlay(),
             Message::Setup(message) => self.on_setup(message),
@@ -2399,10 +2392,8 @@ impl TrackerApp {
         }
 
         tray::pump_gtk();
-        if let Some(handle) = &self.tray
-            && let Some(action) = tray::poll(handle)
-        {
-            return self.apply_tray(action);
+        if let Some(action) = tray::poll_app(self.tray.as_ref()) {
+            return self.update(Message::Tray(action));
         }
 
         if quit_request_due(&self.update_progress, || {

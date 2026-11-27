@@ -21,7 +21,7 @@ use crate::settings::{
 };
 use crate::settings_model::{ConfigEdit, url_host};
 use crate::settings_rows::{
-    Tag, divided, link, page_field, row_title, setting_row, sub_heading, switch, title_line,
+    divided, link, page_field, row_title, setting_row, sub_heading, switch, title_line,
 };
 use crate::settings_save::Commit;
 use crate::settings_update::{Msg, apply, apply_with};
@@ -336,7 +336,11 @@ pub(crate) fn tracker_service(app: &TrackerApp, demo: bool) -> Element<'_, Messa
         ),
     );
     let watch = setting_row(
-        title_line("Watch for match start and end", false, &[]),
+        title_line(
+            "Watch for match start and end",
+            false,
+            crate::settings_bar::part_tag(app, |c| c.auto_detect.enabled),
+        ),
         vec![],
         switch(
             app.settings.auto_detect_enabled,
@@ -348,7 +352,11 @@ pub(crate) fn tracker_service(app: &TrackerApp, demo: bool) -> Element<'_, Messa
     let mut rows = vec![status, login, watch];
     if app.settings.auto_detect_enabled {
         rows.push(setting_row(
-            row_title("Check every (seconds)"),
+            title_line(
+                "Check every (seconds)",
+                false,
+                crate::settings_bar::part_tag(app, |c| c.auto_detect.poll_interval_secs),
+            ),
             vec![hint(POLL_INTERVAL_HELP), hint(ENTER_TO_APPLY)],
             page_field(
                 "auto",
@@ -360,7 +368,11 @@ pub(crate) fn tracker_service(app: &TrackerApp, demo: bool) -> Element<'_, Messa
             ),
         ));
         rows.push(setting_row(
-            row_title("Wait after detection (seconds)"),
+            title_line(
+                "Wait after detection (seconds)",
+                false,
+                crate::settings_bar::part_tag(app, |c| c.auto_detect.cooldown_secs),
+            ),
             vec![hint(ENTER_TO_APPLY)],
             page_field(
                 "120",
@@ -476,7 +488,11 @@ pub(crate) fn bans_picks_row(app: &TrackerApp, demo: bool) -> Element<'_, Messag
         bans_help.push(hint(crate::capture_reading::SERVICE_MAY_DIFFER));
     }
     let row = setting_row(
-        title_line(BANS_PICKS_LABEL, false, &[Tag::AfterRestart]),
+        title_line(
+            BANS_PICKS_LABEL,
+            false,
+            crate::settings_bar::restart_tag(app, "bans_picks_reader"),
+        ),
         bans_help,
         crate::settings_keys::edit_switch(
             bans_on,
@@ -534,7 +550,11 @@ pub(crate) fn troubleshooting(app: &TrackerApp, demo: bool) -> Element<'_, Messa
         debug_help.push(hint(crate::capture_reading::SERVICE_MAY_DIFFER));
     }
     let debug = setting_row(
-        row_title("Save debug images from each capture"),
+        title_line(
+            "Save debug images from each capture",
+            false,
+            crate::settings_bar::restart_tag(app, "debug_ocr"),
+        ),
         debug_help,
         switch(
             app.settings.debug_ocr || env_debug,
@@ -545,7 +565,11 @@ pub(crate) fn troubleshooting(app: &TrackerApp, demo: bool) -> Element<'_, Messa
     );
     // The tracker reads the key once at start: After restart.
     let pregame = setting_row(
-        title_line(PREGAME_SCREENS_LABEL, false, &[Tag::AfterRestart]),
+        title_line(
+            PREGAME_SCREENS_LABEL,
+            false,
+            crate::settings_bar::restart_tag(app, "debug_save_pregame_screens"),
+        ),
         vec![hint(PREGAME_SCREENS_HELP)],
         crate::settings_keys::edit_switch(
             app.saved_config.debug_save_pregame_screens,
