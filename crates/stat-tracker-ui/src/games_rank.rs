@@ -175,12 +175,17 @@ fn role_name(value: &str, open_queue: bool) -> Option<&'static str> {
 
 /// Role and queue for display: "Support, 5V5 ROLE QUEUE". The queue is
 /// spelled as its chip and the Map tooltip spell it (`games_queue`). A
-/// missing queue is left out, and the Open role with an open queue shows
-/// the queue alone ("6V6 OPEN QUEUE"), so open queue is never said twice.
+/// missing queue is left out. The Open role comes only with an open queue
+/// title, so beside an open queue it shows the queue alone, "6V6 OPEN
+/// QUEUE" or, when the size is unknown, "Open queue, size unknown": open
+/// queue is said once and never next to "queue unknown".
 pub fn context_label(role: Option<&str>, queue: Option<&str>) -> String {
+    use crate::games_queue::{OPEN_5V5, OPEN_6V6, OPEN_SIZE_UNKNOWN};
     let role = role.unwrap_or(ROLE_UNKNOWN);
     match queue {
-        Some(q) if role == OPEN_ROLE && stat_tracker::rank_queue::title_is_open(q) => q.to_string(),
+        Some(q) if role == OPEN_ROLE && [OPEN_5V5, OPEN_6V6, OPEN_SIZE_UNKNOWN].contains(&q) => {
+            q.to_string()
+        }
         Some(q) if !q.eq_ignore_ascii_case(role) => format!("{role}, {q}"),
         _ => role.to_string(),
     }

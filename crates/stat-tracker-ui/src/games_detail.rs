@@ -1272,10 +1272,11 @@ pub(crate) mod tests {
         set_queue(&mut g, Some(confident.clone()), Some(5), None);
         assert_eq!(queue_warning(&g), None);
         assert_eq!(queue_value(&g), Some("5V5 OPEN QUEUE"));
-        // No board size: the upload sends unknown, and so does the chip.
+        // No board size: the upload sends unknown; the chip says open queue
+        // with the size left open.
         set_queue(&mut g, Some(confident.clone()), None, None);
         assert_eq!(queue_warning(&g), None);
-        assert_eq!(queue_value(&g), Some("Queue unknown"));
+        assert_eq!(queue_value(&g), Some("Open queue, size unknown"));
         // Weak with no earlier value: the warning, no chip.
         let weak = QueueTitle {
             unsure: true,

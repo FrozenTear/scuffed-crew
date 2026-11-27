@@ -353,13 +353,13 @@ fn map_chips_never_clip_silently() {
         problems.extend(n.bare);
     }
     // Chief's rule (24 Nov): no chip is left out where shortening the name
-    // to two letters and "…" makes room. At 1100 that shortens 69 names
+    // to two letters and "…" makes room. At 1100 that shortens 73 names
     // (with the sign or a queue chip) and leaves nothing out. It was 74
     // while the chip showed the raw title ("COMPETITIVE: 6V6 OPEN QUEUE");
-    // the widest queue chip is shorter since it names `rank.queue` (#654).
+    // the widest queue chip is now "Role queue, size unknown" (#654).
     let want: Vec<(f32, usize, usize)> = WINDOWS
         .iter()
-        .map(|&w| (w, 0, if w == 1100.0 { 69 } else { 0 }))
+        .map(|&w| (w, 0, if w == 1100.0 { 73 } else { 0 }))
         .collect();
     assert_eq!(pinned, want, "(window, chips left out, names shortened)");
     let listed: Vec<&str> = maps

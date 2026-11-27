@@ -325,10 +325,11 @@ fn values_the_upload_drops_are_not_shown() {
     assert_eq!(shown(&g).tier.as_deref(), Some(title.as_str()));
     let g = with_rank(rank("Support", &"d".repeat(65), 2, 45, 23));
     assert_eq!(cell_lines(&g), ["Division 2", "45% +23%"]);
-    // A title that names no queue decides nothing: unknown, as uploaded.
+    // A title that names no queue decides nothing: unknown, as uploaded,
+    // and the board size is not put beside a title.
     let mut g = with_rank(rank("Support", "Diamond", 2, 45, 23));
     queued(&mut g, queue(&"Q".repeat(65)), Some(5));
-    assert_eq!(shown(&g).queue.as_deref(), Some("5V5 queue unknown"));
+    assert_eq!(shown(&g).queue.as_deref(), Some("Queue unknown"));
 }
 
 /// The sample fixture has every case the Rank cell draws.
