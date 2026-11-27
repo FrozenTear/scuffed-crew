@@ -102,3 +102,99 @@ async fn a_12_player_role_queue_rank_is_kept_apart_from_the_5v5_one() {
         ]
     );
 }
+
+fn role_queue_tank_gold(row: &mut storage::PersonalMatch) {
+    use stat_tracker::model::{QueueTitle, RankText, RankUpdate};
+    row.queue_title = Some(QueueTitle {
+        value: Some("ROLE QUEUE".into()),
+        confidence: 0.93,
+        ..QueueTitle::default()
+    });
+    let text = |v: &str| RankText {
+        value: v.into(),
+        confidence: 0.9,
+    };
+    row.rank_update = Some(RankUpdate {
+        role: Some(text("Tank")),
+        role_rank: Some(text("GOLD")),
+        ..RankUpdate::default()
+    });
+}
+
+/// Q3: a held board stores no team size it did not read. On a game with
+/// no other row it has none (its queue stays unknown, never a guessed
+/// 5v5); after a Tab that read 6 a side it takes that read size through
+/// the storage carry, not a size of its own.
+#[tokio::test]
+async fn a_held_board_stores_no_team_size_it_did_not_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = storage::LocalStore::open(dir.path()).await.unwrap();
+    let held = Counters {
+        elims: 2,
+        assists: 1,
+        deaths: 0,
+        damage: 400,
+        healing: 80,
+        mitigation: 900,
+    };
+    let at = Utc::now() - chrono::Duration::seconds(90);
+    for (session, earlier) in [("held-alone", None), ("held-after-6", Some(6_u8))] {
+        if let Some(size) = earlier {
+            let mut tab = tracked_row(session, -120);
+            tab.team_size = Some(size);
+            store.insert_match(tab).await.unwrap();
+        }
+        store_held_board(
+            &store,
+            dir.path(),
+            session,
+            "Ana",
+            "Busan",
+            "unknown",
+            held,
+            at,
+        )
+        .await
+        .unwrap();
+        let rows = store.get_session_snapshots(session).await.unwrap();
+        let held_row = rows.iter().find(|r| r.elims == 2).expect("the held row");
+        assert_eq!(held_row.team_size, earlier, "{session}");
+    }
+}
+
+/// Q2 on the upload side: of a game's unsynced Tabs (sizes 5, then 6, then
+/// one with no size, which carries the 6), the newest is the one sent, so
+/// the upload says `role_6v6`, the same as the local slot of that row.
+#[tokio::test]
+async fn the_newest_tab_decides_the_queue_that_is_sent() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = storage::LocalStore::open(dir.path()).await.unwrap();
+    for (i, size) in [Some(5_u8), Some(6), None].into_iter().enumerate() {
+        let mut row = tracked_row("q2-sent", i as i64 * 60);
+        row.elims = 10 + i as u32;
+        row.team_size = size;
+        role_queue_tank_gold(&mut row);
+        store.insert_match(row).await.unwrap();
+    }
+    let rows = store.get_session_snapshots("q2-sent").await.unwrap();
+    let sizes: Vec<_> = rows.iter().map(|r| r.team_size).collect();
+    assert_eq!(sizes, [Some(5), Some(6), Some(6)], "the newest carries 6");
+    let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = std::sync::Arc::clone(&sent);
+    try_sync_with(&store, dir.path(), None, move |matches, _| {
+        let seen = std::sync::Arc::clone(&seen);
+        async move {
+            seen.lock().unwrap().extend(matches);
+            Ok(upload_ok())
+        }
+    })
+    .await;
+    let sent = sent.lock().unwrap().clone();
+    assert_eq!(sent.len(), 1, "one row per game");
+    assert_eq!(sent[0].elims, 12, "the newest Tab is sent");
+    let body = serde_json::to_value(stat_tracker::sync::upload_request(&sent, &[])).unwrap();
+    assert_eq!(body["matches"][0]["rank"]["queue"]["value"], "role_6v6");
+    let newest = rows.iter().max_by_key(|r| r.elims).unwrap();
+    let slot = stat_tracker::sync::rank_slot(newest).unwrap();
+    assert_eq!(slot.queue, scuffed_types::api::RankQueue::Role6v6);
+}

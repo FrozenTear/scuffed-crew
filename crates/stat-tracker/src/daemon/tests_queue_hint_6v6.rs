@@ -84,6 +84,15 @@ fn a_6v6_role_hint_agrees_only_with_a_6v6_role_title() {
     }
     assert!(hint_agrees(five, "ROLE QUEUE"));
     assert!(hint_agrees(five, "QUEUE ROLE"));
+    // Strict on the words: a repeated word is another key, never collapsed.
+    for (hint, title) in [
+        ("ROLE ROLE QUEUE", "ROLE QUEUE"),
+        ("6V6 6V6 ROLE QUEUE", "6V6 ROLE QUEUE"),
+        ("6V6 ROLE QUEUE", "ROLE 6V6 ROLE QUEUE"),
+    ] {
+        assert!(!hint_agrees(hint, title), "{hint:?} {title:?}");
+    }
+    assert!(hint_agrees("ROLE 6V6 6V6", "6V6 QUEUE 6V6 ROLE"));
 }
 
 /// Through `settle_hint` and `apply_read`: a 6v6 role queue rank screen's

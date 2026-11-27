@@ -481,6 +481,18 @@ fn rank_screen_cases() -> Vec<(&'static str, PersonalMatch, bool)> {
             true,
         ),
         (
+            "GOLD tier alone",
+            with(
+                "ROLE QUEUE",
+                6,
+                RankUpdate {
+                    role_rank: t("GOLD", 0.8),
+                    ..none()
+                },
+            ),
+            true,
+        ),
+        (
             "division 2 on 5 a side",
             with(
                 "ROLE QUEUE",
@@ -509,20 +521,77 @@ fn sent_rank_screen_fields(m: &PersonalMatch) -> Vec<String> {
         .collect()
 }
 
-/// A game counts as ranked locally exactly when the upload sends a rank
-/// screen field for it: a stored read the upload drops (an Open role line
-/// with no open queue title, a misspelled role, a value the site would
-/// null) is no rank here either, though the game still has its queue.
+/// A game counts in the current rank view exactly when the upload sends a
+/// tier for it (`rank.role_rank` or `rank.division`): a stored read the
+/// upload drops (an Open role line with no open queue title, a misspelled
+/// role, a value the site would null) is no rank here, and neither is a
+/// kept read with no tier (a role line or hero SR alone), though the game
+/// still has its queue.
 #[test]
-fn a_game_is_ranked_locally_only_when_the_upload_keeps_a_rank_screen_field() {
-    for (case, m, kept) in rank_screen_cases() {
+fn a_game_counts_in_the_rank_view_only_when_the_upload_keeps_a_tier() {
+    for (case, m, _) in rank_screen_cases() {
         let sent = sent_rank_screen_fields(&m);
-        assert_eq!(!sent.is_empty(), kept, "{case}: upload sent {sent:?}");
+        let tier = sent.iter().any(|k| k == "role_rank" || k == "division");
         let g = game_at(&m, 0);
-        assert!(g.rank_slot.is_some(), "{case}: the queue still has a slot");
+        let slot = g.rank_slot.expect("the queue still has a slot");
+        assert_eq!(slot.tier_read, tier, "{case}: upload sent {sent:?}");
         let latest = latest_rank_per_slot(std::slice::from_ref(&g));
-        assert_eq!(latest.len(), usize::from(kept), "{case}");
+        assert_eq!(
+            latest.len(),
+            usize::from(tier),
+            "{case}: upload sent {sent:?}"
+        );
     }
+}
+
+/// R13: a newer game whose kept read has no tier (a role line, or hero SR
+/// alone) does not hide an older game's real tier in the same slot.
+#[test]
+fn a_newer_read_with_no_tier_does_not_hide_an_older_tier() {
+    let gold = row(Some("ROLE QUEUE"), Some(6), Some("Tank"), Some("GOLD"));
+    let role_only = row(Some("ROLE QUEUE"), Some(6), Some("Tank"), None);
+    let mut sr_only = row(Some("ROLE QUEUE"), Some(6), Some("Tank"), None);
+    sr_only.rank_update.as_mut().unwrap().hero_sr = Some(crate::model::RankNumber {
+        value: 3100,
+        confidence: 0.9,
+    });
+    for newer in [role_only, sr_only] {
+        let games = [game_at(&gold, 0), game_at(&newer, 30)];
+        assert!(
+            games[1].rank_slot.unwrap().rank_read,
+            "the newer read is sent"
+        );
+        let latest = latest_rank_per_slot(&games);
+        assert_eq!(latest.len(), 1);
+        assert_eq!(tier(latest[0]), "GOLD");
+    }
+}
+
+/// R9: an open queue game whose role line was missed, misspelled or read
+/// as a role icon (no role sent) is the same open queue rank as one with
+/// the `Open` line: one current rank per open queue, the newest.
+#[test]
+fn an_open_queue_has_one_current_rank_whatever_its_role_line() {
+    for (title, size) in [("OPEN QUEUE", 6), ("OPEN QUEUE", 5)] {
+        let open = row(Some(title), Some(size), Some("Open"), Some("MASTER"));
+        for role in [None, Some("tank"), Some("Tank")] {
+            let other = row(Some(title), Some(size), role, Some("GOLD"));
+            assert_eq!(Game::from_match(&other).rank_slot.unwrap().role, None);
+            for (older, newer, want) in [(&open, &other, "GOLD"), (&other, &open, "MASTER")] {
+                let games = [game_at(older, 0), game_at(newer, 30)];
+                let latest = latest_rank_per_slot(&games);
+                assert_eq!(latest.len(), 1, "{title} {size} {role:?}");
+                assert_eq!(tier(latest[0]), want, "{title} {size} {role:?}");
+            }
+        }
+    }
+    // Open 5v5 and open 6v6 stay apart.
+    let five = row(Some("OPEN QUEUE"), Some(5), Some("Open"), Some("GOLD"));
+    let six = row(Some("OPEN QUEUE"), Some(6), None, Some("GOLD"));
+    assert_eq!(
+        latest_rank_per_slot(&[game_at(&five, 0), game_at(&six, 1)]).len(),
+        2
+    );
 }
 
 /// [`crate::rank_queue::RankSlot::rank_read`] is the upload's own rank

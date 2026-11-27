@@ -83,11 +83,13 @@ mod overview_side;
 pub mod report;
 mod report_choices;
 pub mod restart_prompt;
+mod scroll_gutter;
 pub mod seasons;
 pub mod seasons_tab;
 mod session_bits;
 mod session_window;
 pub mod settings;
+mod settings_bar;
 pub mod settings_cards;
 mod settings_env;
 mod settings_fixed;
@@ -120,6 +122,8 @@ mod what_leaves;
 pub mod widgets;
 mod winrate_bar;
 
+#[cfg(test)]
+mod tests_dialog_scroll;
 #[cfg(test)]
 mod tests_settings_to_config;
 #[cfg(test)]
