@@ -30,6 +30,7 @@ pub mod stat_reports;
 pub mod strategies;
 pub mod teams;
 pub mod tournaments;
+pub mod training_export;
 pub mod users;
 pub mod wiki;
 

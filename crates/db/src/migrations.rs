@@ -1060,6 +1060,43 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         -- Additive: off by default, rows from before it read false, no row
         -- rewrite.
         DEFINE FIELD OVERWRITE rank_opt_in ON member_settings TYPE bool DEFAULT ALWAYS false;
+
+        -- ================================================
+        -- Training crop export for Scuffed Vision. Three new tables, nothing
+        -- existing is changed. Rollback: REMOVE TABLE training_export_token;
+        -- REMOVE TABLE training_crop_export_entry; REMOVE TABLE
+        -- training_crop_tombstone; (see docs/api/training-crops.md).
+        -- ================================================
+        -- Read-only export tokens, minted by an admin session. Only the
+        -- blake3 hash is kept (same as daemon_token). pseudonym_salt is 32
+        -- random bytes (hex) that key member_key, so keys differ per token.
+        DEFINE TABLE IF NOT EXISTS training_export_token SCHEMAFULL;
+        DEFINE FIELD OVERWRITE token_hash ON training_export_token TYPE string;
+        DEFINE FIELD OVERWRITE label ON training_export_token TYPE string;
+        DEFINE FIELD OVERWRITE created_by ON training_export_token TYPE string;
+        DEFINE FIELD OVERWRITE created_at ON training_export_token TYPE datetime;
+        DEFINE FIELD OVERWRITE expires_at ON training_export_token TYPE datetime;
+        DEFINE FIELD OVERWRITE revoked_at ON training_export_token TYPE option<datetime>;
+        DEFINE FIELD OVERWRITE pseudonym_salt ON training_export_token TYPE string;
+        DEFINE INDEX IF NOT EXISTS tet_token_hash_idx ON training_export_token COLUMNS token_hash UNIQUE;
+
+        -- Crops placed in the export feed (record id = crop id). listed_at is
+        -- the feed position; a crop that becomes eligible again gets a new one.
+        DEFINE TABLE IF NOT EXISTS training_crop_export_entry SCHEMAFULL;
+        DEFINE FIELD OVERWRITE crop_id ON training_crop_export_entry TYPE string;
+        DEFINE FIELD OVERWRITE kind ON training_crop_export_entry TYPE string;
+        DEFINE FIELD OVERWRITE listed_at ON training_crop_export_entry TYPE datetime;
+        DEFINE INDEX IF NOT EXISTS tcee_listed_idx ON training_crop_export_entry COLUMNS listed_at, crop_id;
+
+        -- A crop that left the feed (deleted, consent withdrawn, member
+        -- inactive, suspended or banned). Pruned after 60 days.
+        DEFINE TABLE IF NOT EXISTS training_crop_tombstone SCHEMAFULL;
+        DEFINE FIELD OVERWRITE crop_id ON training_crop_tombstone TYPE string;
+        DEFINE FIELD OVERWRITE kind ON training_crop_tombstone TYPE string;
+        DEFINE FIELD OVERWRITE reason ON training_crop_tombstone TYPE string
+            ASSERT $value IN ['deleted', 'consent_withdrawn', 'member_inactive'];
+        DEFINE FIELD OVERWRITE at ON training_crop_tombstone TYPE datetime;
+        DEFINE INDEX IF NOT EXISTS tct_at_idx ON training_crop_tombstone COLUMNS at, crop_id;
     "#,
             )
             .await?

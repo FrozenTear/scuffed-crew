@@ -579,6 +579,40 @@ impl FromRequestParts<AppState> for CropUploader {
     }
 }
 
+/// Auth for the two training crop export routes only
+/// (`GET /api/training-crops/export` and its image route).
+///
+/// `Authorization: Bearer <export token>`, hashed and matched against
+/// unrevoked, unexpired `training_export_token` rows. It is not a member and
+/// never acts as one: every other route looks the value up as a session or
+/// a sync token, finds nothing, and answers 401. Missing, unknown, revoked
+/// and expired tokens share one 401 body. The lookup does not write.
+pub struct ExportTokenAuth {
+    pub token: scuffed_db::TrainingExportToken,
+}
+
+impl FromRequestParts<AppState> for ExportTokenAuth {
+    type Rejection = Response;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let mode = DaemonUnauthorized::Opaque;
+        let raw = parts
+            .headers
+            .get(AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .ok_or_else(|| *unauthorized(mode.missing()))?;
+        match state.db.find_training_export_token(raw).await {
+            Ok(Some(token)) => Ok(Self { token }),
+            Ok(None) => Err(*unauthorized(mode.rejected())),
+            Err(_e) => Err(*internal_error()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod presented_token_tests {
     use super::presented_session_token;

@@ -154,6 +154,12 @@ or banned). It is accepted, besides a session, on exactly these routes:
 | `GET /api/training-crops/members` (counts) | officer or admin | no (401) |
 | `GET /api/training-crops/resolutions` (totals) | admin | no (401) |
 | every `/api/hero-icons` route | as before | no (401) |
+| `POST`/`GET /api/training-crops/export-tokens`, `DELETE .../export-tokens/{id}` | admin | no (401) |
+| `GET /api/training-crops/export`, `GET /api/training-crops/export/{id}/image` | no (401) | no (401); export token only |
+
+An export token (see Export for training) is accepted on those two export
+routes and nowhere else: every other route, the token routes included,
+answers it 401.
 
 Setting consent is session only, so a leaked or misused sync token can never
 turn a kind on. The tracker shows the consent read-only and links to the site
@@ -559,6 +565,150 @@ resolution (two members, 40 and 7 crops, and totals of 40 at 1080p and 7 at
 1440p). Admins lose nothing by this: they already see each consented crop's
 game resolution in the admin list.
 
+## Export for training
+
+A read-only export so Scuffed Vision can pull opted-in crops on a schedule
+(weekly or every two weeks) for labelling and training. Types and codes:
+`TrainingExport*` and `TRAINING_EXPORT_*` in
+`crates/types/src/api/training_crops.rs`. Code:
+`crates/site-server/src/routes/training_export.rs` and
+`crates/db/src/queries/training_export.rs`.
+
+### Export tokens
+
+| Route | Who | Answer |
+|-------|-----|--------|
+| `POST /api/training-crops/export-tokens` | admin session | 201 `{token, id, label, created_by, created_at, expires_at, expired}`, `Cache-Control: no-store` |
+| `GET /api/training-crops/export-tokens` | admin session | 200, every token newest first, no secrets |
+| `DELETE /api/training-crops/export-tokens/{id}` | admin session | 200 with `revoked_at` set; 404 `export_token_not_found` when no unrevoked token has that id |
+
+- Body of the mint: `{"label": "...", "expires_in_days": 90}`. The label is
+  trimmed, 1 to 64 characters, no control characters. `expires_in_days`
+  defaults to 90 (`TRAINING_EXPORT_TOKEN_DEFAULT_DAYS`), 1 to 365
+  (`TRAINING_EXPORT_TOKEN_MAX_DAYS`). Anything else is 400
+  `invalid_export_token_request`.
+- The plaintext (`sctx_` plus 64 hex characters) is in the mint answer
+  only. The server keeps its blake3 hash, the same hashing as sync tokens,
+  plus a random 32-byte `pseudonym_salt` per token that never leaves the
+  server.
+- Admin session only: an officer or member session is 403, a sync token,
+  an export token or no credential is 401.
+- Audited: `created_training_export_token` and
+  `revoked_training_export_token`, target type `training_export_token`.
+- An export token is not a member and never acts as one. Revoked and
+  expired tokens are 401 with the same body as an unknown one
+  (`Unauthorized`, `Cache-Control: no-store`).
+
+### Who is exported
+
+A crop is in the export only while all of these hold, checked on every
+call:
+
+- its kind is stored (`full_screen` never is; `?kind=full_screen` is 422
+  `full_screen_not_accepted`),
+- its owner is an active member, with no active suspension or ban,
+- its owner consents to that kind right now.
+
+No member id, display name or tracker version is sent. `member_key` is the
+hex HMAC-SHA256 of the member id keyed with the token's `pseudonym_salt`:
+stable for one token, different for another token, so a new token starts a
+new set of keys.
+
+### `GET /api/training-crops/export?kind=&since=&limit=`
+
+Export token as `Authorization: Bearer`. `kind` filters to one kind,
+`limit` is 1 to 500 (default 100), `since` is the `next_cursor` of the
+previous page.
+
+```json
+{
+  "items": [{
+    "id": "<32 hex>", "kind": "stat_digits", "hero": "ana",
+    "meta": { "screen_width": 1920, "screen_height": 1080 },
+    "created_at": "2026-11-10T18:00:00Z",
+    "sha256": "<64 hex of the stored PNG>", "size_bytes": 812,
+    "width": 40, "height": 16,
+    "member_key": "<64 hex>"
+  }],
+  "removed": [{ "id": "<32 hex>", "kind": "map_name" }],
+  "next_cursor": "v1.<micros>.<tag>.<id>",
+  "has_more": false,
+  "tombstone_retention_days": 60
+}
+```
+
+- `created_at` is cut to the start of its UTC hour, as in the admin list.
+- `hero` is the label the tracker read (hero key), when stored.
+- One audit entry per call: `exported_training_crops`, actor the admin who
+  minted the token, target the token, details the counts and kind filter.
+  Image fetches are not audited.
+
+### Cursor
+
+Every call first brings the feed in line with the rules above (one sync,
+serialised in the process):
+
+- an eligible crop that is not in the feed is placed in it at the sync's
+  time,
+- a crop in the feed that is no longer eligible (deleted by any route,
+  consent withdrawn, owner inactive, suspended or banned) leaves it, and a
+  tombstone is written at the sync's time, in the same transaction.
+
+The feed is ordered by (time, items before removals, crop id), and the
+cursor is a position in that order: `v1.<unix micros>.<tag>.<crop id>`.
+Treat it as opaque. A page is the next `limit` events after `since`,
+items and removals together; `has_more` says more are waiting.
+`next_cursor` is always set: on the last page it points past everything
+written so far, so a puller with nothing new still moves forward.
+Sync times strictly increase, so nothing is ever written behind a cursor
+that was handed out. A cursor is only meaningful with the same `kind`
+filter it was made with.
+
+A puller keeps `next_cursor` and asks again with it. For each item it
+downloads the image (and can check `sha256`); for each removal it deletes
+its copy and any labels made from it.
+
+Re-granting consent (or a lifted suspension, or a reactivated member) makes
+the crops eligible again: they come back as items at a new position, with
+the same ids, after their tombstones. A puller that applies events in order
+ends up holding them.
+
+### Tombstones and retention
+
+Tombstones older than 60 days (`TRAINING_TOMBSTONE_RETENTION_DAYS`) are
+pruned at the start of every export call. A `since` older than that is 410
+`export_cursor_expired`, since removals may have been pruned: the puller
+starts again without `since` (a full snapshot of what is eligible now) and
+drops whatever it holds that is not in it. The reason of a tombstone
+(`deleted`, `consent_withdrawn`, `member_inactive`) is stored for
+operators and not sent.
+
+### `GET /api/training-crops/export/{id}/image`
+
+Export token. The same eligibility check, at request time, for this one
+crop; anything else (unknown or malformed id, not eligible, file gone) is
+404 `crop_not_found`. Same headers as the session image route:
+`image/png`, `X-Content-Type-Options: nosniff`, `Cache-Control: private,
+no-store`.
+
+### Limits
+
+The two export routes share their own per-IP bucket: burst 60, then one
+every second (`TRAINING_EXPORT_IP_BURST`,
+`TRAINING_EXPORT_IP_REPLENISH_SECS`). It runs before the token is looked
+up; a refused request is the shared 429 `rate_limited`. The token routes
+are not in it. Each list call reads every crop row's id, owner and kind
+for the sync, which is fine at the org's size (thousands of rows).
+
+### Privacy rules
+
+- Only crops eligible right now are listed or served; eligibility is
+  checked again on every image fetch.
+- No member id, name or exact upload time leaves the server.
+- Deletes, withdrawals and membership changes reach the puller as
+  removals on its next pull, for 60 days.
+- An export token can read the export and nothing else.
+
 ## Release order
 
 1. The API (this contract) ships first.
@@ -598,7 +748,11 @@ Every error body is `{"error": "<code>"}`, except the shared 429 body
 | 413 | `icon_too_large` | A `crop` part over the kind's limit (64 KiB; `map_name` 256 KiB; `rank` 384 KiB), its re-encode over that limit, or the body over 2 MiB |
 | 413 | `too_many_crops_in_request` | More than 20 pairs |
 | 415 | `not_png` | A `crop` part without the PNG signature |
-| 429 | `rate_limited` | Per-member, per-kind upload limiter, or the per-IP limit of the sync token routes |
+| 400 | `invalid_export_cursor` | Export `since` that this server did not make |
+| 400 | `invalid_export_token_request` | Export token mint body not JSON, blank or long label, `expires_in_days` 0 or over 365 |
+| 404 | `export_token_not_found` | Revoke of an unknown or already revoked export token |
+| 410 | `export_cursor_expired` | Export `since` older than 60 days |
+| 429 | `rate_limited` | Per-member, per-kind upload limiter, or the per-IP limit of the sync token routes or the export routes |
 | 503 | `hero_icons_disabled` | Store off (every route except consent) |
 
 ## Storage, migration and rollback
@@ -763,3 +917,16 @@ with `rank` off and must opt in again. No consent comes back on by itself.
 
 Hero icon opt-ins are never rewritten, so a rollback keeps every member's
 hero icon choice.
+
+### Rollback C: undo only the training export
+
+The export adds three tables and changes nothing else: no existing table,
+field or row is touched. Revert the change (the old build ignores the
+tables), then optionally remove them:
+
+```sql
+REMOVE TABLE training_export_token; REMOVE TABLE training_crop_export_entry; REMOVE TABLE training_crop_tombstone;
+```
+
+Every export token stops working with the revert. Crops, consent and audit
+rows stay as they are.

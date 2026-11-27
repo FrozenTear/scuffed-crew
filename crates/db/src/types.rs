@@ -1070,6 +1070,13 @@ pub enum AuditAction {
     DeletedTrainingCrop,
     /// An admin read the training crop list. Details: count and kind filter.
     ViewedTrainingCrops,
+    /// An admin minted a training export token. Details: label and expiry.
+    CreatedTrainingExportToken,
+    /// An admin revoked a training export token.
+    RevokedTrainingExportToken,
+    /// One export list call with a training export token. Actor: the admin
+    /// who minted the token. Details: counts and kind filter.
+    ExportedTrainingCrops,
 }
 
 impl std::fmt::Display for AuditAction {
@@ -1115,6 +1122,7 @@ pub enum AuditTargetType {
     Integration,
     PatchNote,
     StatReport,
+    TrainingExportToken,
 }
 
 impl std::fmt::Display for AuditTargetType {
@@ -1718,6 +1726,37 @@ pub struct TrainingCrop {
     /// Version from a `scuffed-stat-tracker/<semver>` User-Agent.
     pub tracker_version: Option<String>,
     pub meta: scuffed_types::TrainingCropMeta,
+}
+
+/// A training export token without its hash. `pseudonym_salt` is the
+/// 64-hex-character key of `member_key`; it never leaves the server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrainingExportToken {
+    pub id: String,
+    pub label: String,
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub revoked_at: Option<DateTime<Utc>>,
+    pub pseudonym_salt: String,
+}
+
+/// A position in the export feed: time, then items (`tag` 0) before
+/// removals (`tag` 1), then crop id. `tag` 2 with an empty id is the end of
+/// everything written at `at`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TrainingExportPosition {
+    pub at: DateTime<Utc>,
+    pub tag: u8,
+    pub crop_id: String,
+}
+
+/// One row read from the feed: an item (`removed` false) or a tombstone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrainingExportEvent {
+    pub position: TrainingExportPosition,
+    pub kind: scuffed_types::CropKind,
+    pub removed: bool,
 }
 
 /// Fields written when a crop is accepted. Same shape as [`TrainingCrop`].
