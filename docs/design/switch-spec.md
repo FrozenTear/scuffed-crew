@@ -1,6 +1,6 @@
 # Settings switch
 
-One switch for every on/off setting in the Scuffed Crew stat tracker. No checkboxes. No radio-like round dots. Robert decided this in the Design room on 19 November 2026 (Europe/Oslo).
+One switch for every on/off setting in the Scuffed Crew stat tracker. No checkboxes. No radio-like round dots. FrozenTear decided this in the Design room on 19 November 2026 (Europe/Oslo).
 
 The widget is dark only. Colours come only from `crates/stat-tracker-ui/src/theme.rs` on `wip/0.6` at `9ec2bb662cbd3894d4e399006d3958351474e820`. UX Spec draws frames from this spec. Scuffed Tracker builds it. This note does not change the repo.
 

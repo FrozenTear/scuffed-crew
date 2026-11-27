@@ -1,6 +1,6 @@
 # Scuffed Tracker: status pill and pinned Settings bar
 
-Spec for two 0.6 interactions, against `wip/0.6` at `9ec2bb662cbd3894d4e399006d3958351474e820`. Frames are in `/workspace/scuffed/tracker-ux/frames/`. Phone review sheets are in `/workspace/scuffed/tracker-ux/robert/`.
+Spec for two 0.6 interactions, against `wip/0.6` at `9ec2bb662cbd3894d4e399006d3958351474e820`. Frames are in `/workspace/scuffed/tracker-ux/frames/`. Phone review sheets are in `/workspace/scuffed/tracker-ux/<home>/`.
 
 This does not change the daemon. Start, Stop and Restart stay as `daemon::run_verb` (`crates/stat-tracker-ui/src/daemon.rs:592`): the GUI stays open, and only the tracker process is started, stopped or restarted. Instant Settings writes stay instant. The pinned bar is for uncommitted typed drafts and for already saved changes that need a tracker restart.
 
