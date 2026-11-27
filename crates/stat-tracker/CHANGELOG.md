@@ -15,9 +15,27 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
-## Unreleased
+## 0.6.1
 
-- With Read bans and picks on, the bans and your ban votes are now read at 1920x1080 too, not only at 2560x1440. Before, a 1080p game got no bans at all. The tracker scales the ban screens up to 2560x1440 and reads them the same way. Picks (the hero select) are still read at 2560x1440 only, so a 1080p game stores its bans and votes with empty picks, and Tracker health says why. Like at 2560x1440, only the values are sent with the game, never a picture. Measured on 90 frames from 1080p videos, not yet on live 1080p captures (#931).
+0.6.1 brings bans to 1920x1080. With Read bans and picks on, the tracker now reads the bans and your ban votes in 1080p games too, so a 1080p game no longer ends up with no bans at all.
+
+### Highlights
+
+- Picks (the hero select) are still read at 2560x1440 only. A 1080p game gets its bans and ban votes but no picks, and Tracker health says why.
+- Like at 2560x1440, only the values are sent with your game uploads, never a picture.
+- A 1080p game recorded on 0.6.0 or older is not read again and keeps its empty bans. Your next 1080p game is the first to get them.
+
+With Read bans and picks on, the bans and your ban votes are now read at 1920x1080 too, not only at 2560x1440. Before, a 1080p game got no bans at all. The tracker scales the ban screens up to 2560x1440 and reads them the same way. Picks (the hero select) are still read at 2560x1440 only, so a 1080p game stores its bans and votes with empty picks, and Tracker health says why. Like at 2560x1440, only the values are sent with the game, never a picture. Measured on 90 frames from 1080p videos, not yet on live 1080p captures (#931).
+
+Also new against the 0.6.0 tag: the app menu entry, the service description and `scuffed-stat-tracker --help` say Overwatch instead of OW2 or Overwatch 2 (#884).
+
+### Install
+
+```sh
+curl --proto '=https' -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/stat-tracker-v0.6.1/crates/stat-tracker/dist/bootstrap.sh | STAT_TRACKER_TAG=stat-tracker-v0.6.1 bash
+```
+
+Or extract the tarball and run `./install.sh`.
 
 ## 0.6.0
 
