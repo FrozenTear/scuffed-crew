@@ -54,10 +54,10 @@ pub(crate) const NO_SELECT_NOTICE: &str =
     "Bans were read but hero select was not seen, so picks are empty.";
 
 /// Why nothing was read when the only screen seen was a 1920x1080 hero
-/// select (issue #931). Said this way so 1920x1080 is not named as both the
-/// problem and a size the reader takes.
-pub(crate) const SELECT_1080_ONLY: &str =
-    "only the hero select was seen, and it is read at 2560x1440 only";
+/// select (issue #931). The same meaning as the Games line for a stored
+/// 1920x1080 status, which also covers games 0.6.0 or older refused at
+/// 1080p, so 1920x1080 is never named as a supported size there.
+pub(crate) const SELECT_1080_ONLY: &str = "at 1920x1080, hero select and games recorded before 1080p bans were supported are read at 2560x1440 only";
 
 /// The sentence for a 1920x1080 game: the ban results and the ban vote are
 /// read (upscaled), the hero select is not, so the picks are stored empty.

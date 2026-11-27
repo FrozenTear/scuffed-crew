@@ -623,13 +623,14 @@ async fn a_1080p_hero_select_alone_is_a_frame_size_status() {
         0,
         "the reader was not called"
     );
-    // 1920x1080 is not named as the problem: the reader takes it for bans.
+    // Neutral words, true for this game and for a game 0.6.0 or older
+    // refused at 1080p: 1920x1080 is never named as a supported size.
     let note = rig.health().expect("a note");
     assert_eq!(
         note,
-        "Bans and picks were not read: only the hero select was seen, and it is read at 2560x1440 only."
+        "Bans and picks were not read: at 1920x1080, hero select and games recorded before 1080p bans were supported are read at 2560x1440 only."
     );
-    assert!(note.contains(SELECT_1080_ONLY) && !note.contains("1920x1080"));
+    assert!(note.contains(SELECT_1080_ONLY) && !note.contains("or 1920x1080"));
 }
 
 #[tokio::test]

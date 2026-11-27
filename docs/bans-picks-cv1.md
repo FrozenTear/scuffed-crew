@@ -76,7 +76,7 @@ empty and the app status shows a warning:
 | a read fails | the reader failed on this game's screens |
 | frame is not 2560x1440 or 1920x1080 | the game ran at that size and the reader needs 2560x1440 or 1920x1080 |
 | hero select at 1920x1080 | picks were not read: hero select is read at 2560x1440 only (the bans and votes are stored) |
-| only a 1920x1080 hero select was seen | only the hero select was seen, and it is read at 2560x1440 only |
+| only a 1920x1080 hero select was seen | at 1920x1080, hero select and games recorded before 1080p bans were supported are read at 2560x1440 only (the Games tab says `Not read at 1920x1080: hero select and older games need 2560x1440.`, worded to fit games refused at 1080p by 0.6.0 or older too) |
 
 A good read clears the warning.
 

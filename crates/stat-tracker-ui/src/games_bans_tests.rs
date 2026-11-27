@@ -812,14 +812,20 @@ fn nothing_read_shows_the_reason_and_never_hides_the_game() {
     };
     assert_eq!(
         line,
-        "Not read: only the hero select was seen, and it is read at 2560x1440 only."
+        "Not read at 1920x1080: hero select and older games need 2560x1440."
     );
     assert_eq!(
         tip,
         Some(
-            "Bans are read at 2560x1440 and 1920x1080, picks at 2560x1440 only. 4K and other sizes are not read."
+            "Hero select is read at 2560x1440 only, and so were the bans of games recorded before 1080p bans were supported."
         )
     );
+    // The same words must hold for a game 0.6.0 or older refused at 1080p
+    // (its ban screens were seen) and for a 1080p hero select seen alone:
+    // neither names 1920x1080 as a supported size, and the line fits the
+    // 720 px window like the longest spec line (68 characters).
+    assert!(!line.contains("bans also") && !tip.unwrap().contains("1920x1080"));
+    assert!(line.chars().count() <= 68, "{line}");
     assert!(settings.is_none());
 }
 
