@@ -569,6 +569,7 @@ pub(crate) fn set_label(g: &mut Game, words: &str) {
                     queue_confidence: None,
                     role: None,
                     rank_read: false,
+                    tier_read: false,
                 });
                 g.queue_title = t.map(|t| title(t, 0.95));
                 g.team_size = size;
