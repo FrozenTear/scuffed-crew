@@ -381,7 +381,7 @@ pub struct RankTags {
 pub struct RankUpdate {
     /// `Tank`, `Damage`, `Support` or `Open`, spelled as the site's
     /// `RankRole`. The upload sends `Open` only when the game's queue title
-    /// names open queue ([`queue_key`]).
+    /// names open queue (`rank_queue::title_is_open`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[surreal(default)]
     pub role: Option<RankText>,
@@ -518,17 +518,6 @@ impl QueueTitle {
             .as_deref()
             .map(str::trim)
             .filter(|v| sure && !v.is_empty())
-    }
-
-    /// The confident title names open queue: its [`queue_key`] ends in the
-    /// word `OPEN` (`OPEN QUEUE`, `COMPETITIVE: 6V6 OPEN QUEUE`).
-    ///
-    /// Not the upload's open queue check: for anything that must match
-    /// `rank.role` or `rank.queue`, use `confident_value()` with
-    /// `rank_queue::title_is_open`.
-    pub fn is_open_queue(&self) -> bool {
-        self.confident_value()
-            .is_some_and(|v| queue_key(v).rsplit(' ').next() == Some("OPEN"))
     }
 }
 

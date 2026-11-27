@@ -210,9 +210,10 @@ fn agreement_is_the_same_queue_word() {
         ("ROLE", "OPEN QUEUE"),
         ("ROLE QUEUE", "OPEN QUEUE"),
         ("COMPETITIVE", "ROLE QUEUE"),
-        // hint_agrees stays strict: a raw banner does not agree. The rank
-        // wiring drops COMPETITIVE (and a 5V5 or 6V6 after it) in
-        // queue_hint before it sets the hint.
+        // hint_agrees stays strict on the words: a raw banner does not
+        // agree. The rank wiring drops COMPETITIVE (and a 5V5, or a 6V6
+        // before an open queue, after it) in queue_hint before it sets the
+        // hint.
         ("COMPETITIVE: ROLE QUEUE", "ROLE QUEUE"),
         ("QUEUE", "QUEUE"),
         ("", "OPEN QUEUE"),

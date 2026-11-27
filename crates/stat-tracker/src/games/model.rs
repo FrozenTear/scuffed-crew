@@ -238,6 +238,17 @@ pub struct Game {
     /// the screen was not read, and on games recorded before it existed.
     #[serde(default)]
     pub rank_update: Option<crate::model::RankUpdate>,
+    /// Where this game's rank belongs: the queue and role the upload sends
+    /// as `rank.queue` and `rank.role` (`sync::rank_slot`), derived from
+    /// the stored title, team size and rank screen read, never stored.
+    /// `None` when the upload sends no `rank` object (no Competitive
+    /// evidence, a title naming a mode that is not Competitive, or the
+    /// readers off). Group or compare ranks only within one slot
+    /// ([`crate::rank_queue::RankSlot::same_slot`], [`super::rank_slots::latest_rank_per_slot`]),
+    /// so a 6v6 role queue rank never mixes with a 5v5 role queue or open
+    /// queue rank.
+    #[serde(default)]
+    pub rank_slot: Option<crate::rank_queue::RankSlot>,
     /// The game's real start and end ([`crate::model::MatchTimes`]). `None`
     /// on a game recorded before the tracker stored them.
     #[serde(default)]
@@ -310,6 +321,7 @@ impl Game {
             bans_picks_status: m.bans_picks_status.clone(),
             queue_title: m.queue_title.clone(),
             rank_update: m.rank_update.clone(),
+            rank_slot: crate::sync::rank_slot(m),
             match_times: m.match_times.as_ref().map(GameTimes::from_stored),
         }
     }
@@ -631,6 +643,7 @@ mod tests {
             bans_picks_status: None,
             queue_title: None,
             rank_update: None,
+            rank_slot: None,
             match_times: None,
         };
         assert!(game.field_unsure("dmg"));
@@ -669,6 +682,7 @@ mod tests {
             bans_picks_status: None,
             queue_title: None,
             rank_update: None,
+            rank_slot: None,
             match_times: None,
         };
         for field in [
@@ -710,6 +724,7 @@ mod review_tests {
             bans_picks_status: None,
             queue_title: None,
             rank_update: None,
+            rank_slot: None,
             match_times: None,
         }
     }

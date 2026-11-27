@@ -4,6 +4,7 @@
 
 pub mod aggregate;
 pub mod model;
+pub mod rank_slots;
 pub mod rows;
 pub mod small_sample;
 pub mod stat_reads;

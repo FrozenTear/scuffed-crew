@@ -344,6 +344,9 @@ mod tests_queue_title;
 mod tests_team_size;
 
 #[cfg(test)]
+mod tests_rank_slot;
+
+#[cfg(test)]
 mod tests_rank_update;
 
 #[cfg(test)]
