@@ -1064,7 +1064,7 @@ mod tests {
         // queue chip on a long map name with an unsure map read, and an
         // unsure queue with its warning and no chip.
         let sure = find(crate::fixtures_games::QUEUE_SURE);
-        assert!(detail::map_chips(sure).contains(&"OPEN QUEUE".to_string()));
+        assert!(detail::map_chips(sure).contains(&"6V6 OPEN QUEUE".to_string()));
         assert_eq!(detail::queue_warning(sure), None);
         let sure_items = games_rows::unsure_items(sure, false);
         assert!(sure_items.contains(&games_rows::UnsureItem::Map));

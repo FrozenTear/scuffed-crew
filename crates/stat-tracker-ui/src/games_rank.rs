@@ -11,8 +11,8 @@
 //! word in title case (the pack may spell it in capitals), the division
 //! 1..=5, progress and change -100..=100, the role only when the upload
 //! would send it (`Open` only with an open queue title, a role icon never
-//! with one), and the queue only when its title was read confidently (the
-//! same queue the map chip shows). A game with nothing to show keeps the
+//! with one), and the queue as the queue chip names it: the `rank.queue`
+//! the upload sends (`games_queue`). A game with nothing to show keeps the
 //! plain "-" the column had before ranks were read, and so does a game
 //! whose confident title names a mode that is not Competitive (Quick
 //! Play, Stadium...), as the upload sends no rank for it.
@@ -49,7 +49,8 @@ pub struct RankShown {
     pub progress: Option<i32>,
     /// Progress points gained or lost this game, -100..=100.
     pub change: Option<i32>,
-    /// The confident queue title, single spaced, in capitals.
+    /// The queue in the chip's words (`games_queue::label`), when the
+    /// upload sends one.
     pub queue: Option<String>,
 }
 
@@ -87,10 +88,7 @@ impl RankShown {
                 .filter(|d| (1..=5).contains(d)),
             progress: num(&rank.progress_pct).filter(|p| (-100..=100).contains(p)),
             change: num(&rank.progress_change).filter(|c| (-100..=100).contains(c)),
-            queue: crate::games_detail::queue_value(g)
-                .and_then(|q| upload_text(&q))
-                .and_then(|q| clean_text(&q))
-                .map(|q| q.to_uppercase()),
+            queue: crate::games_detail::queue_value(g).map(str::to_string),
         };
         (!shown.badge_parts().is_empty()).then_some(shown)
     }
@@ -105,7 +103,7 @@ impl RankShown {
         }
     }
 
-    /// "Support, ROLE QUEUE", or the role alone. See [`context_label`].
+    /// "Support, 5V5 ROLE QUEUE", or the role alone. See [`context_label`].
     pub fn context(&self) -> String {
         context_label(self.role, self.queue.as_deref())
     }
@@ -175,11 +173,10 @@ fn role_name(value: &str, open_queue: bool) -> Option<&'static str> {
     }
 }
 
-/// Role and queue for display: "Support, ROLE QUEUE". The queue is
-/// spelled as its chip and the Map tooltip spell it, in the game's own
-/// capitals ("COMPETITIVE: 6V6 OPEN QUEUE"). A missing queue is left out,
-/// and the Open role with an open queue title shows the title alone, so
-/// open queue is never said twice.
+/// Role and queue for display: "Support, 5V5 ROLE QUEUE". The queue is
+/// spelled as its chip and the Map tooltip spell it (`games_queue`). A
+/// missing queue is left out, and the Open role with an open queue shows
+/// the queue alone ("6V6 OPEN QUEUE"), so open queue is never said twice.
 pub fn context_label(role: Option<&str>, queue: Option<&str>) -> String {
     let role = role.unwrap_or(ROLE_UNKNOWN);
     match queue {

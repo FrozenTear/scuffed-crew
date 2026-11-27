@@ -326,37 +326,37 @@ pub use crate::games_length::*;
 
 /// The queue title warning for the map line: the sentence when the game has
 /// a queue title with no confident value (`QueueTitle::confident_value`,
-/// the same gate as the upload), `None` when it has one or was never read
-/// (reader off). A chip and the warning never show together.
+/// the same gate as the upload) and its queue is not known, `None` when the
+/// title was read, never read (reader off), or a 6-a-side rank role line
+/// still gave the upload a known queue. A known queue chip and the warning
+/// never show together.
 pub fn queue_warning(g: &Game) -> Option<&'static str> {
     g.queue_title
         .as_ref()
-        .filter(|t| t.confident_value().is_none())
+        .filter(|t| t.confident_value().is_none() && !crate::games_queue::is_known(g))
         .map(|_| stat_tracker::model::QUEUE_TITLE_WARNING)
 }
 
-/// The confident queue ("OPEN QUEUE") for the queue chip, if any:
-/// `QueueTitle::confident_value`, so the chip shows exactly what the upload
-/// sends. The chip is drawn in the Games list row and on the open game's
-/// map line ([`map_chips`]).
-pub fn queue_value(g: &Game) -> Option<String> {
-    g.queue_title
-        .as_ref()?
-        .confident_value()
-        .map(str::to_string)
+/// The game's queue in words for the queue chip ("6V6 ROLE QUEUE",
+/// "6V6 queue unknown"), if the upload sends one: the `rank.queue` of the
+/// game's upload, through [`Game::rank_slot`] ([`crate::games_queue`]).
+/// `None` (no chip) with the readers off, or for a game that is not
+/// Competitive. Drawn in the Games list row and on the open game's map
+/// line ([`map_chips`]), and named in the Rank cell's tooltip.
+pub fn queue_value(g: &Game) -> Option<&'static str> {
+    crate::games_queue::of_game(g)
 }
 
-/// The chips after the map name, in order: the map's mode, then the
-/// confident queue ([`queue_value`]). The Games list row and the open
-/// game's map line both draw these, so a closed row shows the queue too.
-/// A weak or failed read adds no chip, and the open game's map line says
-/// the queue is not known ([`queue_warning`]). With the queue title reader
-/// off there is no read at all: no chip and no warning.
+/// The chips after the map name, in order: the map's mode, then the queue
+/// ([`queue_value`]). The Games list row and the open game's map line both
+/// draw these, so a closed row shows the queue too. A game the upload sends
+/// no queue for adds no chip; the open game's map line says when a weak
+/// title read left the queue unknown ([`queue_warning`]).
 pub fn map_chips(g: &Game) -> Vec<String> {
     crate::games_rows::mode_chip(&g.map_name)
-        .map(str::to_string)
         .into_iter()
         .chain(queue_value(g))
+        .map(str::to_string)
         .collect()
 }
 
@@ -367,7 +367,7 @@ pub enum MapPart {
     Name,
     /// The amber warning sign for an unsure map read.
     Warn,
-    /// One of [`map_chips`]: the mode, then the confident queue.
+    /// One of [`map_chips`]: the mode, then the queue.
     Chip(String),
 }
 
@@ -781,6 +781,7 @@ pub(crate) mod tests {
             queue_title: None,
             rank_update: None,
             rank_slot: None,
+            team_size: None,
             match_times: None,
         }
     }
@@ -1255,10 +1256,11 @@ pub(crate) mod tests {
     }
 
     /// The queue title warning shows only for a game with no confident
-    /// value; the chip only for one with it. The reader off (no title)
-    /// shows neither.
+    /// value and no known queue; the chip names the queue the upload sends.
+    /// The reader off (no title) shows neither.
     #[test]
     fn the_queue_warning_shows_only_without_a_confident_value() {
+        use crate::games_queue::tests::set_queue;
         use stat_tracker::model::{QUEUE_TITLE_WARNING, QueueTitle};
         let mut g = game("a", "Ana", 1, 1, at(20, 0, 0));
         assert_eq!((queue_warning(&g), queue_value(&g)), (None, None));
@@ -1267,24 +1269,30 @@ pub(crate) mod tests {
             confidence: 0.93,
             ..QueueTitle::default()
         };
-        g.queue_title = Some(confident.clone());
+        set_queue(&mut g, Some(confident.clone()), Some(5), None);
         assert_eq!(queue_warning(&g), None);
-        assert_eq!(queue_value(&g).as_deref(), Some("OPEN QUEUE"));
+        assert_eq!(queue_value(&g), Some("5V5 OPEN QUEUE"));
+        // No board size: the upload sends unknown, and so does the chip.
+        set_queue(&mut g, Some(confident.clone()), None, None);
+        assert_eq!(queue_warning(&g), None);
+        assert_eq!(queue_value(&g), Some("Queue unknown"));
         // Weak with no earlier value: the warning, no chip.
-        g.queue_title = Some(QueueTitle {
+        let weak = QueueTitle {
             unsure: true,
             ..QueueTitle::default()
-        });
+        };
+        set_queue(&mut g, Some(weak), Some(5), None);
         assert_eq!(queue_warning(&g), Some(QUEUE_TITLE_WARNING));
         assert_eq!(queue_value(&g), None);
         // A value and the flag together (a row stored before the title was
         // write-once): the chip only, never the warning beside it.
-        g.queue_title = Some(QueueTitle {
+        let both = QueueTitle {
             unsure: true,
             ..confident
-        });
+        };
+        set_queue(&mut g, Some(both), Some(6), None);
         assert_eq!(queue_warning(&g), None);
-        assert_eq!(queue_value(&g).as_deref(), Some("OPEN QUEUE"));
+        assert_eq!(queue_value(&g), Some("6V6 OPEN QUEUE"));
     }
 
     /// The chip uses the upload's gate (`QueueTitle::confident_value`): a
@@ -1292,6 +1300,7 @@ pub(crate) mod tests {
     /// warning and no chip; exactly at the bar shows the chip.
     #[test]
     fn a_stored_value_below_the_bar_shows_the_warning_not_a_chip() {
+        use crate::games_queue::tests::set_queue;
         use stat_tracker::model::{QUEUE_TITLE_MIN_SCORE, QUEUE_TITLE_WARNING, QueueTitle};
         let mut g = game("a", "Ana", 1, 1, at(20, 0, 0));
         let stored = |value: &str, confidence: f32| QueueTitle {
@@ -1307,7 +1316,7 @@ pub(crate) mod tests {
             ("OPEN QUEUE", 1.5),
             ("  ", 0.93),
         ] {
-            g.queue_title = Some(stored(value, confidence));
+            set_queue(&mut g, Some(stored(value, confidence)), Some(5), None);
             assert_eq!(queue_value(&g), None, "{value:?} at {confidence}");
             assert_eq!(
                 queue_warning(&g),
@@ -1315,8 +1324,9 @@ pub(crate) mod tests {
                 "{value:?} at {confidence}"
             );
         }
-        g.queue_title = Some(stored(" OPEN QUEUE ", QUEUE_TITLE_MIN_SCORE));
-        assert_eq!(queue_value(&g).as_deref(), Some("OPEN QUEUE"));
+        let at_bar = stored(" OPEN QUEUE ", QUEUE_TITLE_MIN_SCORE);
+        set_queue(&mut g, Some(at_bar), Some(5), None);
+        assert_eq!(queue_value(&g), Some("5V5 OPEN QUEUE"));
         assert_eq!(queue_warning(&g), None);
     }
 
@@ -1327,26 +1337,28 @@ pub(crate) mod tests {
     #[test]
     fn the_list_row_shows_a_confident_queue_and_keeps_an_unsure_game() {
         use crate::aggregate::{GameFilter, filter_games};
+        use crate::games_queue::tests::set_queue;
         use crate::games_rows::{Grid, TabState, UnsureItem, layout, mode_chip, unsure_items};
         use stat_tracker::model::QueueTitle;
         let mode = mode_chip("Ilios").map(str::to_string);
         assert!(mode.is_some());
         let mut sure = game("sure", "Ana", 1, 1, at(20, 0, 0));
-        sure.queue_title = Some(QueueTitle {
+        let open = QueueTitle {
             value: Some("OPEN QUEUE".into()),
             confidence: 0.93,
             ..QueueTitle::default()
-        });
+        };
+        set_queue(&mut sure, Some(open.clone()), Some(5), None);
         let mut weak = game("weak", "Ana", 1, 1, at(20, 30, 0));
-        weak.queue_title = Some(QueueTitle {
-            value: Some("OPEN QUEUE".into()),
+        let weak_title = QueueTitle {
             confidence: 0.4,
             unsure: true,
-            ..QueueTitle::default()
-        });
+            ..open
+        };
+        set_queue(&mut weak, Some(weak_title), Some(5), None);
         let unread = game("unread", "Ana", 1, 1, at(21, 0, 0));
         let mut want_sure: Vec<String> = mode.clone().into_iter().collect();
-        want_sure.push("OPEN QUEUE".into());
+        want_sure.push("5V5 OPEN QUEUE".into());
         assert_eq!(map_chips(&sure), want_sure);
         let mode_only: Vec<String> = mode.into_iter().collect();
         assert_eq!(map_chips(&weak), mode_only);
@@ -1369,7 +1381,7 @@ pub(crate) mod tests {
             let doubt = unsure_items(g, false).contains(&UnsureItem::Map);
             let mut want = vec![MapPart::Name, mode.clone()];
             if g.session_id == "sure" {
-                want.push(MapPart::Chip("OPEN QUEUE".into()));
+                want.push(MapPart::Chip("5V5 OPEN QUEUE".into()));
             }
             assert_eq!(map_cell_parts(g, doubt), want, "{}", g.session_id);
         }
@@ -1383,12 +1395,13 @@ pub(crate) mod tests {
     fn the_map_warning_comes_before_the_chips() {
         use stat_tracker::model::QueueTitle;
         let mut g = game("long", "Ana", 1, 1, at(20, 0, 0));
-        g.map_name = "Watchpoint: Gibraltar".into();
-        g.queue_title = Some(QueueTitle {
+        let open = QueueTitle {
             value: Some("OPEN QUEUE".into()),
             confidence: 0.93,
             ..QueueTitle::default()
-        });
+        };
+        crate::games_queue::tests::set_queue(&mut g, Some(open), Some(6), None);
+        g.map_name = "Watchpoint: Gibraltar".into();
         let parts = map_cell_parts(&g, true);
         assert_eq!(
             parts,
@@ -1396,7 +1409,7 @@ pub(crate) mod tests {
                 MapPart::Name,
                 MapPart::Warn,
                 MapPart::Chip("Escort".into()),
-                MapPart::Chip("OPEN QUEUE".into()),
+                MapPart::Chip("6V6 OPEN QUEUE".into()),
             ]
         );
         let warn = parts.iter().position(|p| *p == MapPart::Warn).unwrap();
@@ -1411,7 +1424,7 @@ pub(crate) mod tests {
             [
                 MapPart::Name,
                 MapPart::Chip("Escort".into()),
-                MapPart::Chip("OPEN QUEUE".into()),
+                MapPart::Chip("6V6 OPEN QUEUE".into()),
             ]
         );
     }
