@@ -5,7 +5,7 @@ use std::ops::{Deref, DerefMut};
 
 use crate::storage::PersonalMatch;
 
-use scuffed_types::api::{RankRole, StatsUploadEntry};
+use scuffed_types::api::{RankQueue, RankRole, StatsUploadEntry};
 use serde::Serialize;
 
 use super::bans_picks::{UploadBansPicks, upload_bans_picks};
@@ -20,10 +20,11 @@ pub struct UploadEntry {
     entry: StatsUploadEntry,
     #[serde(skip_serializing_if = "Option::is_none")]
     bans_picks: Option<UploadBansPicks>,
-    /// What the `rank-v1` readers read for the game ([`upload_rank`]). Left
-    /// out when they read nothing, so an older server, a game with the
-    /// readers off and a game with no confident read see the same body as
-    /// before.
+    /// What the `rank-v1` readers read for the game ([`upload_rank`]),
+    /// including the decided Competitive queue. Left out when they read
+    /// nothing and the game has no queue to send, so an older server, a
+    /// game with the readers off and a game that is not Competitive see
+    /// the same body as before.
     #[serde(skip_serializing_if = "Option::is_none")]
     rank: Option<UploadRank>,
 }
@@ -71,8 +72,22 @@ pub struct UploadRank {
     /// The queue read on the pre-game screens.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queue_title: Option<UploadRankField<String>>,
+    /// The queue the game was played in ([`upload_queue`]). Sent for
+    /// Competitive games only, next to the other rank fields. A game with
+    /// no rank screen read still sends this (and the queue title) when
+    /// the title names role or open queue.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue: Option<UploadQueueField>,
     /// The reader id ([`RANK_RECOGNIZER_ID`]), sent with any field.
     pub rank_recognizer: &'static str,
+}
+
+/// `rank.queue` on the upload: the decided value and how sure the input
+/// that decided it was. `confidence` is null when the queue is unknown.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct UploadQueueField {
+    pub value: RankQueue,
+    pub confidence: Option<f32>,
 }
 
 /// The reader id sent as `rank.rank_recognizer`, for the queue title and
@@ -81,8 +96,11 @@ pub struct UploadRank {
 pub const RANK_RECOGNIZER_ID: &str = crate::model::RANK_RECOGNIZER_ID;
 
 /// The game's `rank` object as the upload sends it: each field only when
-/// the reader read it, and `None` (no key, the old body) when no field is
-/// set.
+/// the reader read it, plus `queue` on a Competitive game, and `None` (no
+/// key, the old body) when no field is set. A title-only object is sent
+/// only when the title names ROLE or OPEN. A confident title that names a
+/// mode that is not Competitive (QUICK, UNRANKED, ARCADE, STADIUM or
+/// CUSTOM) sends no object at all, rank screen fields or not (#889).
 ///
 /// The local `QueueTitle::mode_hint` is not sent as `rank.next_mode_hint`:
 /// that site field belongs to the game whose rank screen was read (the
@@ -91,15 +109,19 @@ pub const RANK_RECOGNIZER_ID: &str = crate::model::RANK_RECOGNIZER_ID;
 /// word read on this game's own rank screen
 /// (`PersonalMatch::rank_update`).
 pub(super) fn upload_rank(m: &PersonalMatch) -> Option<UploadRank> {
+    let confident_title = m.queue_title.as_ref().and_then(|t| t.confident_value());
+    if confident_title.is_some_and(crate::rank_queue::title_rules_out_competitive) {
+        return None;
+    }
     let queue_title = m.queue_title.as_ref().and_then(|t| {
         Some(UploadRankField {
             value: t.confident_value()?.to_string(),
             confidence: t.confidence,
         })
     });
-    let open_queue = m.queue_title.as_ref().is_some_and(|t| t.is_open_queue());
+    let open_queue = confident_title.is_some_and(crate::rank_queue::title_is_open);
     let r = m.rank_update.clone().unwrap_or_default();
-    let rank = UploadRank {
+    let mut rank = UploadRank {
         role: field(&r.role, |v| rank_role(v, open_queue)),
         role_rank: field(&r.role_rank, |v| text(v)),
         division: field(&r.division, |v| {
@@ -122,9 +144,55 @@ pub(super) fn upload_rank(m: &PersonalMatch) -> Option<UploadRank> {
         hero_sr_change: field(&r.hero_sr_change, |v| i32::try_from(*v).ok()),
         next_mode_hint: field(&r.next_mode_hint, |v| text(v)),
         queue_title,
+        queue: None,
         rank_recognizer: RANK_RECOGNIZER_ID,
     };
-    (rank != UploadRank::none()).then_some(rank)
+    let title_names_queue = rank
+        .queue_title
+        .as_ref()
+        .is_some_and(|t| crate::rank_queue::title_names_role_or_open(&t.value));
+    if rank.has_rank_screen_field() || title_names_queue {
+        rank.queue = Some(upload_queue(m));
+        Some(rank)
+    } else {
+        // A confident title that does not name ROLE or OPEN, and no rank
+        // screen field, is not Competitive evidence: omit the object.
+        None
+    }
+}
+
+/// The decided `rank.queue` for a Competitive game that already has a
+/// `rank` object (a title that names ROLE or OPEN, a rank screen field,
+/// or both). A title or board size that does not map is `unknown` with
+/// no confidence; the game is still uploaded.
+fn upload_queue(m: &PersonalMatch) -> UploadQueueField {
+    // The stored title and role line, each only when sure. The decision
+    // takes the role line only to fall back on a role icon (Tank, Damage,
+    // Support) with no title and 6 per team: an Open line decides nothing,
+    // as it is not sent as the role without an open queue title either.
+    let title = m.queue_title.as_ref().and_then(|t| t.confident_value());
+    let title_confidence = title.and_then(|_| sure(m.queue_title.as_ref()?.confidence));
+    let role = m
+        .rank_update
+        .as_ref()
+        .and_then(|r| r.role.as_ref())
+        .and_then(|t| sure(t.confidence).map(|_| t.value.as_str()));
+    let role_confidence = m
+        .rank_update
+        .as_ref()
+        .and_then(|r| r.role.as_ref())
+        .and_then(|t| sure(t.confidence));
+    let decided = crate::rank_queue::decide_rank_queue(
+        title,
+        title_confidence,
+        m.team_size,
+        role,
+        role_confidence,
+    );
+    UploadQueueField {
+        value: decided.value,
+        confidence: decided.confidence,
+    }
 }
 
 /// Whether storing `rank` on `m` changes the `rank` object the upload
@@ -141,7 +209,43 @@ pub(crate) fn rank_update_changes_upload(
 }
 
 impl UploadRank {
-    /// No field read: what [`upload_rank`] never sends.
+    /// A field read on the rank screen itself, not the pre-game title.
+    fn has_rank_screen_field(&self) -> bool {
+        // No `..`. A field read on the rank screen goes in the `||` chain
+        // below and gets a row in
+        // `each_rank_screen_field_alone_sends_a_rank_object`. Only fields
+        // not read on the rank screen (`queue_title`, `queue`,
+        // `rank_recognizer`) are ignored with `_`.
+        let Self {
+            role,
+            role_rank,
+            division,
+            progress_pct,
+            progress_change,
+            change_tags,
+            higher_than_pct,
+            hero_sr,
+            hero_sr_change,
+            next_mode_hint,
+            queue_title: _,
+            queue: _,
+            rank_recognizer: _,
+        } = self;
+        role.is_some()
+            || role_rank.is_some()
+            || division.is_some()
+            || progress_pct.is_some()
+            || progress_change.is_some()
+            || change_tags.is_some()
+            || higher_than_pct.is_some()
+            || hero_sr.is_some()
+            || hero_sr_change.is_some()
+            || next_mode_hint.is_some()
+    }
+
+    /// No field read: what [`upload_rank`] never sends. Kept for tests
+    /// that build a partial object with `..UploadRank::none()`.
+    #[cfg(test)]
     pub(super) fn none() -> Self {
         Self {
             role: None,
@@ -155,6 +259,7 @@ impl UploadRank {
             hero_sr_change: None,
             next_mode_hint: None,
             queue_title: None,
+            queue: None,
             rank_recognizer: RANK_RECOGNIZER_ID,
         }
     }
@@ -192,7 +297,7 @@ fn text(v: &str) -> Option<String> {
 /// Damage, Support) never with an open queue title: open queue screens have
 /// no role line, so an icon read there is a misread.
 fn rank_role(v: &str, open_queue: bool) -> Option<RankRole> {
-    let role: RankRole = serde_json::from_value(serde_json::Value::String(v.to_string())).ok()?;
+    let role = crate::rank_queue::parse_rank_role(v)?;
     let sent = match role {
         RankRole::Tank | RankRole::Damage | RankRole::Support => !open_queue,
         RankRole::Open => open_queue,

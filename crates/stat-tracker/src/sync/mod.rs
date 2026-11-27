@@ -93,6 +93,9 @@ mod tests_bans_picks;
 mod tests_queue_title;
 
 #[cfg(test)]
+mod tests_rank_queue;
+
+#[cfg(test)]
 mod tests_rank_update;
 
 #[cfg(test)]

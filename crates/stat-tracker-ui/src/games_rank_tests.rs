@@ -147,10 +147,27 @@ fn open_queue_role_follows_the_upload() {
         shown(&g).sentence(),
         "Rank: COMPETITIVE: 6V6 OPEN QUEUE, Silver 1, 10% progress, ±0% this game"
     );
+    // OPEN not next to QUEUE is still an open queue title, said once.
+    g.queue_title = Some(queue("OPEN 6V6 QUEUE"));
+    assert_eq!(shown(&g).context(), "OPEN 6V6 QUEUE");
     let mut g = with_rank(rank("Tank", "Silver", 1, 10, 0));
     g.queue_title = Some(queue("OPEN QUEUE"));
     assert_eq!(shown(&g).context(), "Role unknown, OPEN QUEUE");
     assert_eq!(context_label(Some("Tank"), None), "Tank");
+}
+
+/// The role shows only for the exact `RankRole` spellings the upload
+/// sends; other case or surrounding spaces show no role.
+#[test]
+fn only_the_rank_role_spellings_show_a_role() {
+    assert_eq!(role_name("Tank", false), Some("Tank"));
+    assert_eq!(role_name("Damage", false), Some("Damage"));
+    assert_eq!(role_name("Support", false), Some("Support"));
+    assert_eq!(role_name("Open", true), Some(OPEN_ROLE));
+    for value in ["TANK", "tank", " Tank", "Tank ", "SUPPORT", "OPEN", " Open"] {
+        assert_eq!(role_name(value, false), None, "{value:?}");
+        assert_eq!(role_name(value, true), None, "{value:?}");
+    }
 }
 
 /// The rank tooltip spells the queue as the queue chip and the Map
@@ -386,8 +403,15 @@ fn upload_cases() -> Vec<(RankUpdate, Option<QueueTitle>)> {
         "x".repeat(64),
         "x".repeat(65),
     ];
-    let roles = ["Tank", "Damage", "Support", "Open", "Healer"];
-    let queues = [None, Some("ROLE QUEUE"), Some("OPEN QUEUE")];
+    let roles = [
+        "Tank", "Damage", "Support", "Open", "Healer", "TANK", " Tank",
+    ];
+    let queues = [
+        None,
+        Some("ROLE QUEUE"),
+        Some("OPEN QUEUE"),
+        Some("OPEN QUEUE 6V6"),
+    ];
     let numbers = [-101, -100, 0, 45, 100, 101, i64::MAX];
     let mut cases = Vec::new();
     let mut i = 0;
@@ -427,6 +451,19 @@ fn upload_cases() -> Vec<(RankUpdate, Option<QueueTitle>)> {
     cases.push((rank("Open", "Champion", 2, 10, 5), Some(long_queue)));
     cases.push((RankUpdate::default(), Some(queue("ROLE QUEUE"))));
     cases.push((RankUpdate::default(), None));
+    // A title of a mode that is not Competitive: the upload sends no rank,
+    // so the cell shows "-" even with rank screen fields read.
+    for title in [
+        "ROLE QUEUE: QUICK PLAY",
+        "OPEN QUEUE: 6V6 QUICK PLAY",
+        "QUICK PLAY: ROLE QUEUE",
+        "STADIUM: OPEN QUEUE",
+        "ARCADE",
+    ] {
+        for role in ["Support", "Open"] {
+            cases.push((rank(role, "Diamond", 2, 45, 5), Some(queue(title))));
+        }
+    }
     cases
 }
 

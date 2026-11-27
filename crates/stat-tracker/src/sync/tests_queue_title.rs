@@ -4,7 +4,7 @@
 //! the site's own parse (`StatsUploadBody` and `resolve_rank`).
 
 use super::tests_wire::row;
-use super::wire::{RANK_RECOGNIZER_ID, UploadRank, UploadRankField, upload_rank};
+use super::wire::{RANK_RECOGNIZER_ID, UploadQueueField, UploadRank, UploadRankField, upload_rank};
 use super::*;
 use crate::model::QueueTitle;
 use scuffed_types::api::{StatsUploadBody, resolve_rank};
@@ -53,29 +53,41 @@ fn no_confident_value_sends_exactly_the_old_body() {
 
 #[test]
 fn a_confident_value_is_sent_in_the_rank_object() {
-    let sent: Value = serde_json::from_str(&body(Some(read(Some("OPEN QUEUE"), 0.93)))).unwrap();
+    let mut with_size = game(Some(read(Some("OPEN QUEUE"), 0.93)));
+    with_size.team_size = Some(5);
+    let sent: Value = serde_json::from_str(
+        &serde_json::to_string(&upload_request(&[with_size.clone()], &[])).unwrap(),
+    )
+    .unwrap();
     let m = &sent["matches"][0];
     assert!(m.get("queue_title").is_none(), "no top-level key: {m}");
     assert_eq!(m["rank"]["queue_title"]["value"], json!("OPEN QUEUE"));
     let confidence = m["rank"]["queue_title"]["confidence"].as_f64().unwrap();
     assert!((confidence - 0.93).abs() < 1e-6, "{confidence}");
+    assert_eq!(m["rank"]["queue"]["value"], json!("open_5v5"));
     assert_eq!(m["rank"]["rank_recognizer"], json!("rank-v1"));
     assert_eq!(
         m["rank"].as_object().unwrap().len(),
-        2,
-        "only the fields that were read: {m}"
+        3,
+        "the title, the decided queue, and the recognizer: {m}"
     );
     // Exactly at the bar is sent; the warning and a hint are local only.
     let at_bar = QueueTitle {
         mode_hint: Some("open".into()),
         ..read(Some("OPEN QUEUE"), crate::model::QUEUE_TITLE_MIN_SCORE)
     };
+    let mut at_bar_game = game(Some(at_bar));
+    at_bar_game.team_size = Some(5);
     assert_eq!(
-        upload_rank(&game(Some(at_bar))),
+        upload_rank(&at_bar_game),
         Some(UploadRank {
             queue_title: Some(UploadRankField {
                 value: "OPEN QUEUE".into(),
                 confidence: crate::model::QUEUE_TITLE_MIN_SCORE,
+            }),
+            queue: Some(UploadQueueField {
+                value: scuffed_types::api::RankQueue::Open5v5,
+                confidence: Some(crate::model::QUEUE_TITLE_MIN_SCORE),
             }),
             rank_recognizer: RANK_RECOGNIZER_ID,
             ..UploadRank::none()
@@ -96,6 +108,11 @@ fn the_site_parse_reads_the_queue_title_and_the_rank_recognizer() {
     let confidence = rank.queue_title.confidence.expect("a confidence");
     assert!((confidence - 0.93).abs() < 1e-6, "{confidence}");
     assert_eq!(rank.rank_recognizer.as_deref(), Some("rank-v1"));
+    // No team size on this row: the title is sent and the queue is unknown.
+    assert_eq!(
+        rank.queue.value,
+        Some(scuffed_types::api::RankQueue::Unknown)
+    );
     // Nothing else is claimed.
     assert_eq!(rank.next_mode_hint.value, None);
     assert_eq!(rank.role.value, None);
