@@ -18,15 +18,16 @@ use iced::advanced::widget::operation::{Operation, Scrollable};
 use iced::advanced::widget::{Id, Tree};
 use iced::keyboard::key::Named;
 use iced::keyboard::{self, Key};
-use iced::mouse::{Button, Cursor, Event as Mouse};
+use iced::mouse::{Button, Cursor, Event as Mouse, Interaction, ScrollDelta};
 use iced::{Element, Event, Point, Rectangle, Size, Vector};
 
-use crate::app::Message;
+use crate::app::{Message, TrackerApp};
+use crate::chrome::TopDialog;
 use crate::layout::SCROLLBAR_WIDTH;
 use crate::settings_open::OpenMsg;
 use crate::settings_update::Msg;
 use crate::setup_guide::SetupMessage;
-use crate::theme::GRID_GAP;
+use crate::theme::{GRID_GAP, SIZE_META};
 
 /// The window sizes the dialogs are checked at, including the app minimum.
 const WINDOWS: [(f32, f32); 3] = [(1280.0, 860.0), (1000.0, 768.0), (720.0, 480.0)];
@@ -61,6 +62,8 @@ struct Collect {
     depth: usize,
     scrolls: Vec<(usize, Rectangle, bool)>,
     placed: Vec<Placed>,
+    /// Containers inside a scrollable, below its own content wrapper.
+    boxes: Vec<(Rectangle, Rectangle)>,
 }
 
 impl Operation<()> for Collect {
@@ -72,7 +75,13 @@ impl Operation<()> for Collect {
         self.scrolls.retain(|(d, _, _)| *d < depth);
     }
 
-    fn container(&mut self, _id: Option<&Id>, _bounds: Rectangle) {}
+    fn container(&mut self, _id: Option<&Id>, bounds: Rectangle) {
+        if let Some(&(depth, scroll, _)) = self.scrolls.last()
+            && self.depth > depth + 1
+        {
+            self.boxes.push((bounds, scroll));
+        }
+    }
 
     fn scrollable(
         &mut self,
@@ -101,7 +110,11 @@ impl Operation<()> for Collect {
 
 /// Lays `element` out as the window-sized layer it is in the app and
 /// returns every text block drawn inside a scrollable.
-fn placed(mut element: Element<'_, Message>, window: (f32, f32)) -> Vec<Placed> {
+fn placed(element: Element<'_, Message>, window: (f32, f32)) -> Vec<Placed> {
+    collect(element, window).placed
+}
+
+fn collect(mut element: Element<'_, Message>, window: (f32, f32)) -> Collect {
     let renderer = headless();
     let mut tree = Tree::new(&element);
     let node = element.as_widget_mut().layout(
@@ -113,7 +126,7 @@ fn placed(mut element: Element<'_, Message>, window: (f32, f32)) -> Vec<Placed> 
     element
         .as_widget_mut()
         .operate(&mut tree, Layout::new(&node), &renderer, &mut collect);
-    collect.placed
+    collect
 }
 
 /// Every covered text block of `name` ends left of the bar, at each window
@@ -169,7 +182,7 @@ fn whats_new_keeps_its_text_clear_of_the_bar() {
     let closed = HashSet::new();
     let open: HashSet<String> = sections.iter().map(|s| s.version.clone()).collect();
     for (show_older, open_details) in [(false, &closed), (true, &open)] {
-        assert_clear("what's new", GRID_GAP, || {
+        let build = || {
             crate::notes::dialog(
                 "Release notes",
                 &sections,
@@ -181,7 +194,22 @@ fn whats_new_keeps_its_text_clear_of_the_bar() {
                     show_older,
                 },
             )
-        });
+        };
+        assert_clear("what's new", GRID_GAP, build);
+        // The cards' own 20 px padding keeps their text off the bar even
+        // with no gutter, so the boxes in the body (the cards and the
+        // column around them) must end left of it too.
+        for window in WINDOWS {
+            let boxes = collect(build(), window).boxes;
+            assert!(!boxes.is_empty(), "{window:?}: no box in the body");
+            for (boxed, scroll) in boxes {
+                let bar_left = scroll.x + scroll.width - SCROLLBAR_WIDTH;
+                assert!(
+                    boxed.x + boxed.width <= bar_left,
+                    "what's new {window:?}: a box {boxed:?} runs under the bar at {bar_left}"
+                );
+            }
+        }
     }
 }
 
@@ -288,23 +316,146 @@ fn report_log_wraps_a_no_space_host_header_line() {
     }
 }
 
+/// A path component or host with no break point: letters and digits only,
+/// so Word wrapping cannot split it. QA saw a 192-character one cut at the
+/// bar in Uninstall; this one is 384, at least three lines in any dialog.
+fn unbreakable() -> String {
+    "a1b2c3d4e5f6".repeat(32)
+}
+
+/// Stands in for [`unbreakable`] in the one-line build.
+const SHORT: &str = "short-name";
+
+/// Every text block holding [`unbreakable`] (each ends with it) stays
+/// clear of the bar and is at least two lines taller than the same block
+/// holding [`SHORT`]. Text boxes are clamped to the padded width, so
+/// [`assert_clear`] alone passes on a token that runs on under the bar.
+/// Word wrapping moves the token to a line of its own, one line more;
+/// only breaking it on glyphs makes it two or more.
+fn assert_token_wraps<'a>(
+    name: &str,
+    long: impl Fn() -> Element<'a, Message>,
+    short: impl Fn() -> Element<'a, Message>,
+) {
+    assert_clear(name, GRID_GAP, &long);
+    let token = unbreakable();
+    for window in WINDOWS {
+        let blocks = |element: Element<'a, Message>, needle: &str| -> Vec<Placed> {
+            let all = placed(element, window).into_iter();
+            all.filter(|p| p.text.contains(needle)).collect()
+        };
+        let (tall, one) = (blocks(long(), &token), blocks(short(), SHORT));
+        assert!(
+            !tall.is_empty() && tall.len() == one.len(),
+            "{name} {window:?}: token in {} blocks, short name in {}",
+            tall.len(),
+            one.len()
+        );
+        for (tall, one) in tall.iter().zip(&one) {
+            let line = one.height / one.text.lines().count() as f32;
+            assert!(
+                tall.height >= one.height + 2.0 * line - 0.5,
+                "{name} {window:?}: the token block is {} tall, the short one {} \
+                 ({line} a line): the token did not wrap: {:?}",
+                tall.height,
+                one.height,
+                one.text
+            );
+        }
+    }
+}
+
+/// Uninstall lists the data dir and the AppImage in its groups and the
+/// data dir again under the checkbox. Each wraps a no-space name.
 #[test]
-fn uninstall_keeps_its_text_clear_of_the_bar() {
+fn uninstall_wraps_an_unbreakable_path_clear_of_the_bar() {
     use crate::uninstall::UninstallDialog;
-    let home = std::path::PathBuf::from(
-        "/home/qa a b c d e f g h i j k l m n o p q r s t u v w x y z end",
-    );
-    let dialog = UninstallDialog::Confirm {
-        prefix: home.join(".local"),
-        data_dir: home.join(".local/share/scuffed-stat-tracker with spaces in the data dir path"),
-        appimage: Some(home.join("Applications/Scuffed Stat Tracker x86_64.AppImage")),
-        home,
-        delete_data: true,
-        fallback: true,
+    let confirm = |name: &str| {
+        let home = std::path::PathBuf::from("/home/qa");
+        UninstallDialog::Confirm {
+            prefix: home.join(".local"),
+            data_dir: home.join(".local/share").join(name),
+            appimage: Some(home.join("Applications").join(format!("{name}.AppImage"))),
+            home,
+            delete_data: true,
+            fallback: true,
+        }
     };
-    assert_clear("uninstall", GRID_GAP, || {
-        crate::uninstall::view(&dialog, false)
-    });
+    let (long, short) = (confirm(&unbreakable()), confirm(SHORT));
+    assert_token_wraps(
+        "uninstall",
+        || crate::uninstall::view(&long, false),
+        || crate::uninstall::view(&short, false),
+    );
+}
+
+/// Report a problem: the Saved to path and a send failure that names an
+/// address, each with a no-space token.
+#[test]
+fn report_wraps_an_unbreakable_path_and_reason_clear_of_the_bar() {
+    use crate::report::{ReportDialog, ReportUi, SendOutcome, SendState};
+    let ui = |name: &str| {
+        let mut dialog = ReportDialog::new(None, true);
+        dialog.saved = Some(Ok(std::path::PathBuf::from("/home/qa/reports").join(name)));
+        let reason = format!("Could not reach https://{name}");
+        dialog.send = SendState::Done(SendOutcome::Failed(reason));
+        ReportUi::Dialog(Box::new(dialog))
+    };
+    let (long, short) = (ui(&unbreakable()), ui(SHORT));
+    assert_token_wraps(
+        "report",
+        || crate::report::view(&long),
+        || crate::report::view(&short),
+    );
+}
+
+/// The setup guide's Sync step shows the site's answer to Check token.
+#[test]
+fn the_setup_guide_wraps_an_unbreakable_server_message_clear_of_the_bar() {
+    let guide = |name: &str| {
+        let (dir, mut app) = crate::fixtures::test_app();
+        let _ = app.update(Message::Setup(SetupMessage::Open));
+        let _ = app.update(Message::Setup(SetupMessage::SkipStep)); // Overwatch
+        let _ = app.update(Message::Setup(SetupMessage::SkipStep)); // Sync
+        let message = format!("Could not reach https://{name}");
+        let _ = app.setup.token_checked(Err(message));
+        (dir, app)
+    };
+    let ((_long_dir, long), (_short_dir, short)) = (guide(&unbreakable()), guide(SHORT));
+    assert_token_wraps(
+        "setup guide",
+        || crate::setup_guide::view(&long.setup),
+        || crate::setup_guide::view(&short.setup),
+    );
+}
+
+/// What's new: a release summary and a highlight with a no-space token
+/// (a remote release body can carry a long link).
+#[test]
+fn whats_new_wraps_an_unbreakable_summary_clear_of_the_bar() {
+    let release = |name: &str| crate::notes::ShownRelease {
+        version: "0.7.0".into(),
+        summary: format!("See https://{name}"),
+        highlights: vec![format!("Moved to {name}")],
+        items: Vec::new(),
+        published_on: None,
+    };
+    let (long, short) = ([release(&unbreakable())], [release(SHORT)]);
+    let closed = HashSet::new();
+    let dialog = |sections| {
+        crate::notes::dialog(
+            "Release notes",
+            sections,
+            crate::notes::NotesUi {
+                surface: crate::notes::NotesSurface::Dialog,
+                installed: Some("0.6.0"),
+                offered: None,
+                open_details: &closed,
+                show_older: false,
+            },
+        )
+    };
+    assert_token_wraps("what's new", || dialog(&long), || dialog(&short));
 }
 
 /// Each step the guide reaches with Skip this step, from the first.
@@ -345,7 +496,8 @@ fn the_setup_guide_keeps_its_text_clear_of_the_bar() {
     });
 }
 
-/// Close stays inside the window at every size the dialog is checked at.
+/// Close stays inside the window and the card, at its own size, at every
+/// size the dialog is checked at.
 #[test]
 fn what_leaves_keeps_its_close_button_in_view() {
     let (_dir, mut app) = crate::fixtures::test_app();
@@ -366,6 +518,17 @@ fn what_leaves_keeps_its_close_button_in_view() {
         let card = card_bounds(
             crate::what_leaves::layer(&app).expect("open").content,
             window,
+        );
+        // Inside the card and at its own size: squeezed, Close is laid out
+        // 0 x 0 and the button is gone while the box is still in the window.
+        let inside = card.contains(close_box.position())
+            && card.contains(Point::new(
+                close_box.x + close_box.width,
+                close_box.y + close_box.height,
+            ));
+        assert!(
+            inside && close_box.width >= SIZE_META && close_box.height >= SIZE_META,
+            "{window:?}: Close at {close_box:?} is squeezed or outside the card {card:?}"
         );
         let window_cap = window.1 - 28.0 * 2.0;
         let cap = window_cap.min(560.0);
@@ -415,7 +578,7 @@ fn close_bounds(mut element: Element<'_, Message>, window: (f32, f32)) -> Option
 
 /// The What leaves layer as it sits in the window: a top dialog_focus
 /// layer with the Esc message from [`Dialog::new`].
-fn what_leaves_top(app: &crate::app::TrackerApp) -> Element<'_, Message> {
+fn what_leaves_top(app: &TrackerApp) -> Element<'_, Message> {
     let dialog = crate::what_leaves::layer(app).expect("open");
     crate::dialog_focus::layer(
         dialog.content,
@@ -633,4 +796,212 @@ fn what_leaves_escape_closes_once() {
         closes, 1,
         "Esc should close What leaves once, got {messages:?}"
     );
+}
+
+/// The window sizes the backdrop tests run at: the default and the minimum.
+const BACKDROP_WINDOWS: [(f32, f32); 2] = [(1280.0, 860.0), (720.0, 480.0)];
+
+/// A demo app on Settings in the top tabs layout, with `which` open over
+/// it (or no dialog). Settings is taller than the pane at both sizes.
+fn over_settings(which: Option<TopDialog>) -> (tempfile::TempDir, TrackerApp) {
+    use crate::uninstall::UninstallDialog;
+    let (dir, mut app) = crate::fixtures::test_app();
+    if app.notes_layer().is_some() {
+        let _ = app.update(Message::DismissNotes);
+    }
+    app.nav_style = crate::nav::NavStyle::TopTabs;
+    app.screen = crate::model::Screen::Settings;
+    app.toast = None;
+    assert_eq!(crate::chrome::top_dialog(&app), None);
+    match which {
+        None => {}
+        Some(TopDialog::WhatLeaves) => {
+            let _ = app.update(Message::SettingsPage(Msg::Open(OpenMsg::WhatLeaves(true))));
+        }
+        Some(TopDialog::Report) => {
+            let dialog = crate::report::ReportDialog::new(None, true);
+            app.report = Some(crate::report::ReportUi::Dialog(Box::new(dialog)));
+        }
+        Some(TopDialog::Uninstall) => {
+            let home = std::path::PathBuf::from("/home/qa");
+            app.uninstall_dialog = Some(UninstallDialog::Confirm {
+                prefix: home.join(".local"),
+                data_dir: home.join(".local/share/scuffed-stat-tracker"),
+                appimage: None,
+                home,
+                delete_data: false,
+                fallback: false,
+            });
+        }
+        Some(TopDialog::Guide) => {
+            let _ = app.update(Message::Setup(SetupMessage::Open));
+        }
+        Some(TopDialog::Notes) => {
+            let _ = app.update(Message::OpenAbout);
+        }
+    }
+    assert_eq!(crate::chrome::top_dialog(&app), which);
+    (dir, app)
+}
+
+/// The page pane's bounds and scroll offset.
+#[derive(Default)]
+struct Pane(Option<(Rectangle, f32)>);
+
+impl Operation<()> for Pane {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<()>)) {
+        operate(self);
+    }
+
+    fn scrollable(
+        &mut self,
+        id: Option<&Id>,
+        bounds: Rectangle,
+        _content_bounds: Rectangle,
+        translation: Vector,
+        _state: &mut dyn Scrollable,
+    ) {
+        if id == Some(&Id::new(crate::focus_status::PANE_SCROLL_ID)) {
+            self.0 = Some((bounds, translation.y));
+        }
+    }
+}
+
+/// Wheels down twice on a backdrop point over the page pane, in the 28 px
+/// every dialog layer keeps around its card, and returns the pane offset
+/// before and after, and the window's cursor at that point.
+fn wheel_on_backdrop(app: &TrackerApp, window: (f32, f32)) -> (f32, f32, Interaction) {
+    let renderer = headless();
+    let mut element = crate::chrome::window(app);
+    let mut tree = Tree::new(&element);
+    let size = Size::new(window.0, window.1);
+    let node = element
+        .as_widget_mut()
+        .layout(&mut tree, &renderer, &Limits::new(Size::ZERO, size));
+    let pane = |element: &mut Element<'_, Message>, tree: &mut Tree| {
+        let mut pane = Pane::default();
+        element
+            .as_widget_mut()
+            .operate(tree, Layout::new(&node), &renderer, &mut pane);
+        pane.0.expect("the page pane is laid out")
+    };
+    let (bounds, before) = pane(&mut element, &mut tree);
+    let point = Point::new(bounds.x + 8.0, bounds.y + bounds.height / 2.0);
+    assert!(
+        point.x < 28.0,
+        "{window:?}: {point:?} is not in the layer pad"
+    );
+    let viewport = Rectangle::new(Point::ORIGIN, size);
+    let wheel = Event::Mouse(Mouse::WheelScrolled {
+        delta: ScrollDelta::Lines { x: 0.0, y: -3.0 },
+    });
+    for _ in 0..2 {
+        let mut messages = Vec::new();
+        element.as_widget_mut().update(
+            &mut tree,
+            &wheel,
+            Layout::new(&node),
+            Cursor::Available(point),
+            &renderer,
+            &mut clipboard::Null,
+            &mut Shell::new(&mut messages),
+            &viewport,
+        );
+    }
+    let (_, after) = pane(&mut element, &mut tree);
+    let cursor = element.as_widget().mouse_interaction(
+        &tree,
+        Layout::new(&node),
+        Cursor::Available(point),
+        &viewport,
+        &renderer,
+    );
+    (before, after, cursor)
+}
+
+/// The cursor `content` reports at each point of a 20 px grid over the
+/// window, laid out as the window-sized layer it is in the app.
+fn layer_cursors(
+    mut content: Element<'_, Message>,
+    window: (f32, f32),
+) -> Vec<(Point, Interaction)> {
+    let renderer = headless();
+    let mut tree = Tree::new(&content);
+    let size = Size::new(window.0, window.1);
+    let node = content
+        .as_widget_mut()
+        .layout(&mut tree, &renderer, &Limits::new(Size::ZERO, size));
+    let viewport = Rectangle::new(Point::ORIGIN, size);
+    let mut out = Vec::new();
+    for x in (2..window.0 as u32).step_by(20) {
+        for y in (2..window.1 as u32).step_by(20) {
+            let point = Point::new(x as f32, y as f32);
+            let cursor = content.as_widget().mouse_interaction(
+                &tree,
+                Layout::new(&node),
+                Cursor::Available(point),
+                &viewport,
+                &renderer,
+            );
+            out.push((point, cursor));
+        }
+    }
+    out
+}
+
+/// A dialog covers the page for the mouse, not only for presses: a wheel
+/// on its dimmed backdrop does not scroll the page under it, and the layer
+/// reports a cursor at every point, so iced's Stack hides the cursor from
+/// the page (no hand cursor or hover through it). The bare page scrolls
+/// under the same wheel, so the test can see a leak.
+#[test]
+fn dialog_backdrops_keep_wheel_and_hover_off_the_page() {
+    let dialogs = [
+        TopDialog::WhatLeaves,
+        TopDialog::Report,
+        TopDialog::Uninstall,
+        TopDialog::Guide,
+        TopDialog::Notes,
+    ];
+    for window in BACKDROP_WINDOWS {
+        let (_dir, app) = over_settings(None);
+        let (before, after, _) = wheel_on_backdrop(&app, window);
+        assert!(
+            after > before + 1.0,
+            "{window:?}: the bare page did not scroll ({before} to {after})"
+        );
+        for which in dialogs {
+            let (_dir, app) = over_settings(Some(which));
+            let (before, after, cursor) = wheel_on_backdrop(&app, window);
+            assert_eq!(
+                after, before,
+                "{which:?} {window:?}: a wheel on the backdrop scrolled the page"
+            );
+            assert_eq!(
+                cursor,
+                Interaction::Idle,
+                "{which:?} {window:?}: the window cursor on the backdrop"
+            );
+            let content = match which {
+                TopDialog::WhatLeaves => crate::what_leaves::layer(&app).expect("open").content,
+                TopDialog::Report => crate::report::view(app.report.as_ref().expect("open")),
+                TopDialog::Uninstall => {
+                    crate::uninstall::view(app.uninstall_dialog.as_ref().expect("open"), false)
+                }
+                TopDialog::Guide => crate::setup_guide::view(&app.setup),
+                TopDialog::Notes => app.notes_layer().expect("open"),
+            };
+            let through: Vec<_> = layer_cursors(content, window)
+                .into_iter()
+                .filter(|(_, cursor)| *cursor == Interaction::None)
+                .map(|(point, _)| point)
+                .collect();
+            assert!(
+                through.is_empty(),
+                "{which:?} {window:?}: {} points let the page set the cursor, first {:?}",
+                through.len(),
+                through.first()
+            );
+        }
+    }
 }

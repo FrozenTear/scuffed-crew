@@ -157,17 +157,20 @@ fn dialog<'a>() -> Element<'a, Message> {
         .style(theme::surface_panel);
         // Content is updated first, so opaque(card) absorbs presses on
         // the title, body, and padding; only a press on the dimmed area
-        // reaches on_press and closes.
-        mouse_area(
-            container(opaque(card))
-                .padding(LAYER_PAD)
-                .center(Fill)
-                .width(Fill)
-                .height(Fill)
-                .style(dim),
+        // reaches on_press and closes. The outer opaque reports Idle over
+        // the whole layer (a bare mouse_area reports None), so the window
+        // Stack hides the cursor from the page: no wheel or hover below.
+        opaque(
+            mouse_area(
+                container(opaque(card))
+                    .padding(LAYER_PAD)
+                    .center(Fill)
+                    .width(Fill)
+                    .height(Fill)
+                    .style(dim),
+            )
+            .on_press(close()),
         )
-        .on_press(close())
-        .into()
     })
     .into()
 }

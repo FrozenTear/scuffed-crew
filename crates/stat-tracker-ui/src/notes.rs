@@ -19,7 +19,7 @@ use iced::widget::{button, column, container, opaque, rich_text, row, text};
 use iced::{Alignment, Element, Fill, Font, Length, Padding};
 
 use crate::app::Message;
-use crate::scroll_gutter::guttered_scrollable;
+use crate::scroll_gutter::{guttered_scrollable, wrap_text};
 use crate::theme::{
     self, FONT_BOLD, FONT_EXTRABOLD, FONT_MEDIUM, FONT_SEMIBOLD, SIZE_BODY, SIZE_FEATURED,
     SIZE_META, SIZE_TITLE, TEXT, TEXT_2,
@@ -772,7 +772,7 @@ fn release_card<'a>(section: &'a ShownRelease, ui: &NotesUi<'a>) -> Element<'a, 
     let mut col = column![header].spacing(14).width(Fill);
     if !section.summary.is_empty() {
         col = col.push(
-            text(section.summary.clone())
+            wrap_text(section.summary.clone())
                 .size(LEAD_SIZE)
                 .font(FONT_MEDIUM)
                 .color(TEXT)
@@ -783,7 +783,7 @@ fn release_card<'a>(section: &'a ShownRelease, ui: &NotesUi<'a>) -> Element<'a, 
         let mut list = column![].spacing(10).width(Fill);
         for item in &section.highlights {
             list = list.push(
-                text(format!("• {item}"))
+                wrap_text(format!("• {item}"))
                     .size(SIZE_BODY)
                     .font(FONT_MEDIUM)
                     .color(TEXT)
@@ -900,14 +900,11 @@ impl<'a> markdown::Viewer<'a, Message> for NotesViewer {
         markdown::heading(settings, level, text, index, Message::OpenNotesLink)
     }
 
-    fn paragraph(
-        &self,
-        settings: markdown::Settings,
-        text: &markdown::Text,
-    ) -> Element<'a, Message> {
-        rich_text(text.spans(settings.style))
+    fn paragraph(&self, settings: markdown::Settings, md: &markdown::Text) -> Element<'a, Message> {
+        rich_text(md.spans(settings.style))
             .size(settings.text_size)
             .line_height(1.5)
+            .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
             .on_link_click(Message::OpenNotesLink)
             .into()
     }

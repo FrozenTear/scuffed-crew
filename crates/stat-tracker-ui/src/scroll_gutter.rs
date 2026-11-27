@@ -3,9 +3,16 @@
 //! ends stay clear of the bar whether or not it shows. The dialogs (What
 //! leaves your PC, the setup guide, What's new, Report a problem, and
 //! Uninstall) use this helper for that gap.
+//!
+//! The gutter only helps text that wraps. Plain `text` wraps on words, so
+//! a token wider than the line (a path or URL with no spaces, a hash)
+//! runs on under the bar and is cut there. [`wrap_text`] breaks such a
+//! token on glyphs; the dialogs use it for every path, address, server
+//! message and error they show.
 
 use iced::widget::scrollable::{Direction, Scrollbar};
-use iced::widget::{Scrollable, container, scrollable};
+use iced::widget::text::{IntoFragment, Wrapping};
+use iced::widget::{Scrollable, Text, container, scrollable, text};
 use iced::{Element, Fill, Padding};
 
 use crate::app::Message;
@@ -37,4 +44,10 @@ pub(crate) fn guttered_area<'a>(
     height: impl Into<iced::Length>,
 ) -> Element<'a, Message> {
     guttered_scrollable(body).height(height).width(Fill).into()
+}
+
+/// `text` that wraps on words and, when one word is wider than the line,
+/// on glyphs, so a long path, URL or hash stays left of the gutter.
+pub(crate) fn wrap_text<'a>(value: impl IntoFragment<'a>) -> Text<'a> {
+    text(value).wrapping(Wrapping::WordOrGlyph)
 }

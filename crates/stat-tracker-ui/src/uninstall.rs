@@ -19,11 +19,12 @@ use std::time::Duration;
 use iced::widget::{button, checkbox, column, container, opaque, row, text};
 use iced::{Alignment, Element, Fill, Length, Padding};
 
+use crate::app::Message;
+use crate::scroll_gutter::{guttered_area, wrap_text};
 use crate::theme::{
     self, FONT_BOLD, FONT_EXTRABOLD, FONT_MEDIUM, FONT_SEMIBOLD, SIZE_BODY, SIZE_FEATURED,
     SIZE_LABEL, SIZE_META, SIZE_TITLE, TEXT, TEXT_2, TEXT_3,
 };
-use crate::{app::Message, scroll_gutter::guttered_area};
 
 pub(crate) use crate::uninstall_names::is_tracker_data_name;
 
@@ -1256,7 +1257,7 @@ fn confirm_card<'a>(
             .style(checkbox_style),
     );
     body = body.push(
-        text(format!(
+        wrap_text(format!(
             "{}\nSaved games, debug images, and logs.\n{}\nSettings, including the sync token.",
             data_dir.display(),
             config.display()
@@ -1309,7 +1310,7 @@ fn manual_card<'a>(
 
     for path in paths {
         body = body.push(
-            text(path.display().to_string())
+            wrap_text(path.display().to_string())
                 .size(SIZE_LABEL)
                 .font(FONT_MEDIUM)
                 .color(TEXT_2),
@@ -1318,7 +1319,7 @@ fn manual_card<'a>(
 
     if let Some(command) = command {
         body = body.push(
-            text(command)
+            wrap_text(command)
                 .size(SIZE_BODY)
                 .font(FONT_SEMIBOLD)
                 .color(theme::ACCENT),
@@ -1346,13 +1347,7 @@ fn manual_card<'a>(
 }
 
 fn group_block(group: &PreviewGroup) -> Element<'static, Message> {
-    let heading = group.heading;
-    let note = group.note;
-    let paths: Vec<String> = group
-        .paths
-        .iter()
-        .map(|path| path.display().to_string())
-        .collect();
+    let (heading, note, paths) = (group.heading, group.note, &group.paths);
     let mut col = column![text(heading).size(SIZE_TITLE).font(FONT_BOLD).color(TEXT)]
         .spacing(4)
         .width(Fill);
@@ -1360,7 +1355,12 @@ fn group_block(group: &PreviewGroup) -> Element<'static, Message> {
         col = col.push(text(note).size(SIZE_LABEL).font(FONT_MEDIUM).color(TEXT_3));
     }
     for path in paths {
-        col = col.push(text(path).size(SIZE_LABEL).font(FONT_MEDIUM).color(TEXT_2));
+        col = col.push(
+            wrap_text(path.display().to_string())
+                .size(SIZE_LABEL)
+                .font(FONT_MEDIUM)
+                .color(TEXT_2),
+        );
     }
     col.into()
 }

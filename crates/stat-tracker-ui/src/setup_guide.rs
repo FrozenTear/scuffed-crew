@@ -1791,7 +1791,7 @@ fn frame_view(frame: &MemoryFrame) -> Element<'static, Message> {
 }
 
 fn body_text(value: &str) -> Element<'static, Message> {
-    text(value.to_string())
+    crate::scroll_gutter::wrap_text(value.to_string())
         .size(SIZE_BODY)
         .font(FONT_MEDIUM)
         .color(TEXT_2)
@@ -1799,7 +1799,7 @@ fn body_text(value: &str) -> Element<'static, Message> {
 }
 
 fn error_text(value: &str) -> Element<'static, Message> {
-    text(value.to_string())
+    crate::scroll_gutter::wrap_text(value.to_string())
         .size(SIZE_META)
         .font(FONT_MEDIUM)
         .color(theme::DANGER)
@@ -1807,7 +1807,7 @@ fn error_text(value: &str) -> Element<'static, Message> {
 }
 
 fn warn_text(value: &str) -> Element<'static, Message> {
-    text(value.to_string())
+    crate::scroll_gutter::wrap_text(value.to_string())
         .size(SIZE_META)
         .font(FONT_MEDIUM)
         .color(theme::WARN)
@@ -1815,7 +1815,7 @@ fn warn_text(value: &str) -> Element<'static, Message> {
 }
 
 fn ok_text(value: &str) -> Element<'static, Message> {
-    text(value.to_string())
+    crate::scroll_gutter::wrap_text(value.to_string())
         .size(SIZE_META)
         .font(FONT_MEDIUM)
         .color(theme::OK)
