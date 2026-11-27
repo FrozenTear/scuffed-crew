@@ -812,7 +812,7 @@ fn nothing_read_shows_the_reason_and_never_hides_the_game() {
     };
     assert_eq!(
         line,
-        "Not read: this game ran at 1920x1080. Bans and picks need 2560x1440 (bans also 1920x1080)."
+        "Not read: only the hero select was seen, and it is read at 2560x1440 only."
     );
     assert_eq!(
         tip,
@@ -838,6 +838,16 @@ fn every_status_has_its_spec_line() {
         line(BansPicksStatus::NoFrames),
         (
             "Not read: the tracker didn't see the pre-game screens for this game.".into(),
+            false
+        )
+    );
+    assert_eq!(
+        line(BansPicksStatus::FrameSize {
+            width: 3840,
+            height: 2160
+        }),
+        (
+            "Not read: this game ran at 3840x2160. Bans and picks need 2560x1440 (bans also 1920x1080).".into(),
             false
         )
     );

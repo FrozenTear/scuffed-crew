@@ -4,7 +4,7 @@
 use super::*;
 use crate::daemon::bans_picks::{
     BansPicksFeed, Engine, LoadFailure, Loader, NO_SELECT_NOTICE, SELECT_1080_NOTICE,
-    missing_notice,
+    SELECT_1080_ONLY, missing_notice,
 };
 use image::{DynamicImage, RgbImage};
 use stat_tracker::model::{BansPicksMissing, BansPicksStatus};
@@ -623,6 +623,13 @@ async fn a_1080p_hero_select_alone_is_a_frame_size_status() {
         0,
         "the reader was not called"
     );
+    // 1920x1080 is not named as the problem: the reader takes it for bans.
+    let note = rig.health().expect("a note");
+    assert_eq!(
+        note,
+        "Bans and picks were not read: only the hero select was seen, and it is read at 2560x1440 only."
+    );
+    assert!(note.contains(SELECT_1080_ONLY) && !note.contains("1920x1080"));
 }
 
 #[tokio::test]

@@ -326,6 +326,15 @@ fn reason(status: &BansPicksStatus) -> Option<(String, bool)> {
             "Not read: the tracker didn't see the pre-game screens for this game.".to_string(),
             false,
         ),
+        // The daemon reads 1080p bans and votes, so 1920x1080 here means
+        // only a 1080p hero select was seen (issue #931).
+        BansPicksStatus::FrameSize {
+            width: 1920,
+            height: 1080,
+        } => (
+            "Not read: only the hero select was seen, and it is read at 2560x1440 only.".to_string(),
+            false,
+        ),
         BansPicksStatus::FrameSize { width, height } if *width > 0 && *height > 0 => (
             format!("Not read: this game ran at {width}x{height}. Bans and picks need 2560x1440 (bans also 1920x1080)."),
             false,
