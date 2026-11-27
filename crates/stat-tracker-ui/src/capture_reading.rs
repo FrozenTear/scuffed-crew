@@ -27,7 +27,7 @@ use crate::settings_model::{
     stream_rows_apply,
 };
 use crate::settings_rows::{
-    self, Segment, Tag, divided, dropdown, hairline, link, radio_list, row_title, segmented,
+    self, Segment, divided, dropdown, hairline, link, radio_list, row_title, segmented,
     setting_row, sub_heading, switch, title_line,
 };
 use crate::settings_update::{Msg, apply};
@@ -493,7 +493,11 @@ fn stream_rows(app: &TrackerApp, demo: bool) -> Vec<Element<'_, Message>> {
         fixed_dropdown(FrameRate(fps).to_string())
     };
     let fps_el = setting_row(
-        title_line("Stream frame rate", changed, &[Tag::AfterRestart]),
+        title_line(
+            "Stream frame rate",
+            changed,
+            crate::settings_bar::restart_tag(app, "screencast_max_fps"),
+        ),
         vec![tail.into()],
         control,
     );

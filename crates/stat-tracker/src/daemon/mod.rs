@@ -74,6 +74,8 @@ mod tests_query_server;
 #[cfg(test)]
 mod tests_rank_training;
 #[cfg(test)]
+mod tests_report_kit;
+#[cfg(test)]
 mod tests_roster_cadence;
 #[cfg(test)]
 mod tests_snapshot_policy;

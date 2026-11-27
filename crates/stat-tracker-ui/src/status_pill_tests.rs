@@ -576,24 +576,38 @@ fn mid_game_running() -> (tempfile::TempDir, TrackerApp) {
     (dir, app)
 }
 
+/// A saved change waiting for a restart, so the pinned Settings bar shows
+/// Start tracker or Restart tracker (#776, where the strip's button went).
+/// Page writes go to the temp dir, and nothing is typed, so the bar's
+/// button runs the verb alone.
+fn with_a_waiting_change(dir: &tempfile::TempDir, app: &mut TrackerApp) {
+    app.page_state.config_path = Some(dir.path().join("config.toml"));
+    app.saved_config.debug_ocr = !app.saved_config.debug_ocr;
+    app.settings.debug_ocr = app.saved_config.debug_ocr;
+    assert!(app.changes_waiting() > 0);
+    assert!(crate::settings_bar::drafts(app).is_empty());
+}
+
 #[test]
-fn the_settings_strip_start_does_not_ask_mid_game() {
-    let (_dir, mut app) = mid_game_live();
+fn the_settings_bar_start_does_not_ask_mid_game() {
+    let (dir, mut app) = mid_game_live();
+    with_a_waiting_change(&dir, &mut app);
     click_label(
         &mut app,
-        |app| crate::settings_page::view(app, 976.0),
+        |app| crate::settings_bar::view(app, 1280.0),
         "Start tracker",
     );
-    assert_eq!(app.pill.confirm, None, "strip Start never asks");
+    assert_eq!(app.pill.confirm, None, "the bar's Start never asks");
     assert_eq!(app.pill.in_flight, Some(DaemonVerb::Start));
 }
 
 #[test]
-fn the_settings_strip_restart_asks_first_mid_game() {
-    let (_dir, mut app) = mid_game_running();
+fn the_settings_bar_restart_asks_first_mid_game() {
+    let (dir, mut app) = mid_game_running();
+    with_a_waiting_change(&dir, &mut app);
     click_label(
         &mut app,
-        |app| crate::settings_page::view(app, 976.0),
+        |app| crate::settings_bar::view(app, 1280.0),
         "Restart tracker",
     );
     assert_eq!(app.pill.confirm.map(|c| c.verb), Some(DaemonVerb::Restart));

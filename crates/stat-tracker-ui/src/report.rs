@@ -35,10 +35,13 @@ use stat_tracker::report::{
     GameReportInput, LogOnlyCategory, LogReportInput, ReportZip, Resolution,
 };
 
-use crate::app::Message;
 use crate::theme::{
     self, FONT_BOLD, FONT_EXTRABOLD, FONT_MEDIUM, FONT_SEMIBOLD, SIZE_BODY, SIZE_FEATURED,
     SIZE_LABEL, SIZE_META, SIZE_TITLE, TEXT, TEXT_2, TEXT_3,
+};
+use crate::{
+    app::Message,
+    scroll_gutter::{guttered_area, guttered_scrollable, wrap_text},
 };
 
 #[path = "report_rank.rs"]
@@ -866,9 +869,8 @@ pub fn outcome_for(
                 .filter(|secs| *secs > 0)
                 .map(|secs| format!(" Try again in {}.", wait_text(secs)))
                 .unwrap_or_default();
-            // The site's own words, e.g. "Daily report limit reached". The
-            // game's saved pictures are kept (only a sent report removes
-            // them), so it can be sent again tomorrow.
+            // The site's own words, e.g. "Daily report limit reached".
+            // Saved pictures stay; only a sent report removes them.
             let said = serde_json::from_str::<serde_json::Value>(body)
                 .ok()
                 .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
@@ -1193,10 +1195,7 @@ fn dialog_card(d: &ReportDialog) -> Element<'_, Message> {
     body = body.push(status_block(d));
     body = body.push(actions(d));
 
-    shell(
-        scrollable(body).height(Length::Shrink).width(Fill).into(),
-        620.0,
-    )
+    shell(guttered_area(body, Length::Shrink), 620.0)
 }
 
 fn game_hint(category: GameCategory) -> &'static str {
@@ -1309,7 +1308,7 @@ fn kit_pictures(d: &ReportDialog) -> Element<'_, Message> {
             widget.width(Fill).into()
         };
         col = col.push(
-            text(format!("{} {}×{}", image.path, image.width, image.height))
+            wrap_text(format!("{} {}×{}", image.path, image.width, image.height))
                 .size(SIZE_LABEL)
                 .font(FONT_MEDIUM)
                 .color(TEXT_3),
@@ -1344,7 +1343,7 @@ fn preview_block(d: &ReportDialog) -> Element<'_, Message> {
         None => {}
         Some(Err(e)) => {
             col = col.push(
-                text(e.as_str())
+                wrap_text(e.as_str())
                     .size(SIZE_META)
                     .font(FONT_MEDIUM)
                     .color(theme::DANGER),
@@ -1398,11 +1397,12 @@ fn preview_block(d: &ReportDialog) -> Element<'_, Message> {
                 };
                 col = col.push(
                     container(
-                        scrollable(
+                        guttered_scrollable(
                             text(log)
                                 .size(SIZE_LABEL)
                                 .font(iced::Font::MONOSPACE)
-                                .color(TEXT_2),
+                                .color(TEXT_2)
+                                .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
                         )
                         .height(Length::Fixed(220.0))
                         .width(Fill),
@@ -1418,11 +1418,11 @@ fn preview_block(d: &ReportDialog) -> Element<'_, Message> {
 
 fn file_line<'a>(path: &str, bytes: u64, sha256: &str) -> Element<'a, Message> {
     column![
-        text(format!("{path}, {}", size_text(bytes)))
+        wrap_text(format!("{path}, {}", size_text(bytes)))
             .size(SIZE_META)
             .font(FONT_SEMIBOLD)
             .color(TEXT),
-        text(format!("sha256 {sha256}"))
+        wrap_text(format!("sha256 {sha256}"))
             .size(SIZE_LABEL)
             .font(iced::Font::MONOSPACE)
             .color(TEXT_3),
@@ -1478,7 +1478,7 @@ fn status_block(d: &ReportDialog) -> Element<'_, Message> {
                 None => "It is kept for training until you withdraw it.".into(),
             };
             col = col.push(
-                text(format!("Report sent. Id {id}. {expiry}"))
+                wrap_text(format!("Report sent. Id {id}. {expiry}"))
                     .size(SIZE_META)
                     .font(FONT_SEMIBOLD)
                     .color(theme::OK),
@@ -1501,7 +1501,7 @@ fn status_block(d: &ReportDialog) -> Element<'_, Message> {
         }
         SendState::Done(SendOutcome::Failed(reason)) => {
             col = col.push(
-                text(reason.as_str())
+                wrap_text(reason.as_str())
                     .size(SIZE_META)
                     .font(FONT_SEMIBOLD)
                     .color(theme::DANGER),
@@ -1519,7 +1519,7 @@ fn status_block(d: &ReportDialog) -> Element<'_, Message> {
     match &d.saved {
         Some(Ok(path)) => {
             col = col.push(
-                text(format!("Saved to {}", path.display()))
+                wrap_text(format!("Saved to {}", path.display()))
                     .size(SIZE_META)
                     .font(FONT_SEMIBOLD)
                     .color(theme::OK),
@@ -1527,7 +1527,7 @@ fn status_block(d: &ReportDialog) -> Element<'_, Message> {
         }
         Some(Err(e)) => {
             col = col.push(
-                text(e.as_str())
+                wrap_text(e.as_str())
                     .size(SIZE_META)
                     .font(FONT_SEMIBOLD)
                     .color(theme::DANGER),

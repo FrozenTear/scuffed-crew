@@ -1,10 +1,8 @@
 //! What the tracker is doing, as the window shows it.
 //!
-//! One [`HeaderStatus`] feeds the dot and words in the 0.6 top bar and the
-//! dot in the 0.6 Settings strip. The strip and the Tracker service row
-//! say "Tracker running" or "Tracker stopped" from whether it runs
-//! ([`strip_label`]), so a rejected token never hides that. The classic
-//! (0.5) header keeps its own text ("Last game HH:MM"), its 0.5 dot rules
+//! One [`HeaderStatus`] feeds the dot and words in the 0.6 top bar, and
+//! the Tracker service row in Settings uses the same long words. The
+//! classic (0.5) header keeps its own text ("Last game HH:MM"), its 0.5 dot rules
 //! ([`classify_classic_status`]: a capture the app runs is mint, a failed
 //! one red) and its 0.5 dot colours ([`classic_status_color`]).
 
@@ -18,8 +16,7 @@ use crate::daemon::DaemonVerb;
 use crate::model::Game;
 use crate::theme;
 
-/// What the tracker is doing, for the top bar, the Settings strip and the
-/// classic header dot.
+/// What the tracker is doing, for the top bar and the classic header dot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeaderStatus {
     /// The tracker runs and Overwatch is open (menus included). The focus
@@ -137,7 +134,7 @@ pub fn detail(status: HeaderStatus) -> Option<&'static str> {
     }
 }
 
-/// Dot colour in the 0.6 top bar and Settings strip.
+/// Dot colour in the 0.6 top bar (the status pill).
 pub fn header_status_color(status: HeaderStatus) -> Color {
     match status {
         // Running is green, whether Overwatch is open or the tracker waits
@@ -212,18 +209,6 @@ pub fn long_label(status: HeaderStatus) -> &'static str {
     }
 }
 
-/// Words in the Settings strip and the Tracker service row (spec p6:
-/// "Tracker running"): whether the tracker runs, whatever the website
-/// does with the token. A rejected token turns the strip's dot amber, and
-/// the Website account card says why.
-pub fn strip_label(running: bool) -> &'static str {
-    if running {
-        "Tracker running"
-    } else {
-        "Tracker stopped"
-    }
-}
-
 /// What the classic header dot reads besides [`HeaderStatusInput`].
 #[derive(Debug, Clone, Copy)]
 pub struct ClassicStatusInput {
@@ -277,9 +262,8 @@ pub(crate) fn header_status_for(app: &TrackerApp) -> HeaderStatus {
     classify_header_status(header_input(app))
 }
 
-/// The website answered 401 or 403 for the saved token. The top bar, the
-/// Settings strip and the Website account card all read this. It is the
-/// value [`TrackerApp::refresh_token_rejected`] last read, so a frame does
+/// The website answered 401 or 403 for the saved token. The top bar and
+/// the Website account card read this. It is the value [`TrackerApp::refresh_token_rejected`] last read, so a frame does
 /// not read `auth_pause.json`.
 pub(crate) fn sync_token_rejected(app: &TrackerApp) -> bool {
     app.page_state.token_rejected
@@ -600,8 +584,6 @@ mod tests {
                 assert!(!text.chars().any(|c| c.is_ascii_digit()), "no bare time");
             }
         }
-        assert_eq!(strip_label(true), "Tracker running");
-        assert_eq!(strip_label(false), "Tracker stopped");
     }
 
     /// The classic dot keeps the 0.5 rules for a capture the app runs and

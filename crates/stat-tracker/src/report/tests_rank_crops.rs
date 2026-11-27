@@ -292,7 +292,7 @@ fn fit_edge_keeps_small_crops_and_scales_big_ones() {
 #[test]
 fn a_deleted_game_gets_no_rank_crops() {
     let tmp = seeded(false);
-    kit::remove(tmp.path(), "sess-1");
+    kit::remove(tmp.path(), "sess-1", kit::KitRemoval::GameDeleted);
     let pngs = kit::rank_screen_pngs(Some(OutcomeSource::RankScreen), &rank_frame()).unwrap();
     kit::record_rank_screen_pngs(tmp.path(), "sess-1", &pngs).unwrap();
     let dir = kit::session_dir(tmp.path(), "sess-1").unwrap();

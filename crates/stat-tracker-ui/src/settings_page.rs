@@ -1,15 +1,17 @@
 //! 0.6 Settings page (redesign variant A, top tabs; spec p6, p7, p9).
 //!
-//! Under the "Settings" heading: the status strip (status, version, last
-//! capture; on the right the changes waiting and Restart tracker), "Run
-//! setup again" and the legend, then the everyday cards on the left and
-//! the ADVANCED rows in one panel on the right. Below
-//! [`crate::settings_model::TWO_COLUMN_MIN`] the page is one column of at
-//! most [`crate::settings_model::SINGLE_COLUMN_MAX`], centred between the
-//! page gutters, and the strip puts its right group on a second line.
+//! Under the "Settings" heading: "Run setup again" and the legend, then
+//! the everyday cards on the left and the ADVANCED rows in one panel on
+//! the right. Below [`crate::settings_model::TWO_COLUMN_MIN`] the page is
+//! one column of at most [`crate::settings_model::SINGLE_COLUMN_MAX`],
+//! centred between the page gutters. The tracker's state and its Start,
+//! Restart and Stop are on the status pill; the status strip that held
+//! them went with #776.
 //!
-//! There is no Save: every change applies as it is made
-//! ([`crate::settings_update`]). The old card layout with its Save stays in
+//! There is no Save for controls: every switch, chip and dropdown applies
+//! as it is made ([`crate::settings_update`]). Typed text and changes
+//! waiting for a tracker restart show on the pinned bar under the page
+//! ([`crate::settings_bar`]). The old card layout with its Save stays in
 //! [`crate::settings::view`] for `SCUFFED_TRACKER_LAYOUT=classic`; both
 //! edit the same form and write through [`crate::settings_save`]. The
 //! window chrome scrolls this page like every other tab.
@@ -18,26 +20,18 @@ use iced::widget::{Column, Row, button, column, container, image, row, space, te
 use iced::{Alignment, Background, Border, Color, Element, Fill, Length, Padding, Shadow, Theme};
 
 use crate::app::{Message, TrackerApp};
-use crate::daemon::DaemonVerb;
 use crate::form_widgets::DEMO_NOTE;
 use crate::settings_cards;
 use crate::settings_model::{
-    AdvancedSection, AdvancedValues, COLUMN_GAP, EverydaySection, ReaderChoice,
-    changes_waiting_words, columns_for, monitor_phrase, page_width, strip_version,
+    AdvancedSection, AdvancedValues, COLUMN_GAP, EverydaySection, ReaderChoice, columns_for,
+    monitor_phrase, page_width,
 };
 use crate::settings_rows::{Tag, changed_dot, hairline, link, tag};
 use crate::settings_update::Msg;
-use crate::theme::{
-    self, ACCENT, FONT_BOLD, FONT_MEDIUM, FONT_SEMIBOLD, SIZE_BODY, SIZE_LABEL, SIZE_META, TEXT,
-    TEXT_2, TEXT_3,
-};
-use crate::{tracker_status, update, widgets};
+use crate::theme::{self, ACCENT, FONT_BOLD, FONT_MEDIUM, SIZE_BODY, SIZE_LABEL, TEXT, TEXT_3};
+use crate::{update, widgets};
 
-/// Space between the status items on the strip's left (spec about 24).
-pub(crate) const STRIP_STATUS_GAP: f32 = 24.0;
-/// Space between the strip's right-hand items (spec about 12).
-pub(crate) const STRIP_ACTION_GAP: f32 = 12.0;
-/// Padding inside a card and the strip (spec about 18 to 20).
+/// Padding inside a card (spec about 18 to 20).
 const CARD_PAD: f32 = 20.0;
 /// Space between cards (spec 16).
 const CARD_GAP: f32 = 16.0;
@@ -46,8 +40,10 @@ const BUTTON_RADIUS: f32 = 10.0;
 /// Space between the legend's dot and its words.
 const LEGEND_DOT_GAP: f32 = 6.0;
 
-/// The legend under the strip (spec p6).
-const LEGEND_APPLY: &str = "Changes apply as you make them, except those tagged After restart.";
+/// The legend under the page title (spec p6). The After restart tags now
+/// show only where a change waits (#776), so the legend no longer points
+/// at them (D9 on #776, accepted by FrozenTear 27 Nov 2026).
+const LEGEND_APPLY: &str = "Changes apply as you make them. Some only take effect after a tracker restart; the bar at the bottom says when.";
 const LEGEND_CHANGED: &str = "changed from default";
 const RUN_SETUP_LABEL: &str = "Run setup again";
 
@@ -73,9 +69,7 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
     if demo {
         page = page.push(widgets::empty_surface(DEMO_NOTE));
     }
-    page = page
-        .push(status_strip(app, demo, two_columns))
-        .push(setup_and_legend(demo));
+    page = page.push(setup_and_legend(demo));
 
     if two_columns {
         page = page.push(
@@ -99,143 +93,6 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
     } else {
         page.center_x(Fill).into()
     }
-}
-
-/// The strip's left group: the status with its check, Version (which
-/// opens About), and the last capture.
-fn strip_status(app: &TrackerApp) -> Element<'_, Message> {
-    let running = app.daemon.running() || app.fixture.is_some();
-    // Stopped is red whatever the token does; a rejected token turns a
-    // running tracker's mark amber. The words always say whether it runs.
-    let status = if !running {
-        tracker_status::HeaderStatus::Down
-    } else if tracker_status::sync_token_rejected(app) {
-        tracker_status::HeaderStatus::TokenRejected
-    } else {
-        tracker_status::HeaderStatus::Waiting
-    };
-    let mark: Element<'_, Message> = if status == tracker_status::HeaderStatus::Waiting {
-        settings_cards::check_icon(16.0)
-    } else {
-        container(space().width(8).height(8))
-            .width(8)
-            .height(8)
-            .style(move |_: &Theme| container::Style {
-                background: Some(Background::Color(tracker_status::header_status_color(
-                    status,
-                ))),
-                border: Border {
-                    radius: theme::RADIUS_CHIP.into(),
-                    ..Border::default()
-                },
-                ..container::Style::default()
-            })
-            .into()
-    };
-    let words = text(tracker_status::strip_label(running))
-        .size(SIZE_BODY)
-        .font(FONT_BOLD)
-        .color(TEXT);
-    let version = button(meta_pair(
-        "Version",
-        strip_version(app.installed_version.as_deref()),
-    ))
-    // No side padding, so the gap to the status is STRIP_STATUS_GAP.
-    .padding(Padding::from([2, 0]))
-    .style(theme::quiet_btn(6.0))
-    .on_press(Message::OpenAbout);
-    let mut left = Row::new()
-        .spacing(STRIP_STATUS_GAP)
-        .align_y(Alignment::Center)
-        .push(row![mark, words].spacing(8).align_y(Alignment::Center))
-        .push(version);
-    if let Some(at) = tracker_status::last_game_when(&app.games, app.clock) {
-        left = left.push(meta_pair("Last capture", at));
-    }
-    left.wrap().into()
-}
-
-/// The strip's right group: Working, the waiting count with its tag, and
-/// the tracker button last.
-fn strip_actions(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
-    let waiting = app.changes_waiting();
-    let mut right = Row::new()
-        .spacing(STRIP_ACTION_GAP)
-        .align_y(Alignment::Center);
-    if app.daemon_busy {
-        right = right.push(meta("Working…"));
-    }
-    if waiting > 0 {
-        let (count, words) = changes_waiting_words(waiting);
-        right = right.push(tag(Tag::AfterRestart)).push(
-            row![
-                text(count).size(SIZE_META).font(FONT_BOLD).color(TEXT),
-                text(words).size(SIZE_META).font(FONT_MEDIUM).color(TEXT_2),
-            ]
-            .align_y(Alignment::Center),
-        );
-    }
-    // A stopped tracker gets Start tracker, a running one Restart tracker;
-    // both get it running with the saved config.
-    let running = app.daemon.running() || demo;
-    let (verb, label) = strip_action(running);
-    let primary = waiting > 0 || !running;
-    let enabled = !demo && !app.daemon_busy;
-    let mut b = button(text(label).size(SIZE_META).font(FONT_BOLD).color(TEXT))
-        .padding(Padding::from([9, 18]));
-    // Dimmed whenever it cannot be pressed, demo included.
-    b = if primary {
-        b.style(primary_btn(enabled))
-    } else {
-        b.style(ghost_btn(enabled))
-    };
-    if enabled {
-        b = b.on_press(Message::Daemon(verb));
-    }
-    right.push(b).into()
-}
-
-/// Tracker status, version and last capture on the left; changes waiting
-/// and Restart tracker on the right. One line in two-column mode; in one
-/// column the right group goes on a second line, end-aligned (spec p9).
-fn status_strip(app: &TrackerApp, demo: bool, two_columns: bool) -> Element<'_, Message> {
-    let left = strip_status(app);
-    let right = strip_actions(app, demo);
-    let body: Element<'_, Message> = if two_columns {
-        row![left, space().width(Fill), right]
-            .spacing(STRIP_ACTION_GAP)
-            .align_y(Alignment::Center)
-            .into()
-    } else {
-        column![left, container(right).width(Fill).align_right(Fill)]
-            .spacing(12)
-            .into()
-    };
-    container(body)
-        .padding(Padding::from([14.0, CARD_PAD]))
-        .width(Fill)
-        .style(theme::surface_panel)
-        .into()
-}
-
-/// What the strip's tracker button runs and says.
-fn strip_action(running: bool) -> (DaemonVerb, &'static str) {
-    if running {
-        (DaemonVerb::Restart, "Restart tracker")
-    } else {
-        (DaemonVerb::Start, "Start tracker")
-    }
-}
-
-/// A dim label and a bold value ("Version 0.6.0", "Last capture 00:40").
-fn meta_pair(label: &'static str, value: String) -> Element<'static, Message> {
-    row![
-        text(label).size(SIZE_META).font(FONT_MEDIUM).color(TEXT_3),
-        text(value).size(SIZE_META).font(FONT_BOLD).color(TEXT),
-    ]
-    .spacing(5)
-    .align_y(Alignment::Center)
-    .into()
 }
 
 fn faded(c: Color, enabled: bool) -> Color {
@@ -268,7 +125,7 @@ pub(crate) fn primary_btn(enabled: bool) -> impl Fn(&Theme, button::Status) -> b
 }
 
 /// Outlined button in the same shape, dimmed while it cannot be pressed.
-fn ghost_btn(enabled: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+pub(crate) fn ghost_btn(enabled: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |theme_, status| {
         let base = theme::ghost_btn()(theme_, status);
         button::Style {
@@ -343,7 +200,8 @@ fn advanced_column(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
             panel = panel.push(hairline());
         }
         let open = app.page_state.is_open(section);
-        let mut fold = column![fold_header(section, open, &values)]
+        let waiting = crate::settings_bar::section_waiting(app, section);
+        let mut fold = column![fold_header(section, open, &values, waiting)]
             .spacing(0)
             .width(Fill);
         if open {
@@ -418,10 +276,13 @@ fn advanced_values(app: &TrackerApp) -> AdvancedValues {
     }
 }
 
+/// A fold's header. `waiting`: a saved change in it waits for a tracker
+/// restart, so it carries the After restart tag (#776).
 fn fold_header(
     section: AdvancedSection,
     open: bool,
     values: &AdvancedValues,
+    waiting: bool,
 ) -> Element<'static, Message> {
     let mut title = Row::new().spacing(8).align_y(Alignment::Center).push(
         text(section.title())
@@ -429,7 +290,7 @@ fn fold_header(
             .font(FONT_BOLD)
             .color(TEXT),
     );
-    if section.after_restart() {
+    if waiting {
         title = title.push(tag(Tag::AfterRestart));
     }
     let chevron = if open {
@@ -479,14 +340,6 @@ fn card<'a>(title: &'static str, body: Element<'a, Message>) -> Element<'a, Mess
         .padding(Padding::from([18.0, CARD_PAD]))
         .width(Fill)
         .style(theme::surface_panel)
-        .into()
-}
-
-fn meta(copy: impl Into<String>) -> Element<'static, Message> {
-    text(copy.into())
-        .size(SIZE_META)
-        .font(FONT_SEMIBOLD)
-        .color(TEXT_3)
         .into()
 }
 
@@ -613,26 +466,6 @@ mod tests {
         assert!(page.x.abs() < 0.5 && (page.width - 700.0).abs() < 0.5);
     }
 
-    /// M9: with a change waiting, the one-column strip puts its actions on
-    /// a second line and nothing runs past the column.
-    #[test]
-    fn the_one_column_strip_fits_with_a_change_waiting() {
-        let (_dir, mut app) = app();
-        app.saved_config.auto_detect.cooldown_secs += 1;
-        assert_eq!(app.changes_waiting(), 1);
-        let node = lay_out(view(&app, 976.0), 976.0);
-        let page = &node.children()[0];
-        // Demo note, then the strip.
-        let strip = &page.children()[1];
-        let inner = &strip.children()[0];
-        let lines = inner.children();
-        assert_eq!(lines.len(), 2, "status, then the actions");
-        let actions = &lines[1].children()[0];
-        let right_edge = lines[1].bounds().x + actions.bounds().x + actions.bounds().width;
-        assert!(right_edge <= inner.bounds().width + 0.5, "{right_edge}");
-        assert!(actions.bounds().x > 0.0, "end-aligned");
-    }
-
     /// Render fix (spec p9): at 1024 the legend wraps its words inside
     /// the column and keeps the changed-dot key on one line.
     #[test]
@@ -640,20 +473,14 @@ mod tests {
         let (_dir, app) = app();
         let node = lay_out(view(&app, 976.0), 976.0);
         let page = &node.children()[0];
-        // Demo note, the strip, then "Run setup again" and the legend.
-        let legend = &page.children()[2];
+        // Demo note, then "Run setup again" and the legend.
+        let legend = &page.children()[1];
         let words = &legend.children()[1];
         let right = legend.bounds().x + words.bounds().x + words.bounds().width;
         assert!(right <= page.bounds().width + 0.5, "{right}");
         // The changed-dot key is one line, not squeezed into a stack.
         let key = &words.children()[2];
         assert!(key.bounds().height < 20.0, "{:?}", key.bounds());
-    }
-
-    #[test]
-    fn a_stopped_tracker_gets_start_not_restart() {
-        assert_eq!(strip_action(true), (DaemonVerb::Restart, "Restart tracker"));
-        assert_eq!(strip_action(false), (DaemonVerb::Start, "Start tracker"));
     }
 
     struct Collect {
