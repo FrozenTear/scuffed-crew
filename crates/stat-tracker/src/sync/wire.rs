@@ -202,6 +202,7 @@ fn upload_queue(m: &PersonalMatch) -> UploadQueueField {
 /// a mode that is not Competitive, or the readers off.
 pub fn rank_slot(m: &PersonalMatch) -> Option<crate::rank_queue::RankSlot> {
     let rank = upload_rank(m)?;
+    let rank_read = rank.has_rank_screen_field();
     // `upload_rank` sets the queue on every object it returns; an object
     // without one would be a bug there, and is read as unknown here.
     let queue = rank.queue.unwrap_or(UploadQueueField {
@@ -209,6 +210,7 @@ pub fn rank_slot(m: &PersonalMatch) -> Option<crate::rank_queue::RankSlot> {
         confidence: None,
     });
     Some(crate::rank_queue::RankSlot {
+        rank_read,
         queue: queue.value,
         queue_confidence: queue.confidence,
         role: rank.role.map(|r| r.value),

@@ -57,6 +57,14 @@ pub struct RankSlot {
     /// `None` when no role line the upload keeps was read.
     #[serde(default)]
     pub role: Option<RankRole>,
+    /// The upload's `rank` object holds a field read on the rank screen
+    /// (the tracker's `UploadRank::has_rank_screen_field`), not only the
+    /// title's queue. A rank screen field the upload drops (an `Open` role
+    /// line with no open queue title, a value the site would null) does not
+    /// count, so a game counts as ranked here exactly when the site gets a
+    /// rank screen field for it. Plays no part in [`RankSlot::same_slot`].
+    #[serde(default)]
+    pub rank_read: bool,
 }
 
 impl RankSlot {
@@ -475,18 +483,20 @@ mod tests {
     }
 
     /// Two slots match only on the same queue and the same role; the
-    /// confidence plays no part. A JSON slot from before a field existed
-    /// reads that field as `None`.
+    /// confidence and `rank_read` play no part. A JSON slot from before a
+    /// field existed reads that field as `None` (`rank_read` as false).
     #[test]
     fn a_rank_slot_is_one_queue_and_one_role() {
         let slot = |queue, role| RankSlot {
             queue,
             queue_confidence: Some(0.9),
             role,
+            rank_read: true,
         };
         let tank6 = slot(RankQueue::Role6v6, Some(RankRole::Tank));
         let other_conf = RankSlot {
             queue_confidence: None,
+            rank_read: false,
             ..tank6
         };
         assert!(tank6.same_slot(&other_conf));
@@ -503,6 +513,7 @@ mod tests {
         let read: RankSlot = serde_json::from_str(r#"{"queue":"role_6v6"}"#).unwrap();
         assert_eq!(read.queue, RankQueue::Role6v6);
         assert_eq!((read.queue_confidence, read.role), (None, None));
+        assert!(!read.rank_read);
     }
 
     #[test]

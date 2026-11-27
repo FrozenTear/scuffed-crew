@@ -308,3 +308,231 @@ fn the_newest_of_a_slot_wins_in_any_order() {
     );
     assert_eq!(tier(latest_rank_per_slot(&[tie, new])[0]), "BRONZE");
 }
+
+/// Stored rank screen reads the upload drops or keeps, each on a game whose
+/// title names a queue (so the upload always sends a `rank` object with the
+/// queue). `true`: the upload keeps a rank screen field.
+fn rank_screen_cases() -> Vec<(&'static str, PersonalMatch, bool)> {
+    use crate::model::{RankNumber, RankTags};
+    let t = |v: &str, c: f32| {
+        Some(RankText {
+            value: v.into(),
+            confidence: c,
+        })
+    };
+    let n = |v: i64| {
+        Some(RankNumber {
+            value: v,
+            confidence: 0.9,
+        })
+    };
+    let with = |title: &str, size: u8, rank: RankUpdate| {
+        let mut m = row(Some(title), Some(size), None, None);
+        m.rank_update = Some(rank);
+        m
+    };
+    let none = RankUpdate::default;
+    vec![
+        (
+            "Open role, no open title",
+            with(
+                "ROLE QUEUE",
+                5,
+                RankUpdate {
+                    role: t("Open", 0.5),
+                    ..none()
+                },
+            ),
+            false,
+        ),
+        (
+            "role spelling RankRole does not take",
+            with(
+                "ROLE QUEUE",
+                6,
+                RankUpdate {
+                    role: t("TANK", 0.9),
+                    ..none()
+                },
+            ),
+            false,
+        ),
+        (
+            "role icon under an open title",
+            with(
+                "OPEN QUEUE",
+                6,
+                RankUpdate {
+                    role: t("Tank", 0.9),
+                    ..none()
+                },
+            ),
+            false,
+        ),
+        (
+            "tier at confidence 0",
+            with(
+                "ROLE QUEUE",
+                6,
+                RankUpdate {
+                    role_rank: t("GOLD", 0.0),
+                    ..none()
+                },
+            ),
+            false,
+        ),
+        (
+            "blank tier",
+            with(
+                "ROLE QUEUE",
+                6,
+                RankUpdate {
+                    role_rank: t("   ", 0.9),
+                    ..none()
+                },
+            ),
+            false,
+        ),
+        (
+            "division 9",
+            with(
+                "ROLE QUEUE",
+                6,
+                RankUpdate {
+                    division: n(9),
+                    ..none()
+                },
+            ),
+            false,
+        ),
+        (
+            "negative hero SR",
+            with(
+                "ROLE QUEUE",
+                6,
+                RankUpdate {
+                    hero_sr: n(-5),
+                    ..none()
+                },
+            ),
+            false,
+        ),
+        (
+            "higher than 101%",
+            with(
+                "ROLE QUEUE",
+                6,
+                RankUpdate {
+                    higher_than_pct: n(101),
+                    ..none()
+                },
+            ),
+            false,
+        ),
+        (
+            "nine change tags",
+            with(
+                "ROLE QUEUE",
+                6,
+                RankUpdate {
+                    change_tags: Some(RankTags {
+                        value: vec!["WIN".into(); 9],
+                        confidence: 0.9,
+                    }),
+                    ..none()
+                },
+            ),
+            false,
+        ),
+        (
+            "Tank under a role title",
+            with(
+                "ROLE QUEUE",
+                6,
+                RankUpdate {
+                    role: t("Tank", 0.9),
+                    ..none()
+                },
+            ),
+            true,
+        ),
+        (
+            "hero SR alone",
+            with(
+                "ROLE QUEUE",
+                6,
+                RankUpdate {
+                    hero_sr: n(3000),
+                    ..none()
+                },
+            ),
+            true,
+        ),
+        (
+            "Open role under an open title",
+            with(
+                "OPEN QUEUE",
+                6,
+                RankUpdate {
+                    role: t("Open", 0.5),
+                    ..none()
+                },
+            ),
+            true,
+        ),
+        (
+            "division 2 on 5 a side",
+            with(
+                "ROLE QUEUE",
+                5,
+                RankUpdate {
+                    division: n(2),
+                    ..none()
+                },
+            ),
+            true,
+        ),
+    ]
+}
+
+/// The rank screen fields in the upload body's `rank` object (all but the
+/// title's queue, the title and the reader id).
+fn sent_rank_screen_fields(m: &PersonalMatch) -> Vec<String> {
+    let body = serde_json::to_value(upload_request(std::slice::from_ref(m), &[])).unwrap();
+    let rank = body["matches"][0]["rank"]
+        .as_object()
+        .expect("a rank object");
+    let local = ["queue", "queue_title", "rank_recognizer"];
+    rank.keys()
+        .filter(|k| !local.contains(&k.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// A game counts as ranked locally exactly when the upload sends a rank
+/// screen field for it: a stored read the upload drops (an Open role line
+/// with no open queue title, a misspelled role, a value the site would
+/// null) is no rank here either, though the game still has its queue.
+#[test]
+fn a_game_is_ranked_locally_only_when_the_upload_keeps_a_rank_screen_field() {
+    for (case, m, kept) in rank_screen_cases() {
+        let sent = sent_rank_screen_fields(&m);
+        assert_eq!(!sent.is_empty(), kept, "{case}: upload sent {sent:?}");
+        let g = game_at(&m, 0);
+        assert!(g.rank_slot.is_some(), "{case}: the queue still has a slot");
+        let latest = latest_rank_per_slot(std::slice::from_ref(&g));
+        assert_eq!(latest.len(), usize::from(kept), "{case}");
+    }
+}
+
+/// [`crate::rank_queue::RankSlot::rank_read`] is the upload's own rank
+/// screen test, case by case.
+#[test]
+fn rank_read_is_the_uploads_rank_screen_test() {
+    for (case, m, kept) in rank_screen_cases() {
+        let slot = Game::from_match(&m).rank_slot.expect("a slot");
+        assert_eq!(slot.rank_read, kept, "{case}");
+    }
+    let title_only = row(Some("ROLE QUEUE"), Some(6), None, None);
+    assert!(!Game::from_match(&title_only).rank_slot.unwrap().rank_read);
+}

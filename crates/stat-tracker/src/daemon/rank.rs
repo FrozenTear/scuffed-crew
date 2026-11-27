@@ -527,6 +527,8 @@ async fn apply(
 /// any order). A `6V6` before a role queue is kept (#654): Role Queue 6v6
 /// is its own queue, so `COMPETITIVE: 6V6 ROLE QUEUE` hands on
 /// `6V6 ROLE QUEUE`, which never agrees with the 5v5 `ROLE QUEUE` title.
+/// With today's pack (a bare `ROLE QUEUE` class only) every 6v6 role queue
+/// hint is therefore dropped, not confirmed: local only, and by design.
 /// Words are split as [`stat_tracker::model::queue_key`] splits them, so a
 /// colon, dash or underscore between them works the same. What is left is
 /// the rest of the banner from its first word, as read. With no leading

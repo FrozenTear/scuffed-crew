@@ -11,14 +11,15 @@
 use super::model::Game;
 use crate::rank_queue::RankSlot;
 
-/// The game has a rank screen read and a slot to file it under.
+/// The game has a rank screen read the upload keeps
+/// ([`RankSlot::rank_read`]) and a slot to file it under. The stored
+/// `rank_update` is not looked at: a field the upload drops is no rank here.
 fn ranked_slot(g: &Game) -> Option<RankSlot> {
-    let read = g.rank_update.as_ref().is_some_and(|r| !r.is_empty());
-    g.rank_slot.filter(|_| read)
+    g.rank_slot.filter(|s| s.rank_read)
 }
 
 /// The newest ranked game of each slot (queue and role), newest first. A
-/// game with no rank screen read, or no slot (not Competitive evidence, a
+/// game with no rank screen read the upload keeps, or no slot (not Competitive evidence, a
 /// mode that is not Competitive, or the readers off), is left out. Two
 /// games of one slot played at the same time keep the one listed first.
 pub fn latest_rank_per_slot(games: &[Game]) -> Vec<&Game> {
