@@ -511,7 +511,7 @@ pub fn name_chip(raw: &str) -> Option<String> {
 /// `config` as the Settings form would write it back. A hand-edited value
 /// the form normalises (a cleartext sync URL it drops, an empty
 /// `capture_output`) then never counts as a change.
-fn as_form_would_save(config: &Config) -> Config {
+pub(crate) fn as_form_would_save(config: &Config) -> Config {
     crate::settings::SettingsForm::from_config_and_shadow(
         config,
         Config::shadow_control(config.shadow_recognizer, None),

@@ -203,6 +203,8 @@ pub enum Message {
     RestartLater,
     WindowOpened(window::Id),
     WindowClosed(window::Id),
+    /// The window's close button: the leave confirm may hold it (#776).
+    WindowCloseRequested(window::Id),
     Tray(TrayAction),
     ToggleOverlay,
     OpenAbout,
@@ -287,6 +289,9 @@ pub fn window_settings() -> window::Settings {
             crate::layout::WINDOW_MIN_W.min(fit.width),
             crate::layout::WINDOW_MIN_H.min(fit.height),
         )),
+        // The close button asks first while Settings has unsaved text
+        // and there is no tray (`Message::WindowCloseRequested`).
+        exit_on_close_request: false,
         ..window::Settings::default()
     }
 }
@@ -428,7 +433,7 @@ pub struct TrackerApp {
     update_gate: &'static update::UpdateGate,
     window_id: Option<window::Id>,
     tick_count: u64,
-    tray: Option<TrayHandle>,
+    pub(crate) tray: Option<TrayHandle>,
     pub overlay_hold: OverlayHold,
     pub(crate) overlay_child: Option<CompanionChild>,
     overlay_spawn_blocked: bool,
@@ -765,6 +770,7 @@ impl TrackerApp {
         let mut subs = vec![
             iced::time::every(Duration::from_secs(1)).map(|_| Message::Tick),
             window::close_events().map(Message::WindowClosed),
+            window::close_requests().map(Message::WindowCloseRequested),
         ];
         if self.overlay_hotkey.enabled
             && self.companion_enabled()
@@ -849,6 +855,9 @@ impl TrackerApp {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         crate::games_table::before_message(self, &message);
+        if let Some(task) = crate::settings_bar::intercept(self, &message) {
+            return task;
+        }
         match message {
             Message::Tick => self.on_tick(),
             Message::Navigate(screen) => {
@@ -1672,6 +1681,7 @@ impl TrackerApp {
                     Task::none()
                 }
             }
+            Message::WindowCloseRequested(id) => window::close(id),
             Message::Tray(action) => self.apply_tray(action),
             Message::ToggleOverlay => self.toggle_overlay(),
             Message::Setup(message) => self.on_setup(message),

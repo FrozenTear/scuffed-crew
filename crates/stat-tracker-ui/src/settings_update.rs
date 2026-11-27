@@ -77,6 +77,8 @@ pub enum Msg {
     /// What opening the page fetched, Sign out, and the "What leaves your
     /// PC" dialog ([`crate::settings_open`]).
     Open(crate::settings_open::OpenMsg),
+    /// The pinned bar and its leave confirm ([`crate::settings_bar`]).
+    Bar(crate::settings_bar::Msg),
 }
 
 impl Msg {
@@ -86,7 +88,10 @@ impl Msg {
             Msg::Open(open) => open.acts(),
             _ => !matches!(
                 self,
-                Msg::ToggleAdvanced(_) | Msg::ReaderChecked { .. } | Msg::UpdatesChecked(_)
+                Msg::ToggleAdvanced(_)
+                    | Msg::ReaderChecked { .. }
+                    | Msg::UpdatesChecked(_)
+                    | Msg::Bar(_)
             ),
         }
     }
@@ -163,6 +168,8 @@ pub struct PageState {
     bans_picks_row: crate::bans_picks_setting::RowMark,
     /// What the page fetched when it last opened, and its dialog.
     pub opened: crate::settings_open::OpenState,
+    /// The pinned bar's error, keyboard mark and leave confirm.
+    pub(crate) bar: crate::settings_bar::BarState,
     /// The last changes waiting count with the baseline and saved config it
     /// was counted from, so a frame recounts only after one of them moved.
     waiting_memo: RefCell<Option<(Config, Config, usize)>>,
@@ -195,6 +202,7 @@ impl PageState {
             focus_row_until: None,
             bans_picks_row: crate::bans_picks_setting::RowMark::default(),
             opened: crate::settings_open::OpenState::default(),
+            bar: crate::settings_bar::BarState::default(),
             waiting_memo: RefCell::new(None),
             rank_pack_memo: RefCell::new(None),
         }
@@ -321,6 +329,12 @@ impl PageState {
         self.baseline_unknown = false;
     }
 
+    /// The config the running tracker started with, as far as the GUI
+    /// knows ([`Self::restart_baseline`]).
+    pub(crate) fn restart_baseline(&self) -> &Config {
+        &self.restart_baseline
+    }
+
     /// The player left Settings: an open chip input closes.
     pub fn left_page(&mut self) {
         self.chip_draft = None;
@@ -400,6 +414,7 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> Task<Message> {
             return Task::batch([first, save]);
         }
         Msg::Commit(commit) => return page_save(app, commit, None),
+        Msg::Bar(bar) => return crate::settings_bar::update(app, bar),
         Msg::Edit(edit) => return page_save(app, Commit::Control, Some(edit)),
         Msg::PickReader(choice) => return pick_reader(app, choice),
         Msg::Open(open) => {

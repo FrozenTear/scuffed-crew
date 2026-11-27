@@ -21,7 +21,7 @@ use crate::settings::{
 };
 use crate::settings_model::{ConfigEdit, url_host};
 use crate::settings_rows::{
-    Tag, divided, link, page_field, row_title, setting_row, sub_heading, switch, title_line,
+    divided, link, page_field, row_title, setting_row, sub_heading, switch, title_line,
 };
 use crate::settings_save::Commit;
 use crate::settings_update::{Msg, apply, apply_with};
@@ -476,7 +476,11 @@ pub(crate) fn bans_picks_row(app: &TrackerApp, demo: bool) -> Element<'_, Messag
         bans_help.push(hint(crate::capture_reading::SERVICE_MAY_DIFFER));
     }
     let row = setting_row(
-        title_line(BANS_PICKS_LABEL, false, &[Tag::AfterRestart]),
+        title_line(
+            BANS_PICKS_LABEL,
+            false,
+            crate::settings_bar::restart_tag(app, "bans_picks_reader"),
+        ),
         bans_help,
         crate::settings_keys::edit_switch(
             bans_on,
@@ -545,7 +549,11 @@ pub(crate) fn troubleshooting(app: &TrackerApp, demo: bool) -> Element<'_, Messa
     );
     // The tracker reads the key once at start: After restart.
     let pregame = setting_row(
-        title_line(PREGAME_SCREENS_LABEL, false, &[Tag::AfterRestart]),
+        title_line(
+            PREGAME_SCREENS_LABEL,
+            false,
+            crate::settings_bar::restart_tag(app, "debug_save_pregame_screens"),
+        ),
         vec![hint(PREGAME_SCREENS_HELP)],
         crate::settings_keys::edit_switch(
             app.saved_config.debug_save_pregame_screens,
