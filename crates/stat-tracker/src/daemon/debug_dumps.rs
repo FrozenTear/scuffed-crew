@@ -248,11 +248,56 @@ pub(crate) fn write_report_kit(
     }
 }
 
+/// Whether a rank screen's crops may go into `game`'s report kit (#810): the
+/// game has a stored board, or a start screen opened it and its first board
+/// has not come yet (a post-match Tab can still bring it).
+///
+/// Any other open game is one a Tab opened with no board: its captures were
+/// all rejected. On 2026-11-21 a Tab on the rank screen opened one, the
+/// rejected frame's Defeat made it recent, and the next poll tick wrote
+/// that rank screen into a kit of its own: pictures with no reads and no
+/// stored game.
+///
+/// Stricter than [`is_empty_tab_game`], which is not its negation: a game
+/// holding only a pending board (`reader = "new"`), a deferred board, a
+/// result hint or a gate is not an empty Tab game, but it gets no crops
+/// here either. A kit's reads come only from a stored board
+/// ([`record_report_kit`] runs after the board is stored), so the crops
+/// follow the same rule.
+pub(crate) fn rank_crops_belong_to(game: &ActiveGame) -> bool {
+    game.session_created || game.awaiting_first_board
+}
+
+/// Say once per game that its rank screen crops are left out
+/// ([`rank_crops_belong_to`]): the rank screen shows for many poll ticks.
+/// The newest few games are remembered, so the line is not repeated when
+/// two games take turns (the tests run several at once).
+fn note_rank_crops_left_out(session_id: &str) {
+    const REMEMBERED: usize = 16;
+    static SAID: std::sync::Mutex<std::collections::VecDeque<String>> =
+        std::sync::Mutex::new(std::collections::VecDeque::new());
+    let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
+    if said.iter().any(|id| id == session_id) {
+        return;
+    }
+    if said.len() >= REMEMBERED {
+        said.pop_front();
+    }
+    said.push_back(session_id.to_string());
+    tracing::info!(
+        target: "scuffed_stat_tracker",
+        session_id,
+        "report kit: rank screen crops left out, the open game has no stored board"
+    );
+}
+
 /// Report kit: the rank screen crops of one poll tick (`outcome.png`,
 /// `rank.png`, `rank_banner.png`), for the open game. The rank screen
 /// follows the game it belongs to: a game quiet for longer than
-/// [`RANK_OUTCOME_MAX_IDLE`] gets no crop. A failed write is a warning with
-/// the session id (#811).
+/// [`RANK_OUTCOME_MAX_IDLE`] gets no crop, and neither does a game with no
+/// stored board that no start screen opened ([`rank_crops_belong_to`],
+/// logged once per game). A failed write is a warning with the session id
+/// (#811).
 pub(crate) fn record_rank_crops(
     data_dir: &std::path::Path,
     game: Option<&ActiveGame>,
@@ -262,6 +307,10 @@ pub(crate) fn record_rank_crops(
         return;
     };
     if game.last_activity.elapsed() > RANK_OUTCOME_MAX_IDLE {
+        return;
+    }
+    if !rank_crops_belong_to(game) {
+        note_rank_crops_left_out(&game.session_id);
         return;
     }
     if let Err(e) =

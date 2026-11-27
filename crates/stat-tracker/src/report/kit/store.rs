@@ -355,6 +355,76 @@ mod removal_tests {
         assert_eq!(removed_lines(data).len(), REMOVED_KITS_KEEP_LINES + 2);
     }
 
+    /// What this thread logged, every level, one line per event, while
+    /// `attempt` ran for tries `0, 1, ...` until `done` holds for the lines
+    /// so far (at most 50 tries).
+    ///
+    /// The tries are for tracing's interest cache: while one subscriber
+    /// exists, a parallel test with none can register a callsite first and
+    /// cache it as off. The cache is rebuilt before each try, so a later try
+    /// sees the line. `done` should not look at the level, so a line logged
+    /// at the wrong level still ends the tries and fails the test.
+    fn logged_until(
+        mut attempt: impl FnMut(usize),
+        done: impl Fn(&[String]) -> bool,
+    ) -> Vec<String> {
+        #[derive(Clone, Default)]
+        struct Buf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buf {
+            type Writer = Buf;
+            fn make_writer(&'a self) -> Buf {
+                self.clone()
+            }
+        }
+        let buf = Buf::default();
+        let lines = || -> Vec<String> {
+            let text = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+            text.lines().map(str::to_string).collect()
+        };
+        let sub = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .finish();
+        tracing::subscriber::with_default(sub, || {
+            for i in 0..50 {
+                tracing::callsite::rebuild_interest_cache();
+                attempt(i);
+                if done(&lines()) {
+                    break;
+                }
+            }
+        });
+        lines()
+    }
+
+    /// Each delete is an INFO line with the session and the reason: the
+    /// default log level (`stat_tracker=info`) keeps it, a debug line
+    /// would be dropped (#811).
+    #[test]
+    fn a_kit_delete_is_an_info_line_with_the_session_and_why() {
+        const DELETED: &str = "report kit: deleted";
+        let tmp = tempfile::tempdir().unwrap();
+        let lines = logged_until(
+            |i| super::super::remove(tmp.path(), &format!("gone-{i}"), KitRemoval::GameDeleted),
+            |lines| lines.iter().any(|l| l.contains(DELETED)),
+        );
+        let deleted: Vec<&String> = lines.iter().filter(|l| l.contains(DELETED)).collect();
+        assert_eq!(deleted.len(), 1, "{lines:?}");
+        assert!(deleted[0].contains(" INFO "), "{}", deleted[0]);
+        assert!(deleted[0].contains("gone-"), "{}", deleted[0]);
+        assert!(deleted[0].contains("game deleted"), "{}", deleted[0]);
+    }
+
     /// The app's one-line form gives the sent-report reason.
     #[test]
     fn remove_sent_records_a_sent_report() {
