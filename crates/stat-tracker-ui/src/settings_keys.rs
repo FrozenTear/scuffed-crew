@@ -20,7 +20,7 @@ use iced::widget::Row;
 use crate::app::{Message, TrackerApp};
 use crate::form_widgets::hint;
 use crate::settings::SettingsField;
-use crate::settings_model::{ChipList, ConfigEdit, needs_restart, row_shown, same_name};
+use crate::settings_model::{ChipList, ConfigEdit, row_shown, same_name};
 use crate::settings_rows::{
     Segment, Tag, add_chip, chip, chip_control, segmented, setting_row, switch, title_line,
 };
@@ -29,13 +29,10 @@ use crate::settings_update::Msg;
 /// Under a row whose key nothing reads yet.
 const NOT_READ_NOTE: &str = "Not read by this build yet, so this changes nothing for now.";
 
-/// The row's tags for `key`: After restart only when the tracker reads it.
-fn read_tags(key: &str) -> &'static [Tag] {
-    if needs_restart(key) {
-        &[Tag::AfterRestart]
-    } else {
-        &[]
-    }
+/// The row's tags for `key`: After restart only while a saved change to
+/// it waits for a tracker restart (#776; the bar carries the count).
+fn read_tags(app: &TrackerApp, key: &str) -> &'static [Tag] {
+    crate::settings_bar::restart_tag(app, key)
 }
 
 /// Help under In-game names (spec).
@@ -136,7 +133,7 @@ pub(crate) fn names_row(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         chips = chips.push(add_chip(app, ChipList::Names, "+ Add name", "Name", demo));
     }
     setting_row(
-        title_line("In-game names", false, read_tags("player_names")),
+        title_line("In-game names", false, read_tags(app, "player_names")),
         vec![hint(NAMES_HELP)],
         chip_control(chips),
     )
@@ -245,7 +242,7 @@ pub(crate) fn rank_row(app: &TrackerApp, demo: bool) -> Option<Element<'_, Messa
     }
     let rank = app.rank_switch();
     Some(setting_row(
-        title_line(RANK_LABEL, false, read_tags("rank_reader")),
+        title_line(RANK_LABEL, false, read_tags(app, "rank_reader")),
         rank_lines(app, rank, RANK_HELP),
         edit_switch(rank.rank_on, demo || rank.rank_env, ConfigEdit::RankReader),
     ))
@@ -265,7 +262,7 @@ pub(crate) fn sharing_rows<'a>(
             title_line(
                 "Share stat pictures",
                 false,
-                read_tags("share_stat_pictures"),
+                read_tags(app, "share_stat_pictures"),
             ),
             vec![hint(pictures_help), hint(NOT_READ_NOTE)],
             edit_switch(c.share_stat_pictures, demo, ConfigEdit::ShareStatPictures),
@@ -317,7 +314,11 @@ pub(crate) fn focus_gate_row<'a>(
         title_line(
             crate::focus_status::ROW_TITLE,
             !auto,
-            &[Tag::New, Tag::AfterRestart],
+            if crate::settings_bar::key_waiting(app, "capture_only_on_screen") {
+                &[Tag::New, Tag::AfterRestart]
+            } else {
+                &[Tag::New]
+            },
         ),
         lines,
         demo_tooltip(
@@ -475,7 +476,7 @@ mod tests {
         {
             assert!(row_shown(key), "{key}");
         }
-        let (_dir, app) = crate::fixtures::test_app();
+        let (_dir, mut app) = crate::fixtures::test_app();
         assert!(upload_row(&app, false, "help", true).is_none());
         assert_eq!(not_connected_note(false), Some(UPLOAD_NO_SITE));
         assert_eq!(sharing_rows(&app, false, "b").len(), 1);
@@ -483,9 +484,14 @@ mod tests {
         assert!(!RANK_HELP.contains('\u{2014}') && RANK_HELP.contains("Starts off"));
         assert!(report_pictures_row(&app, false, "c").is_some());
         assert!(focus_gate_row(&app, false, "d").is_some());
-        assert_eq!(read_tags("rank_reader"), &[Tag::AfterRestart]);
-        assert_eq!(read_tags("share_stat_pictures"), &[] as &[Tag]);
-        assert_eq!(read_tags("player_names"), &[Tag::AfterRestart]);
+        // After restart only while the change waits (#776).
+        assert_eq!(read_tags(&app, "rank_reader"), &[] as &[Tag]);
+        app.saved_config.rank_reader = !app.saved_config.rank_reader;
+        app.saved_config.share_stat_pictures = !app.saved_config.share_stat_pictures;
+        app.saved_config.player_name = Some("Someone".into());
+        assert_eq!(read_tags(&app, "rank_reader"), &[Tag::AfterRestart]);
+        assert_eq!(read_tags(&app, "share_stat_pictures"), &[] as &[Tag]);
+        assert_eq!(read_tags(&app, "player_names"), &[Tag::AfterRestart]);
         assert!(NOT_READ_NOTE.starts_with("Not read by this build yet"));
     }
 

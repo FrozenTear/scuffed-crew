@@ -1272,3 +1272,7 @@ fn the_pill_menu_and_confirm_keep_the_pane_and_its_scroll() {
     });
     assert!(kept > 0.0, "closing the confirm reset the scroll");
 }
+
+/// The pinned Settings bar's tree tests (#776), with these helpers.
+#[path = "chrome_bar_tests.rs"]
+mod bar_tests;

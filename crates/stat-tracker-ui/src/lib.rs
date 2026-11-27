@@ -88,6 +88,7 @@ pub mod seasons_tab;
 mod session_bits;
 mod session_window;
 pub mod settings;
+mod settings_bar;
 pub mod settings_cards;
 mod settings_env;
 mod settings_fixed;
