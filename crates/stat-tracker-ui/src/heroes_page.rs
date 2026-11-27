@@ -62,6 +62,9 @@ pub enum Msg {
     View(HeroView),
     /// Show or hide the heroes under 3 games.
     ToggleOthers,
+    /// Played | When banned, and the When banned table's sort.
+    Mode(crate::heroes_banned::Mode),
+    Banned(crate::heroes_banned::Msg),
 }
 
 /// What the Heroes page keeps between frames.
@@ -70,6 +73,8 @@ pub struct HeroesPage {
     pub sort: HeroSort,
     pub view: HeroView,
     pub show_others: bool,
+    pub mode: crate::heroes_banned::Mode,
+    pub banned: crate::heroes_banned::BanUi,
 }
 
 pub fn update(app: &mut TrackerApp, msg: Msg) -> Task<Message> {
@@ -78,6 +83,8 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> Task<Message> {
         Msg::Sort(sort) => page.sort = sort,
         Msg::View(view) => page.view = view,
         Msg::ToggleOthers => page.show_others = !page.show_others,
+        Msg::Mode(mode) => page.mode = mode,
+        Msg::Banned(m) => crate::heroes_banned::update(&mut page.banned, m),
     }
     Task::none()
 }
@@ -230,6 +237,9 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
                 crate::games_state::LOADING_LINE
             )))
             .into();
+    }
+    if app.heroes_page.mode == crate::heroes_banned::Mode::WhenBanned {
+        return crate::heroes_banned_view::view(app, content_width);
     }
     if !crate::overview_page::shows_filters(app) {
         return col
