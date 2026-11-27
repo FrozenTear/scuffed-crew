@@ -327,11 +327,11 @@ fn reason(status: &BansPicksStatus) -> Option<(String, bool)> {
             false,
         ),
         BansPicksStatus::FrameSize { width, height } if *width > 0 && *height > 0 => (
-            format!("Not read: this game ran at {width}x{height}. Bans and picks need 2560x1440."),
+            format!("Not read: this game ran at {width}x{height}. Bans and picks need 2560x1440 (bans also 1920x1080)."),
             false,
         ),
         BansPicksStatus::FrameSize { .. } => (
-            "Not read: bans and picks need a 2560x1440 game.".to_string(),
+            "Not read: bans and picks need a 2560x1440 game (bans also 1920x1080).".to_string(),
             false,
         ),
         BansPicksStatus::PackMissing { linked: false } => (
@@ -385,7 +385,7 @@ fn settings_link(status: Option<&BansPicksStatus>) -> SettingsLink {
 /// The tooltip of a reason line, when the spec gives one.
 fn reason_tip(status: Option<&BansPicksStatus>) -> Option<&'static str> {
     matches!(status, Some(BansPicksStatus::FrameSize { .. }))
-        .then_some("Only 2560x1440 is read. 1080p and 4K are not.")
+        .then_some("Bans are read at 2560x1440 and 1920x1080, picks at 2560x1440 only. 4K and other sizes are not read.")
 }
 
 /// One ban as stored.

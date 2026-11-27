@@ -28,8 +28,14 @@
 //!   the first. The first frame is mid transition (a wipe band, a fade) and
 //!   gave false accepts on rows that are not readable. As a second guard a
 //!   row under the wipe band reads as `None` anyway ([`BAND_MAX`]).
-//! * Pass 2560x1440 frames. Other sizes are refused (`None`), because the
-//!   positions, scales and thresholds were measured at that size only.
+//! * Pass 2560x1440 frames. The ban results and the ban vote also take
+//!   1920x1080 frames: those are upscaled to 2560x1440 (Lanczos3, only
+//!   where the reader looks, see `upscale.rs`) and read on the same path,
+//!   because the 1080p screens are the 1440p layout scaled by 0.75
+//!   (Scuffed Vision, issue #931). The
+//!   hero select is read at 2560x1440 only. Other sizes are refused
+//!   (`None`), because the positions, scales and thresholds were measured
+//!   at 2560x1440 only.
 //! * Install the templates ([`templates`]); without them [`Reader::load`]
 //!   fails and the reader is off.
 //! * Never take the ban vote screen's left roster column for votes: it
@@ -56,6 +62,7 @@ mod digits;
 mod imaging;
 mod matcher;
 mod templates;
+mod upscale;
 mod vote;
 
 #[cfg(test)]
@@ -72,6 +79,8 @@ pub use templates::{
     NO_PREFERENCE_KEY, TEMPLATE_DIR, TEMPLATE_H, TEMPLATE_W, TemplateError, TemplateSet, Use,
     hero_keys,
 };
+use upscale::{RESULTS_REGIONS, at_read_size};
+pub use upscale::{at_frame_size, ban_vote_ring};
 pub use vote::{BanScoreEntry, BanVote, SlotState, VoteSlotRead};
 
 /// The recognizer id written next to the values.
@@ -87,9 +96,13 @@ pub const MIN_SCORE: f32 = 0.45;
 pub const MIN_MARGIN: f32 = 0.12;
 /// A row with at least this share of wipe-band cyan reads as `None`.
 pub const BAND_MAX: f32 = 0.4;
-/// The only frame size the reader accepts.
+/// The frame size the reader reads at.
 pub const FRAME_W: u32 = 2560;
 pub const FRAME_H: u32 = 1440;
+/// The other size the ban results and ban vote readers take, upscaled to
+/// [`FRAME_W`]x[`FRAME_H`] first (`upscale.rs`). Not the hero select.
+pub const FRAME_1080_W: u32 = 1920;
+pub const FRAME_1080_H: u32 = 1080;
 
 /// Whether the cv-v1 reader runs. On unless set to `off`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -426,7 +439,7 @@ impl Reader {
     /// The ban results screen. `own_ring` is the own-team ring colour from
     /// the hero select ([`HeroSelect::ring`]); without it every `team` is `None`.
     /// Same as [`Reader::read_ban_results_rings`] with at most one ring.
-    /// `None` when the frame is not 2560x1440.
+    /// `None` when the frame is neither 2560x1440 nor 1920x1080.
     pub fn read_ban_results(
         &self,
         img: &RgbImage,
@@ -439,11 +452,11 @@ impl Reader {
     /// source first (see [`slot_teams`]). The hero select ring can be missing
     /// or faded, so the caller also gives the ring of the ban vote screen,
     /// which has it at the same place ([`self_ring_colour`]).
-    /// `None` when the frame is not 2560x1440.
+    /// A 1920x1080 frame is upscaled first (`upscale.rs`). `None` when the
+    /// frame is neither 2560x1440 nor 1920x1080.
     pub fn read_ban_results_rings(&self, img: &RgbImage, rings: &[[u8; 3]]) -> Option<BanResults> {
-        if img.dimensions() != (FRAME_W, FRAME_H) {
-            return None;
-        }
+        let img = at_read_size(img, &RESULTS_REGIONS)?;
+        let img: &RgbImage = &img;
         let field = Field::of(img, 510, 352, 2053, 985);
         // Which layout: the one whose two middle slots match a hero best.
         let probe: Vec<f32> = SLOT_CY
@@ -524,7 +537,8 @@ impl Reader {
 
     /// Ban results and hero select picks together, from the ban results
     /// frame and the last hero select frame. `None` when either frame is
-    /// not 2560x1440.
+    /// not 2560x1440 (a 1080p hero select is not read, so neither is the
+    /// pair).
     pub fn read(&self, ban_results: &RgbImage, hero_select_last: &RgbImage) -> Option<BansPicks> {
         let hs = self.read_hero_select(hero_select_last)?;
         let br = self.read_ban_results(ban_results, Some(hs.ring))?;

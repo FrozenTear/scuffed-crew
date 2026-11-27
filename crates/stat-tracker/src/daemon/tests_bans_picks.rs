@@ -71,6 +71,26 @@ fn the_ban_vote_ring_is_given_to_the_ban_results_as_a_second_ring() {
     assert_eq!(spy.0.lock().unwrap()[2], vec![[1, 2, 3]]);
 }
 
+#[test]
+fn a_1080p_ban_vote_gives_its_ring_from_the_upscaled_frame() {
+    // The ring as a 1080p game draws it: the 1440p place scaled by 0.75,
+    // drawn wider so the upscale leaves the read area flat.
+    let mut img = RgbImage::new(FRAME_1080_W, FRAME_1080_H);
+    for y in 315..365 {
+        for x in 40..60 {
+            img.put_pixel(x, y, Rgb([128, 0, 128]));
+        }
+    }
+    let spy = Spy(Mutex::new(Vec::new()));
+    let frames = Frames {
+        vote: Some(Arc::new(DynamicImage::ImageRgb8(img))),
+        results: Some(ringed(FRAME_1080_W, FRAME_1080_H, [0, 0, 0])),
+        ..Frames::default()
+    };
+    assert!(read_with(&spy, &frames).is_some());
+    assert_eq!(spy.0.lock().unwrap()[0], vec![[128, 0, 128]]);
+}
+
 /// A config.toml as alpha.2.3 saved it with Read bans and picks off. The
 /// switch moved to Settings, Capture and reading; its key did not.
 const ALPHA_2_3_READER_OFF: &str = "\

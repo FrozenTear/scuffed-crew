@@ -1,5 +1,6 @@
 //! The ban vote screen: the local player's three vote slots and the TEAM
-//! BAN SCORE strip, read at 2560x1440 only.
+//! BAN SCORE strip, read at 2560x1440. A 1920x1080 frame is upscaled to
+//! that size first (`upscale.rs`).
 //!
 //! The left roster column of this screen shows each player's preferred
 //! heroes, not their votes, so it is never read here (the hero select
@@ -34,7 +35,8 @@ use serde::{Deserialize, Serialize};
 
 use super::digits::{Number, read_number};
 use super::matcher::SearchPlan;
-use super::{Choice, FRAME_H, FRAME_W, Field, NO_PREFERENCE_KEY, Read, Reader, Use, ranked};
+use super::upscale::{VOTE_REGIONS, at_read_size};
+use super::{Choice, Field, NO_PREFERENCE_KEY, Read, Reader, Use, ranked};
 
 /// A native rectangle, inclusive: `(x0, y0, x1, y1)`.
 type Rect = (u32, u32, u32, u32);
@@ -263,12 +265,13 @@ enum Look {
 
 impl Reader {
     /// The ban vote screen: the local player's three votes and the TEAM
-    /// BAN SCORE strip. Pass the last frame. `None` only when the frame is
-    /// not 2560x1440; a part the frame does not show is `None` inside.
+    /// BAN SCORE strip. Pass the last frame. A 1920x1080 frame is upscaled
+    /// first (`upscale.rs`). `None` only when the frame is
+    /// neither 2560x1440 nor 1920x1080; a part the frame does not show is
+    /// `None` inside.
     pub fn read_ban_vote(&self, img: &RgbImage) -> Option<BanVote> {
-        if img.dimensions() != (FRAME_W, FRAME_H) {
-            return None;
-        }
+        let img = at_read_size(img, &VOTE_REGIONS)?;
+        let img: &RgbImage = &img;
         Some(BanVote {
             slots: self.read_vote_slots(img),
             score: self.read_ban_score(img),

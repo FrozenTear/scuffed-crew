@@ -812,9 +812,14 @@ fn nothing_read_shows_the_reason_and_never_hides_the_game() {
     };
     assert_eq!(
         line,
-        "Not read: this game ran at 1920x1080. Bans and picks need 2560x1440."
+        "Not read: this game ran at 1920x1080. Bans and picks need 2560x1440 (bans also 1920x1080)."
     );
-    assert_eq!(tip, Some("Only 2560x1440 is read. 1080p and 4K are not."));
+    assert_eq!(
+        tip,
+        Some(
+            "Bans are read at 2560x1440 and 1920x1080, picks at 2560x1440 only. 4K and other sizes are not read."
+        )
+    );
     assert!(settings.is_none());
 }
 
@@ -842,7 +847,7 @@ fn every_status_has_its_spec_line() {
             height: 0
         }),
         (
-            "Not read: bans and picks need a 2560x1440 game.".into(),
+            "Not read: bans and picks need a 2560x1440 game (bans also 1920x1080).".into(),
             false
         )
     );

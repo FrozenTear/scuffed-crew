@@ -366,7 +366,7 @@ fn the_reader_keys_sit_together_in_capture_and_reading() {
     );
     assert_eq!(
         crate::settings_cards::BANS_PICKS_HELP,
-        "Reads the ban and hero select screens to fill in bans and picks. Works at 2560x1440 only."
+        "Reads the ban and hero select screens to fill in bans and picks. Bans work at 2560x1440 and 1920x1080, picks at 2560x1440 only."
     );
 }
 

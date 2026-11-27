@@ -589,10 +589,11 @@ pub struct Status {
     /// under the capture method in Settings.
     pub capture_notice: String,
     /// Why the bans and picks reader (`cv-v1`) read nothing for the last game:
-    /// no pack, a pack that did not load, a read that failed, or a frame that
-    /// was not 2560x1440. The game is recorded all the same. Empty when the
-    /// last read worked or the reader is off. The app shows it in Tracker
-    /// health, next to the OCR line, whatever OCR is set to.
+    /// no pack, a pack that did not load, a read that failed, or a frame of
+    /// a size it does not take (and the picks left out of a 1920x1080
+    /// game). The game is recorded all the same. Empty when the last read
+    /// worked or the reader is off. The app shows it in Tracker health,
+    /// next to the OCR line, whatever OCR is set to.
     pub bans_picks_notice: String,
     /// What the focus gate (`capture_only_on_screen`) last saw. The app
     /// shows it in its top bar while a game runs.

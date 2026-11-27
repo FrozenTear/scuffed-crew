@@ -74,7 +74,8 @@ empty and the app status shows a warning:
 | not installed, install not linked to a site account | the same, and to link a site account in Settings, since the pack routes need the sync token |
 | `Reader::load` fails | the pack did not load, with the reason, and to reinstall the pack or turn the setting off |
 | a read fails | the reader failed on this game's screens |
-| frame is not 2560x1440 | the game ran at that size and the reader needs 2560x1440 |
+| frame is not 2560x1440 or 1920x1080 | the game ran at that size and the reader needs 2560x1440 or 1920x1080 |
+| hero select at 1920x1080 | picks were not read: hero select is read at 2560x1440 only (the bans and votes are stored) |
 
 A good read clears the warning.
 
@@ -170,9 +171,14 @@ not a side.
 - Pass the LAST frame of the hero select and ban vote screens. The first
   frame is mid fade or under a wipe band, and a first frame read gave false
   accepts on rows nobody could read.
-- Only 2560x1440 frames are read. Any other size returns `None`.
-- 1080p, other UI scales and non-English clients are not measured. Team
-  side was measured on the default colours and on yellow and purple only; a
+- 2560x1440 frames are read. The ban results and the ban vote also take
+  1920x1080 frames: the reader upscales them x4/3 with Lanczos3, only where
+  it looks (`upscale.rs`), and reads them on the 1440p path (issue #931).
+  The hero select is read at 2560x1440 only. Any other size returns `None`.
+- The 1080p ban screens were measured on 90 frames of public 1080p video
+  (issue #931), not on live 1080p captures. The 1080p hero select, other
+  UI scales and non-English clients are not measured. Team side was
+  measured on the default colours and on yellow and purple only; a
   colourblind filter that gives other colour pairs reads by the same rule, but
   no frame of one was measured.
 

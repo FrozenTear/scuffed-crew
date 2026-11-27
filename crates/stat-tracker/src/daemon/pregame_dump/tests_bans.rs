@@ -3,7 +3,8 @@
 
 use super::*;
 use crate::daemon::bans_picks::{
-    BansPicksFeed, Engine, LoadFailure, Loader, NO_SELECT_NOTICE, missing_notice,
+    BansPicksFeed, Engine, LoadFailure, Loader, NO_SELECT_NOTICE, SELECT_1080_NOTICE,
+    missing_notice,
 };
 use image::{DynamicImage, RgbImage};
 use stat_tracker::model::{BansPicksMissing, BansPicksStatus};
@@ -278,14 +279,16 @@ async fn a_failed_read_still_records_the_game_and_warns() {
 }
 
 #[tokio::test]
-async fn a_frame_that_is_not_1440p_is_a_note_and_the_reader_is_not_called() {
+async fn a_frame_that_is_not_1440p_or_1080p_is_a_note_and_the_reader_is_not_called() {
     let rig = Rig::new();
     let mut dump = rig.dump(false, rig.feed(Ok(Mode::Fine), true));
-    let (_, stored) = game_then_read(&rig, &mut dump, three(1920, 1080)).await;
+    let (_, stored) = game_then_read(&rig, &mut dump, three(3840, 2160)).await;
     assert_eq!(stored, None);
     let warning = rig.health().expect("a note");
     assert!(
-        warning.contains("1920x1080") && warning.contains("2560x1440"),
+        warning.contains("3840x2160")
+            && warning.contains("2560x1440")
+            && warning.contains("1920x1080"),
         "{warning}"
     );
     assert_eq!(
@@ -558,13 +561,67 @@ async fn a_read_of_all_three_screens_is_ok() {
 async fn a_frame_of_the_wrong_size_is_a_frame_size_status() {
     let rig = Rig::new();
     let mut dump = rig.dump(false, rig.feed(Ok(Mode::Fine), true));
-    let (store, _) = game_then_read(&rig, &mut dump, three(1920, 1080)).await;
+    let (store, _) = game_then_read(&rig, &mut dump, three(3840, 2160)).await;
+    assert_eq!(
+        status_of(&store).await,
+        Some(BansPicksStatus::FrameSize {
+            width: 3840,
+            height: 2160
+        })
+    );
+}
+
+#[tokio::test]
+async fn a_1080p_game_reads_the_bans_and_the_vote_and_not_the_hero_select() {
+    // Issue #931: the reader upscales a 1080p ban vote and ban results; the
+    // hero select is read at 1440p only, so the picks stay empty and the
+    // note says why.
+    let rig = Rig::new();
+    let mut dump = rig.dump(false, rig.feed(Ok(Mode::Fine), true));
+    let (store, stored) = game_then_read(&rig, &mut dump, three(1920, 1080)).await;
+    let stored = stored.expect("a result");
+    assert!(
+        stored.contains("reaper") && stored.contains("genji"),
+        "{stored}"
+    );
+    assert!(stored.contains("\"picks\":[]"), "{stored}");
+    assert!(!stored.contains("mercy"), "{stored}");
+    assert_eq!(
+        rig.reads.load(Ordering::SeqCst),
+        2,
+        "the ban vote and the ban results were read, the hero select was not"
+    );
+    assert_eq!(
+        status_of(&store).await,
+        Some(BansPicksStatus::Partial {
+            missing: vec![BansPicksMissing::HeroSelect]
+        })
+    );
+    assert_eq!(rig.health().as_deref(), Some(SELECT_1080_NOTICE));
+}
+
+#[tokio::test]
+async fn a_1080p_hero_select_alone_is_a_frame_size_status() {
+    let rig = Rig::new();
+    let mut dump = rig.dump(false, rig.feed(Ok(Mode::Fine), true));
+    let f = frame(1920, 1080);
+    let batch = vec![PregameOp::Save(shot(
+        PregamePhase::HeroSelect.last_name(),
+        &f,
+    ))];
+    let (store, stored) = game_then_read(&rig, &mut dump, batch).await;
+    assert_eq!(stored, None);
     assert_eq!(
         status_of(&store).await,
         Some(BansPicksStatus::FrameSize {
             width: 1920,
             height: 1080
         })
+    );
+    assert_eq!(
+        rig.reads.load(Ordering::SeqCst),
+        0,
+        "the reader was not called"
     );
 }
 

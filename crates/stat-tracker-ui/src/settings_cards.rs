@@ -461,8 +461,7 @@ pub(crate) const BANS_PICKS_LABEL: &str = "Read bans and picks";
 
 /// Help under [`BANS_PICKS_LABEL`] (UX Spec). The pictures are only held in
 /// memory for the read, none are written, and the result stays on this PC.
-pub(crate) const BANS_PICKS_HELP: &str =
-    "Reads the ban and hero select screens to fill in bans and picks. Works at 2560x1440 only.";
+pub(crate) const BANS_PICKS_HELP: &str = "Reads the ban and hero select screens to fill in bans and picks. Bans work at 2560x1440 and 1920x1080, picks at 2560x1440 only.";
 
 /// Read bans and picks. The tracker reads the key once at start: After
 /// restart. STAT_TRACKER_BANS_PICKS_RECOGNIZER set to off turns the reader
