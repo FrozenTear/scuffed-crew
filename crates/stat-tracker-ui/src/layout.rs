@@ -7,7 +7,25 @@
 //! cards as fit at that minimum. Settings cards stay between
 //! [`MIN_SETTINGS_CARD`] and [`MAX_SETTINGS_CARD`] in 1-4 columns (G4).
 
+use gtk::gdk::prelude::MonitorExt;
+
 use crate::theme::{GRID_GAP, PAGE_PAD_X, SIDEBAR_WIDTH};
+
+/// Primary monitor size in px, when GTK has a display.
+pub(crate) fn current_display_size() -> Option<(f32, f32)> {
+    if !gtk::is_initialized() {
+        return None;
+    }
+    let display = gtk::gdk::Display::default()?;
+    let monitor = display.primary_monitor().or_else(|| display.monitor(0))?;
+    let rect = monitor.geometry();
+    let width = rect.width();
+    let height = rect.height();
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+    Some((width as f32, height as f32))
+}
 
 /// Minimum card width used when deciding how many columns fit.
 pub const MIN_CARD: f32 = 300.0;

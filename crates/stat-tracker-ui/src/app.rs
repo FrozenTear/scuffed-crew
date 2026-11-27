@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use chrono::{DateTime, Utc};
-use gtk::gdk::prelude::MonitorExt;
 use iced::widget::image::Handle;
 use iced::{Element, Subscription, Task, window};
 use stat_tracker::capture::CaptureBackend;
@@ -279,7 +278,7 @@ pub(crate) fn tray_show_op(window_id: Option<window::Id>) -> TrayWindowOp {
 }
 
 pub fn window_settings() -> window::Settings {
-    let fit = match current_display_size() {
+    let fit = match crate::layout::current_display_size() {
         Some((width, height)) => crate::layout::fit_window(width, height),
         None => crate::layout::fit_window(0.0, 0.0),
     };
@@ -294,22 +293,6 @@ pub fn window_settings() -> window::Settings {
         exit_on_close_request: false,
         ..window::Settings::default()
     }
-}
-
-/// Primary monitor size in px, when GTK has a display.
-fn current_display_size() -> Option<(f32, f32)> {
-    if !gtk::is_initialized() {
-        return None;
-    }
-    let display = gtk::gdk::Display::default()?;
-    let monitor = display.primary_monitor().or_else(|| display.monitor(0))?;
-    let rect = monitor.geometry();
-    let width = rect.width();
-    let height = rect.height();
-    if width <= 0 || height <= 0 {
-        return None;
-    }
-    Some((width as f32, height as f32))
 }
 
 fn live_game_session_now(
