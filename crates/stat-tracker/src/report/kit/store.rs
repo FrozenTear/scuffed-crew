@@ -152,6 +152,76 @@ pub(super) fn was_removed(dir: &Path) -> bool {
         .contains(dir)
 }
 
+/// Why a session's kit is deleted ([`super::remove`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KitRemoval {
+    /// The member deleted the game in the app.
+    GameDeleted,
+    /// The app sent the game as a report: it keeps no copy of what it sent.
+    ReportSent,
+}
+
+impl KitRemoval {
+    /// The reason as the log line and [`REMOVED_KITS_JSONL`] carry it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::GameDeleted => "game deleted",
+            Self::ReportSent => "game report sent",
+        }
+    }
+}
+
+/// `<data_dir>/debug/removed_kits.jsonl`: one line per kit delete. Local
+/// only: nothing uploads it or puts it in a report.
+pub const REMOVED_KITS_JSONL: &str = "removed_kits.jsonl";
+
+/// Past this size [`REMOVED_KITS_JSONL`] is cut back to its newest
+/// [`REMOVED_KITS_KEEP_LINES`] lines before the next line is added. A line
+/// is about 120 bytes, so the file holds a few hundred deletes at most.
+pub(super) const REMOVED_KITS_MAX_BYTES: u64 = 64 * 1024;
+
+/// Lines [`REMOVED_KITS_JSONL`] keeps when it is cut back.
+pub(super) const REMOVED_KITS_KEEP_LINES: usize = 200;
+
+/// Say that `session_id`'s kit was deleted and why, in the log and as one
+/// JSON line in [`REMOVED_KITS_JSONL`] (`removed_at`, `session_id`, `why`,
+/// `had_kit`). The file is kept because the desktop app deletes kits too,
+/// and its log is often not kept anywhere: with the line, a kit that was
+/// deleted can be told from one that was never written (#811). `had_kit`
+/// is whether a kit folder was there to delete.
+pub(super) fn note_removed(data_dir: &Path, session_id: &str, why: KitRemoval, had_kit: bool) {
+    let why = why.as_str();
+    tracing::info!(session_id, why, had_kit, "report kit: deleted");
+    let row = serde_json::json!({
+        "removed_at": chrono::Utc::now().to_rfc3339(),
+        "session_id": session_id,
+        "why": why,
+        "had_kit": had_kit,
+    });
+    if let Err(e) = append_removed_line(&data_dir.join("debug"), &row.to_string()) {
+        tracing::warn!(session_id, error = %e, "report kit: delete not recorded");
+    }
+}
+
+/// Add `line` to `dir`'s [`REMOVED_KITS_JSONL`], first cutting the file
+/// back to its newest lines when it is over [`REMOVED_KITS_MAX_BYTES`].
+fn append_removed_line(dir: &Path, line: &str) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
+    let path = dir.join(REMOVED_KITS_JSONL);
+    if fs::metadata(&path).is_ok_and(|m| m.len() > REMOVED_KITS_MAX_BYTES) {
+        let bytes = fs::read(&path)?;
+        let text = String::from_utf8_lossy(&bytes);
+        let lines: Vec<&str> = text.lines().collect();
+        let newest = &lines[lines.len().saturating_sub(REMOVED_KITS_KEEP_LINES)..];
+        fs::write(&path, format!("{}\n", newest.join("\n")))?;
+    }
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    writeln!(file, "{line}")
+}
+
 pub(super) fn modified(path: &Path) -> std::time::SystemTime {
     fs::metadata(path)
         .and_then(|m| m.modified())
@@ -204,4 +274,103 @@ fn dir_bytes(dir: &Path) -> u64 {
                 .sum()
         })
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod removal_tests {
+    use super::*;
+
+    /// The lines of `debug/removed_kits.jsonl`, parsed.
+    fn removed_lines(data_dir: &Path) -> Vec<serde_json::Value> {
+        let path = data_dir.join("debug").join(REMOVED_KITS_JSONL);
+        fs::read_to_string(path)
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("one JSON object per line"))
+            .collect()
+    }
+
+    /// #811: a kit delete left nothing behind, so a game with rows and no
+    /// kit could not be told from one whose kit was never written. Both
+    /// callers of `remove` (the daemon for a deleted game, the app after a
+    /// sent report) now leave which session and why.
+    #[test]
+    fn a_deleted_kit_leaves_a_line_saying_which_session_and_why() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path();
+        let dir = session_dir(data, "sent-1").unwrap();
+        private_dir(&dir).unwrap();
+        write_private(&dir, READS_JSON, b"{}").unwrap();
+        assert!(removed_lines(data).is_empty());
+
+        super::super::remove(data, "sent-1", KitRemoval::ReportSent);
+        assert!(!dir.exists(), "the kit is deleted");
+        let lines = removed_lines(data);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0]["session_id"], "sent-1");
+        assert_eq!(lines[0]["why"], "game report sent");
+        assert_eq!(lines[0]["had_kit"], true);
+        let at = lines[0]["removed_at"].as_str().expect("a time");
+        assert!(chrono::DateTime::parse_from_rfc3339(at).is_ok(), "{at}");
+
+        // A delete with no kit folder is kept too: it still stops any kit
+        // write in flight for that session.
+        super::super::remove(data, "never-had-one", KitRemoval::GameDeleted);
+        let lines = removed_lines(data);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(lines[1]["session_id"], "never-had-one");
+        assert_eq!(lines[1]["why"], "game deleted");
+        assert_eq!(lines[1]["had_kit"], false);
+    }
+
+    /// The record is bounded: past [`REMOVED_KITS_MAX_BYTES`] only the
+    /// newest [`REMOVED_KITS_KEEP_LINES`] lines stay, and the new line
+    /// follows them.
+    #[test]
+    fn the_record_of_deleted_kits_keeps_only_its_newest_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data = tmp.path();
+        let path = data.join("debug").join(REMOVED_KITS_JSONL);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let old: String = (0..2000)
+            .map(|i| {
+                format!(
+                    "{{\"session_id\":\"old-{i:04}\",\"why\":\"game deleted\",\"had_kit\":true}}\n"
+                )
+            })
+            .collect();
+        assert!(old.len() as u64 > REMOVED_KITS_MAX_BYTES);
+        fs::write(&path, old).unwrap();
+
+        super::super::remove(data, "newest", KitRemoval::GameDeleted);
+        let lines = removed_lines(data);
+        assert_eq!(lines.len(), REMOVED_KITS_KEEP_LINES + 1);
+        assert_eq!(lines[0]["session_id"], "old-1800", "the oldest lines went");
+        assert_eq!(lines[REMOVED_KITS_KEEP_LINES - 1]["session_id"], "old-1999");
+        assert_eq!(lines[REMOVED_KITS_KEEP_LINES]["session_id"], "newest");
+        assert!(fs::metadata(&path).unwrap().len() < REMOVED_KITS_MAX_BYTES);
+
+        // Under the limit nothing is cut.
+        super::super::remove(data, "next", KitRemoval::ReportSent);
+        assert_eq!(removed_lines(data).len(), REMOVED_KITS_KEEP_LINES + 2);
+    }
+
+    /// The app's one-line form gives the sent-report reason.
+    #[test]
+    fn remove_sent_records_a_sent_report() {
+        let tmp = tempfile::tempdir().unwrap();
+        super::super::remove_sent(tmp.path(), "reported");
+        let lines = removed_lines(tmp.path());
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0]["why"], "game report sent");
+    }
+
+    /// A session id that is no folder name has no kit and leaves no line.
+    #[test]
+    fn an_unsafe_session_id_deletes_and_records_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        super::super::remove(tmp.path(), "../escape", KitRemoval::GameDeleted);
+        assert!(removed_lines(tmp.path()).is_empty());
+        assert!(!tmp.path().join("debug").exists());
+    }
 }

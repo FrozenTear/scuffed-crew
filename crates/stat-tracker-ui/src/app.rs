@@ -2030,7 +2030,7 @@ impl TrackerApp {
                         d.built = None;
                         d.show_log = false;
                         if let Some(sid) = d.game_session.clone().filter(|_| d.is_game()) {
-                            stat_tracker::report::kit::remove(&data_dir, &sid);
+                            stat_tracker::report::kit::remove_sent(&data_dir, &sid);
                         }
                     }
                     d.send = SendState::Done(outcome);

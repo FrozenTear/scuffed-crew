@@ -23,6 +23,7 @@ summary, then the highlights, and tucks the remaining text under Details.
 - Stopping or restarting the tracker during a match asks first, because the current game won't be recorded. Keep tracking is the default (#775).
 - In the default top tabs layout, if the tracker could not start, the status says Couldn't start until you try again. Its menu shows why, links to Troubleshooting and offers Retry. In the classic sidebar there is no Couldn't start menu (#775).
 - In the default top tabs layout, Settings, Tracker service now points to the status at the top for Start, Restart and Stop. In the classic sidebar, Tracker service keeps its own buttons (#775).
+- A game's report kit (the blanked scoreboard and reads a game report is built from) no longer goes missing without a trace. If the tracker cannot save the scoreboard, the reads, the player names or the rank screen pictures of a kit, the log now has a warning with the game's id, where it had only a debug line that the default log level drops. A scoreboard with a team size other than 5 or 6 still saves its reads, with no picture, and logs the size, instead of saving nothing and logging nothing. When a kit is deleted, because you deleted the game or sent it as a game report, the tracker now notes which game and why in the log and in `debug/removed_kits.jsonl` in its data folder (#811).
 
 ## 0.6.0
 

@@ -790,19 +790,9 @@ pub(crate) async fn run_loop(
                             .await;
                             return Ok(());
                         }
-                        if let Some(pngs) = rank_pngs
-                            && let Some(game) = st.active_game.as_ref()
-                            // the rank screen follows the game it belongs
-                            // to: a game quiet for longer gets no outcome crop
-                            && game.last_activity.elapsed() <= RANK_OUTCOME_MAX_IDLE
-                            && let Err(e) = stat_tracker::report::kit::record_rank_screen_pngs(
-                                data_dir,
-                                &game.session_id,
-                                &pngs,
-                            )
-                        {
-                            tracing::debug!(target: "scuffed_stat_tracker", error = %e, "report kit: rank screen crops not written");
-                        }
+                        // Report kit: this tick's rank screen crops, for the
+                        // open game when it was active within the idle limit.
+                        record_rank_crops(data_dir, st.active_game.as_ref(), rank_pngs.as_ref());
                         // Reader on: hold this tick's rank screen read for the
                         // open game (same idle rule as the outcome crop), or
                         // settle and store the held ones once the screen is gone.
@@ -1195,7 +1185,11 @@ pub(crate) async fn apply_queued_commands(
             }
             storage::StoreCommand::DeleteSession { session_id } => {
                 // A deleted game's report kit goes too (QC1-6).
-                stat_tracker::report::kit::remove(data_dir, session_id);
+                stat_tracker::report::kit::remove(
+                    data_dir,
+                    session_id,
+                    stat_tracker::report::kit::KitRemoval::GameDeleted,
+                );
                 if st
                     .active_game
                     .as_ref()

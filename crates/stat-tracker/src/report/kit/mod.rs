@@ -40,12 +40,13 @@ pub use rank::{
 };
 pub use reads::{KitRead, KitReads, result_is_unknown};
 pub use store::{
-    KIT_DIR, MAX_AGE, NAMES_JSON, OUTCOME_PNG, RANK_BANNER_PNG, RANK_PNG, READS_JSON,
-    SCOREBOARD_PNG, encode_png, kit_root, retention, session_dir, set_retention,
+    KIT_DIR, KitRemoval, MAX_AGE, NAMES_JSON, OUTCOME_PNG, RANK_BANNER_PNG, RANK_PNG, READS_JSON,
+    REMOVED_KITS_JSONL, SCOREBOARD_PNG, encode_png, kit_root, retention, session_dir,
+    set_retention,
 };
 use store::{
-    modified, prune_locked, read_reads, removed, safe_session, was_removed, write_lock,
-    write_private,
+    modified, note_removed, prune_locked, read_reads, removed, safe_session, was_removed,
+    write_lock, write_private,
 };
 
 /// What [`load`] found for one session.
@@ -219,9 +220,11 @@ pub fn has_reads(data_dir: &Path, session_id: &str) -> bool {
     load(data_dir, session_id).reads.is_some()
 }
 
-/// Delete a session's kit (the member deleted the game), its portrait
-/// memory, and any kit write still in flight for it.
-pub fn remove(data_dir: &Path, session_id: &str) {
+/// Delete a session's kit, its portrait memory, and any kit write still in
+/// flight for it. `why` is who asked ([`KitRemoval`]). The delete is logged
+/// and kept as one line in `debug/removed_kits.jsonl`
+/// ([`store::note_removed`]), so a kit that is gone leaves a trace (#811).
+pub fn remove(data_dir: &Path, session_id: &str, why: KitRemoval) {
     forget_portraits(data_dir, session_id);
     if let Some(dir) = session_dir(data_dir, session_id) {
         let _guard = write_lock();
@@ -229,8 +232,16 @@ pub fn remove(data_dir: &Path, session_id: &str) {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(dir.clone());
+        let had_kit = dir.is_dir();
         let _ = fs::remove_dir_all(dir);
+        note_removed(data_dir, session_id, why, had_kit);
     }
+}
+
+/// [`remove`] for a game the app has just sent as a report
+/// ([`KitRemoval::ReportSent`]).
+pub fn remove_sent(data_dir: &Path, session_id: &str) {
+    remove(data_dir, session_id, KitRemoval::ReportSent);
 }
 
 /// Trim session kits to `keep`: oldest first, newest always kept.
@@ -417,8 +428,8 @@ mod tests {
         for sid in ["keep", "gone"] {
             record_scoreboard(tmp.path(), sid, &frame(), Some(6), &reads()).unwrap();
         }
-        remove(tmp.path(), "gone");
-        remove(tmp.path(), "../keep");
+        remove(tmp.path(), "gone", KitRemoval::GameDeleted);
+        remove(tmp.path(), "../keep", KitRemoval::GameDeleted);
         assert!(!session_dir(tmp.path(), "gone").unwrap().exists());
         assert_eq!(sessions(tmp.path()), vec!["keep".to_string()]);
     }
@@ -900,7 +911,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         record_scoreboard(tmp.path(), "gone-1", &frame(), Some(6), &reads()).unwrap();
         assert!(has_kit(tmp.path(), "gone-1"));
-        remove(tmp.path(), "gone-1");
+        remove(tmp.path(), "gone-1", KitRemoval::GameDeleted);
         record_scoreboard(tmp.path(), "gone-1", &frame(), Some(6), &reads()).unwrap();
         record_outcome_png(tmp.path(), "gone-1", b"png").unwrap();
         assert!(!session_dir(tmp.path(), "gone-1").unwrap().exists());
@@ -1016,7 +1027,7 @@ mod tests {
         remember_gated(tmp.path(), "mem-keep");
         assert!(memory_holds(tmp.path(), "mem-del"));
         assert!(memory_holds(tmp.path(), "mem-end"));
-        remove(tmp.path(), "mem-del");
+        remove(tmp.path(), "mem-del", KitRemoval::GameDeleted);
         assert!(!memory_holds(tmp.path(), "mem-del"));
         assert!(memory_holds(tmp.path(), "mem-end"));
         forget_portraits(tmp.path(), "mem-end");
