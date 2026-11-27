@@ -151,8 +151,13 @@ pub(crate) fn board_names(rows: &[ocr::RowOcrResult]) -> Vec<String> {
 }
 
 /// Report kit (`report::kit`): the blanked scoreboard and the reads of this
-/// accepted capture. Written off the capture path; a failure is logged and
-/// never touches the stored match.
+/// accepted capture. Written off the capture path ([`write_report_kit`]); a
+/// failure is logged as a warning and never touches the stored match.
+///
+/// A team size the blanker has no layout for is logged as a warning, and
+/// the reads are still saved, with no picture and an unknown layout (#811:
+/// before, such a board left no kit and no log line). The handle is for
+/// tests.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn record_report_kit(
     data_dir: &std::path::Path,
@@ -165,11 +170,20 @@ pub(crate) fn record_report_kit(
     tab_at: stat_tracker::report::blank::CaptureTime,
     board_names: Vec<String>,
     confidences: &std::collections::BTreeMap<String, stat_tracker::report::kit::ReaderRead>,
-) {
-    let Some(layout) = stat_tracker::report::blank::TeamLayout::from_team_size(Some(team_size))
-    else {
-        return;
-    };
+) -> tokio::task::JoinHandle<()> {
+    use stat_tracker::report::blank::TeamLayout;
+    let layout = TeamLayout::from_team_size(Some(team_size)).unwrap_or_else(|| {
+        tracing::warn!(
+            target: "scuffed_stat_tracker",
+            session_id,
+            team_size,
+            "report kit: no layout for this team size, saving the reads without a picture"
+        );
+        TeamLayout::Unknown
+    });
+    // What the blanker is told: 5 or 6, or nothing for a refused size. With
+    // nothing it keeps no picture, and only the reads are written.
+    let blank_size = layout.team_size().map(|n| n as usize);
     let reads = stat_tracker::report::kit::KitReads::from_capture(
         ocr_parsed,
         stored,
@@ -185,25 +199,81 @@ pub(crate) fn record_report_kit(
         frame.clone(),
     );
     tokio::task::spawn_blocking(move || {
-        if let Err(e) = stat_tracker::report::kit::record_scoreboard_at(
+        write_report_kit(
             &data_dir,
             &session_id,
             &frame,
-            Some(team_size),
+            blank_size,
             &reads,
             tab_at,
-        ) {
-            tracing::debug!(target: "scuffed_stat_tracker", error = %e, "report kit: scoreboard not written");
-        }
-        // The board's names stay on this PC; a report hands them to the
-        // log scrubber.
-        if !board_names.is_empty()
-            && let Err(e) =
-                stat_tracker::report::kit::record_names(&data_dir, &session_id, &board_names)
-        {
-            tracing::debug!(target: "scuffed_stat_tracker", error = %e, "report kit: names not written");
-        }
-    });
+            &board_names,
+        );
+    })
+}
+
+/// The blocking half of [`record_report_kit`]: the kit's scoreboard and
+/// reads, then the board's names. Each failed write is a warning with the
+/// session id (#811: they were debug lines, which the default log level
+/// drops, so a game could lose its kit with nothing in the log).
+pub(crate) fn write_report_kit(
+    data_dir: &std::path::Path,
+    session_id: &str,
+    frame: &image::DynamicImage,
+    team_size: Option<usize>,
+    reads: &stat_tracker::report::kit::KitReads,
+    tab_at: stat_tracker::report::blank::CaptureTime,
+    board_names: &[String],
+) {
+    if let Err(e) = stat_tracker::report::kit::record_scoreboard_at(
+        data_dir, session_id, frame, team_size, reads, tab_at,
+    ) {
+        tracing::warn!(
+            target: "scuffed_stat_tracker",
+            session_id,
+            error = %e,
+            "report kit: scoreboard and reads not written"
+        );
+    }
+    // The board's names stay on this PC; a report hands them to the
+    // log scrubber.
+    if !board_names.is_empty()
+        && let Err(e) = stat_tracker::report::kit::record_names(data_dir, session_id, board_names)
+    {
+        tracing::warn!(
+            target: "scuffed_stat_tracker",
+            session_id,
+            error = %e,
+            "report kit: names not written"
+        );
+    }
+}
+
+/// Report kit: the rank screen crops of one poll tick (`outcome.png`,
+/// `rank.png`, `rank_banner.png`), for the open game. The rank screen
+/// follows the game it belongs to: a game quiet for longer than
+/// [`RANK_OUTCOME_MAX_IDLE`] gets no crop. A failed write is a warning with
+/// the session id (#811).
+pub(crate) fn record_rank_crops(
+    data_dir: &std::path::Path,
+    game: Option<&ActiveGame>,
+    pngs: Option<&stat_tracker::report::kit::RankScreenPngs>,
+) {
+    let (Some(game), Some(pngs)) = (game, pngs) else {
+        return;
+    };
+    if game.last_activity.elapsed() > RANK_OUTCOME_MAX_IDLE {
+        return;
+    }
+    if let Err(e) =
+        stat_tracker::report::kit::record_rank_screen_pngs(data_dir, &game.session_id, pngs)
+    {
+        tracing::warn!(
+            target: "scuffed_stat_tracker",
+            session_id = %game.session_id,
+            error = %e,
+            "report kit: rank screen crops not written"
+        );
+    }
 }
 
 /// The board written to `debug/accepted`: the unpadded scoreboard crop
