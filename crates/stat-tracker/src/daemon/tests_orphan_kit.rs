@@ -236,6 +236,132 @@ fn a_result_screen_with_the_other_word_keeps_the_result_and_logs_it() {
     }
 }
 
+/// A probe Tab on the Ilios game's rank screen (93 s after its Defeat, 107 s
+/// after its last board) whose rejected frame shows Defeat, with `between`
+/// run on the state while the capture runs, under `log`. Returns the state
+/// and the fresh session of the Tab's request.
+fn probe_tab_with_change_while_capturing(
+    log: &Logged,
+    between: impl FnOnce(&mut SessionState),
+) -> (SessionState, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    log.during(|| {
+        rt.block_on(async {
+            let store = storage::LocalStore::open(dir.path()).await.unwrap();
+            let press = test_now();
+            let mut st = session(Some(finished_game("ilios", press, 93, 107)), press);
+            let req =
+                tab_capture_request(
+                    &mut st,
+                    &store,
+                    dir.path(),
+                    press,
+                    || std::future::ready(()),
+                )
+                .await;
+            assert!(req.finished_game_probe.is_some(), "a probe");
+            let fresh = req.session_id.clone();
+            between(&mut st);
+            let mut report = rejected_report(&fresh);
+            report.outcome = detect::MatchOutcome::Defeat;
+            let result = Ok(report);
+            let landed = press + Duration::from_millis(420);
+            let sid = settle_tab_probe(
+                &mut st,
+                &store,
+                dir.path(),
+                fresh.clone(),
+                &result,
+                landed,
+                || std::future::ready(()),
+            )
+            .await;
+            apply_capture_report(&mut st, &store, dir.path(), &sid, result, landed).await;
+            (st, fresh)
+        })
+    })
+}
+
+/// A result screen keeps only the game the probe was for. If another game
+/// opened while the capture ran (a start screen), that game stays, the
+/// Tab's report is not applied to it, and the log says so. The finished
+/// game is not reopened either.
+#[test]
+fn a_result_screen_probe_after_another_game_opened_leaves_that_game_alone() {
+    let log = Logged::at(tracing::Level::INFO);
+    let (st, fresh) = probe_tab_with_change_while_capturing(&log, |st| {
+        let mut other =
+            ActiveGame::open_now("other".into(), detect::MatchOutcome::Unknown, Vec::new());
+        other.awaiting_first_board = true;
+        st.active_game = Some(other);
+    });
+    let open = st.active_game.as_ref().expect("the other game stays open");
+    assert_eq!(open.session_id, "other", "not ilios, not {fresh}");
+    assert_eq!(
+        open.outcome,
+        detect::MatchOutcome::Unknown,
+        "the Tab's Defeat is not the other game's"
+    );
+    let warned = log.warned("another game opened while this Tab was read");
+    assert_eq!(warned.len(), 1, "{:?}", log.all());
+    assert!(warned[0].contains(&fresh), "{}", warned[0]);
+}
+
+/// With no game open when the capture lands (the finished game was closed
+/// while it ran), a result screen opens the Tab's fresh session as before
+/// #810, and that session takes the frame's Defeat.
+#[test]
+fn a_result_screen_probe_with_no_game_open_opens_the_fresh_session() {
+    let log = Logged::at(tracing::Level::INFO);
+    let (st, fresh) = probe_tab_with_change_while_capturing(&log, |st| {
+        st.active_game = None;
+    });
+    let open = st.active_game.as_ref().expect("the fresh session opens");
+    assert_eq!(open.session_id, fresh);
+    assert_eq!(open.outcome, detect::MatchOutcome::Defeat);
+    let adopted: Vec<String> = log
+        .all()
+        .into_iter()
+        .filter(|l| l.contains("outcome recovered from rejected capture frame: adopting"))
+        .collect();
+    assert_eq!(adopted.len(), 1, "{:?}", log.all());
+    assert!(adopted[0].contains(&fresh), "{}", adopted[0]);
+}
+
+/// The left-out line is said once per game, and the memory of games it was
+/// said for is bounded: after 16 newer games the first is forgotten and its
+/// next rank screen tick says it again. Other tests share the memory, which
+/// only makes the first game forgotten sooner.
+#[test]
+fn the_left_out_memory_keeps_only_the_newest_games() {
+    let dir = tempfile::tempdir().unwrap();
+    let empty = |i: usize| {
+        ActiveGame::open_now(
+            format!("bound-{i:02}"),
+            detect::MatchOutcome::Defeat,
+            Vec::new(),
+        )
+    };
+    let log = Logged::at(tracing::Level::INFO);
+    log.during(|| {
+        for i in 0..17 {
+            record_rank_crops(dir.path(), Some(&empty(i)), Some(&rank_pngs()));
+        }
+        record_rank_crops(dir.path(), Some(&empty(0)), Some(&rank_pngs()));
+    });
+    let first: Vec<String> = log
+        .all()
+        .into_iter()
+        .filter(|l| l.contains(LEFT_OUT) && l.contains("bound-00"))
+        .collect();
+    assert_eq!(first.len(), 2, "forgotten after 16 newer games: {first:?}");
+    assert_eq!(kit_folders(dir.path()), Vec::<String>::new());
+}
+
 /// A probe Tab whose rejected frame shows no result (a menu, a Tab let go
 /// early in the next game) still closes the finished game and opens the
 /// fresh session, as before #810.

@@ -59,7 +59,16 @@ impl Logged {
     }
 
     /// Run `f` with this log as the thread's subscriber.
+    ///
+    /// A no-op dispatcher is kept for the whole test run first. While only
+    /// one dispatcher exists, tracing decides a new callsite's interest from
+    /// the default of the thread that hits it first, so a parallel test with
+    /// no subscriber can cache a callsite as off for this log too. With two
+    /// or more, every callsite is decided over all of them under a lock.
     pub(super) fn during<T>(&self, f: impl FnOnce() -> T) -> T {
+        static KEEP_TWO: std::sync::OnceLock<tracing::Dispatch> = std::sync::OnceLock::new();
+        KEEP_TWO
+            .get_or_init(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()));
         tracing::subscriber::with_default(self.subscriber(), || {
             tracing::callsite::rebuild_interest_cache();
             f()
@@ -344,4 +353,52 @@ fn rank_crops_go_to_the_open_game_only_while_it_is_recent() {
         assert_eq!(files("recent"), [true; 3]);
     });
     assert!(log.all().is_empty(), "no warning: {:?}", log.all());
+}
+
+/// The daemon's delete path (#811): a game deleted in the app reaches the
+/// daemon as a queued `DeleteSession`. Its kit goes, and the record and
+/// the INFO line give the reason "game deleted", not "game report sent"
+/// (the app's reason for a kit it removed after a sent report). The INFO
+/// line itself is read in `report::kit::store`'s removal tests.
+#[tokio::test]
+async fn a_queued_delete_removes_the_kit_and_records_a_deleted_game() {
+    let dir = tempfile::tempdir().unwrap();
+    write_report_kit(
+        dir.path(),
+        "delete-me",
+        &frame(),
+        Some(6),
+        &kit_reads("delete-me"),
+        CaptureTime::now(),
+        &[],
+    );
+    assert!(kit::has_reads(dir.path(), "delete-me"));
+    storage::queue_command(
+        dir.path(),
+        &storage::StoreCommand::DeleteSession {
+            session_id: "delete-me".into(),
+        },
+    )
+    .unwrap();
+
+    let store = storage::LocalStore::open(dir.path()).await.unwrap();
+    let mut st = session(None, test_now());
+    let backoff = Arc::new(Mutex::new(sync::SyncBackoff::default()));
+    let mut sync_task = None;
+    apply_queued_commands(&mut st, &store, dir.path(), &mut sync_task, &backoff, None).await;
+
+    assert!(
+        !kit::has_reads(dir.path(), "delete-me"),
+        "the kit is deleted"
+    );
+    let record = dir.path().join("debug").join(kit::REMOVED_KITS_JSONL);
+    let lines: Vec<serde_json::Value> = std::fs::read_to_string(&record)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0]["session_id"], "delete-me");
+    assert_eq!(lines[0]["why"], "game deleted");
+    assert_eq!(lines[0]["had_kit"], true);
 }

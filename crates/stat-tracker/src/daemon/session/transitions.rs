@@ -578,6 +578,12 @@ pub(crate) fn finished_game_tab_probe(game: Option<&ActiveGame>, now: Instant) -
 ///
 /// A rejected frame with no result on it (a menu, a Tab released early in
 /// the next game) still opens the fresh session, as before.
+///
+/// The `finished_game_tab.is_none()` check cannot be false at the one
+/// caller today, the `None` arm of [`settle_tab_probe`]. It stays so the
+/// predicate means what its name says on its own: a report that compared a
+/// board with the finished game's ([`boundary::FinishedGameTab`]) showed a
+/// board, not a result screen, whatever its outcome field holds.
 pub(crate) fn probe_tab_shows_result_screen(result: &Result<CaptureReport, String>) -> bool {
     result.as_ref().is_ok_and(|report| {
         report.finished_game_tab.is_none() && !report.board_taken() && report.outcome.is_decided()
