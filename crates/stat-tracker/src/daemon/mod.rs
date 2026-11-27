@@ -50,6 +50,8 @@ mod tests_loading_stand_ins;
 #[cfg(test)]
 mod tests_memtune;
 #[cfg(test)]
+mod tests_orphan_kit;
+#[cfg(test)]
 mod tests_postgame_dump;
 #[cfg(test)]
 mod tests_postgame_round;
