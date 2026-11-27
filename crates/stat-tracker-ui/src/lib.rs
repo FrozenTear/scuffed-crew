@@ -47,6 +47,7 @@ mod games_length;
 mod games_map_fit;
 mod games_panel;
 mod games_picker;
+mod games_queue;
 mod games_rank;
 mod games_retry;
 mod games_rows;

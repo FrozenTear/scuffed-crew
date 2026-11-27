@@ -40,9 +40,10 @@ pub const LOBBY_ONLY: &str = "sess-g-h04";
 /// team read and the lobby ban), the widest row the block draws.
 pub const MIXED: &str = "sess-g-h05";
 
-/// A confident `OPEN QUEUE` on a long map name (Watchpoint: Gibraltar)
-/// with an unsure map read: the list row's name, warning sign, mode chip
-/// and queue chip, the widest Map cell the table draws.
+/// A confident `OPEN QUEUE` title on a 6-a-side board (the queue chip
+/// "6V6 OPEN QUEUE") on a long map name (Watchpoint: Gibraltar) with an
+/// unsure map read: the list row's name, warning sign, mode chip and queue
+/// chip, the widest Map cell the table draws.
 pub const QUEUE_SURE: &str = "sess-g-h09";
 /// A queue title read that was weak or failed: no queue chip, and the open
 /// game says the queue is not known.
@@ -281,6 +282,7 @@ pub fn snapshot() -> Snapshot {
         confidence: 0.93,
         ..QueueTitle::default()
     });
+    queue_sure.team_size = Some(6);
     let mut queue_unsure = wb(
         QUEUE_UNSURE.into(),
         "Colosseo",

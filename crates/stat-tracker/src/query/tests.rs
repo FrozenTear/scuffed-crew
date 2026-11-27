@@ -31,6 +31,7 @@ fn game(sid: &str, hero: &str, role: Role, outcome: Outcome, mins: i64) -> Game 
         queue_title: None,
         rank_update: None,
         rank_slot: None,
+        team_size: None,
         match_times: None,
     }
 }

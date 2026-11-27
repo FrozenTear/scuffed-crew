@@ -249,6 +249,12 @@ pub struct Game {
     /// queue rank.
     #[serde(default)]
     pub rank_slot: Option<crate::rank_queue::RankSlot>,
+    /// Players per team on the game's board, 5 or 6, as the upload's queue
+    /// rule reads it (`PersonalMatch::team_size`). `None` when no Tab board
+    /// gave a size. Games names it beside an unknown queue ("6V6 queue
+    /// unknown"); the queue itself is only ever [`Self::rank_slot`].
+    #[serde(default)]
+    pub team_size: Option<u8>,
     /// The game's real start and end ([`crate::model::MatchTimes`]). `None`
     /// on a game recorded before the tracker stored them.
     #[serde(default)]
@@ -322,6 +328,7 @@ impl Game {
             queue_title: m.queue_title.clone(),
             rank_update: m.rank_update.clone(),
             rank_slot: crate::sync::rank_slot(m),
+            team_size: m.team_size.filter(|n| matches!(n, 5 | 6)),
             match_times: m.match_times.as_ref().map(GameTimes::from_stored),
         }
     }
@@ -644,6 +651,7 @@ mod tests {
             queue_title: None,
             rank_update: None,
             rank_slot: None,
+            team_size: None,
             match_times: None,
         };
         assert!(game.field_unsure("dmg"));
@@ -683,6 +691,7 @@ mod tests {
             queue_title: None,
             rank_update: None,
             rank_slot: None,
+            team_size: None,
             match_times: None,
         };
         for field in [
@@ -725,6 +734,7 @@ mod review_tests {
             queue_title: None,
             rank_update: None,
             rank_slot: None,
+            team_size: None,
             match_times: None,
         }
     }

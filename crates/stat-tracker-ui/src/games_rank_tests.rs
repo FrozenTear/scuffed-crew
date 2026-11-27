@@ -43,6 +43,13 @@ fn queue(value: &str) -> QueueTitle {
     }
 }
 
+/// Give `g` the title `t` read on a board of `size` per team, with the
+/// queue the upload derives for its rank (`games_queue`).
+fn queued(g: &mut Game, t: QueueTitle, size: Option<u8>) {
+    let r = g.rank_update.clone();
+    crate::games_queue::tests::set_queue(g, Some(t), size, r);
+}
+
 /// The Rank cell's text, top line first, as [`cell`] draws it: the lines
 /// of [`RankShown::from_game`], or "-" when it is None.
 fn cell_lines(g: &Game) -> Vec<String> {
@@ -94,19 +101,21 @@ fn sentence_with_and_without_queue_and_role() {
         shown(&g).sentence(),
         "Rank: Support, Diamond 2, 45% progress, +23% this game"
     );
-    g.queue_title = Some(queue("ROLE QUEUE"));
+    queued(&mut g, queue("ROLE QUEUE"), Some(5));
     assert_eq!(
         shown(&g).sentence(),
-        "Rank: Support, ROLE QUEUE, Diamond 2, 45% progress, +23% this game"
+        "Rank: Support, 5V5 ROLE QUEUE, Diamond 2, 45% progress, +23% this game"
     );
-    // A weak queue read is not shown, as the map chip and upload skip it.
-    g.queue_title = Some(QueueTitle {
+    // A weak queue read decides nothing: the upload sends an unknown queue
+    // for the rank, and the tooltip says so, as the chip does.
+    let weak = QueueTitle {
         confidence: 0.1,
         ..queue("ROLE QUEUE")
-    });
+    };
+    queued(&mut g, weak, Some(5));
     assert_eq!(
         shown(&g).sentence(),
-        "Rank: Support, Diamond 2, 45% progress, +23% this game"
+        "Rank: Support, 5V5 queue unknown, Diamond 2, 45% progress, +23% this game"
     );
 
     // No role read: the site's "Role unknown".
@@ -117,10 +126,10 @@ fn sentence_with_and_without_queue_and_role() {
         "Rank: Role unknown, Gold 3, -15% progress, -15% this game. \
          Negative progress means demotion protection."
     );
-    g.queue_title = Some(queue("ROLE QUEUE"));
+    queued(&mut g, queue("ROLE QUEUE"), Some(5));
     assert_eq!(
         shown(&g).sentence(),
-        "Rank: Role unknown, ROLE QUEUE, Gold 3, -15% progress, -15% this game. \
+        "Rank: Role unknown, 5V5 ROLE QUEUE, Gold 3, -15% progress, -15% this game. \
          Negative progress means demotion protection."
     );
     // Zero progress is not negative; a negative change alone says nothing
@@ -138,21 +147,21 @@ fn sentence_with_and_without_queue_and_role() {
 fn open_queue_role_follows_the_upload() {
     let mut g = with_rank(rank("Open", "Silver", 1, 10, 0));
     assert_eq!(shown(&g).context(), ROLE_UNKNOWN);
-    g.queue_title = Some(queue("OPEN QUEUE"));
-    assert_eq!(shown(&g).context(), "OPEN QUEUE");
-    // The game's own spelling, 6V6 included, and open queue said once.
-    g.queue_title = Some(queue("COMPETITIVE: 6V6 OPEN QUEUE"));
-    assert_eq!(shown(&g).context(), "COMPETITIVE: 6V6 OPEN QUEUE");
+    queued(&mut g, queue("OPEN QUEUE"), Some(5));
+    assert_eq!(shown(&g).context(), "5V5 OPEN QUEUE");
+    // The size from the title alone, and open queue said once.
+    queued(&mut g, queue("COMPETITIVE: 6V6 OPEN QUEUE"), None);
+    assert_eq!(shown(&g).context(), "6V6 OPEN QUEUE");
     assert_eq!(
         shown(&g).sentence(),
-        "Rank: COMPETITIVE: 6V6 OPEN QUEUE, Silver 1, 10% progress, ±0% this game"
+        "Rank: 6V6 OPEN QUEUE, Silver 1, 10% progress, ±0% this game"
     );
     // OPEN not next to QUEUE is still an open queue title, said once.
-    g.queue_title = Some(queue("OPEN 6V6 QUEUE"));
-    assert_eq!(shown(&g).context(), "OPEN 6V6 QUEUE");
+    queued(&mut g, queue("OPEN 6V6 QUEUE"), Some(6));
+    assert_eq!(shown(&g).context(), "6V6 OPEN QUEUE");
     let mut g = with_rank(rank("Tank", "Silver", 1, 10, 0));
-    g.queue_title = Some(queue("OPEN QUEUE"));
-    assert_eq!(shown(&g).context(), "Role unknown, OPEN QUEUE");
+    queued(&mut g, queue("OPEN QUEUE"), Some(5));
+    assert_eq!(shown(&g).context(), "Role unknown, 5V5 OPEN QUEUE");
     assert_eq!(context_label(Some("Tank"), None), "Tank");
 }
 
@@ -174,14 +183,17 @@ fn only_the_rank_role_spellings_show_a_role() {
 /// tooltip do (`games_detail::map_chips`, `games_map_fit::fit`).
 #[test]
 fn both_tooltips_spell_the_queue_the_same_way() {
-    for title in ["ROLE QUEUE", "COMPETITIVE: 6V6 OPEN QUEUE"] {
+    for (title, size, want) in [
+        ("ROLE QUEUE", Some(6), "6V6 ROLE QUEUE"),
+        ("COMPETITIVE: 6V6 OPEN QUEUE", None, "6V6 OPEN QUEUE"),
+    ] {
         let mut g = with_rank(rank("Support", "Gold", 3, 10, 5));
-        g.queue_title = Some(queue(title));
+        queued(&mut g, queue(title), size);
         let chip = crate::games_detail::map_chips(&g)
             .into_iter()
             .find(|c| c.contains("QUEUE"))
             .unwrap();
-        assert_eq!(chip, title);
+        assert_eq!(chip, want);
         assert!(
             shown(&g).sentence().contains(&format!(", {chip}, ")),
             "{title}"
@@ -313,9 +325,11 @@ fn values_the_upload_drops_are_not_shown() {
     assert_eq!(shown(&g).tier.as_deref(), Some(title.as_str()));
     let g = with_rank(rank("Support", &"d".repeat(65), 2, 45, 23));
     assert_eq!(cell_lines(&g), ["Division 2", "45% +23%"]);
+    // A title that names no queue decides nothing: unknown, as uploaded,
+    // and the board size is not put beside a title.
     let mut g = with_rank(rank("Support", "Diamond", 2, 45, 23));
-    g.queue_title = Some(queue(&"Q".repeat(65)));
-    assert_eq!(shown(&g).queue, None);
+    queued(&mut g, queue(&"Q".repeat(65)), Some(5));
+    assert_eq!(shown(&g).queue.as_deref(), Some("Queue unknown"));
 }
 
 /// The sample fixture has every case the Rank cell draws.
@@ -341,7 +355,11 @@ fn sample_fixture_ranks() {
 
 /// The site's `RankShown::from_rank` (`crates/app/src/pages/stats/rank.rs`,
 /// private to the app crate, which the tracker does not build), copied for
-/// this test with the role as the words it shows.
+/// this test with the role as the words it shows. Its queue is the raw
+/// title the site shows today; the tracker names `rank.queue` instead
+/// (#654 T14), so [`the_cell_matches_what_the_upload_sends_the_site`]
+/// compares every other value with the site, and `games_queue::tests`
+/// checks the queue against `rank.queue` in the same body.
 fn site_shown(rank: &scuffed_types::api::MatchRank) -> Option<RankShown> {
     use scuffed_types::api::RankRole;
     let shown = RankShown {
@@ -471,7 +489,8 @@ fn upload_cases() -> Vec<(RankUpdate, Option<QueueTitle>)> {
 /// upload_request`, whose `rank` key is `upload_rank`'s object), then the
 /// site's `resolve_rank` and its badge rules ([`site_shown`]). The cell
 /// shows the same values, or "-" when the site would have no rank text,
-/// progress or change to show.
+/// progress or change to show. The queue is left out of the compare (see
+/// [`site_shown`]); here it must be the chip's words.
 #[test]
 fn the_cell_matches_what_the_upload_sends_the_site() {
     let mut shown_count = 0;
@@ -486,8 +505,22 @@ fn the_cell_matches_what_the_upload_sends_the_site() {
         let site = scuffed_types::api::resolve_rank(sent.get("rank"))
             .and_then(|rank| site_shown(&rank))
             .filter(|s| !s.badge_parts().is_empty());
-        let cell = RankShown::from_game(&Game::from_match(&m));
-        assert_eq!(cell, site, "{:?} {:?}", m.rank_update, m.queue_title);
+        let g = Game::from_match(&m);
+        let cell = RankShown::from_game(&g);
+        let no_queue = |s: &RankShown| RankShown {
+            queue: None,
+            ..s.clone()
+        };
+        assert_eq!(
+            cell.as_ref().map(no_queue),
+            site.as_ref().map(no_queue),
+            "{:?} {:?}",
+            m.rank_update,
+            m.queue_title
+        );
+        if let Some(c) = &cell {
+            assert_eq!(c.queue.as_deref(), crate::games_detail::queue_value(&g));
+        }
         shown_count += usize::from(cell.is_some());
     }
     assert!(shown_count > 100, "most cases show a rank: {shown_count}");

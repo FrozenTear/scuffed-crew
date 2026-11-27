@@ -13,7 +13,6 @@ use iced::advanced::graphics::text::Paragraph;
 use iced::advanced::layout::{Limits, Node};
 use iced::advanced::widget::Tree;
 use iced::advanced::widget::tree::Tag;
-use stat_tracker::model::QueueTitle;
 
 /// The default window, the grid switch points and their edges, 1280 and
 /// 1920.
@@ -21,8 +20,13 @@ const WINDOWS: [f32; 8] = [
     720.0, 1000.0, 1099.0, 1100.0, 1280.0, 1439.0, 1440.0, 1920.0,
 ];
 
-/// A queue title the chip shows, and a long one.
-const QUEUES: [&str; 2] = ["ROLE QUEUE", "COMPETITIVE: 6V6 OPEN QUEUE"];
+/// A queue the chip names, and the widest one (`games_queue::ALL`).
+fn queues() -> [&'static str; 2] {
+    [
+        crate::games_queue::ROLE_6V6,
+        crate::games_queue::tests::widest(),
+    ]
+}
 
 /// What the cell draws for one case.
 #[derive(Default)]
@@ -169,16 +173,14 @@ struct Counts {
 }
 
 /// A game with map `m`, the map read unsure (`doubt`) or not, and a
-/// confident queue title or none.
+/// queue chip with these words or none.
 fn case_game(m: &str, doubt: bool, queue: Option<&str>) -> Game {
     let suspect: &[&str] = if doubt { &["map"] } else { &[] };
     let mut g = crate::games_rows::tests::game(Outcome::Win, "2026-09-02T21:14:00Z", suspect);
     g.map_name = m.into();
-    g.queue_title = queue.map(|q| QueueTitle {
-        value: Some(q.into()),
-        confidence: 0.95,
-        ..QueueTitle::default()
-    });
+    if let Some(q) = queue {
+        crate::games_queue::tests::set_label(&mut g, q);
+    }
     g
 }
 
@@ -301,7 +303,8 @@ fn check_case(
 fn cases(m: &str) -> Vec<(&str, bool, Option<&str>)> {
     let mut out = Vec::new();
     for doubt in [false, true] {
-        for queue in [None, Some(QUEUES[0]), Some(QUEUES[1])] {
+        let [one, wide] = queues();
+        for queue in [None, Some(one), Some(wide)] {
             out.push((m, doubt, queue));
         }
     }
@@ -350,11 +353,13 @@ fn map_chips_never_clip_silently() {
         problems.extend(n.bare);
     }
     // Chief's rule (24 Nov): no chip is left out where shortening the name
-    // to two letters and "…" makes room. At 1100 that shortens 74 names
-    // (with the sign or a queue chip) and leaves nothing out.
+    // to two letters and "…" makes room. At 1100 that shortens 73 names
+    // (with the sign or a queue chip) and leaves nothing out. It was 74
+    // while the chip showed the raw title ("COMPETITIVE: 6V6 OPEN QUEUE");
+    // the widest queue chip is now "Role queue, size unknown" (#654).
     let want: Vec<(f32, usize, usize)> = WINDOWS
         .iter()
-        .map(|&w| (w, 0, if w == 1100.0 { 74 } else { 0 }))
+        .map(|&w| (w, 0, if w == 1100.0 { 73 } else { 0 }))
         .collect();
     assert_eq!(pinned, want, "(window, chips left out, names shortened)");
     let listed: Vec<&str> = maps
@@ -399,7 +404,7 @@ fn map_chips_never_clip_silently_at_any_window() {
     for window in 720..=1920 {
         for &m in &widest {
             for (m, doubt, queue) in cases(m) {
-                if queue != Some(QUEUES[1]) {
+                if queue != Some(queues()[1]) {
                     check_case(
                         &renderer,
                         (m, doubt, queue),
