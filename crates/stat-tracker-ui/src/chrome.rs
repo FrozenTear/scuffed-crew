@@ -209,7 +209,7 @@ fn top_tabs_parts(
     app: &TrackerApp,
     width: f32,
 ) -> (Column<'_, Message>, Option<Element<'_, Message>>) {
-    let mut content = column![crate::nav::page_heading(app.screen)];
+    let mut content = column![crate::heroes_banned_view::heading(app)];
     // No Tracker health panel here: without a keyboard Tab is never
     // seen, so the reason and its fix sit under the title on every tab.
     if let Some(notice) = top_tabs_input_notice(app) {
