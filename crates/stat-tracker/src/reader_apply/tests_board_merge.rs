@@ -355,6 +355,7 @@ fn row(hero: &str, map: &str, mode: &str) -> PersonalMatch {
         queue_title: None,
         rank_update: None,
         match_times: None,
+        team_size: None,
     }
 }
 

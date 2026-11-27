@@ -75,6 +75,7 @@ pub(crate) async fn store_held_board(
         queue_title: None,
         rank_update: None,
         match_times: None,
+        team_size: None,
     };
     storage::append_match_log(data_dir, &row);
     store

@@ -176,6 +176,7 @@ fn row(game: usize, capture: usize) -> PersonalMatch {
         queue_title: None,
         rank_update: None,
         match_times: None,
+        team_size: None,
     }
 }
 

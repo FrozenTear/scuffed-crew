@@ -389,20 +389,20 @@ fn reason_tip(status: Option<&BansPicksStatus>) -> Option<&'static str> {
 }
 
 /// One ban as stored.
-struct Ban {
-    slot: Slot,
-    team: Option<Team>,
+pub(crate) struct Ban {
+    pub(crate) slot: Slot,
+    pub(crate) team: Option<Team>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Team {
+pub(crate) enum Team {
     Own,
     Enemy,
 }
 
 /// The lobby ban slot, as stored with the layout.
 #[derive(Clone, PartialEq, Eq)]
-enum Lobby {
+pub(crate) enum Lobby {
     /// The plain layout (or no ban screen): no lobby slot.
     None,
     Hero(String),
@@ -411,18 +411,18 @@ enum Lobby {
 }
 
 /// The stored JSON, as plain slots.
-struct Stored {
+pub(crate) struct Stored {
     /// The result was stored by cv-v1 (or carries no tag, which sync also
     /// takes as cv-v1).
-    known_reader: bool,
-    bans: Vec<Ban>,
-    lobby: Lobby,
+    pub(crate) known_reader: bool,
+    pub(crate) bans: Vec<Ban>,
+    pub(crate) lobby: Lobby,
     picks: Vec<Slot>,
     /// Our own ban votes as (stored slot number, slot), in slot order.
     ban_vote: Vec<(u8, Slot)>,
 }
 
-fn parse(json: &str) -> Option<Stored> {
+pub(crate) fn parse(json: &str) -> Option<Stored> {
     let v: Value = serde_json::from_str(json).ok()?;
     if !v.is_object() {
         return None;

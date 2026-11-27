@@ -1126,6 +1126,7 @@ pub(crate) async fn handle_capture(
             // first capture creates the session row; later captures (including hero
             // swaps and the post-match scoreboard) append to the same session.
             parsed.session_id = target_session.clone();
+            parsed.team_size = crate::rank_queue::stored_team_size(team_size);
             // The read before the gate, kept for the report kit's `ocr_v1`
             // field: this capture's fields with the stats as they were read
             // (Tesseract under ocr-v1, the digit reader under the new one).

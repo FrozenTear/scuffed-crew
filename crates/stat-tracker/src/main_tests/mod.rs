@@ -81,8 +81,7 @@ pub(crate) fn game(
     }
 }
 
-/// Session state around an optional game, everything else quiescent,
-/// the baseline the poll_slow_mode tests perturb.
+/// Quiescent session state around an optional game; the poll_slow_mode baseline.
 pub(crate) fn session(active_game: Option<ActiveGame>, now: Instant) -> SessionState {
     SessionState {
         capture_count: 0,
@@ -327,6 +326,7 @@ pub(crate) fn test_match(session_id: &str, outcome: &str) -> storage::PersonalMa
         queue_title: None,
         rank_update: None,
         match_times: None,
+        team_size: None,
     }
 }
 
@@ -490,8 +490,7 @@ pub(crate) fn o8_analysis(career: Option<&str>, pack: Option<&str>) -> FrameAnal
     }
 }
 
-/// The new reader's board for that Tab: digits read, own-row hero as
-/// given (`None`: a suspect read that names no hero).
+/// The new reader's board for that Tab: digits, and the own-row hero (`None` if suspect).
 pub(crate) fn o8_board(hero: Option<&str>) -> shadow::BoardRead {
     let mut fields = vec![
         shadow::FieldRead {
@@ -2160,6 +2159,7 @@ mod session_recovery;
 mod shutdown_and_restart;
 pub(crate) mod source_text;
 mod tab_keyboard_pid;
+mod team_size;
 mod test_log;
 mod unread_columns;
 mod untrusted_maps;
