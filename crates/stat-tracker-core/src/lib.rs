@@ -18,6 +18,7 @@ pub mod parse;
 pub mod perf;
 pub mod perf_log;
 pub mod proc_id;
+pub mod rank_queue;
 pub mod replace;
 pub mod sandbox;
 pub mod setup;

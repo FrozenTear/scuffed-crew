@@ -77,6 +77,7 @@ const CRATE_OF: &[(&str, Crate)] = &[
     ("perf", Crate::Core),
     ("perf_log", Crate::Core),
     ("proc_id", Crate::Core),
+    ("rank_queue", Crate::Core),
     ("replace", Crate::Core),
     ("sandbox", Crate::Core),
     ("setup", Crate::Core),
@@ -630,8 +631,7 @@ fn compat_reexport(e: &Edge) -> bool {
 
 /// Every place in `sources` that reaches a [`COMPAT_REEXPORTS`] item
 /// through its old path, as `file:line: what`:
-/// * a path in any form (`crate::`, `super::`, `self::`, the lib name) to
-///   `<from>::<alias>`;
+/// * a path in any form (`crate::`, `super::`, `self::`, the lib name) to `<from>::<alias>`;
 /// * a `use` of the `from` module itself, or a glob of it, outside it
 ///   (`detect::TabKey` after `use crate::detect;`, or a bare name after
 ///   `use crate::detect::*;`);

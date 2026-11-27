@@ -319,6 +319,7 @@ fn lacks_game_fields(m: &PersonalMatch) -> bool {
         || m.queue_title.is_none()
         || m.rank_update.is_none()
         || m.match_times.is_none()
+        || m.team_size.is_none()
 }
 
 /// Fill the fields that belong to the whole game, and that a later snapshot
@@ -329,7 +330,8 @@ fn lacks_game_fields(m: &PersonalMatch) -> bool {
 /// * the bans and picks result and its status;
 /// * the queue title;
 /// * the rank update;
-/// * the game's real start and end.
+/// * the game's real start and end;
+/// * the board's team size.
 fn carry_game_fields(m: &mut PersonalMatch, snaps: &[PersonalMatch]) {
     let newest = || snaps.iter().rev();
     if name_recognizer_absent(&m.name_recognizer)
@@ -356,6 +358,9 @@ fn carry_game_fields(m: &mut PersonalMatch, snaps: &[PersonalMatch]) {
     }
     if m.match_times.is_none() {
         m.match_times = newest().find_map(|row| row.match_times.clone());
+    }
+    if m.team_size.is_none() {
+        m.team_size = newest().find_map(|row| row.team_size);
     }
 }
 
