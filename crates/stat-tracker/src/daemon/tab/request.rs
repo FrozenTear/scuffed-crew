@@ -227,6 +227,20 @@ where
                 session_id = %probe.old_session,
                 "Tab past the grace window shows a result screen, not a board: same game, no new session"
             );
+            // The stored result stays even when the frame's word is the
+            // other one (a false latch, R9-2, whose real end screen this
+            // is): logged so such a game can be found in the journal.
+            if let (Ok(report), Some(g)) = (result, st.active_game.as_ref())
+                && report.outcome != g.outcome
+            {
+                tracing::info!(
+                    target: "scuffed_stat_tracker",
+                    session_id = %probe.old_session,
+                    stored_outcome = %g.outcome,
+                    frame_outcome = %report.outcome,
+                    "result screen of a finished game shows another result: the stored result is kept"
+                );
+            }
             probe.old_session
         }
         Some(boundary::FinishedGameTab::NewGame) | None => {

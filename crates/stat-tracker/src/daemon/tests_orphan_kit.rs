@@ -178,6 +178,64 @@ async fn replay_2026_11_21_a_tab_on_the_rank_screen_opens_no_game_and_leaves_no_
     );
 }
 
+const KEPT_OTHER_RESULT: &str =
+    "result screen of a finished game shows another result: the stored result is kept";
+
+/// A probe Tab on the finished game's result screen keeps the stored result
+/// even when the frame shows the other word: a false latch (R9-2) whose real
+/// end screen this is. That case is one INFO line with the session and both
+/// results, so it shows in the journal. When the words agree, no line.
+#[test]
+fn a_result_screen_with_the_other_word_keeps_the_result_and_logs_it() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    for (on_frame, differs) in [
+        (detect::MatchOutcome::Victory, true),
+        (detect::MatchOutcome::Defeat, false),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let log = Logged::at(tracing::Level::INFO);
+        let st = log.during(|| {
+            rt.block_on(async {
+                let store = storage::LocalStore::open(dir.path()).await.unwrap();
+                let press = test_now();
+                let mut st = session(Some(finished_game("ilios", press, 93, 107)), press);
+                let (_, probe) = rejected_tab(&mut st, &store, dir.path(), press, on_frame).await;
+                assert!(probe, "93 s after the result, 107 s after the last board");
+                st
+            })
+        });
+
+        let open = st
+            .active_game
+            .as_ref()
+            .expect("the finished game stays open");
+        assert_eq!(open.session_id, "ilios", "frame {on_frame}");
+        assert_eq!(
+            open.outcome,
+            detect::MatchOutcome::Defeat,
+            "frame {on_frame}: the stored result is kept"
+        );
+        let lines: Vec<String> = log
+            .all()
+            .into_iter()
+            .filter(|l| l.contains(KEPT_OTHER_RESULT))
+            .collect();
+        if differs {
+            assert_eq!(lines.len(), 1, "one line: {lines:?}");
+            let line = &lines[0];
+            assert!(line.contains(" INFO "), "{line}");
+            assert!(line.contains("session_id=ilios"), "{line}");
+            assert!(line.contains("stored_outcome=defeat"), "{line}");
+            assert!(line.contains("frame_outcome=victory"), "{line}");
+        } else {
+            assert_eq!(lines, Vec::<String>::new(), "the words agree: no line");
+        }
+    }
+}
+
 /// A probe Tab whose rejected frame shows no result (a menu, a Tab let go
 /// early in the next game) still closes the finished game and opens the
 /// fresh session, as before #810.

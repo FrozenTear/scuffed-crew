@@ -257,6 +257,13 @@ pub(crate) fn write_report_kit(
 /// rejected frame's Defeat made it recent, and the next poll tick wrote
 /// that rank screen into a kit of its own: pictures with no reads and no
 /// stored game.
+///
+/// Stricter than [`is_empty_tab_game`], which is not its negation: a game
+/// holding only a pending board (`reader = "new"`), a deferred board, a
+/// result hint or a gate is not an empty Tab game, but it gets no crops
+/// here either. A kit's reads come only from a stored board
+/// ([`record_report_kit`] runs after the board is stored), so the crops
+/// follow the same rule.
 pub(crate) fn rank_crops_belong_to(game: &ActiveGame) -> bool {
     game.session_created || game.awaiting_first_board
 }
