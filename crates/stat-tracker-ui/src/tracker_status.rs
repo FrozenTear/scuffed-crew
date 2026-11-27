@@ -14,6 +14,7 @@ use iced::Color;
 use stat_tracker::ocr_status::FocusGateStatus;
 
 use crate::app::TrackerApp;
+use crate::daemon::DaemonVerb;
 use crate::model::Game;
 use crate::theme;
 
@@ -37,10 +38,18 @@ pub enum HeaderStatus {
     Down,
     /// The website answered 401 or 403 for the sync token.
     TokenRejected,
+    /// A Start runs and has not answered yet ([`crate::status_pill`]).
+    Starting,
+    /// A Restart runs and has not answered yet.
+    Restarting,
+    /// A Stop runs and has not answered yet (it can take up to 90 s).
+    Stopping,
+    /// The last Start or Restart failed. It stays until the next verb.
+    StartFailed,
 }
 
 /// Every status, for tests that walk all of them.
-pub const ALL: [HeaderStatus; 7] = [
+pub const ALL: [HeaderStatus; 11] = [
     HeaderStatus::Capturing,
     HeaderStatus::CapturingAnyWindow,
     HeaderStatus::Paused,
@@ -48,6 +57,10 @@ pub const ALL: [HeaderStatus; 7] = [
     HeaderStatus::Waiting,
     HeaderStatus::Down,
     HeaderStatus::TokenRejected,
+    HeaderStatus::Starting,
+    HeaderStatus::Restarting,
+    HeaderStatus::Stopping,
+    HeaderStatus::StartFailed,
 ];
 
 #[derive(Debug, Clone, Copy)]
@@ -59,12 +72,26 @@ pub struct HeaderStatusInput {
     /// The focus gate as the bar shows it (debounced,
     /// [`crate::focus_status::FocusDisplay`]). Read only while Capturing.
     pub focus: FocusGateStatus,
+    /// The verb the app runs now ([`crate::status_pill`]).
+    pub busy: Option<DaemonVerb>,
+    /// The last Start or Restart failed ([`crate::status_pill`]).
+    pub start_failed: bool,
 }
 
 /// A failed test capture (Capture now, Check the picture) is not part of
 /// this: its error shows under Check the picture, and the tracker still
 /// runs. A capture the GUI runs itself is not a game either.
 pub fn classify_header_status(input: HeaderStatusInput) -> HeaderStatus {
+    // The demo runs no verb and always shows Ready.
+    if !input.demo {
+        match input.busy {
+            Some(DaemonVerb::Start) => return HeaderStatus::Starting,
+            Some(DaemonVerb::Restart) => return HeaderStatus::Restarting,
+            Some(DaemonVerb::Stop) => return HeaderStatus::Stopping,
+            None if input.start_failed => return HeaderStatus::StartFailed,
+            None => {}
+        }
+    }
     if input.sync_token_rejected {
         return HeaderStatus::TokenRejected;
     }
@@ -84,9 +111,20 @@ pub fn classify_header_status(input: HeaderStatusInput) -> HeaderStatus {
 }
 
 /// Whether the long and medium words end in the last game's time. The
-/// pause and the unreadable pill drop it.
+/// pause, the unreadable pill, a verb in flight and a failed start drop it.
 pub fn shows_time(status: HeaderStatus) -> bool {
-    !matches!(status, HeaderStatus::Paused | HeaderStatus::FocusUnknown)
+    !matches!(
+        status,
+        HeaderStatus::Paused | HeaderStatus::FocusUnknown | HeaderStatus::StartFailed
+    ) && !is_busy(status)
+}
+
+/// Starting, Restarting or Stopping: the pill has no menu then.
+pub fn is_busy(status: HeaderStatus) -> bool {
+    matches!(
+        status,
+        HeaderStatus::Starting | HeaderStatus::Restarting | HeaderStatus::Stopping
+    )
 }
 
 /// The detail line (tooltip) for a status, if it has one.
@@ -111,7 +149,10 @@ pub fn header_status_color(status: HeaderStatus) -> Color {
         HeaderStatus::Paused => theme::TEXT_3,
         // Amber is kept for real warnings and the unsure focus only.
         HeaderStatus::TokenRejected | HeaderStatus::FocusUnknown => theme::WARN,
-        HeaderStatus::Down => theme::DANGER,
+        // A verb in flight: a static amber dot, never Ready's green. The
+        // app has no reduced-motion source, so it never pulses.
+        HeaderStatus::Starting | HeaderStatus::Restarting | HeaderStatus::Stopping => theme::WARN,
+        HeaderStatus::Down | HeaderStatus::StartFailed => theme::DANGER,
     }
 }
 
@@ -124,8 +165,12 @@ pub fn classic_status_color(status: HeaderStatus) -> Color {
         | HeaderStatus::CapturingAnyWindow
         | HeaderStatus::Paused
         | HeaderStatus::FocusUnknown => theme::OK,
-        HeaderStatus::Waiting | HeaderStatus::TokenRejected => theme::WARN,
-        HeaderStatus::Down => theme::DANGER,
+        HeaderStatus::Waiting
+        | HeaderStatus::TokenRejected
+        | HeaderStatus::Starting
+        | HeaderStatus::Restarting
+        | HeaderStatus::Stopping => theme::WARN,
+        HeaderStatus::Down | HeaderStatus::StartFailed => theme::DANGER,
     }
 }
 
@@ -138,6 +183,17 @@ pub fn short_label(status: HeaderStatus) -> &'static str {
         HeaderStatus::Waiting => "Ready",
         HeaderStatus::Down => "Stopped",
         HeaderStatus::TokenRejected => "Token rejected",
+        HeaderStatus::StartFailed => "Couldn't start",
+        busy => busy_label(busy),
+    }
+}
+
+/// The words while a verb runs, the same at every width.
+fn busy_label(status: HeaderStatus) -> &'static str {
+    match status {
+        HeaderStatus::Starting => "Starting...",
+        HeaderStatus::Restarting => "Restarting...",
+        _ => "Stopping...",
     }
 }
 
@@ -151,6 +207,8 @@ pub fn long_label(status: HeaderStatus) -> &'static str {
         HeaderStatus::Waiting => "Tracker ready",
         HeaderStatus::Down => "Tracker stopped",
         HeaderStatus::TokenRejected => "Website token rejected",
+        HeaderStatus::StartFailed => "Couldn't start the tracker",
+        busy => busy_label(busy),
     }
 }
 
@@ -210,6 +268,8 @@ fn header_input(app: &TrackerApp) -> HeaderStatusInput {
         game_running: app.game_running,
         sync_token_rejected: sync_token_rejected(app),
         focus: app.page_state.focus.shown(),
+        busy: app.pill.in_flight,
+        start_failed: app.pill.failure.is_some(),
     }
 }
 
@@ -290,6 +350,8 @@ mod tests {
             game_running: game,
             sync_token_rejected: false,
             focus: FocusGateStatus::Unknown,
+            busy: None,
+            start_failed: false,
         }
     }
 
@@ -436,6 +498,72 @@ mod tests {
             assert_ne!(header_status_color(status), theme::DANGER);
             assert_eq!(classic_status_color(status), theme::OK);
         }
+    }
+
+    /// Spec 1.2: the states the status pill adds.
+    #[test]
+    fn the_pill_states_read_as_spec_1_2() {
+        let table = [
+            (
+                HeaderStatus::Starting,
+                "Starting...",
+                "Starting...",
+                theme::WARN,
+            ),
+            (
+                HeaderStatus::Restarting,
+                "Restarting...",
+                "Restarting...",
+                theme::WARN,
+            ),
+            (
+                HeaderStatus::Stopping,
+                "Stopping...",
+                "Stopping...",
+                theme::WARN,
+            ),
+            (
+                HeaderStatus::StartFailed,
+                "Couldn't start",
+                "Couldn't start the tracker",
+                theme::DANGER,
+            ),
+        ];
+        for (status, short, long, color) in table {
+            assert_eq!(short_label(status), short);
+            assert_eq!(long_label(status), long);
+            assert_eq!(header_status_color(status), color);
+            assert!(!shows_time(status), "{status:?}");
+            assert_eq!(is_busy(status), status != HeaderStatus::StartFailed);
+        }
+        // A verb in flight wins over every reported state, a rejected
+        // token included; the demo never runs one.
+        for (verb, want) in [
+            (DaemonVerb::Start, HeaderStatus::Starting),
+            (DaemonVerb::Restart, HeaderStatus::Restarting),
+            (DaemonVerb::Stop, HeaderStatus::Stopping),
+        ] {
+            let mut busy = input(false, true, true);
+            busy.sync_token_rejected = true;
+            busy.start_failed = true;
+            busy.busy = Some(verb);
+            assert_eq!(classify_header_status(busy), want);
+            busy.demo = true;
+            busy.sync_token_rejected = false;
+            assert_eq!(classify_header_status(busy), HeaderStatus::Waiting);
+        }
+        let mut failed = input(false, false, false);
+        failed.start_failed = true;
+        assert_eq!(classify_header_status(failed), HeaderStatus::StartFailed);
+        failed.daemon_running = true;
+        assert_eq!(classify_header_status(failed), HeaderStatus::StartFailed);
+        // The classic header keeps its own rules.
+        let classic = ClassicStatusInput {
+            shared: failed,
+            capturing: false,
+            capture_error: false,
+        };
+        assert_eq!(classify_classic_status(classic), HeaderStatus::Waiting);
     }
 
     #[test]

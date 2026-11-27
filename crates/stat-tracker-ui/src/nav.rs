@@ -20,13 +20,13 @@ use crate::app::{Message, TrackerApp};
 use crate::icons::{self, Icon};
 use crate::model::{Game, RoleFilter, Screen, SeasonSel, game_card_in_progress};
 use crate::nav_fit::{
-    BADGE_PAD_X, CHEVRON, CHIP_GAP, CHIP_GLYPH_GAP, CHIP_PAD_X, DOT, DOT_GAP, ICON, ICON_GAP,
-    MIN_GAP, QUESTION_BUTTON, SIZE_BADGE, SIZE_BRAND, SIZE_CHIP, SIZE_STATUS, SIZE_TAB, StatusForm,
-    TAB_PAD, TAB_PAD_PLAIN, TAB_SPACING, TIME_GAP, TITLE_GAP, TITLE_GAP_WIDE, WARN_ICON,
+    BADGE_PAD_X, CHEVRON, CHIP_GAP, CHIP_GLYPH_GAP, CHIP_PAD_X, DOT, ICON, ICON_GAP, MIN_GAP,
+    SIZE_BADGE, SIZE_BRAND, SIZE_CHIP, SIZE_STATUS, SIZE_TAB, StatusForm, TAB_PAD, TAB_PAD_PLAIN,
+    TAB_SPACING, TITLE_GAP, TITLE_GAP_WIDE, WARN_ICON,
 };
 use crate::theme::{
     self, ACCENT, BORDER, FONT_BOLD, FONT_EXTRABOLD, FONT_MEDIUM, FONT_SEMIBOLD, SIZE_TITLE, TEXT,
-    TEXT_2, TEXT_3, WARN,
+    TEXT_2, WARN,
 };
 use crate::tracker_status::{self, HeaderStatus};
 
@@ -346,9 +346,13 @@ pub fn top_bar(app: &TrackerApp, width: f32) -> Element<'_, Message> {
     let last_game = tracker_status::last_game_when(&app.games, app.clock);
     let fit = crate::nav_fit::layout_kept(width, status, last_game.as_deref(), count);
     let (label, time) = bar_status(status, last_game.as_deref(), fit.status);
+    let tip = pill_tip(app, status, fit.status, last_game.as_deref());
+    let chevron = crate::nav_fit::pill_chevron(status, fit.status, width);
 
     let mut right = Row::new().spacing(CHIP_GAP).align_y(Alignment::Center);
-    right = right.push(status_slot(status, fit.status, label, time));
+    right = right.push(status_slot(
+        app, status, fit.status, label, time, chevron, tip,
+    ));
     if count > 0 {
         right = right.push(needs_look_chip(count, fit.compact_chip));
     }
@@ -418,33 +422,22 @@ pub fn top_bar(app: &TrackerApp, width: f32) -> Element<'_, Message> {
         .into()
 }
 
-/// The status slot: the words with their dot (or the pause ring), the
-/// unreadable pill or its "?" button, and the detail as a tooltip where
-/// the state has one. iced has no accessibility API, so the words and the
-/// tooltip are the whole message: colour is never the only cue.
-fn status_slot(
+/// The status slot: the status pill ([`crate::status_pill::pill`]) with
+/// its tooltip ([`pill_tip`]). iced has no accessibility API, so the words
+/// and the tooltip are the whole message: colour is never the only cue.
+fn status_slot<'a>(
+    app: &'a TrackerApp,
     status: HeaderStatus,
     form: StatusForm,
     label: String,
     time: Option<String>,
-) -> Element<'static, Message> {
-    let color = tracker_status::header_status_color(status);
-    let body = match status {
-        HeaderStatus::FocusUnknown => unreadable_button(form, label),
-        HeaderStatus::Paused => bar_status_line_with(ring(color), label, time),
-        _ => bar_status_line(label, time, color),
-    };
-    let Some(detail) = tracker_status::detail(status) else {
-        return body;
-    };
+    chevron: bool,
+    tip: Vec<(String, Color)>,
+) -> Element<'a, Message> {
+    let body = crate::status_pill::pill(app, status, form, label, time, chevron);
     let mut lines = column![].spacing(2);
-    // Under 1100px the "?" hides the words: the tooltip leads with them.
-    if status == HeaderStatus::FocusUnknown && form == StatusForm::Short {
-        lines = lines.push(tooltip_line(crate::focus_status::UNREADABLE_LONG, TEXT));
-    }
-    lines = lines.push(tooltip_line(detail, TEXT_2));
-    if status == HeaderStatus::FocusUnknown {
-        lines = lines.push(tooltip_line(crate::focus_status::UNREADABLE_ACTION, TEXT_2));
+    for (words, color) in tip {
+        lines = lines.push(text(words).size(SIZE_STATUS).font(FONT_MEDIUM).color(color));
     }
     let tip = container(lines)
         .padding(Padding::from([8, 12]))
@@ -463,118 +456,42 @@ fn status_slot(
         .into()
 }
 
-fn tooltip_line(words: &'static str, color: Color) -> Element<'static, Message> {
-    text(words)
-        .size(SIZE_STATUS)
-        .font(FONT_MEDIUM)
-        .color(color)
-        .into()
-}
-
-/// The unreadable state: an amber outline pill with a dot, the words and a
-/// chevron, or under 1100px a round "?" button. Both open the setting
-/// ([`Msg::ShowFocusSetting`]).
-fn unreadable_button(form: StatusForm, label: String) -> Element<'static, Message> {
-    if form == StatusForm::Short {
-        let mark = text(label)
-            .size(SIZE_CHIP)
-            .font(FONT_BOLD)
-            .align_x(Alignment::Center)
-            .align_y(Alignment::Center);
-        return button(container(mark).center_x(Fill).center_y(Fill))
-            .width(QUESTION_BUTTON)
-            .height(QUESTION_BUTTON)
-            .padding(0)
-            .style(pill_style)
-            .on_press(Message::Nav(Msg::ShowFocusSetting))
-            .into();
-    }
-    let content = row![
-        dot(WARN),
-        text(label)
-            .size(SIZE_STATUS)
-            .font(FONT_MEDIUM)
-            .color(TEXT)
-            .wrapping(Wrapping::None),
-        text(CHEVRON)
-            .size(SIZE_STATUS)
-            .font(FONT_BOLD)
-            .color(TEXT_2),
-    ]
-    .spacing(CHIP_GLYPH_GAP)
-    .align_y(Alignment::Center);
-    button(content)
-        .padding(Padding {
-            top: 5.0,
-            bottom: 5.0,
-            left: CHIP_PAD_X,
-            right: CHIP_PAD_X,
-        })
-        .style(pill_style)
-        .on_press(Message::Nav(Msg::ShowFocusSetting))
-        .into()
-}
-
-/// Calm amber outline (`WARN_LINE`), never a fill; a light tint on hover.
-fn pill_style(_theme: &Theme, status: button::Status) -> button::Style {
-    let tint = match status {
-        button::Status::Hovered => 0.10,
-        button::Status::Pressed => 0.16,
-        button::Status::Active | button::Status::Disabled => 0.0,
+/// The pill's tooltip lines (spec 1.6): the long words with the time, the
+/// detail where the state has one, what the unreadable pill does, the
+/// reason a start failed, and the menu line when a click opens the menu.
+pub fn pill_tip(
+    app: &TrackerApp,
+    status: HeaderStatus,
+    form: StatusForm,
+    last_game: Option<&str>,
+) -> Vec<(String, Color)> {
+    let (long, time) = bar_status(status, last_game, StatusForm::Long);
+    let first = match time {
+        Some(time) => format!("{long} {time}"),
+        None => long,
     };
-    button::Style {
-        background: (tint > 0.0).then_some(Background::Color(Color { a: tint, ..WARN })),
-        text_color: TEXT,
-        border: Border {
-            color: theme::WARN_LINE,
-            width: 1.0,
-            radius: theme::RADIUS_CHIP.into(),
-        },
-        shadow: Shadow::default(),
-        snap: false,
+    let mut lines = vec![(first, TEXT)];
+    if let Some(detail) = tracker_status::detail(status) {
+        lines.push((detail.to_string(), TEXT_2));
     }
-}
-
-/// Dot, the status words in TEXT_3, and the time brighter in its own span.
-fn bar_status_line(
-    label: String,
-    time: Option<String>,
-    dot_color: Color,
-) -> Element<'static, Message> {
-    bar_status_line_with(dot(dot_color), label, time)
-}
-
-/// [`bar_status_line`] with any mark in front (the dot, or the pause ring).
-fn bar_status_line_with(
-    mark: Element<'static, Message>,
-    label: String,
-    time: Option<String>,
-) -> Element<'static, Message> {
-    let mut words = Row::new().spacing(TIME_GAP).align_y(Alignment::Center);
-    words = words.push(
-        text(label)
-            .size(SIZE_STATUS)
-            .font(FONT_MEDIUM)
-            .color(TEXT_3)
-            .wrapping(Wrapping::None),
-    );
-    if let Some(time) = time {
-        words = words.push(
-            text(time)
-                .size(SIZE_STATUS)
-                .font(FONT_SEMIBOLD)
-                .color(TEXT_2)
-                .wrapping(Wrapping::None),
-        );
+    let question = status == HeaderStatus::FocusUnknown && form == StatusForm::Short;
+    if status == HeaderStatus::FocusUnknown {
+        let action = crate::focus_status::UNREADABLE_ACTION;
+        lines.push((action.to_string(), TEXT_2));
     }
-    row![mark, words]
-        .spacing(DOT_GAP)
-        .align_y(Alignment::Center)
-        .into()
+    if status == HeaderStatus::StartFailed
+        && let Some(failure) = &app.pill.failure
+    {
+        lines.push((failure.reason.clone(), TEXT_2));
+    }
+    if !question && !crate::status_pill::items(app).is_empty() {
+        lines.push((crate::status_pill::MENU_HINT.to_string(), TEXT_2));
+    }
+    lines
 }
 
 /// The pause mark: a grey ring the size of the dot, no fill.
-fn ring(color: Color) -> Element<'static, Message> {
+pub(crate) fn ring(color: Color) -> Element<'static, Message> {
     container(space().width(DOT).height(DOT))
         .width(DOT)
         .height(DOT)
@@ -590,7 +507,7 @@ fn ring(color: Color) -> Element<'static, Message> {
         .into()
 }
 
-fn dot(color: Color) -> Element<'static, Message> {
+pub(crate) fn dot(color: Color) -> Element<'static, Message> {
     container(space().width(DOT).height(DOT))
         .width(DOT)
         .height(DOT)

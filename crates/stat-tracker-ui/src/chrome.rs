@@ -19,10 +19,12 @@ use crate::nav::NavStyle;
 use crate::theme::{self, PAGE_PAD_X, PAGE_PAD_Y, SIDEBAR_WIDTH};
 use crate::{restart_prompt, widgets};
 
-/// The whole window ([`TrackerApp::view`]): the chrome, What's new, the
-/// setup guide, Uninstall and Report a problem, in that order from the
-/// bottom ([`with_layers`] puts What leaves your PC on top). Each closes
-/// on Esc from its layer, except the guide: the app listens for its keys.
+/// The whole window ([`TrackerApp::view`]): the chrome, the status pill's
+/// menu and confirm, What's new, the setup guide, Uninstall and Report a
+/// problem, in that order from the bottom ([`with_layers`] puts What leaves
+/// your PC on top). Each dialog closes on Esc from its layer, except the
+/// guide: the app listens for its keys. The pill's menu and confirm keep
+/// their place as empty layers when they are closed.
 pub(crate) fn window(app: &TrackerApp) -> Element<'_, Message> {
     let notes = app
         .notes_layer()
@@ -53,7 +55,8 @@ pub(crate) enum TopDialog {
 }
 
 /// The open dialog on top of the window, the one with the keyboard, in the
-/// order [`window`] stacks them; `None` with no dialog open.
+/// order [`window`] stacks them; `None` with no dialog open. The pill's
+/// menu and confirm sit under the dialogs and have their own key listener.
 pub(crate) fn top_dialog(app: &TrackerApp) -> Option<TopDialog> {
     [
         (
@@ -69,12 +72,15 @@ pub(crate) fn top_dialog(app: &TrackerApp) -> Option<TopDialog> {
     .find_map(|(open, dialog)| open.then_some(dialog))
 }
 
-/// The chrome for the layout picked at start on the page background, with
-/// each open dialog in `layers` stacked over it in order. A closed dialog
-/// keeps its place as an empty layer ([`empty_layer`]), and the page and
-/// every open dialog sit in a [`dialog_focus`] layer whatever its role, so
-/// the page keeps its scroll when a dialog opens or closes. The top open
-/// dialog has the keyboard; the page and the dialogs under it get none.
+/// The chrome for the layout picked at start on the page background, then
+/// the status pill's menu and confirm, then each open dialog in `layers`.
+/// A closed menu, confirm or dialog keeps its place as an empty layer
+/// ([`empty_layer`]), and the page and every open dialog sit in a
+/// [`dialog_focus`] layer whatever its role, so the page keeps its scroll
+/// when a menu, confirm or dialog opens or closes. The top open dialog has
+/// the keyboard; the page and the dialogs under it get none. The pill's
+/// menu and confirm are ordinary layers: they have their own key listener
+/// and do not cover the page the way a dialog does.
 pub(crate) fn with_layers<'a, const N: usize>(
     app: &'a TrackerApp,
     layers: [Option<Dialog<'a>>; N],
@@ -87,6 +93,10 @@ pub(crate) fn with_layers<'a, const N: usize>(
         .width(Fill)
         .height(Fill)
         .style(theme::page_background);
+    let pill = [
+        crate::status_pill::menu_layer(app),
+        crate::status_pill::confirm_layer(app),
+    ];
     let layers: Vec<_> = layers
         .into_iter()
         .chain([crate::what_leaves::layer(app)])
@@ -94,6 +104,9 @@ pub(crate) fn with_layers<'a, const N: usize>(
     let top = layers.iter().rposition(Option::is_some);
     let covered = |covered: bool| if covered { Role::Covered } else { Role::Live };
     let page = dialog_focus::layer(page, covered(top.is_some()), None);
+    let pill = pill
+        .into_iter()
+        .map(|layer| layer.unwrap_or_else(empty_layer));
     let layers = layers
         .into_iter()
         .enumerate()
@@ -104,7 +117,7 @@ pub(crate) fn with_layers<'a, const N: usize>(
             Some(dialog) => dialog_focus::layer(dialog.content, Role::Covered, dialog.on_escape),
             None => empty_layer(),
         });
-    Stack::with_children(std::iter::once(page).chain(layers))
+    Stack::with_children(std::iter::once(page).chain(pill).chain(layers))
         .width(Fill)
         .height(Fill)
         .into()
@@ -435,6 +448,9 @@ mod tests {
 #[cfg(test)]
 #[path = "chrome_tree_tests.rs"]
 mod tree_tests;
+
+#[cfg(test)]
+pub(crate) use tree_tests::headless;
 
 #[cfg(test)]
 #[path = "chrome_focus_tests.rs"]
