@@ -47,6 +47,9 @@ const STAT_PICTURES_HELP: &str = "Uploads the grayscale stat area after each gam
 const ALPHA_HELP: &str = "Test builds before release. They may have bugs.";
 /// Under the Tracker service timing fields.
 const ENTER_TO_APPLY: &str = "Press Enter to apply.";
+/// The Tracker service state row points to the status pill.
+pub(crate) const TRACKER_SERVICE_POINTER: &str =
+    "Start, restart or stop it from the status at the top.";
 /// Under the Website connection fields.
 const SYNC_HELP: &str = "Both are needed to upload. Blank either and Apply to turn uploads off.";
 /// The shortcut's own copy, as on the classic page.
@@ -109,6 +112,7 @@ pub(crate) fn companion(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let mut shortcut = column![boxed, hint(SHORTCUT_HELP)].spacing(6);
     if app.settings.overlay_hotkey_enabled {
         let mut input = text_input(crate::hotkey::DEFAULT_BIND, &app.settings.overlay_hotkey)
+            .id(crate::settings_rows::field_id(SettingsField::OverlayHotkey))
             .padding(Padding::from([8, 10]))
             .size(SIZE_BODY)
             .style(theme::text_input_style)
@@ -294,8 +298,10 @@ pub(crate) fn updates(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     divided(vec![version_row, alpha])
 }
 
-/// Tracker service: its state and Stop, Start on login, and match
-/// watching with its timings. Start and Restart are in the strip.
+/// Tracker service: its state in the status pill's words, Start on login,
+/// and match watching with its timings. Start, Restart and Stop are in
+/// the status pill at the top, where Stop and Restart ask first
+/// mid-game.
 pub(crate) fn tracker_service(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let d = &app.daemon;
     let busy = app.daemon_busy;
@@ -310,21 +316,14 @@ pub(crate) fn tracker_service(app: &TrackerApp, demo: bool) -> Element<'_, Messa
     if busy {
         state_help.push(hint("Working…"));
     }
-    // The same words as the strip, so the two never disagree.
-    let status_words = crate::tracker_status::strip_label(d.running() || app.fixture.is_some());
-    let state: Element<'_, Message> = if d.running() && !demo && !busy {
-        action_btn(
-            "Stop",
-            false,
-            Message::Daemon(crate::daemon::DaemonVerb::Stop),
-        )
-    } else {
-        text("Start and Restart are at the top.")
-            .size(SIZE_LABEL)
-            .font(FONT_MEDIUM)
-            .color(TEXT_3)
-            .into()
-    };
+    // The pill's long words, so the two never disagree.
+    let status_words =
+        crate::tracker_status::long_label(crate::tracker_status::header_status_for(app));
+    let state: Element<'_, Message> = text(TRACKER_SERVICE_POINTER)
+        .size(SIZE_LABEL)
+        .font(FONT_MEDIUM)
+        .color(TEXT_3)
+        .into();
     let status = setting_row(title_line(status_words, false, &[]), state_help, state);
     let login = setting_row(
         row_title("Start on login"),
