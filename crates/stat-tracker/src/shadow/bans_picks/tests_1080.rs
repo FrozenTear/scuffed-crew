@@ -13,8 +13,15 @@ fn to_1080(img: &RgbImage) -> RgbImage {
     imageops::resize(img, 1920, 1080, imageops::FilterType::Lanczos3)
 }
 
+/// One ban slot as read: the hero and the team.
+type BanSlot<'a> = (Option<&'a str>, Option<Team>);
+/// One own vote slot as read: the state and the hero.
+type VoteSlot<'a> = (Option<SlotState>, Option<&'a str>);
+/// One strip box as read: rank, hero, votes, empty.
+type StripEntry<'a> = (u8, Option<&'a str>, Option<u32>, bool);
+
 /// What a ban results read says, without the scores.
-fn ban_values(b: &BanResults) -> (Layout, Vec<(Option<&str>, Option<Team>)>, Option<&str>) {
+fn ban_values(b: &BanResults) -> (Layout, Vec<BanSlot<'_>>, Option<&str>) {
     (
         b.layout,
         b.bans.iter().map(|b| (key(&b.read), b.team)).collect(),
@@ -23,13 +30,7 @@ fn ban_values(b: &BanResults) -> (Layout, Vec<(Option<&str>, Option<Team>)>, Opt
 }
 
 /// What a ban vote read says, without the scores.
-#[allow(clippy::type_complexity)]
-fn vote_values(
-    v: &BanVote,
-) -> (
-    Option<Vec<(Option<SlotState>, Option<&str>)>>,
-    Option<Vec<(u8, Option<&str>, Option<u32>, bool)>>,
-) {
+fn vote_values(v: &BanVote) -> (Option<Vec<VoteSlot<'_>>>, Option<Vec<StripEntry<'_>>>) {
     (
         v.slots
             .as_ref()
