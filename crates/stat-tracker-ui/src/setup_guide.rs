@@ -39,7 +39,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use iced::widget::image::Handle;
-use iced::widget::{button, column, container, opaque, row, scrollable, space, text, text_input};
+use iced::widget::{button, column, container, opaque, row, space, text, text_input};
 use iced::{Alignment, Element, Fill, Length, Padding};
 
 use scuffed_types::{
@@ -47,11 +47,11 @@ use scuffed_types::{
 };
 use stat_tracker::config::{Config, SetupDiskPatch, SyncConfig};
 
-use crate::app::Message;
 use crate::theme::{
     self, FONT_BOLD, FONT_MEDIUM, FONT_SEMIBOLD, SIZE_BODY, SIZE_FEATURED, SIZE_META, SIZE_TITLE,
     TEXT, TEXT_2, TEXT_3,
 };
+use crate::{app::Message, scroll_gutter::guttered_area};
 
 pub const CAPTURE_FAILED: &str =
     "Could not capture the screen. Allow screen capture for this app, then try again.";
@@ -1577,7 +1577,7 @@ pub fn view(guide: &GuideUi) -> Element<'_, Message> {
     footer = footer.push(guide_button(forward, true, forward_msg));
 
     let card = container(
-        column![header, scrollable(body).height(Fill).width(Fill), footer,]
+        column![header, guttered_area(body, Fill), footer,]
             .spacing(16)
             .height(Fill),
     )
@@ -1791,7 +1791,7 @@ fn frame_view(frame: &MemoryFrame) -> Element<'static, Message> {
 }
 
 fn body_text(value: &str) -> Element<'static, Message> {
-    text(value.to_string())
+    crate::scroll_gutter::wrap_text(value.to_string())
         .size(SIZE_BODY)
         .font(FONT_MEDIUM)
         .color(TEXT_2)
@@ -1799,7 +1799,7 @@ fn body_text(value: &str) -> Element<'static, Message> {
 }
 
 fn error_text(value: &str) -> Element<'static, Message> {
-    text(value.to_string())
+    crate::scroll_gutter::wrap_text(value.to_string())
         .size(SIZE_META)
         .font(FONT_MEDIUM)
         .color(theme::DANGER)
@@ -1807,7 +1807,7 @@ fn error_text(value: &str) -> Element<'static, Message> {
 }
 
 fn warn_text(value: &str) -> Element<'static, Message> {
-    text(value.to_string())
+    crate::scroll_gutter::wrap_text(value.to_string())
         .size(SIZE_META)
         .font(FONT_MEDIUM)
         .color(theme::WARN)
@@ -1815,7 +1815,7 @@ fn warn_text(value: &str) -> Element<'static, Message> {
 }
 
 fn ok_text(value: &str) -> Element<'static, Message> {
-    text(value.to_string())
+    crate::scroll_gutter::wrap_text(value.to_string())
         .size(SIZE_META)
         .font(FONT_MEDIUM)
         .color(theme::OK)
