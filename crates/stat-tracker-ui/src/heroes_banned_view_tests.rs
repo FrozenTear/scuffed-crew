@@ -644,5 +644,89 @@ fn sort_messages_reach_the_page_state() {
     }
 }
 
+/// The whole window, as the app draws it: the top tabs layout puts
+/// Played | When banned on the Heroes title row through `chrome.rs`
+/// (`top_tabs_parts` calls [`heading`]), so the switch cannot drop out of
+/// the real window while the [`heading`] tests stay green. The classic
+/// sidebar layout does not have it yet (#912).
+#[test]
+fn the_top_tabs_window_draws_the_switch_on_heroes() {
+    let (_dir, mut app) = app_with(sample());
+    app.nav_style = crate::nav::NavStyle::TopTabs;
+    let window = |app: &TrackerApp| texts(crate::chrome::window(app), 1280.0);
+    let heroes = window(&app);
+    assert!(
+        has(&heroes, "Played") && has(&heroes, "When banned"),
+        "{heroes:?}"
+    );
+    app.screen = crate::model::Screen::Maps;
+    let maps = window(&app);
+    assert!(!has(&maps, "When banned"), "only on Heroes: {maps:?}");
+    app.screen = crate::model::Screen::Heroes;
+    app.nav_style = crate::nav::NavStyle::ClassicSidebar;
+    let classic = window(&app);
+    assert!(!has(&classic, "When banned"), "not yet (#912): {classic:?}");
+}
+
+#[test]
+fn no_switch_while_the_game_list_loads() {
+    let (_dir, mut app) = app_with(sample());
+    app.fixture = None;
+    app.snapshot_mtime = None;
+    assert!(crate::games_state::loading(&app));
+    let words = texts(heading(&app), 1232.0);
+    assert!(has(&words, "Heroes"), "{words:?}");
+    assert!(
+        !has(&words, "Played") && !has(&words, "When banned"),
+        "{words:?}"
+    );
+    app.snapshot_mtime = Some(std::time::SystemTime::now());
+    let words = texts(heading(&app), 1232.0);
+    assert!(has(&words, "When banned"), "once the list is in: {words:?}");
+}
+
+/// With only the open game recorded there is no game yet, so the page
+/// says No bans yet, not that the filters leave nothing.
+#[test]
+fn only_the_open_game_is_no_bans_yet() {
+    let mut games = banned("sombra", 1, 1, 0);
+    games[0].outcome = Outcome::Unknown;
+    let (_dir, mut app) = app_with(games);
+    app.live_game_session = Some(app.games[0].session_id.clone());
+    when_banned(&mut app);
+    let words = page(&app);
+    assert!(has(&words, "No bans yet"), "{words:?}");
+    assert!(!has(&words, "No games match these filters"), "{words:?}");
+}
+
+/// The Hero and Result filters do not apply to Heroes, so When banned
+/// draws no chip for them (no "×" to clear) and keeps every row.
+#[test]
+fn hero_and_result_filters_draw_no_chip_on_when_banned() {
+    let (_dir, mut app) = app_with(banned("sombra", 3, 1, 2));
+    app.filter_hero = Some("ana".into());
+    app.filter_outcome = Some(Outcome::Win);
+    when_banned(&mut app);
+    let words = page(&app);
+    assert!(has(&words, "Sombra"), "rows kept: {words:?}");
+    assert!(!has(&words, "×"), "no set chip: {words:?}");
+    assert!(
+        !has(&words, "Ana") && !has(&words, Outcome::Win.label()),
+        "{words:?}"
+    );
+}
+
+#[test]
+fn the_switch_goes_back_to_played() {
+    let (_dir, mut app) = app_with(sample());
+    when_banned(&mut app);
+    assert!(has(&page(&app), CAPTION));
+    let _ = app.update(Message::HeroesPage(HeroesMsg::Mode(Mode::Played)));
+    assert_eq!(app.heroes_page.mode, Mode::Played);
+    let words = page(&app);
+    assert!(has(&words, "Cards") && has(&words, "List"), "{words:?}");
+    assert!(!has(&words, CAPTION), "{words:?}");
+}
+
 #[path = "heroes_banned_view_fit_tests.rs"]
 mod fit;
