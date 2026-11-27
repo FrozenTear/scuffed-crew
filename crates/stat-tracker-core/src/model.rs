@@ -318,6 +318,15 @@ pub struct PersonalMatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[surreal(default)]
     pub match_times: Option<MatchTimes>,
+    /// Players per team on this game's Tab board (5 or 6). Set on each Tab
+    /// capture when the board size is known, before a best guess is cloned
+    /// from that row, and carried onto later snapshots. `None` on games
+    /// recorded before the field existed, on a game first stored with no
+    /// Tab, and when the board size was not 5 or 6. Used with the queue
+    /// title to decide `rank.queue` on upload. Omitted from JSON when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub team_size: Option<u8>,
 }
 
 /// A game's real start and end ([`PersonalMatch::match_times`]). Either is
@@ -513,6 +522,10 @@ impl QueueTitle {
 
     /// The confident title names open queue: its [`queue_key`] ends in the
     /// word `OPEN` (`OPEN QUEUE`, `COMPETITIVE: 6V6 OPEN QUEUE`).
+    ///
+    /// Not the upload's open queue check: for anything that must match
+    /// `rank.role` or `rank.queue`, use `confident_value()` with
+    /// `rank_queue::title_is_open`.
     pub fn is_open_queue(&self) -> bool {
         self.confident_value()
             .is_some_and(|v| queue_key(v).rsplit(' ').next() == Some("OPEN"))

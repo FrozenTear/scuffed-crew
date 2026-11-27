@@ -24,6 +24,7 @@ summary, then the highlights, and tucks the remaining text under Details.
 - Stopping or restarting the tracker during a match asks first, because the current game won't be recorded. Keep tracking is the default (#775).
 - In the default top tabs layout, if the tracker could not start, the status says Couldn't start until you try again. Its menu shows why, links to Troubleshooting and offers Retry. In the classic sidebar there is no Couldn't start menu (#775).
 - In the default top tabs layout, Settings, Tracker service now points to the status at the top for Start, Restart and Stop. In the classic sidebar, Tracker service keeps its own buttons (#775).
+- With Read my rank after Comp games on, a Competitive game upload now also says which queue the game was played in: role or open queue, 5v5 or 6v6, or unknown when the tracker could not tell. It comes from the queue title read before the game and the number of players per team on your scoreboard, never a picture. A game whose queue title names Quick Play, Unranked, Arcade, Stadium or Custom sends no rank at all (#654).
 
 ## 0.6.0
 

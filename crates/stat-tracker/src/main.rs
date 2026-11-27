@@ -2,8 +2,8 @@ use stat_tracker::boundary::{self, ResultMark};
 use stat_tracker::capture_gate::{self, Counters, GateState};
 use stat_tracker::hero_auth::{self, HeroAuthState, HeroSource};
 use stat_tracker::{
-    capture, config, detect, mapcrops, names, ocr, parse, reader_apply, setup, shadow, storage,
-    sync,
+    capture, config, detect, mapcrops, names, ocr, parse, rank_queue, reader_apply, setup, shadow,
+    storage, sync,
 };
 
 use std::sync::Arc;

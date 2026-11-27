@@ -80,7 +80,14 @@ fn f(value: Value, confidence: f32) -> Value {
 
 #[test]
 fn a_full_read_sends_every_field_next_to_the_queue_title() {
-    let rank = sent(Some(full()), Some(queue("ROLE QUEUE")));
+    let mut m = game(Some(full()), Some(queue("ROLE QUEUE")));
+    m.team_size = Some(5);
+    let rank = {
+        let v: Value =
+            serde_json::from_str(&serde_json::to_string(&upload_request(&[m], &[])).unwrap())
+                .unwrap();
+        v["matches"][0]["rank"].clone()
+    };
     let want = json!({
         "role": f(json!("Damage"), 0.874),
         "role_rank": f(json!("Diamond"), 0.81),
@@ -93,6 +100,7 @@ fn a_full_read_sends_every_field_next_to_the_queue_title() {
         "hero_sr_change": f(json!(-21), 0.75),
         "next_mode_hint": f(json!("ROLE QUEUE"), 0.66),
         "queue_title": f(json!("ROLE QUEUE"), 0.93),
+        "queue": f(json!("role_5v5"), 0.93),
         "rank_recognizer": "rank-v1",
     });
     assert_eq!(rank, want);
@@ -109,6 +117,10 @@ fn a_full_read_sends_every_field_next_to_the_queue_title() {
     assert_eq!(site.hero_sr_change.value, Some(-21));
     assert_eq!(site.next_mode_hint.value.as_deref(), Some("ROLE QUEUE"));
     assert_eq!(site.queue_title.value.as_deref(), Some("ROLE QUEUE"));
+    assert_eq!(
+        site.queue.value,
+        Some(scuffed_types::api::RankQueue::Role5v5)
+    );
     assert_eq!(site.rank_recognizer.as_deref(), Some("rank-v1"));
     assert_eq!(site.hero_sr.confidence, Some(0.85));
     // the whole body still parses as the site's upload
@@ -129,11 +141,17 @@ fn a_partial_read_sends_only_the_fields_read() {
         json!({
             "progress_pct": f(json!(31), 0.9),
             "hero_sr": f(json!(2481), 0.8),
+            "queue": { "value": "unknown", "confidence": null },
             "rank_recognizer": "rank-v1",
         })
     );
-    // no null keys
-    assert!(!body(Some(full()), None).contains("null"));
+    // Fields the reader did not set are left out, not sent as null. This
+    // game has no title and no team size, so the queue is unknown and its
+    // confidence is the one null the contract allows.
+    let body = body(Some(full()), None);
+    let unknown_queue = r#""value":"unknown","confidence":null"#;
+    assert!(body.contains(unknown_queue), "{body}");
+    assert_eq!(body.matches("null").count(), 1, "{body}");
 }
 
 #[test]
@@ -147,7 +165,11 @@ fn no_rank_update_sends_exactly_the_old_body() {
     let with_title = body(None, Some(queue("OPEN QUEUE")));
     assert_eq!(
         sent(None, Some(queue("OPEN QUEUE"))),
-        json!({ "queue_title": f(json!("OPEN QUEUE"), 0.93), "rank_recognizer": "rank-v1" })
+        json!({
+            "queue_title": f(json!("OPEN QUEUE"), 0.93),
+            "queue": { "value": "unknown", "confidence": null },
+            "rank_recognizer": "rank-v1"
+        })
     );
     assert_eq!(
         body(Some(RankUpdate::default()), Some(queue("OPEN QUEUE"))),
