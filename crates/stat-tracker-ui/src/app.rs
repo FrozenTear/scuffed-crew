@@ -2392,10 +2392,8 @@ impl TrackerApp {
         }
 
         tray::pump_gtk();
-        if let Some(handle) = &self.tray
-            && let Some(action) = tray::poll(handle)
-        {
-            return self.apply_tray(action);
+        if let Some(action) = tray::poll_app(self.tray.as_ref()) {
+            return self.update(Message::Tray(action));
         }
 
         if quit_request_due(&self.update_progress, || {

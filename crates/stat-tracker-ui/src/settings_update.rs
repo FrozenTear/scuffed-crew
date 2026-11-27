@@ -411,6 +411,7 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> Task<Message> {
         Msg::Apply(inner, commit) => {
             let first = app.update(*inner);
             let save = page_save(app, commit, None);
+            crate::settings_bar::drop_hidden_drafts(app);
             return Task::batch([first, save]);
         }
         Msg::Commit(commit) => return page_save(app, commit, None),

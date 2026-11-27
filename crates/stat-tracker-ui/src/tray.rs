@@ -127,6 +127,25 @@ where
     result.ok()
 }
 
+/// The tray click the tick acts on: [`poll`] on the real tray, or one a
+/// test put in [`TEST_CLICK`]. The tick sends it through
+/// `TrackerApp::update`, so a Quit with unsaved Settings text asks first
+/// (#776, B1 of the #921 QA).
+pub(crate) fn poll_app(handle: Option<&TrayHandle>) -> Option<TrayAction> {
+    #[cfg(test)]
+    if let Some(action) = TEST_CLICK.with(std::cell::Cell::take) {
+        return Some(action);
+    }
+    handle.and_then(poll)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A tray click for the next tick, in a test (no GTK tray there).
+    pub(crate) static TEST_CLICK: std::cell::Cell<Option<TrayAction>> =
+        const { std::cell::Cell::new(None) };
+}
+
 /// Drain pending tray events. Call from the UI tick after pumping GTK.
 pub fn poll(handle: &TrayHandle) -> Option<TrayAction> {
     let menu_rx = MenuEvent::receiver();

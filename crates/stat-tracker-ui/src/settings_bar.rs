@@ -385,6 +385,20 @@ pub(crate) fn restart_tag(app: &TrackerApp, key: &str) -> &'static [Tag] {
     }
 }
 
+/// A row's tags for one value inside a key (`auto_detect.enabled`, say):
+/// After restart while that value, as the running tracker loaded it,
+/// differs from what is saved. The key alone would tag every row it holds.
+pub(crate) fn part_tag<T: PartialEq>(
+    app: &TrackerApp,
+    part: impl Fn(&Config) -> T,
+) -> &'static [Tag] {
+    if part(app.page_state.restart_baseline()) != part(&app.saved_config) {
+        &[Tag::AfterRestart]
+    } else {
+        &[]
+    }
+}
+
 /// A fold's After restart tag: one of its shown keys waits.
 pub(crate) fn section_waiting(
     app: &TrackerApp,
@@ -411,9 +425,14 @@ pub(crate) fn save_drafts(app: &mut TrackerApp) -> (Task<Message>, bool) {
     if drafts(app).is_empty() {
         return (Task::none(), true);
     }
-    let before = app.toast.clone();
+    // Clear the toast first, so a refusal shows up even when the same
+    // words already toast (say after Enter was refused the same way).
+    let before = (app.toast.take(), app.toast_action.take());
     let (task, ok) = app.save_settings_checked(SaveFrom::Page(Commit::Drafts), None);
-    if !ok && app.toast != before && !drafts(app).is_empty() {
+    if app.toast.is_none() {
+        // Nothing new to say: the earlier toast stays.
+        (app.toast, app.toast_action) = before;
+    } else if !ok && !drafts(app).is_empty() {
         let message = app.toast.take().unwrap_or_default();
         app.toast_action = None;
         app.page_state.bar.error = Some((message, DraftText::of(&app.settings)));
@@ -557,7 +576,14 @@ pub(crate) fn intercept(app: &mut TrackerApp, message: &Message) -> Option<Task<
     if drafts(app).is_empty() {
         return None;
     }
-    let asked = ask(app, after);
+    // B2 (#921 QA, FrozenTear 27 Nov): a Quit or a close is answered in
+    // front of the user, so a read-only dialog closes first.
+    let closed = if matches!(after, Leave::Quit | Leave::CloseWindow(_)) {
+        close_read_only_dialogs(app)
+    } else {
+        Task::none()
+    };
+    let asked = Task::batch([closed, ask(app, after)]);
     if after == Leave::Quit {
         return Some(Task::batch([
             app.update(Message::Tray(TrayAction::Show)),
@@ -565,6 +591,41 @@ pub(crate) fn intercept(app: &mut TrackerApp, message: &Message) -> Option<Task<
         ]));
     }
     Some(asked)
+}
+
+/// Close What leaves your PC, Report a problem, and What's new or About
+/// (one dialog), each through its own close, so the leave confirm under
+/// the dialogs is what the user sees. A report that is sending stays
+/// open, as its own close leaves it.
+fn close_read_only_dialogs(app: &mut TrackerApp) -> Task<Message> {
+    let mut tasks = Vec::new();
+    if app.page_state.opened.what_leaves_open {
+        let close = crate::settings_open::OpenMsg::WhatLeaves(false);
+        tasks.push(
+            app.update(Message::SettingsPage(crate::settings_update::Msg::Open(
+                close,
+            ))),
+        );
+    }
+    if app.report.is_some() {
+        tasks.push(app.update(Message::Report(crate::report::ReportMessage::Close)));
+    }
+    if app.notes_dialog.is_some() {
+        tasks.push(app.update(Message::DismissNotes));
+    }
+    Task::batch(tasks)
+}
+
+/// R5 (#921 QA, FrozenTear 27 Nov): a typed group whose field a switch
+/// just hid is dropped, back to what is saved. It leaves the unsaved
+/// count, Save never writes it, and showing the field again shows the
+/// saved value. Today that is the timings, hidden while Watch for match
+/// start and end is off.
+pub(crate) fn drop_hidden_drafts(app: &mut TrackerApp) {
+    if !app.settings.auto_detect_enabled {
+        let saved = app.form_from_saved();
+        crate::settings_save::discard_draft(&mut app.settings, &saved, Draft::Timings);
+    }
 }
 
 /// Open the leave confirm with Cancel marked, over everything but the
@@ -787,22 +848,34 @@ fn bar_button(
     ring: bool,
 ) -> Element<'static, Message> {
     let b = button(text(label).size(SIZE_META).font(FONT_BOLD).color(TEXT))
-        .padding(Padding::from([9, 18]));
-    let b = if accent {
-        b.style(crate::status_pill::with_ring(
-            crate::settings_page::primary_btn(enabled),
-            ring,
-        ))
-    } else {
-        b.style(crate::status_pill::with_ring(
-            crate::settings_page::ghost_btn(enabled),
-            ring,
-        ))
-    };
+        .padding(Padding::from([9, 18]))
+        .style(button_style(accent, enabled, ring));
     if enabled {
         b.on_press(bar_msg(msg)).into()
     } else {
         b.into()
+    }
+}
+
+/// A bar or confirm button's look. The keyboard ring is 2 px ACCENT on a
+/// ghost button; on the ACCENT-filled primary an ACCENT ring would not
+/// show, so it is TEXT there (R3 of the #921 QA).
+pub(crate) fn button_style(
+    accent: bool,
+    enabled: bool,
+    ring: bool,
+) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme_, status| {
+        let mut out = if accent {
+            crate::settings_page::primary_btn(enabled)(theme_, status)
+        } else {
+            crate::settings_page::ghost_btn(enabled)(theme_, status)
+        };
+        if ring {
+            out.border.color = if accent { TEXT } else { theme::ACCENT };
+            out.border.width = 2.0;
+        }
+        out
     }
 }
 

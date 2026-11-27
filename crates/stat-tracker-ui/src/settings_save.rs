@@ -112,6 +112,11 @@ pub(crate) fn dirty_drafts(typed: &SettingsForm, saved: &SettingsForm) -> Vec<Dr
         .collect()
 }
 
+/// One typed group back to `saved` ([`crate::settings_bar::drop_hidden_drafts`]).
+pub(crate) fn discard_draft(form: &mut SettingsForm, saved: &SettingsForm, draft: Draft) {
+    copy_draft(form, saved, draft);
+}
+
 /// Discard on the pinned bar: every typed group back to `saved`. Switches,
 /// chips and the session window are already written and stay as they are.
 pub(crate) fn discard_drafts(form: &mut SettingsForm, saved: &SettingsForm) {
@@ -468,8 +473,14 @@ impl TrackerApp {
                     self.saved_config.shadow_recognizer_control(),
                 )
                 .with_installed_version(&self.saved_config, self.installed_version.as_deref());
-                if let SaveFrom::Page(commit) = from {
-                    keep_uncommitted(&mut self.settings, &typed, commit);
+                match from {
+                    // The pinned bar's Save commits every group, so none
+                    // would come back: put all the typed text back, so the
+                    // refusal keeps it and the next Save writes it against
+                    // the fresh file (#776).
+                    SaveFrom::Page(Commit::Drafts) => keep_drafts(&mut self.settings, &typed),
+                    SaveFrom::Page(commit) => keep_uncommitted(&mut self.settings, &typed, commit),
+                    SaveFrom::Classic => {}
                 }
                 self.config_unreadable = false;
                 self.page_state.file_read(&self.saved_config);

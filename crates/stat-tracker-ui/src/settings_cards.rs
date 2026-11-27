@@ -336,7 +336,11 @@ pub(crate) fn tracker_service(app: &TrackerApp, demo: bool) -> Element<'_, Messa
         ),
     );
     let watch = setting_row(
-        title_line("Watch for match start and end", false, &[]),
+        title_line(
+            "Watch for match start and end",
+            false,
+            crate::settings_bar::part_tag(app, |c| c.auto_detect.enabled),
+        ),
         vec![],
         switch(
             app.settings.auto_detect_enabled,
@@ -348,7 +352,11 @@ pub(crate) fn tracker_service(app: &TrackerApp, demo: bool) -> Element<'_, Messa
     let mut rows = vec![status, login, watch];
     if app.settings.auto_detect_enabled {
         rows.push(setting_row(
-            row_title("Check every (seconds)"),
+            title_line(
+                "Check every (seconds)",
+                false,
+                crate::settings_bar::part_tag(app, |c| c.auto_detect.poll_interval_secs),
+            ),
             vec![hint(POLL_INTERVAL_HELP), hint(ENTER_TO_APPLY)],
             page_field(
                 "auto",
@@ -360,7 +368,11 @@ pub(crate) fn tracker_service(app: &TrackerApp, demo: bool) -> Element<'_, Messa
             ),
         ));
         rows.push(setting_row(
-            row_title("Wait after detection (seconds)"),
+            title_line(
+                "Wait after detection (seconds)",
+                false,
+                crate::settings_bar::part_tag(app, |c| c.auto_detect.cooldown_secs),
+            ),
             vec![hint(ENTER_TO_APPLY)],
             page_field(
                 "120",
@@ -538,7 +550,11 @@ pub(crate) fn troubleshooting(app: &TrackerApp, demo: bool) -> Element<'_, Messa
         debug_help.push(hint(crate::capture_reading::SERVICE_MAY_DIFFER));
     }
     let debug = setting_row(
-        row_title("Save debug images from each capture"),
+        title_line(
+            "Save debug images from each capture",
+            false,
+            crate::settings_bar::restart_tag(app, "debug_ocr"),
+        ),
         debug_help,
         switch(
             app.settings.debug_ocr || env_debug,
