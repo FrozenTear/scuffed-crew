@@ -195,6 +195,40 @@ fn upload_queue(m: &PersonalMatch) -> UploadQueueField {
     }
 }
 
+/// Where this game's rank belongs locally: the queue and role of the `rank`
+/// object the upload sends for it (`rank.queue`, `rank.role`), so the local
+/// value can never say another queue than the site gets. `None` when the
+/// upload sends no `rank` object: not Competitive evidence, a title naming
+/// a mode that is not Competitive, or the readers off.
+pub fn rank_slot(m: &PersonalMatch) -> Option<crate::rank_queue::RankSlot> {
+    let rank = upload_rank(m)?;
+    // `upload_rank` sets the queue on every object it returns; an object
+    // without one would be a bug there, and is read as unknown here.
+    let queue = rank.queue.unwrap_or(UploadQueueField {
+        value: RankQueue::Unknown,
+        confidence: None,
+    });
+    Some(crate::rank_queue::RankSlot {
+        queue: queue.value,
+        queue_confidence: queue.confidence,
+        role: rank.role.map(|r| r.value),
+    })
+}
+
+/// Whether storing `title` on `m` changes the `rank` object the upload
+/// sends for it. A title the upload does not send or that decides nothing
+/// (a warning, a title naming a mode that is not Competitive, or one naming
+/// neither ROLE nor OPEN with no rank screen read) changes no uploaded
+/// byte, so the store leaves the game's upload state as it is.
+pub(crate) fn queue_title_changes_upload(
+    m: &PersonalMatch,
+    title: &crate::model::QueueTitle,
+) -> bool {
+    let mut with = m.clone();
+    with.queue_title = Some(title.clone());
+    upload_rank(&with) != upload_rank(m)
+}
+
 /// Whether storing `rank` on `m` changes the `rank` object the upload
 /// sends for it. A rank whose fields the upload drops (an Open role with no
 /// open queue title, values the site would null) changes no uploaded byte,

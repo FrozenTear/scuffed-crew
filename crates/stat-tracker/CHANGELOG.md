@@ -25,6 +25,7 @@ summary, then the highlights, and tucks the remaining text under Details.
 - In the default top tabs layout, if the tracker could not start, the status says Couldn't start until you try again. Its menu shows why, links to Troubleshooting and offers Retry. In the classic sidebar there is no Couldn't start menu (#775).
 - In the default top tabs layout, Settings, Tracker service now points to the status at the top for Start, Restart and Stop. In the classic sidebar, Tracker service keeps its own buttons (#775).
 - With Read my rank after Comp games on, a Competitive game upload now also says which queue the game was played in: role or open queue, 5v5 or 6v6, or unknown when the tracker could not tell. It comes from the queue title read before the game and the number of players per team on your scoreboard, never a picture. A game whose queue title names Quick Play, Unranked, Arcade, Stadium or Custom sends no rank at all (#654).
+- With Read my rank after Comp games on, the tracker now keeps each rank with the queue it was played in on your PC, so a 6v6 Role Queue rank is never filed with your 5v5 Role Queue or Open Queue rank, and a game whose queue it could not tell stays apart as unknown. The queue is worked out from what is already stored, so nothing changes on disk and your rank history from 0.6 is kept as it was. A rank screen's next-mode word for 6v6 Role Queue now only confirms a following game that reads as 6v6 Role Queue, in either word order. Nothing new is sent (#654).
 
 ## 0.6.0
 

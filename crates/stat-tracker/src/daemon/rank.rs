@@ -522,11 +522,14 @@ async fn apply(
 /// (`COMPETITIVE: 6V6 OPEN QUEUE`, `COMPETITIVE: ROLE QUEUE`), and the next
 /// game's pre-game title reads `OPEN QUEUE` or `ROLE QUEUE`. So a leading
 /// `COMPETITIVE` word is dropped, then a team size word right after it
-/// (`5V5` or `6V6`), before the hint is handed on
-/// ([`super::queue_title::hint_agrees`], which stays strict). Words are
-/// split as [`stat_tracker::model::queue_key`] splits them, so a colon,
-/// dash or underscore between them works the same. What is left is the rest
-/// of the banner from its first word, as read. With no leading
+/// (`5V5`, or `6V6` before an open queue), before the hint is handed on
+/// ([`super::queue_title::hint_agrees`], which compares the same words in
+/// any order). A `6V6` before a role queue is kept (#654): Role Queue 6v6
+/// is its own queue, so `COMPETITIVE: 6V6 ROLE QUEUE` hands on
+/// `6V6 ROLE QUEUE`, which never agrees with the 5v5 `ROLE QUEUE` title.
+/// Words are split as [`stat_tracker::model::queue_key`] splits them, so a
+/// colon, dash or underscore between them works the same. What is left is
+/// the rest of the banner from its first word, as read. With no leading
 /// `COMPETITIVE` word, or nothing after the dropped words, the banner is
 /// kept as read, trimmed. The upload and the game record still keep the
 /// banner word as read.
@@ -543,10 +546,15 @@ pub(crate) fn queue_hint(banner: &str) -> &str {
         return text;
     }
     let mut next = words.next();
-    if next.is_some_and(|(_, word)| {
-        word.eq_ignore_ascii_case("5V5") || word.eq_ignore_ascii_case("6V6")
-    }) {
-        next = words.next();
+    if let Some((at, word)) = next {
+        let six = word.eq_ignore_ascii_case("6V6");
+        let rest = &text[at + word.len()..];
+        if six && stat_tracker::rank_queue::title_is_role(rest) {
+            return &text[at..];
+        }
+        if six || word.eq_ignore_ascii_case("5V5") {
+            next = words.next();
+        }
     }
     match next {
         Some((at, _)) => &text[at..],

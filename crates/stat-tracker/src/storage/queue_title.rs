@@ -13,10 +13,14 @@ impl LocalStore {
     /// read (say after a restart mid-game, with no frames held) can never
     /// replace a confident title with a warning.
     ///
-    /// A title the upload sends (`QueueTitle::confident_value`) re-queues the
-    /// game for upload in the same statement (`storage::upload_queue`), as
-    /// every payload write does: it is part of the uploaded `rank`. A
-    /// warning changes no uploaded byte, so it leaves the queue as it is.
+    /// A title that changes the `rank` object the upload sends for the game
+    /// (`sync::wire`) re-queues it in the same statement
+    /// (`storage::upload_queue`), as every payload write does. One that
+    /// changes no uploaded byte leaves the queue, and a set-aside game, as
+    /// it is: a warning, a title naming a mode that is not Competitive
+    /// (QUICK, UNRANKED, ARCADE, STADIUM, CUSTOM), or one naming neither
+    /// ROLE nor OPEN on a game with no rank screen read. Same rule as
+    /// `attach_rank_update`.
     pub async fn attach_queue_title(
         &self,
         session_id: &str,
@@ -27,7 +31,9 @@ impl LocalStore {
         if snaps.is_empty() || snaps.iter().any(|m| m.queue_title.is_some()) {
             return Ok(false);
         }
-        let uploaded = title.confident_value().is_some();
+        let uploaded = snaps
+            .iter()
+            .any(|m| crate::sync::queue_title_changes_upload(m, title));
         let sql = if uploaded {
             "UPDATE personal_match SET queue_title = $qt, synced = false, \
              upload_reject = '', sync_rev = (sync_rev ?? 0) + 1 WHERE session_id = $sid"

@@ -483,6 +483,7 @@ mod tests {
             bans_picks_status: None,
             queue_title: None,
             rank_update: None,
+            rank_slot: None,
             match_times: None,
         }
     }

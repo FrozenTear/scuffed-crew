@@ -35,6 +35,38 @@ impl DecidedQueue {
     }
 }
 
+/// Where one Competitive game's rank belongs on this PC: its queue and,
+/// when the rank screen showed one the upload keeps, its role. Ranks are
+/// only ever compared or grouped within one slot ([`RankSlot::same_slot`]),
+/// so a 6v6 role queue Tank rank never mixes with a 5v5 role queue Tank
+/// rank or an open queue rank, and a game whose queue could not be read
+/// stays in the `Unknown` queue instead of joining a known one.
+///
+/// The same queue and role the upload sends as `rank.queue` and
+/// `rank.role` for that game (the tracker's `sync::rank_slot` takes both
+/// from the upload's own `rank` object). Derived from the stored title,
+/// team size and rank screen read whenever a game is built, never stored,
+/// so it follows a later Tab that fills in the team size.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RankSlot {
+    pub queue: RankQueue,
+    /// How sure the input that decided `queue` was ([`DecidedQueue`]).
+    /// `None` when the queue is unknown.
+    #[serde(default)]
+    pub queue_confidence: Option<f32>,
+    /// `None` when no role line the upload keeps was read.
+    #[serde(default)]
+    pub role: Option<RankRole>,
+}
+
+impl RankSlot {
+    /// Same queue and same role: the two games' ranks may be compared.
+    /// The confidence plays no part.
+    pub fn same_slot(&self, other: &Self) -> bool {
+        self.queue == other.queue && self.role == other.role
+    }
+}
+
 /// Words of a title or role line: upper case, each run of letters or
 /// digits as one word. `6v6 Role Queue`, `6V6-ROLE-QUEUE` and
 /// `COMPETITIVE: 6V6 OPEN QUEUE` all split the same way.
@@ -92,6 +124,12 @@ pub fn title_names_role_or_open(text: &str) -> bool {
 /// [`title_names_role_or_open`].
 pub fn title_is_open(text: &str) -> bool {
     kind_in(&title_words(text)) == Some(QueueKind::Open)
+}
+
+/// The title names ROLE and not OPEN, with the same word reader as
+/// [`title_is_open`].
+pub fn title_is_role(text: &str) -> bool {
+    kind_in(&title_words(text)) == Some(QueueKind::Role)
 }
 
 /// The team size word in the title: `Some(None)` when it has none, and
@@ -419,6 +457,52 @@ mod tests {
         assert!(!title_names_role_or_open("6V6 QUICK PLAY"));
         assert!(!title_names_role_or_open("ARCADE"));
         assert!(!title_names_role_or_open("ROLE OPEN QUEUE"));
+    }
+
+    #[test]
+    fn title_is_role_reads_role_and_not_open_in_any_order() {
+        for t in [
+            "ROLE QUEUE",
+            "6V6 ROLE QUEUE",
+            "ROLE QUEUE 6V6",
+            "queue-role",
+        ] {
+            assert!(title_is_role(t), "{t}");
+        }
+        for t in ["OPEN QUEUE", "ROLE OPEN QUEUE", "6V6", "", "ROLEQUEUE"] {
+            assert!(!title_is_role(t), "{t}");
+        }
+    }
+
+    /// Two slots match only on the same queue and the same role; the
+    /// confidence plays no part. A JSON slot from before a field existed
+    /// reads that field as `None`.
+    #[test]
+    fn a_rank_slot_is_one_queue_and_one_role() {
+        let slot = |queue, role| RankSlot {
+            queue,
+            queue_confidence: Some(0.9),
+            role,
+        };
+        let tank6 = slot(RankQueue::Role6v6, Some(RankRole::Tank));
+        let other_conf = RankSlot {
+            queue_confidence: None,
+            ..tank6
+        };
+        assert!(tank6.same_slot(&other_conf));
+        for other in [
+            slot(RankQueue::Role5v5, Some(RankRole::Tank)),
+            slot(RankQueue::Unknown, Some(RankRole::Tank)),
+            slot(RankQueue::Role6v6, Some(RankRole::Support)),
+            slot(RankQueue::Role6v6, None),
+            slot(RankQueue::Open6v6, Some(RankRole::Open)),
+        ] {
+            assert!(!tank6.same_slot(&other), "{other:?}");
+            assert!(!other.same_slot(&tank6), "{other:?}");
+        }
+        let read: RankSlot = serde_json::from_str(r#"{"queue":"role_6v6"}"#).unwrap();
+        assert_eq!(read.queue, RankQueue::Role6v6);
+        assert_eq!((read.queue_confidence, read.role), (None, None));
     }
 
     #[test]

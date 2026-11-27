@@ -66,8 +66,8 @@ pub use training_store::{
     read_training_status, record_training_delete_ok, training_warning,
 };
 pub use visibility::{StatsVisibility, parse_hero_icon_consent, parse_stats_visibility};
-pub(crate) use wire::rank_update_changes_upload;
-pub use wire::{UploadEntry, UploadRequest, row_needs_review, upload_request};
+pub use wire::{UploadEntry, UploadRequest, rank_slot, row_needs_review, upload_request};
+pub(crate) use wire::{queue_title_changes_upload, rank_update_changes_upload};
 
 // Names the test files saw through `use super::*` before the split: two of
 // the old file's imports and two private items.

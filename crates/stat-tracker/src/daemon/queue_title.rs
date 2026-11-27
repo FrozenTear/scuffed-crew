@@ -97,8 +97,9 @@ pub(crate) type ReadFn = Arc<dyn Fn(&RgbImage, Screen) -> Field<String> + Send +
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PendingHint {
     /// The hint the rank wiring handed on ([`super::rank::queue_hint`]: the
-    /// mode banner word without its `COMPETITIVE` and team size words),
-    /// trimmed and not empty.
+    /// mode banner word without its `COMPETITIVE` word, and without its team
+    /// size word unless that is `6V6` before a role queue), trimmed and not
+    /// empty.
     pub(crate) text: String,
     /// The session whose rank screen showed it: the hint names the game
     /// after this one, so this one never settles it.
@@ -348,7 +349,8 @@ pub(crate) fn confident(read: &Field<String>) -> Option<&str> {
 /// `COMPETITIVE: ROLE QUEUE` (`COMPETITIVE ROLE`) does not agree with a
 /// `ROLE QUEUE` title (`ROLE`); the rank wiring maps its own labels to
 /// this spelling before it sets a hint ([`super::rank::queue_hint`] drops
-/// the `COMPETITIVE:` of the banner and a `5V5` or `6V6` after it). A
+/// the `COMPETITIVE:` of the banner and a `5V5` after it, or a `6V6`
+/// before an open queue, and keeps a `6V6` before a role queue). A
 /// spelling that does not match is dropped, never confirmed: the safe way
 /// to fail.
 /// The key itself is [`stat_tracker::model::queue_key`], shared with the
@@ -358,12 +360,26 @@ pub(crate) fn queue_key(text: &str) -> String {
 }
 
 /// A next mode hint agrees with a queue title when both name the same
-/// queue ([`queue_key`]) and that queue is not empty. Anything else
-/// disagrees, so a hint the reader cannot place (say a mode word with no
-/// queue in it) is dropped by the next confident read.
+/// queue and that queue is not empty: the same words of [`queue_key`], in
+/// any order, with every `QUEUE` word left out (#654: `6V6 ROLE QUEUE` and
+/// `ROLE QUEUE 6V6` are one queue). Still strict on the words themselves:
+/// `6V6 ROLE` never agrees with `ROLE`, nor `COMPETITIVE ROLE` with
+/// `ROLE`. Anything else disagrees, so a hint the reader cannot place (say
+/// a mode word with no queue in it) is dropped by the next confident read.
 pub(crate) fn hint_agrees(hint: &str, title: &str) -> bool {
-    let key = queue_key(hint);
-    !key.is_empty() && key == queue_key(title)
+    let key = queue_words(hint);
+    !key.is_empty() && key == queue_words(title)
+}
+
+/// The words of [`queue_key`] without any `QUEUE` word, sorted.
+fn queue_words(text: &str) -> Vec<String> {
+    let mut words: Vec<String> = queue_key(text)
+        .split(' ')
+        .filter(|w| !w.is_empty() && *w != "QUEUE")
+        .map(str::to_string)
+        .collect();
+    words.sort_unstable();
+    words
 }
 
 /// What becomes of the pending hint on a read of `game` whose confident
@@ -441,3 +457,7 @@ pub(crate) fn apply_read(
 #[cfg(test)]
 #[path = "tests_queue_title.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests_queue_hint_6v6.rs"]
+mod tests_hint_6v6;
