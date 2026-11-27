@@ -62,11 +62,30 @@ fn kind_in(words: &[String]) -> Option<QueueKind> {
     }
 }
 
+/// Title words of a mode that is not Competitive. A title with any of
+/// them is never Competitive evidence, even when it also names ROLE or
+/// OPEN (`QUICK PLAY: ROLE QUEUE`), so the upload sends no `rank` object
+/// and no `rank.queue` for it (#889: Competitive only).
+const NOT_COMPETITIVE: [&str; 5] = ["QUICK", "UNRANKED", "ARCADE", "STADIUM", "CUSTOM"];
+
+fn names_not_competitive(words: &[String]) -> bool {
+    words.iter().any(|w| NOT_COMPETITIVE.contains(&w.as_str()))
+}
+
+/// The title names a mode that is not Competitive: QUICK, UNRANKED,
+/// ARCADE, STADIUM or CUSTOM as a word (any word order, case and
+/// punctuation).
+pub fn title_rules_out_competitive(text: &str) -> bool {
+    names_not_competitive(&title_words(text))
+}
+
 /// The title names ROLE or OPEN (any word order, case and punctuation),
-/// and not both. Used to decide whether a title-only upload is
-/// Competitive evidence.
+/// and not both, and no mode that is not Competitive
+/// ([`title_rules_out_competitive`]). Used to decide whether a title-only
+/// upload is Competitive evidence.
 pub fn title_names_role_or_open(text: &str) -> bool {
-    kind_in(&title_words(text)).is_some()
+    let words = title_words(text);
+    kind_in(&words).is_some() && !names_not_competitive(&words)
 }
 
 /// The title names OPEN and not ROLE, with the same word reader as
@@ -75,13 +94,16 @@ pub fn title_is_open(text: &str) -> bool {
     kind_in(&title_words(text)) == Some(QueueKind::Open)
 }
 
-fn size_in(words: &[String]) -> Option<u8> {
+/// The team size word in the title: `Some(None)` when it has none, and
+/// `None` when it names both `5V5` and `6V6`, which contradicts itself.
+fn size_in(words: &[String]) -> Option<Option<u8>> {
     let has5 = words.iter().any(|w| w == "5V5");
     let has6 = words.iter().any(|w| w == "6V6");
     match (has5, has6) {
-        (true, false) => Some(5),
-        (false, true) => Some(6),
-        _ => None,
+        (true, true) => None,
+        (true, false) => Some(Some(5)),
+        (false, true) => Some(Some(6)),
+        (false, false) => Some(None),
     }
 }
 
@@ -99,13 +121,16 @@ pub fn parse_rank_role(role: &str) -> Option<RankRole> {
     serde_json::from_value(serde_json::Value::String(role.to_string())).ok()
 }
 
-/// The rank screen role line as a queue kind, parsed the same way the
-/// upload maps `rank.role` ([`parse_rank_role`]).
-fn role_line_kind(role: &str) -> Option<QueueKind> {
-    match parse_rank_role(role)? {
-        RankRole::Tank | RankRole::Damage | RankRole::Support => Some(QueueKind::Role),
-        RankRole::Open => Some(QueueKind::Open),
-    }
+/// The rank screen role line names a role icon (Tank, Damage or Support),
+/// parsed the same way the upload maps `rank.role` ([`parse_rank_role`]).
+/// `Open` is not one: the reader takes it from an empty role band, which
+/// another screen state can show too, so the upload sends it as the role
+/// only under an open queue title, and it decides no queue by itself.
+fn role_line_is_icon(role: &str) -> bool {
+    matches!(
+        parse_rank_role(role),
+        Some(RankRole::Tank | RankRole::Damage | RankRole::Support)
+    )
 }
 
 fn from_kind_and_size(kind: QueueKind, size: u8, confidence: Option<f32>) -> Option<DecidedQueue> {
@@ -127,9 +152,13 @@ fn from_kind_and_size(kind: QueueKind, size: u8, confidence: Option<f32>) -> Opt
 /// - Title names ROLE and the size is 6: `role_6v6`. With 5: `role_5v5`.
 /// - Title names OPEN and the size is 6: `open_6v6`. With 5: `open_5v5`.
 /// - Size comes from the board when it is 5 or 6, else from a `5V5` or
-///   `6V6` word in the title. If those two disagree, the queue is unknown.
+///   `6V6` word in the title. If those two disagree, or the title names
+///   both, the queue is unknown.
 /// - No confident title and 6 per team: a sure Tank, Damage or Support
-///   role line is `role_6v6`; Open is `open_6v6`.
+///   role line is `role_6v6`. An `Open` role line decides nothing.
+/// - A title that names a mode that is not Competitive
+///   ([`title_rules_out_competitive`]) is unknown; the upload sends no
+///   queue for it at all.
 /// - Anything else is [`RankQueue::Unknown`].
 pub fn decide_rank_queue(
     title: Option<&str>,
@@ -139,8 +168,13 @@ pub fn decide_rank_queue(
     rank_role_confidence: Option<f32>,
 ) -> DecidedQueue {
     let words = title.map(title_words).unwrap_or_default();
+    if names_not_competitive(&words) {
+        return DecidedQueue::unknown();
+    }
     let kind = kind_in(&words);
-    let title_size = size_in(&words);
+    let Some(title_size) = size_in(&words) else {
+        return DecidedQueue::unknown();
+    };
     let board = board_size(team_size);
     let size = match (board, title_size) {
         (Some(a), Some(b)) if a != b => return DecidedQueue::unknown(),
@@ -162,8 +196,8 @@ pub fn decide_rank_queue(
 
     if size == Some(6)
         && usable_confidence(rank_role_confidence).is_some()
-        && let Some(kind) = rank_role.and_then(role_line_kind)
-        && let Some(decided) = from_kind_and_size(kind, 6, rank_role_confidence)
+        && rank_role.is_some_and(role_line_is_icon)
+        && let Some(decided) = from_kind_and_size(QueueKind::Role, 6, rank_role_confidence)
     {
         return decided;
     }
@@ -220,9 +254,31 @@ mod tests {
 
     #[test]
     fn board_and_title_sizes_that_disagree_are_unknown() {
-        let (value, confidence) = decide(Some("6V6 ROLE QUEUE"), Some(5), None);
-        assert_eq!(value, RankQueue::Unknown);
-        assert_eq!(confidence, None);
+        // Both ways round (board below and above the title's size), for
+        // ROLE and OPEN.
+        for (title, board) in [
+            ("6V6 ROLE QUEUE", 5),
+            ("5V5 ROLE QUEUE", 6),
+            ("6V6 OPEN QUEUE", 5),
+            ("5V5 OPEN QUEUE", 6),
+        ] {
+            let (value, confidence) = decide(Some(title), Some(board), None);
+            assert_eq!(value, RankQueue::Unknown, "{title} board={board}");
+            assert_eq!(confidence, None, "{title} board={board}");
+        }
+    }
+
+    #[test]
+    fn a_title_that_names_both_team_sizes_is_unknown() {
+        // A title with both size words contradicts itself: the board does
+        // not pick one.
+        for title in ["5V5 6V6 ROLE QUEUE", "6V6 OPEN QUEUE 5V5"] {
+            for board in [Some(5), Some(6), None] {
+                let (value, confidence) = decide(Some(title), board, Some("Tank"));
+                assert_eq!(value, RankQueue::Unknown, "{title} board={board:?}");
+                assert_eq!(confidence, None, "{title} board={board:?}");
+            }
+        }
     }
 
     #[test]
@@ -232,9 +288,102 @@ mod tests {
             assert_eq!(value, RankQueue::Role6v6, "{role}");
             assert_eq!(confidence, Some(0.8), "{role}");
         }
-        let (value, confidence) = decide(None, Some(6), Some("Open"));
+    }
+
+    #[test]
+    fn an_open_role_line_with_no_open_title_decides_nothing() {
+        // The reader takes Open from an empty role band, which another
+        // screen state can show too; the upload does not send it as the
+        // role, so it does not decide the queue either.
+        for (title, size) in [(None, Some(6)), (Some(""), Some(6)), (None, None)] {
+            let d = decide_rank_queue(title, None, size, Some("Open"), Some(0.5));
+            assert_eq!(d.value, RankQueue::Unknown, "{title:?} {size:?}");
+            assert_eq!(d.confidence, None, "{title:?} {size:?}");
+        }
+        // With an open queue title, the title decides as before.
+        let (value, _) = decide(Some("OPEN QUEUE"), Some(6), Some("Open"));
         assert_eq!(value, RankQueue::Open6v6);
-        assert_eq!(confidence, Some(0.8));
+    }
+
+    #[test]
+    fn the_title_rule_does_not_depend_on_word_order() {
+        // Season 6 may put the size word before or after the queue word.
+        // Each word (mode, ROLE or OPEN, size) is read on its own.
+        for (titles, want) in [
+            (
+                ["COMPETITIVE: 6V6 ROLE QUEUE", "COMPETITIVE: ROLE QUEUE 6V6"],
+                RankQueue::Role6v6,
+            ),
+            (
+                ["COMPETITIVE: 6V6 OPEN QUEUE", "COMPETITIVE: OPEN QUEUE 6V6"],
+                RankQueue::Open6v6,
+            ),
+            (
+                ["COMPETITIVE: 5V5 ROLE QUEUE", "ROLE QUEUE 5V5: COMPETITIVE"],
+                RankQueue::Role5v5,
+            ),
+        ] {
+            for title in titles {
+                assert!(title_names_role_or_open(title), "{title}");
+                for size in [None, Some(want_size(want))] {
+                    let (value, confidence) = decide(Some(title), size, None);
+                    assert_eq!(value, want, "{title} {size:?}");
+                    assert_eq!(confidence, Some(0.93), "{title} {size:?}");
+                }
+            }
+        }
+        // The Quick Play mirrors stay not Competitive in either order.
+        for title in [
+            "ROLE QUEUE: 6V6 QUICK PLAY",
+            "ROLE QUEUE 6V6: QUICK PLAY",
+            "OPEN QUEUE: 6V6 QUICK PLAY",
+            "OPEN QUEUE 6V6: QUICK PLAY",
+            "QUICK PLAY: 6V6 ROLE QUEUE",
+        ] {
+            assert!(title_rules_out_competitive(title), "{title}");
+            assert!(!title_names_role_or_open(title), "{title}");
+            let (value, confidence) = decide(Some(title), Some(6), Some("Tank"));
+            assert_eq!((value, confidence), (RankQueue::Unknown, None), "{title}");
+        }
+    }
+
+    fn want_size(q: RankQueue) -> u8 {
+        match q {
+            RankQueue::Role5v5 | RankQueue::Open5v5 => 5,
+            _ => 6,
+        }
+    }
+
+    #[test]
+    fn a_title_naming_a_mode_that_is_not_competitive_is_never_evidence() {
+        for word in ["QUICK", "UNRANKED", "ARCADE", "STADIUM", "CUSTOM"] {
+            let lower = word.to_lowercase();
+            // The game's own order puts the mode last ("ROLE QUEUE: QUICK
+            // PLAY", "OPEN QUEUE: 6V6 QUICK PLAY"); the mode word first too.
+            for title in [
+                format!("ROLE QUEUE: {word} PLAY"),
+                format!("OPEN QUEUE: 6V6 {word} PLAY"),
+                format!("ROLE QUEUE: 6V6 {word} PLAY"),
+                format!("ROLE QUEUE 6V6: {word} PLAY"),
+                format!("{word}: ROLE QUEUE"),
+                format!("{word} PLAY: OPEN QUEUE"),
+                format!("6V6 {word} ROLE"),
+                format!("open queue - {lower}"),
+                word.to_string(),
+            ] {
+                assert!(title_rules_out_competitive(&title), "{title}");
+                assert!(!title_names_role_or_open(&title), "{title}");
+                for size in [Some(5), Some(6), None] {
+                    let (value, confidence) = decide(Some(&title), size, Some("Tank"));
+                    assert_eq!(value, RankQueue::Unknown, "{title} {size:?}");
+                    assert_eq!(confidence, None, "{title} {size:?}");
+                }
+            }
+        }
+        for title in ["ROLE QUEUE", "OPEN QUEUE", "COMPETITIVE: 6V6 ROLE QUEUE"] {
+            assert!(!title_rules_out_competitive(title), "{title}");
+            assert!(title_names_role_or_open(title), "{title}");
+        }
     }
 
     #[test]
@@ -250,9 +399,11 @@ mod tests {
 
     #[test]
     fn a_role_line_without_a_sure_confidence_is_not_used() {
-        let d = decide_rank_queue(None, None, Some(6), Some("Tank"), Some(f32::NAN));
-        assert_eq!(d.value, RankQueue::Unknown);
-        assert_eq!(d.confidence, None);
+        for c in [f32::NAN, 0.0, -0.5, 1.5] {
+            let d = decide_rank_queue(None, None, Some(6), Some("Tank"), Some(c));
+            assert_eq!(d.value, RankQueue::Unknown, "{c}");
+            assert_eq!(d.confidence, None, "{c}");
+        }
         let d = decide_rank_queue(None, None, Some(6), Some("Tank"), None);
         assert_eq!(d.value, RankQueue::Unknown);
     }
@@ -271,11 +422,13 @@ mod tests {
     }
 
     #[test]
-    fn no_title_and_five_a_side_stays_unknown() {
-        for role in [Some("Tank"), Some("Open"), None] {
-            let (value, confidence) = decide(None, Some(5), role);
-            assert_eq!(value, RankQueue::Unknown, "{role:?}");
-            assert_eq!(confidence, None, "{role:?}");
+    fn no_title_and_five_a_side_or_no_size_stays_unknown() {
+        for size in [Some(5), None] {
+            for role in [Some("Tank"), Some("Open"), None] {
+                let (value, confidence) = decide(None, size, role);
+                assert_eq!(value, RankQueue::Unknown, "{size:?} {role:?}");
+                assert_eq!(confidence, None, "{size:?} {role:?}");
+            }
         }
     }
 
@@ -303,8 +456,15 @@ mod tests {
 
     #[test]
     fn a_bad_confidence_is_dropped_and_the_value_is_kept() {
-        let d = decide_rank_queue(Some("ROLE QUEUE"), Some(f32::NAN), Some(5), None, None);
-        assert_eq!(d.value, RankQueue::Role5v5);
-        assert_eq!(d.confidence, None);
+        for c in [f32::NAN, 0.0, -0.5, 1.5] {
+            let d = decide_rank_queue(Some("ROLE QUEUE"), Some(c), Some(5), None, None);
+            assert_eq!(d.value, RankQueue::Role5v5, "{c}");
+            assert_eq!(d.confidence, None, "{c}");
+        }
+        // The edges the site keeps: above 0, at most 1.
+        for c in [f32::MIN_POSITIVE, 1.0] {
+            let d = decide_rank_queue(Some("ROLE QUEUE"), Some(c), Some(5), None, None);
+            assert_eq!(d.confidence, Some(c), "{c}");
+        }
     }
 }

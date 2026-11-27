@@ -98,7 +98,9 @@ pub const RANK_RECOGNIZER_ID: &str = crate::model::RANK_RECOGNIZER_ID;
 /// The game's `rank` object as the upload sends it: each field only when
 /// the reader read it, plus `queue` on a Competitive game, and `None` (no
 /// key, the old body) when no field is set. A title-only object is sent
-/// only when the title names ROLE or OPEN.
+/// only when the title names ROLE or OPEN. A confident title that names a
+/// mode that is not Competitive (QUICK, UNRANKED, ARCADE, STADIUM or
+/// CUSTOM) sends no object at all, rank screen fields or not (#889).
 ///
 /// The local `QueueTitle::mode_hint` is not sent as `rank.next_mode_hint`:
 /// that site field belongs to the game whose rank screen was read (the
@@ -107,17 +109,17 @@ pub const RANK_RECOGNIZER_ID: &str = crate::model::RANK_RECOGNIZER_ID;
 /// word read on this game's own rank screen
 /// (`PersonalMatch::rank_update`).
 pub(super) fn upload_rank(m: &PersonalMatch) -> Option<UploadRank> {
+    let confident_title = m.queue_title.as_ref().and_then(|t| t.confident_value());
+    if confident_title.is_some_and(crate::rank_queue::title_rules_out_competitive) {
+        return None;
+    }
     let queue_title = m.queue_title.as_ref().and_then(|t| {
         Some(UploadRankField {
             value: t.confident_value()?.to_string(),
             confidence: t.confidence,
         })
     });
-    let open_queue = m
-        .queue_title
-        .as_ref()
-        .and_then(|t| t.confident_value())
-        .is_some_and(crate::rank_queue::title_is_open);
+    let open_queue = confident_title.is_some_and(crate::rank_queue::title_is_open);
     let r = m.rank_update.clone().unwrap_or_default();
     let mut rank = UploadRank {
         role: field(&r.role, |v| rank_role(v, open_queue)),
@@ -164,10 +166,10 @@ pub(super) fn upload_rank(m: &PersonalMatch) -> Option<UploadRank> {
 /// or both). A title or board size that does not map is `unknown` with
 /// no confidence; the game is still uploaded.
 fn upload_queue(m: &PersonalMatch) -> UploadQueueField {
-    // Use the stored title and role, not the fields the upload already
-    // kept: an Open role line is dropped from the body when there is no
-    // open queue title, but with 6 per team and no title it still decides
-    // open_6v6.
+    // The stored title and role line, each only when sure. The decision
+    // takes the role line only to fall back on a role icon (Tank, Damage,
+    // Support) with no title and 6 per team: an Open line decides nothing,
+    // as it is not sent as the role without an open queue title either.
     let title = m.queue_title.as_ref().and_then(|t| t.confident_value());
     let title_confidence = title.and_then(|_| sure(m.queue_title.as_ref()?.confidence));
     let role = m

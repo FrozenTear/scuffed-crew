@@ -13,7 +13,9 @@
 //! would send it (`Open` only with an open queue title, a role icon never
 //! with one), and the queue only when its title was read confidently (the
 //! same queue the map chip shows). A game with nothing to show keeps the
-//! plain "-" the column had before ranks were read.
+//! plain "-" the column had before ranks were read, and so does a game
+//! whose confident title names a mode that is not Competitive (Quick
+//! Play, Stadium...), as the upload sends no rank for it.
 
 use iced::widget::text::Wrapping;
 use iced::widget::{column, container, text, tooltip};
@@ -52,15 +54,16 @@ pub struct RankShown {
 }
 
 impl RankShown {
-    /// None when the game has no rank, or no rank value the cell can show
-    /// (a rank text, progress or change).
+    /// None when the game has no rank, no rank value the cell can show
+    /// (a rank text, progress or change), or a confident title of a mode
+    /// that is not Competitive, for which the upload sends no rank.
     pub fn from_game(g: &Game) -> Option<Self> {
         let rank = g.rank_update.as_ref()?;
-        let open_queue = g
-            .queue_title
-            .as_ref()
-            .and_then(|t| t.confident_value())
-            .is_some_and(stat_tracker::rank_queue::title_is_open);
+        let title = g.queue_title.as_ref().and_then(|t| t.confident_value());
+        if title.is_some_and(stat_tracker::rank_queue::title_rules_out_competitive) {
+            return None;
+        }
+        let open_queue = title.is_some_and(stat_tracker::rank_queue::title_is_open);
         // A word or number the upload sends: one read with a confidence it
         // keeps ([`sure`]), and text of a length it keeps ([`upload_text`]).
         fn word(w: &Option<RankText>) -> Option<&str> {

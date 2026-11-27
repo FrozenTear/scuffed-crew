@@ -15,6 +15,10 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## Unreleased
+
+- With Read my rank after Comp games on, a Competitive game upload now also says which queue the game was played in: role or open queue, 5v5 or 6v6, or unknown when the tracker could not tell. It comes from the queue title read before the game and the number of players per team on your scoreboard, never a picture. A game whose queue title names Quick Play, Unranked, Arcade, Stadium or Custom sends no rank at all (#654).
+
 ## 0.6.0
 
 0.6.0 is the first stable release since 0.5.0 and brings together everything from the 0.6.0 alphas and release candidates. The desktop app has a new look with Overview, Games, Heroes, Maps and Seasons tabs and a rebuilt Settings page. With Read my rank after Comp games on (it starts off), the tracker reads your rank screen after each Comp game at 2560x1440 and sends the rank with your game uploads.

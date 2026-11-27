@@ -451,6 +451,19 @@ fn upload_cases() -> Vec<(RankUpdate, Option<QueueTitle>)> {
     cases.push((rank("Open", "Champion", 2, 10, 5), Some(long_queue)));
     cases.push((RankUpdate::default(), Some(queue("ROLE QUEUE"))));
     cases.push((RankUpdate::default(), None));
+    // A title of a mode that is not Competitive: the upload sends no rank,
+    // so the cell shows "-" even with rank screen fields read.
+    for title in [
+        "ROLE QUEUE: QUICK PLAY",
+        "OPEN QUEUE: 6V6 QUICK PLAY",
+        "QUICK PLAY: ROLE QUEUE",
+        "STADIUM: OPEN QUEUE",
+        "ARCADE",
+    ] {
+        for role in ["Support", "Open"] {
+            cases.push((rank(role, "Diamond", 2, 45, 5), Some(queue(title))));
+        }
+    }
     cases
 }
 
