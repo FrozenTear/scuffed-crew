@@ -161,12 +161,16 @@ where
 ///   ([`boundary::FinishedGameTab::StillPlaying`]), the capture stored the
 ///   board there, and the recorded result was false and is cleared
 ///   ([`unlatch_false_outcome`]).
+/// * No board, and the frame was a result screen
+///   ([`probe_tab_shows_result_screen`]): it is the finished game's own
+///   rank or end screen, and that game stays open (#810). A rank or end
+///   screen alone opens no session.
 /// * Anything else (another game's board, a board that cannot be compared,
-///   a rejected or missed frame, a failed capture): the fresh session opens
-///   as of the press and the finished game closes, as a Tab past the grace
-///   window did before rc.9, with the upload of a closed game that had rows
-///   ([`open_fresh_for_tab_and_sync`]). Not when another game took over
-///   while the capture ran.
+///   a rejected or missed frame with no result on it, a failed capture):
+///   the fresh session opens as of the press and the finished game closes,
+///   as a Tab past the grace window did before rc.9, with the upload of a
+///   closed game that had rows ([`open_fresh_for_tab_and_sync`]). Not when
+///   another game took over while the capture ran.
 pub(crate) async fn settle_tab_probe<F, Fut>(
     st: &mut SessionState,
     store: &storage::LocalStore,
@@ -215,6 +219,14 @@ where
             if still_open && unlocked {
                 unlatch_false_outcome(st, store, data_dir, now).await;
             }
+            probe.old_session
+        }
+        None if still_open && probe_tab_shows_result_screen(result) => {
+            tracing::info!(
+                target: "scuffed_stat_tracker",
+                session_id = %probe.old_session,
+                "Tab past the grace window shows a result screen, not a board: same game, no new session"
+            );
             probe.old_session
         }
         Some(boundary::FinishedGameTab::NewGame) | None => {

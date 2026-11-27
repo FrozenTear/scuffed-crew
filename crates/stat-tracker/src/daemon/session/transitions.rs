@@ -563,6 +563,27 @@ pub(crate) fn finished_game_tab_probe(game: Option<&ActiveGame>, now: Instant) -
         && should_start_fresh_session(game, now)
 }
 
+/// Whether the frame of a Tab past the grace window of a finished game
+/// ([`finished_game_tab_probe`]) was a result screen and not a board
+/// (#810): the capture took no board and gave no verdict, and a result word
+/// or the end title was read on the frame.
+///
+/// That is the finished game's own rank or end screen. The probe only runs
+/// within [`FINISHED_GAME_TAB_MAX_GAP`] of that game's last board, and no
+/// other game can have ended since. So the game stays open and no session
+/// is opened ([`settle_tab_probe`]): a rank or end screen alone starts no
+/// game. On 2026-11-21 such a Tab, 93 s after a Defeat, closed the game and
+/// opened an empty session, which took the frame's Defeat and then the
+/// rank screen's crops as a report kit of its own.
+///
+/// A rejected frame with no result on it (a menu, a Tab released early in
+/// the next game) still opens the fresh session, as before.
+pub(crate) fn probe_tab_shows_result_screen(result: &Result<CaptureReport, String>) -> bool {
+    result.as_ref().is_ok_and(|report| {
+        report.finished_game_tab.is_none() && !report.board_taken() && report.outcome.is_decided()
+    })
+}
+
 pub(crate) fn known_label(s: Option<&str>) -> Option<&str> {
     s.map(str::trim)
         .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("unknown"))
