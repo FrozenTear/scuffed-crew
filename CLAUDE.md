@@ -15,10 +15,11 @@ crates/
   auth/          # OAuth, sessions, crypto (shared crate)
   chat/          # Nostr chat backend (relay client, NIP-44/59 crypto)
   stat-tracker/    # Overwatch stat tracker (OCR capture daemon)
+  stat-tracker-core/ # Tracker bottom layer: config, parsing, shared model types
   stat-tracker-ui/ # Iced 0.14 desktop GUI (binary: stat-tracker-gui)
   map-pipeline/  # Map asset processing tooling
   map-renderer/  # Map rendering tooling
-  relay-policy/  # Nostr relay policy plugin (NIP-42/29, rate limits) — standalone, not yet in deploy (future work)
+  relay-policy/  # Nostr relay policy plugin (NIP-42/29, rate limits); image in relay/, compose profile `relay`
 ```
 
 Production = `scuffed-server` serving `dist/` (built by `dx build` from crates/app). See `scripts/build.sh` and `Containerfile`.
