@@ -326,12 +326,23 @@ fn reason(status: &BansPicksStatus) -> Option<(String, bool)> {
             "Not read: the tracker didn't see the pre-game screens for this game.".to_string(),
             false,
         ),
+        // 1920x1080 is stored for two cases the line cannot tell apart: a
+        // game recorded at 1080p before 1080p bans were read (0.6.0 or
+        // older), and since issue #931 a game whose only screen seen was a
+        // 1080p hero select. The words fit both; the tip says more.
+        BansPicksStatus::FrameSize {
+            width: 1920,
+            height: 1080,
+        } => (
+            "Not read at 1920x1080: hero select and older games need 2560x1440.".to_string(),
+            false,
+        ),
         BansPicksStatus::FrameSize { width, height } if *width > 0 && *height > 0 => (
-            format!("Not read: this game ran at {width}x{height}. Bans and picks need 2560x1440."),
+            format!("Not read: this game ran at {width}x{height}. Bans and picks need 2560x1440 (bans also 1920x1080)."),
             false,
         ),
         BansPicksStatus::FrameSize { .. } => (
-            "Not read: bans and picks need a 2560x1440 game.".to_string(),
+            "Not read: bans and picks need a 2560x1440 game (bans also 1920x1080).".to_string(),
             false,
         ),
         BansPicksStatus::PackMissing { linked: false } => (
@@ -384,9 +395,21 @@ fn settings_link(status: Option<&BansPicksStatus>) -> SettingsLink {
 
 /// The tooltip of a reason line, when the spec gives one.
 fn reason_tip(status: Option<&BansPicksStatus>) -> Option<&'static str> {
-    matches!(status, Some(BansPicksStatus::FrameSize { .. }))
-        .then_some("Only 2560x1440 is read. 1080p and 4K are not.")
+    match status? {
+        BansPicksStatus::FrameSize {
+            width: 1920,
+            height: 1080,
+        } => Some(FRAME_1080_TIP),
+        BansPicksStatus::FrameSize { .. } => Some(
+            "Bans are read at 2560x1440 and 1920x1080, picks at 2560x1440 only. 4K and other sizes are not read.",
+        ),
+        _ => None,
+    }
 }
+
+/// The tooltip of the 1920x1080 line: true for a game recorded before
+/// 1080p bans were read and for a game where only the hero select was seen.
+const FRAME_1080_TIP: &str = "Hero select is read at 2560x1440 only, and so were the bans of games recorded before 1080p bans were supported.";
 
 /// One ban as stored.
 struct Ban {

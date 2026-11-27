@@ -15,6 +15,10 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## Unreleased
+
+- With Read bans and picks on, the bans and your ban votes are now read at 1920x1080 too, not only at 2560x1440. Before, a 1080p game got no bans at all. The tracker scales the ban screens up to 2560x1440 and reads them the same way. Picks (the hero select) are still read at 2560x1440 only, so a 1080p game stores its bans and votes with empty picks, and Tracker health says why. Like at 2560x1440, only the values are sent with the game, never a picture. Measured on 90 frames from 1080p videos, not yet on live 1080p captures (#931).
+
 ## 0.6.0
 
 0.6.0 is the first stable release since 0.5.0 and brings together everything from the 0.6.0 alphas and release candidates. The desktop app has a new look with Overview, Games, Heroes, Maps and Seasons tabs and a rebuilt Settings page. With Read my rank after Comp games on (it starts off), the tracker reads your rank screen after each Comp game at 2560x1440 and sends the rank with your game uploads.

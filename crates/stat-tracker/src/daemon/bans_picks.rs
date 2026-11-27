@@ -29,8 +29,9 @@ use image::{DynamicImage, RgbImage};
 use serde::Serialize;
 use stat_tracker::model::{BansPicksMissing, BansPicksStatus};
 use stat_tracker::shadow::bans_picks::{
-    BanRead, BanResults, BanScoreEntry, BanVote, BansPicksSetting, FRAME_H, FRAME_W, HeroSelect,
-    Layout, RECOGNIZER_ID, Read, Reader, SlotState, TEMPLATE_DIR, VoteSlotRead, self_ring_colour,
+    BanRead, BanResults, BanScoreEntry, BanVote, BansPicksSetting, FRAME_1080_H, FRAME_1080_W,
+    FRAME_H, FRAME_W, HeroSelect, Layout, RECOGNIZER_ID, Read, Reader, SlotState, TEMPLATE_DIR,
+    VoteSlotRead, ban_vote_ring,
 };
 
 use super::pregame_dump::{BAN_RESULTS_NAME, PregameOp, PregamePhase, RejectLabel};
@@ -51,6 +52,17 @@ const ERROR_CHARS: usize = 120;
 /// select, so the picks are stored empty.
 pub(crate) const NO_SELECT_NOTICE: &str =
     "Bans were read but hero select was not seen, so picks are empty.";
+
+/// Why nothing was read when the only screen seen was a 1920x1080 hero
+/// select (issue #931). The same meaning as the Games line for a stored
+/// 1920x1080 status, which also covers games 0.6.0 or older refused at
+/// 1080p, so 1920x1080 is never named as a supported size there.
+pub(crate) const SELECT_1080_ONLY: &str = "at 1920x1080, hero select and games recorded before 1080p bans were supported are read at 2560x1440 only";
+
+/// The sentence for a 1920x1080 game: the ban results and the ban vote are
+/// read (upscaled), the hero select is not, so the picks are stored empty.
+pub(crate) const SELECT_1080_NOTICE: &str =
+    "Picks were not read: hero select is read at 2560x1440 only and this game ran at 1920x1080.";
 
 /// The reader, as far as this wiring uses it. A trait so a test can count
 /// the calls and make one fail.
@@ -464,8 +476,27 @@ fn load_notice(error: &str) -> String {
 
 fn resolution_notice(w: u32, h: u32) -> String {
     not_read(&format!(
-        "the game ran at {w}x{h} and the reader needs {FRAME_W}x{FRAME_H}"
+        "the game ran at {w}x{h} and the reader needs {FRAME_W}x{FRAME_H} or \
+         {FRAME_1080_W}x{FRAME_1080_H}"
     ))
+}
+
+fn is_1080(f: &DynamicImage) -> bool {
+    (f.width(), f.height()) == (FRAME_1080_W, FRAME_1080_H)
+}
+
+/// Drop a 1920x1080 hero select (its last and its first frame): the
+/// reader upscales the ban results and the ban vote at that size, not the
+/// hero select (issue #931). Whether one was dropped.
+fn drop_1080_select(frames: &mut Frames) -> bool {
+    let mut dropped = false;
+    for slot in [&mut frames.select, &mut frames.select_first] {
+        if slot.as_deref().is_some_and(is_1080) {
+            *slot = None;
+            dropped = true;
+        }
+    }
+    dropped
 }
 
 /// The read itself, on a blocking thread. Returns the reader when it
@@ -477,6 +508,7 @@ fn read_frames(
     linked: bool,
     folder: &str,
 ) -> (Option<Arc<dyn Engine>>, Outcome) {
+    let mut frames = frames;
     let fail = |engine, notice, status| {
         (
             engine,
@@ -487,18 +519,32 @@ fn read_frames(
             },
         )
     };
+    let select_1080 = drop_1080_select(&mut frames);
+    if select_1080 && !frames.any() {
+        // Only a 1080p hero select: nothing left the reader takes.
+        return fail(
+            cached,
+            not_read(SELECT_1080_ONLY),
+            BansPicksStatus::FrameSize {
+                width: FRAME_1080_W,
+                height: FRAME_1080_H,
+            },
+        );
+    }
     let shown = [
         frames.vote.as_ref(),
         frames.select.as_ref(),
         frames.results.as_ref(),
         frames.ring_fallback(),
     ];
-    // The reader refuses any other size, so ask before loading it.
+    // The reader refuses any other size, so ask before loading it. A
+    // 1080p hero select was dropped above, so 1080p here is a ban vote or
+    // ban results frame, which the reader upscales.
     if let Some(odd) = shown
         .iter()
         .copied()
         .flatten()
-        .find(|f| (f.width(), f.height()) != (FRAME_W, FRAME_H))
+        .find(|f| (f.width(), f.height()) != (FRAME_W, FRAME_H) && !is_1080(f))
     {
         return fail(
             cached,
@@ -541,6 +587,13 @@ fn read_frames(
             };
             let notice = if json.is_none() {
                 not_read("the result could not be written")
+            } else if select_1080 {
+                tracing::info!(
+                    target: "scuffed_stat_tracker",
+                    game = folder,
+                    "bans and picks: the hero select is 1920x1080, which is not read, picks are empty"
+                );
+                SELECT_1080_NOTICE.to_string()
             } else if select_missing(&frames, &stored) {
                 tracing::warn!(
                     target: "scuffed_stat_tracker",
@@ -618,16 +671,13 @@ fn read_with(engine: &dyn Engine, frames: &Frames) -> Option<Stored> {
             .and_then(|f| engine.select(&rgb(f)))
             .map(|s| s.ring),
     };
-    let vote_ring = frames
-        .vote
-        .as_ref()
-        .map(rgb)
-        .filter(|f| f.dimensions() == (FRAME_W, FRAME_H))
-        .map(|f| self_ring_colour(&f));
+    // A 1080p ban vote gives its ring too (upscaled where the ring is).
+    let vote_img = frames.vote.as_ref().map(rgb);
+    let vote_ring = vote_img.as_ref().and_then(ban_vote_ring);
     let rings: Vec<[u8; 3]> = select_ring.into_iter().chain(vote_ring).collect();
     let results = read_ban_results(engine, frames, &rings)?;
-    let vote = match &frames.vote {
-        Some(f) => Some(engine.vote(&rgb(f))?),
+    let vote = match &vote_img {
+        Some(f) => Some(engine.vote(f)?),
         None => None,
     };
     if let Some(v) = &vote {

@@ -19,8 +19,9 @@ use crate::theme::{
 const TITLE: &str = "What leaves your PC";
 
 /// The bans and picks in the game upload: values only, never a picture.
-/// Read at 2560x1440, and the switch starts on.
-pub(crate) const BANS_PICKS_LINE: &str = "With Read bans and picks on (it starts on): the bans and picks the tracker read at 2560x1440, sent with the game as values only, never a picture.";
+/// Bans read at 2560x1440 or 1920x1080, picks at 2560x1440 only, and the
+/// switch starts on.
+pub(crate) const BANS_PICKS_LINE: &str = "With Read bans and picks on (it starts on): the bans and picks the tracker read (bans at 2560x1440 or 1920x1080, picks at 2560x1440 only), sent with the game as values only, never a picture.";
 
 /// The rank fields in the game upload: read values only, never a picture.
 /// Rank screen pictures go only as training crops, when that kind is on.
@@ -168,7 +169,8 @@ mod tests {
     }
 
     /// The bans and picks line sits under Game uploads, says they start on,
-    /// are read at 2560x1440, and go with the game as values only.
+    /// are read at 2560x1440 (bans also at 1920x1080), and go with the game
+    /// as values only.
     #[test]
     fn the_bans_picks_line_says_values_go_with_uploads_at_2560x1440() {
         assert!(SECTIONS[0].0.starts_with("Game uploads"));
@@ -176,6 +178,7 @@ mod tests {
         assert!(
             BANS_PICKS_LINE.contains("it starts on")
                 && BANS_PICKS_LINE.contains("2560x1440")
+                && BANS_PICKS_LINE.contains("1920x1080")
                 && BANS_PICKS_LINE.contains("values only")
                 && BANS_PICKS_LINE.contains("never a picture"),
             "{BANS_PICKS_LINE}"

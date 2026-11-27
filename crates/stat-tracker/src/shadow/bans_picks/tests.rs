@@ -379,18 +379,27 @@ fn without_a_no_preference_template_that_icon_is_none() {
 }
 
 #[test]
-fn a_frame_that_is_not_2560x1440_is_refused() {
+fn a_frame_that_is_not_2560x1440_or_1920x1080_is_refused() {
     let r = reader();
+    for (w, h) in [(1280, 720), (2560, 1080), (1920, 1200), (3840, 2160)] {
+        let odd = RgbImage::from_pixel(w, h, BG);
+        assert!(r.read_ban_results(&odd, None).is_none(), "{w}x{h}");
+        assert!(r.read_ban_vote(&odd).is_none(), "{w}x{h}");
+        assert!(r.read_hero_select(&odd).is_none(), "{w}x{h}");
+        assert!(at_frame_size(&odd).is_none(), "{w}x{h}");
+    }
+    // 1080p: the ban results and the ban vote are read (upscaled), the
+    // hero select is not, so the combined read is refused too.
     let small = RgbImage::from_pixel(1920, 1080, BG);
-    assert!(r.read_ban_results(&small, None).is_none());
+    assert!(r.read_ban_results(&small, None).is_some());
+    assert!(r.read_ban_vote(&small).is_some());
     assert!(r.read_hero_select(&small).is_none());
-    assert!(r.read_ban_vote(&small).is_none());
-    assert!(
-        r.read_ban_vote(&RgbImage::from_pixel(2560, 1080, BG))
-            .is_none()
-    );
     assert!(r.read(&small, &small).is_none());
 }
+
+// The 1920x1080 path (issue #931).
+#[path = "tests_1080.rs"]
+mod tests_1080;
 
 #[test]
 fn the_combined_read_has_the_documented_json_shape() {

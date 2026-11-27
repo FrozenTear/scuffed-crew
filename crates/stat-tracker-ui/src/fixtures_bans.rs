@@ -311,7 +311,7 @@ pub fn reader_off(m: &mut PersonalMatch) {
     m.bans_picks_status = Some(BansPicksStatus::ReaderOff);
 }
 
-/// Nothing read, the game ran at 1080p.
+/// Nothing read: only a 1080p hero select was seen.
 pub fn frame_size(m: &mut PersonalMatch) {
     m.bans_picks = None;
     m.bans_picks_status = Some(BansPicksStatus::FrameSize {

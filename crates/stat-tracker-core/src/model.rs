@@ -275,7 +275,7 @@ pub struct PersonalMatch {
     /// JSON the tracker writes (`daemon::bans_picks::Stored`): the bans, the
     /// lobby ban, the six picks, the ban vote picks and the recognizer id.
     /// `None` when nothing was read (the reader off, no pack, a frame that
-    /// was not 2560x1440). Kept on every snapshot of the match. The upload
+    /// the reader does not take). Kept on every snapshot of the match. The upload
     /// sends the values of it (no confidences) when it holds any, and omits
     /// the key otherwise. Omitted from JSON when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -544,7 +544,8 @@ pub enum BansPicksStatus {
     Partial { missing: Vec<BansPicksMissing> },
     /// None of this game's pre-game screens were seen.
     NoFrames,
-    /// A frame was not the size the reader needs (2560x1440).
+    /// A frame was not a size the reader takes: 2560x1440, or 1920x1080 for
+    /// the ban vote and ban results (a 1080p hero select alone is this too).
     FrameSize { width: u32, height: u32 },
     /// The pack is not installed; `linked` is whether this install has a
     /// site account, which is what fetches it.
